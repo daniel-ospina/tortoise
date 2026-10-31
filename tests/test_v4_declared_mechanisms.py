@@ -1136,9 +1136,17 @@ def test_the_state_value_carve_out_is_registered_and_marked_absent() -> None:
     assert "_render_master_compact" in row["note"], row["note"]
 
 
-def test_every_render_path_carries_the_carve_out_the_guarantee_requires(
-    monkeypatch,
-) -> None:
+#: The carve-out's BOUNDARY SENTENCE, as a literal: the clause that says what
+#: may STILL be dropped once the durable values are carried. It is pinned as a
+#: literal rather than through `STATE_VALUE_CARVE_OUT` because comparing the
+#: constant against a render that renders the same constant is true by
+#: construction — editing this sentence moved both sides together and left the
+#: guard green (measured, #9775 fix round 2), which is precisely the
+#: "declared-vs-present" hole the registry row exists to catch.
+CARVE_OUT_BOUNDARY = "Only INCIDENTAL process logistics remain droppable"
+
+
+def test_every_render_path_carries_the_carve_out_the_guarantee_requires() -> None:
     """The declared guarantee holds on EVERY path that builds a prompt (#9775).
 
     §7 of `EXTRACTOR-V4-ARCHITECTURE.md` declares it: *"any mechanical filter MUST
@@ -1152,9 +1160,12 @@ def test_every_render_path_carries_the_carve_out_the_guarantee_requires(
     So the guarantee is pinned as a GUARANTEE, not as string presence on one path.
     Both halves are asserted where they are load-bearing:
 
-    * `STATE_VALUE_CARVE_OUT` — the whole constant, so editing the boundary
-      sentence ("only INCIDENTAL process logistics remain droppable") reds here
-      rather than shipping under an unchanged header;
+    * `STATE_VALUE_CARVE_OUT` — the whole constant AND a literal of its boundary
+      sentence, so editing that sentence reds here rather than shipping under an
+      unchanged header. The literal is what makes the claim true: an edit to the
+      constant moves BOTH sides of `v2.STATE_VALUE_CARVE_OUT in rendered`
+      together, so pinning the constant alone cannot see the boundary sentence go
+      (measured: that mutation left this test green);
     * the user-personal-state vocabulary it names — S2's Tier-A rule tells the
       mapper to see "the USER-PERSONAL-STATE VOCABULARY in the master list", so a
       render that omits the block leaves that instruction pointing at a section
@@ -1171,7 +1182,6 @@ def test_every_render_path_carries_the_carve_out_the_guarantee_requires(
     from tortoise import extractor_v2 as v2
 
     master = v2.build_master_list()
-    marker = "STATE-VALUE CARVE-OUT"
     ups_header = "USER-PERSONAL-STATE VOCABULARY (Tier-A classification"
     ups = master.get("user_personal_state") or {}
     assert ups, (
@@ -1184,6 +1194,15 @@ def test_every_render_path_carries_the_carve_out_the_guarantee_requires(
         assert v2.STATE_VALUE_CARVE_OUT in rendered, (
             f"{where} dropped the declared state-value carve-out (~#9775): the "
             "guarantee is `STATE_VALUE_CARVE_OUT` rendered whole, not a header"
+        )
+        # The BOUNDARY SENTENCE, as a literal — not through the constant. This is
+        # the half that says what may still be dropped, and a literal is the only
+        # way to pin it: the constant comparison above tracks the constant, so an
+        # edit to the sentence alone keeps it green on BOTH sides.
+        assert CARVE_OUT_BOUNDARY in rendered, (
+            f"{where} carries the carve-out but not its boundary sentence "
+            f"({CARVE_OUT_BOUNDARY!r}) — what may still be dropped is "
+            "unpinned by the constant alone (~#9775)"
         )
         if not vocabulary:
             return
@@ -1217,19 +1236,63 @@ def test_every_render_path_carries_the_carve_out_the_guarantee_requires(
         rendered = v2._render_master_compact(master, story)
         _assert_guarantee(f"the compact render (story={story!r})", rendered)
 
-    # …and through the dispatcher the S2/S4 write path actually calls, so a fix
-    # that only touched `_render_master_compact` while the prompt path bypassed
-    # it cannot pass. Exactly ONCE: the seam rule is single-render, per the
-    # `SHORT_SESSION_FACT_RULE` precedent in `tests/test_extractor_v2.py`.
+
+def test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly(
+    monkeypatch,
+) -> None:
+    """…and through the dispatcher the S2/S4 write path actually CALLS (#9775).
+
+    A fix that only touched `_render_master_compact` while the prompt path bypassed
+    it cannot pass this. Two details are what make that sentence true, and both were
+    measured as WRONG before this revision:
+
+    * `core_only=False` is passed **explicitly**. `render_s2_prompt` / `render_s4_prompt`
+      resolve `core_only` from `TORTOISE_CLASSIFY_LATER` when it is `None`, and with
+      that flag on `_render_master` takes the CORE-ONLY branch — so the assertions
+      silently tested a render that is not the one under test (measured: with the
+      render fix reverted and `TORTOISE_CLASSIFY_LATER=1`, the dispatcher half
+      contributed nothing and the direct assertions failed alone);
+    * the COMPACT branch is PROVEN taken, not assumed: `PACK KINDS` survives
+      compaction but is absent from the core-only render, and the compact master's
+      header (`"…from this list. Do NOT mint kinds."`) is compact-only text — the
+      verbose render interposes `(namespaced or bare form)`.
+
+    Exactly ONCE per prompt: the seam rule is single-render, per the
+    `SHORT_SESSION_FACT_RULE` precedent in `tests/test_extractor_v2.py`.
+    """
+    from tortoise import extractor_v2 as v2
+
+    master = v2.build_master_list()
+    marker = "STATE-VALUE CARVE-OUT"
+    compact_header = "from this list. Do NOT mint kinds."
+    matched_story = "we shipped the dev: extractor change"
     monkeypatch.setenv("TORTOISE_EXTRACTOR_PROMPT", "compact")
     for name, prompt in (
         ("S2 (compact, via `render_s2_prompt`)",
-         v2.render_s2_prompt(master=master, story=matched_story)),
+         v2.render_s2_prompt(master=master, story=matched_story,
+                             core_only=False)),
         ("S4 (compact, via `render_s4_prompt`)",
          v2.render_s4_prompt(matched_story, {"results": []}, {},
-                             master=master)),
+                             master=master, core_only=False)),
     ):
-        _assert_guarantee(name, prompt)
+        assert "PACK KINDS" in prompt, (
+            f"{name} carries no PACK KINDS section, so it rendered the CORE-ONLY "
+            "master and this guard is not testing the compact path at all "
+            "(pass `core_only=False` explicitly — the flag default is "
+            "`TORTOISE_CLASSIFY_LATER`)"
+        )
+        assert compact_header in prompt, (
+            f"{name} does not carry the compact master header, so it rendered "
+            "the VERBOSE master and the compact path is unpinned here"
+        )
+        assert v2.STATE_VALUE_CARVE_OUT in prompt, (
+            f"{name} dropped the declared state-value carve-out (~#9775): the "
+            "compact prompt reached through the dispatcher carries no guarantee"
+        )
+        assert CARVE_OUT_BOUNDARY in prompt, (
+            f"{name} carries the carve-out but not its boundary sentence "
+            f"({CARVE_OUT_BOUNDARY!r}) (~#9775)"
+        )
         assert prompt.count(marker) == 1, (
             f"{name} renders the carve-out {prompt.count(marker)} times — "
             "one prompt, one copy of the guarantee"
