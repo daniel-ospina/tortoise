@@ -1993,6 +1993,39 @@ def render_summary(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+#: The 74-row table's columns, in order.
+#: ⛔ ONE list drives the header row AND the delimiter row. They used to be two
+#: hand-maintained literals, and adding `cleared by a re-run` to the header and the data
+#: rows only left a NINE-cell delimiter under a TEN-cell header. GFM refuses a table whose
+#: header and delimiter rows differ in cell count (spec §4.10: "If not, a table will not be
+#: recognised"), so the committed report — #10131's own acceptance artifact — rendered as
+#: one paragraph of pipe text. Generated from one list, the two cannot drift apart again.
+TABLE_COLUMNS: tuple[str, ...] = (
+    "file",
+    "status",
+    "lane",
+    "PR runs (attested)",
+    "main runs (attested)",
+    "leg runs w/o this file",
+    "PR-head catches",
+    "main catches",
+    "cleared by a re-run",
+    "UNKNOWN",
+)
+
+
+def _cell(value: object) -> str:
+    """One table cell: a single line, and no unescaped pipe.
+
+    ⛔ An UNKNOWN reason EMBEDS another process's text (`gh`'s stderr, a zip's error), which
+    is routinely multi-line and can contain a `|`. Either one breaks the row it lands in —
+    a newline ends the row early, a pipe mints a phantom column — so the table rendered as
+    broken markdown exactly when the data was imperfect, which is the case this report
+    exists for. Flatten first (all whitespace runs become one space), then escape.
+    """
+    return " ".join(str(value).split()).replace("|", "\\|")
+
+
 def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
     """The 74-row table. ``only`` filters to one status (``pr``/``push``/``never``/``unknown``/``nonpremerge``)."""
     alias = {
@@ -2004,10 +2037,8 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
     }
     wanted = alias.get(only, only)
     rows = [
-        "| file | status | lane | PR runs (attested) | main runs (attested) "
-        "| leg runs w/o this file | PR-head catches | main catches | cleared by a re-run "
-        "| UNKNOWN |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| " + " | ".join(TABLE_COLUMNS) + " |",
+        "|" + "---|" * len(TABLE_COLUMNS),
     ]
     for row in report["files"]:
         if wanted and row["status"] != wanted:
@@ -2028,12 +2059,21 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
         # ⛔ "attested" is per FILE (the artifact named it), never "its leg ran": the legs
         # are diff-SCOPED on tier-2, so the leg column counts runs that did NOT touch it.
         unattested = row.get("pr_leg_runs_unattested", 0) + row.get("push_leg_runs_unattested", 0)
-        rows.append(
-            f"| `{row['file']}` | {row['status']} | {row.get('lane', '-')} "
-            f"| {row.get('pr_runs_attested', 0)} | {row.get('push_runs_attested', 0)} "
-            f"| {unattested} "
-            f"| {prs} | {pushes} | {cleared} | {unknown} |"
-        )
+        # One cell per TABLE_COLUMNS entry, in the same order — a column added above with
+        # no cell here would be a short row, which MD056 reds and GFM renders off-line.
+        cells = [
+            f"`{row['file']}`",
+            row["status"],
+            row.get("lane", "-"),
+            row.get("pr_runs_attested", 0),
+            row.get("push_runs_attested", 0),
+            unattested,
+            prs,
+            pushes,
+            cleared,
+            unknown,
+        ]
+        rows.append("| " + " | ".join(_cell(c) for c in cells) + " |")
     return "\n".join(rows)
 
 

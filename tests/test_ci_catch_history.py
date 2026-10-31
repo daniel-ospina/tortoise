@@ -45,6 +45,11 @@ properties. Each has a test here that FAILS when the property is broken:
    UNKNOWN rather than answering them from an empty sample.
    `test_a_wall_bound_that_expires_while_listing_stops_and_says_so` fails if the bound is
    checked only inside the detail loop (it then lists all six populations).
+9. **The markdown report IS a table** — GFM refuses a table whose header and delimiter rows
+   differ in cell count, and a cell carrying a newline (an UNKNOWN reason embeds `gh`'s
+   stderr) ends its row early. `test_every_markdown_row_has_the_same_number_of_cells` and
+   `test_an_unknown_reason_cannot_break_the_row_it_is_rendered_in` fail if either returns,
+   which is the difference between #10131's acceptance artifact and 74 rows of pipe text.
 
 Everything is offline: the fixtures are the same payloads a live run reads, archived
 (`runs.json`, `jobs/<run_id>.json`, `artifacts/<run_id>/<name>.zip`), so these tests also
@@ -54,6 +59,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -654,6 +660,71 @@ def test_the_cli_writes_the_markdown_table_from_an_offline_fixture(tmp_path, cap
     assert "Window in one line:" in rendered
     assert "newest **ATTEMPT** decides" in rendered
     assert "regenerate it, do not edit it" in rendered
+
+
+# --- the markdown table is a TABLE ------------------------------------------
+
+
+def _cells(line: str) -> int:
+    """Cells in one markdown table row. An UNESCAPED pipe delimits; `\\|` is content."""
+    return len(re.findall(r"(?<!\\)\|", line)) - 1
+
+
+def test_every_markdown_row_has_the_same_number_of_cells(tmp_path):
+    """GFM refuses a table whose header and delimiter rows differ in cell count.
+
+    ⛔ `render_table` built its header and its delimiter row as two hand-maintained
+    literals. Adding the `cleared by a re-run` column to the header and to the data rows
+    left the delimiter at NINE cells under a TEN-cell header, so GFM (spec §4.10: "The
+    header row must match the delimiter row in the number of cells. If not, a table will
+    not be recognised") rendered #10131's own acceptance artifact — the committed 74-row
+    report — as ONE PARAGRAPH of pipe text. Both rows are generated from `TABLE_COLUMNS`
+    now; this assertion is what keeps a future column from splitting them apart again.
+    """
+    table = catch.render_table(_report(_world(tmp_path, runs=[])))
+    cells = [_cells(line) for line in table.splitlines()]
+    assert len(set(cells)) == 1, f"the rows disagree on cell count: {sorted(set(cells))}"
+    assert cells[0] == len(catch.TABLE_COLUMNS)
+    assert len(cells) == 76  # header + delimiter + one row per slow file
+
+
+def test_an_unknown_reason_cannot_break_the_row_it_is_rendered_in(tmp_path):
+    """A reason embeds `gh`'s stderr, which is multi-line and can contain a `|`.
+
+    ⛔ Cells were interpolated raw, so a download failure whose message ran to two lines
+    ended the row early and a pipe inside it minted a phantom column: the committed report
+    rendered as broken markdown EXACTLY when the data was imperfect — the case it exists
+    for. Pre-fix this table's line count and its arity both disagree with its header.
+    """
+    family, leg = _leg_of("test_billing.py")
+    root = _world(
+        tmp_path,
+        runs=[_run(RUN_PR, SHA, "pull_request", pr=64)],
+        jobs={RUN_PR: [_check(100, RUN_PR, f"{family} ({leg})", "failure")]},
+        artifacts={
+            (RUN_PR, catch.artifact_name(family, leg)): _zip(
+                _junit([("tests/test_billing.py", "t", True)])
+            )
+        },
+    )
+    client = catch.OfflineClient(root)
+
+    def _broke(artifact_id):
+        raise catch.ReadError(
+            "check your internet connection\npost https://api.github.com/x: 502 | gateway"
+        )
+
+    client.artifact_zip = _broke  # type: ignore[method-assign]
+    report = catch.build_history(MANIFEST, client)
+    assert _row(report, "test_billing.py")["status"] == catch.UNKNOWN
+
+    table = catch.render_table(report)
+    cells = [_cells(line) for line in table.splitlines()]
+    assert len(set(cells)) == 1, f"a reason split a row: {sorted(set(cells))}"
+    assert len(cells) == 76  # header + delimiter + one row per slow file
+    rendered = next(line for line in table.splitlines() if "`test_billing.py`" in line)
+    assert "gateway" in rendered, "the reason belongs IN the row, not dropped from it"
+    assert "\\|" in rendered, "a pipe inside a cell is escaped, so it cannot mint a column"
 
 
 # --- 5. a leg RUNNING is not a FILE running --------------------------------
@@ -1436,3 +1507,26 @@ def test_the_lane_split_follows_ci_selection_instead_of_a_constant(tmp_path, mon
     row = _row(report, "test_billing.py")
     assert row["lane"] == catch.LANE_NON_GATING
     assert row["status"] == catch.NOT_PREMERGE, "a by-decision exclusion, not a gap"
+
+
+# --- the `durations` note re-derives its own count --------------------------
+
+
+def test_the_durations_note_counts_the_tests_this_file_actually_has():
+    """The `durations` justification cites its own derivation command — keep it true.
+
+    ⛔ `config/ci-surfaces.yml` states the wall of "its offline tests (**N** of them —
+    `grep -c '^def test_'`)". It read 29, then 32, while this file grew to 41: two separate
+    reviews filed the SAME stale number, because the comment asserts a count it also carries
+    the command to refute. So the guard RUNS that command rather than trusting the prose.
+    """
+    config = (REPO / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")
+    block = re.search(r"^\s*test_ci_catch_history\.py:.*(?:\n\s*#.*)*", config, re.MULTILINE)
+    assert block, "the durations entry this note justifies is gone — re-derive the note"
+    stated = re.search(r"\b(\d+) of them", block.group(0))
+    assert stated, "the note no longer states a count — update this guard with the note"
+    actual = len(re.findall(r"^def test_", Path(__file__).read_text(encoding="utf-8"), re.MULTILINE))
+    assert int(stated.group(1)) == actual, (
+        f"config/ci-surfaces.yml claims {stated.group(1)} offline tests; the file defines "
+        f"{actual} — refresh the note (the count is asserted, so it cannot go stale silently)"
+    )
