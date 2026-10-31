@@ -9121,7 +9121,7 @@ durations:
   test_ci_verdict.py: 0.2
   test_ci_catch_history.py: 8.5  # #10131: a NEW file has no CI junit measurement (a file that
   # never ran cannot appear in an artifact), so this is the LOCAL wall of its offline tests:
-  # 44 of them — `grep -c '^def test_'`, re-run by
+  # 45 of them — `grep -c '^def test_'`, re-run by
   # `test_the_durations_note_counts_the_tests_this_file_actually_has` so the count cannot go
   # stale silently — 8.5-9.5 s, measured 2026-10-31 at the #10359 fix head,
   # `-q -p no:cacheprovider`. Every test is pure: an archived runs.json/jobs fixture plus

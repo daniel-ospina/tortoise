@@ -685,7 +685,44 @@ def test_every_markdown_row_has_the_same_number_of_cells(tmp_path):
     cells = [_cells(line) for line in table.splitlines()]
     assert len(set(cells)) == 1, f"the rows disagree on cell count: {sorted(set(cells))}"
     assert cells[0] == len(catch.TABLE_COLUMNS)
-    assert len(cells) == 76  # header + delimiter + one row per slow file
+    # ⛔ DERIVED, not the literal 76: 76 is today's manifest size, so a snapshot of the
+    # live config reds on any legitimate `slow_files` edit with a bare message that names
+    # no cause and gives no update guidance — the same rot #10194 caused once.
+    assert len(cells) == len(MANIFEST["slow_files"]) + 2  # header + delimiter + one row per slow file
+
+
+def test_the_counts_follow_the_manifest_not_a_literal(tmp_path):
+    """A manifest that GROWS moves the table and the coverage total with it.
+
+    ⛔ Three snapshots of "74" survived in this file (`assert total == 74`, two
+    `len(cells) == 76`) — the exact rot the 74-row test below forbids: a legitimate
+    `slow_files` add/remove reds them with a message that names no cause and gives no
+    update guidance, and the update they demand is a new constant. Pre-fix this test
+    reds on BOTH literals while the code is correct; post-fix it is the assertion that
+    keeps the derivation honest in the other direction (a row silently dropped would
+    still red it).
+    """
+    widened = dict(MANIFEST)
+    widened["slow_files"] = [*MANIFEST["slow_files"], "test_a_file_the_manifest_grew.py"]
+    root = _world(tmp_path, runs=[])
+    report = catch.build_history(widened, catch.OfflineClient(root))
+
+    expected = len(MANIFEST["slow_files"]) + 1
+    assert len(report["files"]) == expected
+    coverage = report["coverage"]
+    statuses = (
+        catch.CATCH_PR,
+        catch.CATCH_PUSH_ONLY,
+        catch.NEVER,
+        catch.UNKNOWN,
+        catch.NOT_PREMERGE,
+    )
+    assert sum(coverage[f"status_{key}"] for key in statuses) == expected
+
+    table = catch.render_table(report)
+    cells = [_cells(line) for line in table.splitlines()]
+    assert len(set(cells)) == 1, f"the rows disagree on cell count: {sorted(set(cells))}"
+    assert len(cells) == expected + 2  # header + delimiter + one row per slow file
 
 
 def test_an_unknown_reason_cannot_break_the_row_it_is_rendered_in(tmp_path):
@@ -721,7 +758,7 @@ def test_an_unknown_reason_cannot_break_the_row_it_is_rendered_in(tmp_path):
     table = catch.render_table(report)
     cells = [_cells(line) for line in table.splitlines()]
     assert len(set(cells)) == 1, f"a reason split a row: {sorted(set(cells))}"
-    assert len(cells) == 76  # header + delimiter + one row per slow file
+    assert len(cells) == len(MANIFEST["slow_files"]) + 2  # header + delimiter + one row per slow file
     rendered = next(line for line in table.splitlines() if "`test_billing.py`" in line)
     assert "gateway" in rendered, "the reason belongs IN the row, not dropped from it"
     assert "\\|" in rendered, "a pipe inside a cell is escaped, so it cannot mint a column"
@@ -1107,7 +1144,9 @@ def test_coverage_counts_reconcile_and_never_extrapolate(tmp_path):
     coverage = report["coverage"]
     statuses = (catch.CATCH_PR, catch.CATCH_PUSH_ONLY, catch.NEVER, catch.UNKNOWN, catch.NOT_PREMERGE)
     total = sum(coverage[f"status_{key}"] for key in statuses)
-    assert total == 74
+    # ⛔ DERIVED, not the literal 74 — the manifest read is two lines up and a constant
+    # here is a snapshot that reds on a legitimate `slow_files` edit.
+    assert total == len(MANIFEST["slow_files"])
     # The leg's files carry the artifact reason; every other row is UNKNOWN for the OTHER
     # reason (nothing measured it) — the two are never collapsed into one number.
     attributed_unknown = [

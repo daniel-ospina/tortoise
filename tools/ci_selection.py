@@ -2359,7 +2359,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # and config/ci-surfaces.yml's `core`-home row.
              # Pinned by tests/test_ci_selection.py::
              # test_substrate_map_guard_runs_on_the_diffs_it_guards.
-             "tools/substrate_map_check.py")
+             "tools/substrate_map_check.py",
+             # #10131 review P1: tools/ci_catch_history.py owns
+             # tests/test_ci_catch_history.py — registered `core` (the registration this
+             # PR adds) — but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY change filtered to
+             # `changed == []`, took the docs-only early return and fell to tier-1 smoke,
+             # where that file is NOT registered. The `core` row that registers the file is
+             # CLASSIFICATION only (#4348); it does not make a `tools/` path select `core`.
+             # MEASURED before this entry: `select(["tools/ci_catch_history.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False, n=68, guard
+             # ABSENT. The most likely follow-up to this exact instrument IS a change to the
+             # instrument (every finding class on #10131's reviews so far has been in a read
+             # path — `NEVER` licensing, the cleared-red loop, the wall bound), so the diff
+             # that can break all 44 of its pins was the one diff that ran none of them:
+             # the #1349/#3332/#3616 silent-drop class. CORE_ALSO (not TOOL_CARVEOUTS)
+             # because the suite is hermetic (an archived runs.json, job JSON and in-memory
+             # zips — no DB, no network) and `core` is where it is registered. Pinned by
+             # tests/test_ci_selection.py::
+             # test_ci_catch_history_tool_change_selects_core_not_tier1.
+             "tools/ci_catch_history.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
