@@ -94,9 +94,14 @@ USAGE
   uv run python tools/served_skills_parity.py --sync --commit <sha>
 
 ``--sync`` is the DERIVATION: it fetches upstream (HEAD, or ``--commit``),
-writes each served copy byte-for-byte and re-cuts
-`config/served-skills-upstream.yml`. Run it after editing a skill upstream,
-then commit the changed skills + the pin together.
+writes each served copy byte-for-byte, re-cuts
+`config/served-skills-upstream.yml`, and **re-cuts the derived
+`website/skills/<name>.skill` archives** for every skill whose archive is stale
+under the root — not only the ones it wrote (the archive is built from the
+served copy, so re-deriving the source invalidates it, and a stale archive left
+by an earlier commit is the same defect — see `tools/build_skill_archives.py`).
+Run it after editing a skill upstream, then commit the changed skills + the pin
++ the archives together.
 
 ``--sync --commit <sha>`` is for pinning a specific upstream commit. It is not
 silently equivalent to HEAD: the currency arm compares the pinned bytes against
@@ -261,7 +266,8 @@ def dump_manifest(manifest: dict) -> str:
         "# MIT repo named below; this tree holds the derived MIRROR. Do not edit",
         "# a served skill or this pin by hand — edit the skill upstream, then run",
         "#   uv run python tools/served_skills_parity.py --sync",
-        "# and commit the mirrored skills together with this file.",
+        "# and commit the mirrored skills, the re-cut `website/skills/*.skill`",
+        "# archives that same command derives, and this file — all three together.",
         "#",
         "# `commit` is a real upstream commit and every sha256 is the CONTENT of",
         "# that commit — `--check-upstream` re-fetches by commit and re-hashes, so",
@@ -663,8 +669,11 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
             f"      The MIT repo is the AUTHOR: this skill changed there and the "
             f"served copy here was never re-derived.\n"
             f"      Fix: `uv run python tools/served_skills_parity.py --sync` "
-            f"and commit the mirrored skills + the pin. (#4643 target 2 — this "
-            f"is the drift that must not ship behind a green deploy.)")
+            f"and commit the mirrored skills, the re-cut `website/skills/*.skill` "
+            f"archives it derives, and the pin. Committing only the mirror + pin "
+            f"leaves the archive stale, which is the SAME red one gate later. "
+            f"(#4643 target 2 — this is the drift that must not ship behind a "
+            f"green deploy.)")
     if not drifted and not unread:
         # Green, but say WHY it is green — otherwise a reader sees the pin's
         # commit differ from HEAD and has to re-derive that it is harmless.
@@ -738,6 +747,88 @@ class SyncResult(NamedTuple):
     target: str
     previous: str
     at_head: bool | None  # None = could not be read (the note is still printed)
+    #: Derived `.skill` archives re-cut because this sync left them stale.
+    archives: tuple[str, ...] = ()
+
+
+def _rebuilt_archives(root: Path, names: list[str]) -> tuple[str, ...]:
+    """Re-cut every derived `.skill` archive that is stale under `root`.
+
+    ⛔ NOT "for the served copies just written" — that narrower summary is what
+    review finding F3 was about, and it contradicts this function's own body
+    (below) and its call site (`sorted(manifest["skills"])`, not `changed`). A
+    maintainer reading only this line would narrow the call to `changed` and
+    silently delete the behaviour
+    `test_4643_sync_re_cuts_a_stale_archive_whose_served_copy_it_did_not_write`
+    exists to pin.
+
+    ⛔ The served copy is the archive's ONLY source (`build_skill_archives.py`),
+    so re-deriving it without re-cutting the archive leaves the tree RED on
+    `test_9660_skill_archive_holds_exactly_its_own_skill` — the documented
+    remedy for mirror drift produced a stale archive every time. Measured twice
+    in two days: cd7410b80 (#9750 round 3) and f045ac953 (#10423), same test,
+    same one-line remedy, two lanes spent finding it. Generating the output as
+    part of the step that invalidates it is the standard treatment for a checked-
+    in derived artifact (Go's `go generate`: run before the build, never left to
+    a second tool the operator has to know about).
+
+    EVERY skill whose archive is stale under `root` is re-cut, not only the ones
+    this sync wrote — `sync()` passes `sorted(manifest["skills"])`, not the
+    `changed` list. A skill whose served bytes did not move can still carry a
+    stale archive left by an earlier commit, and that is precisely the state
+    this PR exists to repair, so `--sync` repairs it instead of enumerating what
+    it just wrote. The wider call reports no churn: `write_stale_archives()`
+    compares the bytes before writing (they are byte-stable via `_FIXED_DATE`),
+    so an archive that is already current is neither rewritten nor reported.
+
+    Best-effort by design: the archive builder is imported from `tools/`, and a
+    checkout that cannot supply it must not make `--sync` fail AFTER it has
+    already written the served copies and the pin — that would leave a half-done
+    sync behind a non-zero exit. The staleness is still caught by the gate
+    (`build_skill_archives.py --check`, and the 9660 test).
+    """
+    wanted = [n for n in names if n in _ARCHIVE_SKILL_NAMES()]
+    if not wanted:
+        return ()
+    try:
+        builder = _archive_builder()
+    except Exception:  # a missing builder must not fail the sync
+        return ()
+    if builder is None:
+        return ()
+    return tuple(builder.write_stale_archives(root, wanted))
+
+
+_ARCHIVE_BUILDER: list[object] = []
+
+
+def _archive_builder():
+    """`tools/build_skill_archives.py` as a module, or None if unavailable.
+
+    Two import contexts to satisfy: a test does `from tools import
+    served_skills_parity`, where `tools` is a package; the CLI runs the file as
+    a SCRIPT, where `tools/` itself is `sys.path[0]`. Try both, never guess.
+    """
+    if _ARCHIVE_BUILDER:
+        return _ARCHIVE_BUILDER[0]
+    module = None
+    try:
+        import build_skill_archives as module  # script context
+    except ImportError:
+        try:
+            from tools import build_skill_archives as module  # package context
+        except ImportError:
+            module = None
+    _ARCHIVE_BUILDER.append(module)
+    return module
+
+
+def _ARCHIVE_SKILL_NAMES() -> tuple[str, ...]:
+    """The skills the builder ships an archive for (its own `SKILL_NAMES`)."""
+    builder = _archive_builder()
+    if builder is None:
+        return ()
+    return tuple(getattr(builder, "SKILL_NAMES", ()))
 
 
 def sync(root: Path, manifest_path: Path, commit: str | None = None,
@@ -784,8 +875,15 @@ def sync(root: Path, manifest_path: Path, commit: str | None = None,
     manifest["upstream"]["commit"] = target
     if not dry_run:
         manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
+    # The served copy is the archive's only source, so every archive that is
+    # stale under `root` is re-cut here — not only the ones whose served copy
+    # was rewritten above, because an archive left stale by an earlier commit is
+    # the same defect — in the same command, not in a second tool the operator
+    # has to know about (#10423). `--dry-run` wrote nothing, so it rebuilds
+    # nothing.
+    archives = _rebuilt_archives(root, sorted(manifest["skills"])) if not dry_run else ()
     return SyncResult(changed=changed, target=target, previous=previous,
-                      at_head=at_head)
+                      at_head=at_head, archives=archives)
 
 
 # ── report + CLI ───────────────────────────────────────────────────────────
@@ -900,6 +998,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  pin moved {result.previous[:12]} -> {result.target[:12]}")
             for line in result.changed:
                 print(f"  ~ {line}")
+            for name in result.archives:
+                print(f"  ~ rebuilt derived archive: {name}.skill")
             if result.at_head is False:
                 _note(
                     f"{result.target[:12]} is NOT upstream HEAD: the currency arm "

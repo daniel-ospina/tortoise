@@ -684,6 +684,12 @@ divergence — report it:
 `direction_dropped_resubmit` · `direction_changed_resubmit` ·
 `point_mediated_route`
 
+> **Not deduplicated today.** A repeated target in a multi-item `to` is written
+> once per LIST ENTRY (a typed edge *and* its `INPUT` mirror each), so the
+> repeated claim is double-counted in EP (tortoise#9750 — open). Send DISTINCT
+> targets. A thirteenth key (`duplicate_target_deduped`) is **reserved**: it
+> joins this closed set when that fix lands, and is emitted by nothing until then.
+
 ## Query-back verification (J8 exit state)
 
 After ingest, VERIFY what you wrote: `recall_subgraph(seed)` /
