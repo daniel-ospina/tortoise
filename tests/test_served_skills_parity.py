@@ -579,6 +579,132 @@ def test_4643_sync_dry_run_writes_nothing(monkeypatch, tmp_path):
         assert (root / entry["served_path"]).read_bytes() == b"# stale\n"
 
 
+# ── #10437: `--sync` must also re-derive the `.skill` DOWNLOAD archives ────
+
+def _seed_mirror_and_stale_archives(root: Path, manifest: dict) -> None:
+    """The exact #10088 shape: a served copy, and an archive built from the OLD one.
+
+    A pre-fix `sync()` moved the served copy and left `website/skills/<name>.skill`
+    holding the previous bytes, so `tests/test_onboarding_variants.py::
+    test_9660_skill_archive_holds_exactly_its_own_skill` failed — after a green
+    exit from both parity arms (#10088 measured `1 failed, 2869 passed`).
+    """
+    for name, entry in manifest["skills"].items():
+        served = root / entry["served_path"]
+        served.parent.mkdir(parents=True, exist_ok=True)
+        served.write_bytes(b"# stale mirror\n")
+        archive = root / sp.ARCHIVES_REL / f"{name}.skill"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(b"PK\x03\x04 stale archive, not even a zip")
+
+
+def _archive_payload(root: Path, name: str) -> tuple[list[str], bytes]:
+    import zipfile
+
+    archive = root / sp.ARCHIVES_REL / f"{name}.skill"
+    assert archive.is_file(), f"sync did not rebuild {archive}"
+    with zipfile.ZipFile(archive) as zf:
+        return ([i.filename for i in zf.infolist()],
+                zf.read(f"{name}/SKILL.md"))
+
+
+def test_10437_sync_rebuilds_the_skill_archives_from_the_bytes_it_wrote(
+        monkeypatch, tmp_path):
+    """The sanctioned remedy must leave a tree that PASSES the archive gate.
+
+    `--sync` is the only documented way the served copy changes, and the `.skill`
+    download is built FROM that copy — so a sync that rewrites the mirror and
+    not the archive hands back a tree both parity arms call green and
+    `test_onboarding_variants` calls stale. Pins the payload (not just "a file
+    appeared"): the zip must hold the bytes sync just wrote, under the
+    uploader's `<name>/SKILL.md` entry.
+    """
+    src = REPO / sp.MANIFEST_REL
+    pin = tmp_path / "pin.yml"
+    shutil.copyfile(src, pin)
+    manifest = sp.load_manifest(pin)
+    root = tmp_path / "root"
+    _seed_mirror_and_stale_archives(root, manifest)
+    upstream_bytes = {entry["upstream_path"]: f"# fresh upstream — {name}\n".encode()
+                      for name, entry in manifest["skills"].items()}
+    _pin_upstream(monkeypatch, manifest, "c" * 40, upstream_bytes)
+
+    result = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert len(result.changed) == 3, result.changed
+    # `changed` keeps meaning "served copies" — the archive is reported apart.
+    rebuilt = {line.split(" (", 1)[0] for line in result.archives}
+    assert rebuilt == {str(sp.ARCHIVES_REL / f"{name}.skill")
+                       for name in manifest["skills"]}, result.archives
+    for name, entry in manifest["skills"].items():
+        entries, payload = _archive_payload(root, name)
+        assert entries == [f"{name}/SKILL.md"], entries
+        assert payload == (root / entry["served_path"]).read_bytes(), (
+            f"{name}.skill must hold the served copy sync just wrote")
+        assert payload == upstream_bytes[entry["upstream_path"]]
+
+
+def test_10437_a_second_sync_rewrites_no_archive(monkeypatch, tmp_path):
+    """Idempotence, so committing a sync is not a binary churn on every run.
+
+    The builder pins `ZipInfo.date_time`, so the archive is byte-stable; this
+    asserts the sync path actually exploits that instead of unconditionally
+    rewriting — the other direction of the same defect (a remedy that is
+    correct but noisy gets reverted).
+    """
+    src = REPO / sp.MANIFEST_REL
+    pin = tmp_path / "pin.yml"
+    shutil.copyfile(src, pin)
+    manifest = sp.load_manifest(pin)
+    root = tmp_path / "root"
+    _seed_mirror_and_stale_archives(root, manifest)
+    upstream_bytes = {entry["upstream_path"]: f"# fresh upstream — {name}\n".encode()
+                      for name, entry in manifest["skills"].items()}
+    _pin_upstream(monkeypatch, manifest, "d" * 40, upstream_bytes)
+
+    sp.sync(root, pin, attempts=1, backoff=0)
+    after_first = {name: (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes()
+                   for name in manifest["skills"]}
+
+    second = sp.sync(root, pin, attempts=1, backoff=0)
+    assert second.changed == [], second.changed
+    assert second.archives == [], second.archives
+    for name, payload in after_first.items():
+        assert (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes() == payload
+
+
+def test_10437_the_cli_reports_the_archives_and_dry_run_writes_none(
+        monkeypatch, tmp_path, capsys):
+    """The operator has to SEE the archive change: an unreported derived artifact
+    is one a reviewer of the diff does not know to look at."""
+    src = REPO / sp.MANIFEST_REL
+    pin = tmp_path / "pin.yml"
+    shutil.copyfile(src, pin)
+    manifest = sp.load_manifest(pin)
+    root = tmp_path / "root"
+    _seed_mirror_and_stale_archives(root, manifest)
+    upstream_bytes = {entry["upstream_path"]: f"# fresh upstream — {name}\n".encode()
+                      for name, entry in manifest["skills"].items()}
+    _pin_upstream(monkeypatch, manifest, "e" * 40, upstream_bytes)
+    sentinel = {name: (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes()
+                for name in manifest["skills"]}
+
+    rc = sp.main(["--sync", "--dry-run", "--root", str(root),
+                  "--manifest", str(pin), "--attempts", "1", "--backoff", "0"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would re-derive 3 .skill archive(s)" in out, out
+    assert "how-to-use-tortoise.skill" in out, out
+    for name, payload in sentinel.items():
+        assert (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes() == payload, (
+            "--dry-run must not write the archives")
+
+    rc = sp.main(["--sync", "--root", str(root), "--manifest", str(pin),
+                  "--attempts", "1", "--backoff", "0"])
+    assert rc == 0
+    assert "re-derived 3 .skill archive(s)" in capsys.readouterr().out
+
+
 def _sync_fixture(tmp_path, monkeypatch, head: str, upstream_bytes: dict[str, bytes]):
     """A throwaway pin + root holding `upstream_bytes` at the served paths."""
     src = REPO / sp.MANIFEST_REL

@@ -91,9 +91,19 @@ def source_path(name: str) -> Path:
     return SERVED_SKILLS / name / "SKILL.md"
 
 
-def build(name: str) -> bytes:
-    """Bytes of the `.skill` archive for `name` (a zip with ONE entry)."""
-    src = source_path(name)
+def build(name: str, source: Path | None = None) -> bytes:
+    """Bytes of the `.skill` archive for `name` (a zip with ONE entry).
+
+    ``source`` overrides the served copy the payload is read from. It exists for
+    the ONE caller that derives the served copy itself
+    (`tools/served_skills_parity.py --sync`): that tool writes the mirror into a
+    root it was handed, so it must build from that root's file rather than from
+    the module-level repo path — and it must produce the SAME bytes this tool
+    writes, or the two would disagree about the derived artifact. The archive
+    entry name stays ``<name>/SKILL.md`` either way: that is the uploader's
+    layout, not the source's.
+    """
+    src = source_path(name) if source is None else source
     if not src.is_file():
         raise SystemExit(f"missing source skill: {src}")
     import io
