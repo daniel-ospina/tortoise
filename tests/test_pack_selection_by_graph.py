@@ -504,18 +504,30 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     last-client branch … shuts the daemon down", so "callers that need more than
     the lock must therefore ALSO verify visibility at seed time".
 
-    THE FIX IS TWO INDEPENDENT HALVES, each measured sufficient on its own at
-    this head (each alone → this file's 54 tests pass): `sdk.close()` releases
-    the seeder through the GUARDED close seam — `tortoise.FalkorDB.close()`
-    (`tortoise/__init__.py:288`) asks `cotenant_holds_server()` and, with a
-    co-tenant present, takes `disconnect_only()` +
-    `_neutralize_redislite_cleanup()` instead of any teardown — and this
-    guard's read through the app's OWN anchor pins that handle, so the store has
-    a live client that outlasts the seeder. Both are kept because they prevent
-    different failures: the close keeps the release off the UNGUARDED teardown
-    path, the guard converts any recurrence into a named `SeedVisibilityError`
-    carrying the identity evidence — the diagnosis that a bare 404 on an
-    unrelated assertion cost a cycle to reach.
+    THE FIX IS TWO HALVES, AND THEY ARE NOT INTERCHANGEABLE — measured at
+    this head on the whole file, each half removed from `_seed_org` in turn
+    (an earlier revision of this paragraph claimed "each measured sufficient
+    on its own", and that is false):
+
+      neither half (the pre-fix shape)   1 failed, 53 passed
+      guard kept, `sdk.close()` dropped  1 failed, 53 passed  ← the CLOSE
+      close kept, guard dropped          54 passed
+      both (shipped)                     54 passed
+
+    `sdk.close()` releases the seeder through the GUARDED close seam —
+    `tortoise.FalkorDB.close()` (`tortoise/__init__.py:288`) asks
+    `cotenant_holds_server()` and, with a co-tenant present, takes
+    `disconnect_only()` + `_neutralize_redislite_cleanup()` instead of any
+    teardown — and this guard's read through the app's OWN anchor pins that
+    handle, so the store has a live client that outlasts the seeder. WHY the
+    close is the load-bearing half: the guard runs BEFORE the release, so it
+    cannot see a miss the RELEASE causes (with only the guard, the seed checks
+    out, the handle is then dropped, and the rows are gone by assertion time).
+    The guard is the DIAGNOSIS — it converts a recurrence into a named
+    `SeedVisibilityError` carrying the identity evidence, which is what a bare
+    404 on an unrelated assertion cost a cycle to reach — and the close is what
+    keeps the store reachable through the release. Both are kept for those two
+    different jobs, not because either suffices.
     `patched_tortoise_sdk` closes the anchor at fixture exit, so no extra server
     lifetime escapes the fixture.
 
@@ -615,11 +627,13 @@ def test_a_seeded_team_survives_the_seeder_that_wrote_it(monkeypatch):
     records, and this test pins what a reader can actually verify: the seeded
     Team is still visible through the app's OWN anchor after `gc.collect()`.
     The guard's read is what pins that second client; the close keeps the
-    release off the unguarded teardown path. THIS test pins the GUARD, not the
-    `close()` half: the guard's anchor read is what makes the rows readable
-    here, and `close()`'s contribution is that the release does not tear down a
-    store the anchor is still on. It is the pre-fix shape (neither half) that
-    reds — see FAIL-ON below.
+    release off the unguarded teardown path. THIS test pins the CLOSE, not the
+    guard — and that is measured, not argued: dropping `sdk.close()` from
+    `_seed_org` while KEEPING the guard reds this test with **0** rows, while
+    dropping the guard and keeping the close is green (see
+    `_assert_seed_visible` for the two-way mutation table). The guard runs
+    before the release, so it checks out and the rows then vanish; it is the
+    diagnosis, not the fix.
 
     FAIL-ON (MEASURED on `main`'s tree at `7a6301142`): with the seeder's SDK
     dropped rather than closed (#10424's pre-fix shape), the app's read lands on
@@ -1345,6 +1359,14 @@ def _seed_create_team(db_path: str, org_id: str, *, tier: str = "solo",
     # the store's second client; the close then takes the co-tenant path
     # instead of tearing down the server `create_client`'s `TestClient(app)`
     # is reading.
+    # MEASURED, so nobody over-claims it later: `TestCreateGraphWithPacks` is
+    # 8/8 green WITH and WITHOUT these two lines (the fixture enters
+    # `TestClient(app)` before the seed, so the app's own handle already exists
+    # and the dropped seeder is never the store's last client). This closes a
+    # LATENT risk; it does not fix a reproduced red. The guard is still armed
+    # here — mutating the Team write away reds the seed with a named
+    # `SeedVisibilityError` instead of a downstream `404 'Unknown
+    # organization'` on `POST /v1/graphs` (measured).
     _assert_seed_visible(db_path, org_id)
     sdk.close()
 
