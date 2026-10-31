@@ -22,7 +22,6 @@ import copy
 import hashlib
 import math
 import os
-import re
 import secrets
 import tempfile
 import threading
@@ -191,9 +190,19 @@ def supabase_cp(monkeypatch) -> FakeControlPlane:
     return cp
 
 
+#: #3524 §9 step 4 — a *configured* AS is what this suite models. Since the
+#: consent page can no longer approve without the AS holding the key the session
+#: origin minted with, `/oauth/authorize` refuses to RENDER a page without it
+#: (typed 503 in `oauth_authorize`, pinned in tests/test_oauth_consent_page_step4.py).
+#: The suite-wide value keeps every render test measuring the page, not the
+#: deployment fault.
+_CONSENT_TOKEN_SECRET = "oauth-mcp-test-secret-0123456789abcdef"
+
+
 @pytest.fixture
-def api_client(supabase_cp):
+def api_client(supabase_cp, monkeypatch):
     """TestClient over the real hosted_api app (OAuth + well-known routes)."""
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _CONSENT_TOKEN_SECRET)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "oauth.db")
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
@@ -375,15 +384,33 @@ class TestDynamicClientRegistration:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestAuthorizePage:
+    """The rendered consent page — #3524 §9 step 4's SHAPE, and its protocol edges.
+
+    ⛔ THE SIGN-IN SURFACE IS GONE, so this class no longer pins it. Until step 4 the
+    page ran an inline supabase-js client and this class asserted its storage
+    adapter, its cookie caps, its CDN semver, its `flowType`, its org picker and
+    its retry affordances. Each of those was a pin on the SECOND identity system,
+    and all of it is deleted (§7's deletion set): `tests/test_oauth_consent_page_step4.py`
+    now owns the page's behaviour — the bounce, the attempt-key carriage, the mint
+    call, the token-bound POST — and executes the inline script under node.
+    `tests/test_oauth_consent_bridge.py::test_the_deleted_page_artefacts_are_GONE`
+    keeps it deleted.
+
+    What stays HERE is the renderer's own contract (the page's markup/JSON is
+    sane and injection-safe) and the endpoint's RFC-6749 error behaviour. The
+    page is only served for a request carrying `attempt_key` — the AS's evidence
+    that the app advanced this flow — so every page render below presents one.
+    """
+
     def test_authorize_renders_consent_html(self, api_client):
         tc, _ = api_client
         reg = _register_client(tc)
-        verifier, challenge = _pkce()  # noqa: RUF059
+        _verifier, challenge = _pkce()
         r = tc.get("/oauth/authorize", params={
             "client_id": reg["client_id"], "redirect_uri": REDIRECT,
             "response_type": "code", "code_challenge": challenge,
             "code_challenge_method": "S256", "state": "st-1",
-            "scope": "mcp", "resource": ""})
+            "scope": "mcp", "resource": "", "attempt_key": "ak-1"})
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
         assert "test-connector" in r.text  # client name embedded
@@ -391,46 +418,9 @@ class TestAuthorizePage:
         # #1701 regression: the template was written with {{ }} (a .format()
         # escape) but is served via .replace() — double braces reached the
         # browser, breaking BOTH the CSS (unstyled page) and the inline JS
-        # (SyntaxError → 'Team resolving…' hangs, Authorize does nothing).
+        # (SyntaxError → the card hangs, Authorize does nothing).
         assert "{{" not in r.text and "}}" not in r.text
         assert r.text.count("{") == r.text.count("}")  # no unbalanced braces
-        # #1704: the page reuses the dashboard's parent-domain cookie session
-        # (sb-tortoise-auth-token) — a signed-in dashboard user must not see a
-        # second login. The storage must declare the FULL SupportedStorage
-        # interface: a missing setItem breaks gotrue's _saveSession (the
-        # OAuth/email fallback would TypeError on every sign-in).
-        assert "sb-tortoise-auth-token" in r.text
-        assert "cookieStorage" in r.text
-        assert "getItem(key) {" in r.text
-        assert "setItem(key, value) {" in r.text
-        assert "removeItem(key) {" in r.text
-        assert "SIZE_GUARD" in r.text  # #1225 cookie-cap guard ported
-        # #3496: the browser auth client must name an EXACT version — a mutable
-        # range (`@2`, `@2.x`, `@latest`) silently ships whatever the CDN serves.
-        # The BEHAVIOURAL half of this contract (the specifier's version EQUALS
-        # the vendored bundle the page's harness executes) is pinned by
-        # tests/test_oauth_consent_pkce.py, which runs that bundle under node:vm;
-        # this assertion is deliberately the shape-only tripwire so a version
-        # bump has exactly one derived place to satisfy.
-        assert re.search(
-            r"@supabase/supabase-js@\d+\.\d+\.\d+/dist/umd/supabase\.min\.js", r.text)
-        # The negative adds coverage only when a SECOND reference coexists, so it
-        # pins the mutable shapes a numeric-only pattern misses: `@2.x` and
-        # `@latest` carry no bare digit run before the `/`. (Not "every mutable
-        # shape" — a caret/tilde range or a non-`latest` dist-tag such as `@next`
-        # is caught by the positive above, which requires three numeric
-        # components.) The numeric arm is bounded to at most two components plus an
-        # optional `.x`, so it does NOT match the pinned full semver — an unbounded
-        # `\d+(\.\d+){0,2}` swallows `2.112.2` itself and fails on the very page
-        # this guards.
-        assert not re.search(
-            r"@supabase/supabase-js@(?:latest|x|\d+(?:\.\d+)?(?:\.x)?)[/\"]", r.text)
-        # #3496: RFC 10017 §7.2 — the implicit grant MUST NOT be used by a
-        # browser-based client, so the flow type is explicit. The behaviour
-        # (code_challenge_method=s256, verifier routed off the cookie) is pinned
-        # by the harness above, which pairs it with an implicit control.
-        assert 'flowType: "pkce"' in r.text
-        assert "SIZE_CAP" in r.text  # #3496 item 6: derived cookie-cap refusal
 
     def test_consent_page_escapes_script_breakout(self, api_client):
         """P1 (PR #1264 review): a malicious state / client_name containing
@@ -439,18 +429,17 @@ class TestAuthorizePage:
         tc, _ = api_client
         reg = _register_client(
             tc, client_name='</script><script>window.pwned=1</script>')
-        verifier, challenge = _pkce()  # noqa: RUF059
+        _verifier, challenge = _pkce()
         # #6001: the payload also carries a PLACEHOLDER TOKEN, so this assertion
         # set covers the substitution-rescan defect as well as the breakout one
         # — the `_json.loads` parse below is what failed when the token was
-        # re-expanded inside the JSON literal (see the dedicated test that
-        # follows for all four tokens and both attacker-reachable vectors).
-        evil_state = '__SUPABASE_URL__</script><script>window.pwned=1</script>'
+        # re-expanded inside the JSON literal.
+        evil_state = '__SIGNIN_URL__</script><script>window.pwned=1</script>'
         r = tc.get("/oauth/authorize", params={
             "client_id": reg["client_id"], "redirect_uri": REDIRECT,
             "response_type": "code", "code_challenge": challenge,
             "code_challenge_method": "S256", "state": evil_state,
-            "scope": "mcp", "resource": ""})
+            "scope": "mcp", "resource": "", "attempt_key": "ak-1"})
         assert r.status_code == 200
         # the raw breakout payload must never appear verbatim in the page
         assert "</script><script>window.pwned=1</script>" not in r.text
@@ -460,196 +449,98 @@ class TestAuthorizePage:
         assert "const PARAMS = {" in r.text
         # the embedded JSON still parses as a JS object literal
         import json as _json
-        payload = r.text.split("const PARAMS = ", 1)[1].split(";", 1)[0]
+        payload = r.text.split("const PARAMS = ", 1)[1].split(";\n", 1)[0]
         parsed = _json.loads(payload.encode().decode("unicode_escape"))
         assert parsed["state"] == evil_state
         assert parsed["client_name"] == reg["client_name"]
-        # CSP is served with the nonce used on both script tags
+        # CSP is served with the nonce used on the inline script tag. There is
+        # exactly ONE script tag now (the supabase-js CDN tag is gone with the
+        # inline client), and no third-party script origin is permitted.
         csp = r.headers.get("content-security-policy", "")
         assert "script-src" in csp and "nonce-" in csp
+        assert "cdn.jsdelivr.net" not in csp
         assert "frame-ancestors 'none'" in csp
-        assert r.text.count('nonce="') == 2  # CDN + inline script tags
-
-    # ═════ #6001 — placeholder substitution must not rescan its own output ═══
-
-    @pytest.mark.parametrize("token", [
-        "__PARAMS__", "__SUPABASE_URL__", "__SUPABASE_ANON_KEY__", "__NONCE__",
-    ])
-    def test_consent_page_inserts_a_placeholder_token_verbatim(
-            self, api_client, token):
-        """#6001: a param value that CONTAINS a placeholder token is inserted
-        verbatim — the substitution pass must never re-examine what it inserted.
-
-        `consent_page_html` substituted with a CHAIN of `str.replace()` calls, so
-        each later pass rescanned the text an earlier pass had injected. `state`
-        is never shape-validated and `client_name` is DCR/CIMD
-        client-controlled, so both vectors are exercised here. Before #6001 the
-        token inside the PARAMS JSON string literal was replaced by the pass
-        meant for the TEMPLATE, and that replacement's text is raw JSON — its own
-        `"` closed the literal early, the inline block became a hard
-        `SyntaxError`, and the page shipped with no PARAMS, no handlers and an
-        inert Authorize button.
-
-        The parse below is the discrimination: the escaping assertions in the
-        test above stay green either way, because escaping happens FIRST and is
-        not the failing stage.
-        """
-        tc, _ = api_client
-        reg = _register_client(tc, client_name=token)
-        _, challenge = _pkce()
-        r = tc.get("/oauth/authorize", params={
-            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
-            "response_type": "code", "code_challenge": challenge,
-            "code_challenge_method": "S256", "state": token,
-            "scope": "mcp", "resource": ""})
-        assert r.status_code == 200
-        import json as _json
-        payload = r.text.split("const PARAMS = ", 1)[1].split(";", 1)[0]
-        parsed = _json.loads(payload.encode().decode("unicode_escape"))
-        assert parsed["state"] == token, (
-            f"the token in `state` was re-expanded ({parsed['state']!r}) instead "
-            f"of being inserted verbatim")
-        assert parsed["client_name"] == token, (
-            f"the token in `client_name` was re-expanded ({parsed['client_name']!r}) "
-            f"instead of being inserted verbatim")
-        assert r.text.count('nonce="') == 2  # CDN + inline script tags
-
-    # ═════ #1701 R1 — consent page team-chooser + hardening (static strings) ═══
-    # These are STATIC tripwires on the server-rendered markup. The behaviours
-    # added by #3496 — the PKCE grant type and challenge, the verifier's storage
-    # home, the terminal failure state, the item-6 write path and the return-target
-    # canonicalisation — are EXECUTED (node:vm against the vendored supabase bundle)
-    # by tests/test_oauth_consent_pkce.py. This file pins only their SHAPE:
-    # the exact CDN semver, `flowType: "pkce"`, `SIZE_GUARD` and `SIZE_CAP`.
-    # The #1701 behaviours are NOT in that harness: the multi-org picker
-    # (`org-select`), the refresh-first preview recovery, the absence of
-    # `signOut` and the in-flight guard stay static-only pins here.
-
-    def _consent_html(self, api_client, *, client_name: str = "test-connector") -> str:
-        tc, _ = api_client
-        reg = _register_client(tc, client_name=client_name)
-        verifier, challenge = _pkce()  # noqa: RUF059
-        r = tc.get("/oauth/authorize", params={
-            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
-            "response_type": "code", "code_challenge": challenge,
-            "code_challenge_method": "S256", "state": "st-1",
-            "scope": "mcp", "resource": ""})
-        assert r.status_code == 200
-        return r.text
-
-    def test_consent_html_team_picker_wiring(self, api_client):
-        html = self._consent_html(api_client)
-        assert 'id="org-select"' in html
-        # the Authorize POST carries the PICKER selection first, then the
-        # client-declared resource (single-team flow unchanged)
-        assert "resource: orgResource || PARAMS.resource || null" in html
-        # options carry each membership's team-scoped resource as the value
-        assert "opt.value = m.resource" in html
-        assert "memberships.forEach" in html
-
-    def test_consent_html_single_team_select_not_visible(self, api_client):
-        html = self._consent_html(api_client)
-        # select present-but-hidden in the shared markup; only unhidden for
-        # memberships.length > 1
-        assert 'id="org-select" style="display:none' in html
-        assert "memberships && memberships.length > 1" in html
-        assert 'id="org-line"' in html
-        assert html.count('id="org-select"') == 1
-
-    def test_consent_html_authorize_disabled_in_markup(self, api_client):
-        html = self._consent_html(api_client)
-        # Authorize starts DISABLED in the markup and is enabled only after
-        # the preview resolves (single team) or an explicit picker selection
-        assert '<button class="btn-auth" id="btn-auth" disabled>' in html
-        assert "function enableAuthorize()" in html
-        assert "function disableAuthorize()" in html
-        assert "if (authBtn().disabled)" in html  # submit guard
-
-    def test_consent_html_picker_placeholder_and_no_autobind(self, api_client):
-        html = self._consent_html(api_client)
-        # no silent auto-bind: a leading disabled placeholder forces an explicit
-        # change event, and teamResource is set ONLY in the change handler
-        assert "Choose an org…" in html
-        assert "placeholder.disabled = true" in html
-        assert 'orgResource = orgSelectEl.value' in html
-        assert "orgResource = null" in html  # reset at every run entry
-        assert "if (orgResource) enableAuthorize(); else disableAuthorize();" in html
-
-    def test_consent_html_401_recovery_refresh_first_no_signout(self, api_client):
-        html = self._consent_html(api_client)
-        # stale session recovery is refresh-first with a one-attempt cap and
-        # NO signOut on the preview-401 path (shared parent-domain session)
-        assert "supabaseClient.auth.refreshSession()" in html
-        assert "staleRefreshes < 1" in html
-        assert "Your session expired — sign in again." in html
-        assert html.count("signOut(") == 0
-
-    def test_consent_html_consent_post_401_refreshes_once(self, api_client):
-        html = self._consent_html(api_client)
-        # the Authorize POST 401 path refreshes once and re-POSTs with the
-        # fresh session token; a second 401 shows the expired-session view
-        assert "res.status === 401" in html
-        assert "refreshSession()" in html
-        assert "d2.session.access_token" in html
-        assert html.count("signOut(") == 0
-
-    def test_consent_html_retry_and_inflight_guard(self, api_client):
-        html = self._consent_html(api_client)
-        assert 'id="btn-retry-preview"' in html
-        # in-flight guard spans the async preview + options are rebuilt from
-        # scratch (no duplicate rows on sequential re-runs). Since #5734 the guard
-        # hands back the RUNNING flow rather than bare `undefined`, so a caller
-        # that awaits it observes the flow it would otherwise race.
-        assert "let previewInFlight = null" in html
-        assert "if (previewInFlight) return previewInFlight;" in html
-        assert "while (orgSelect.firstChild) orgSelect.removeChild" in html
-        assert "onAuthStateChange" in html
-        assert 'event === "INITIAL_SESSION"' in html
-
-    def test_authorize_invalid_request_redirects_error(self, api_client):
-        """A REGISTERED redirect_uri receives the error redirect (RFC 6749
-        §4.1.2.1) when the request is invalid (here: missing PKCE)."""
-        tc, _ = api_client
-        reg = _register_client(tc)
-        r = tc.get("/oauth/authorize", params={
-            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
-            "response_type": "code", "state": "st-1"},
-            follow_redirects=False)
-        assert r.status_code == 307
-        assert "error=invalid_request" in r.headers["location"]
-        assert "state=st-1" in r.headers["location"]
-
-    def test_authorize_invalid_client_no_open_redirect(self, api_client):
-        """Open-redirect guard: an unknown client's error is NOT redirected
-        to an unregistered redirect_uri — it returns JSON instead."""
-        tc, _ = api_client
-        verifier, challenge = _pkce()  # noqa: RUF059
-        r = tc.get("/oauth/authorize", params={
-            "client_id": "ct_nope", "redirect_uri": "https://evil.example/cb",
-            "response_type": "code", "code_challenge": challenge,
-            "code_challenge_method": "S256", "state": "st-1"},
-            follow_redirects=False)
-        assert r.status_code == 400
-        assert "Location" not in r.headers or "evil.example" not in r.headers.get("Location", "")
+        assert r.text.count('nonce="') == 1
 
     def test_authorize_requires_pkce(self, api_client):
+        """RFC 7636: a `code` request with no PKCE challenge is an `invalid_request`,
+        relayed to the REGISTERED redirect with `state` echoed (RFC 6749 §4.1.2.1).
+
+        Restored after the class was slimmed for #3524 §9 step 4 (#10346 review): the
+        slim version dropped it, and the surviving error-path tests all used a
+        response_type the endpoint refuses — so “no challenge at all” had no test.
+        The assertions below name the error AND the destination, because `error=` in
+        a Location is satisfied by a redirect to the wrong target too.
+        """
         tc, _ = api_client
         reg = _register_client(tc)
         r = tc.get("/oauth/authorize", params={
             "client_id": reg["client_id"], "redirect_uri": REDIRECT,
             "response_type": "code", "state": "st-1"},
             follow_redirects=False)
-        assert "error=" in r.headers["location"]
+        assert r.status_code in (302, 303, 307), r.text
+        location = r.headers["location"]
+        assert location.startswith(REDIRECT + "?"), location
+        assert "error=invalid_request" in location, location
+        assert "state=st-1" in location, location
 
     def test_authorize_rejects_plain_challenge(self, api_client):
+        """RFC 7636 §4.2: `code_challenge_method=plain` is refused — this AS supports
+        S256 only — as the same relayed `invalid_request` error.
+
+        Restored with `test_authorize_requires_pkce` above (same review finding).
+        """
         tc, _ = api_client
         reg = _register_client(tc)
         r = tc.get("/oauth/authorize", params={
             "client_id": reg["client_id"], "redirect_uri": REDIRECT,
             "response_type": "code",
-            "code_challenge": "x" * 64, "code_challenge_method": "plain"},
+            "code_challenge": "x" * 64, "code_challenge_method": "plain",
+            "state": "st-1"},
             follow_redirects=False)
-        assert "error=" in r.headers["location"]
+        assert r.status_code in (302, 303, 307), r.text
+        location = r.headers["location"]
+        assert location.startswith(REDIRECT + "?"), location
+        assert "error=invalid_request" in location, location
+        assert "state=st-1" in location, location
+
+    def test_an_unknown_client_cannot_reach_an_unregistered_redirect(self, api_client):
+        """THE OPEN-REDIRECT GUARD, on the input that has no registered URI at all.
+
+        `test_an_invalid_authorize_request_still_gets_its_oauth_error_not_a_bounce`
+        (`test_oauth_consent_page_step4.py`) proves the refuse-to-navigate arm for a
+        REGISTERED client whose `redirect_uri` is unregistered. The other input to the
+        same decision is an UNRESOLVABLE `client_id` — the one shape where nothing at
+        all is registered for anyone to rebuild a destination from
+        (`canonical_redirect_target(None, …) is None`, `hosted_api.oauth_authorize`'s
+        except-block). `tests/test_oauth_consent_pkce.py` carried this case as
+        `test_authorize_invalid_client_no_open_redirect` and was deleted wholesale with
+        the inline client it pinned, so nothing in the tree covered it (#10346 review 1,
+        finding 2).
+
+        Stricter than the test it restores: that one tolerated a `Location` which merely
+        did not *contain* `evil.example`, which an empty or wrong-host Location
+        satisfies. Any Location at all is the defect — RFC 6749 §4.1.2.1 has the AS
+        answer a malformed request itself, and it may not send the browser to a
+        destination the client never proved it owns.
+        """
+        tc, _ = api_client
+        _verifier, challenge = _pkce()
+        evil = "https://evil.example/cb"
+        r = tc.get("/oauth/authorize", params={
+            "client_id": "ct_this_client_was_never_registered",
+            "redirect_uri": evil,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "attempt_key": "ak-1"},
+            follow_redirects=False)
+        assert r.status_code == 400, r.text
+        assert "location" not in {k.lower() for k in r.headers}, (
+            "an unknown client_id must not produce ANY navigation — the raw "
+            f"redirect_uri reached the browser as {r.headers.get('location')!r}")
+        assert r.json()["error"] == "invalid_request", r.text
+        # …and the attacker's destination is not smuggled in the error body either.
+        assert evil not in r.text, r.text
 
 
 class TestLoopbackPortAgnostic:
@@ -702,7 +593,7 @@ class TestLoopbackPortAgnostic:
         one, so the two values differ) is
         `TestCanonicalRedirectTarget::test_authorize_page_carries_the_rebuilt_target`
         in this file, not this test; the end-to-end page NAVIGATION itself is
-        `tests/test_oauth_consent_pkce.py::test_3443_navigation_uses_the_server_built_target_with_a_raw_guard_control`,
+        `tests/test_oauth_consent_page_step4.py::test_the_authorize_click_posts_the_token_and_navigates_with_the_state_echoed`,
         which runs the page under node."""
         tc, _ = api_client
         reg = _register_client(tc, redirect_uris=[self.PORTLESS])
@@ -711,7 +602,7 @@ class TestLoopbackPortAgnostic:
             "redirect_uri": "http://localhost:3118/callback",
             "response_type": "code", "state": "st-1",
             "code_challenge": "x" * 43,
-            "code_challenge_method": "S256"},
+            "code_challenge_method": "S256", "attempt_key": "ak-1"},
             follow_redirects=False)
         assert r.status_code == 200, r.text
         assert "error=" not in r.headers.get("location", "")
@@ -1152,7 +1043,7 @@ class TestCursorPrivateUseRedirectScheme:
             "client_id": reg["client_id"], "redirect_uri": self.CURSOR_CB,
             "response_type": "code", "code_challenge": challenge,
             "code_challenge_method": "S256", "state": "st-cur",
-            "scope": "mcp", "resource": ""})
+            "scope": "mcp", "resource": "", "attempt_key": "ak-cur"})
         assert page.status_code == 200, page.text
         assert "text/html" in page.headers["content-type"]
 
@@ -1220,7 +1111,8 @@ class TestCanonicalRedirectTarget:
          the RFC 6749 §4.1.3 exact match at /oauth/token are untouched.
     Leg E — the page's `redirectBack` navigating the rebuilt target rather than
     the raw one — is EXECUTED by the node harness in
-    `tests/test_oauth_consent_pkce.py` (`test_3443_...`), where that script runs.
+    `tests/test_oauth_consent_page_step4.py::test_the_authorize_click_posts_the_token_and_navigates_with_the_state_echoed`,
+    where that script runs.
     """
 
     ATTACK = "http://evil.example:8443\\@127.0.0.1/callback"
@@ -1428,9 +1320,9 @@ class TestCanonicalRedirectTarget:
             "redirect_uri": "http://LOCALHOST:3118/callback",
             "response_type": "code", "code_challenge": challenge,
             "code_challenge_method": "S256", "state": "st-1",
-            "scope": "mcp", "resource": ""})
+            "scope": "mcp", "resource": "", "attempt_key": "ak-1"})
         assert r.status_code == 200, r.text
-        payload = r.text.split("const PARAMS = ", 1)[1].split(";", 1)[0]
+        payload = r.text.split("const PARAMS = ", 1)[1].split(";\n", 1)[0]
         parsed = _json.loads(payload.encode().decode("unicode_escape"))
         assert parsed["redirect_target"] == "http://localhost:3118/callback", parsed
         # …and the raw value is still there, because the page POSTS it back for
@@ -2499,10 +2391,20 @@ def test_consent_html_literal_parses_without_syntax_warning():
         warnings.simplefilter("error", SyntaxWarning)
         compile(source, str(oauth_path), "exec")
 
-    # The raw prefix must not have re-interpreted any escape in the literal.
+    # The literal must stay RAW. §9 step 4 removed the RFC-1918 regex that used
+    # to witness this (`isLocal()`, deleted with the inline client), so the
+    # property is asserted where it lives: the source declares a raw literal, and
+    # the compiled value is the emitted bytes rather than an escape-processed
+    # near-miss.
+    assert '_CONSENT_HTML = r"""<!DOCTYPE html>' in source, (
+        "the consent template lost its raw prefix — a future backslash in the JS "
+        "would then be an invalid Python escape (SyntaxWarning now, SyntaxError on "
+        "a future Python) and would change the bytes served to the browser"
+    )
     from tortoise.oauth import _CONSENT_HTML
 
-    assert r"/^172\.(1[6-9]|2\d|3[01])\./" in _CONSENT_HTML
+    assert _CONSENT_HTML.startswith("<!DOCTYPE html>")
+    assert "\n" in _CONSENT_HTML
 # ═══════════════════════════════════════════════════════════════════════════
 # #2866 — DCR capacity policy: bounded store, stated caps, CIDR exemption
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3320,7 +3222,12 @@ class TestCimdClientIdentity:
             "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
             "response_type": "code", "code_challenge": challenge,
             "code_challenge_method": "S256", "state": "st-1",
-            "scope": "mcp", "resource": ""})
+            # #3524 §9 step 4: the AS renders the consent page only for a request
+            # that carries an attempt key (its only render-time SIGNAL — presence
+            # is not provenance; the mint proves ownership, `403
+            # no_authorize_attempt` on a mismatch); without one it 302s to the
+            # app's sign-in leg, which this file's TestClient cannot answer (404).
+            "scope": "mcp", "resource": "", "attempt_key": "ak-cimd"})
         assert r.status_code == 200, r.text
         assert "claude.ai" in r.text
         assert "Totally Not Claude" not in r.text
