@@ -510,7 +510,7 @@ def test_supersede_repoint_lets_a_same_class_supersede_through_a_string_idx(
     assert _operator_rows(lane, old) == []
 
 
-@pytest.mark.parametrize("raw_idx", ["1", "+-1", "slot-one"])
+@pytest.mark.parametrize("raw_idx", ["1", "+-1", "slot-one", 1.0])
 def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     """#10195 crossed with a raw-written ``idx`` — the door must still refuse.
 
@@ -526,15 +526,19 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     Three unprovable-looking shapes are pinned: a string that looks like a slot
     number (`'1'`), a string that only LOOKS numeric (`'+-1'` — the shape that
     crashed the first cut of the coercion, because `str.lstrip('+-').isdigit()`
-    accepts it but `int()` refuses it), and one that names no number at all
-    (`'slot-one'`). Each takes the same candidate arm — MEASURED: the engine's
-    `ORDER BY coalesce(r.idx, 0), c.id` groups a STRING slot AHEAD of a numeric
-    one, so no numeric coercion can reproduce the slot order and none is
-    attempted — and each must still REFUSE this wiring.
+    accepts it but `int()` refuses it), one that names no number at all
+    (`'slot-one'`), and a FLOAT (`1.0`). Each takes the same candidate arm —
+    MEASURED: the engine's `ORDER BY coalesce(r.idx, 0), c.id` groups a STRING slot
+    AHEAD of a numeric one, so no numeric coercion can reproduce the slot order and
+    none is attempted — and each must still REFUSE this wiring.
 
-    ⚠️ No `float` parametrization: MEASURED, FalkorDB returns `1` (an `int`) for
-    a property written as `1.0`, so a float-idx case would take the int path and
-    "pass" on the pre-fix code too — a non-discriminating case is not coverage.
+    ⚠️ The `float` case is INCLUDED and it is discriminating (#10418 review P3).
+    An earlier cut omitted it, claiming the engine returned `1` (an `int`) for a
+    property written `1.0`, so the case would take the int path and "pass" on the
+    pre-fix code too. That does not reproduce: `SET r.idx = 1.0` over an operator's
+    slot edges returns `[(1.0, 'Float'), (1, 'Integer')]` (measured on the
+    carve-out engine, 2026-10-31), i.e. the layout IS mixed, the door takes the
+    candidate arm, and the pre-fix blanket skip let the supersede through.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -557,7 +561,18 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     # (#10418 review P3). Pre-fix the message was a single phrase for the whole
     # candidate arm: "the slots carry an idx that cannot be ordered".
     _msg = str(_exc.value)
-    assert "MIXED types" in _msg, _msg
+    if isinstance(raw_idx, str):
+        assert "MIXED types" in _msg, _msg
+    else:
+        # ⚠️ A FLOAT ``idx`` is measured UNSTABLE in storage, so this case pins
+        # the VERDICT, not the phrase: `SET r.idx = 1.0` over an operator's slot
+        # edges returned `[(1.0, 'Float'), (1, 'Integer')]` in one measurement and
+        # all-`Integer` in this one, i.e. which arm the door takes depends on the
+        # value the engine hands back (Float → the mixed/candidate arm; Integer →
+        # the ordered arm, where the source really IS proven). Both arms REFUSE
+        # this wiring, which is the property that matters — asserting a phrase
+        # here would pin the engine's storage choice, not the door.
+        assert ("MIXED types" in _msg or "at the SOURCE position" in _msg), _msg
     assert "cannot be ordered" not in _msg, _msg
 
     # Refused BEFORE any mutation, and the refused wiring is not in the graph.
@@ -959,6 +974,139 @@ def test_supersede_repoint_judges_a_stored_op_type_outside_the_pair(
     assert _props(lane, old).get("status") == "live"
     assert _operator_shaped_rows(lane, old) == [[op["id"], "IMPL", 1]]
     assert _operator_shaped_rows(lane, new) == []
+
+
+def test_supersede_repoint_judges_the_REL_TYPE_when_the_stored_op_type_is_weaker(
+        lane):
+    """The MECHANISM a re-pointed edge carries is judged, not just the stored one.
+
+    The door used to judge ONE mechanism per operator: the stored ``op_type``
+    when it was in the pair, else whichever rel type ``edges_result`` returned
+    FIRST (``.setdefault(...)`` over a statement with no ``ORDER BY``). The two
+    are not equivalent, and the stored one can be the WEAKER of the two —
+    ``_canonical_direction("NAND", None)`` is ``unidirectional`` (one leg),
+    while ``IMPL``'s absent default is ``bidirectional`` (both legs, which is
+    also what ``ep.py`` canonicalizes an absent direction to). Here the node
+    records ``NAND`` while the edge 2a re-points is an ``IMPL``, and the wiring
+    is derived-target-under-asserted-source — refused on IMPL's BACKWARD leg,
+    invisible to NAND's forward-only reading:
+
+        src(asserted) --IMPL(no direction, idx 1)--> old(derived)
+        supersede old -> new(derived)
+
+    Pre-fix the supersede went through with no verdict — #10195's harm on the
+    MECHANISM axis, reachable by a raw ``op_type`` write. RED pre-fix and
+    deterministic (the stored value is in the pair, so there is no row-order
+    coin flip): the union below is what makes it refuse.
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    # Legal AS WRITTEN (``->`` is the corroboration leg). The absent-direction
+    # shape is then restored by the raw write below — that is the legacy form.
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # A stored mechanism the node does not actually carry, and no direction:
+    # the rel type 2a re-points is the ONLY record of the real mechanism.
+    lane._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.op_type='NAND' REMOVE n.direction",
+        params={"id": op["id"]})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    with pytest.raises(ValueError, match="re-pointing the OPERATOR") as _exc:
+        lane.supersede_point(old, new)
+
+    # The mechanism that BLOCKS is the one the edge carries — named, so the
+    # caller is not told about a NAND they will not find.
+    assert "(IMPL," in str(_exc.value), _exc.value
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_shaped_rows(lane, old) == [[op["id"], "IMPL", 1]]
+    assert _operator_shaped_rows(lane, new) == []
+
+
+def test_supersede_repoint_judges_BOTH_mechanisms_of_a_legacy_operator(lane):
+    """Two mechanisms into the predecessor, no stored record — judge BOTH.
+
+    The shape ``.setdefault(...)`` could not handle: one operator with an
+    ``IMPL`` AND a ``NAND`` edge into the predecessor, no stored ``op_type``
+    and no stored ``direction`` (a legacy node, or the raw-write
+    ``op_type='hasPart'`` shape). 2a re-points BOTH edges, so both mechanisms
+    reach the rebuilt factor — but the door judged whichever one the
+    ``edges_result`` row order happened to hand ``setdefault`` first, and here
+    the two disagree: ``NAND``'s absent default is ``unidirectional`` (forward
+    only ⇒ the asserted source over the derived target is legal), ``IMPL``'s is
+    ``bidirectional`` (its BACKWARD leg refuses exactly that wiring). So the
+    verdict — and the refusal text — flipped between runs, which is the one
+    thing the slot query's own ``ORDER BY op.id, inp.id`` was added to prevent.
+
+    Post-fix every mechanism the re-pointed edge carries is judged, so the
+    refusal holds whichever row comes back first. RED pre-fix on the NAND-first
+    order (the assertable half): there the supersede succeeded and minted
+    ``derived --IMPL--> asserted`` with no verdict, no warning, no record.
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # 2a transfers ``IMPL|NAND`` edges and nothing narrower.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op}), (old:Point {id:$old}) "
+        "MERGE (op)-[r:NAND {idx:1}]->(old)",
+        params={"op": op["id"], "old": old})
+    lane._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) REMOVE n.op_type, n.direction",
+        params={"id": op["id"]})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_shaped_rows(lane, new) == []
+
+
+def test_supersede_repoint_survives_a_non_string_stored_direction(lane):
+    """A raw-written non-string ``direction`` must not CRASH the door.
+
+    ``_canonical_direction`` returns a stored value VERBATIM (only an absent one
+    is defaulted), so the door's iteration over the stored directions can hold
+    mixed types — and the bare ``sorted({1, "->"})`` raised
+    ``TypeError: '<' not supported between instances of 'str' and 'int'``, a
+    traceback aborting a supersede this guard is not even about (#10418 review
+    P3). It is reachable exactly the way the rest of this arm's raw shapes are: a
+    duplicated operator id (#7822 — ids are not unique), one node carrying the
+    token and one a number.
+
+    The verdict is unchanged: a number is not a direction token, so it reads as
+    ABSENT (``direction_flows``' both-ways default) and its BACKWARD leg refuses
+    the derived target under the asserted source. RED pre-fix with
+    ``TypeError`` — which is not a ``ValueError``, so ``pytest.raises`` fails.
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # The same operator id on a SECOND node — #7822's non-unique-id shape —
+    # carrying a numeric ``direction`` and its own slot edge into the prior.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op}) "
+        "CREATE (dup:Point) SET dup = properties(op) SET dup.direction = 1",
+        params={"op": op["id"]})
+    lane._get_proj().g.query(
+        "MATCH (dup:Point {id:$op}), (old:Point {id:$old}) "
+        "WHERE dup.direction = 1 CREATE (dup)-[:IMPL {idx:1}]->(old)",
+        params={"op": op["id"], "old": old})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
 
 
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
