@@ -17804,13 +17804,20 @@ class TortoiseSDK:
                 _slot_classes = _claim_class.classes_for_ids(proj.g, _slot_ids)
                 _meta_rows = _op_meta.get(_oid) or []
                 # Conservative on BOTH axes when a duplicated operator id leaves
-                # the stored record ambiguous: judge EVERY stored ``op_type``, and
-                # take the most permissive direction (``None`` ⇒ the per-type
-                # default ⇒ both legs judged) if the rows disagree. A node with no
-                # ``op_type`` is pre-v3.6 legacy; the rel type that carried it into
-                # this set IS its mechanism then.
+                # the stored record ambiguous (ids are not unique — #7822 — so
+                # this is a raw-write shape, reachable the same way the
+                # mixed-``idx`` arm is): judge EVERY stored ``op_type`` and EVERY
+                # stored ``direction``. Collapsing the directions to ONE stored
+                # row picks an arbitrary one, and collapsing them to the per-type
+                # default is NOT the conservative reading — a NAND's absent
+                # default is ``unidirectional`` (one leg), so a ``<-`` row's
+                # BACKWARD leg would go unjudged and a derived target under an
+                # asserted source could be re-pointed into a factor the load side
+                # reports ``derived_over_asserted`` (#10195 — the same fail-open
+                # this arm's mixed-``idx`` sibling closes, on the direction axis).
+                # A node with no ``op_type`` is pre-v3.6 legacy; the rel type that
+                # carried it into this set IS its mechanism then.
                 _dirs = {_d for _, _d in _meta_rows}
-                _node_dir = next(iter(_dirs)) if len(_dirs) == 1 else None
                 _op_types = sorted({t for t, _ in _meta_rows if t}) or [
                     _repoint_ops[_oid]]
                 for _slot_source in _candidate_sources:
@@ -17825,19 +17832,26 @@ class TortoiseSDK:
                                 or _slot_source not in _slot_classes
                                 or not _slot_target_classes):
                             continue
-                        _effective_dir = self._canonical_direction(
-                            _op_type, _node_dir)
-                        if _claim_class.direction_blocks_create(
-                                _effective_dir,
-                                _slot_classes.get(_slot_source),
-                                _slot_target_classes):
-                            raise ValueError(_claim_class.repoint_refusal(
-                                operator_id=_oid, op_type=_op_type,
-                                direction=_effective_dir,
-                                source_proven=not _unorderable,
-                                old_id=old_id, new_id=new_id,
-                                source_id=_slot_source,
-                                target_ids=_slot_targets))
+                        # Every stored direction, canonicalized per ``op_type``
+                        # (absent ⇒ that type's own default). ``_meta_rows`` is
+                        # non-empty whenever ``_srows`` is, so ``_dirs`` always
+                        # holds at least one row's value; a ``None`` in it is
+                        # canonicalized here, never skipped.
+                        _effective_dirs = sorted({
+                            self._canonical_direction(_op_type, _d)
+                            for _d in _dirs})
+                        for _effective_dir in _effective_dirs:
+                            if _claim_class.direction_blocks_create(
+                                    _effective_dir,
+                                    _slot_classes.get(_slot_source),
+                                    _slot_target_classes):
+                                raise ValueError(_claim_class.repoint_refusal(
+                                    operator_id=_oid, op_type=_op_type,
+                                    direction=_effective_dir,
+                                    source_proven=not _unorderable,
+                                    old_id=old_id, new_id=new_id,
+                                    source_id=_slot_source,
+                                    target_ids=_slot_targets))
 
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting

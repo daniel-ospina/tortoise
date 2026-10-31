@@ -598,6 +598,50 @@ def test_supersede_repoint_judges_a_duplicated_slot_idx(lane):
     assert _operator_rows(lane, new) == []
 
 
+def test_supersede_repoint_judges_every_stored_direction(lane):
+    """A duplicated operator NODE's OTHER direction is judged, not dropped.
+
+    ``Point`` ids are not unique (#7822 — the same fan-out the lifecycle guard
+    and ``classes_for_ids`` already read), so ONE operator ``id`` can be carried
+    by two nodes that disagree about ``direction``. Collapsing those rows to one
+    stored value picks an arbitrary row; collapsing them to the per-type default
+    is not conservative either, because a NAND's ABSENT default is
+    ``unidirectional`` — ONE leg — so a ``<-`` row's BACKWARD leg goes unjudged.
+    That is the same fail-open the mixed-``idx`` arm closes, on the direction
+    axis: the door would be more permissive than the load side.
+
+    The factor here is ``asserted source --NAND--> old``, legal under ``->``, and
+    the predecessor's successor is DERIVED — so the ``->`` leg refuses nothing
+    while the ``<-`` leg is exactly ``derived_over_asserted`` (the load side
+    reports it when it reads that row). The door must refuse either way.
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("NAND", src, [old], direction="->")
+    # A SECOND node under the SAME operator id — the raw-write shape, and the
+    # way this codebase already models a non-unique Point id — carrying the
+    # other stored direction and its own copy of the operator's slot edges.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op}) "
+        "CREATE (dup:Point) SET dup = op "
+        "SET dup.direction = '<-' "
+        "WITH op, dup "
+        "MATCH (op)-[r:NAND]->(i) "
+        "CREATE (dup)-[:NAND {idx: r.idx}]->(i)",
+        params={"op": op["id"]})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
+        lane.supersede_point(old, new)
+
+    # Refused BEFORE any mutation, and the refused wiring is not in the graph.
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_rows(lane, new) == []
+
+
 def test_supersede_repoint_leaves_an_alreadyDecided_operator_alone(lane):
     """The #1080 carve-out the pre-flight depends on, pinned.
 
