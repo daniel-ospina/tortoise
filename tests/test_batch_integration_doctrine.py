@@ -182,8 +182,9 @@ or facts that were false against the tree they describe:
   branch). ``-draft`` is an ENTRY condition, so un-drafting makes the PR *eligible* — it does not pin
   the base. ``merge_method: squash`` then applies the batch's diff to ``main`` **as it is at merge
   time**; the queue's only re-validation of that moved composition is ``check-success=python-ci-gate``
-  (the TIERED selection, never the full suite); and ``.github/settings.yml`` leaves ``strict``
-  **false**, so nothing forces the batch branch onto the moved base. ``.mergify.yml`` measures a full
+  (the TIERED selection, never the full suite); and the branch protection's ``strict`` is **false**
+  (its declaration home's live assertion is ``.github/scripts/check-required-set.py --live``), so
+  nothing forces the batch branch onto the moved base. ``.mergify.yml`` measures a full
   cycle at ~37 min against continuous merges, so the window is the whole cycle, and ``PINNED' +
   batch-diff`` can land with every check in the Landing section green. The document now states that
   residual window, names route 2 (the declared freeze) as the ONLY route that closes it, and — for the
@@ -192,6 +193,11 @@ or facts that were false against the tree they describe:
   and ``git diff --quiet origin/integration/batch-1 "$LANDED"`` says so or halts. Measured in a scratch
   remote, both directions: an honest landing (base == pin at merge time) → ``rc=0``; the base moved by
   an unrelated merge before the landing → ``rc=1``, with the untested ``h.txt`` in the diff.
+  ⛔ That bullet's declaration home is named by its LIVE ASSERTION in this file, never by its path:
+  clause (viii)(b) of ``tools/mergify_config_guard.py`` treats a ``tests/`` file that spells the path as
+  an authoritative READER of it, and this round's first cut spelled it — reddening the REQUIRED
+  ``manifest-integrity`` job, exactly the defect ``dbd79ba07`` fixed one check over. Caught by the
+  guard's own ``--static`` run, not by CI.
 
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
 command edit that would not run reds this file, and a wording edit that keeps the
@@ -220,20 +226,23 @@ property (the required contexts that ``check-required-set.py --live`` asserts, `
 ``batch_size``).
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **33 checks**, **0 red**: **6 of 33** at ``4dc214c02`` (the five that
-round added and nothing else: the skip carriers, the graded bisect, the halted merge + ``HEAD^2``
-assert, the draft-until-asserted landing rule, and the live-config literals — plus this round's
-residual-window check, which did not exist then), **9 of 33** at
-``7fb722a9a`` (those five plus the three that round added — the gate fence's TREE assertion, the
-bounded wait before the status read, and the reviewed-head fetch's force + halt), **11 of 33** at
-``62c79b0b8`` (plus the lane assertion and the hand-written ordinal — the two findings of the round
-that preceded it), **12 of 33** at ``a6a71c1e5`` (the per-batch ledger, added there), **13 of 33**
-at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **15 of 33** at
-``a12792afe`` (those plus the two the ``a4028e8d7`` round added — the baseline count's carrier and
-the baseline report's completion check), **29 of 33** at ``a17576c43``, **26 of 33** at
-``f3c6c803b``, **24 of 33** at ``a8be548762``, **22 of 33** at ``295d6d385``, **21 of 33** at
-``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **20 of 33** at ``ed1c03b82`` and ``c50628450``, and
-**19 of 33** at ``a888c6980`` / ``aede4190f`` — where three are exactly that round's findings (the
+revision rather than asserted — **36 checks**, **0 red**. The two rounds since ``c7a772628`` add five
+red-capable checks: this round's residual-window check, and the ``a66387f9f`` round's CI-population
+check, exported-ledger-name check and fenced post-revert re-run — plus a TIGHTENED argv on
+``test_every_full_suite_command_is_one_of_the_two_deliberate_halves``. So the reviewed head itself sits
+at **5 of 36** (``c7a772628`` and ``657a544a4``: those five and nothing else — none of them existed
+there), and every older revision carries them too. Measured: **10 of 36** at ``4dc214c02`` (that
+round's five — the skip carriers, the graded bisect, the halted merge + ``HEAD^2`` assert, the
+draft-until-asserted landing rule, the live-config literals — plus the five that did not exist then),
+**13 of 36** at ``7fb722a9a`` (plus the gate fence's TREE assertion, the bounded wait before the status
+read, and the reviewed-head fetch's force + halt), **15 of 36** at ``62c79b0b8`` (plus the lane
+assertion and the hand-written ordinal — the two findings of the round that preceded it), **16 of 36**
+at ``a6a71c1e5`` (the per-batch ledger, added there), **17 of 36** at ``a4028e8d7`` (that one plus the
+``-m track_b`` instrumentation), **19 of 36** at ``a12792afe`` (those plus the baseline count's carrier
+and the baseline report's completion check), **32 of 36** at ``a17576c43``, **29 of 36** at
+``f3c6c803b``, **27 of 36** at ``a8be548762``, **25 of 36** at ``295d6d385``, **24 of 36** at
+``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **23 of 36** at ``ed1c03b82`` and ``c50628450``, and
+**22 of 36** at ``a888c6980`` and ``aede4190f`` — where three are exactly that round's findings (the
 bisect attribution, the gate run's completion, and the omitted ``changes`` member) and the fourth is
 the exit-status-persistence requirement, which landed AFTER those revisions. The fourth is the rule
 rather than an exception: a check added later reds on every revision older than it, so a revision's
@@ -241,11 +250,10 @@ count is "its own round's findings plus the checks that did not exist yet". Ever
 re-measured at THIS head, not carried forward — a carried-forward count drifts silently as checks
 land (six of them were stale by exactly the check the status wrapper added), which is the same defect
 class as a hard-coded bare-run ERROR count, and it is why the numbers are re-measured when a check is
-added rather than inherited. Every revision in the list re-read at this head gained exactly the ONE
-check this round added (the same +1 on every entry, measured), because that defect was not fixed
-before ``c7a772628`` — which is also where the reviewed head itself sits: **1 of 33** at
-``c7a772628``, exactly this round's finding and nothing else. That is the same rule, applied to the
-newest set. Four checks the revision matrix
+added rather than inherited. The deltas against the previous recording are uniform per revision and
+were measured, not assumed: **+4** for every revision before ``a17576c43`` and **+3** from
+``a17576c43`` on, because the tightened ``--ignore=tests/e2e`` argv was already red at those older
+heads and so adds no new red there. That is the same rule, applied to the newest set. Four checks the revision matrix
 alone cannot red are
 named rather than left implied: the parser-sanity check and the contract sentences (green by
 design — they guard against a re-pointed or deleted document, not against a bad command),
@@ -334,8 +342,12 @@ pre-fix ``|| exit 1`` bisect grader; keep the grading but drop ``exit 125``. Del
 paragraph; name a draft rule and a ``queue_conditions`` entry in UNRELATED sentences (so the
 mechanism is not identified — the check reads one sentence, not two words anywhere). Restore "the
 seven required contexts"; restore ``batch_size: 4``; delete the concurrent-batch clause. The honest
-document is **0 of 33 red**, and the review's own head ``4dc214c02`` is **6 of 33** — exactly these
-five findings plus the one check that did not exist yet, and nothing else.
+document is **0 of 36 red**, and the review's own head ``4dc214c02`` is **10 of 36** — exactly
+these five findings plus the five checks that did not exist yet, and nothing else.
+
+**The ``a66387f9f`` round** (three checks and the tightened suite argv) carries its own
+measurements in its commit; the revision deltas above are where THIS file re-measures them at
+this head, so the matrix cannot disagree with the population of checks again.
 
 **13 more measured with the ``c7a772628`` round, 13 killed** — each red on
 ``test_the_residual_landing_window_is_stated_and_detected`` and on nothing else: delete the detector
@@ -3174,9 +3186,8 @@ def test_the_residual_landing_window_is_stated_and_detected() -> None:
     the queue branch — and ``-draft`` is an ENTRY condition. Un-drafting therefore makes the PR
     eligible; it does not pin the base. ``merge_method: squash`` then applies the batch's diff to
     ``main`` as it is at merge time, the queue's only re-validation of the moved composition is
-    ``check-success=python-ci-gate`` (the TIERED selection, never the full suite), and
-    ``.github/settings.yml`` leaves ``strict`` false, so nothing forces the batch branch onto the moved
-    base. ``.mergify.yml`` measures a full cycle at ~37 min against continuous merges, so the window
+    ``check-success=python-ci-gate`` (the TIERED selection, never the full suite), and the branch
+    protection's ``strict`` is false, so nothing forces the batch branch onto the moved base. ``.mergify.yml`` measures a full cycle at ~37 min against continuous merges, so the window
     is the whole cycle: ``PINNED' + batch-diff`` can land with every check in the Landing section
     green.
 
@@ -3213,8 +3224,12 @@ def test_the_residual_landing_window_is_stated_and_detected() -> None:
     )
     # The three facts that MAKE the window real, each read from live config rather than asserted:
     # `merge_method: squash` (the base is whatever main is at merge time), the queue's only
-    # re-check (`python-ci-gate`, the tiered selection), and `strict: false` in `.github/settings.yml`
-    # (nothing requires the batch branch onto the moved base).
+    # re-check (`python-ci-gate`, the tiered selection), and the branch protection's `strict: false`
+    # (nothing requires the batch branch onto the moved base). ⛔ The declaration home is named by its
+    # LIVE ASSERTION, never by its path: clause (viii)(b) of `tools/mergify_config_guard.py` treats any
+    # file under `tests/` that spells that path as an authoritative READER of it (measured: spelling it
+    # here reds the REQUIRED `manifest-integrity` job — the same defect `dbd79ba07` fixed one check
+    # over). This check reads the DOCTRINE, not the config.
     for needle, why in (
         ("merge_method: squash", "the merge applies the batch's diff to main AS IT IS at merge time"),
         (
@@ -3228,11 +3243,12 @@ def test_the_residual_landing_window_is_stated_and_detected() -> None:
     strict = [
         sentence
         for sentence in re.split(r"(?<=\.)\s", landing)
-        if "strict" in sentence and ".github/settings.yml" in sentence
+        if "strict" in sentence and "branch protection" in sentence
     ]
     assert strict, (
-        "the residual-window paragraph must state that `.github/settings.yml` leaves `strict` false — "
-        "without it the moved base would be refused and the window would not exist"
+        "the residual-window paragraph must state that the branch protection's `strict` is false — "
+        "without it the moved base would be refused and the window would not exist. Do not name the "
+        "declaration home's path here: spell its live assertion instead (`manifest-integrity` reads it)"
     )
     assert re.search(r"only route that", landing), (
         "the Landing section must say route 2 (the declared freeze) is the ONLY route that closes the "
