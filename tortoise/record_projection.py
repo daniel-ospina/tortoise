@@ -2482,12 +2482,13 @@ _STRUCTURAL_REL_LABELS: dict[str, str] = {
     "extractedFrom": "Source",
 }
 
-#: The structural repoint rels whose target is addressed by the node's OWN `id`
-#: rather than by a name/url natural key (#9836), and the labels such a target
-#: may carry. Restated from `projection/edges.py::ID_ADDRESSED_STRUCTURAL_RELS` /
-#: `EPISTEMIC_LABEL_ORDER` for the STANDALONE reason every other constant in this
-#: block is (the PGlite harness `spec_from_file_location`s this module, so a
-#: package-relative import raises there) and pinned to the fold's own constants —
+#: The structural repoint rels whose target is addressed by the descriptor's
+#: OWN label rather than by a label derived from the rel (#9836), and HOW each
+#: label is addressed: the node's own `id` for an epistemic node, its `url` for a
+#: `:Source`. Restated from `projection/edges.py::ID_ADDRESSED_STRUCTURAL_RELS` /
+#: `ID_ADDRESSED_TARGET_ADDRESSING` for the STANDALONE reason every other constant
+#: in this block is (the PGlite harness `spec_from_file_location`s this module, so
+#: a package-relative import raises there) and pinned to the fold's own constant —
 #: both directions — by `tests/test_9836_id_addressed_repoint.py`.
 #:
 #: ⛔ WHY THESE ARE NOT ROWS OF `_STRUCTURAL_REL_LABELS`. That map is
@@ -2496,11 +2497,26 @@ _STRUCTURAL_REL_LABELS: dict[str, str] = {
 #: target label is not a function of the rel (ONTOLOGY §3.2 says Object->Object;
 #: its writers type-check nothing). So the label travels on the DESCRIPTOR
 #: (`target_label`, which the live emitter fills with the label it observed) and
-#: is validated against this set before it reaches SQL.
+#: is validated against this map before it reaches SQL.
+#:
+#: ⛔ `Source` IS A MEMBER, keyed by `url` (#9836 review P1). It is NOT an
+#: epistemic label and it is deliberately not in
+#: :data:`RECORD_ADDRESSABLE_EDGE_LABELS` — that set answers a DIFFERENT question
+#: (which labels pass-2b's `DirectEdgeCreated` sweep can probe by `id`) — but a
+#: `:Source` IS addressable on this route: `public.source.node_key` is its `url`
+#: (`chk_source_node_key_is_contract_key`), which is exactly the property the
+#: graph's replay arm matches. Reading the id sweep's boundary as this family's
+#: boundary is what made the earlier revision decline the descriptor and leave
+#: the row behind while live moved the edge.
 _ID_ADDRESSED_STRUCTURAL_RELS: frozenset[str] = frozenset(
     {"aboutAction", "wasDerivedFrom"})
-_ID_ADDRESSED_TARGET_LABELS: frozenset[str] = frozenset(
-    {"Point", "Subject", "Object", "Event"})
+_ID_ADDRESSED_TARGET_ADDRESSING: dict[str, str] = {
+    "Point": "id",
+    "Subject": "id",
+    "Object": "id",
+    "Event": "id",
+    "Source": "url",
+}
 
 #: The five EDGE attributes a structural `DirectEdgeRepoint` carries, restated
 #: from `projection/edges.py::DIRECT_EDGE_ATTR_KEYS` — the ONE vocabulary the
@@ -2629,9 +2645,12 @@ def _structural_target_resolution(org_id: str, graph_id: str, label: str,
     ⛔ `by_id=True` (#9836) is the OTHER addressing, and it is not a fifth arm of
     the map below: for the ID-ADDRESSED family (`wasDerivedFrom`/`aboutAction`)
     the rel fixes no label, so the label arrives on the DESCRIPTOR and the key is
-    the node's OWN `id` — the resolution is then `_endpoint_resolution`, the same
-    one every other edge endpoint in this module uses. The arms below are the
-    NAME/url family and stay untouched.
+    either the node's OWN `id` — the resolution is then `_endpoint_resolution`,
+    the same one every other edge endpoint in this module uses — or, for a
+    `:Source` target, its `url` (matched on `node_key` alone: a Source's
+    `node_key` IS its url, and the `id` disjunct of the Source's default match
+    would let one Source's `id` resolve to a different Source's url row). The arms
+    below are the NAME/url-by-REL family and stay untouched.
 
     Per label (each verified against the fold's own arm):
 
@@ -2671,34 +2690,49 @@ def _structural_target_resolution(org_id: str, graph_id: str, label: str,
             prefer=("canonical_url", canonical),
         )
     if by_id:
-        # ⛔ #9836 — the ID-ADDRESSED arm, and it is deliberately NOT a new rule:
-        # it delegates to `_endpoint_resolution`, the resolution EVERY other edge
-        # endpoint in this module uses (the `DirectEdgeCreated` arm and both legs
-        # of the 2a-DIRECT descriptor). `relation.src_key`/`tgt_key` are composite
-        # FKs into `node_identity`, so the endpoint must be filed by the label's
-        # CANONICAL key — `Point`/`Session`/`Event` → `node_key`, `Object`/
-        # `Subject` → `id` (`_ENTITY_MATCH_COLUMNS`) — and that is exactly what
-        # this call produces, from the record's own rows, without minting.
+        # ⛔ #9836 — the ID-ADDRESSED arm, and it is deliberately NOT a new rule.
+        #
+        # For an EPISTEMIC label it delegates to `_endpoint_resolution`, the
+        # resolution EVERY other edge endpoint in this module uses (the
+        # `DirectEdgeCreated` arm and both legs of the 2a-DIRECT descriptor).
+        # `relation.src_key`/`tgt_key` are composite FKs into `node_identity`, so
+        # the endpoint must be filed by the label's CANONICAL key —
+        # `Point`/`Session`/`Event` → `node_key`, `Object`/`Subject` → `id`
+        # (`_ENTITY_MATCH_COLUMNS`) — and that is exactly what this call produces,
+        # from the record's own rows, without minting.
+        #
+        # ⛔ A `:Source` target is matched on `node_key` ALONE (`#9836` review P1):
+        # a Source's identity IS its `url` and `node_key` IS that url, while the
+        # Source's default match ALSO carries an `id` disjunct (`_ENTITY_MATCH_
+        # COLUMNS`) — a descriptor whose key is a url must not be allowed to
+        # resolve onto some Source's `id`. The graph's twin arm
+        # (`resolve_structural_target(by_url=True)`) is the same exact match, so one
+        # descriptor cannot land two different rows.
         #
         # ⛔ THE GRAPH RESOLVES IT THE SAME WAY and that is the whole point: pass-2b
-        # (#9836) matches `(x:{label} {id:$id})`, the id-addressed twin of this
-        # match, so one descriptor cannot land on two different nodes/rows.
+        # (#9836) matches `(x:{label} {id:$id})` — or `{url:$url}` for a Source —
+        # the id-addressed twin of this match, so one descriptor cannot land on two
+        # different nodes/rows.
         # ⛔ #5509's refusal (a NAME held by 2+ carriers resolves to NOTHING, never
-        # to an arbitrary pick) has no analogue here and none is invented: an `id`
-        # is a node's primary identity rather than a mutable natural key, and the
-        # schema's own `node_identity` uniqueness makes the label-keyed lookup
-        # single-valued. That is the reason the two families cannot share one
-        # resolver, not an omission.
+        # to an arbitrary pick) has no analogue for the `id`/`url` arms and none is
+        # invented: both are primary identity keys rather than mutable natural
+        # keys, and the schema's own `node_identity` uniqueness makes the
+        # label-keyed lookup single-valued. That is the reason the two families
+        # cannot share one resolver, not an omission.
         #
         # A label outside the addressable set is a REFUSAL, not a fallback: the
         # caller validates it too, so reaching this line with one means the
         # descriptor vocabulary changed without this arm following it.
-        if label not in _ID_ADDRESSED_TARGET_LABELS:
+        scheme = _ID_ADDRESSED_TARGET_ADDRESSING.get(label)
+        if scheme is None:
             raise RecordProjectionError(
                 f"id-addressed structural edge {rel!r} names target label "
-                f"{label!r}, which is not an addressable epistemic label "
-                f"({sorted(_ID_ADDRESSED_TARGET_LABELS)})"
+                f"{label!r}, which is not an addressable target label "
+                f"({sorted(_ID_ADDRESSED_TARGET_ADDRESSING)})"
             )
+        if scheme == "url":
+            return _endpoint_resolution(org_id, graph_id, label, key, alias,
+                                        match=("node_key",))
         return _endpoint_resolution(org_id, graph_id, label, key, alias)
     table = _LABEL_TABLES.get(label)
     if table is None:
@@ -2848,7 +2882,8 @@ def _structural_repoint_statements(
     by_id = isinstance(etype, str) and etype in _ID_ADDRESSED_STRUCTURAL_RELS
     if by_id:
         label = record.get("target_label")
-        if not isinstance(label, str) or label not in _ID_ADDRESSED_TARGET_LABELS:
+        if (not isinstance(label, str)
+                or label not in _ID_ADDRESSED_TARGET_ADDRESSING):
             # A descriptor whose label cannot be addressed moves NOTHING and
             # deletes NOTHING — never a partial move (the DELETE without the
             # INSERT is the measured defect the atomic `moved` gate exists to

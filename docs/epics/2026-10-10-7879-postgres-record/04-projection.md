@@ -362,11 +362,22 @@ closed at both layers:
   > two apart) by `(src, edge_type, RESOLVED target node)`, while the successor-side transfer still runs. Residuals:
   > (a) **CLOSED by #9836** — `wasDerivedFrom`/`aboutAction` are MOVED live by 2b but are not derivable, so 2b
   > used to journal no repoint and the journal route lost them after a supersede. They now carry a descriptor
-  > too (the ID-ADDRESSED family: the target is addressed by the node's own `id`, with the label the transfer
-  > observed riding `target_label`), and both routes resolve `(label, id)`, so `live == journal-rebuild` for the
-  > whole family. ⛔ The boundary that remains is the PRE-FIX JOURNAL: a supersede journaled before #9836
+  > too (the ID-ADDRESSED family: the target is addressed by the node's own `id`, or **by its `url` when the
+  > observed label is `:Source`**, with the label the transfer observed riding `target_label`), and both routes
+  > resolve `(label, key)`, so `live == journal-rebuild` for the whole family — measured per label family
+  > (Point/Object/Subject/**Source**), not just per rel. ⛔ `:Source` is the shape a review caught: the first
+  > cut read "not addressable by `id`" as "not addressable" and declined the descriptor, which left the edge
+  > moved live and absent from BOTH rebuilds. ❌ Membership of the derivable set is not what decides whether a
+  > rel is journalled (`STRUCTURAL_REPOINT_RELS` is). ⛔ The boundary that remains is the PRE-FIX JOURNAL: a
+  > supersede journaled before #9836
   > carries no descriptor for these two rels, so on that journal the record keeps the row at the pre-supersede point
   > while live moved the edge to the successor (a rebuild does not repair historical graphs).
+  > (c) **CLOSED by #9836 review round 2** — the NO-SELF-EDGE guard (the target IS the successor) now emits its
+  > `delete_only` descriptor for the ID-ADDRESSED family too. On the GRAPH the delete-leg is a constrained no-op
+  > for these rels (nothing re-creates the old-side edge); it is the RECORD that needed it — its
+  > `DirectEdgeCreated` fold had already written a relation row at the old point and it has no
+  > superseded-endpoint skip of its own, so without the descriptor `relation` kept an edge the graph DELETED
+  > (measured on real Postgres before the fix: `{src_key:'p1', tgt_key:'p2'}` survived).
   > (b) **CLOSED for the derivable set by #10191**, and closed for the ID-ADDRESSED family by #9836 — the record
   > applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the
   > hop `superseded_by` names — one hop per descriptor, so a chain reaches the terminal row as each hop runs), so the row follows the edge. A shape the producer DECLINES at the mint (`_record_addressable`) holds nothing at all — no

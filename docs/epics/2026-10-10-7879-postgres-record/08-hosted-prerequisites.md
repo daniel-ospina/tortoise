@@ -494,12 +494,18 @@ learned it (`_supersede_took_this_edge`):
    delete-leg is exempted for those keys — while still performing the successor-side transfer, because live holds
    BOTH (the moved edge at the successor, the re-assertion at the old point; measured).
 
-Measured across 16 combinations (rel × direction × before/after supersede) plus the exists-and-is-re-asserted
-shape: everything agrees live↔rebuild except the residuals below.
+Measured across 16 combinations (rel × direction × before/after supersede), plus the exists-and-is-re-asserted
+shape, plus (round 2) every LABEL FAMILY a target can belong to — Point, Object, Subject, **Source** — and the
+target-superseded shape: everything agrees live↔rebuild except the residuals below.
 
 - **journal route, `wasDerivedFrom`/`aboutAction`** — **CLOSED by #9836**: MOVED live by 2b, not derivable, and
-  now journalled as the ID-ADDRESSED family (the target is addressed by the node's own `id`, with the label the
-  transfer observed riding `target_label`) — so the journal rebuild has the edge at the successor, as live does.
+  now journalled as the ID-ADDRESSED family (the target is addressed by the node's own `id` — or by its `url`
+  when the observed label is `:Source` — with the label the transfer observed riding `target_label`) — so the
+  journal rebuild has the edge at the successor, as live does. ⛔ The `:Source` arm is the review's finding: the
+  first cut declined that target and the census read `LIVE [(new, url)] / JREBUILD []`, i.e. live ≠ rebuild on
+  a shape `create_edge` produces (it type-checks nothing). An endpoint the record cannot address would still die
+  at rebuild — but "cannot be addressed by `id`" is not "cannot be addressed", and a Source IS addressable by
+  its `url` on both routes.
 - **record route, EVERY moved structural rel** — **CLOSED for the derivable set by #10191**, and closed for the
   ID-ADDRESSED family by #9836:
   the record applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the
@@ -507,12 +513,17 @@ shape: everything agrees live↔rebuild except the residuals below.
   is the PRE-FIX JOURNAL: a supersede journaled before #9836 carries no descriptor for those two rels, so on that
   journal the record keeps the row at the pre-supersede point (live moved it to the successor). A shape the producer DECLINES at the mint (`_record_addressable`) holds
   nothing at all, and the `:Source`-targeted shape is one of those rather than the only one: the same gate also
-  declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`).
+  declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`). ⛔ That mint
+  gate is about the `DirectEdgeCreated` CARRIER, not about the supersede MOVE: a `:Source`-targeted edge of the
+  ID-ADDRESSED family still lands no creation row, but the 2b repoint descriptor is url-keyed and DOES move
+  whatever row is there (`#9836` review round 2).
   ⚠️ The retired claim here read *the record's `DirectEdgeRepoint` is a plain upsert* — true before #10191, and
   it pre-dated #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried.
 
 Closing what remains needs the supersede move journaled for non-derivable rels AND the record taught to model a
-move for them too (delete-old + write-successor): **#9836**, whose scope covers all eight moved rels.
+move for them too (delete-old + write-successor): **#9836** — LANDED in this lane for all eight moved rels
+(the family's descriptor is `ID_ADDRESSED_STRUCTURAL_RELS`; the no-self-edge `delete_only` leg landed in
+review round 2).
 
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item

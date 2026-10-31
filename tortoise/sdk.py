@@ -769,7 +769,8 @@ STALE_TERMINAL_STATUSES = TERMINAL_EXCLUDED_STATUSES
 # `projection.edges.STRUCTURAL_REL_LABELS` (which carries only the
 # snapshot-derivable subset): `aboutAction` (Action dissolved in Ontology v3.0)
 # and `wasDerivedFrom` (A10 raw family) transfer but are never snapshot-recreated
-# — their repoint descriptor is keyed by the target's OWN `id`
+# — their repoint descriptor is keyed by the target's OWN `id` (or its `url`
+# for a `:Source`) under the label the transfer observed
 # (`projection.edges.ID_ADDRESSED_STRUCTURAL_RELS`, #9836), not by a natural key.
 SUPERSEDE_STRUCTURAL_RELS = (
     'aboutSubject', 'aboutObject', 'aboutAction', 'aboutEvent',
@@ -17785,11 +17786,12 @@ class TortoiseSDK:
         #     NOT the terminal `_final(src)`, which is only the skip guard) AND
         #     delete the resurrection at old.
         #   * the ID-ADDRESSED family (`aboutAction`, `wasDerivedFrom`, #9836)
-        #     keys its target by the node's OWN `id` and carries the label it
-        #     observed live — the only addressing that resolves for them (a Point
-        #     has no `name`; `wasDerivedFrom`'s target label is not a function of
-        #     the rel). Nothing ever resurrects these at old, so the descriptor's
-        #     whole job is the MOVE, which live already performs.
+        #     keys its target by the node's OWN `id` — or by its `url` when the
+        #     target is a `:Source` — and carries the label it observed live: the
+        #     only addressing that resolves for them (a Point has no `name`;
+        #     `wasDerivedFrom`'s target label is not a function of the rel).
+        #     Nothing ever resurrects these at old, so the descriptor's whole job
+        #     is the MOVE, which live already performs.
         # The journal carries the target's LOGICAL identity only (`tgt=<key>` or,
         # for the delete-only guard, `tgt=new_id`) — never the FalkorDB internal
         # ID (internal ids die at rebuild).
@@ -17882,28 +17884,36 @@ class TortoiseSDK:
                     # #2489 no-self-edge guard: the structural target IS the
                     # successor node. Delete the old edge ONLY — no transfer (a
                     # transfer would MERGE the phantom (new)-[:rel]->(new)). For
-                    # DERIVABLE rels emit a DELETE-ONLY descriptor so the pass-2b
-                    # replay deletes the pass-2-resurrected edge at old on the
-                    # NEXT rebuild — old's immutable snapshot re-mints the
-                    # phantom on every rebuild, so without the descriptor
-                    # old-side zero-incident is violated in exactly this lane.
-                    # ⛔ For the ID-ADDRESSED family (#9836) no descriptor is
-                    # needed and none is emitted: nothing ever re-creates their
-                    # old-side edge (they are not snapshot-recreated, and the
-                    # `DirectEdgeCreated` fold skips the creation because the rel
-                    # is in `SUPERSEDE_TRANSFERRED_RELS` with a superseded src),
-                    # so a delete-only descriptor here would journal a permanent
-                    # no-op delete-leg. `aboutAction`/`wasDerivedFrom` therefore
-                    # emit NOTHING on this arm and a repoint on the transfer arm
-                    # below — the two arms are the WHOLE of the family's
-                    # journalling, and the transfer arm is #9836's fix.
-                    if derivable and rel not in emitted_self_deletes:
+                    # EVERY structural repoint rel emit a DELETE-ONLY descriptor
+                    # so the pass-2b replay deletes the pass-2-resurrected edge at
+                    # old on the NEXT rebuild — old's immutable snapshot re-mints
+                    # the phantom on every rebuild for the DERIVABLE rels, so
+                    # without the descriptor old-side zero-incident is violated in
+                    # exactly that lane.
+                    # ⛔ FOR THE ID-ADDRESSED FAMILY (#9836 review P2) the
+                    # descriptor is emitted for the RECORD's sake, not the graph's:
+                    # nothing re-creates those old-side edges (they are not
+                    # snapshot-recreated, and the `DirectEdgeCreated` fold skips
+                    # the creation because the rel is in `SUPERSEDE_TRANSFERRED_RELS`
+                    # with a superseded src), so on the GRAPH the delete-leg is a
+                    # constrained no-op. The RECORD, though, already holds a
+                    # `relation` row at the old point from that `DirectEdgeCreated`,
+                    # and it has no superseded-endpoint skip of its own — measured
+                    # on real Postgres: the row `{src_key:'p1', tgt_key:'p2'}`
+                    # survives while live and journal-rebuild both hold no edge. A
+                    # `delete_only` descriptor is exactly that missing DELETE
+                    # (`_relation_delete_statement`), so the record route agrees
+                    # with the other two instead of keeping an edge the graph
+                    # removed. `target_label` is `Point` for both families here:
+                    # the target IS the successor point.
+                    if rel not in emitted_self_deletes:
                         emitted_self_deletes.add(rel)
                         self._emit_event(
                             "DirectEdgeRepoint",
                             id=f"{old_id}->{new_id}:{rel}:self",
                             src=old_id, tgt=new_id,
-                            target_label=STRUCTURAL_REL_LABELS.get(rel),
+                            target_label=(STRUCTURAL_REL_LABELS.get(rel)
+                                          or "Point"),
                             edge_type=rel, delete_only=True,
                         )
                     proj.g.query(
@@ -17923,11 +17933,14 @@ class TortoiseSDK:
                 # an id-targeted create_about_edge; a Source target lacking url):
                 # a null-key descriptor is un-replayable — those edges die at
                 # rebuild today anyway (zero regression).
-                # ⛔ #9836: `target.id` IS the key for the ID-ADDRESSED family
-                # (`elif rel in ID_ADDRESSED_STRUCTURAL_RELS` below) — those rels
-                # have no natural key to read, which is WHY they are a separate
-                # family. The two branches are mutually exclusive and the rel set
-                # decides which one runs; nothing here guesses per target.
+                # ⛔ #9836: the ID-ADDRESSED family has its OWN arm
+                # (`elif rel in ID_ADDRESSED_STRUCTURAL_RELS` below) because these
+                # rels have no natural key to read — which is WHY they are a
+                # separate family. Their target is keyed by its own `id`, or by its
+                # `url` when it is a `:Source` (a Source's identity IS its url, and
+                # its `url` is likewise the record's `node_key` for it). The two
+                # branches are mutually exclusive and the rel set decides which one
+                # runs; nothing here guesses per target.
                 if derivable:
                     keyed = stub_key(rel, target_props)
                     if keyed is not None:
@@ -17971,21 +17984,28 @@ class TortoiseSDK:
                     # endpoint gate, and pass-2 never resurrects them) while the
                     # record route kept the pre-supersede row. The `derivable`
                     # gate above was the whole of that loss.
-                    # ⛔ The target is addressed the way every other epistemic
-                    # endpoint in this tree is: by its OWN `id`, label-agnostic
-                    # (`id_addressed_target`, Point-first via the fold's own
+                    # ⛔ The target is addressed the way the rest of the tree
+                    # addresses it, and the scheme is a property of the OBSERVED
+                    # LABEL (`ID_ADDRESSED_TARGET_ADDRESSING`): a Point/Subject/
+                    # Object/Event by its OWN `id` (Point-first via the fold's own
                     # `EPISTEMIC_LABELS` order — the SAME rule the 2a-DIRECT leg
-                    # above applies to a far endpoint, #8622). A name/url key is
-                    # unavailable by construction: a Point has no `name`, and
-                    # `wasDerivedFrom`'s target label is not a function of the
-                    # rel (ONTOLOGY §3.2 says Object->Object; the writers type-
-                    # check nothing). The OBSERVED label rides `target_label`,
-                    # which is what that field means on the structural route.
-                    # SKIP (never half-journal) a target the record cannot
-                    # address — a `:Source` is outside the fold's sweep, so a
-                    # descriptor for it would make the record richer than the
-                    # graph. Same reason, same helper as the 2a leg's label
-                    # resolution.
+                    # above applies to a far endpoint, #8622), and a `:Source` by
+                    # its `url` — a Source's identity IS its url, and BOTH replay
+                    # routes already resolve one that way (`resolve_structural_target(
+                    # by_url=True)`; `relation.tgt_key`). A name key is unavailable
+                    # by construction: a Point has no `name`, and `wasDerivedFrom`'s
+                    # target label is not a function of the rel (ONTOLOGY §3.2 says
+                    # Object->Object; the writers type-check nothing). The label
+                    # rides `target_label`, which is what that field means on the
+                    # structural route.
+                    # SKIP (never half-journal) a target with NO addressable label
+                    # and no url — filing a descriptor for it would make the record
+                    # RICHER than the graph. Same reason, same helper as the 2a
+                    # leg's label resolution. ⚠️ An earlier revision of this arm
+                    # skipped `:Source` on the claim that a source target "cannot be
+                    # addressed"; it can — by url, on both routes — and the skip
+                    # is what left the edge moved live and present on NEITHER
+                    # rebuild (measured, review P1).
                     id_keyed = id_addressed_target(row[2], target_props)
                     if id_keyed is not None:
                         target_label, target_key = id_keyed
