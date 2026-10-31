@@ -865,7 +865,9 @@ class TestProbeDbBoundedAcquisition:
         LOAD-BEARING (mutation: drop ``- acquisition_elapsed`` from the return):
         ``excluded`` collapses to this test's own bracket (~0 s) instead of the
         acquisition's ~0.5 s, and the assertion below reds. The discrimination
-        is the acquisition's 0.5 s, not a millisecond threshold.
+        is the acquisition's 0.5 s, not a millisecond threshold. The sdk=
+        control is load-bearing too: a 300 ms inflation on that shape reds it
+        (minima on both sides, so no single stall can fake either direction).
         """
         # A leftover abandoned acquisition from an earlier test in this class
         # must not share the single probe slot and be charged to this probe.
@@ -882,45 +884,58 @@ class TestProbeDbBoundedAcquisition:
         # The bracket: the SAME clock around the whole call, so the interval
         # carries whatever the call cost on THIS runner — including a
         # scheduling stall — instead of assuming how fast the runner is.
-        bracket_start = time.monotonic()
-        acquired = monitoring.probe_db(acquire=slow_acquire)
-        acquired_bracket = time.monotonic() - bracket_start
-        assert acquired["ok"] is True, acquired
-        # The acquisition really did take the time: the exclusion below is
-        # observable, not a rounding artifact.
-        assert acquisition["elapsed"] >= 0.5, acquisition
-        # How much of the call's wall clock the reported field does NOT contain.
-        # ``latency_ms`` is rounded to 0.1 ms by the production code and this
-        # interval is derived from it, so allow half a rounding step — three
-        # orders of magnitude below the 0.5 s being discriminated.
-        rounding_slack = 0.00005  # 0.05 ms
-        excluded = acquired_bracket - acquired["latency_ms"] / 1000
-        assert excluded + rounding_slack >= acquisition["elapsed"], (
-            f"the acquire= shape's call took {acquired_bracket * 1000:.1f}ms "
-            f"and reported latency_ms={acquired['latency_ms']}, so only "
-            f"{excluded * 1000:.1f}ms was excluded while its acquisition alone "
-            f"took {acquisition['elapsed']:.3f}s — the reported field must keep "
-            "meaning PROBE latency (pre-#3446 semantics), not silently absorb "
-            "the acquisition phase (#3446 review)"
-        )
+        #
+        # THREE samples, and the MINIMUM is what the cross-shape control reads:
+        # a stall can only ever INFLATE one sample, so the smallest of three is
+        # the stall-free estimate. That is what lets the control keep asserting
+        # a real bound on the sdk= shape (P3, fresh review of #10424) after the
+        # absolute millisecond ceiling had to go.
+        samples = []
+        for _ in range(3):
+            bracket_start = time.monotonic()
+            acquired = monitoring.probe_db(acquire=slow_acquire)
+            acquired_bracket = time.monotonic() - bracket_start
+            assert acquired["ok"] is True, acquired
+            # The acquisition really did take the time: the exclusion below is
+            # observable, not a rounding artifact.
+            assert acquisition["elapsed"] >= 0.5, acquisition
+            excluded = acquired_bracket - acquired["latency_ms"] / 1000
+            # 90% of the acquisition, not 100%: ``excluded`` and
+            # ``acquisition["elapsed"]`` are measured on opposite sides of the
+            # worker future (the field is ``whole call - acquisition_elapsed``,
+            # the callable's own clock is INSIDE it), so an exact comparison
+            # leaves only the future-delivery overhead — ~0.1 ms in the very
+            # run this test exists for (P3, fresh review of #10424). A 10% band
+            # is 50 ms of margin against a change whose un-fixed value is ~0 ms,
+            # so no discrimination is lost and no stall can reach it.
+            assert excluded >= acquisition["elapsed"] * 0.9, (
+                f"the acquire= shape's call took {acquired_bracket * 1000:.1f}ms "
+                f"and reported latency_ms={acquired['latency_ms']}, so only "
+                f"{excluded * 1000:.1f}ms was excluded while its acquisition "
+                f"alone took {acquisition['elapsed']:.3f}s — the reported field "
+                "must keep meaning PROBE latency (pre-#3446 semantics), not "
+                "silently absorb the acquisition phase (#3446 review)"
+            )
+            samples.append(acquired["latency_ms"])
+        acquired_min = min(samples)
 
-        # CONTROL, not load-bearing on the mutation above: the acquisition's
-        # cost belongs to NEITHER shape. The sdk= caller acquired OUTSIDE the
-        # measured window, so its call must carry no acquisition-sized charge —
-        # which is what makes the excluded interval above attributable to the
-        # acquisition rather than to something inherent in probe_db. Bracketed
-        # the same way, so a stall in a probe phase cancels here too.
-        supplier_start = time.monotonic()
-        supplied = monitoring.probe_db(FakeSDK(db_ok=True))
-        supplied_bracket = time.monotonic() - supplier_start
-        assert supplied["ok"] is True, supplied
-        supplied_residual = supplied_bracket - supplied["latency_ms"] / 1000
-        assert supplied_residual < acquisition["elapsed"], (
-            f"the sdk= shape's call carried {supplied_residual * 1000:.1f}ms "
-            f"its reported latency_ms={supplied['latency_ms']} does not "
-            "account for — nothing was acquired inside that call, so the "
-            "acquire= shape's exclusion cannot be attributed to the "
-            "acquisition"
+        # The equivalent sdk= shape reports the SAME ORDER — the acquisition's
+        # cost belongs to NEITHER (the module docstring's claim). Minima on both
+        # sides, so this is stall-proof as well: a regression that inflates the
+        # sdk= shape cannot hide in a quiet sample, and a stall cannot manufacture
+        # a failure from one. The band is 50 ms — far below the 500 ms acquisition
+        # it sits under, far above the ~1 ms both shapes actually report.
+        supplied_samples = []
+        for _ in range(3):
+            supplied = monitoring.probe_db(FakeSDK(db_ok=True))
+            assert supplied["ok"] is True, supplied
+            supplied_samples.append(supplied["latency_ms"])
+        supplied_min = min(supplied_samples)
+        assert supplied_min < acquired_min + 50, (
+            f"the sdk= shape reports latency_ms={supplied_min} against "
+            f"{acquired_min} for the acquire= shape — the acquisition's "
+            "exclusion exists to make those the SAME order, so the sdk= shape "
+            "is charging something the acquire= shape is not"
         )
 
     def test_queued_acquisition_names_the_wait_not_an_overrun(self):
