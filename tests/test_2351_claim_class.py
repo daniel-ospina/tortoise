@@ -1068,6 +1068,47 @@ def test_supersede_repoint_judges_BOTH_mechanisms_of_a_legacy_operator(lane):
     assert _operator_shaped_rows(lane, new) == []
 
 
+def test_supersede_repoint_survives_a_non_string_stored_direction(lane):
+    """A raw-written non-string ``direction`` must not CRASH the door.
+
+    ``_canonical_direction`` returns a stored value VERBATIM (only an absent one
+    is defaulted), so the door's iteration over the stored directions can hold
+    mixed types — and the bare ``sorted({1, "->"})`` raised
+    ``TypeError: '<' not supported between instances of 'str' and 'int'``, a
+    traceback aborting a supersede this guard is not even about (#10418 review
+    P3). It is reachable exactly the way the rest of this arm's raw shapes are: a
+    duplicated operator id (#7822 — ids are not unique), one node carrying the
+    token and one a number.
+
+    The verdict is unchanged: a number is not a direction token, so it reads as
+    ABSENT (``direction_flows``' both-ways default) and its BACKWARD leg refuses
+    the derived target under the asserted source. RED pre-fix with
+    ``TypeError`` — which is not a ``ValueError``, so ``pytest.raises`` fails.
+    """
+    src = lane.create_point("statement", "authored source")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # The same operator id on a SECOND node — #7822's non-unique-id shape —
+    # carrying a numeric ``direction`` and its own slot edge into the prior.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op}) "
+        "CREATE (dup:Point) SET dup = properties(op) SET dup.direction = 1",
+        params={"op": op["id"]})
+    lane._get_proj().g.query(
+        "MATCH (dup:Point {id:$op}), (old:Point {id:$old}) "
+        "WHERE dup.direction = 1 CREATE (dup)-[:IMPL {idx:1}]->(old)",
+        params={"op": op["id"], "old": old})
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+
+    with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
+        lane.supersede_point(old, new)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+
+
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
 
 def _raw_direct_edge(lane, src, tgt, *, direction):
