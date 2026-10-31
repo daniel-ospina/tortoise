@@ -218,3 +218,104 @@ Local: `npm --prefix supabase/tests/pglite run validate`.
   operation is a follow-up (#2340).
 - **docs:** schema details in `docs/registry-graph-schema.md`; the key
   permission model in `docs/auth-architecture.md` §6.
+
+## 6. The default graph is TWO facts, and nothing can move either (#10180)
+
+**Measured 2026-10-27, line numbers at the head that ships this section** (each
+row also names its symbol, so a later drift is visible rather than silent). #10180
+asks for the one step a team needs
+to start using a new graph: a verb that moves the DEFAULT. Building it surfaced
+that "the default graph" is not one fact in this codebase — it is **two**,
+resolved in two unrelated ways — and that is why no verb exists.
+
+| # | reader (file:line) | the question it answers | its source |
+|---|---|---|---|
+| 1 | `supabase_control.default_graph_id_for` (`:1215`) | which id is the default — the RECORD tenant | the row: `kind='default' AND status='active'` |
+| 2 | `supabase_control.default_graph_id_for_credential` (`:1258`) | the same, minting on a miss (#10046) | #1 + `ensure_default_graph_row` |
+| 3 | `supabase_control._graph_namespace_for` (`:1190`) | a credential's `graph_namespace` | **`organizations.graph_name`** for an org-wide credential — never the default row |
+| 4 | `hosted_api._data_graph_name` (`:611`) / `_data_sdk` (`:7115`), org-wide branch | **which physical graph an org-wide REST credential opens** | **the org-ID derivation** (`_graph_name_for_namespace` → `org_{org_id}`) — neither the row nor the column |
+| 5 | `mcp_auth._get_org_sdk` (`:170`), org-wide branch | the same, for MCP | the same derivation (`TortoiseSDK(namespace=org_id)`); its resolver (`sdk.apikey_verify`) carries `graph_namespace = None` for an org-wide key |
+| 6 | `supabase_control.graph_metadata` (`:3939`) | the dashboard's default row: name, `stable_id`, namespace | the row for name/id, **the column** for namespace |
+| 7 | `backup_sweep.enumerate_org_graphs` (`:558`) → #6 | which namespace the "default" backup slot dumps | follows #6 |
+| 8 | the `"default"` sentinel consumers (the default-graph delete guard `:4390`/`:4420`, `sdk.py`, `backup_sweep`, the dashboard; >8 sites) | "is this the default graph" | derived from `kind`, via #6 |
+| 9 | `ensure_default_graph_row` (`:4046`) / `_mint_default_graph_row_best_effort` (`:4249`) | who WRITES the default row | creation/provisioning only |
+| 10 | `set_graph_name` (`:4484`) / `set_graph_recording` (`:4609`) | rename / recording override on the default | read the `kind='default'` row |
+| 11 | `20261028000001` §3 (§2 above) | the default row's namespace must equal `organizations.graph_name` | the column |
+
+**Fact A — the control-plane fact** (#1, #6, #9–#11): *which `public.graphs` row
+carries `kind='default'`*. It answers the RECORD tenant, the dashboard slot, the
+backup slot and the `"default"` sentinel — and it is the fact #10025 gave a
+stable id.
+
+**Fact B — the derivation fact** (#4, #5): *an org-wide credential opens
+`org_{org_id}`*. Both data-plane lanes compute it from the org ID and
+deliberately ignore the control plane. That is a recorded decision, not an
+oversight: `_data_sdk`'s docstring says `graph_namespace` (`t.graph_name`) is
+**NOT** used for the org-wide open because "the selfhost legacy lane
+(`sdk.org_create org_{name}`, #2023) diverges and flipping would silently move
+those orgs' data access" (`_data_graph_name` states the same decision in its own
+inline note at `hosted_api.py:641`), and
+`tests/test_capture_loop_responsiveness.py::test_capture_graph_name_mirrors_the_sdk_mapping`
+drives that derivation against the real `_get_proj`.
+
+The two facts agree today **only because provisioning makes them agree by
+construction**: all five hosted provisioning sites write
+`graph_name = f"org_{org_id}"` (`hosted_api.py:4885`, `:11498`, `:21274`,
+`:28349`, `:33378`) — exactly what the derivation produces. Nothing tests,
+constrains or observes that equality (**#10361** — filed from this
+measurement).
+
+### Why no verb can be written as "flip a row"
+
+Every coherent promotion shape moves Fact A. A promotion that moves **only** Fact
+A leaves an org-wide credential **filing its record under the new graph while
+writing its data into the old graph's physical store** — the
+two-answers-to-one-question split #10025 exists to remove, one level up. So the
+verb cannot be added without deciding how Fact B follows Fact A, and that
+decision reopens #2023's pin.
+
+### The options (owner decision on #10180)
+
+1. **The row becomes the single authority** *(recommended)*. The org-wide
+   branches of `_data_graph_name`/`_data_sdk` and `mcp_auth._get_org_sdk` open
+   the default ROW's namespace instead of the derivation; `graph_metadata`'s
+   default `namespace` reads the row rather than the column; promotion = swap
+   `kind` + move `organizations.graph_name` (which keeps §3's invariant true).
+   Byte-identical today for every hosted org (the five literals above) and for
+   every registry/selfhost org (an org-wide registry credential carries
+   `graph_namespace = None`, so the fallback IS the derivation) — but it
+   re-expresses the E2E-5 "byte-identical" gate as "byte-identical for every org
+   whose default row names `org_{org_id}`", and the derivation/column equality
+   must be pinned by a test or a constraint first.
+2. **Promote the record only.** Rejected: splits the record from the data plane
+   (above).
+3. **Copy on promote.** A data migration that duplicates a team's records across
+   two graphs while the record FK is per-graph-id. Not a pointer move; it belongs
+   to its own issue — the copy-then-verify-then-delete migration that already
+   exists is #10017, and it is the right tool for a team that wants the
+   **history** moved as well.
+4. **Keep the column as the pointer** (a mirror of 1 sourcing Fact B from
+   `organizations.graph_name` instead of the row). Practically identical;
+   preferring the row means the record tenant and the data plane read ONE field.
+
+Neither the org-wide verb above nor the per-key alternative substitutes for the
+other: a key that is merely **rebound** to a new graph still leaves every
+org-wide credential on the old default (**#10362**).
+
+Whatever is chosen, these hold and are not optional: **ids never change**
+(#10025 — the id is identity, the name is a label); **each graph keeps its own
+`namespace`**, so no points are copied, moved or deleted, and the demoted graph
+remains an active custom graph addressed by its own id (#10175's owner ruling
+keeps the old graph on purpose); the move is **one transaction** —
+`uq_graphs_org_default_active` makes two live defaults impossible and a
+demote-then-promote inside one transaction makes zero defaults unobservable;
+and it is **journalled** to `audit_events` (append-only) as the operator trail,
+while the control plane stays the system of record, so a rebuild reads the new
+state and agrees. A capture in flight at the commit resolves both its tenant and
+its namespace from the SAME credential dict, so neither can land split; one
+resolved before the commit lands under the old graph, one after under the new.
+
+⛔ **`default_graph_id_for`'s docstring used to say "the default graph is the
+organization's own graph" — true at creation, false the moment Fact A and Fact B
+are allowed to diverge.** It now names the row instead (§6's #1), so the
+next lane reads the measured answer rather than the creation-time one.
