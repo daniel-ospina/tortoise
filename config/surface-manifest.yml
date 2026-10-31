@@ -177,6 +177,18 @@ response_fields:
   emitted_when: always — the count of credential-shaped spans redacted from this capture's stored turn text (0 when
     nothing matched)
   unchanged_when_off: n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)
+- response: tortoise_session_capture
+  field: stats.step_witness
+  emitted_when: always on the v2 capture path — the eight per-stage witness blocks (#9116), copied from the extractor's
+    own return (reader/story/map/vet/classify_later/search/merge/commit), each carrying that stage's counts. Recorded
+    because this receipt is caller-facing on all three served surfaces, and the witness cannot drift between
+    them — all three read the SAME `meta['stats']` that `_extract_session_v2`'s meta fold produces. The MCP tool and
+    the hosted `POST /v1/sessions` body share `_capture_session_impl`'s receipt literal, and
+    `TortoiseSDK.capture_session` assembles its own `resp` (sdk.py) from that same `meta` — so this key is identical
+    on all three, while a field added to `_capture_session_impl`'s literal alone would NOT reach the SDK receipt
+  unchanged_when_off: yes — a flag-gated stage still emits its block with `enabled` false, so the shape never moves
+    with a flag; the seam forwards COUNTS only (the VET gate's per-candidate `decisions` text stays on the extractor's
+    return), and the replay/M2 lanes never reach this fold, so their receipt is unchanged
 - response: sdk:provenance
   field: raw
   emitted_when: 'the point has an extractedFrom :Source — the index entry for the raw: source_id, content_hash,
@@ -251,6 +263,16 @@ response_fields:
     by the counts_capture_ops decorator (#3561)
   unchanged_when_off: n/a — not gated by a flag; an additive key on the returned dict, absent from the MCP tortoise_session_capture
     response, which calls the underlying impl directly
+- response: sdk:capture_session
+  field: stats.step_witness
+  emitted_when: always on the v2 capture path — the eight per-stage witness blocks (#9116) under the already-present
+    `stats` key, one per extractor stage (reader/story/map/vet/classify_later/search/merge/commit), each carrying
+    that stage's own counts and, for the two flag-gated passes, the `enabled` flag beside them. A block witnesses
+    its step only when the stage reports that it did work; the seam copies COUNTS, never the VET gate's per-candidate
+    `decisions` text
+  unchanged_when_off: yes — a flag-gated stage still emits its block with `enabled` false, so the shape does not move
+    with a flag; the replay/M2 lanes never reach this fold and carry an empty `stats` (or none), byte-identical to
+    before
 - response: sdk:traverse
   field: idx
   emitted_when: always, on every returned point — the matched edge's idx (0 names the operator's SOURCE, >= 1 a
