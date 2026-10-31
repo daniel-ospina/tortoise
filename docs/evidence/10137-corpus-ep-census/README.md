@@ -1,3 +1,14 @@
+---
+title: "#10137 — the corpus census: questions_with_ep / questions on frozen LongMemEval-S"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-10-31
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph, epistemic belief layer, LongMemEval-S corpus
+aboutObjects: "#10137, #10188, #8486, #2598, ingest_v2, measurement_posture"
+---
+
 # #10137 — the corpus census: `questions_with_ep / questions` on frozen LongMemEval-S
 
 **The number this issue was opened to produce, measured on a pre-registered 24-question sample.**
@@ -7,7 +18,7 @@ issue's verification comment recorded that as `PARTIAL` and the remaining work a
 step-5 run". This is a **pre-registered stratified sample**, not the 500-question population — the
 denominator is stated everywhere below.
 
-```
+```text
 questions_with_ep / questions = 24 / 24 = 1.00      (all six question types: 4/4 each)
 corpus   = xiaowu0162/longmemeval-cleaned, split s (frozen)
            sha256:d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442
@@ -95,6 +106,7 @@ per-question cells but not the per-question graphs, and the corpus cache lives o
 the cells are auditable against the committed sample identity (`census.json.completed`: 24
 `question_id` + `question_type` pairs) and reproducible by re-running the two probes, not
 recomputable from the artifact alone.
+
 - The issue's **open owner decision** ("should `activated` additionally require contribution?") gains
   data: every question here has `questions_off_neutral == 1` and `points_moved_off_neutral > 0`, so
   on this sample the stricter bar would not change any question's state. It would still be a re-cut

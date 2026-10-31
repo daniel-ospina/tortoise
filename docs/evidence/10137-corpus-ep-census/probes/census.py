@@ -25,7 +25,10 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 
-from tools.longmem_eval import measurement_posture as mp  # noqa: E402
+# No suppression directive here on purpose: ruff's E402 deliberately EXEMPTS an
+# import that follows a `sys.path` modification (ruff PR #9047, v0.2.0), so a
+# no-suppression-needed `E402` marker would be UNUSED and RUF100 reds the lint job.
+from tools.longmem_eval import measurement_posture as mp
 
 
 def cells(path: str) -> dict:
