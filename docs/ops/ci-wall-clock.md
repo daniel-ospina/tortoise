@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: ci-wall-clock, ci-headroom-guards
 aboutObjects: tortoise, .github/workflows/python-ci.yml, .github/workflows/ci.yml, .github/workflows/ai-review-gate.yml, .github/workflows/drift-guard.yml
 created: 2026-10-27
-updated: 2026-10-27
+updated: 2026-10-31
 ---
 
 # CI wall-clock bounds on the merge path
@@ -334,8 +334,81 @@ same step with the same tail is the investigation.
   `OK`: an unmeasured wait is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 20 jobs (max 28) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
-  is a sharding/capacity question (#5215, #9539), not a timeout question.
+  is a sharding/capacity question (#5215, #9539), not a timeout question. It does now bound how
+  many of those jobs ONE run may hold at once — §7 — which moves the queue, not the work.
 - **It does not restore post-merge validation.** §4 — 17 of 20 recent push-to-main runs never
   ran, for reasons that predate this change.
 - **It does not make a superseded PR cheap.** Cancelling the superseded run frees the slot it was
   holding, not the work it had already done.
+
+---
+
+## 7. Matrix fan-out: how many slots one run may hold (`max-parallel`)
+
+`strategy.max-parallel` was unset on every matrix in this repo until #6744, so a single PR
+enqueued its whole shard set — 17 matrix jobs (9 fast + 5 slow + 3 carve-out) — at the same
+instant, on top of 11 singleton jobs.
+
+**Measured 2026-10-31, ~03:30Z**, 9 `python-ci` runs (`pull_request`, 2026-10-30T21:48Z ..
+10-31T02:54Z), jobs API `filter=all`, completed jobs only:
+
+| reading | value |
+| --- | --- |
+| runners registered / online | 12 / 12 (11 busy, 1 idle at read) |
+| per-PR PEAK simultaneous jobs | **p50 11, max 18** (92%–150% of the pool) |
+| per-PR peak of the FAST matrix alone | p50 8, **max 9** (75% of the pool) |
+| instants with ≥6 jobs running where ONE run held ≥50% of them | **352 of 367** (median share 0.73, max 1.00) |
+| repo queue at the read | 35 queued runs, 3 in-progress runs |
+| per-job queue wait (`created_at` → `started_at`) | p50 5.4 m, p95 21.3 m, max 27.3 m |
+| fast-shard wall | p50 10.5 m (5.8–15.7) |
+| fast-shard START stagger within a run | 4.0–23.9 m (p50 ~10) — the pool already delivers 2–4 waves |
+| slow-leg wall / carve-out wall | p50 8.9 m (3.7–12.6) / p50 8.8 m (7.5–9.4) |
+
+The monopolisation row is the one that names the queue: it is not that jobs are slow, it is that
+one run owns the pool, so every other PR waits for that run's shard set to drain.
+
+**The cap is `3` on all three matrices, and it is pinned from both sides rather than chosen:**
+
+1. **Do not invent waves the pool already creates.** `ceil(fast_shards / C) <= 4` — the measured
+   stagger (4.0–23.9 m against a p50 10.5 m wall) says the pool already runs these shards in 2–4
+   waves, so a cap needing more than 4 is strictly added wall. `C >= 3`.
+2. **No single PR may hold the pool.** The three matrices start after `changes` and overlap, so a
+   PR's maximum hold is `C_fast + C_slow + C_carve`; reserving 3 of the 12 runners so three other
+   PRs can always make progress gives `sum <= 12 - 3 = 9`, i.e. `C <= 3` with equal caps.
+
+Only `C = 3` satisfies both. An interval simulation over the same 9 runs — each job keeps its own
+observed start as an earliest bound, so the delta is an **upper** bound: it does not credit back
+the queue the PR no longer waits behind — gives per-PR peak / matrix-band delta:
+
+| cap (fast/slow/carve) | per-PR peak (p50 / max) | matrix-band end delta (p50 / max) |
+| --- | --- | --- |
+| 2 / 2 / 2 | 8 / 9 | +31.8 m / +38.5 m |
+| **3 / 3 / 3 (shipped)** | **9 / 12** | **+17.9 m / +23.2 m** |
+| 4 / 4 / 3 | 10 / 13 | +10.1 m / +14.4 m |
+| 5 / 3 / 3 | 10 / 12 | +8.1 m / +9.6 m |
+| unset | 11 / 18 | 0 / 0 |
+
+The accepted regression is the slow matrix's second wave (`ceil(5/3)`): its band goes ~13 m →
+~18 m, still narrower than the fast band under the same cap (~31.5 m), so it does not become the
+run's widest leg. Capping slow at 5 to keep its single wave would put a PR's hold at 11 of 12
+runners and fail invariant 2.
+
+⛔ **The clock this is judged on.** `cancel-in-progress` is keyed per PR (`refs/pull/N/merge`,
+§3), so a cap protects **other** PRs from this one. It does **not** make the capped PR finish
+sooner, and a later reading that judges it that way is reading the wrong clock: the target is
+"no single PR holds more than 9 slots", not "each PR is faster".
+
+⛔ **Why it cannot false-red a shard.** `max-parallel` limits start order only. Every bound in
+these jobs is measured from runner pickup — the in-step watchdog is started INSIDE the job — so a
+start delayed by the cap cannot consume a shard's budget. The matrix itself is untouched (the
+shard set is still the selector's `fast_matrix` / `slow_matrix` / `carve_matrix`), and a `needs:`
+on a matrix job waits for **every** leg regardless of ordering (#5219) — so `python-ci-gate`
+cannot conclude before a shard it needs has run. Both halves are pinned by
+`tests/test_ci_selection.py::test_every_matrix_bounds_its_fan_out_below_the_measured_pool` and
+`::test_no_required_check_names_a_fast_leg`.
+
+**Re-derive before moving any of the three numbers**: re-read the pool (`gh api
+repos/<owner>/<repo>/actions/runners`), the per-shard wall and the start stagger with §2's
+command. If the pool grows, invariant 2 permits a larger cap; if a shard's wall grows past
+`4 × cap × wall` catching the carve-out, invariant 1 is the one that moves.
+

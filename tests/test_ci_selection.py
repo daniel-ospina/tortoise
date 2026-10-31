@@ -5566,6 +5566,71 @@ def test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard():
     assert dl["with"]["name"] == "pytest-canary-producer"
 
 
+def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
+    """#6744: each shard matrix declares `max-parallel`, and the three caps
+    together keep ONE PR below the measured runner pool.
+
+    Unbounded, a single PR enqueues its whole shard set (17 jobs) at once. The
+    measured consequence (9 `python-ci` runs, 2026-10-30T21:48Z..10-31T02:54Z,
+    completed jobs only): per-PR peak simultaneous jobs p50 11 / max 18 against
+    a 12-runner pool, and a single run held >=50% of all running jobs at 352 of
+    the 367 sampled instants.
+
+    This pins the INVARIANTS, not the chosen number, so a re-tune from a fresh
+    measurement passes and a silent removal does not:
+
+    1. presence — every matrix job declares the cap (its absence IS the defect,
+       and it is invisible in a green run because a matrix completes either
+       way);
+    2. no new waves — `ceil(shards / cap) <= 4`, because the measured start
+       stagger (4.0–23.9m) against the measured per-shard wall (p50 10.5m) says
+       the pool already delivers these shards in 2–4 waves, so a cap needing
+       more than 4 is strictly added wall;
+    3. no monopolisation — the three matrices overlap (all start after
+       `changes`), so the per-PR maximum hold is their SUM and it must leave
+       the rest of the measured pool to other PRs: `sum <= 12 - 3`.
+
+    ⛔ It deliberately says nothing about job ORDER or the matrix contents: the
+    shard set is still the selector's, so `max-parallel` cannot skip a leg, and
+    `python-ci-gate`'s `needs:` (job-id keyed, per test_no_required_check_names_
+    a_fast_leg) still waits for every leg regardless of when it starts.
+    """
+    from tools.ci_selection import fast_shard_count
+
+    wf = _load_python_ci()
+    counts = {
+        "test": fast_shard_count(load_manifest()),
+        "test-slow": slow_shard_count(load_manifest()),
+        "test-carve-out": carve_shard_count(load_manifest()),
+    }
+    measured_pool = 12          # `gh api .../actions/runners` — 12 online
+    reserved_for_others = 3     # three other PRs must always get a runner
+    max_waves = 4               # measured stagger/wall ratio-implied ceiling
+
+    caps = {}
+    for job_id, shards in counts.items():
+        strategy = wf["jobs"][job_id].get("strategy") or {}
+        cap = strategy.get("max-parallel")
+        assert isinstance(cap, int) and cap >= 1, (
+            f"{job_id} declares no integer `max-parallel` (got {cap!r}) — an "
+            "uncapped matrix lets one PR hold its whole shard set at once, "
+            f"which is #6744; measured per-PR peak was 18 of a {measured_pool}"
+            "-runner pool")
+        waves = -(-shards // cap)
+        assert waves <= max_waves, (
+            f"{job_id}: cap {cap} over {shards} shards needs {waves} waves, "
+            f"past the measured {max_waves}-wave ceiling — a cap this small "
+            "makes the matrix the critical path instead of the queue (#6744)")
+        caps[job_id] = cap
+
+    hold = sum(caps.values())
+    assert hold <= measured_pool - reserved_for_others, (
+        f"one PR can hold {hold} matrix jobs at once ({caps}) and still take "
+        f"the pool: the bound is {measured_pool} - {reserved_for_others} = "
+        f"{measured_pool - reserved_for_others} so other PRs keep a runner "
+        "(#6744)")
+
+
 def test_no_required_check_names_a_fast_leg():
     """#6135 acceptance: a shard-ADDING diff must not leave a required check
     that no longer exists — an unsatisfiable required check is a queue that

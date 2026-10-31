@@ -716,6 +716,49 @@ jobs:
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
+      # #6744: BOUND THE FAN-OUT. Unset, a matrix enqueues its whole shard set at
+      # once — every PR requests all 17 jobs (9 fast + 5 slow + 3 carve-out) at
+      # the same instant. Measured over 9 `python-ci` runs (2026-10-30T21:48Z ..
+      # 2026-10-31T02:54Z, jobs API `filter=all`, completed jobs only): ONE PR's
+      # peak simultaneous jobs was p50 11 / **max 18** against a 12-runner pool
+      # (92%–150% of it), and the fast matrix alone peaked at 8–9, i.e. 75% of
+      # the pool. Fleet-wide, at 352 of the 367 sampled instants with >=6 jobs
+      # running a SINGLE run held >=50% of them (median share 0.73, max 1.00) —
+      # that, not job duration, is what makes the queue (`queued=35`,
+      # `in_progress=3` at the read) serve one PR at a time.
+      #
+      # `3` IS DERIVED, NOT CHOSEN. Two inequalities pin it, and only 3
+      # satisfies both:
+      #   (a) DO NOT INVENT WAVES THE POOL ALREADY CREATES. Measured per-shard
+      #       wall p50 10.5m (range 5.8–15.7m) against a measured start stagger
+      #       across the 9 shards of 4.0–23.9m (p50 ~10m): under the present
+      #       queue the pool already delivers these shards in 2–4 waves. A cap
+      #       that needs MORE than 4 waves is strictly new wall —
+      #       `ceil(9/C) <= 4  =>  C >= 3`.
+      #   (b) NO SINGLE PR MAY HOLD THE POOL. The three matrices all start after
+      #       `changes` and overlap, so a PR's maximum hold is
+      #       `C_fast + C_slow + C_carve`. Reserving 3 of the 12 measured
+      #       runners so three other PRs can always make progress:
+      #       `sum <= pool - 3 = 9`, i.e. with equal caps `C <= 3`.
+      # The interval simulation over those same 9 runs — each job keeps its own
+      # observed start as an earliest bound, so the delta is an UPPER bound that
+      # does NOT credit back the queue this PR no longer waits behind — gives
+      # per-PR peak / matrix-band delta: cap 2 → 8 / +31.8m; cap 3 → 9 /
+      # +17.9m; cap 4 → 10 / +10.1m; uncapped → 11 (max 18) / 0. Re-derive from
+      # a fresh measurement if the pool or the per-shard wall moves.
+      #
+      # ⛔ WHAT THIS DOES NOT DO, so it is never judged on the wrong clock:
+      # `cancel-in-progress` is keyed per PR (`refs/pull/N/merge`), so a cap
+      # protects OTHER PRs from this one. It does not make a capped PR finish
+      # sooner; the target is "no single PR holds more than 9 slots".
+      # ⛔ AND WHAT IT CANNOT DO: `max-parallel` limits START order only. Every
+      # bound in this job is measured from runner pickup (the in-step watchdog
+      # is started INSIDE the job), so a start delayed by the cap can never
+      # consume a shard's budget — the failure mode this cannot introduce.
+      # It does not touch the matrix itself: the shard set is still exactly the
+      # selector's `fast_matrix`, so no shard can be skipped, and `needs:` on a
+      # matrix job waits for EVERY leg regardless of ordering (#5219).
+      max-parallel: 3
       # #6135: the WHOLE matrix is the selector's output — the shard count
       # (`config/ci-surfaces.yml::fast_shards`) and the leg names are derived,
       # and neither is written here. `include` rows carry `half` (the positional
@@ -1933,6 +1976,18 @@ jobs:
       # projected wall. `test_slow_shards_are_duration_packed_and_meet_the_wall_target`
       # reds when the projection leaves the guideline, and
       # `test_slow_shards_declaration_is_fail_closed` pins the config contract.
+      #
+      # #6744: bounded like the fast matrix, and for the same derivation — read
+      # the `test` job's `max-parallel` comment for the measurement and the two
+      # inequalities. `3` here costs ONE extra wave (ceil(5/3) = 2 instead of 1)
+      # and that cost is the one accepted wall regression in the change:
+      # measured leg wall p50 8.9m → the band goes ~13m → ~18m, still narrower
+      # than the fast band under the same cap (3 waves × 10.5m ≈ 31.5m), so it
+      # does not become the run's widest matrix. Capping at 5 instead (keeping
+      # its single wave) would put a PR's maximum hold at 3 + 5 + 3 = 11 of the
+      # 12 measured runners — failing inequality (b) and reinstating exactly the
+      # monopolisation this exists to remove.
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.changes.outputs.slow_matrix) }}
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
@@ -3060,6 +3115,15 @@ jobs:
     # rail would refuse as unattributable instead of comparing (#4453).
     strategy:
       fail-fast: false
+      # #6744: bounded, same derivation as the `test` job's `max-parallel`
+      # (read it there — the measurement and both inequalities live in one
+      # place on purpose). At `carve_shards: 3` this cap equals the shard count
+      # and therefore adds NO wave today; it is declared rather than omitted so
+      # the per-PR hold bound (`C_fast + C_slow + C_carve <= pool - 3`) holds
+      # here by construction instead of by accident, and so a future rise in
+      # `carve_shards` cannot silently reinstate unbounded fan-out on this band.
+      # Removing this key is a complete rollback of the carve-out half only.
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.changes.outputs.carve_matrix) }}
     # ⛔ The BARE `test-carve-out` is shard 0's name (`suffix == ''`), NOT
     # `test-carve-out (a)`. The merge rail's lane-parity subtracts main's job
