@@ -41661,18 +41661,26 @@ async def oauth_authorize(request: Request):
     `Domain=.premiselabs.co` cookie. That is deleted. The split is by evidence
     the AS actually has:
 
-      * an authorize request that carries `attempt_key` is one the app ALREADY
-        advanced (its `/api/consent/start` route records the attempt, resolves
-        the session, and only then redirects here) → render the page, which asks
-        that same origin for a bound assertion;
-      * anything else has no evidence of a session → 302 to the app's sign-in
+      * an authorize request that carries `attempt_key` is the one the app's
+        `/api/consent/start` route writes after it records the attempt and
+        resolves the session → render the page, which asks that same origin for a
+        bound assertion. ⛔ The CARRIAGE is what the AS can see, not the author:
+        see the paragraph below on why presence is not provenance;
+      * anything else carries no attempt marker at all → 302 to the app's sign-in
         leg with the COMPLETE request carried as its return target
         (`consent_bounce_url`), so nothing has to be reconstructed from memory
         on the way back.
 
-    An attempt key is not a credential: a forged one renders a page whose mint
-    answers `403 no_authorize_attempt`, which is a typed refusal on the page and
-    never a code. What it does establish is that the app itself wrote this URL.
+    An attempt key is not a credential, and its PRESENCE proves nothing about
+    who wrote this URL: the AS only tests that the parameter is non-empty, so a
+    guessed one renders the page exactly like a real one. Presence selects the
+    BRANCH — page vs. sign-in bounce — and nothing else. The ownership proof
+    happens at the mint, on the session origin, which compares
+    `attempt_key_hash` against the recorded attempt row and answers
+    `403 no_authorize_attempt` on a mismatch (`api/consent/token.ts`), a typed
+    refusal on the page and never a code. A forged key therefore buys a dead
+    end, not a flow: do NOT read this parameter as evidence the app wrote the
+    URL.
 
     The params are validated BEFORE the bounce, so a malformed authorize request
     still gets its RFC 6749 §4.1.2.1 error (redirect-vs-JSON, unchanged) instead

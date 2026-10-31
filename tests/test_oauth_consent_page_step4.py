@@ -433,10 +433,11 @@ def test_the_served_button_ships_DISABLED_and_the_page_only_armss_it_later(
 
 
 def test_a_request_carrying_an_attempt_key_renders_the_page(api_client):
-    """The attempt key is the AS's only evidence the app advanced this flow.
+    """The attempt key is the AS's only render-time SIGNAL — not evidence of authorship.
 
-    Anything else bounces. It is not a credential: a forged key renders a page
-    whose mint refuses (`403 no_authorize_attempt`) — a typed refusal, never a
+    Anything else bounces. It is not a credential, and its presence does not prove the
+    app wrote the URL: a forged key renders the same page, and that mint refuses
+    (`403 no_authorize_attempt`) — a typed refusal, never a
     code — which the page test below pins.
     """
     tc, _ = api_client
