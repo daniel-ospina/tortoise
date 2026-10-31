@@ -413,7 +413,11 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   `'superseded'`. Measured on a live engine BEFORE the guard, all three
 #:   ACCEPTED by `update_entity` (and by `create_object`; both doors now refuse
 #:   them unless the same call supplies `status='superseded'` —
-#:   `sdk._refuse_bare_lifecycle_carrier`):
+#:   `sdk._refuse_bare_lifecycle_carrier`). ⚠️ The refusal keys on the record's
+#:   carrier COLUMN through `record_projection.snake`, not on a list of prop
+#:   names, so it covers `superseded_by`/`superseded_at` as well as
+#:   `supersededBy`/`supersededAt` — the camel-only list was inert against the
+#:   snake spelling, which reaches this very column (PR #10379 review P1):
 #:
 #:       update_entity(obj, supersededBy='v2')                  -> status='live', supersededBy='v2'
 #:       update_entity(obj, supersededAt='2026-01-01T00:00:00Z') -> status='live', supersededAt='…'

@@ -1168,7 +1168,11 @@ def test_an_empty_carrier_is_not_a_supersession():
 
     ⚠️ #10192 CLOSED that write door — both shapes are now REFUSED unless the
     same call supplies `status='superseded'` (`sdk._refuse_bare_lifecycle_
-    carrier`), so a NEW row cannot be minted this way. The row is still
+    carrier`), so a NEW row cannot be minted this way. That refusal keys on the
+    record's carrier COLUMN (`record_projection.snake`), so it covers the snake
+    spelling of the same column too — a prop-name list of the camelCase pair
+    left `update_entity(obj, superseded_by="")` open (PR #10379 review P1). The
+    row is still
     reachable (one written before the guard, and the record's own legacy
     id-only `ObjectSuperseded`), which is why this reading is unchanged: truthiness
     — not `IS NOT NULL` — is what agrees with the graph, and the record VIEW is

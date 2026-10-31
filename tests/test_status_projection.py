@@ -1002,6 +1002,14 @@ def _make_carrier_entity(sdk, label: str, name: str) -> str:
 #: #10192 guard: a pointer/stamp alone, a BLANK pointer (the record view's
 #: `IS NOT NULL` reads `''` as a carrier), a carrier with an explicit LIVE status,
 #: and a carrier with an explicit null status.
+#:
+#: ⚠️ The SNAKE spellings are in this list because the camel-only guard was
+#: INERT against them (review P1): `record_projection._split_properties` sends a
+#: props key to a record COLUMN through `snake`, so `superseded_by` reaches the
+#: very `public.object.superseded_by` / `public.subject.superseded_by` column
+#: the cached camel spelling reaches — and the record's `IS NOT NULL` fold then
+#: reports a LIVE node as `'superseded'` exactly as it did for `supersededBy`.
+#: A guard that only knew one spelling of the column it protects is not a guard.
 _BARE_CARRIER_SHAPES = [
     pytest.param({"supersededBy": "v2"}, id="pointer-only"),
     pytest.param({"supersededAt": "2026-01-01T00:00:00Z"}, id="stamp-only"),
@@ -1010,6 +1018,14 @@ _BARE_CARRIER_SHAPES = [
                  id="live-status-with-pointer"),
     pytest.param({"status": None, "supersededBy": "v2"},
                  id="null-status-with-pointer"),
+    pytest.param({"superseded_by": "v2"}, id="snake-pointer-only"),
+    pytest.param({"superseded_at": "2026-01-01T00:00:00Z"},
+                 id="snake-stamp-only"),
+    pytest.param({"superseded_by": ""}, id="snake-empty-pointer"),
+    pytest.param({"status": "live", "superseded_by": "v2"},
+                 id="snake-live-status-with-pointer"),
+    pytest.param({"status": None, "superseded_at": "2026-01-01T00:00:00Z"},
+                 id="snake-null-status-with-stamp"),
 ]
 
 
@@ -1095,6 +1111,24 @@ class TestLifecycleCarrierCoherence:
             assert _carrier_row(sdk, "Object", "eta") == live_row, (
                 "the ON-MATCH re-create wrote the carrier onto the live node")
 
+            # …and the SNAKE spelling is the same channel (review P1): the
+            # record column is `superseded_by`, so `_split_properties` maps
+            # BOTH spellings onto it and the create door must refuse both.
+            snake_before = len(_records(journal))
+            with pytest.raises(ValueError, match="lifecycle CARRIER"):
+                sdk.create_object("eta", "core:strategy",
+                                  superseded_by="eta-v2")
+            assert _carrier_row(sdk, "Object", "eta") == live_row, (
+                "the ON-MATCH re-create smuggled the carrier in under the "
+                "snake spelling")
+            with pytest.raises(ValueError, match="lifecycle CARRIER"):
+                sdk.create_subject("eta-subj", "core:organization",
+                                   superseded_at="2026-01-01T00:00:00Z")
+            assert _carrier_row(sdk, "Subject", "eta-subj") is None, (
+                "a refused create_subject(superseded_at=...) minted the node")
+            assert len(_records(journal)) == snake_before, (
+                "a refused snake-spelling create appended journal records")
+
             # A BORN-superseded create names the status and stays writable.
             sdk.create_object("eta2", "core:strategy", status="superseded",
                               supersededBy="eta2-v2",
@@ -1149,6 +1183,12 @@ class TestLifecycleCarrierCoherence:
                               supersededAt=None)
             assert _carrier_row(sdk, "Object", "beta")[1:] == ("live", None,
                                                                None)
+            # …and the SNAKE spelling of a clear is a clear too: `None` is not a
+            # carrier under either spelling, so the guard must not over-block it
+            # (review P1 extended the guard to that spelling, not the CLEAR).
+            sdk.update_entity(oid, superseded_by=None, superseded_at=None)
+            assert _carrier_row(sdk, "Object", "beta")[1:] == ("live", None,
+                                                               None)
         finally:
             sdk.close()
 
@@ -1170,8 +1210,37 @@ class TestLifecycleCarrierCoherence:
             sdk.update_entity(oid, supersededAt="2026-02-02T00:00:00Z")
             assert _carrier_row(sdk, "Object", "gamma")[1:] == (
                 "superseded", "gamma-v2", "2026-02-02T00:00:00Z")
+            # Same under the snake spelling: the guard reads the RESULT status,
+            # so it is a coherence guard and not a ban on a property name.
+            sdk.update_entity(oid, superseded_by="gamma-v3")
+            assert _carrier_row(sdk, "Object", "gamma")[1:] == (
+                "superseded", "gamma-v2", "2026-02-02T00:00:00Z")
         finally:
             sdk.close()
+
+    @pytest.mark.parametrize("spelling", ["supersededBy", "superseded_by",
+                                          "SupersededBy"])
+    def test_every_spelling_of_a_carrier_is_the_same_record_column(
+            self, spelling):
+        """The guard's surface IS the record's surface (review P1).
+
+        This is the property the finding turned on: the door's carrier set must
+        be derived from the COLUMNS `_split_properties` writes, not from a
+        hand-written pair of prop names — `snake` maps every camel/mixed/snake
+        spelling onto the one `superseded_by` column, so one column has many
+        spellings and a guard that lists one of them protects none of them.
+        """
+        from tortoise.record_projection import snake
+
+        assert snake(spelling) == "superseded_by", (
+            f"{spelling!r} does not reach the record's carrier column")
+        # The door must recognise it for that reason — through the SAME rule.
+        from tortoise.sdk import _lifecycle_carrier_keys
+
+        assert _lifecycle_carrier_keys({spelling: "v2"}) == {
+            spelling: "superseded_by"}, (
+            f"the guard does not treat {spelling!r} as a carrier; it would "
+            "write public.object.superseded_by without a status (#10192)")
 
     def test_the_mirror_shape_is_not_refused(self, tmp_path):
         """`status='superseded'` with NO carrier is OUT of scope, by decision.
@@ -1247,6 +1316,20 @@ class TestLifecycleCarrierCoherence:
             "the record fold is supposed to derive a status from the carrier "
             "alone — that is exactly why the door must refuse a bare carrier")
 
+        # (c) the SAME row under the SNAKE spelling (review P1). This is why a
+        # camel-only guard closes nothing: `_split_properties` maps the key
+        # through `snake`, so `superseded_by` lands in the identical column and
+        # the identical fold reports the LIVE graph's node as terminal.
+        snake_bare = record_row({"superseded_by": "v2"})
+        assert snake_bare == bare, (
+            "the snake spelling must produce the SAME record row as the camel "
+            f"one — otherwise this lane is guarding the wrong surface: "
+            f"{snake_bare} != {bare}")
+        assert cp.node_from_row("Object", snake_bare).props.get(
+            "status") == "superseded", (
+            "the snake-spelled bare carrier must derive 'superseded' in the "
+            "record too — that is the divergence the guard must refuse")
+
         # …and the door now does refuse it, on a node the graph holds LIVE.
         sdk = TortoiseSDK(str(tmp_path / "t10192d.db"))
         try:
@@ -1255,5 +1338,10 @@ class TestLifecycleCarrierCoherence:
                 sdk.update_entity(oid, supersededBy="v2")
             assert _carrier_row(sdk, "Object", "epsilon")[1] == "live", (
                 "the graph's reading of the refused node must stay 'live'")
+            with pytest.raises(ValueError, match="lifecycle CARRIER"):
+                sdk.update_entity(oid, superseded_by="v2")
+            assert _carrier_row(sdk, "Object", "epsilon")[1] == "live", (
+                "a snake-spelled carrier was ACCEPTED on a live node — the "
+                "guard is inert against it (review P1)")
         finally:
             sdk.close()
