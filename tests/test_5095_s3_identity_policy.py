@@ -243,6 +243,19 @@ class TestPlanIdentity:
         assert block["unresolved_total"] == 5
         assert block["candidates"]["operators"] == 1
 
+    def test_a_COMPLETE_lookup_with_unchecked_candidates_is_PARTIAL(self):
+        """The measured #5095-review-B1 shape: `search_graph` runs over the S2
+        list and S4 then COMPLETES it, so a candidate S4 added has no derived
+        query at all. Reporting `resolved` there would make the block contradict
+        its own `unresolved` counter — and silence the caller's warning."""
+        block_out = fp.plan_identity(_search(), candidates={"points": 3},
+                                     unresolved={"points": 1})
+        assert block_out["state"] == fp.LOOKUP_PARTIAL, block_out
+        assert block_out["unresolved_total"] == 1
+        # ...and a fully-covered run stays resolved: the elevation is not a default.
+        assert fp.plan_identity(_search(), candidates={"points": 3},
+                                unresolved={"points": 0})["state"] == fp.LOOKUP_RESOLVED
+
     def test_a_partial_lookup_reports_partial_and_no_reason(self):
         """`reason` is the producer's failure text — a bounded lookup has none,
         and inventing one would report a failure that did not happen."""
@@ -332,8 +345,16 @@ class TestRenderSearchResults:
             "\n\nEXISTING POINTS (id | content | kind):\n"
             "- p1 | the budget is 40k | statement")
 
-    def test_no_search_renders_the_historical_line(self):
-        assert v2._render_search_results({}) == "(no graph search results)"
+    def test_an_empty_search_does_not_claim_a_measured_absence(self):
+        """`{}` is reachable (`run_s4` from a tool, a test) and it is UNRESOLVED,
+        not "nothing exists" — the same unmeasured absence claim this change
+        removed from the degraded branch (#5095 review B3)."""
+        rendered = v2._render_search_results({})
+        assert "UNRESOLVED" in rendered, rendered
+        assert "no existing items" not in rendered.replace(
+            "no existing items available", ""), rendered
+        # `None` too: a caller that passed nothing established nothing.
+        assert "UNRESOLVED" in v2._render_search_results(None)
 
 
 # ── 7. the producer: search_graph reports coverage ─────────────────────────
@@ -453,6 +474,43 @@ def _records(result: dict) -> list[dict]:
             or str(rec.get("found")) == "None"]
 
 
+class TestTheSharedCandidateText:
+    """#5095 review B2: one home for the text a candidate's query is built from.
+
+    `_derive_queries` used to cut the RAW text to 80 and strip afterwards, while
+    `execute_embed` stripped first and then took `content[:80]`. For a long point
+    whose raw text begins with whitespace those are different strings, so the
+    query that RAN and the key asked for at commit time differed — and the record
+    then said *"the lookup did not run"* about a lookup that ran.
+    """
+
+    def test_strip_then_cut_is_the_derivation_order(self):
+        raw = "   " + "x" * 100
+        assert v2._candidate_query_text("point", raw) == "x" * 80
+        assert v2._candidate_query_text("point", ("  " + "y" * 70)) == "y" * 70
+        # an entity name is not cut: two long names must not collapse onto one key
+        long_a = "ACME Corporation International Holdings Division " + "A" * 60
+        long_b = "ACME Corporation International Holdings Division " + "B" * 60
+        assert v2._candidate_query_text("object", long_a) != \
+            v2._candidate_query_text("object", long_b)
+
+    def test_a_whitespace_prefixed_long_point_is_still_covered(self):
+        """The exact reproduction: the derived/run key is built from the SAME
+        window, so the record says `no match` — not `never looked`."""
+        raw = "   " + "the budget is 40k " + "x" * 90
+        key = v2._query_key("point", v2._candidate_query_text("point", raw))
+        assert key is not None
+        search = _search(query_results={"ran": [key], "failed": []})
+        assert v2._candidate_covered(
+            search, "point", v2._candidate_query_text("point", raw)) is True
+        embed = {"entities": [], "events": [], "operators": [], "chain_notes": [],
+                 "points": [{"content": raw, "pointKind": "statement"}]}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        rec = next(r for r in result["link_before_create"]
+                   if r["searched_for"].startswith("point "))
+        assert rec["found"] is False, rec
+
+
 class TestExecuteEmbedRecord:
     def test_an_unresolved_lookup_records_NO_match_claim(self):
         result = v2.execute_embed(_EMBED, {}, session_id="s1")
@@ -487,6 +545,33 @@ class TestExecuteEmbedRecord:
         point = by_ref["point 'the budget is 40k'"]
         assert entity["found"] is False, entity
         assert point["found"] is None, point
+
+
+class TestTheRemainingAbsence:
+    """The MINT half of §4.4's I1, pinned as an ABSENCE — kept behind a call.
+
+    `#5095` made the prompt and the record truthful; it deliberately did NOT
+    suppress a write (the correct seam is a create gate inside S5, and
+    `execute_embed({})` also drops retractions, supersessions and chain notes).
+    So the run still mints a candidate whose identity was never established, and
+    that is the whole of what remains missing from `failure_policy`.
+
+    ⛔ This test exists to make the absence FALSIFIABLE rather than narrated: the
+    day a create gate lands, the payload below is empty for an unresolved lookup,
+    this reds, and `config/v4-mechanisms.yml`'s row must flip to `implemented`.
+    A register whose absence claim no call can see is the drift the register
+    exists to prevent (#5095 review A3).
+    """
+
+    def test_an_unresolved_lookup_still_mints(self):
+        result = v2.execute_embed(_EMBED, {}, session_id="s1")
+        payload = result["payload"]
+        assert payload is not None
+        assert payload["points"], (
+            "no Point was committed for an UNRESOLVED lookup — if a create gate "
+            "landed, flip `failure_policy` to `implemented` in "
+            "config/v4-mechanisms.yml and re-point its note")
+        assert payload["entities"], "no entity was committed for an UNRESOLVED lookup"
 
 
 # ── 10. the run's own report ───────────────────────────────────────────────

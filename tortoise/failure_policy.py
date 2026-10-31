@@ -312,6 +312,19 @@ def plan_identity(search: object, *, candidates: Mapping[str, int],
                     ``operators`` / ``retractions``).
     ``unresolved``  the subset whose OWN identity query did not run, per class.
 
+    ⭐ **The state is the RUN's, not the lookup's**, and that is a measured
+    correction (#5095 review B1): `search_graph` runs over the **S2** list and S4
+    then *completes* it, so a candidate S4 added has no derived query at all —
+    its identity was never checked. With the state read off the lookup alone, a
+    fully-covered lookup plus one S4-added candidate reported `resolved` and the
+    caller's warning stayed silent while the block's own `unresolved` counter
+    said 1. So a resolved lookup is elevated to `partial` when ANY candidate is
+    unresolved; `resolved` means *nothing in this run is unchecked*.
+
+    ``reason`` stays the PRODUCER's failure text (only an ``unresolved`` lookup
+    has one); a `partial` state carries its evidence in the counts instead of
+    naming a failure that did not happen.
+
     The block is the *measurement* I2 asks for (*"a failure never silently drops
     memory"*) and the input the next slice — I1's create gate — will read. It
     reports; it does not decide a write.
@@ -341,6 +354,12 @@ def plan_identity(search: object, *, candidates: Mapping[str, int],
         pending[key] = value
     state = lookup_state(search)
     reason = _reason(search) if state == LOOKUP_UNRESOLVED else None
+    if state == LOOKUP_RESOLVED and sum(pending.values()):
+        # The lookup was complete, and something the run is about to commit was
+        # still never checked against it — a candidate the S4 gap reviewer added
+        # after the query derivation ran. Reporting `resolved` here would make
+        # the block contradict its own counter (#5095 review B1).
+        state = LOOKUP_PARTIAL
     return {
         "state": state,
         "reason": reason,

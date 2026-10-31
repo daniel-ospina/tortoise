@@ -2673,6 +2673,37 @@ def _story_topics(story: str, cap: int = 6) -> list[str]:
     return topics
 
 
+#: The character width a leg's derived query is cut to BEFORE sanitisation, per
+#: leg. ``object`` is uncut (an entity name is short and cutting it would merge
+#: two different entities into one query); the text legs are cut to 80 because
+#: the query is a search string, not the claim.
+_QUERY_TEXT_WIDTH: dict[str, int | None] = {
+    "object": None,
+    "event": 80,
+    "point": 80,
+}
+
+
+def _candidate_query_text(entity_type: str, raw: str) -> str:
+    """The text a candidate's OWN derived query is built from — ONE home, in this
+    order: **strip, then cut to the leg's width**.
+
+    ⛔ The order is the whole point, and it was a live defect (#5095 review B2):
+    `_derive_queries` cut the RAW text to 80 and stripped afterwards (inside
+    `_sanitise_query_text`), while `execute_embed` stripped first and then took
+    `content[:80]`. For a 100-character point whose raw text begins with a space,
+    those two windows are different strings, so the query that RAN and the key
+    asked for at commit time were different — and the record then said *"the
+    lookup did not run for this candidate"* about a lookup that ran, which is the
+    opposite lie from the one this change exists to remove. Every producer of a
+    candidate query (the derivation, the coverage question, the record) goes
+    through this function.
+    """
+    text = (raw or "").strip()
+    width = _QUERY_TEXT_WIDTH.get(entity_type)
+    return text[:width] if width else text
+
+
 def _sanitise_query_text(raw: str) -> str:
     """The searchable form of one derived query — sanitised, truncated to 160.
 
@@ -2724,10 +2755,10 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
             _add("object", str(e["name"]))
     for ev in embed_list.get("events", []) or []:
         if isinstance(ev, dict) and ev.get("content"):
-            _add("event", str(ev["content"])[:80])
+            _add("event", _candidate_query_text("event", str(ev["content"])))
     for p in embed_list.get("points", []) or []:
         if isinstance(p, dict) and p.get("content"):
-            _add("point", str(p["content"])[:80])
+            _add("point", _candidate_query_text("point", str(p["content"])))
     for t in _story_topics(story):
         _add("point", t)
     return queries
@@ -2902,7 +2933,17 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     Returns:
         {"mode": str, "degraded": bool, "reason": str|None,
          "entities": [{id, name, kind}], "points": [{id, content, kind}],
-         "events": [{id, content, kind}], "queries_run": int}
+         "events": [{id, content, kind}], "queries_run": int,
+         "query_coverage": {"derived"|"ran"|"failed": {leg: int}},
+         "query_results": {"ran": [key], "failed": [key]}}
+
+    ⛔ ``degraded`` is NOT the completeness signal (#5095). It means the search
+    never got through its FIRST query, so a degraded result carries ZERO priors;
+    a failure on query 2..N is swallowed and the run returns ``degraded: False``
+    with a genuinely PARTIAL prior set. ``query_coverage`` / ``query_results``
+    are what make that distinction readable — ``failure_policy.lookup_state``
+    reads them, and a consumer that reads only ``degraded`` is asking the
+    question this function could not previously answer.
     """
     mode = resolve_backend_mode()
     empty = {"mode": mode, "degraded": True, "reason": None,
@@ -3043,12 +3084,12 @@ def _identity_report(search: dict, candidates: dict) -> dict:
                  if isinstance(item, dict)]
         counts[section] = len(items)
         text_key = {"entities": "name", "events": "content", "points": "content"}[section]
-        short = {"entities": None, "events": 80, "points": 80}[section]
         missing = 0
         for item in items:
-            raw = str(item.get(text_key) or "")
-            if short:
-                raw = raw[:short]
+            # ⛔ the SAME text the derivation used (`_candidate_query_text`), not
+            # a second width applied to a differently-stripped string — that
+            # drift is what made a ran query read as unrun (#5095 review B2).
+            raw = _candidate_query_text(leg, str(item.get(text_key) or ""))
             if not raw.strip():
                 continue
             if not _candidate_covered(search, leg, raw):
@@ -3080,7 +3121,13 @@ def _render_search_results(search: dict) -> str:
     is prepended. A `resolved` lookup renders byte-identically to pre-#5095.
     """
     if not search:
-        return "(no graph search results)"
+        # An empty/None search is `unresolved`, not "nothing exists" (#5095
+        # review B3): `run_s4` is reachable with `{}` (a tool caller, a test), and
+        # saying "no existing items" there is the same unmeasured absence claim
+        # this function no longer makes for a degraded lookup.
+        empty_note = _failure_policy.lookup_note(search)
+        return (f"{empty_note}\n\n(no graph search results)"
+                if empty_note else "(no graph search results)")
     note = _failure_policy.lookup_note(search)
     if search.get("degraded"):
         # A degraded lookup has no priors to render (the handler is reachable
@@ -7557,7 +7604,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                                 "create cannot disambiguate)")
             link_before_create.append(_failure_policy.created_record(
                 f"entity '{name}'",
-                query_ran=_candidate_covered(search, "object", name)))
+                query_ran=_candidate_covered(
+                    search, "object", _candidate_query_text("object", name))))
         lifecycle = str(e.get("lifecycle", "") or "").strip()
         supersedes_ref = str(e.get("supersedes") or "").strip()
         supersedes_collected = bool(supersedes_ref and supersedes_ref
@@ -7678,7 +7726,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         else:
             link_before_create.append(_failure_policy.created_record(
                 f"event '{content[:60]}'",
-                query_ran=_candidate_covered(search, "event", content[:80])))
+                query_ran=_candidate_covered(
+                    search, "event", _candidate_query_text("event", content))))
         event_ids[n] = eid
         ev_entry = {
             "id": eid, "eventKind": ekind.rsplit(":", 1)[-1] if ":" in ekind else ekind,
@@ -7946,7 +7995,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             reason = "NEW"
             link_before_create.append(_failure_policy.created_record(
                 f"point '{content[:60]}'",
-                query_ran=_candidate_covered(search, "point", content[:80])))
+                query_ran=_candidate_covered(
+                    search, "point", _candidate_query_text("point", content))))
         # #2552 (op_04): collect an explicit point-level ``supersedes`` ref
         # (the DECISION-REVERSAL channel — a NEW decision/claim replaces a
         # prior-session one). Resolution runs after the loop against the S3
@@ -9416,13 +9466,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # graph, so nothing about an unrun lookup is silent (I2). The held/averted
     # count is the input the next slice (I1's create gate) reads.
     result["identity"] = _identity_report(search, complete_list)
-    if result["identity"]["state"] != _failure_policy.LOOKUP_RESOLVED:
-        _id = result["identity"]
+    _id = result["identity"]
+    if _id["state"] != _failure_policy.LOOKUP_RESOLVED:
+        # The denominator is the ATTRIBUTED classes (entities / events / points) —
+        # the ones a query can establish or fail to. `operators` and `retractions`
+        # name OTHER items and are reported as counts only, so folding them in
+        # here would print a share over two different populations (#5095 review
+        # B4). And the set is the run's PROPOSED candidate list, before S5's own
+        # dedup drops any of it — the warning says "candidate", never
+        # "committed", because a candidate S5 folds away was never going to be
+        # checked anyway.
+        _denominator = sum(_id["candidates"].get(section, 0)
+                           for section in _failure_policy.LEG_BY_SECTION)
         result.setdefault("warnings", []).append(
             f"S3 identity {_id['state']}: {_id['unresolved_total']} of "
-            f"{sum(_id['candidates'].values())} committed candidate(s) were "
-            f"never checked against the graph — recorded as UNRESOLVED, never "
-            f"as 'not found'{(': ' + _id['reason']) if _id['reason'] else ''}")
+            f"{_denominator} candidate(s) were never checked against the graph "
+            f"— recorded as UNRESOLVED, never as 'not found'"
+            f"{(': ' + _id['reason']) if _id['reason'] else ''}")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface

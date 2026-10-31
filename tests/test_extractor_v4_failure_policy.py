@@ -6,9 +6,11 @@ THE DEFECT THIS PINS
 two of the eight steps (S2.2 *"fail-open — keep"*, S2.3 *"never raises"*) said
 what they do when they fail. The unstated default is not neutral — for S3 the
 natural fail-open marks every candidate `new`, which **manufactures duplicates**,
-the exact failure S3 exists to prevent. The shipped renderer still invites it:
-`_render_search_results` tells the model *"no existing items available; assume
-everything is new"* (`extractor_v2.py:2353`).
+the exact failure S3 exists to prevent. ⚠️ **The renderer used to invite it**
+(`_render_search_results` told the model *"no existing items available; assume
+everything is new"*); `#5095` removed that and the caller-visible record's
+`found: false` for a lookup that never ran, and the guard below now pins the pair
+in the other polarity.
 
 The repair DECLARES the policy per step, with three invariants (I1: an
 unresolved identity is never asserted `new`; I2: a failure holds or records, it
@@ -27,9 +29,12 @@ WHAT THIS PINS
 4. `HOLD` is declared a run-level disposition and NOT a new `vet_gate.OUTCOMES`
    member — cross-checked against the shipped module, so adding one without
    updating the doc reds.
-5. The spec-change warning stays TRUE: while `extractor_v2.py` still says
-   "assume everything is new", the doc must keep saying the code implements the
-   inverted policy. Fix the code and this reds, forcing the doc to follow.
+5. The state-of-code claim tracks the CODE, in whichever polarity is true:
+   while `extractor_v2.py` said "assume everything is new", §4.4 had to say the
+   code implemented the inverted policy; `#5095` fixed the render and the record,
+   so the guard now asserts the instruction is GONE from the code, that the doc
+   no longer claims the inverted policy, and that the doc still names what is
+   absent (the mint gate). Reverting either half reds it.
 6. Every `file.py:NNNN` citation in §4.4 names its revision pin. The header
    pins every `file.py:NNNN` to `c79ba1cf2` *except where a passage names a later
    pin*; `extractor_v2.py:2353` is a `7d348d351` line (2042 at the default pin),
