@@ -21,6 +21,7 @@ leaves the property itself free to regress.
 from __future__ import annotations
 
 import inspect
+import os
 import socket
 import subprocess
 import sys
@@ -3044,3 +3045,161 @@ def test_the_env_fallback_does_not_call_a_readable_ceiling_unreadable(
     monkeypatch.setattr(tl, "_docker", env_and_unreadable_cap)
     tl._note_missing_dataset_ceiling("fdb-lane-deadbeef12")
     assert capsys.readouterr().err == ""
+
+
+# ── #10399: `run` — the invocation cannot be mis-spelled ───────────────────
+#
+# WHAT THESE PIN. A full suite started with the invocation AGENTS.md documented
+# (`TORTOISE_DB_URI='docker://:falkordb@localhost:6379/…' pytest tests/`) cannot
+# run on a cell: the services lanes publish on EPHEMERAL ports (#6673) and a
+# private lane on its own, so nothing answers on 6379. The session-start gate
+# then refuses once per test, and the run reports a wall of `E`s (405 measured on
+# a full `tests/` collection) that reads like a product catastrophe. `run`
+# removes the step a caller can forget, so what it must be pinned on is the exact
+# child ENVIRONMENT and ARGV — not Docker's behaviour, which is why `start` is
+# stubbed here like everywhere else in this file.
+
+def _stub_start(monkeypatch, *, port: int = 16406):
+    """Pin the resolved lane, so the seam under test is the child env, not Docker."""
+    monkeypatch.setattr(tl, "start", lambda _p=None: ("fdb-lane-0123456789", port))
+
+
+def _capture_run(monkeypatch, *, returncode: int = 0) -> dict:
+    """Capture the child invocation. Returns the record the assertions read."""
+    seen: dict = {}
+
+    def fake_run(argv, env=None, **kwargs):
+        seen["argv"] = list(argv)
+        seen["env"] = dict(env or {})
+        seen["kwargs"] = kwargs
+        return _R(returncode, "", "")
+
+    monkeypatch.setattr(tl.subprocess, "run", fake_run)
+    return seen
+
+
+def test_run_exports_ALL_THREE_seam_vars_to_the_child(lane, monkeypatch):
+    """The whole point of the subcommand: the private lane must be the SESSION's
+    target for BOTH resolution paths.
+
+    Exporting only `TORTOISE_DB_URI` is the measured failure this tool's SCOPE
+    section records: tests that build their target through
+    `tests/_live_utils.py` key on the port and password seams too, so a URI-only
+    export leaves them on the SHARED instance — and against a passwordless
+    private container the probe raises AuthenticationError, which an
+    `except Exception` turns into "not available" → skips, rc=0.
+    """
+    _stub_start(monkeypatch, port=16406)
+    seen = _capture_run(monkeypatch)
+    rc = tl.main(["run", "--", "-q", "tests/test_guard.py"])
+    assert rc == 0
+    assert seen["env"]["TORTOISE_DB_URI"] == \
+        "docker://:@127.0.0.1:16406/tortoise_test_matrix"
+    assert seen["env"]["TORTOISE_TEST_DOCKER_PORT"] == "16406"
+    # `''` is a REAL value ("no requirepass"), not a missing one — `None` is the
+    # different spelling (no userinfo at all) the seam also has to distinguish.
+    assert seen["env"]["TORTOISE_TEST_DOCKER_PASSWORD"] == ""
+
+
+def test_run_invokes_the_RUNNING_venv_and_passes_pytest_argv_verbatim(
+        lane, monkeypatch):
+    """`sys.executable -m pytest`, never a bare `pytest` from PATH.
+
+    On a box with several worktrees a PATH `pytest` is whichever venv happens to
+    be first — a wrong-venv run measures the wrong code, and a venv missing the
+    `embeddings` extra silently runs a keyword-only product (#2985). The pytest
+    argv after the separator is the caller's, unmodified.
+    """
+    _stub_start(monkeypatch)
+    seen = _capture_run(monkeypatch)
+    tl.main(["run", "--", "-q", "-k", "seam or not", "tests/"])
+    assert seen["argv"] == [sys.executable, "-m", "pytest",
+                            "-q", "-k", "seam or not", "tests/"]
+
+
+def test_run_does_not_leak_the_lane_target_into_the_PARENT_environment(
+        lane, monkeypatch):
+    """A `run` must not arm the calling shell's env.
+
+    The caller is often a lane's own driver, which then runs other commands
+    (a `down`, a second subset). Mutating `os.environ` would silently aim those
+    at a container that may already be gone — the same class the tool refuses
+    everywhere else by deriving its target from the worktree instead of the env.
+    """
+    before = dict(os.environ)
+    _stub_start(monkeypatch, port=16411)
+    _capture_run(monkeypatch)
+    tl.main(["run", "--", "-q"])
+    assert dict(os.environ) == before
+
+
+def test_run_propagates_pytest_failure_unchanged(lane, monkeypatch):
+    """pytest's own exit code IS the answer — 1 = tests failed, not a tool error."""
+    _stub_start(monkeypatch)
+    _capture_run(monkeypatch, returncode=1)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 1
+
+
+def test_run_reports_a_SIGNAL_kill_as_128_plus_N_not_a_negative_code(
+        lane, monkeypatch, capsys):
+    """A killed run is NOT a test failure, and it has no count line.
+
+    The batch's `E=405` investigation began with a log that just ENDED: the
+    process was killed (this box OOM-killed five python processes in 23 minutes
+    at load 15 on 15 GB), so no `N passed` line existed. `subprocess` reports
+    that as a NEGATIVE returncode, and returning it made the shell see 256-N —
+    which every caller read as an argparse-ish usage error. 128+N is the shell
+    convention, and the stderr line names the kill so the next reader does not
+    have to guess.
+    """
+    _stub_start(monkeypatch)
+    _capture_run(monkeypatch, returncode=-9)
+    assert tl.main(["run", "--", "-q", "tests/"]) == 137
+    err = capsys.readouterr().err
+    assert "KILLED by signal 9" in err
+    assert "NOT a test failure" in err
+
+
+def test_run_names_the_target_BEFORE_the_child_starts(
+        lane, monkeypatch, capsys):
+    """The resolved lane is on stderr before pytest runs, so a run that is killed
+    mid-flight still leaves its target in whatever log it was redirected to."""
+    _stub_start(monkeypatch, port=16406)
+    order: list = []
+
+    def fake_run(argv, env=None, **kwargs):
+        order.append("child")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl.subprocess, "run", fake_run)
+    tl.main(["run", "--", "-q"])
+    err = capsys.readouterr().err
+    assert "fdb-lane-0123456789" in err
+    assert "TORTOISE_DB_URI=docker://:@127.0.0.1:16406/" in err
+    assert order == ["child"]
+
+
+def test_run_and_up_emit_the_SAME_three_seam_vars(lane, monkeypatch, capsys):
+    """`up` (printed for `eval`) and `run` (exported to the child) come from ONE
+    definition. If they could drift, a lane that eval-ed `uri` and a lane that
+    ran `run` would be testing against different variables — the split this
+    function exists to remove.
+    """
+    _stub_start(monkeypatch, port=16406)
+    seen = _capture_run(monkeypatch)
+    tl.main(["run", "--", "-q"])
+    child_env = seen["env"]
+
+    monkeypatch.setattr(tl, "start", lambda _p=None: ("fdb-lane-0123456789", 16406))
+    monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
+    tl.main(["up"])
+    printed = capsys.readouterr().out.splitlines()
+    exports = dict(
+        line[len("export "):].split("=", 1) for line in printed
+        if line.startswith("export ")
+    )
+    # Strip the shell quoting `up` prints for `eval`.
+    assert {k: v.strip("'") for k, v in exports.items()} == {
+        k: child_env[k] for k in exports
+    }
+    assert len(exports) == 3

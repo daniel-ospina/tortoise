@@ -625,10 +625,40 @@ calls `worktree_report.py check` rather than re-implementing the format.
 
 > Epic #1647 (P4): `pytest` now defaults to the DOCKER lane — a URI-less
 > run fails unless `TORTOISE_TEST_CARVE_OUT=1` is set (the carve-out's 17
-> embedded-only files). Docker: `docker compose -f ../eldato/operations/memory/docker-compose.yml up -d` + the URI below.
+> embedded-only files).
+>
+> ⛔ **On a cell / any box where nothing serves `localhost:6379`, do NOT use the
+> `docker://:falkordb@localhost:6379/…` URI below** — start the lane's own
+> container and let the tool export all three seam variables:
+>
+> ```bash
+> uv run python tools/test_lane.py run -- tests/ -v    # the correct invocation
+> ```
+>
+> WHY (#10399, measured): a full suite started with the 6379 URI on a cell
+> reports **405 `E`s** and no verdict, from ONE refusal repeated per test —
+> `Failed: no TORTOISE_DB_URI database could be reached at localhost:6379 …`
+> (`tests/_embedded.py:954`). Nothing listens on 6379 there: the services lanes
+> publish on **ephemeral** ports (#6673) and a private lane on its own. A
+> **URI-less** run fails the same way from the other side, verbatim:
+> `Failed: default pytest requires TORTOISE_DB_URI (epic #1647 P4) …`
+> (`tests/_embedded.py:770`). Neither is a diff regression — both are the suite
+> refusing a target that does not exist, which is why `run` (not a hand-eval'd
+> export) is the documented path.
+>
+> ⚠️ **A full-suite run needs a box that can carry it.** It cannot produce a
+> verdict on an oversubscribed host: measured 2026-10-31 on a 15 GB / 8-core cell
+> at load 15, the kernel **OOM-killed five `python` processes in 23 minutes**, and
+> a killed run prints no count line at all (the log just ends — `run` names the
+> target on stderr first, and reports a signal kill as `128+N`, so that case is
+> now distinguishable from a test failure). Check `free -g` / `uptime` before
+> starting a gating run; a run that dies at 80% proves nothing about `main`.
 
 ```bash
-# Default (docker FalkorDB — epic #1647 P4):
+# Default — a private lane container, all three seam vars exported (#10399):
+uv run python tools/test_lane.py run -- tests/ -v
+
+# …or the raw form on a box that already serves the docker lane on 6379:
 export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'
 uv run pytest tests/ -v
 
@@ -649,18 +679,27 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run 
 > — for every test that takes its target from `TORTOISE_DB_URI`, the graphs land in a
 > container this tool refuses to address from any other lane, so no lane's run leaves
 > residue on another's target.
-> The container is not self-cleaning: it lives until an explicit `down`. **Not yet the whole suite**:
-> tests that build their URI through `tests/_live_utils.py` key on
-> `TORTOISE_TEST_DOCKER_PORT` (default 6379) and a `falkordb` password, so they still address
-> the shared instance and their graphs still accumulate there. Closing that seam is #5084's
-> remaining work — the tool is the isolation half, not the whole fix.
+> The container is not self-cleaning: it lives until an explicit `down`.
+> **Seam coverage (corrected, #10399):** the tool now exports ALL THREE variables the
+> suite resolves its target from — `TORTOISE_DB_URI`, `TORTOISE_TEST_DOCKER_PORT` and
+> `TORTOISE_TEST_DOCKER_PASSWORD=''` — so the `tests/_live_utils.py` path is covered
+> too, not only the `TORTOISE_DB_URI` path. The residual gap is narrower: a site that
+> spells the shared URI as a **literal string**
+> (`docker://:falkordb@localhost:6379/…`) cannot be reached by a seam, so it still
+> addresses the shared instance until it is converted (#5084's remaining work).
 >
 > ```bash
-> uri="$(uv run python tools/test_lane.py uri)" || exit 1   # start; capture the export line
+> uv run python tools/test_lane.py run -- tests/ -q   # start + export + run, one step
+> uv run python tools/test_lane.py status            # is it running; how many graphs
+> uv run python tools/test_lane.py down              # remove it
+> ```
+>
+> The `eval`-a-captured-export form still works where a shell wants the variables:
+>
+> ```bash
+> uri="$(uv run python tools/test_lane.py uri)" || exit 1   # start; capture the export lines
 > eval "$uri"                                              # two steps on purpose — see USAGE
 > uv run pytest tests/ -q
-> uv run python tools/test_lane.py status          # it prints the URI again
-> uv run python tools/test_lane.py down            # remove it
 > ```
 >
 > Isolation, **not** speed: the same single test measured 90.59 s privately vs 92.66 s on
