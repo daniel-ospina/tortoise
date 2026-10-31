@@ -21,16 +21,27 @@ starved-prior bound MOVES to that set (each leg's ``DEFAULT_POOL_SIZE``, times t
 live legs) instead of disappearing at 500 turns. See ``_DOCUMENTED_PROD_POOL``
 and ``test_production_pool_bound_still_starves_the_prior`` below.
 
-#10121 note: the fused pool is ordered by the shared recency-then-id tie
-(``search_engine.recency_tie_clause``), so WHICH prior the bound starves is the
-OLDEST row, not the latest-sorting id (#3019's ``id ASC`` premise, which the
-production fixture used to rely on). The bound itself is unchanged.
+ORDERING note (#10240): the fused pool is ordered by the BM25 lexical arm's
+RELEVANCE ranking, which is ON by default since #10240 — so WHICH prior the
+bound starves is the LEXICALLY WEAKEST row (``_PRIOR_TEXT``), not the oldest.
+Before #10240 the rows all tied and the shared recency-then-id tie
+(``search_engine.recency_tie_clause``) decided it, so the starved row was the
+OLDEST (#10121; and #3019's ``id ASC`` before it). Against a relevance ranking
+that tie does not fire. The bound itself is unchanged.
 
 These tests are HERMETIC (per-test embedded store, no provider keys, no
 network): the query embedder is pinned to None so the sparse leg is the only one
-submitted and ranking is a pure FTS ordering, and ``TORTOISE_POOL_FLOOR`` is
+submitted and ranking is that leg's own ordering, and ``TORTOISE_POOL_FLOOR`` is
 deleted so a caller's environment cannot move the window these bounds are
 measured against.
+
+#10405 / #10240 note: the sparse leg's ordering is the BM25 lexical arm, which
+since #10240 is ON by default, and it is a RELEVANCE ranking (k1=1.2, b=0.75) —
+not the tie-broken all-equal ordering the pre-#10240 shipped scorer produced.
+Both bounds below are measured against a prior that the echo wall OUTRANKS, so
+the fixture's prior must be the WEAKEST lexical match, which is what ``_PRIOR_TEXT``
+constructs and documents. The assertions themselves are unchanged: what the arm
+re-ordered is which prior sits outside the window, never the seam or the bound.
 """
 from __future__ import annotations
 
@@ -73,6 +84,38 @@ _POOL = 200
 #: "per leg". That fixture also deletes ``TORTOISE_POOL_FLOOR``, which widens the
 #: same window from the environment.
 _DOCUMENTED_PROD_POOL = 120
+
+
+def _weak_prior(tag: str) -> str:
+    """A REAL prior that is the LEXICALLY WEAKEST match on its fixture.
+
+    It carries the query tokens exactly once (so it is a genuine candidate of
+    the fused pool) and is padded with ``40`` non-query tokens, so BM25's length
+    normalisation (``b=0.75``) pushes it below every echo in the wall.
+
+    WHY padding is needed at all (#10405, #10240): the sparse leg is the BM25
+    arm, ON by default since #10240, and BM25 is a relevance ranking. Its
+    term-frequency SATURATION (``k1=1.2``) and length NORMALISATION both favour a
+    short document, so the query-twice prior this module used to seed scored
+    0.014157 and ranked FIRST of 151, ahead of every echo (11-token, query three
+    times: 0.013835; 5-token, query once: 0.011189 — token counts as the shipped
+    ``keep_numeric=False`` tokeniser sees them, which drops the bare turn index).
+    MEASURED with ``tortoise.bm25.bm25_rank`` on the ``_ECHOES`` fixture.
+    Diluting the prior (query once, then filler) puts it at rank 150 of 151, the
+    last row — the wall outranks it on relevance, which is the shape these bounds
+    are about (a prior captured earlier in the session, then the session keeps
+    talking). A prior that ranks
+    first cannot be starved by any window, so the old prior made the premise of
+    every bound below unconstructible rather than merely stale — it relied on the
+    pre-#10240 scorer ranking every row EQUAL, which is not a relevance decision
+    at all. The filler is deliberately NOT query text: it must add length, never
+    term frequency.
+    """
+    return f"{QUERY} " + " ".join(f"{tag}{i}" for i in range(40))
+
+
+#: The REAL prior's text used by both wall fixtures.
+_PRIOR_TEXT = _weak_prior("noted")
 
 
 @pytest.fixture(autouse=True)
@@ -126,17 +169,20 @@ def _seed_echo_wall(s, session_id: str, prior_id: str) -> None:
     real prior. The echoes contain the query tokens; the prior does too, so it
     is a genuine candidate of the fused pool.
 
-    Every row here scores alike, so the fused order is the shared recency-then-id
-    tie (#10121) — recency now decides, so seed ORDER is what places the prior.
-    The prior is seeded BETWEEN the two bands: the ``_COLD`` echoes written after
-    it hold newer stamps and fill the over-fetch window ahead of it (that is the
-    starvation the test reproduces), while the ``_HOT`` band written before it is
-    older. Before #10121 this fixture got the same property from the ``id``
-    tie-break (``prior_id`` sorts after ``<session_id>_t<i>``); that spelling is
-    no longer what orders these rows — the recency key is."""
+    The rows are NOT tied against the shipped scorer: the sparse leg is the BM25
+    arm (#10240, ON by default), so the fused order is a RELEVANCE order and the
+    prior is deliberately the weakest match (``_PRIOR_TEXT``) — that is what puts
+    it below the echo wall, and it is why seed ORDER no longer decides anything
+    under the DEFAULT arm. Before #10240 every row scored alike and the order
+    came from the recency-then-id tie (#10121), so this fixture placed the prior
+    by seeding it between the two bands. The ``_HOT``/``_COLD`` banding is KEPT
+    because that is still what places the prior when the arm is opted out
+    (``TORTOISE_BM25_LEXICAL=0``): there the rows tie again, and the ``_COLD``
+    band written after the prior holds the newer stamps that fill the over-fetch
+    window ahead of it. The fixture therefore holds under BOTH arm states."""
     for i in range(_HOT):
         _seed_echo(s, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
-    s.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
+    s.create_point("statement", _PRIOR_TEXT, id=prior_id)
     for i in range(_HOT, _ECHOES):
         _seed_echo(s, session_id, i, f"[user] {QUERY} turn {i}")
 
@@ -239,24 +285,38 @@ def test_limit_applies_to_the_already_filtered_candidate_set(sdk):
     FALSIFIER — (1) *what value makes this test fail?* The identity of the two
     returned rows: pre-truncation they are the two REAL priors; a filter applied
     after the cut finds the window full of echoes, drops them, and returns
-    nothing. (2) *reachable?* Yes — the two priors are seeded FIRST and the three
-    echoes LAST, so under the shared recency tie (#10121) the echoes hold the
-    three newest stamps, the three rows of the pool are all echoes, and
-    ``result_ids[:2]`` is entirely echoes: only a pre-truncation filter can put
-    the priors inside the page.
+    nothing. (2) *reachable?* Yes — the priors are seeded as the WEAKEST lexical
+    matches (``_weak_prior``), so the three echoes outrank them on relevance and
+    ``result_ids[:2]`` is entirely echoes. Under the BM25 arm (#10240, default
+    ON) relevance decides that; with the arm opted out (``=0``) every row ties
+    and the recency-then-id tie does, the echoes being seeded last and therefore
+    newest. Either way only a pre-truncation filter can put the priors inside
+    the page — and the DISCRIMINATOR assertion below states that requirement
+    outright instead of leaving it implicit in the seeding.
 
-    ⚠️ That seeding order is load-bearing and was REVERSED by #10121's tie
-    direction. An earlier revision seeded the echoes first and named the priors
-    ``zz_pt_*`` so they sorted after the ``s1_t*`` echoes under #3019's
-    ``id ASC``; with recency-first ordering that made the priors the NEWEST rows,
-    i.e. ``result_ids[:2]`` — so the pre-#4509 after-the-cut drop returned both
-    priors and this test passed on the very code it exists to fail. Seeding the
-    priors first restores the discrimination under the shipped direction.
+    ⚠️ That is why the priors are lexically weak and NOT query-twice: #10240's
+    relevance ranking made a query-twice prior outrank the echoes, so
+    ``result_ids[:2]`` already held both priors and this test passed on the very
+    after-the-cut code it exists to fail (measured: raw ``limit=2`` returned
+    ``['zz_pt_b', 'zz_pt_a']`` with the exclusion DISABLED). Seeding it weak
+    restores the discrimination, and the pinned discriminator keeps it from
+    going vacuous again. (#10121's reversal of an earlier seeding order is the
+    same defect one scorer earlier.)
     """
-    sdk.create_point("statement", f"{QUERY} {QUERY}", id="zz_pt_a")
-    sdk.create_point("statement", f"{QUERY} {QUERY}", id="zz_pt_b")
+    sdk.create_point("statement", _weak_prior("aa"), id="zz_pt_a")
+    sdk.create_point("statement", _weak_prior("bb"), id="zz_pt_b")
     for i in range(3):
         _seed_echo(sdk, "s1", i, f"[user] {QUERY} {QUERY} turn {i}")
+
+    # DISCRIMINATOR, pinned so the fixture cannot silently go vacuous: the page
+    # a NON-opting caller gets is entirely echoes, so an after-the-cut filter
+    # would have nothing left to return.
+    unfiltered = _ids(sdk.tortoise_fts_query(
+        QUERY, entity_type="point", limit=2))
+    assert unfiltered, "fixture invalid: the unfiltered page is empty"
+    assert not set(unfiltered) & {"zz_pt_a", "zz_pt_b"}, (
+        "fixture invalid: a prior must NOT be in the unfiltered page, or an "
+        f"after-the-cut filter would pass too — page={unfiltered}")
 
     rows = _ids(sdk.tortoise_fts_query(
         QUERY, entity_type="point", limit=2, exclude_turn_echo_session="s1"))
@@ -293,16 +353,18 @@ def _seed_echo_wall_production(sdk, session_id: str, prior_id: str,
     prior, and — unlike ``_seed_echo_wall`` — no ``pool_size`` is passed by the
     caller under test, so the fused pool is the product default.
 
-    Every row here scores alike, so the tie-break decides who fills the pool —
-    and #10121 changed WHICH tie-break that is. It used to be #3019's ``id
-    ASC``, so the prior was seeded LAST and relied on ``zz_pt_real`` sorting
-    after the ``s1_t<i>`` ids. It is now recency-then-id DESC, so the prior
-    that starves is the OLDEST row: seeding it FIRST is what puts it below a
-    wall of newer echoes — the production shape the residual is about (a prior
-    captured earlier in the session, then the session keeps talking). MEASURED
-    at the pre-change head: with the prior seeded last it came back FIRST out
-    of a 130-row pool, because recency now leads the pool."""
-    sdk.create_point("statement", f"{QUERY} {QUERY}", id=prior_id)
+    The rows are not tied against the shipped scorer: the sparse leg is the BM25
+    arm (#10240, ON by default), so who fills the pool is decided by RELEVANCE —
+    term-frequency saturation (``k1=1.2``) and length normalisation
+    (``b=0.75``), both of which favour a short document. #10121's
+    recency-then-id tie decided this when every row scored alike; against a
+    relevance ranking the tie never fires, so the prior that starves is the
+    LEXICALLY WEAKEST row, which ``_PRIOR_TEXT`` constructs. That is the
+    production shape the residual is about: a prior captured earlier in the
+    session, then the session keeps talking in text that matches the query more
+    densely. Seeding the prior FIRST is kept so the fixture also holds when the
+    arm is opted out (the tie fires again there and the oldest row starves)."""
+    sdk.create_point("statement", _PRIOR_TEXT, id=prior_id)
     for i in range(n_echoes):
         _seed_echo(sdk, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
 
@@ -322,12 +384,16 @@ def test_production_pool_bound_still_starves_the_prior(sdk):
     it still starves a real prior ranked below them.
 
     #10121 moved the ORDER that decides which prior sits outside that window,
-    not the bound. The tie was ``id ASC`` (#3019); it is now recency-then-id
-    DESC, so the prior that starves is the OLDEST-ranked one rather than the
-    latest-sorting id — the fixture seeds the prior first for that reason
-    (measured at the pre-change head: seeded last, it came back FIRST out of a
-    130-row pool). The number this pin measures is unchanged: one leg's
-    ``DEFAULT_POOL_SIZE``.
+    not the bound. The tie was ``id ASC`` (#3019), then recency-then-id DESC. It
+    is neither any more: since #10240 the sparse leg is the BM25 arm ON by
+    default, so the order is a RELEVANCE ranking and the prior that starves is
+    the LEXICALLY WEAKEST one, which ``_PRIOR_TEXT`` constructs. MEASURED with
+    ``tortoise.bm25.bm25_rank`` on THIS fixture (130 echoes + 1 prior = 131
+    rows): the query-twice prior ranks 0 of 131 — it cannot be starved at all —
+    and the diluted prior ranks 130 of 131, i.e. the last row, outside the
+    120-row pool. (The 0-of-151 / 150-of-151 figures quoted in ``_weak_prior``
+    belong to the 150-echo ``_ECHOES`` fixture, not to this one.) The number
+    this pin measures is unchanged: one leg's ``DEFAULT_POOL_SIZE``.
 
     This is the falsifier for any claim that #4509 removes starvation outright.
     The claim used to be written into the comments in ``extractor_v2.py`` and
