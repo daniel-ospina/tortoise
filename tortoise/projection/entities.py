@@ -6737,6 +6737,16 @@ _SOURCE_SERVER_MANAGED_PROPS: frozenset = frozenset({
     # node AND into the `EntityMutated` record, where a rebuild restores it — the
     # same `__runId` hole (#5196 round 3, P2) one line up.
     "sessionId", "capturedAt", "eventId",
+    # #10000: the S1 narrative is NOT a node property at all. §9.1/D1 places it
+    # in Postgres (`public.session_narrative`, #9555), and the commit writer's
+    # raw `SET s.story_arc` is deleted — but the property stays DECLARED (legacy
+    # nodes read back; ONTOLOGY §4.4 lists it), so without this entry the
+    # generic tenant route can put the prose back: measured,
+    # `update_entity(<source url>, story_arc=<narrative>)` is accepted, journalled
+    # into an `EntityMutated` record, and SURVIVES `rebuild_all` — the `__runId`
+    # hole one property over (#5196 round 3). Declared ⇒ readable; listed HERE ⇒
+    # caller-unsettable.
+    "story_arc",
 })
 
 # The IDENTITY keys of a `:Source` — NOT refused to a caller-supplied map.

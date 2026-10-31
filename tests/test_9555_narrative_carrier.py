@@ -129,15 +129,21 @@ def test_an_empty_narrative_EMITS_NOTHING(empty):
         empty, SUMMARY, session_id=SESSION, event_id="e", captured_at="t") is None
 
 
-def test_the_commit_path_emits_the_carrier_AFTER_the_write_it_describes():
-    """§17.1's APPLY-FIRST lane, pinned structurally.
+def test_the_commit_path_emits_the_carrier_and_writes_no_narrative_onto_a_node():
+    """§9.1/D1's placement, pinned structurally (#9555 / #10000).
 
-    The raw `MERGE (s:Source …) SET s.story_arc=$arc` is not journalled, so the
-    record states the write that ALREADY landed — it must therefore appear after
-    it. Emitting before the write would state a narrative the commit may never
-    have stored (the write is fail-closed below), i.e. a record that outlives its
-    own fact. Line ordering is the checkable half of "apply-first"; the direction
-    is what a reviewer cannot otherwise see.
+    The narrative has exactly ONE home — `public.session_narrative`, written by
+    the `SessionNarrated` carrier — and the graph holds NONE of it. This pin is
+    what reds if the prose comes back onto a node: it walks the commit write
+    phase and refuses a `story_arc` SET on either identity anchor the phase
+    mints (the transcript `:Source`, the AgentSession `:Event`).
+
+    ⛔ THIS USED TO PIN LINE ORDER ("the carrier is emitted AFTER the raw
+    `s.story_arc=$arc` MERGE it describes"), because §17.1's apply-first lane
+    requires a record to state a write that already landed. #10000 DELETED that
+    write — §9.1/D1 forbids it — so the ordering premise is gone and the
+    invariant that remains is the placement itself: the carrier is still
+    emitted, and no narrative text reaches a node. Re-derived, not deleted.
     """
     src = (REPO_ROOT / "tortoise" / "hosted_api.py").read_text()
     tree = ast.parse(src)
@@ -145,9 +151,15 @@ def test_the_commit_path_emits_the_carrier_AFTER_the_write_it_describes():
                if isinstance(n, ast.FunctionDef) and n.name == "_execute_commit_writes"),
               None)
     assert fn is not None, "the commit write phase is gone — re-measure #9555"
-    merge_line = min((n.lineno for n in ast.walk(fn)
-                      if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                      and "s.story_arc=$arc" in n.value), default=None)
+    narrative_node_writes = [
+        (n.lineno, n.value) for n in ast.walk(fn)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        and "story_arc" in n.value]
+    assert not narrative_node_writes, (
+        "the commit write phase writes `story_arc` again at "
+        f"{narrative_node_writes} — §9.1/D1 places the S1 narrative in Postgres "
+        "ONLY (\"not in the graph, not a `Document` node, not a `Point`\"), and "
+        "its one home is `public.session_narrative` (#10000)")
     emit_line = min((n.lineno for n in ast.walk(fn)
                      if isinstance(n, ast.Call)
                      and isinstance(n.func, ast.Attribute)
@@ -155,17 +167,11 @@ def test_the_commit_path_emits_the_carrier_AFTER_the_write_it_describes():
                      and n.args
                      and isinstance(n.args[0], ast.Name)
                      and n.args[0].id == "NARRATIVE_RECORD_TYPE"), default=None)
-    assert merge_line is not None, (
-        "the transcript `:Source` MERGE (`s.story_arc=$arc`) is gone — the "
-        "carrier's anchor moved and this pin must be re-derived, not deleted")
     assert emit_line is not None, (
         "the commit path no longer emits the narrative carrier — that is "
         "exactly the #9555 (b) gap returning: the record keeps the COUNTS and "
-        "loses the TEXT")
-    assert emit_line > merge_line, (
-        f"the carrier is emitted at line {emit_line}, BEFORE the write it "
-        f"describes (line {merge_line}) — §17.1's apply-first lane states the "
-        "write's own result, so the record must follow it")
+        "loses the TEXT, and with the node write gone (#10000) the narrative "
+        "would then be stored NOWHERE")
 
 
 # ── §2 the record effect, through the shape-keyed projection ────────────────

@@ -17312,6 +17312,18 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # on this statement already follow (#5082, #5140 P2 finding 5) — the genre
     # is simply not coalesced because `'transcript'` must stay writable on a
     # node that has none.
+    #
+    # ⛔ NO `story_arc` ON THIS NODE (#10000). §9.1/D1 places the S1 narrative
+    # in Postgres — "not in the graph, not a `Document` node, not a `Point`" —
+    # and this statement used to SET `s.story_arc=$arc` anyway, so every commit
+    # rented RAM for the whole narrative prose in the store §2.1 says can never
+    # unload it. MEASURED on a live FalkorDB before the removal: one commit with
+    # a 167-char narrative left `sum(size(n.story_arc))` = 334 bytes across the
+    # `:Source` and its `:Event` (both carried the full text), and NO production
+    # read path reads the property back — only two tests asserted it was there.
+    # The narrative's home is `public.session_narrative`, written by the
+    # `SessionNarrated` carrier below (2b), which is unchanged and remains the
+    # ONE writer. `summary`/`title` stay: they are §4.4 metadata, not the prose.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
         "SET s.id=coalesce(s.id, $did), "
@@ -17322,23 +17334,24 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         "        THEN s.documentKind "
         "        ELSE 'transcript' END, "
         "    s.title=$title, s.summary=$summary, "
-        "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
+        "    s.sessionId=$sid, s.eventId=$eid, "
         "    s.sourcePath=$srcpath, s.is_episodic=true, "
         "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
         "    s.updatedAt=$now",
         params={"did": doc_id, "title": payload.summary or session_id,
-                "summary": payload.summary, "arc": payload.story_arc,
+                "summary": payload.summary,
                 "sid": session_id, "eid": event_id,
                 "srcpath": document_basename, "now": now},
     )
 
     # ── 2b. THE NARRATIVE'S JOURNAL CARRIER (#9555 / R7, §9.1). ──────────────
-    # The MERGE above writes `s.story_arc` — §9.1's S1 narrative ("the connected
-    # prose form of a captured session") — by RAW CYPHER, and raw Cypher is not
-    # a journal record (§17.1's unjournalled-writer ledger). Measured for #9555:
-    # that left the record's narrative home, `public.session_narrative`, with its
-    # two COUNT columns filled and its two TEXT columns NULL on every live
-    # capture, because the shape-keyed projection that owns that home
+    # This carrier is now the narrative's ONLY writer (#10000): the raw-Cypher
+    # `s.story_arc=$arc` / `e.story_arc=$arc` writes above it are GONE, because
+    # §9.1/D1 places the S1 narrative outside the graph and the record's own home
+    # for it is `public.session_narrative`. History, kept because it is why this
+    # type exists: measured for #9555 the record's narrative home had its two
+    # COUNT columns filled and its two TEXT columns NULL on every live capture,
+    # because the shape-keyed projection that owns that home
     # (`record_projection._narrative_statements`) reads `story_arc` off a RECORD
     # and no producer ever journalled one. The record could therefore reproduce
     # the rows but not the narrative — exactly the D7 gap (#9567).
@@ -17348,12 +17361,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # seam, and its live door (`record_writer.write_live_record`) is the ONE
     # boundary into Postgres, driving the ONE fold (`record_projection.replay`).
     # This adds a RECORD, which is what a producer does; it adds no writer. What
-    # it states is the write that already landed one statement above, which is
-    # §17.1's APPLY-FIRST lane — the record describes the write's own stored
-    # result (`payload.story_arc` is what the MERGE wrote verbatim; nothing in
-    # the payload is read back from the node, and the write's failure is
+    # it states is this commit's narrative (`payload.story_arc`), which nothing
+    # in the payload is read back from the node for, and the write's failure is
     # fail-closed above, so a record can never outlive a write that did not
-    # land).
+    # land.
     #
     # WHY A DEDICATED TYPE RATHER THAN `SourceCreated`/`EventRecorded`. §9.1
     # places the narrative *outside* the graph — "not in the graph, not a
@@ -17384,12 +17395,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         "MERGE (e:Event {eventId:$eid}) "
         "SET e.id=$eid, e.eventKind='AgentSession', e.name=$name, "
         "    e.capturedAt=$cap, e.startedAt=$cap, e.endedAt=$cap, "
-        "    e.sessionId=$sid, e.summary=$sum, e.story_arc=$arc, "
+        "    e.sessionId=$sid, e.summary=$sum, "
         "    e.is_episodic=true, e.keywords=$kw, e.eventStatus='scheduled', "
         "    e.updatedAt=$now",
         params={"eid": event_id, "name": payload.summary or session_id,
                 "cap": payload.captured_at, "sid": session_id,
-                "sum": payload.summary, "arc": payload.story_arc,
+                "sum": payload.summary,
                 "kw": [session_id], "now": now},
     )
     proj.g.query(
