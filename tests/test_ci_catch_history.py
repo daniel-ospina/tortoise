@@ -1070,9 +1070,21 @@ def test_a_green_pr_leg_with_an_unreadable_artifact_withholds_only_on_main(tmp_p
     assert report["coverage"]["status_" + catch.CATCH_PUSH_ONLY] == 0
 
     # And the read gap is legible in the deliverable's own gap column, not only in the JSON.
+    # ⛔ Assert the CELL, never an incidental substring of the row: `"| 1 |"` is ALSO the
+    # `main runs (attested)` cell in this fixture, so the pre-fix `gap = unattested` — the
+    # exact defect this test exists for — satisfied it and the column regressed silently
+    # (measured: reverting the `*_unread` terms left this test green). The column index is
+    # DERIVED from `TABLE_COLUMNS`, not a literal, so a column inserted before it cannot
+    # re-point the assertion at a neighbour; the count guard catches a short/truncated row
+    # (GFM truncates body rows longer than the header, so the cell count is not free).
     table = catch.render_table(report)
     rendered = next(line for line in table.splitlines() if f"`{row['file']}`" in line)
-    assert "| 1 |" in rendered, rendered
+    cells = [c.strip() for c in re.split(r"(?<!\\)\|", rendered)][1:-1]
+    assert len(cells) == len(catch.TABLE_COLUMNS), f"row is not one cell per column: {cells}"
+    gap_cell = cells[catch.TABLE_COLUMNS.index("leg runs w/o this file")]
+    assert gap_cell == "1", (
+        f"the PR-head READ gap must be IN the gap column, not only in the JSON: {cells}"
+    )
 
 
 def test_a_red_cleared_by_a_rerun_is_visible_because_green_runs_are_read(tmp_path):
