@@ -148,8 +148,8 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `:9435-9441` here, not in the log. The `8288-8292` cite is
-the `result["vet"]` block, and it is corrected to `:9445-9449` here — **not** to the `:8537-8541`
+the `result["classify_later"]` block at `:9459-9465` here, not in the log. The `8288-8292` cite is
+the `result["vet"]` block, and it is corrected to `:9469-9473` here — **not** to the `:8537-8541`
 this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
 head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
 number. (The SYMBOL is what makes
@@ -258,7 +258,7 @@ is reached. `vet_enabled` is computed at `extractor_v2.py:9083`, i.e. BEFORE the
 each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:9178`), `if vet_enabled and
 complete_list:` (`:9300`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
-`{}` on its fail-open path, `:8935-8938`). Because `_witness_block` returns the first positive
+`{}` on its fail-open path, `:8962-8965`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
 would then have passed on a step nobody observed. The rule now requires the flag AND positive
 activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
@@ -285,7 +285,7 @@ proves the flag; a classify or vet block can legitimately carry `enabled: True, 
 list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
-unconditionally at `:9435`/`:9445` and now reaches the receipt through the seam at the meta fold
+unconditionally at `:9459`/`:9469` and now reaches the receipt through the seam at the meta fold
 `sdk.py:14765` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 
