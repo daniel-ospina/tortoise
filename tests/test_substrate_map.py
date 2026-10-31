@@ -211,11 +211,17 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _commit(repo: Path, message: str) -> str:
-    """Commit the staged tree and return the new sha (hermetic identity)."""
+    """Commit the staged tree and return the new sha (hermetic identity).
+
+    `commit.gpgsign=false` is pinned alongside the identity: without it a
+    developer box with signing enabled globally fails the commit with
+    `gpg failed to sign the data`, which would red the ancestry controls below
+    for a non-bug (the hazard `test_ci_timing.py` keeps a dedicated case for).
+    """
     done = subprocess.run(
         [
             "git", "-c", "user.name=substrate-map", "-c", "user.email=t@example.invalid",
-            "commit", "-qm", message,
+            "-c", "commit.gpgsign=false", "commit", "-qm", message,
         ],
         cwd=repo,
         capture_output=True,
@@ -262,6 +268,7 @@ def _deepened_shallow_clone(tmp_path: Path) -> tuple[Path, str]:
     _commit(src, "X2")
     _git(
         src, "-c", "user.name=substrate-map", "-c", "user.email=t@example.invalid",
+        "-c", "commit.gpgsign=false",
         "merge", "-q", "--no-ff", "-m", "P", "main",
     )
     clone = tmp_path / "clone"
