@@ -715,12 +715,37 @@ The 3-point micro-test that SELECTS the granularity knob before the pilot:
 #   * third case, distinct from both: a cell that loads the embedder but embeds
 #     0 of N points (the write itself degraded) reads NOT MEASURED however the
 #     run was invoked — the dense leg did not actually run.
+#   * FOURTH case, and the one that looks like a healthy run: the embedder
+#     loaded, the point writes happened, and the cell still reads NOT MEASURED
+#     because the CENSUS producer contradicted itself. A record claiming
+#     `points_embedded > points_total` (or a bool, or a negative) is REFUSED
+#     rather than summed — excluding it could only inflate coverage, and a
+#     cell whose only record was impossible would report `None/None` and slip
+#     past the zero-coverage arm — so the cell fails CLOSED. The remedy is the
+#     census producer, never the embedder: re-running reproduces the verdict
+#     byte for byte, so do NOT go hunting a missing model or a stale binary.
 python -m tools.longmem_eval.sweep_granularity --data tests/fixtures/longmemeval_mini.json \
     --limit 5 --mock --skip-preflight
 
 # real v2 sweep (needs the embedder + provider keys / --extractor-model):
 python -m tools.longmem_eval.sweep_granularity --split s --limit 20
 ```
+
+Read the sweep's own `dense leg:` line before the table — it is the verdict,
+printed with the numbers rather than left to a scrollable warning:
+
+```
+dense leg: vector_strategy=enabled  embedding_coverage=[1.0]  (MEASURED)
+dense leg: vector_strategy=enabled  embedding_coverage=[1.0]  (NOT MEASURED)  records_refused=[1]
+```
+
+`vector_strategy` is the pre-flight answer and `embedding_coverage` the
+write-time witness (the two disagreeing IS the "loaded but wrote nothing"
+case above). `records_refused=[…]` appears only when a cell refused a census
+record, one count per `chunk_turns` cell (zero when none did — the field is
+present on every row, the token is printed only when non-zero). It is the
+fourth case's signature: a rejected count, i.e. a numbers defect, not a
+missing-model one.
 
 Runs `chunk_turns ∈ {1, 2, 4}` with all other knobs fixed, prints a
 comparison table (evidence / chunk-evidence / session / turn recall@10,

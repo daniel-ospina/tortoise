@@ -561,10 +561,19 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
                   file=sys.stderr)
             if UNMEASURED_EMBEDDER not in causes \
                     and UNMEASURED_ZERO_COVERAGE not in causes:
+                # Cause-specific, and only claims what the two arms that did
+                # NOT fire actually prove: ``vector_strategy == "enabled"``
+                # for every cell, and no cell tripped the zero-coverage arm.
+                # It used to assert "its coverage is numeric" as fact, which
+                # is FALSE for a cell whose records were one impossible pair
+                # plus one absent one — the census then has no admissible
+                # pair left and publishes ``None`` (#10355 review P3,
+                # optional).
                 print("   the other two causes do NOT hold here: the "
-                      "embedder ran for every cell and its coverage is "
-                      "numeric, so these recall values ARE a hybrid run's "
-                      "— they are refused because the census contradicts "
+                      "embedder loaded for every cell and none of them "
+                      "was refused for writing no vectors, so the recall "
+                      "values above are not the missing-dense-leg story — "
+                      "the cell is refused because the census contradicts "
                       "itself, not because the leg was missing.",
                       file=sys.stderr)
         remedy = ("→ NOT selected: do NOT feed this to the pilot (step 3) or "

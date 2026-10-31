@@ -5897,6 +5897,33 @@ def test_print_winner_names_the_refused_census_cause(capsys):
     assert "keyword-only" in out.err
     assert "Install the pinned embedder" in out.err
     assert "REFUSED a census record" not in out.err
+
+    # Second refused shape: the cell's ONLY published pair is absent while a
+    # record was refused, so the census has no admissible pair left and
+    # ``_aggregate_embedding_coverage`` publishes ``None`` — NOT a numeric
+    # coverage. The census branch used to assert "its coverage is numeric" as
+    # fact, which is false here (#10355 review P3, optional), so this arm reds
+    # on that wording.
+    absent_and_refused = [_sweep_cell(
+        points_total=None, points_embedded=None, embedding_coverage=None,
+        records_refused=1)]
+    assert absent_and_refused[0]["vector_strategy"] == "enabled"
+    assert absent_and_refused[0]["embedding_coverage"] is None
+    assert sg._dense_leg_verified(absent_and_refused) is False
+    assert sg._unmeasured_causes(absent_and_refused) == {sg.UNMEASURED_CENSUS}
+    capsys.readouterr()
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified(absent_and_refused),
+                     results=absent_and_refused)
+    out = capsys.readouterr()
+    assert "REFUSED a census record" in out.err
+    assert "coverage is numeric" not in out.err, (
+        "the census branch claims a NUMERIC coverage, which is false for a "
+        "cell whose only pair is absent: " + out.err)
+    assert "Install the pinned embedder" not in out.err
+
     # The cause helper mirrors the predicate's arms, including the pair that
     # fires together when the embedder never loaded (so the two can never
     # disagree about what refuted a cell).
@@ -5906,6 +5933,43 @@ def test_print_winner_names_the_refused_census_cause(capsys):
     ) == {sg.UNMEASURED_EMBEDDER, sg.UNMEASURED_ZERO_COVERAGE}
     # ... and a sweep with no rows names no cause rather than inventing one.
     assert sg._unmeasured_causes([]) == set()
+
+
+def test_readme_enumerates_the_refused_census_cause():
+    """#10355 review P3: the README is the surface an operator reads when a
+    sweep says NOT MEASURED, and its enumeration of the causes was one case
+    short — the third bullet closed the list, so a reader concluded that a
+    healthy host with numeric coverage on every cell CANNOT read NOT MEASURED.
+    That is exactly the wrong model: it sends them hunting the embedder for a
+    run whose embedder worked, the same P3 this PR fixed in the winner line.
+
+    It also never named the operator-visible ``records_refused=[…]`` token on
+    the ``dense leg:`` line — the "a surface nobody pins" class this PR's body
+    raises for ``--mock``. So both halves are pinned here.
+
+    RED on the pre-fix README: the fourth bullet and the ``records_refused``
+    description are absent, and the enumeration ends at "third case"."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    readme = Path(sg.__file__).with_name("README.md").read_text(
+        encoding="utf-8")
+    sweep = readme.split("## Granularity sweep", 1)[1]
+    # The enumeration itself must reach a FOURTH case, and that case must be
+    # the census refusal with the census producer named as the remedy — not
+    # a fifth rewrite of the embedder story.
+    assert "third case" in sweep, "the NOT-MEASURED enumeration moved — re-anchor"
+    after_third = sweep.split("third case", 1)[1]
+    fourth = after_third.split("python -m tools.longmem_eval", 1)[0]
+    assert "FOURTH case" in fourth, (
+        "the NOT-MEASURED enumeration still stops at three cases, so an "
+        "operator concludes a healthy host cannot read NOT MEASURED")
+    assert "CENSUS" in fourth and "census producer" in fourth, fourth
+    # The operator-visible token on the ``dense leg:`` line is described, in
+    # the form the tool actually prints.
+    assert "records_refused=[" in sweep, (
+        "the README never shows the ``records_refused=[…]`` token that the "
+        "``dense leg:`` line prints")
+    assert "dense leg:" in sweep, sweep[:200]
 
 
 def test_sweep_granularity_v2_waived_sweep_never_exits_zero(
