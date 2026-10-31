@@ -7523,6 +7523,45 @@ class TestEvidence8503Claims:
 PORTFOLIO_STORY = "the board reviewed the investment mandate last week"
 
 
+def _declared_pack_relations() -> list[tuple[str, str, str]]:
+    """Every kind-to-kind relation the SHIPPED manifests declare, as
+    ``(predicate, fromKind, toKind)`` — namespaced endpoints only.
+
+    Read off the MANIFESTS, not off the brief's `pack_refs`: this is the
+    declared-INTENT side, and the residual set below is a gap between what the
+    packs declare and what the catalog brief can offer. `pack_refs` has already
+    dropped the `core:`/bare values (both are always spelled), so it cannot
+    answer "which declarations can no closure reach".
+
+    `default_packs_dir()`, not a cwd-relative `Path("packs")`: the manifests
+    must be the ones `build_master_list()` actually compiled, and that
+    resolution honours `TORTOISE_PACKS_DIR` first and falls back to the repo
+    root. A cwd-relative glob agrees with it only when pytest is run from the
+    repo root.
+    """
+    import yaml
+
+    from tortoise.pack_registry import default_packs_dir
+
+    rels: list[tuple[str, str, str]] = []
+    for path in sorted(default_packs_dir().glob("*/manifest.yaml")):
+        raw = yaml.safe_load(path.read_text()) or {}
+        for rel in ((raw.get("ontology") or {}).get("relations") or []):
+            if not isinstance(rel, dict):
+                continue
+            a, b = rel.get("fromKind"), rel.get("toKind")
+            # shape, not key: `fromKind`/`toKind` also carry entity types
+            # (`packs/venture` declares `toKind: Subject`)
+            if not (isinstance(a, str) and isinstance(b, str)):
+                continue
+            if ":" not in a or ":" not in b:
+                continue
+            if a.split(":")[0] == "core" or b.split(":")[0] == "core":
+                continue
+            rels.append((str(rel.get("predicate")), a, b))
+    return rels
+
+
 class TestCompactReferenceClosure:
     def test_a_referenced_kind_survives_selection(self):
         """The defect, asserted at the level it lives: the trigger words select
@@ -7559,7 +7598,7 @@ class TestCompactReferenceClosure:
 
         Keyed by kind (#9733) and NOT by declaring namespace: `pack_refs` has no
         namespace rows to iterate, and the old namespace-shaped loop also read
-        `_PACK_TRIGGERS[f"{ns}:"][0]` directly — a `KeyError` for any
+        `_PACK_TRIGGERS[f"{ns}:"][0]` directly was a `KeyError` for any
         ref-declaring namespace with no trigger row, a catalog state the engine
         explicitly supports and injects whole (extractor_v2.py `_PACK_TRIGGERS`
         read, ``triggers is None``). That guard would then have gone red for a
@@ -7653,7 +7692,10 @@ class TestCompactReferenceClosure:
                 {"fromKind": "b:two", "toKind": "a:three"},
                 # core is always rendered — never a ref
                 {"fromKind": "a:one", "toKind": "core:plan"},
-                # a bare name resolves against the declaring namespace
+                # a bare value is a CORE PascalCase kind — the validator rejects
+                # an unprefixed camelCase endpoint (`pack_registry`: "must be a
+                # core PascalCase kind or 'namespace:kind'"), and core is
+                # rendered on every path, so this is dropped as one
                 {"fromKind": "a:one", "toKind": "Bare"},
             ]},
             "extraction": {"relationTemplates": [
@@ -7797,29 +7839,10 @@ class TestCompactReferenceClosure:
         closes the asymmetry (synthesize kindDefs-less declared kinds in the
         catalog loop, as the tenant loop does), this row is the place to update.
         """
-        from tortoise.pack_registry import default_packs_dir
-
-        import yaml as _yaml
-
         m = v2.build_master_list()
         pack_kinds = m["pack_kinds"]
-        residual = set()
-        # `default_packs_dir()`, not a cwd-relative `Path("packs")`: the manifests
-        # this test reads must be the ones `build_master_list()` actually compiled,
-        # and that resolution honours `TORTOISE_PACKS_DIR` first and falls back to
-        # the repo root. A cwd-relative glob agrees with it only when pytest is run
-        # from the repo root.
-        for path in sorted(default_packs_dir().glob("*/manifest.yaml")):
-            raw = _yaml.safe_load(path.read_text()) or {}
-            for rel in ((raw.get("ontology") or {}).get("relations") or []):
-                if not isinstance(rel, dict):
-                    continue
-                for side in ("fromKind", "toKind"):
-                    v = rel.get(side)
-                    if (isinstance(v, str) and ":" in v
-                            and v.split(":")[0] != "core"
-                            and v not in pack_kinds):
-                        residual.add(v)
+        residual = {e for _, a, b in _declared_pack_relations()
+                    for e in (a, b) if e not in pack_kinds}
         assert residual == {
             "agent-ops:rationale", "dev:api", "dev:database",
             "marketing:keyword",
@@ -7830,6 +7853,49 @@ class TestCompactReferenceClosure:
             "docs must be updated with it; if it SHRANK, that is an improvement "
             "worth saying out loud. Either way, do not just re-pin this set \u2014 "
             f"update the claim. got: {sorted(residual)}")
+
+    def test_every_residual_relation_is_named_in_the_docs(self):
+        """The prose enumeration and this pin must be the SAME set.
+
+        Review cycle 5: `docs/EXPANSION_PACKS.md` qualified the "zero" and then
+        enumerated TWO residual relations, while the pin above measures FOUR
+        brief-absent endpoints — THREE relations. The third,
+        `dev:api → dev:database`, is strictly WORSE than the two the prose named:
+        BOTH of its endpoints are declared `objectKinds` with no `kindDef`, so it
+        is not half-offered but wholly unspellable in every render mode. The
+        prose is what a reader meets first, so an under-enumerating sentence
+        ships a claim smaller than the measurement — the exact class this PR
+        polices. (It failed at `92ba0d497`, which named two of the three.)
+
+        Two-sided like the metric row: the DOC must name every residual the
+        catalog really has, and a NEW residual reds here as well, so "the pin
+        reds, the claim does not" cannot happen again.
+        """
+        m = v2.build_master_list()
+        pack_kinds = m["pack_kinds"]
+        rels = sorted(
+            (a, b) for _, a, b in _declared_pack_relations()
+            if a not in pack_kinds or b not in pack_kinds)
+        assert rels == [
+            ("agent-ops:rule", "agent-ops:rationale"),   # half-offered
+            ("dev:api", "dev:database"),                 # BOTH endpoints absent
+            ("marketing:content", "marketing:keyword"),  # half-offered
+        ], rels
+        # the class the docs distinguish: half-offered vs wholly unspellable
+        half = [(a, b) for a, b in rels
+                if (a in pack_kinds) != (b in pack_kinds)]
+        wholly = [(a, b) for a, b in rels
+                  if a not in pack_kinds and b not in pack_kinds]
+        assert len(half) == 2 and wholly == [("dev:api", "dev:database")], (
+            half, wholly)
+        doc = (Path(__file__).resolve().parents[1]
+               / "docs/EXPANSION_PACKS.md").read_text()
+        for a, b in rels:
+            assert f"`{a} → {b}`" in doc, (
+                f"{a} → {b} is a residual relation, but "
+                "`docs/EXPANSION_PACKS.md` does not name it — the \"zero "
+                "half-offered relations\" qualifier is enumerating less than "
+                "the measurement")
 
     def test_nothing_matched_still_returns_everything(self):
         """The all-packs fallback returns before the closure runs — it is

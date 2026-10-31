@@ -748,10 +748,11 @@ def _build_master_from_brief(brief: dict,
         # declares neither, which is still every shipped pack today.
         "pack_hints": {ns: dict(h) for ns, h in
                        (brief.get("pack_hints") or {}).items()},
-        # #9733: the packs' declared cross-pack relation endpoints, carried on
-        # the master so compact-mode story selection co-selects the kinds a
-        # SELECTED pack's own relations name (``_select_pack_kinds``). Absent
-        # for every pack that declares no cross-pack endpoint.
+        # #9733: the packs' declared relation endpoints, carried on the
+        # master so compact-mode story selection co-selects the kinds a
+        # SELECTED pack's own relations name (``_select_pack_kinds``). Foreign
+        # AND same-namespace partners both ride it (a namespace can be selected
+        # partially). Absent for every pack that declares no endpoint.
         "pack_refs": {ns: list(r) for ns, r in
                       (brief.get("pack_refs") or {}).items()
                       if isinstance(r, (list, tuple))},

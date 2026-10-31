@@ -33,8 +33,9 @@ from tortoise.commit_schema import EVENT_KINDS as _GATE_EVENT_KINDS
 #: ``_object_kind_vocab`` reads THIS set, so the reservation and the emit cannot
 #: drift, and ``tests/test_pack_brief_hints_4894.py`` fails if a new non-kind
 #: section is added without landing here.
-#: ``pack_refs`` (#9733) is the cross-pack kind references the packs' own
-#: relation declarations name — pack-authored data, so it rides the brief too,
+#: ``pack_refs`` (#9733) is the kind references the packs' own relation
+#: declarations name — foreign AND same-namespace partners, since a namespace
+#: can be selected partially — pack-authored data, so it rides the brief too,
 #: and it must never read as a pack namespace either.
 RESERVED_BRIEF_KEYS = frozenset({"memory_granularity", "pack_hints", "pack_refs"})
 
@@ -103,7 +104,12 @@ def _relation_endpoint_refs(raw: object) -> dict[str, list[str]]:
             return
         partner = partner.strip()
         if ":" not in partner:
-            return  # bare ⇒ the declaring namespace, or a core bare kind
+            # a bare endpoint is a CORE PascalCase kind, never a same-namespace
+            # one: `pack_registry._validate` accepts only a known core kind or
+            # `namespace:kind` here and REJECTS an unprefixed camelCase value
+            # ("must be a core PascalCase kind or 'namespace:kind'"). Core is
+            # rendered on every path, so dropping it loses nothing.
+            return
         target_ns = partner.split(":", 1)[0]
         if not target_ns or target_ns == "core":
             return  # core is rendered on every path, always spellable
@@ -450,7 +456,7 @@ def compile_value_brief(packs_dir: Path | str | None = None,
             # pack's declarations reference, to a fixpoint.
             # RESERVED for the same reason ``pack_hints`` is — it names the
             # vocabulary, it is not in it. Absent-equivalent (``{}``) for a
-            # catalog where no pack declares a cross-pack relation endpoint.
+            # catalog where no pack declares a relation endpoint.
             "pack_refs": pack_refs}
 
 
