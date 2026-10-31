@@ -641,7 +641,7 @@ table and the `UNPROVEN-FULL-SUITE(<lane>)` rule.
 ```bash
 # ⛔ THE LANE FIRST — Phase 4 is the LATEST shell of all. Phases 1 and 3 state it, Landing is "a
 # different actor"; this section is where the operator reads a wall of `ERROR at setup` and calls it a
-# culprits. `_p4_uri_required` is session-scoped and autouse, so with no usable lane EVERY item
+# culprit. `_p4_uri_required` is session-scoped and autouse, so with no usable lane EVERY item
 # ERRORs at setup and pytest exits 1 — a status the grader below accepts as "this commit is bad".
 # The predicate is the GATE's (`tests/_embedded.py`'s `_uri_set_supported` OR
 # `_carve_out_opted_in`), never a plain `-n`: a set-but-unsupported `bolt://` and a
