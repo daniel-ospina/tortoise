@@ -11,7 +11,7 @@ Canonical key enumeration (plan §5.5/E2E-6.2, INGEST_CONTRACT §2.2/§3.2):
   created/deduped = {points, entities, sources, connections}
   ids        = {points, entities, sources, connections, refs}
   failure    = {error, code, violations}  (never a results key)
-  warnings   = the TWELVE-key closed set (§3.2 table)
+  warnings   = the THIRTEEN-key closed set (§3.2 table)
 
 Skill markers (J8 — the how-to-use-tortoise skill section is #1057's
 deliverable; the skill file lives in the agent-infra repo and is mirrored
@@ -51,6 +51,14 @@ WARNING_KEYS = {
     # row and its A12 note amended in the same change — extending this set is
     # a contract amendment, never a drive-by emission.
     "point_mediated_route",
+    # #9750: the thirteenth key — a repeated endpoint in the connection's `to`
+    # list was collapsed before the operator write (the input set is a SET).
+    # Same rule, with one ordering constraint: the SERVED mirror is DERIVED
+    # (`config/served-skills-upstream.yml` pins its bytes upstream), so the key
+    # lands in the upstream skill repo FIRST and this repo re-derives the mirror
+    # with `tools/served_skills_parity.py --sync` in the same change — a
+    # hand-edit of the served copy reds the parity gate instead.
+    "duplicate_target_deduped",
 }
 
 
@@ -103,7 +111,7 @@ def test_sdk_success_response_key_set_equal(sdk):
         assert len(res["batch_id"]) == 26
         assert isinstance(res["warnings"], list)
         # E2E-6.2 closed-set enforcement: every emitted warning's key-prefix
-        # is in the TWELVE-key enumeration (a key outside it is a divergence)
+        # is in the THIRTEEN-key enumeration (a key outside it is a divergence)
         for w in res["warnings"]:
             assert isinstance(w, str), f"warning entry must be a key-prefixed string: {w!r}"
             assert w.split(":", 1)[0] in WARNING_KEYS, \
@@ -193,7 +201,7 @@ def test_tool_description_names_promotion_policy_and_gated_default():
 def test_doc_carries_canonical_enumeration_anchors():
     """A12 doc-side: INGEST_CONTRACT.md's §2.2 example JSON block carries
     every canonical top-level key and the §3.2 warnings table carries all
-    TWELVE keys (the closed-set anchor)."""
+    THIRTEEN keys (the closed-set anchor)."""
     doc = (REPO_ROOT / "docs" / "INGEST_CONTRACT.md").read_text(
         encoding="utf-8")
     for key in TOP_LEVEL:
@@ -242,7 +250,7 @@ def test_skill_markers_contract():
     exists (the served mirror), it must carry the operational markers —
     bundle shape, granularity, the gated default, the interim promotion
     entry, idempotent resubmission, the retry/decision tables, and all
-    TWELVE warning keys. SKIPPED until #1057 (J8) lands the section — the
+    THIRTEEN warning keys. SKIPPED until #1057 (J8) lands the section — the
     marker-grep is the enforcement the moment it does."""
     text = _skill_text()
     if text is None or "promotion_policy" not in text:

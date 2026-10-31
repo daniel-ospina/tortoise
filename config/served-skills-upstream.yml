@@ -19,13 +19,13 @@ version: 1
 upstream:
   repo: daniel-ospina/tortoise-skills-and-integrations
   branch: main
-  commit: 8996937fedc69a3268789e5a03e6f775c076db54
+  commit: f7fe148e0788a2059fb8f300611c772cc78f257c
 skills:
   how-to-use-tortoise:
     upstream_path: skills/how-to-use-tortoise/SKILL.md
     served_path: website/apps/dashboard/public/skills/how-to-use-tortoise/SKILL.md
-    sha256: 57383b01d66032832ddfc624241a4e0438b1e36684d36ff8088a924ec234bee2
-    bytes: 40141
+    sha256: 5c5e310661658a3049635a9492164c856979015950379f04118b5a8cf4f19c43
+    bytes: 39778
   tortoise-decide:
     upstream_path: skills/tortoise-decide/SKILL.md
     served_path: website/apps/dashboard/public/skills/tortoise-decide/SKILL.md
