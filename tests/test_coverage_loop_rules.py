@@ -243,6 +243,24 @@ def test_facet_window_bounds_resolution():
     # a negative day count can never invert the window
     assert facet_window_bounds("recency", "-7", None, PRODUCER_DATES) == (
         "2023-04-10", "2023-04-10")
+    # #9182: an EXPLICIT anchor is the clock — the eval seam passes the
+    # question's own date, and it must WIN over the latest-known rule (the
+    # two disagree on the frozen dataset: haystack dates run past qdate).
+    assert facet_window_bounds("recency", "7", None, PRODUCER_DATES,
+                               anchor="2023/04/20 (Thu) 10:00") == (
+        "2023-04-13", "2023-04-20")
+    assert facet_window_bounds("recency", "7", None, None,
+                              anchor="2023-04-20") == (
+        "2023-04-13", "2023-04-20")
+    # …and an UNRESOLVABLE anchor is NO BOUND, never a substitution: falling
+    # back to the latest known session date here would silently answer a
+    # different question's clock.
+    assert facet_window_bounds("recency", "7", None, PRODUCER_DATES,
+                              anchor="not a date") is None
+    # an anchor never reaches the interval branch (the eval seam passes None)
+    assert facet_window_bounds("interval", "2023-04-03", "2023-04-10",
+                               anchor="not a date") == (
+        "2023-04-03", "2023-04-10")
 
 
 def test_calendar_date_normalizes_both_shapes_and_rejects_the_rest():
