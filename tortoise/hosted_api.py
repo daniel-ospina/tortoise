@@ -182,6 +182,13 @@ from tortoise.quota import with_limit_contact  # #5425 refusal seam
 # differently is the `create_document(type="SourceCreated")` class, which
 # journalled NOTHING.
 from tortoise.record_projection import NARRATIVE_RECORD_TYPE
+
+# #10389 review P3: the seam's own name for "the journal is a scratch buffer",
+# imported rather than re-typed. `_report_narrative_home` branches on it, and a
+# hardcoded copy would drift in the one direction that matters — a renamed token
+# would route a NON-DURABLE journal into the durable branch and downgrade the
+# "stored NOWHERE" ERROR to a WARNING.
+from tortoise.record_writer import NON_DURABLE_JOURNAL_REFUSAL
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
     RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
@@ -17075,8 +17082,8 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
 
     #10000 deleted the two node writes that used to hold the S1 narrative
     (``s.story_arc`` / ``e.story_arc``), so the ``SessionNarrated`` carrier is now
-    the narrative's ONLY write. Its outcome therefore IS the guarantee, and the
-    commit door is the one place that can say so.
+    the narrative's only PRODUCER on the commit path. Its outcome therefore IS
+    the guarantee, and the commit door is the one place that can say so.
 
     ⛔ IT CANNOT BE ASSUMED. `sdk._emit_event` is best-effort by contract
     ("Both stores are best-effort — failures log and continue (never crash the
@@ -17121,10 +17128,13 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
             and getattr(outcome, "statements", 0) >= 1)
     if took:
         return "record"
-    #: The seam's own refusal vocabulary (`record_writer.LIVE_WRITE_REFUSALS`),
-    #: read rather than re-derived: one word list, not a second thing to drift.
+    #: The seam's own refusal vocabulary, READ rather than re-derived (#10389
+    #: review P3): one word list, not a second thing to drift. The token is
+    #: `NON_DURABLE_JOURNAL_REFUSAL` from `record_writer`, the same name the
+    #: tuple and the verdict are built from — so a rename lands here too, instead
+    #: of silently routing a scratch buffer into the durable branch below.
     refusal = getattr(outcome, "refusal", None)
-    if journalled and refusal != "no_durable_journal":
+    if journalled and refusal != NON_DURABLE_JOURNAL_REFUSAL:
         _logger.warning(
             "commit of session %s: the record did not take the S1 narrative "
             "(refusal=%s), but the journal append did — the narrative is "
@@ -17437,8 +17447,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # `:Source` and its `:Event` (both carried the full text), and NO production
     # read path reads the property back — only two tests asserted it was there.
     # The narrative's home is `public.session_narrative`, written by the
-    # `SessionNarrated` carrier below (2b), which is unchanged and remains the
-    # ONE writer. `summary`/`title` stay: they are §4.4 metadata, not the prose.
+    # SHAPE-KEYED projection `record_projection._narrative_statements` (any
+    # record naming its session and carrying `story_arc`), whose production
+    # producer below (2b) is the `SessionNarrated` carrier — unchanged, and the
+    # only PRODUCER this path contributes. `summary`/`title` stay: they are §4.4
+    # metadata, not the prose.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
         "SET s.id=coalesce(s.id, $did), "
@@ -17460,7 +17473,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     )
 
     # ── 2b. THE NARRATIVE'S JOURNAL CARRIER (#9555 / R7, §9.1). ──────────────
-    # This carrier is now the narrative's ONLY writer (#10000): the raw-Cypher
+    # This carrier is now the narrative's only PRODUCER on the commit path
+    # (#10000): the raw-Cypher
     # `s.story_arc=$arc` / `e.story_arc=$arc` writes above it are GONE, because
     # §9.1/D1 places the S1 narrative outside the graph and the record's own home
     # for it is `public.session_narrative`. History, kept because it is why this

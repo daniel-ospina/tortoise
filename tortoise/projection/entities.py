@@ -1753,9 +1753,18 @@ class _EntityHandlers:
         # are the document's own provenance metadata. Both spellings are listed
         # for the session/source pair because the document writer emits the
         # snake_case forms while the session-capture writer mints the camelCase.
-        "needs_extraction", "story_arc", "document_knowledge_domain",
+        # ⛔ `story_arc` is NOT one of them and is declared for the OPPOSITE
+        # reason (#10000 / §9.1/D1, #10389 review P3): it is here so a legacy
+        # node's prose still READS BACK, and it is in `_DOC_PASSTHROUGH_HANDLED`
+        # precisely so no payload can write it (declared ⇒ readable, listed in
+        # the passthrough reserve ⇒ never written) — `_upsert_source`'s closed
+        # set already denied it, so this is the two folds agreeing rather than
+        # the document route landing it. Do not cite this line as evidence the
+        # key reaches a node.
+        "needs_extraction", "document_knowledge_domain",
         "authored_by", "owned_by", "managed_by", "governing_agreement",
         "createdAt", "session_id", "event_id", "source_path",
+        "story_arc",
     })
     _SOURCE_EXTRA_PROPS: frozenset = frozenset({
         "credibilityTier",   # create_source(tier=)
