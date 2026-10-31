@@ -731,5 +731,60 @@ def test_the_position_check_is_not_vacuous():
         "framing — the block cannot certify itself")
 
 
+def test_the_durable_record_states_the_ladder_the_code_actually_runs():
+    """The CHANGELOG is what a later lane reads INSTEAD of the code.
+
+    It once described a *chained* ladder — ``body += marker(nonce(body))``,
+    *"each attempt an attacker 'wins' changes the body they must win against
+    next"* — which is the WEAKER, SEQUENTIAL shape: defeat attempt *n*, then
+    *n+1* against a body you already influenced. The renderer has never done
+    that (``_UNTRUSTED_MARKER_ATTEMPTS``): it hashes ONE unchanged body eight
+    times, so all eight candidates must be defeated SIMULTANEOUSLY. A reader
+    following the record would "repair" the sound code toward the weaker chain,
+    so the record is pinned to the code's own wording — including that the
+    ``4.3e-16`` figure is the bound for **ONE** candidate, the weakest form.
+
+    Non-vacuous both ways: the retired chain sentence fails the first assertion,
+    and a record quoting ``4.3e-16`` without the per-candidate qualifier fails
+    the ``ONE candidate`` one (the code comment carries it; the record did not).
+    """
+    root = Path(__file__).resolve().parent.parent
+    changelog = (root / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md"
+                 ).read_text(encoding="utf-8")
+    start = changelog.index("**Determinism, and why it costs nothing.**")
+    end = changelog.index("**What the boundary does NOT do")
+    record = " ".join(changelog[start:end].split())
+
+    # The retired chain narrative: absent as a CLAIM ...
+    assert "each attempt an attacker" not in record, (
+        "the record describes the chained ladder again — the chain is the "
+        "WEAKER shape and the renderer has never done it")
+    # ... and, where the chain is mentioned at all, only to deny it.
+    assert "no `body += marker(nonce(body))` chain to walk" in record
+
+    # The mechanism the code actually runs (`_UNTRUSTED_MARKER_ATTEMPTS`).
+    assert "never rewritten between attempts" in record
+    assert "SIMULTANEOUSLY" in record
+    assert "WEAKER" in record and "SEQUENTIAL" in record
+
+    # The estimate carries its qualifier, or it reads as the cost of landing on
+    # the fixed point at all — which is wrong by construction.
+    assert "ONE candidate" in record, (
+        "the record quotes 4.3e-16 without saying it is the bound for ONE "
+        "candidate (the weakest form), so it overstates the guard")
+    assert "WEAKEST" in record
+
+    # ... and the code comment carries the same qualifiers, so the two records
+    # cannot drift apart again in either direction.
+    code = Path(v2.__file__).read_text(encoding="utf-8")
+    cstart = code.index("How many nonce candidates")
+    cend = code.index("_UNTRUSTED_MARKER_ATTEMPTS = ")
+    comment = " ".join(code[cstart:cend].replace("#:", " ").split())
+    for claim in ("ONE candidate", "WEAKEST", "SIMULTANEOUSLY",
+                  "never rewritten between attempts"):
+        assert claim in comment, f"the code comment lost {claim!r}"
+        assert claim in record, f"the record lost the code's {claim!r}"
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))

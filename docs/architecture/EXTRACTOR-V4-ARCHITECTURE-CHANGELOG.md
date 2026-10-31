@@ -1384,7 +1384,9 @@ hash of that same unchanged body — what the body must defeat is all eight SIMU
 `body += marker(nonce(body))` chain to walk: the render has never done that, and a chained ladder
 would be WEAKER (it would make the attacker's job SEQUENTIAL — defeat attempt *n*, then *n+1* against
 a body they already influenced — instead of simultaneous). Landing on the fixed point is therefore a
-search over ~`len(body)/16¹⁶` ≈ **4.3e-16** for an 8,009 B body. The exhaustion path is defined
+search over ~`len(body)/16¹⁶` ≈ **4.3e-16** for an 8,009 B body — and that figure is quoted **per ONE
+candidate**, i.e. the **WEAKEST** form of the bound: holding for all eight at once can only be harder,
+never easier. The exhaustion path is defined
 anyway, because a render path must not raise: it emits the clause **without** a marker, since a
 boundary the content can forge is worse than none — it invites the model to trust a border the
 attacker drew.
