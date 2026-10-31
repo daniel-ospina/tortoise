@@ -22,11 +22,14 @@ Runnable with:
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import logging
 import os
 import shutil
 import sys
 import tempfile
+import textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -782,6 +785,101 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert rows[0][0] == "live", (
             "the declared 'retracted' was popped by the dedup fold, so nothing "
             "in this bundle mounts a terminal mint")
+
+
+def _leg_kind_comes_from_the_single_home(source: str) -> bool:
+    """True when every ``_find_terminal_dedup_hit`` call in ``source`` is handed
+    a NAME whose assignment is a ``_item_point_kind(...)`` call (#9819 P3).
+
+    ``_item_point_kind`` exists so the Phase-1 readers of an item\'s
+    ``pointKind`` cannot drift apart; a reader that re-derives the default
+    inline is a third copy. This predicate is the structural form of that
+    claim: it looks at the ARGUMENT the call is handed and at the assignment
+    that produced it, so prose, comments and docstrings mentioning the helper
+    prove nothing. No call site at all returns ``False`` — a pin that cannot
+    find what it pins must red, not pass.
+    """
+    tree = ast.parse(source)
+    homes = {
+        target.id
+        for node in ast.walk(tree) if isinstance(node, ast.Assign)
+        if isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_item_point_kind"
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_find_terminal_dedup_hit"
+    ]
+    if not calls:
+        return False
+    for call in calls:
+        if len(call.args) < 2 or not isinstance(call.args[1], ast.Name):
+            return False
+        if call.args[1].id not in homes:
+            return False
+    return True
+
+
+class TestTheRetainedConnectionLegReadsTheSingleKindHome:
+    """#9819 review P3: the retained per-connection content leg must not be a
+    THIRD, drifted reader of an item\'s ``pointKind``.
+
+    The leg is the pre-#9173 ``create_direct_edge`` prediction. It is DEAD by
+    construction today — a bundle-local ``points`` ref makes the pair
+    Point-bearing, so ``_effective_connection_routes`` answers ``operator`` and
+    the leg\'s ``route != "direct"`` skip keeps it out — which is exactly why a
+    private copy of the kind default survived there: nothing exercises it.
+    ``_item_point_kind`` is the declared single home for that value (its own
+    docstring says so, and the write loop reads the item\'s ``kind`` the same
+    way), so the leg must resolve it there rather than re-deriving
+    ``item.get("kind") or "statement"`` inline.
+
+    ⚠️ WHY A SOURCE PIN AND NOT A BEHAVIOURAL ONE, measured rather than
+    assumed: the two spellings differ ONLY for a truthy non-``str`` kind, and
+    such a kind is itself a Phase-1 violation (``_check_kind``) that
+    ``create_point`` refuses — so no bundle can commit through either spelling,
+    and the live `points` loop refuses it on its own. A behavioural test is
+    therefore vacuous here: it passes on BOTH spellings (measured — the driver
+    accepts the dict as a bound parameter and simply matches no row, so even
+    the "raw driver error" shape does not surface). The drift is a STRUCTURAL
+    claim, so it is pinned structurally, with a negative control that reds on
+    the pre-fix spelling.
+    """
+
+    def test_the_leg_resolves_kind_through_the_single_home(self):
+        source = textwrap.dedent(inspect.getsource(TortoiseSDK._check_endpoints))
+        assert _leg_kind_comes_from_the_single_home(source), (
+            "the per-connection content leg resolves ``pointKind`` inline "
+            "instead of through ``_item_point_kind`` — a third reader of a "
+            "value that already has one home, so a #8499 narrowing that "
+            "re-arms the leg would resolve a different kind than the write "
+            "loop (#9819 review P3)")
+
+    def test_the_pin_reads_the_call_site_not_the_docstring(self):
+        """NON-VACUITY: the pre-fix spelling must fail the pin.
+
+        The predicate looks at the ARGUMENT the retained
+        ``_find_terminal_dedup_hit`` call is handed and at the assignment that
+        produced it — not at prose. Driven here on the exact drifted shape, so
+        a pin that quietly stopped looking (or that accepted any mention of the
+        helper) would red rather than pass.
+        """
+        drifted = textwrap.dedent(
+            """
+            def _check_endpoints(self, item):
+                global _item_point_kind
+                kind = item.get("kind") or "statement"
+                hit = self._find_terminal_dedup_hit(content, kind, key=None)
+                return hit
+            """
+        )
+        assert not _leg_kind_comes_from_the_single_home(drifted), (
+            "the pin accepts the pre-fix spelling (`item.get(\"kind\") or "
+            "\"statement\"`), so it proves nothing")
 
 
 class TestContentIdentityReadIsBatched:

@@ -23018,7 +23018,18 @@ class TortoiseSDK:
                     # 'int' object has no attribute 'encode') — shape violation
                     # already reported (check 1), skip the dedup-hit scan.
                     continue
-                kind = item.get("kind") or "statement"
+                # #9819 review P3: the item's ``pointKind`` has ONE home —
+                # ``_item_point_kind`` — and this leg is one of its Phase-1
+                # readers. It used to re-derive the value inline
+                # (``item.get("kind") or "statement"``), which is the same
+                # answer for a ``str`` kind but a THIRD reader of it: a truthy
+                # non-``str`` spelling (``kind: {"a": 1}``) would reach
+                # ``_find_terminal_dedup_hit`` as ``pointKind`` and raise a raw
+                # driver error out of Phase 1 instead of the structured verdict
+                # ``_check_kind`` owes the caller. Dead today (the
+                # ``route != "direct"`` skip above), so this is the leg being
+                # correct BEFORE a #8499 narrowing re-arms it.
+                kind = _item_point_kind(item)
                 # #8400: pass the item's effective key with `_coerce_props`'
                 # precedence (top-level wins by PRESENCE, not truthiness), so
                 # the guard resolves exactly the point the writer folds onto —
