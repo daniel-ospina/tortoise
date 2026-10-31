@@ -1743,13 +1743,23 @@ def test_the_batch_lane_defaults_to_a_private_container() -> None:
     )
 
 
-#: The lane ASSERTION a suite fence must carry before it runs. `tests/conftest.py::_p4_uri_required`
-#: accepts a `TORTOISE_DB_URI` OR an explicit carve-out opt-in, so the assertion is the DISJUNCTION;
-#: the halt is checked separately (`_halts`), because a bare `[ -n … ]` that only prints asserts
-#: nothing.
+#: The lane ASSERTION a suite fence must carry before it runs.
+#: ⛔ It is the GATE's predicate, not "is the variable set". `tests/_embedded.py::_assert_p4_uri_required`
+#: accepts a SUPPORTED `TORTOISE_DB_URI` (`_uri_set_supported` — `is_db_uri`, `SUPPORTED_URI_SCHEMES`)
+#: OR a TRUTHY `TORTOISE_TEST_CARVE_OUT` (`_carve_out_opted_in` — `is_truthy`). The pre-fix assertion was
+#: `[ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ]`, which satisfies neither
+#: half of that for the two values the helpers were written to refuse: a set-but-unsupported `bolt://`
+#: URI (this repo's own AGENTS.md documents it as a legal value) and `TORTOISE_TEST_CARVE_OUT=0`. Both
+#: pass a `-n` test, both make the session fixture ERROR every collected item, and both exit 1 — the
+#: status the COMPLETED predicate accepts. So the fence ASKS the gate's two predicates instead of
+#: re-spelling the scheme list and the truthy vocabulary, which cannot drift when either grows.
+#: The halt is checked separately (`_halts`): an invocation that only prints asserts nothing.
 _LANE_ASSERT = re.compile(
-    r'\[\s*-n\s+"\$\{?TORTOISE_DB_URI:-\}?"\s*\]\s*\|\|\s*'
-    r'\[\s*-n\s+"\$\{?TORTOISE_TEST_CARVE_OUT:-\}?"\s*\]\s*\|\|'
+    r"^(?:uv\s+run\s+)?python3?\s+-c\s+'"
+    r"(?=[^']*\btests\._embedded\b)"
+    r"(?=[^']*\b_uri_set_supported\b)"
+    r"(?=[^']*\b_carve_out_opted_in\b)"
+    r"(?=[^']*\bsys\.exit\b)[^']*'"
 )
 
 
@@ -1788,8 +1798,9 @@ def test_the_lane_is_asserted_in_every_fence_that_runs_the_suite() -> None:
             "shell-local, and a run with no lane ERRORs every collected test at setup and exits 1 — "
             "which this fence's own COMPLETED predicate ACCEPTS — so both id sets become all-error "
             "and the Phase 4 diff is empty: BATCH-GREEN on a tree where nothing ran. Assert it IN "
-            'the fence, the way `$B` is re-derived there: `[ -n "${TORTOISE_DB_URI:-}" ] || '
-            '[ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { … exit 1; }`'
+            "the fence, the way `$B` is re-derived there, and with the GATE's predicate: "
+            "`uv run python -c '… from tests._embedded import _uri_set_supported, "
+            "_carve_out_opted_in …'` || { … exit 1; }"
         )
         assert any(_halts(_block(fence, i)) for i in asserts), (
             f"the lane assertion in suite fence {number} does not HALT: a bare `[ -n … ]`, `|| true` "
@@ -1833,10 +1844,28 @@ _TREE_ASSERT_REF = re.compile(
 #: certifies a tree nobody batches and nobody lands.
 _NON_BATCH_REFS = {"main", "master", "HEAD", "-", "$PINNED", "origin/main"}
 
+#: The smallest wait the document may use, in SECONDS: 6 h.
+#: ⛔ The pre-fix bound was **240 × 15 s = 60 min**, and the run it bounded cannot finish in it. The
+#: command (`uv run pytest tests/ -m 'not track_b and not live and not integration' --ignore=tests/e2e`)
+#: has no xdist and no leg partition, so it runs the UNION of CI's pools in one process — by this
+#: repo's own measurements (`docs/ops/ci-wall-clock.md`, `config/ci-surfaces.yml`): `test (a…i)` p50s
+#: serialise to ≈91–134 min, `test-slow` is 37.05 min of measured test time, `test-carve-out` is
+#: 8.3–8.6 min × 3 shards ≈ 25 min — ≈153–196 min, before collecting 41,726 tests. CI gets ~37 min of
+#: WALL clock out of that only by sharding across runners. So a bound under the run is not a wedge
+#: detector, it is a false halt on every honest run — and its recovery path (re-run the fence) clears
+#: the status of a suite that is still EXECUTING, because the run is detached and outlives the shell.
+_MIN_WAIT_SECONDS = 6 * 60 * 60
+
 #: The only honest shape of "wait for the detached run": a BOUNDED loop on a literal count that
 #: sleeps between reads. Unbounded (`while [ ! -f … ]`) holds a wedged lane forever; unbounded-free
-#: (`sleep 900` once) guesses. A literal bound makes the wait provably finite.
-_BOUNDED_WAIT = re.compile(r"^for\b.*\$\(\s*seq\s+1\s+[0-9]+\s*\).*\bdo\b.*\bsleep\s+[0-9]+")
+#: (`sleep 900` once) guesses. A literal bound makes the wait provably finite — and `count × sleep`
+#: must clear `_MIN_WAIT_SECONDS`, or the bound is shorter than the run it bounds.
+_BOUNDED_WAIT = re.compile(
+    r"^for\b.*\$\(\s*seq\s+1\s+(?P<count>[0-9]+)\s*\).*\bdo\b.*\bsleep\s+(?P<sleep>[0-9]+)"
+)
+
+#: A refusal to re-run over a run that is STILL EXECUTING: the wait's expiry is not the run's end.
+_LIVE_RUN_REFUSAL = re.compile(r"find\s+\"?\$\{?B\}?/[\w.-]+\"?\s+-newermt")
 
 
 def test_every_full_suite_fence_names_the_tree_it_runs_on() -> None:
@@ -1948,12 +1977,44 @@ def test_a_fence_that_launches_the_suite_waits_before_it_reads_the_status() -> N
         if not launches:
             continue
         for poll in (i for i, c in enumerate(codes) if _RC_POLL.match(c)):
-            assert any(_BOUNDED_WAIT.match(codes[i]) for i in range(launches[0], poll)), (
+            waits = [
+                w
+                for i in range(launches[0], poll)
+                if (w := _BOUNDED_WAIT.match(codes[i]))
+            ]
+            assert waits, (
                 f"fence {number} launches a detached suite run and then reads its status file with "
                 "no bounded wait in between, so the fence cannot execute: it prints RUNNING and the "
                 "halt below it reports a run it just launched as never launched. Put a bounded wait "
-                "(`for _ in $(seq 1 240); do [ -f $B/<run>.rc ] && break; sleep 15; done`) between "
+                "(`for _ in $(seq 1 360); do [ -f $B/<run>.rc ] && break; sleep 60; done`) between "
                 "the launch and the poll"
+            )
+            # ...and the bound must OUTLAST the run, not merely be bounded. The pre-fix `240 × 15 s`
+            # is 60 min against a command whose own documented composition is ≈153–196 min, so the
+            # fence halted EVERY honest run and then its re-run cleared the status of a suite that
+            # was still executing. Presence alone cannot see that (measured: `1 × 15` and `240 × 1`
+            # both left the guard green), so the ARITHMETIC is graded.
+            seconds = max(int(w.group("count")) * int(w.group("sleep")) for w in waits)
+            assert seconds >= _MIN_WAIT_SECONDS, (
+                f"fence {number}'s bounded wait is {seconds} s, under the {_MIN_WAIT_SECONDS} s this "
+                "command's own measurements say one uninterrupted run of it costs (≈153–196 min of "
+                "test time, unsharded, before collecting 41.7k tests). A bound shorter than the run "
+                "halts honest gates instead of wedges, and re-running the fence then `rm -f`s the "
+                "status of a suite that is still EXECUTING"
+            )
+            # ...and the expiry must not be READ as "the run is over": the run is detached and
+            # outlives this shell, so the fence must refuse to restart over a live one (a re-run
+            # clears `$B/<run>.rc` of a suite that is still executing, and both runs then share this
+            # batch's ledger).
+            assert any(
+                _LIVE_RUN_REFUSAL.search(codes[i]) and _halts(_block(fence, i))
+                for i in range(launches[0], len(codes))
+            ), (
+                f"fence {number} treats its bounded wait's EXPIRY as the run's END: the suite is "
+                "detached and outlives the shell, so re-running hits the `rm -f` above for a suite "
+                "that is still EXECUTING — whichever finishes first owns the ledger, which is the "
+                "per-batch-ledger collision one level down, inside one batch. Refuse to restart when "
+                "`$B/<run>.log` was written recently, and say to wait for the status instead"
             )
             waited += 1
     assert waited, (
@@ -2183,6 +2244,12 @@ def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
         and not (
             _lands_on_branch(c, batch_branch)
             or _is_blame_binding(_code(c))
+            # ...and the LANE assertion, which this window must admit or the doctrine's own remedy
+            # is inexpressible: the blame probe runs the suite, so its fence owes the lane halt the
+            # other suite fences carry — and `benign` cannot see it, because it invokes python, not
+            # pytest. It moves nothing (it reads two env predicates) and it HALTS, which is checked
+            # here rather than assumed.
+            or (_LANE_ASSERT.match(_code(c)) and _halts(_code(c)))
             or (
                 benign.match(_code(c))
                 # ...checked on the UNQUOTED text, so `git bisect run sh -c '… || exit 1'`
@@ -3887,6 +3954,86 @@ def test_the_bisect_grader_does_not_convict_a_commit_on_an_infra_error() -> None
         assert not _BISECT_COLLAPSED.search(code), (
             "the grader still collapses every non-zero status into `bad` (`|| exit 1`): a killed or "
             f"misconfigured probe then convicts an innocent commit: {code}"
+        )
+
+
+#: The BLAME probes — the runs whose ONLY job is to convict one merge, and the two the lane check
+#: could not see. `_SUITE_CMD` excludes both by SPELLING, not by judgement: the manual probe's target
+#: is a `<…>` placeholder (the `(?!\s+<)` lookahead refuses it, correctly, as "not a full-suite run")
+#: and `git bisect run …` does not start with `uv` at all. So the lane assertion was required in every
+#: fence EXCEPT the two whose verdict a dropped PR is read from — measured: rewriting the placeholder to
+#: a real file (`uv run pytest tests/test_projection.py -q`) reds 5 of 38, i.e. the exclusion really is
+#: spelling rather than scope.
+_BLAME_PROBE = re.compile(r"^(?:uv\s+run\s+pytest\s+<|git\s+bisect\s+run\b)")
+
+#: pytest's session-start refusal, verbatim from `tests/_embedded.py::_assert_p4_uri_required`. It is
+#: the ONE string that separates "the lane is gone, nothing ran" from "this commit is red": both exit
+#: 1, and pytest's documented codes have no value that tells them apart.
+_LANE_ERROR = "default pytest requires TORTOISE_DB_URI"
+
+
+def test_the_blame_probes_assert_the_lane_and_decline_to_convict_an_unrunnable_probe() -> None:
+    """the ``0a9ee9050`` P2: the two runs a PR is DROPPED from carried no lane assertion.
+
+    Phase 4 is the LATEST shell of all — Phases 1 and 3 state the lane, Landing is "a different
+    actor" — and `_p4_uri_required` is session-scoped and autouse, so with no usable lane EVERY
+    collected item ERRORs at setup and pytest exits **1**. The grader accepts exactly that status as
+    "this commit is bad", so `git bisect run` names the OLDEST probe (the doctrine's own measurement,
+    in the paragraph above it) and `git revert -m 1` drops the batch's FIRST merge, irreversibly
+    within the batch — the innocent-PR drop the whole phase exists to prevent. The manual route is no
+    better: a wall of `ERROR at setup` reads as "this merge is the culprit".
+
+    So both blame runs must assert the lane (the GATE's predicate, `_LANE_ASSERT`) and HALT in their
+    own fence, and the grader must hand a probe that could not RUN the suite back to git as its skip
+    code — git's own documented protocol (`make || exit 125   # this skips broken builds`). The lane
+    assertion is a start-of-fence fact; a probe runs minutes later against a checked-out tree, so the
+    container can be reaped in between and the IN-PROBE decline is what covers that window.
+
+    Non-vacuity, measured at the pre-fix head: neither blame fence carries the assertion and the
+    grader has no decline, so this check reds on its first assert and on nothing else.
+    """
+    fences = [
+        fence for fence in _fences() if any(_BLAME_PROBE.match(_code(c)) for c in fence)
+    ]
+    assert len(fences) >= 2, (
+        "expected the manual blame probe and the `git bisect run` fence, parsed "
+        f"{len(fences)} — re-point this guard"
+    )
+    for number, fence in enumerate(fences, start=1):
+        codes = [_code(c) for c in fence]
+        probes = [i for i, c in enumerate(codes) if _BLAME_PROBE.match(c)]
+        asserts = [i for i, c in enumerate(codes) if _LANE_ASSERT.match(c)]
+        assert asserts, (
+            f"blame fence {number} runs a probe without asserting a lane: `_p4_uri_required` is "
+            "session-scoped and autouse, so a run with no usable lane ERRORs every item at setup and "
+            "exits 1 — the grader's own ACCEPTED \"bad\" status — and `bisect run` then convicts the "
+            "OLDEST merge in the batch, whose PR the next step DROPS. Assert the GATE's predicate in "
+            "this fence, as Phases 1 and 3 do"
+        )
+        assert any(_halts(_block(fence, i)) for i in asserts), (
+            f"the lane assertion in blame fence {number} does not HALT — a bare check leaves every "
+            "probe grading an all-setup-error session as a real red"
+        )
+        assert min(asserts) < min(probes), (
+            f"blame fence {number} asserts the lane only AFTER a probe, so the probe it guards is "
+            "exactly the one that convicts"
+        )
+    # ...and the decline must still be a decline: pin the needle against the module it comes from, or
+    # the `case` below matches a string no pytest run can ever print.
+    embedded = (ROOT / "tests" / "_embedded.py").read_text(encoding="utf-8")
+    assert _LANE_ERROR in embedded, (
+        f"the grader declines to convict on {_LANE_ERROR!r}, which no longer exists in "
+        "tests/_embedded.py — the needle drifted and the decline can never fire"
+    )
+    graders = [c for c in _fenced_commands() if _BISECT_RUN.match(_code(c))]
+    assert graders, "the doctrine no longer documents `git bisect run` — re-point this guard"
+    for command in graders:
+        code = _code(command)
+        assert _LANE_ERROR in code and "exit 125" in code, (
+            "the bisect grader does not decline to convict an all-setup-error probe: pytest gives "
+            "\"nothing ran\" and \"this commit is red\" the SAME status (1), so without the lane-error "
+            "escape every probe grades BAD and the OLDEST merge is convicted. Capture the probe's "
+            f"output and `case` on {_LANE_ERROR!r} → `exit 125`: {code}"
         )
 
 

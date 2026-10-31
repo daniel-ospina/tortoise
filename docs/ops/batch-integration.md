@@ -224,9 +224,17 @@ B="/tmp/batch-$BATCH"
 # the process exits 1, which the COMPLETED predicate below ACCEPTS (measured at this head: rc=1, one
 # `<testcase>` per item). Both id sets then become all-error and identical, Phase 4 diffs them to no
 # NEW ids, and the verdict is BATCH-GREEN for a tree on which nothing ran. Assert it here, the way
-# `$B` is re-derived here: present, re-derived with `tools/test_lane.py uri`, or an explicit carve-out
-# (whose verdict is UNPROVEN-FULL-SUITE and no phase below can change that).
-[ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
+# `$B` is re-derived here.
+# ⛔ And assert the GATE'S predicate, not "the variable is set". `tests/_embedded.py`'s
+# `_assert_p4_uri_required` tests `_uri_set_supported()` (a SUPPORTED scheme — `is_db_uri`,
+# `tortoise/config.py`'s SUPPORTED_URI_SCHEMES) OR `_carve_out_opted_in()` (`is_truthy`,
+# `tortoise/env_truthy.py`), and a plain `[ -n … ]` satisfies neither half of that: a
+# set-but-unsupported `bolt://` (this repo's own AGENTS.md documents it as a legal value) passes it,
+# and so does `TORTOISE_TEST_CARVE_OUT=0`. Both then ERROR every collected item at setup and exit 1 —
+# the same fail-open this halt exists to close, one spelling over. So ASK the gate's own two
+# predicates instead of re-spelling the scheme list or the truthy vocabulary: one source of truth, and
+# no drift when either grows.
+uv run python -c 'import sys; from tests._embedded import _carve_out_opted_in as opted_in, _uri_set_supported as supported; sys.exit(0 if supported() or opted_in() else 1)' || { echo "no USABLE lane in this shell — the gate is not \"is the variable set\": tests/_embedded.py's _assert_p4_uri_required accepts only a SUPPORTED TORTOISE_DB_URI (docker/redis/rediss — tortoise/config.py's SUPPORTED_URI_SCHEMES) or a TRUTHY TORTOISE_TEST_CARVE_OUT (1/true/yes/on — tortoise/env_truthy.py), so a set-but-unsupported bolt:// and a =0 both PASS a plain -n test and then ERROR every collected item at setup, exiting 1 — a status COMPLETED accepts. The Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly"; exit 1; }
 # ⛔ CLEAR the report and the carried count FIRST. pytest truncates a junit file only in
 # `pytest_sessionfinish`, so a baseline run the kernel killed leaves the PREVIOUS batch's report at
 # this path — and the count below then reads it as THIS baseline, which is the ledger every later
@@ -515,17 +523,28 @@ B="/tmp/batch-$BATCH"
 # shell than Phase 0's, and a run with no lane ERRORs every item and exits 1 — which the COMPLETED
 # predicate below accepts, so both id sets become all-error and identical and Phase 4 diffs them to
 # BATCH-GREEN. An absent lane HALTS here; the Phase 0 export is not carried, and a carve-out is an
-# explicit opt-in whose verdict is UNPROVEN-FULL-SUITE.
-[ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
+# explicit opt-in whose verdict is UNPROVEN-FULL-SUITE. The predicate is the GATE's (`tests/_embedded.py`
+# `_uri_set_supported` OR `_carve_out_opted_in`), never "the variable is set" — see Phase 1: a
+# set-but-unsupported `bolt://` and a `TORTOISE_TEST_CARVE_OUT=0` both satisfy a plain `-n` test and
+# both ERROR every item at setup.
+uv run python -c 'import sys; from tests._embedded import _carve_out_opted_in as opted_in, _uri_set_supported as supported; sys.exit(0 if supported() or opted_in() else 1)' || { echo "no USABLE lane in this shell — the gate is not \"is the variable set\": tests/_embedded.py's _assert_p4_uri_required accepts only a SUPPORTED TORTOISE_DB_URI (docker/redis/rediss — tortoise/config.py's SUPPORTED_URI_SCHEMES) or a TRUTHY TORTOISE_TEST_CARVE_OUT (1/true/yes/on — tortoise/env_truthy.py), so a set-but-unsupported bolt:// and a =0 both PASS a plain -n test and then ERROR every collected item at setup, exiting 1 — a status COMPLETED accepts. The Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly"; exit 1; }
 rm -f "$B/batch.rc" "$B/batch-junit.xml"   # a stale status/report from an earlier run must not decide this one
 ( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' --ignore=tests/e2e > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
 # ⛔ WAIT before the poll, and BOUND the wait. The suite is detached (the `&` above), so a one-shot
 # read on the very next line is not a poll — it is a race this fence loses every time: the block would
 # print RUNNING and the halt below would then report "never launched in this shell" about a run it
 # launched one line earlier, and half 2 — the `track_b` gate member — would never be reached. So the
-# fence as written measured nothing on any tree. The loop is bounded (240 × 15 s = 60 min) so a wedged
-# run cannot hold the lane, and the run stays detached, so it outlives this shell.
-for _ in $(seq 1 240); do [ -f "$B/batch.rc" ] && break; sleep 15; done
+# fence as written measured nothing on any tree. The run stays detached, so it outlives this shell.
+# ⛔ And the bound must OUTLAST the run it bounds, or it is not a wedge detector — it is a false halt.
+# This fence carried `240 × 15 s = 60 min`, which is UNDER the run it waits for, by the document's own
+# measurements: `docs/ops/ci-wall-clock.md`'s `test (a…i)` p50s serialise to ≈91–134 min, `test-slow`
+# is 37.05 min of measured test time (`config/ci-surfaces.yml`), and `test-carve-out` is 8.3–8.6 min ×
+# 3 shards ≈ 25 min — ≈153–196 min in the ONE process this command runs (no xdist, no leg partition),
+# before collecting 41.7k tests. CI gets ~37 min of wall clock out of that only by sharding across
+# runners. 360 × 60 s = 6 h is ≈1.8× that worst documented composition, so an honest full run cannot
+# reach it while a wedged one is still released. Phase 1 runs the byte-identical command with no bound
+# at all; the same command cannot be expected to finish in Phase 1 and not here.
+for _ in $(seq 1 360); do [ -f "$B/batch.rc" ] && break; sleep 60; done
 [ -f "$B/batch.rc" ] && echo 'DONE — read $B/batch.rc' || echo RUNNING   # reachable now: the wait above
 
 # ⛔ DONE is not PASSED. A pid that goes away fails exactly as fast for a run the kernel OOM-killed as
@@ -533,7 +552,16 @@ for _ in $(seq 1 240); do [ -f "$B/batch.rc" ] && break; sleep 15; done
 # killed run prints no summary, hence carries no failure ids, so Phase 4 would diff it straight to
 # BATCH-GREEN. The status the run itself wrote is the only thing that separates them; require a
 # COMPLETED report:
-[ -f "$B/batch.rc" ] || { echo "no $B/batch.rc after the bounded wait — the gate run did not finish within 60 min (read $B/batch.log for where it stopped), or this shell never launched it"; exit 1; }
+# ⛔ And the wait's EXPIRY does not mean the run stopped: the run stays detached and outlives this
+# shell, so re-running this fence would hit the `rm -f` above for a suite that is STILL EXECUTING —
+# two runs then share this batch's `$B`, whichever finishes first owns the ledger, and the fence reads
+# that. That is the per-batch-ledger collision this document already closes BETWEEN batches, one level
+# down INSIDE one batch, where no directory namespacing can separate them. A live pytest writes to its
+# log continuously, so a log written in the last 10 minutes IS the run: wait for `$B/batch.rc` instead
+# of restarting, and kill the suite first if you are certain it is wedged. Both halts are keyed on
+# `$B/batch.rc` being ABSENT, so neither can fire at a run that already finished.
+[ -f "$B/batch.rc" ] || [ -n "$(find "$B/batch.log" -newermt '-10 minutes' 2>/dev/null)" ] || { echo "no $B/batch.rc after the 6 h bounded wait, and $B/batch.log has not been written in 10 min — the gate run either never launched in this shell or stopped without writing a status (read $B/batch.log); a run that DID launch writes $B/batch.rc even when it is killed, so this is a shell mistake before it is a wedge"; exit 1; }
+[ -f "$B/batch.rc" ] || { echo "no $B/batch.rc after the 6 h bounded wait, but $B/batch.log was written in the last 10 min — a gate run is STILL LIVE and will write its status when it finishes: wait for that instead of re-running (a re-run clears the status of a suite that is still EXECUTING, and the two runs then share this ledger), and kill the suite FIRST if you are certain it is wedged"; exit 1; }
 RC="$(cat "$B/batch.rc")"
 [ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || { echo "the gate run did not COMPLETE (rc=$RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
 # ⛔ The baseline TOTAL does not survive Phase 1's shell either: Phase 3 may be a LATER shell, where
@@ -611,6 +639,14 @@ table and the `UNPROVEN-FULL-SUITE(<lane>)` rule.
 - **A failure id that is NOT in the baseline set is NEW** and convicts a PR. Find which one:
 
 ```bash
+# ⛔ THE LANE FIRST — Phase 4 is the LATEST shell of all. Phases 1 and 3 state it, Landing is "a
+# different actor"; this section is where the operator reads a wall of `ERROR at setup` and calls it a
+# culprits. `_p4_uri_required` is session-scoped and autouse, so with no usable lane EVERY item
+# ERRORs at setup and pytest exits 1 — a status the grader below accepts as "this commit is bad".
+# The predicate is the GATE's (`tests/_embedded.py`'s `_uri_set_supported` OR
+# `_carve_out_opted_in`), never a plain `-n`: a set-but-unsupported `bolt://` and a
+# `TORTOISE_TEST_CARVE_OUT=0` both pass one and both ERROR every item — see Phase 1.
+uv run python -c 'import sys; from tests._embedded import _carve_out_opted_in as opted_in, _uri_set_supported as supported; sys.exit(0 if supported() or opted_in() else 1)' || { echo "no USABLE lane in this shell — the gate is not \"is the variable set\": tests/_embedded.py's _assert_p4_uri_required accepts only a SUPPORTED TORTOISE_DB_URI (docker/redis/rediss — tortoise/config.py's SUPPORTED_URI_SCHEMES) or a TRUTHY TORTOISE_TEST_CARVE_OUT (1/true/yes/on — tortoise/env_truthy.py), so a set-but-unsupported bolt:// and a =0 both PASS a plain -n test and then ERROR every collected item at setup, exiting 1 — a status COMPLETED accepts. The Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly"; exit 1; }
 git log --first-parent --merges --oneline origin/main..integration/batch-1   # merges ATTEMPTED — skip any with a matching Revert
 git bisect start --first-parent integration/batch-1 origin/main   # or, cheaper, walk the merges
 #   at each step: run ONLY the failing files (not the whole suite)
@@ -621,6 +657,10 @@ uv run pytest <the failing file(s)> -q
   `git bisect run` is the honest tool when the failing file set is stable:
 
 ```bash
+# ⛔ The lane AGAIN — this fence is a different shell from the one above, and a probe with no lane
+# ERRORs every item and exits 1, which is the grader's ACCEPTED "bad" status: every probe then reads
+# BAD and `bisect run` convicts the OLDEST merge in the batch (measured, and stated two lines below).
+uv run python -c 'import sys; from tests._embedded import _carve_out_opted_in as opted_in, _uri_set_supported as supported; sys.exit(0 if supported() or opted_in() else 1)' || { echo "no USABLE lane in this shell — the gate is not \"is the variable set\": tests/_embedded.py's _assert_p4_uri_required accepts only a SUPPORTED TORTOISE_DB_URI (docker/redis/rediss — tortoise/config.py's SUPPORTED_URI_SCHEMES) or a TRUTHY TORTOISE_TEST_CARVE_OUT (1/true/yes/on — tortoise/env_truthy.py), so a set-but-unsupported bolt:// and a =0 both PASS a plain -n test and then ERROR every collected item at setup, exiting 1 — a status COMPLETED accepts. The Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly"; exit 1; }
 # ⛔ GRADE THE EXIT CODE. `git bisect run`'s protocol is 0 = good, 125 = SKIP THIS PROBE, anything
 # else = BAD. A bare `|| exit 1` collapses every other status into "bad": pytest rc 2/3/4/5
 # (interrupted / usage / internal / misconfigured) and 128+N (SIGKILL/OOM — the class this document
@@ -630,7 +670,14 @@ uv run pytest <the failing file(s)> -q
 # below would DROP an innocent PR for an infrastructure error, irreversibly within the batch. Accept
 # only the two statuses this document already calls COMPLETED, and hand every other one back to git
 # as its own skip code, so the probe is removed from the search instead of convicted.
-git bisect run sh -c 'uv run pytest <failing files> -q >/dev/null 2>&1; rc=$?; [ "$rc" -eq 0 ] && exit 0; [ "$rc" -eq 1 ] && exit 1; exit 125'
+# ⛔ And a probe that could not RUN the suite is not a probe that FAILED it — git's own manual's
+# example is `make || exit 125   # this skips broken builds`. pytest assigns ONE status to both
+# meanings: an all-setup-ERROR session exits 1, exactly as a real red does, and the lane can go away
+# BETWEEN the assertion above and a probe (the private container reaped, a Docker restart). So the
+# probe captures the output and declines to convict on the gate's own message: the session-fixture
+# failure is `Failed: default pytest requires TORTOISE_DB_URI …` (`tests/_embedded.py`), which no
+# genuine test failure carries. `exit 125` removes that probe instead of blaming it.
+git bisect run sh -c 'out=$(uv run pytest <failing files> -q 2>&1); rc=$?; case "$out" in *"default pytest requires TORTOISE_DB_URI"*) exit 125;; esac; [ "$rc" -eq 0 ] && exit 0; [ "$rc" -eq 1 ] && exit 1; exit 125'
 BAD="$(git rev-parse refs/bisect/bad)" # ⛔ NOT `HEAD` — see below: `bisect run` leaves HEAD on the LAST
                                        # PROBE it tested. `refs/bisect/bad` is the ref git's own manual
                                        # names as the result, and it survives until `git bisect reset`,
@@ -701,15 +748,22 @@ git log --oneline -1                   # must name integration/batch-1's tip, ne
   BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
   B="/tmp/batch-$BATCH"
   [ -d "$B" ] || { echo "no ledger directory $B — Phase 0 creates it, per batch; absent means BATCH is unset or names another batch"; exit 1; }
-  [ -n "${TORTOISE_DB_URI:-}" ] || [ -n "${TORTOISE_TEST_CARVE_OUT:-}" ] || { echo "no lane in this shell — the Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly; an unexported run ERRORs every item and exits 1, which COMPLETED accepts"; exit 1; }
+  # ⛔ The GATE's lane predicate, not "the variable is set" (see Phase 1): a set-but-unsupported
+  # `bolt://` URI and a `TORTOISE_TEST_CARVE_OUT=0` both pass a plain `-n` test and then ERROR every
+  # collected item at setup, exiting 1 — which this fence's own COMPLETED predicate accepts.
+  uv run python -c 'import sys; from tests._embedded import _carve_out_opted_in as opted_in, _uri_set_supported as supported; sys.exit(0 if supported() or opted_in() else 1)' || { echo "no USABLE lane in this shell — the gate is not \"is the variable set\": tests/_embedded.py's _assert_p4_uri_required accepts only a SUPPORTED TORTOISE_DB_URI (docker/redis/rediss — tortoise/config.py's SUPPORTED_URI_SCHEMES) or a TRUTHY TORTOISE_TEST_CARVE_OUT (1/true/yes/on — tortoise/env_truthy.py), so a set-but-unsupported bolt:// and a =0 both PASS a plain -n test and then ERROR every collected item at setup, exiting 1 — a status COMPLETED accepts. The Phase 0 export does not cross a shell boundary: export it, re-derive it with eval \"\$(uv run python tools/test_lane.py uri)\", or opt into the carve-out explicitly"; exit 1; }
   # ⛔ CLEAR BOTH halves first: these are Phase 3's paths, so a stale report from the PRE-revert run
   # would be diffed as if it were this one.
   rm -f "$B/batch.rc" "$B/batch-junit.xml" "$B/batch-trackb.xml" "$B/batch.skipped-reasons" "$B/new-skip-reasons"
   rm -f "$B/batch-trackb.skipped-reasons" "$B/new-skip-reasons-trackb"
   ( uv run pytest tests/ -q --junitxml="$B/batch-junit.xml" -m 'not track_b and not live and not integration' --ignore=tests/e2e > "$B/batch.log" 2>&1; echo $? > "$B/batch.rc" ) &
-  for _ in $(seq 1 240); do [ -f "$B/batch.rc" ] && break; sleep 15; done
+  # ⛔ The SAME bound as Phase 3's, for the same reason (see there): 240 × 15 s = 60 min is UNDER the
+  # ≈153–196 min composition this command runs, so it halted every honest re-check instead of a wedge.
+  for _ in $(seq 1 360); do [ -f "$B/batch.rc" ] && break; sleep 60; done
   [ -f "$B/batch.rc" ] && echo 'RECHECK DONE — read $B/batch.rc' || echo RUNNING
-  [ -f "$B/batch.rc" ] || { echo "no $B/batch.rc after the bounded wait — the re-check did not finish within 60 min (read $B/batch.log for where it stopped), or this shell never launched it"; exit 1; }
+  # ...and the same refusal to re-run over a LIVE re-check: the wait's expiry is not the run's end.
+  [ -f "$B/batch.rc" ] || [ -n "$(find "$B/batch.log" -newermt '-10 minutes' 2>/dev/null)" ] || { echo "no $B/batch.rc after the 6 h bounded wait, and $B/batch.log has not been written in 10 min — the re-check either never launched in this shell or stopped without writing a status (read $B/batch.log)"; exit 1; }
+  [ -f "$B/batch.rc" ] || { echo "no $B/batch.rc after the 6 h bounded wait, but $B/batch.log was written in the last 10 min — the re-check is STILL LIVE and will write its status when it finishes: wait for that instead of re-running (a re-run clears the status of a suite that is still EXECUTING, and the two runs then share this ledger), and kill the suite FIRST if you are certain it is wedged"; exit 1; }
   RC="$(cat "$B/batch.rc")"
   [ "$RC" -eq 0 ] || [ "$RC" -eq 1 ] || { echo "the re-check run did not COMPLETE (rc=$RC; 137=SIGKILL/OOM) — UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
   [ -s "$B/baseline.total" ] || { echo "no $B/baseline.total — Phase 1 never recorded the baseline count; re-run Phase 1 (Landing route 1)"; exit 1; }
