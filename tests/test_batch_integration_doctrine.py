@@ -59,13 +59,14 @@ the leg names (``test-d14-hosted-api``, ``test-record-postgres``) whose omission
 would make the reproduced/not-reproduced list read as a complete partition.
 
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — 14 checks at this head: **12 of 14 red** at
-``a17576c43``, **9 of 14** at ``f3c6c803b``, **5 of 14** at ``a8be548762``, and
-**2 of 14** at ``295d6d385``. The five at ``a8be548762`` are exactly the findings
+revision rather than asserted — 15 checks at this head: **12 of 15 red** at
+``a17576c43``, **9 of 15** at ``f3c6c803b``, **6 of 15** at ``a8be548762``, and
+**3 of 15** at ``295d6d385``. The six at ``a8be548762`` are exactly the findings
 that head's review raised (the landing pin's ``--jq -r``, the baseline's missing
 ``-m track_b`` half, the missing clean-tree precondition, and the two gate test
-legs the URI lane skips) plus the batch fence's own re-runnable-spelling check;
-the two at ``295d6d385`` are the checks the post-record commits added, so they are
+legs the URI lane skips) plus the batch fence's own re-runnable-spelling and
+bisect-return checks;
+the three at ``295d6d385`` are the checks the post-record commits added, so they are
 non-vacuous rather than bookkeeping. The parser-sanity check is green on every
 revision by design: it guards against a re-pointed or deleted document, not
 against a bad command. The contract-sentences check is green from ``f3c6c803b``
@@ -97,12 +98,12 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **103 such mutants
-measured at this head: 0 survive**, and the honest document is 0 of 14 red.
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **109 such mutants
+measured at this head: 0 survive**, and the honest document is 0 of 15 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
 session closed when no lane is exported (`_p4_uri_required` → `_assert_p4_uri_required`). Running
-this file with a bare `pytest tests/test_batch_integration_doctrine.py` therefore reports 14 ERRORS
+this file with a bare `pytest tests/test_batch_integration_doctrine.py` therefore reports 15 ERRORS
 that have nothing to do with the doctrine. Name a lane:
 
     TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_integration_doctrine.py -q
@@ -345,6 +346,34 @@ def _is_refusal(fence: list[str], i: int) -> bool:
             return False
     return _ends_at_halt(
         _block(fence, i), allow=_allows_dirty_test, subject=_allows_dirty_test
+    )
+
+
+#: `--detach` / `-d`: HEAD ends on a COMMIT, not a branch. The document itself
+#: endorses that spelling for the Phase-1 pin create, which is exactly how an editor
+#: "harmonising" the Phase-4 return writes it — and then the revert commits detached.
+_DETACHES = re.compile(r"(?<!\S)(?:--detach(?:=\S*)?|-d)(?!\S)")
+_FORCE_CREATE = re.compile(r"(?<!\S)(?:-C|-B|-c|-b|--force-create)(?!\S)")
+
+
+def _lands_on_branch(code: str, branch: str) -> bool:
+    """Does HEAD end ON ``branch`` — a branch at its tip, not detached, not reset?
+
+    ``git switch --detach <branch>`` names the branch and moves HEAD off it;
+    ``git switch -C <branch>`` with no start point RESETS the branch to whatever the
+    bisect probe left checked out. Both keep every name-based check green, and both
+    make the revert commit somewhere other than the branch that lands.
+    """
+    code = _code(code)
+    code = re.sub(r"\|\|\s*(?:exit\s+[1-9]|\{[^}]*\})\s*$", "", code).strip()
+    if _DETACHES.search(code) or _FORCE_CREATE.search(code):
+        return False
+    if code.startswith("git bisect reset"):
+        rest = code[len("git bisect reset") :].split()
+        return not rest or rest[0] == branch
+    return (
+        re.fullmatch(rf"git\s+(?:switch|checkout)\s+{re.escape(branch)}\s*", code)
+        is not None
     )
 
 
@@ -778,15 +807,32 @@ def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
         if min(bisects) < i < min(reverts)
         and (_MOVES_HEAD.search(_code(c)) or _code(c).startswith("git bisect reset"))
     ]
-    wrong = [c for _, c in window if _code(c) != "git bisect reset" and batch_branch not in c]
+    # ...and the whole window is an ALLOWLIST, because `_MOVES_HEAD` names only
+    # switch/checkout: `git reset --hard main` as the "return" never entered the
+    # window, the `git bisect reset` above it satisfied the ordering assert, and the
+    # revert committed on `main`. Benign inspection and suite runs are allowed; every
+    # other command between the bisect and the revert must land HEAD ON the branch.
+    benign = re.compile(r"^(?:git\s+(?:log|bisect)\b|uv\s+run\s+pytest\b)")
+    stray = [
+        c
+        for i, c in enumerate(commands)
+        if min(bisects) < i < min(reverts)
+        and not (_lands_on_branch(c, batch_branch) or benign.match(_code(c)))
+    ]
+    assert not stray, (
+        "the only commands between the bisect and the revert may be benign "
+        "inspection, a suite run, or a return that lands HEAD ON "
+        f"{batch_branch}: {stray}"
+    )
+    wrong = [c for _, c in window if not _lands_on_branch(c, batch_branch)]
     assert not wrong, (
         "every HEAD-moving command between the bisect and the revert must land on "
         f"the branch Phase 2 creates ({batch_branch}); these do not, so the revert "
         f"commits onto another branch and the batch still carries the culprit: {wrong}"
     )
     assert window, "no return to the batch branch found — re-point this guard"
-    assert _code(window[-1][1]).startswith("git bisect reset") or _halts(
-        _code(window[-1][1])
+    assert _lands_on_branch(window[-1][1], batch_branch) and (
+        _code(window[-1][1]).startswith("git bisect reset") or _halts(_code(window[-1][1]))
     ), (
         "the LAST command that moves HEAD before the revert must stay on the batch "
         f"branch without being able to fail open: {window[-1][1]}"
