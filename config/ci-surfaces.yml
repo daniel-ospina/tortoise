@@ -909,6 +909,15 @@ surfaces:
   - test_epic903_hosted.py
   - test_epic903_mcp.py
   - test_export_delete.py
+  # #10180: the verb that MOVES the default graph — `POST /v1/graphs/{graph_id}/promote`
+  # plus every org-wide opener that has to follow it (`hosted_api._org_sdk`,
+  # `supabase_control.moved_default_namespace`, the quota gate, the capture receipt's
+  # `graph: {id, namespace}`). All three modules it drives — `tortoise/hosted_api.py`,
+  # `tortoise/supabase_control.py`, `tortoise/mcp_auth.py` — are EXACT `api`
+  # SOURCE_PATTERNS matches, so `api` is the surface that must run it; without this row
+  # a promote-only diff selected surfaces that did not include the pins, and the file
+  # reds `tools/ci_selection.py --integrity` as unclassified (manifest drift).
+  - test_10180_promote_default_graph.py
   - test_export_cli.py
   - test_export_pack_config.py
   - test_failure_contract.py
