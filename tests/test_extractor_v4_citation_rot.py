@@ -600,15 +600,49 @@ _SECTION_13_8 = ("### 13.8 What this does to our design", "## 14. Not establishe
 _SYMBOL_CITATION = re.compile(r"`([A-Za-z0-9_./-]+\.py)::([A-Za-z_][\w.]*)`")
 
 #: A stale `file.py:NNNN` line citation. §13.8 carries none.
-_LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.py:[0-9]+")
+#: ⚠️ `.md` is included (#10389 review P3-3): a line in a MARKDOWN table rots
+#: exactly like a line in a module — §9.1(b) cited the placement table's
+#: `story_arc` rows as `02-identity-and-placement.md:368`, a figure nothing
+#: re-derives and any edit above it invalidates. The `.py`-only pattern could not
+#: see the one citation shape the section was still carrying.
+_LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.(?:py|md):[0-9]+")
 
 
 def _symbol_span(path: Path, base: str) -> tuple[int, int] | None:
-    """The line span of `base`'s definition in `path`, or None if it is absent."""
+    """The line span of `base`'s BINDING in `path`, or None if it is absent.
+
+    A binding is a `def`/`class`, a module- or class-level ASSIGNMENT
+    (`ast.Assign` / `ast.AnnAssign`, including a tuple/list unpack), or a
+    `with … as` / `for` target. Assignments are the half this resolver was
+    missing (#10389 review P3-2): §9.1 cites the deny SETS this change is about
+    (`_SOURCE_SERVER_MANAGED_PROPS`, `_EVENT_SERVER_MANAGED_PROPS`, …), which are
+    frozenset literals, so the section used to fall back to a WORD-regex over the
+    module source — and `entities.py` names both of those symbols in its own
+    COMMENTS. Measured: renaming either left §9.1 citing a dead symbol with a
+    green guard, because a comment mention is not a binding. The fallback is
+    deleted rather than widened: a guard that accepts prose cannot tell a live
+    citation from a rotted one, which is the whole failure mode it exists for.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if getattr(node, "name", None) == base:
             return node.lineno, node.end_lineno or node.lineno
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.For, ast.AugAssign)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [i.optional_vars for i in node.items
+                       if i.optional_vars is not None]
+        else:
+            targets = []
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id == base:
+                return node.lineno, node.end_lineno or node.lineno
+            if isinstance(target, (ast.Tuple, ast.List)) and any(
+                    isinstance(e, ast.Name) and e.id == base
+                    for e in target.elts):
+                return node.lineno, node.end_lineno or node.lineno
     return None
 
 
@@ -710,11 +744,14 @@ def test_section_9_1_cites_symbols_not_lines_and_its_symbols_resolve():
     * every `` `module.py::symbol` `` resolves in that module at HEAD, so the
       symbol-keyed form cannot rot into a name that no longer exists.
 
-    ``_symbol_span`` only sees `def`/`class` nodes, and §9.1 cites module/class
-    CONSTANTS (`_SOURCE_EXTRA_PROPS`, `_SOURCE_SERVER_MANAGED_PROPS`) as well as
-    functions, so an assignment counts as resolving when the name is present as
-    a word — the contract the document-wide guard above already uses. The floor
-    stops the first arm going vacuous if the section's citation shape changes.
+    §9.1 cites module/class CONSTANTS (`_SOURCE_EXTRA_PROPS`,
+    `_SOURCE_SERVER_MANAGED_PROPS`) as well as functions, so `_symbol_span`
+    resolves ASSIGNMENT bindings too (#10389 review P3-2) — and the symbol arm
+    has NO prose fallback: a word-regex over the module source accepted a
+    COMMENT mention, and `entities.py` names the managed sets in its own
+    comments, so a rename left this section citing a dead symbol with a green
+    guard. The floor stops the symbol arm going vacuous if the section's
+    citation shape changes.
     """
     text = STORAGE.read_text(encoding="utf-8")
     heading = text.index(_SECTION_9_1)
@@ -754,10 +791,9 @@ def test_section_9_1_cites_symbols_not_lines_and_its_symbols_resolve():
             unresolved.append((doc_line, symbol, cited_file, "file not found"))
             continue
         base = re.sub(r"\(\)$", "", symbol).rsplit(".", 1)[-1]
-        source = path.read_text(encoding="utf-8")
-        if _symbol_span(path, base) is None and not re.search(
-            rf"\b{re.escape(base)}\b", source
-        ):
+        # NO word-regex fallback (#10389 review P3-2): a prose MENTION in a
+        # comment resolved a dead citation. `_symbol_span` knows assignments now.
+        if _symbol_span(path, base) is None:
             unresolved.append(
                 (doc_line, symbol, cited_file, "symbol does not resolve at HEAD")
             )
