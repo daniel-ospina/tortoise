@@ -96,10 +96,12 @@ USAGE
 ``--sync`` is the DERIVATION: it fetches upstream (HEAD, or ``--commit``),
 writes each served copy byte-for-byte, re-cuts
 `config/served-skills-upstream.yml`, and **re-cuts the derived
-`website/skills/<name>.skill` archives** for the skills it wrote (the archive is
-built from the served copy, so re-deriving the source invalidates it — see
-`tools/build_skill_archives.py`). Run it after editing a skill upstream, then
-commit the changed skills + the pin + the archives together.
+`website/skills/<name>.skill` archives** for every skill whose archive is stale
+under the root — not only the ones it wrote (the archive is built from the
+served copy, so re-deriving the source invalidates it, and a stale archive left
+by an earlier commit is the same defect — see `tools/build_skill_archives.py`).
+Run it after editing a skill upstream, then commit the changed skills + the pin
++ the archives together.
 
 ``--sync --commit <sha>`` is for pinning a specific upstream commit. It is not
 silently equivalent to HEAD: the currency arm compares the pinned bytes against
@@ -741,7 +743,7 @@ class SyncResult(NamedTuple):
     target: str
     previous: str
     at_head: bool | None  # None = could not be read (the note is still printed)
-    #: Derived `.skill` archives re-cut because this sync changed their source.
+    #: Derived `.skill` archives re-cut because this sync left them stale.
     archives: tuple[str, ...] = ()
 
 
@@ -758,10 +760,14 @@ def _rebuilt_archives(root: Path, names: list[str]) -> tuple[str, ...]:
     in derived artifact (Go's `go generate`: run before the build, never left to
     a second tool the operator has to know about).
 
-    Only the skills THIS sync wrote are rebuilt — the archives of untouched
-    skills are already a function of bytes that did not change, and rebuilding
-    them would report churn that did not happen (the archive is byte-stable via
-    `_FIXED_DATE`).
+    EVERY skill whose archive is stale under `root` is re-cut, not only the ones
+    this sync wrote — `sync()` passes `sorted(manifest["skills"])`, not the
+    `changed` list. A skill whose served bytes did not move can still carry a
+    stale archive left by an earlier commit, and that is precisely the state
+    this PR exists to repair, so `--sync` repairs it instead of enumerating what
+    it just wrote. The wider call reports no churn: `rebuild()` compares the
+    bytes before writing (they are byte-stable via `_FIXED_DATE`), so an archive
+    that is already current is neither rewritten nor reported.
 
     Best-effort by design: the archive builder is imported from `tools/`, and a
     checkout that cannot supply it must not make `--sync` fail AFTER it has
@@ -774,7 +780,7 @@ def _rebuilt_archives(root: Path, names: list[str]) -> tuple[str, ...]:
         return ()
     try:
         builder = _archive_builder()
-    except Exception:  # noqa: BLE001 — a missing builder must not fail the sync
+    except Exception:  # a missing builder must not fail the sync
         return ()
     if builder is None:
         return ()
@@ -857,10 +863,12 @@ def sync(root: Path, manifest_path: Path, commit: str | None = None,
     manifest["upstream"]["commit"] = target
     if not dry_run:
         manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
-    # The served copy is the archive's only source, so the archives of the
-    # skills this sync WROTE are stale as of the lines above and are re-cut here
-    # — in the same command, not in a second tool the operator has to know about
-    # (#10423). `--dry-run` wrote nothing, so it rebuilds nothing.
+    # The served copy is the archive's only source, so every archive that is
+    # stale under `root` is re-cut here — not only the ones whose served copy
+    # was rewritten above, because an archive left stale by an earlier commit is
+    # the same defect — in the same command, not in a second tool the operator
+    # has to know about (#10423). `--dry-run` wrote nothing, so it rebuilds
+    # nothing.
     archives = _rebuilt_archives(root, sorted(manifest["skills"])) if not dry_run else ()
     return SyncResult(changed=changed, target=target, previous=previous,
                       at_head=at_head, archives=archives)

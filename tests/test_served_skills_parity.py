@@ -591,6 +591,31 @@ def _sync_fixture(tmp_path, monkeypatch, head: str, upstream_bytes: dict[str, by
     return pin, manifest, root
 
 
+def _make_archive_stale(root, name: str,
+                        older: bytes = b"---\nname: older\n---\n# the OLDER served copy\n"):
+    """Leave `name`'s archive holding bytes cut from `older`, served copy intact.
+
+    The archive is a byte function of the served copy, so an archive that differs
+    from it can only come from a PREVIOUS source revision — the stale-derived-
+    artifact state `--sync` exists to repair (`f045ac953`, `cd7410b80`). It is
+    also the only state in which a rebuild is OBSERVABLE: rebuilding from an
+    already-matching source writes nothing (`build_skill_archives.rebuild`).
+    """
+    sys.path.insert(0, str(REPO))
+    from tools import build_skill_archives as bsa
+
+    served = bsa.source_path(name, root)
+    current = served.read_bytes()
+    served.write_bytes(older)
+    try:
+        stale = bsa.build(name, root)
+    finally:
+        served.write_bytes(current)
+    archive = bsa.archive_path(name, root)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(stale)
+
+
 def test_4643_sync_re_cuts_the_derived_skill_archives_it_invalidates(monkeypatch, tmp_path):
     """`--sync` must leave a tree that passes EVERY gate its own bytes feed.
 
@@ -641,6 +666,46 @@ def test_4643_sync_re_cuts_the_derived_skill_archives_it_invalidates(monkeypatch
     assert bsa.rebuild(root) == [], "sync output must leave no stale archive"
 
 
+def test_4643_sync_re_cuts_a_stale_archive_whose_served_copy_it_did_not_write(
+        monkeypatch, tmp_path):
+    """The write surface is "every stale archive under `root`", not "what I wrote".
+
+    Review finding F3: the code hands `_rebuilt_archives` every skill in the
+    manifest, while the docstring/field/usage prose said "the skills it wrote".
+    The wider behaviour is the one this PR wants (`--sync` leaves a tree that
+    passes every gate, including an archive left stale by an earlier commit), so
+    the prose was corrected and the behaviour is pinned here.
+
+    The discriminating half: this sync writes NOTHING (`result.changed` is
+    empty, the served copies already equal upstream), so a narrowing to the
+    `changed` names — the other way to reconcile code and prose, explicitly
+    considered — would leave `result.archives` empty and red this test.
+    """
+    sys.path.insert(0, str(REPO))
+    from tools import build_skill_archives as bsa
+
+    current = b"---\nname: mid\n---\n# upstream\n"
+    pin, manifest, root = _sync_fixture(
+        tmp_path, monkeypatch, "e" * 40,
+        {e["upstream_path"]: current
+         for e in sp.load_manifest(REPO / sp.MANIFEST_REL)["skills"].values()})
+    for entry in manifest["skills"].values():
+        served = root / entry["served_path"]
+        served.parent.mkdir(parents=True, exist_ok=True)
+        served.write_bytes(current)
+    for name in bsa.SKILL_NAMES:
+        _make_archive_stale(root, name)
+
+    result = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert result.changed == [], (
+        f"fixture: the served copies are current, so this sync writes nothing: {result.changed!r}")
+    assert sorted(result.archives) == sorted(bsa.SKILL_NAMES), (
+        "a stale archive is re-cut even when its own served copy was not written; "
+        f"rebuilt {result.archives!r}")
+    assert bsa.rebuild(root) == [], "sync left a stale archive behind"
+
+
 def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
     """`--dry-run` wrote nothing, so it re-cuts nothing — including archives.
 
@@ -680,14 +745,7 @@ def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
         served.write_bytes(b"---\nname: served\n---\n# the CURRENT served copy\n")
     # (2) every archive is stale against its served copy: cut from OLDER bytes.
     for name in bsa.SKILL_NAMES:
-        served = bsa.source_path(name, root)
-        current = served.read_bytes()
-        served.write_bytes(b"---\nname: older\n---\n# the EVEN OLDER served copy\n")
-        stale = bsa.build(name, root)
-        served.write_bytes(current)
-        archive = bsa.archive_path(name, root)
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        archive.write_bytes(stale)
+        _make_archive_stale(root, name)
     before = {n: bsa.archive_path(n, root).read_bytes() for n in bsa.SKILL_NAMES}
 
     result = sp.sync(root, pin, attempts=1, backoff=0, dry_run=True)
