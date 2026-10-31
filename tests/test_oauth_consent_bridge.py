@@ -2976,6 +2976,37 @@ _ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
     ".github/scripts/fly-managed-secrets.txt",        # CONSENT_TOKEN_SECRET's DEDICATED note
 )
 
+#: ⛔ THE ONE HOME THAT CANNOT BE CORRECTED WHERE IT SITS — and why this exemption is per-FILE and
+#: per-NEEDLE rather than a blanket "applied migrations are exempt".
+#:
+#: `supabase/migrations/**` is APPEND-ONLY (#1095; the #1001 P0 is the reason). `86f519df3`
+#: corrected the false premise by editing this applied migration's `--` comment block, and the
+#: `migration-append-only` REQUIRED check failed on it exactly as it would have on a DDL edit: the
+#: rule keys on git STATUS, and an M/T/D of a base-tree migration is NEVER exempt (#2240 scope
+#: (a)+(c) — a comment edit carries no destination version to bound). MEASURED on this branch:
+#: `bash .github/scripts/check-migration-append-only diff` → `M<TAB>…/20261030000001_….sql`, exit 1.
+#:
+#: So the file is restored byte-identical to `origin/main`'s blob and the correction lives where a
+#: reader looks — `docs/engineering/auth/consent-identity-bridge.md` §2.3/§8/§10 — while this
+#: record keeps the HOME visible: the file stays in `_ANON_KEY_PREMISE_CORPUS` above, and the exact
+#: sentence it carries is pinned here. Tolerating the recorded sentence is the honest position;
+#: DROPPING the file from the corpus would have reported the tree clean by not looking, which is
+#: the false PASS this whole gate exists to prevent.
+#:
+#: ⛔ Both halves are asserted in
+#: `test_the_immutable_migration_exemption_tolerates_only_the_RECORDED_premise`: a claim that is
+#: NOT recorded reds even in an exempt file (so append-only cannot be used to smuggle a second
+#: claim past this gate), every exempt path must be a file the append-only gate actually covers,
+#: and the sibling pgTAP suite — which is NOT append-only and WAS fixable — must carry no premise
+#: at all.
+#: The applied migration that froze the pre-correction sentence (see the exemption below), and
+#: the file whose real `--`-wrapped shape the leader arm in the corpus test is anchored on.
+_IMMUTABLE_MIGRATION_SAMPLE = "supabase/migrations/20261030000001_oauth_consent_tickets.sql"
+
+_RECORDED_IMMUTABLE_MIGRATION_PREMISES: dict[str, tuple[str, ...]] = {
+    _IMMUTABLE_MIGRATION_SAMPLE: ("the consent page embeds it",),
+}
+
 
 #: A line-leading comment leader in ANY language this corpus holds: SQL `--`, JS `//`, Python
 #: `#`, C-style `*` continuation. ⛔ This is load-bearing, not cosmetic. The corpus now includes
@@ -3003,6 +3034,33 @@ def _false_anon_key_claims(text: str) -> list[str]:
     return [why for needle, why in _FALSE_ANON_KEY_BROWSER_CLAIMS if _flatten(needle) in flat]
 
 
+def _false_anon_key_needles(text: str) -> list[str]:
+    """Which denylisted NEEDLES this text carries (empty == clean) — the record's own key form.
+
+    `_false_anon_key_claims` answers "why this is false"; the immutable-home record is written in
+    needles, so the exemption and the thing it tolerates are compared in one vocabulary.
+    """
+    flat = _flatten(text)
+    return [needle for needle, _why in _FALSE_ANON_KEY_BROWSER_CLAIMS if _flatten(needle) in flat]
+
+
+def _unrecorded_anon_key_claims(rel: str, text: str) -> list[str]:
+    """The false premises in `text` that are NOT recorded against an immutable home.
+
+    `rel` decides the record, not the caller: the sentence an APPLIED migration is known to carry
+    (`_RECORDED_IMMUTABLE_MIGRATION_PREMISES`, frozen there by append-only) is tolerated in THAT
+    file and nowhere else, so the exemption can never be borrowed by a home that could still be
+    corrected — and any claim beyond the recorded one still reds, in the exempt file too.
+    """
+    tolerated = _RECORDED_IMMUTABLE_MIGRATION_PREMISES.get(rel, ())
+    flat = _flatten(text)
+    return [
+        why
+        for needle, why in _FALSE_ANON_KEY_BROWSER_CLAIMS
+        if needle not in tolerated and _flatten(needle) in flat
+    ]
+
+
 def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
     """⛔ A claim that contradicts #4054/#4178 must not survive in any of the twelve homes.
 
@@ -3025,9 +3083,9 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
         "files, so a clean result below would prove nothing")
 
     for rel, text in corpus.items():
-        assert not _false_anon_key_claims(text), (
+        assert not _unrecorded_anon_key_claims(rel, text), (
             f"{rel} still claims the anon key is public BECAUSE this app ships it to browsers:\n  "
-            + "\n  ".join(_false_anon_key_claims(text))
+            + "\n  ".join(_unrecorded_anon_key_claims(rel, text))
             + "\n⛔ #4054 removed the dashboard's UMD bundle and #4178 keeps "
               "`VITE_SUPABASE_ANON_KEY` non-load-bearing precisely so no browser receives it. "
               "State the real mechanism instead (Supabase designs the key for browser exposure "
@@ -3056,7 +3114,10 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
     # leaves the leader in place turns that into `embeds -- it` and never matches, so without this
     # arm the two `.sql` homes are in the corpus and still unscanned — a false PASS on the exact
     # claim the gate names (measured on `8ed208244`, both files, both reported clean).
-    sample_sql = corpus["supabase/migrations/20261030000001_oauth_consent_tickets.sql"]
+    # Read from the tree rather than from `corpus`: the migration is the file whose real shape this
+    # arm is about, and it is the one corpus entry the append-only restoration leaves carrying the
+    # sentence — so it must not be dropped from the arm along with its exemption.
+    sample_sql = (REPO / _IMMUTABLE_MIGRATION_SAMPLE).read_text(encoding="utf-8")
     for needle, _why in _FALSE_ANON_KEY_BROWSER_CLAIMS:
         words = needle.split()
         half = len(words) // 2
@@ -3083,6 +3144,75 @@ def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
     assert "refuse a collision" in bindings, (
         "config/required-bindings.yml — the canonical wording this PR points every other home "
         "at — no longer states that the API reads the key to REFUSE a collision")
+
+
+def test_the_immutable_migration_exemption_tolerates_only_the_RECORDED_premise():
+    """The append-only home is tolerated for the ONE sentence it is recorded as carrying.
+
+    Without this test the exemption would be indistinguishable from a hole: a blanket "applied
+    migrations are exempt" would let the next documentation sweep leave the same false premise in
+    a NEW migration (which IS editable — it is this PR's own `A`), and prompt any future lane to
+    drop a home from the corpus instead of correcting it. So the record is asserted three ways:
+
+      1. **narrow** — every exempt path is a file the append-only gate actually covers
+         (`supabase/migrations/`), so the mechanism cannot be reused for a doc that could still be
+         fixed;
+      2. **exactly the recorded needles** — the exempt file carries the recorded sentence and NO
+         other denylisted claim, so the record cannot quietly widen;
+      3. **still biting** — an ADDITIONAL claim injected into that same file is REPORTED, which is
+         what proves the tolerance is per-needle rather than per-file; and the sibling pgTAP
+         suite, which is not append-only and therefore WAS correctable, must carry none at all.
+    """
+    assert _RECORDED_IMMUTABLE_MIGRATION_PREMISES, (
+        "the immutable-home record is empty, so nothing explains why an applied migration is "
+        "allowed to carry a denylisted claim")
+    for rel in _RECORDED_IMMUTABLE_MIGRATION_PREMISES:
+        assert rel.startswith("supabase/migrations/"), (
+            f"{rel} is recorded as an immutable home but is NOT under `supabase/migrations/`, so "
+            "the append-only rule does not make it unfixable — correct the file instead")
+        assert rel in _ANON_KEY_PREMISE_CORPUS, (
+            f"{rel} is tolerated for a denylisted claim but is absent from "
+            "`_ANON_KEY_PREMISE_CORPUS`, so nothing records it as a home of the premise — a "
+            "dropped home is exactly the false PASS this gate exists to prevent")
+
+    source = (REPO / _IMMUTABLE_MIGRATION_SAMPLE).read_text(encoding="utf-8")
+    assert _false_anon_key_needles(source) == list(
+        _RECORDED_IMMUTABLE_MIGRATION_PREMISES[_IMMUTABLE_MIGRATION_SAMPLE]
+    ), (
+        "the applied migration's denylisted claims no longer match the recorded set ("
+        f"{_false_anon_key_needles(source)!r}) — the exemption is recorded for exactly "
+        f"{_RECORDED_IMMUTABLE_MIGRATION_PREMISES[_IMMUTABLE_MIGRATION_SAMPLE]!r}; if main's "
+        "blob changed, append-only was violated, and if a claim was ADDED the record must not be "
+        "widened to cover it")
+
+    # (3) the tolerance is per-NEEDLE: a second, unrecorded claim in the SAME file still reds.
+    extra = next(
+        needle
+        for needle, _why in _FALSE_ANON_KEY_BROWSER_CLAIMS
+        if needle not in _RECORDED_IMMUTABLE_MIGRATION_PREMISES[_IMMUTABLE_MIGRATION_SAMPLE]
+    )
+    assert _unrecorded_anon_key_claims(
+        _IMMUTABLE_MIGRATION_SAMPLE,
+        source + f"\n-- the anon key is public: it {extra}, so reuse cannot matter.\n",
+    ), (
+        f"an unrecorded claim ({extra!r}) added to the exempt migration was NOT reported — the "
+        "exemption is then per-FILE, and append-only becomes a licence to ship new false "
+        "premises in the one tree this gate cannot read back")
+
+    # …and it cannot be borrowed: the SAME sentence in a file that could still be corrected reds.
+    assert _unrecorded_anon_key_claims(
+        "docs/auth-architecture.md", source
+    ), "the recorded tolerance leaked to another home — it must apply to the recorded path only"
+
+    # …and the sibling pgTAP suite is NOT append-only, so it had to be CORRECTED, not tolerated.
+    sibling = (REPO / "supabase/tests/20261030000001_oauth_consent_tickets.sql").read_text(
+        encoding="utf-8"
+    )
+    assert not _false_anon_key_needles(sibling), (
+        "the pgTAP suite beside the migration still carries a denylisted claim "
+        f"({_false_anon_key_needles(sibling)!r}) — it is NOT under `supabase/migrations/`, so "
+        "append-only does not reach it and the sentence must be corrected in place"
+    )
 
 
 #: Every tracked file that is either binary or absent from the tree is counted, not dropped, so a
@@ -3154,7 +3284,7 @@ def _claims_beyond_the_corpus(population: dict[str, str]) -> dict[str, list[str]
     for rel, text in population.items():
         if rel in _ANON_KEY_PREMISE_CORPUS:
             continue  # scanned by the corpus test above, which owns its own reporting
-        why = _false_anon_key_claims(text.split(_PREMISE_GATE_MARKER)[0])
+        why = _unrecorded_anon_key_claims(rel, text.split(_PREMISE_GATE_MARKER)[0])
         if why:
             found[rel] = why
     return found

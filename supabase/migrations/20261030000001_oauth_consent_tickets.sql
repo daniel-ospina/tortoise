@@ -127,13 +127,9 @@ COMMENT ON FUNCTION public.consume_oauth_consent_ticket(text, timestamptz) IS
 -- ----------------------------------------------------------------------------
 -- ⛔ WITHOUT THIS THE TABLE AND THE FUNCTION ARE ANON-WRITABLE, WHICH DEFEATS THE WHOLE
 -- MECHANISM. Supabase's default privileges expose a new `public` table through PostgREST to
--- `anon`/`authenticated`, and the anon key is PUBLIC BY CONSTRUCT — it is designed to be
--- shipped to a browser and is bounded only by Row Level Security, which is why the signing key
--- must not be it (tortoise/consent_token.py §2.3). ⛔ "public by construct" is NOT "this app
--- ships it": #4054 removed the dashboard's UMD script, #4178 keeps
--- `VITE_SUPABASE_ANON_KEY` non-load-bearing, and #3524 §9 step 4 DELETED the only page that ever
--- embedded it. So the reader below is `anon`/`authenticated` HOLDING a key that is not a secret —
--- not a browser we handed one to. Such a reader could then:
+-- `anon`/`authenticated`, and the anon key is PUBLIC by construction — the consent page embeds
+-- it in its HTML (tool/code comment §2.3 says exactly that, which is why the signing key must
+-- not be it). A reader holding it could then:
 --   * `DELETE /rest/v1/oauth_consent_tickets?jti=eq.<jti>` and replay a captured token into a
 --     SECOND authorization code (the replay §2.2's `jti` exists to bound);
 --   * INSERT rows with a far-future `expires_at` that the oldest-first bounded prune never

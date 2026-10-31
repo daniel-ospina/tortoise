@@ -520,6 +520,20 @@ and qualified here, where the rule is read. Nothing reverses the decision that s
   posture. The only residual is a typed `503 temporarily_unavailable` when the register cannot answer —
   never a silent fall-through to per-process state, because the store is installed unconditionally.
 
+> **⚠ The applied migration's RLS justification still carries its PRE-correction wording.** It is
+> `supabase/migrations/20261030000001_oauth_consent_tickets.sql`, which is already merged, so the
+> comment block explaining why the signing key must not be the anon key predates the correction of the
+> premise stated above. Migrations are APPEND-ONLY (#1095; the #1001 P0 is the reason): an edit to an
+> applied one — even a `--` comment, which carries no destination version to bound — is rejected by the
+> `migration-append-only` required check exactly like a DDL edit, so THAT wording cannot be corrected
+> where it sits. The file was therefore restored byte-identical to `origin/main`, and the correction is
+> carried in the three places a reader can act on: this §2.3/§9 text,
+> `supabase/tests/20261030000001_oauth_consent_tickets.sql` (a pgTAP suite, NOT a migration — it was
+> editable, and it is corrected), and
+> `tests/test_oauth_consent_bridge.py::test_the_immutable_migration_exemption_tolerates_only_the_RECORDED_premise`,
+> which pins the frozen wording as the ONLY tolerated claim in that file (a second claim added there
+> still reds) and asserts the recorded home never leaves `_ANON_KEY_PREMISE_CORPUS`.
+
 Two properties of the arm that a later step must be written against, because they are limits of the
 contract rather than of the implementation:
 
