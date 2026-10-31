@@ -2460,12 +2460,19 @@ def _relation_delete_statement(
 # E2E-11.6 no-self-edge contract).
 
 #: rel → the label of the STRUCTURAL target, restated from
-#: `projection/edges.py::STRUCTURAL_REL_LABELS`. ⛔ The label is derived from the
-#: REL and never read off the descriptor's `target_label`: that is what the graph
-#: does (`STRUCTURAL_REL_LABELS[etype]` — the journal fold IGNORES the field), and
-#: a `target_label` that disagreed with the rel would otherwise file the row
-#: under a label the fold never resolved. The map is also the ROUTER: membership
-#: is what distinguishes a 2b structural descriptor from a 2a direct one.
+#: `projection/edges.py::STRUCTURAL_REL_LABELS`. ⛔ For THIS family the label is
+#: derived from the REL and never read off the descriptor's `target_label`: that is
+#: what the graph does (`STRUCTURAL_REL_LABELS[etype]` — the journal fold IGNORES
+#: the field for these rels), and a `target_label` that disagreed with the rel
+#: would otherwise file the row under a label the fold never resolved. ⚠️ The
+#: ID-ADDRESSED family (#9836, `_ID_ADDRESSED_STRUCTURAL_RELS`) is the opposite
+#: case and reads the descriptor's label: its rels fix no label (see that
+#: constant).
+#:
+#: The map is a ROUTER: membership is what distinguishes a 2b KEY-ADDRESSED
+#: structural descriptor from a 2a direct one — and, together with the
+#: id-addressed set below, from the ID-ADDRESSED family, which is also a MOVE and
+#: routes through the same statements.
 #:
 #: Restated rather than imported for the STANDALONE reason every other constant
 #: in this block is (the PGlite harness `spec_from_file_location`s this module,
@@ -2479,6 +2486,46 @@ _STRUCTURAL_REL_LABELS: dict[str, str] = {
     "aboutPoint": "Point",
     "aboutDocument": "Source",
     "extractedFrom": "Source",
+}
+
+#: The structural repoint rels whose target is addressed by the descriptor's
+#: OWN label rather than by a label derived from the rel (#9836), and HOW each
+#: label is addressed: the node's own IDENTITY property — `id` for
+#: Point/Subject/Object, `eventId` for an `Event` (the meeting guard's SUFFIX
+#: branch keeps `id = <candidate>`, so two distinct Events can share one `id`;
+#: `eventId` is what this route files an Event under, `public.event.node_key =
+#: event_id`), `url` for a `:Source`. Restated from
+#: `projection/edges.py::ID_ADDRESSED_STRUCTURAL_RELS` /
+#: `ID_ADDRESSED_TARGET_ADDRESSING` for the STANDALONE reason every other constant
+#: in this block is (the PGlite harness `spec_from_file_location`s this module, so
+#: a package-relative import raises there) and pinned to the fold's own constant —
+#: both directions — by `tests/test_9836_id_addressed_repoint.py`.
+#:
+#: ⛔ WHY THESE ARE NOT ROWS OF `_STRUCTURAL_REL_LABELS`. That map is
+#: `rel -> ONE label` and is ALSO the router. Neither property holds: a Point has
+#: no `name` (so the Point arm below cannot resolve one) and `wasDerivedFrom`'s
+#: target label is not a function of the rel (ONTOLOGY §3.2 says Object->Object;
+#: its writers type-check nothing). So the label travels on the DESCRIPTOR
+#: (`target_label`, which the live emitter fills with the label it observed) and
+#: is validated against this map before it reaches SQL.
+#:
+#: ⛔ `Source` IS A MEMBER, keyed by `url` (#9836 review P1). It is NOT an
+#: epistemic label and it is deliberately not in
+#: :data:`RECORD_ADDRESSABLE_EDGE_LABELS` — that set answers a DIFFERENT question
+#: (which labels pass-2b's `DirectEdgeCreated` sweep can probe by `id`) — but a
+#: `:Source` IS addressable on this route: `public.source.node_key` is its `url`
+#: (`chk_source_node_key_is_contract_key`), which is exactly the property the
+#: graph's replay arm matches. Reading the id sweep's boundary as this family's
+#: boundary is what made the earlier revision decline the descriptor and leave
+#: the row behind while live moved the edge.
+_ID_ADDRESSED_STRUCTURAL_RELS: frozenset[str] = frozenset(
+    {"aboutAction", "wasDerivedFrom"})
+_ID_ADDRESSED_TARGET_ADDRESSING: dict[str, str] = {
+    "Point": "id",
+    "Subject": "id",
+    "Object": "id",
+    "Event": "eventId",
+    "Source": "url",
 }
 
 #: The five EDGE attributes a structural `DirectEdgeRepoint` carries, restated
@@ -2593,7 +2640,8 @@ def _supersede_chain_cte(org_id: str, graph_id: str,
 
 def _structural_target_resolution(org_id: str, graph_id: str, label: str,
                                  rel: str, key: str,
-                                 alias: str) -> tuple[str, list[Any]]:
+                                 alias: str,
+                                 by_id: bool = False) -> tuple[str, list[Any]]:
     """`projection/edges.py::resolve_structural_target` as a scalar subquery.
 
     The four name-keyed labels resolve by **`name`** — never by `id`, which is
@@ -2603,6 +2651,16 @@ def _structural_target_resolution(org_id: str, graph_id: str, label: str,
     the non-folded entry and skips the descriptor); a name that does not name ONE
     identity has no target, and `LIMIT 1` would let the record land an edge on a
     different carrier than the graph did.
+
+    ⛔ `by_id=True` (#9836) is the OTHER addressing, and it is not a fifth arm of
+    the map below: for the ID-ADDRESSED family (`wasDerivedFrom`/`aboutAction`)
+    the rel fixes no label, so the label arrives on the DESCRIPTOR and the key is
+    either the node's OWN `id` — the resolution is then `_endpoint_resolution`,
+    the same one every other edge endpoint in this module uses — or, for a
+    `:Source` target, its `url` (matched on `node_key` alone: a Source's
+    `node_key` IS its url, and the `id` disjunct of the Source's default match
+    would let one Source's `id` resolve to a different Source's url row). The arms
+    below are the NAME/url-by-REL family and stay untouched.
 
     Per label (each verified against the fold's own arm):
 
@@ -2641,6 +2699,51 @@ def _structural_target_resolution(org_id: str, graph_id: str, label: str,
             order_by="node_key",
             prefer=("canonical_url", canonical),
         )
+    if by_id:
+        # ⛔ #9836 — the ID-ADDRESSED arm, and it is deliberately NOT a new rule.
+        #
+        # For an EPISTEMIC label it delegates to `_endpoint_resolution`, the
+        # resolution EVERY other edge endpoint in this module uses (the
+        # `DirectEdgeCreated` arm and both legs of the 2a-DIRECT descriptor).
+        # `relation.src_key`/`tgt_key` are composite FKs into `node_identity`, so
+        # the endpoint must be filed by the label's CANONICAL key —
+        # `Point`/`Session`/`Event` → `node_key`, `Object`/`Subject` → `id`
+        # (`_ENTITY_MATCH_COLUMNS`) — and that is exactly what this call produces,
+        # from the record's own rows, without minting.
+        #
+        # ⛔ A `:Source` target is matched on `node_key` ALONE (`#9836` review P1):
+        # a Source's identity IS its `url` and `node_key` IS that url, while the
+        # Source's default match ALSO carries an `id` disjunct (`_ENTITY_MATCH_
+        # COLUMNS`) — a descriptor whose key is a url must not be allowed to
+        # resolve onto some Source's `id`. The graph's twin arm
+        # (`resolve_structural_target(by_url=True)`) is the same exact match, so one
+        # descriptor cannot land two different rows.
+        #
+        # ⛔ THE GRAPH RESOLVES IT THE SAME WAY and that is the whole point: pass-2b
+        # (#9836) matches `(x:{label} {id:$id})` — or `{url:$url}` for a Source —
+        # the id-addressed twin of this match, so one descriptor cannot land on two
+        # different nodes/rows.
+        # ⛔ #5509's refusal (a NAME held by 2+ carriers resolves to NOTHING, never
+        # to an arbitrary pick) has no analogue for the `id`/`url` arms and none is
+        # invented: both are primary identity keys rather than mutable natural
+        # keys, and the schema's own `node_identity` uniqueness makes the
+        # label-keyed lookup single-valued. That is the reason the two families
+        # cannot share one resolver, not an omission.
+        #
+        # A label outside the addressable set is a REFUSAL, not a fallback: the
+        # caller validates it too, so reaching this line with one means the
+        # descriptor vocabulary changed without this arm following it.
+        scheme = _ID_ADDRESSED_TARGET_ADDRESSING.get(label)
+        if scheme is None:
+            raise RecordProjectionError(
+                f"id-addressed structural edge {rel!r} names target label "
+                f"{label!r}, which is not an addressable target label "
+                f"({sorted(_ID_ADDRESSED_TARGET_ADDRESSING)})"
+            )
+        if scheme == "url":
+            return _endpoint_resolution(org_id, graph_id, label, key, alias,
+                                        match=("node_key",))
+        return _endpoint_resolution(org_id, graph_id, label, key, alias)
     table = _LABEL_TABLES.get(label)
     if table is None:
         raise RecordProjectionError(
@@ -2678,8 +2781,20 @@ def _structural_repoint_statements(
     """The MOVE a 2b structural `DirectEdgeRepoint` describes (#9972/#9973).
 
     Returns `None` for every other shape — a 2a direct descriptor, a malformed
-    one, or a `delete_only` guard — so those keep the existing path byte for byte
+    one, a `delete_only` guard — so those keep the existing path byte for byte
     (a 2a `src` is ALREADY the successor and an upsert `DELETE`s nothing).
+
+    Returns `[]` — this shape, and NO mutation — for an ID-ADDRESSED descriptor
+    (`#9836`) whose `target_label` is not an addressable label. ⛔ An EMPTY LIST,
+    not `None`: `None` sends the descriptor back to the plain-upsert fall-through
+    in `_declared_mutations`, which has no superseded-endpoint gate — it would
+    write a relation row AT the retired point (or raise, for a label the record
+    cannot address) while the graph leg `continue`s. That is the
+    `live != record-rebuild` divergence this family exists to close, one shape
+    over. `[]` is the record's half of the graph's SKIP: a descriptor neither
+    route can address moves NOTHING and deletes NOTHING, and the plain-upsert
+    path is NOT that no-op (unreachable from a live producer either way — the
+    producer only emits a label `id_addressed_target` resolved).
 
     Two statements, in this order, and both gated on the SAME condition: the
     descriptor has an effect only when `src` is (a) TERMINAL and (b) has a
@@ -2768,9 +2883,42 @@ def _structural_repoint_statements(
     `test_a_cycle_with_a_descriptor_per_hop_loses_the_edge_at_rebuild`.
     """
     etype = record.get("edge_type")
-    label = _STRUCTURAL_REL_LABELS.get(etype) if isinstance(etype, str) else None
-    if label is None:
-        return None
+    # TWO routes, ONE mutation (#9836). The router is the REL SET, and the two
+    # families differ in exactly one thing: HOW the target is addressed.
+    #
+    #   * the snapshot-derivable family (`_STRUCTURAL_REL_LABELS`) addresses it by
+    #     the label's NATURAL replay key — the label is a function of the rel;
+    #   * the id-addressed family (`wasDerivedFrom`/`aboutAction`) addresses it by
+    #     the node's OWN `id`, and the label is whatever the DESCRIPTOR observed
+    #     live. It is read off the record and validated against the addressable
+    #     set before it reaches SQL — the same allowlist discipline the graph's
+    #     replay leg applies, so a forged or stale label can never interpolate
+    #     into a query it was not checked against.
+    #
+    # ⛔ `None` (not this shape) keeps every other descriptor on the existing path
+    # byte for byte: a 2a direct descriptor (`src` is already the successor), a
+    # `delete_only` guard (handled by its own arm) and a malformed record.
+    by_id = isinstance(etype, str) and etype in _ID_ADDRESSED_STRUCTURAL_RELS
+    if by_id:
+        label = record.get("target_label")
+        if (not isinstance(label, str)
+                or label not in _ID_ADDRESSED_TARGET_ADDRESSING):
+            # A descriptor whose label cannot be addressed moves NOTHING and
+            # deletes NOTHING — never a partial move (the DELETE without the
+            # INSERT is the measured defect the atomic `moved` gate exists to
+            # prevent, one line below). The graph leg SKIPS the same descriptor
+            # (`continue`), so the two routes agree on the miss — and `[]` is
+            # how this layer says SKIP: returning `None` would fall through to
+            # `_relation_upsert_statement`, whose plain upsert has no
+            # superseded-endpoint gate and therefore writes a row at the RETIRED
+            # point (or raises `RecordProjectionError` for a label outside the
+            # node vocabulary) where the graph holds nothing.
+            return []
+    else:
+        label = (_STRUCTURAL_REL_LABELS.get(etype)
+                 if isinstance(etype, str) else None)
+        if label is None:
+            return None
     src, tgt = record.get("src"), record.get("tgt")
     if not (isinstance(src, str) and src and isinstance(tgt, str) and tgt):
         return None  # malformed: the existing path raises the same refusal
@@ -2781,9 +2929,9 @@ def _structural_repoint_statements(
     # bare SCALAR subquery, the INSERT joins the aliased one as a FROM item. One
     # rule, one helper — the alias is the only difference, so neither can drift.
     tgt_scalar, tgt_scalar_params = _structural_target_resolution(
-        org_id, graph_id, label, rel_type, tgt, "")
+        org_id, graph_id, label, rel_type, tgt, "", by_id=by_id)
     tgt_select, tgt_params = _structural_target_resolution(
-        org_id, graph_id, label, rel_type, tgt, "tgt")
+        org_id, graph_id, label, rel_type, tgt, "tgt", by_id=by_id)
     # The move exists only for a TERMINAL src with a surviving successor AND a
     # reachable DESTINATION — the DIRECT successor's own row (`depth = 2`). The
     # third conjunct is what makes the pair atomic: a successor whose `point` row
@@ -4125,7 +4273,12 @@ def _declared_mutations(
             # target by its replay key, remove the row at the superseded point,
             # and re-create it at the DIRECT successor live named. `None` = not that shape (the 2a
             # direct descriptor, whose `src` is already the successor), and it
-            # keeps the plain upsert below byte for byte.
+            # keeps the plain upsert below byte for byte. `[]` = the ID-ADDRESSED
+            # family's SKIP (a descriptor whose target label neither route can
+            # address): the graph leg `continue`s on the same record, so the
+            # record must write nothing — the upsert below is NOT that no-op
+            # (it has no superseded-endpoint gate), which is why the skip is
+            # returned here rather than as `None`.
             moved = _structural_repoint_statements(
                 org_id, graph_id, record, columns, refused)
             if moved is not None:

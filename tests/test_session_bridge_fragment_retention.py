@@ -39,8 +39,9 @@ fragment-consumer map.
 
 KEEPING ``_require_node``
 -------------------------
-``tests/test_oauth_consent_pkce.py`` imports ``_require_node`` from this module
-for its own node harness. It stays here, and MUST keep failing (never skipping)
+``tests/test_oauth_consent_bff_routes.py`` and
+``tests/test_oauth_consent_page_step4.py`` import ``_require_node`` from this module
+for their own node harnesses. It stays here, and MUST keep failing (never skipping)
 when node is absent — a skipped harness is a no-op gate.
 """
 
@@ -150,21 +151,31 @@ def test_no_browser_surface_writes_a_session_to_a_js_readable_store() -> None:
 
 
 def test_one_fragment_consumer_per_page() -> None:
-    """#3503 P1: exactly one surface ingests the OAuth fragment.
+    """#3503 P1, in its post-#3524-step-4 form: NO surface ingests the fragment.
 
-    The consent page builds its own inline client with ``detectSessionInUrl:
-    true`` and loads no bridge; every other surface builds no client, or
-    explicitly opts out (the BFF-backed console). With the bridge deleted there
-    is no second consumer to clear the hash before a save.
+    Until step 4 the consent page was the ONE consumer — it built an inline
+    client with ``detectSessionInUrl: true`` and loaded no bridge. Step 4 deleted
+    that client (§7's deletion set), so the count is now zero and the property
+    the guard protects is stronger: no page constructs a supabase-js client at
+    all, so a fragment cannot be ingested anywhere, and the #3503 hazard (a
+    second consumer clearing the hash before a save) has no carrier left.
+
+    ⛔ The assertion has therefore INVERTED. It is not "the file moved": the
+    consent page has no auth client, and a `detectSessionInUrl` reappearing in it
+    would mean the inline client — and the second identity system — is back.
     """
     oauth = _read(OAUTH)
-    assert "detectSessionInUrl: true" in oauth, (
-        "the consent page loads NO bridge and builds its own inline client — it "
-        "is the sole fragment consumer there and must ingest the hash (#3503 P1)"
+    assert "detectSessionInUrl" not in oauth, (
+        "the consent page configures supabase-js again — it holds no credential "
+        "since #3524 §9 step 4 and must not ingest an OAuth fragment (#3503 P1)"
+    )
+    assert "createClient(" not in oauth, (
+        "the consent page builds a supabase-js client again — §9 step 4 deleted "
+        "the inline client; the session is proved by a bound token minted on the "
+        "session origin, never by the page"
     )
     assert '<script src="/assets/supabase-session.js">' not in oauth, (
-        "the consent page must not load the deleted shared bridge; its inline "
-        "client is the only consumer (#3503 P1)"
+        "the consent page must not load the deleted shared bridge (#3559)"
     )
 
     # The dashboard is BFF-migrated: it builds NO supabase-js client and sets NO
