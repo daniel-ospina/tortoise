@@ -628,10 +628,13 @@ mechanisms:
       lookup), supersessions and chain notes, so a wholesale suppression drops
       memory I2 forbids dropping (#5095's PLAN-VERIFY round 1 measured it).
       §4.4's carry-forward store also does not exist. Pinned by
-      `tests/test_5095_s3_identity_policy.py` together with
+      `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence`, which
+      asserts a CALL that the mint is still UNGATED (`execute_embed` commits a
+      Point and an entity for an unresolved lookup — the day a create gate lands
+      it reds and this row must flip), together with
       `test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render`,
-      which keeps a CALL behind the absence claim: the render and the record,
-      not this row's prose. #5087 (E1) remains the code-owner of the mint half.
+      which pins the record half's presence and this row's state. #5087 (E1)
+      remains the code-owner of the mint half.
       ⚠️ NOT registered as one mechanism: §4.4 also gives each of the eight
       steps its own direction and transaction boundary. Those are per-step
       policies of THIS mechanism, not eight more mechanisms, and a row per step
