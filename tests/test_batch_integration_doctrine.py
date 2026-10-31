@@ -100,7 +100,9 @@ TRACK_B_FILTER = "-m track_b"
 #: — optionally followed by flags or a redirect. ``pytest <some file>`` (the
 #: bisect/blame commands) deliberately does NOT match, so it is not required to
 #: carry a full-suite marker filter.
-_FULL_SUITE = re.compile(r"\bpytest\s+(?:\./)?tests/?\s*(?:$|[-\s>])")
+_FULL_SUITE = re.compile(
+    r"\bpytest\b(?:\s+-\S+)*\s+(?:\./)?tests/?\s*(?:$|[-\s>])"
+)
 
 #: The landing-time base check: compare ``origin/main`` to the pinned sha.
 _PINNED_MAIN_ASSERTION = re.compile(
@@ -134,6 +136,49 @@ def _halts(code: str) -> bool:
     if "|| true" in code:
         return False
     return re.search(r"\|\|\s*(exit\s+[1-9]|\{[^}]*exit\s+[1-9])", code) is not None
+
+
+def _block(fence: list[str], i: int) -> str:
+    """The COMMAND at ``fence[i]``, joined across a multi-line ``|| { … }``.
+
+    ``_fences()`` keeps one entry per line, so a halt written as
+
+        [ "$(git rev-parse origin/main)" = "$PINNED" ] || {
+          echo "main moved …"; exit 1
+        }
+
+    reaches ``_halts()`` as a line that merely ENDS in ``{`` — the ``exit 1``
+    that makes it a halt sits two entries later and was invisible. The doc's
+    landing fence uses exactly this form, so the checks that read it must see the
+    block, not the first line.
+    """
+    code = _code(fence[i])
+    if not code.rstrip().endswith("{"):
+        return code
+    parts = [code]
+    for following in fence[i + 1 : i + 6]:
+        piece = _code(following)
+        parts.append(piece)
+        if piece.rstrip().endswith("}"):
+            break
+    return " ".join(parts)
+
+
+def _is_refusal(fence: list[str], i: int) -> bool:
+    """Is entry ``i`` a command that REFUSES — shape AND halt, not two substrings?
+
+    A line carrying ``git status --porcelain`` and ``exit 1`` satisfied the
+    previous check while only PRINTING them
+    (``echo '[ -z "$(git status --porcelain)" ] || exit 1'``), so the shape is
+    pinned: the command must BE the test, not a message about it.
+    """
+    code = _code(fence[i])
+    if code.startswith(("echo ", "printf ", ":", "true")):
+        return False  # a message about the refusal is not the refusal
+    if "git status --porcelain" in code:
+        if not re.match(r"^(?:!\s*)?(?:\[\s*-n?z\s|test\s+-n?z\s)", code):
+            return False
+    return _halts(_block(fence, i))
 
 
 def _re_runnable(code: str) -> bool:
@@ -430,32 +475,26 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     first = _fence_index(lambda fence: any(_FULL_SUITE.search(c) for c in fence))
     assert first >= 0, "no baseline fence found — re-point this guard"
     baseline = fences[first]
-    # A MENTION is not a refusal: `[ -z "$(git status --porcelain)" ]` on its own,
-    # `|| true`, and an `echo "[ -z ... ]"` all "contain" the substring, and this
-    # test's whole point is that the fence STOPS on a dirty tree.
-    dirty_ok = [
-        c for c in baseline
-        if "git status --porcelain" in c and "exit 1" in c and "|| true" not in c
-    ]
-    assert dirty_ok, (
-        "the baseline fence must REFUSE a dirty tree in the same command "
-        "(`[ -z \"$(git status --porcelain)\" ] || { …; exit 1; }`): `git switch -C` "
-        "carries uncommitted and untracked files into the baseline tree, so the "
-        "run would measure the lane"
-    )
-
-    # ...and the same precondition on EVERY fence that runs the full suite: the
-    # Phase 3 run is the one that authorizes BATCH-GREEN, so a tree dirtied during
-    # phases 2-3 must stop it too.
+    # A MENTION is not a refusal — `[ -z "$(git status --porcelain)" ]` alone,
+    # `|| true`, and an `echo '[ -z … ] || exit 1'` all "contain" the tokens — and
+    # a refusal AFTER the suite refuses nothing. Both are pinned: the command must
+    # BE the test with a non-zero halt, and it must precede the first suite line.
     for fence in fences:
-        if not any(_FULL_SUITE.search(c) for c in fence):
+        run = [i for i, c in enumerate(fence) if _FULL_SUITE.search(c)]
+        if not run:
             continue
-        assert any(
-            "git status --porcelain" in c and "exit 1" in c and "|| true" not in c
-            for c in fence
-        ), (
-            "every fence that runs the full suite must refuse a dirty tree first; "
-            f"this one does not: {fence[:3]}"
+        dirty = [i for i, c in enumerate(fence) if "git status --porcelain" in _code(c)]
+        assert dirty, (
+            "every fence that runs the full suite must refuse a dirty tree: "
+            f"`git switch -C` carries uncommitted and untracked files into the tree "
+            f"under test, so the run measures the lane. This one does not: {fence[:3]}"
+        )
+        refused = [i for i in dirty if _is_refusal(fence, i) and i < min(run)]
+        assert refused, (
+            "the dirty-tree precondition must be an EXECUTED refusal (`[ -z \"$(git "
+            "status --porcelain)\" ] || { …; exit 1; }`) positioned BEFORE the suite "
+            f"— this fence only mentions it, halts nothing, or checks it too late: "
+            f"{[fence[i] for i in dirty]}"
         )
 
     # The idempotency half (final-head review P2). A RE-baseline is the normal
@@ -577,6 +616,24 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
         "the landing pin is read with `--jq -r`, which gh does not have (that is "
         "jq's flag): `-r` is taken as the expression and `.body` as a second "
         f"argument, so the body is never extracted and $PINNED is empty: {confused}"
+    )
+    # The assertion the doctrine calls "the only mechanical enforcement of the
+    # tested-tree==landed-tree invariant" must STOP the fence, not merely return
+    # 1: the landing fence has no `set -e`, so an unhalted `[ … ]` is discarded
+    # and the operator merges onto a moved `main` — the document's headline
+    # failure, certified green by its own guard.
+    refusals = [
+        i
+        for i, c in enumerate(landing[0])
+        if _code(c).startswith(("[", "test ", "!"))
+    ]
+    assert refusals, (
+        "the landing fence carries no guarded command at all — re-point this guard"
+    )
+    unhalted = [landing[0][i] for i in refusals if not _halts(_block(landing[0], i))]
+    assert not unhalted, (
+        "every guard in the landing fence must halt on failure (`|| { …; exit 1; }` "
+        f"— `|| true` is not a halt): these return 1 and are discarded: {unhalted}"
     )
     assert any("--jq" in cmd or "--template" in cmd for cmd in defines), (
         "the landing pin must read the batch PR body through `--jq '.body'` or "
