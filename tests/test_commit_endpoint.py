@@ -4437,7 +4437,7 @@ class Test9876AboutMentionDisposition:
             "an about-edge MENTION was recorded as an identity refusal")
 
 
-def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source():
+def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source(client):
     """#10000: the S1 narrative is not a node property, and NOT caller-writable.
 
     The commit writer's raw `SET s.story_arc` is gone, but `story_arc` stays
@@ -4451,19 +4451,33 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_a_source():
     (1) FAILS if the key is only DECLARED: the write is accepted and survives.
     (2) REACHABLE: the refusal is checked through the real tenant surface, and
         the node is read afterwards to prove nothing landed.
+    (3) ISOLATED (#10389 review P2-1): the `client` fixture is REQUIRED, not
+        decorative. `_team_sdk()` → `hosted_api._make_sdk` takes its
+        `TORTOISE_DB_URI` branch when no fixture is active, so an argument-less
+        run bound the AMBIENT store (this lane's shared `tortoise_test_matrix`
+        container, or the embedded fallback) and wrote a `:Source` into the
+        FIXED tenant graph `team_team-001` that no leg here ever deletes — the
+        residue class `tests._http_fixtures.patched_tortoise_sdk` exists to end
+        (its header: the #2090/#1950 copies lacked the `TORTOISE_DB_PATH` pin;
+        AGENTS.md records #5084's measured leftovers). Under `client`, the
+        patched `__init__` binds the per-test temp DB, so the probe graph is
+        private and the SDK is closed in a `finally`.
     """
     sdk = _team_sdk()
     url = f"session:narr-route-{content_hash('narrative-route-probe')[:12]}"
-    sdk.create_source(url, "agentSession", contentHash="h1")
+    try:
+        sdk.create_source(url, "agentSession", contentHash="h1")
 
-    with pytest.raises(ValueError, match="server-managed"):
-        sdk.update_entity(url, story_arc="NARRATIVE-ZEBRA prose must not land")
+        with pytest.raises(ValueError, match="server-managed"):
+            sdk.update_entity(url, story_arc="NARRATIVE-ZEBRA prose must not land")
 
-    rows = sdk._get_proj().g.query(
-        "MATCH (s:Source {url:$u}) RETURN s.story_arc", params={"u": url}
-    ).result_set
-    assert rows, "the probe Source is missing — the refusal proved nothing"
-    assert rows[0][0] is None, (
-        "the S1 narrative reached a :Source node through the tenant route — "
-        "§9.1/D1 places it in public.session_narrative only (#10000)"
-    )
+        rows = sdk._get_proj().g.query(
+            "MATCH (s:Source {url:$u}) RETURN s.story_arc", params={"u": url}
+        ).result_set
+        assert rows, "the probe Source is missing — the refusal proved nothing"
+        assert rows[0][0] is None, (
+            "the S1 narrative reached a :Source node through the tenant route — "
+            "§9.1/D1 places it in public.session_narrative only (#10000)"
+        )
+    finally:
+        sdk.close()

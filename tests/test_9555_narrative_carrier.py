@@ -65,7 +65,7 @@ from pathlib import Path
 
 import pytest
 
-from tortoise import hosted_api, record_read, record_text
+from tortoise import hosted_api, record_read, record_text, record_writer
 from tortoise import record_projection as rp
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -277,7 +277,9 @@ def test_a_narrative_outside_its_record_home_is_NAMED_not_assumed(caplog):
 
     caplog.clear()
     assert report(session_id=SESSION,
-                  outcome=_record_write("REFUSED", refusal="no_durable_journal"),
+                  outcome=_record_write(
+                      "REFUSED",
+                      refusal=record_writer.NON_DURABLE_JOURNAL_REFUSAL),
                   journalled=True) == "nowhere", (
         "a NON-DURABLE journal was read as holding the narrative — nothing in "
         "it survives the process, so replay cannot heal the record from it")
@@ -290,6 +292,50 @@ def test_a_narrative_outside_its_record_home_is_NAMED_not_assumed(caplog):
                for r in caplog.records), (
         "the narrative reached no store and the door said nothing — a silent "
         "200 is the exact state #10389 ISSUE 2 reds")
+
+
+def test_the_reporter_reads_the_seams_refusal_vocabulary_instead_of_retyping_it():
+    """#10389 review P3-2 — the non-durable token is IMPORTED, not re-typed.
+
+    `_report_narrative_home` branches on ONE refusal token: the seam's
+    `no_durable_journal` is the case where the journal DID take the write but
+    nothing in it survives the process, so the narrative is in no store at all.
+    A hardcoded copy of that token was one rename away from silently routing a
+    scratch buffer into the DURABLE branch — downgrading the "stored NOWHERE"
+    ERROR to a WARNING, which is the one outcome the reporter's own docstring
+    says must never happen.
+
+    (1) FAILS pre-fix on both arms: the comparison target was a string CONSTANT
+        inside the function, and `record_writer` declared no such name at all.
+    (2) DERIVED, not restated: the token is read off `record_writer`, and its
+        membership in `LIVE_WRITE_REFUSALS` is asserted here — a rename that
+        forgets the tuple reds in this file rather than at a caller.
+    """
+    token = record_writer.NON_DURABLE_JOURNAL_REFUSAL
+    assert token in record_writer.LIVE_WRITE_REFUSALS, (
+        "the seam's refusal vocabulary and the non-durable token it is built "
+        "from have come apart — a caller branching on the token would miss a "
+        "value the seam actually returns")
+
+    tree = ast.parse((REPO_ROOT / "tortoise" / "hosted_api.py").read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)
+               and n.name == "_report_narrative_home"), None)
+    assert fn is not None, "the narrative-home reporter is gone — re-measure #10389"
+    retyped = [n.value for n in ast.walk(fn)
+               if isinstance(n, ast.Constant) and n.value == token]
+    assert not retyped, (
+        f"`_report_narrative_home` re-types the seam's refusal token ({retyped}) "
+        "instead of reading `record_writer.NON_DURABLE_JOURNAL_REFUSAL` — a "
+        "rename of the token would then route a NON-DURABLE journal into the "
+        "durable branch and downgrade the 'stored NOWHERE' ERROR to a WARNING")
+
+    assert hosted_api._report_narrative_home(
+        session_id=SESSION,
+        outcome=_record_write("REFUSED", refusal=token),
+        journalled=True) == "nowhere", (
+        "the imported token did not reach the decision — the reporter's branch "
+        "and the seam's vocabulary are no longer the same word")
 
 
 def test_the_receipt_says_the_narrative_is_not_in_its_record_home():
@@ -1223,8 +1269,38 @@ def _placement_row(table: str, column: str) -> str:
 
     Read rather than restated: the residual's claim is *"the record keeps the
     column"*, and the only authority for that is the placement table's class.
+
+    ⛔ SCOPED BY TABLE (#10389 review P3-1). The appendix carries ONE SECTION PER
+    NODE TABLE (`### Episodic — `Event`` / `## Event (node) — …`), and the same
+    column name appears in several of them — `story_arc` is a P row for BOTH
+    `public.event` (`:309`) and `public.source` (`:368`). An unscoped scan
+    returns the FIRST match in file order, so the `:Event` half of this test
+    passed on the SOURCE row and deleting the source row red nothing while the
+    failure message claimed it was about `public.event`. The `table` argument
+    was accepted and never used (Ruff would flag `ARG001` if `ARG` were
+    selected).
+
+    The node label for the table is DERIVED from `cache_projection.NODE_TABLES`
+    — the projection's own table map, the same one the restore lane uses — so a
+    table whose label spelling changes moves here instead of silently matching
+    no section at all.
     """
+    from tortoise import cache_projection
+
+    labels = [label for label, mapped in cache_projection.NODE_TABLES.items()
+              if mapped == table]
+    if len(labels) != 1:
+        return ""
+    in_section = False
     for line in _PLACEMENT_DOC.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#"):
+            # Section boundaries: the appendix's `## Event (node) — …` heading is
+            # the authority for which table the rows below belong to.
+            stripped = line.lstrip("#").strip()
+            in_section = stripped.split(" ", 1)[0] == labels[0]
+            continue
+        if not in_section:
+            continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if len(cells) >= 2 and cells[0] == f"`{column}`" and cells[1] == "P":
             return line

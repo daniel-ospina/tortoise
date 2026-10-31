@@ -221,7 +221,11 @@ def test_the_document_fold_cannot_put_the_narrative_back_on_a_source():
     story_arc=<narrative>)` (the SDK door behind the MCP tool
     `tortoise_create_document`) left `s.story_arc` = the PROSE on the node.
 
-    (1) FAILS pre-fix at the first `is None`: the prose is on the node.
+    (1) FAILS pre-fix, at the FIRST assertion rather than at the graph probe: the
+        deny-set membership check below reds before the fold runs, because
+        `story_arc` was in no deny set at all. The prose-on-the-node probe is the
+        second, independent arm — it is what reds if the entry is dropped again
+        while the membership check is (wrongly) satisfied.
     (2) DOES NOT CLOSE #228: a genuinely arbitrary caller prop still lands, so
         this is a deny-list entry and not a blanket refusal. It also asserts the
         key stays DECLARED for reads — declared ⇒ readable, listed in the
