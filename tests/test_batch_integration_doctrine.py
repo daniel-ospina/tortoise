@@ -129,11 +129,12 @@ def _re_runnable(code: str) -> bool:
     switch option, so accepting ``-B`` for a ``switch`` would bless a command
     that does not run.
     """
-    if "\bswitch\b" in code or code.lstrip().startswith("git switch"):
+    sub = re.search(r"\bgit\s+(switch|checkout)\b", code)
+    if sub is None:
+        return False
+    if sub.group(1) == "switch":
         return ("switch -C" in code) or ("--force-create" in code) or ("--detach" in code)
-    if code.lstrip().startswith("git checkout"):
-        return ("-B " in code) or ("--detach" in code)
-    return False
+    return ("-B " in code) or ("--detach" in code)
 
 
 #: The test target a marker-scoped run names (``tests/test_ingest_safety.py``).
@@ -426,13 +427,20 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
     fences = _fences()
     batch = [
         fence for fence in fences
-        if any("batch-1" in c and _MOVES_HEAD.search(c) and "$PINNED" in c for c in fence)
+        if any(
+            "batch-1" in _code(c) and _MOVES_HEAD.search(_code(c)) and "$PINNED" in _code(c)
+            for c in fence
+        )
     ]
     assert batch, "the batch-assembly fence no longer creates batch-1 from the pin — re-point this guard"
     flat = [
         c for fence in batch for c in fence
         if _MOVES_HEAD.search(_code(c)) and "$PINNED" in _code(c)
     ]
+    assert flat, (
+        "no re-runnable-spelling check target — a trailing comment nominated the "
+        "fence, and all([]) would pass vacuously"
+    )
     assert all(_re_runnable(_code(c)) for c in flat), (
         "rebuilding the batch must reset the branch to the pin; a one-shot create "
         f"leaves the following --no-ff merge on the wrong branch: {flat}"
