@@ -17718,27 +17718,44 @@ class TortoiseSDK:
                 _slot_map.setdefault(_sid, []).append((_sidx, _sinp))
             for _oid in sorted(_repoint_ops):
                 _srows = _slot_map.get(_oid) or []
-                # ⛔ THE ONE STAND-DOWN the load side shares: a slot edge with NO
-                # ``idx`` at all. ``ep.py`` clears ``op_idx_known[op_id]`` for
-                # exactly that evidence (``if idx is None``) and that flag is what
-                # gates its #2351 backstop; every row then coalesces to position 0
-                # and the tie breaks lexicographically, so ``input_ids[0]`` is not
-                # provably the SOURCE (#943-review).
-                # ⛔ NOTHING ELSE stands down. A non-``int`` ``idx`` and one
-                # ``idx`` carried by two inputs do NOT clear ``op_idx_known`` —
-                # the load side builds the factor and judges it (`ep.py` orders
-                # ``coalesce(r.idx, 0)`` and keys the flag on NULL only), so a
-                # door that skipped those shapes would be the SAME divergence in
-                # the FAIL-OPEN direction: a supersede minting
-                # derived-over-asserted with no verdict, defeated by one string
-                # property (#10195 review P2 — this arm's earlier "the same
-                # evidence silences both" claim was false for two of its legs).
-                if not _srows or any(_sidx is None for _sidx, _ in _srows):
+                if not _srows:
+                    # No slot rows at all: this operator has no ``IMPL|NAND``
+                    # edge reaching a point, so there is no rebuilt factor to
+                    # judge.
                     continue
+                # ⛔ NO STAND-DOWN ON, OR FOR, A NULL ``idx`` (#10195 review P2;
+                # #10364/#10404). An earlier cut skipped the whole operator
+                # whenever a slot edge carried no ``idx``, justified by "``ep.py``
+                # clears ``op_idx_known[op_id]`` under ``if idx is None`` and that
+                # flag gates its #2351 backstop". That was true at this branch's
+                # base and is FALSE on main: ``#10404`` removed the gate, so the
+                # load side now runs ``factor_direction_over_claims``
+                # UNCONDITIONALLY (``ep.py`` — "⛔ NOT gated on ``op_idx_known``
+                # (#10364)"), and ``op_idx_known`` survives only for the
+                # SOURCE-STRIP guard, which asks a different question and is
+                # correctly gated. So the door skipping killed the supersede's
+                # only verdict while the loader still judged the factor it built.
+                # ⛔ And the layout was never even unorderable: ``ep.py`` orders
+                # ``coalesce(r.idx, 0), c.id``, so a NULL slot IS position 0 — the
+                # very shape the duplicated-``idx`` arm below already reads (one
+                # candidate, tie-broken by claim id). NULL is therefore COERCED to
+                # 0 here, exactly as ``coalesce`` does, and judged. The skip was
+                # the ONE remaining fail-open of this arm: a supersede minting
+                # ``derived --IMPL--> asserted`` with no verdict, no warning and no
+                # record, reachable by REMOVING a property rather than by writing a
+                # hostile one.
+                # ⛔ NOTHING ELSE stands down either. A non-``int`` ``idx`` and one
+                # ``idx`` carried by two inputs are JUDGED too — the load side
+                # builds and judges those factors, so a door that skipped them
+                # would be the same divergence in the FAIL-OPEN direction (#10195
+                # review P2 — this arm's earlier "the same evidence silences both"
+                # claim was false for two of its legs).
                 # The rebuilt layout: ``old`` becomes ``new`` AT ITS SLOT, so what
                 # is judged below is the wiring the graph holds AFTER the write.
+                # A NULL ``idx`` enters the layout as the 0 ``coalesce`` reads it.
                 _slots: list[tuple[object, str]] = [
-                    (_sidx, new_id if _sinp == old_id else _sinp)
+                    (0 if _sidx is None else _sidx,
+                     new_id if _sinp == old_id else _sinp)
                     for _sidx, _sinp in _srows]
                 _slot_ids = [i for _, i in _slots]
                 # ⛔ ORDERABILITY IS NOT A NUMERIC PROPERTY, and this was MEASURED
@@ -17769,9 +17786,13 @@ class TortoiseSDK:
                 # reachable only by a raw write (``create_operator`` stamps ints), and
                 # the refusal names a real remedy — while a stand-down here is exactly
                 # the #10195 fail-open one property of a schemaless graph defeated.
+                # ⚠️ A NULL ``idx`` was coerced to 0 above, so it joins the ORDERED
+                # arm rather than the candidate one — which is the loader's own
+                # reading (``coalesce(r.idx, 0)``), not a leniency: an all-NULL
+                # layout is exactly the duplicated-``idx`` shape handled below.
                 _uniform_int = all(
                     isinstance(_sidx, int) and not isinstance(_sidx, bool)
-                    for _sidx, _ in _srows)
+                    for _sidx, _ in _slots)
                 _unorderable = not _uniform_int
                 if _uniform_int:
                     # The load side's own rule: the source is the input at the
@@ -17780,7 +17801,7 @@ class TortoiseSDK:
                     # the SAME single candidate rather than judging every tied one —
                     # judging them all would refuse a shape the load side keeps,
                     # the divergence `claim_class` warns against (#10195 review P3).
-                    _low = min(_sidx for _sidx, _ in _srows)
+                    _low = min(_sidx for _sidx, _ in _slots)
                     _candidate_sources = [min(
                         {i for _sidx, i in _slots if _sidx == _low}, key=str)]
                 else:

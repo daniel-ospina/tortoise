@@ -357,21 +357,29 @@ def test_supersede_repoint_judges_the_leg_that_flows(lane):
     assert _operator_rows(lane, old) == []
 
 
-def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
-    """No ``idx`` on the slot edges ⇒ neither side can name the SOURCE slot.
+def test_supersede_repoint_lets_a_same_class_supersede_through_a_null_idx(lane):
+    """No ``idx`` on the slot edges ⇒ the loader reads position 0, so the door does too.
 
-    An idx-less (legacy) operator coalesces every input to position 0 and the
-    tie breaks lexicographically, so ``input_ids[0]`` is not provably the
-    source — the ONE condition for which the load side itself distrusts
-    position 0 (``ep.py`` clears ``op_idx_known[op_id]`` under ``if idx is
-    None``, and that flag gates its #2351 backstop). The door stands down WITH
-    the load side rather than judging a slot it cannot name, because a door
-    refusing a shape the load side keeps is its own divergence.
+    An idx-less (legacy/migrated) operator is NOT an unorderable layout: the load
+    side reads the factor with ``ORDER BY coalesce(r.idx, 0), c.id``, so a NULL
+    ``idx`` IS position 0 and a tie is broken by the claim ID. The door coerces
+    the same way, takes the same single candidate source, and JUDGES — it does
+    not stand down.
 
-    ⛔ This parity is NULL-``idx`` only. The TYPE leg pinned by the test below
-    is NOT a stand-down: the load side keeps judging a numeric-string ``idx``
-    (``op_idx_known`` is keyed on NULL alone), so the door judges it too —
-    standing down there was the fail-open #10195 review P2 found.
+    ⛔ The pre-fix stand-down here rested on "``ep.py`` clears
+    ``op_idx_known[op_id]`` under ``if idx is None``, and that flag gates its
+    #2351 backstop". ``#10404`` deleted that gate, so on the merged result the
+    load side JUDGED an idx-less factor while the door skipped it — the #10195
+    fail-open, reachable by REMOVING a property.
+
+    ⚠️ TWO cases were needed to say that honestly, because the door now ORDERS
+    this layout. This one keeps the successor COMPUTED, so no candidate
+    assignment can override and the supersede must go through (the
+    anti-over-refusal half); ``…refuses_an_idx_less_derived_over_asserted``
+    authors the successor and pins the refusal (the discriminating half — it is
+    the SAME wiring as the pre-fix case below, which consequently had to change:
+    with ``src`` tie-broken first it is exactly derived-source-over-asserted-
+    successor, i.e. the illegal factor, not an exemption).
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -381,11 +389,70 @@ def test_supersede_repoint_leaves_an_unprovable_source_slot_alone(lane):
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL|NAND]->() REMOVE r.idx",
         params={"op": op["id"]})
-    new = lane.create_point("statement", "authored v2")["id"]
+    # COMPUTED successor: same class on both sides, so the guard has nothing to
+    # say under ANY candidate source assignment.
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
 
     assert lane.supersede_point(old, new)["edges_transferred"] == 1
-    assert len(_operator_rows(lane, new)) == 1
+    # The slot MOVES and the absent ``idx`` stays absent — 2a reads ``idx``
+    # opaquely, exactly as it preserves a string one.
+    assert _operator_rows(lane, new) == [[op["id"], "IMPL", None]]
     assert _operator_rows(lane, old) == []
+
+
+def test_supersede_repoint_refuses_an_idx_less_derived_over_asserted(lane):
+    """The idx-less twin of ``…refuses_a_raw_written_slot_idx`` (#10195 P2).
+
+    The pre-fix door skipped every operator whose slot edges carried no ``idx``,
+    on the premise that the LOAD side stood down there too. ``#10404`` deleted
+    that stand-down (``ep.py``: "⛔ NOT gated on ``op_idx_known`` (#10364)"), so
+    on the merged result the loader judges an idx-less factor while the door
+    skipped it — the same fail-open #10195 is filed for, on the one axis left,
+    reachable by REMOVING a property instead of writing a hostile value:
+
+        src(derived) --IMPL(->)--> old(derived)   # no ``idx`` on either edge
+        supersede old -> new(asserted)            # door: skip ⇒ SUCCEEDS
+        ⇒ derived --IMPL--> asserted, no verdict, no warning, no record,
+          which the very next EP run drops and reports.
+
+    The layout is not even unorderable: ``ep.py`` reads the factor with
+    ``ORDER BY coalesce(r.idx, 0), c.id``, so a NULL ``idx`` IS position 0 and
+    the tie breaks on the claim ID — exactly the duplicated-``idx`` arm the door
+    already reads. So the door coerces NULL to 0 and judges, and must REFUSE
+    this wiring before any mutation.
+
+    ⛔ THE TWO IDS ARE PINNED, because position 0 is tie-broken LEXICOGRAPHICALLY
+    and ``ids.ulid()`` is ``<ms-hex>-<uuid4().hex[:12]>`` (``tortoise/ids.py``) —
+    two mints in the same millisecond sort by their RANDOM suffix, so the source
+    would be a coin flip. With ``src`` pinned first it provably IS the source,
+    the successor is authored, and the rebuilt factor is the illegal one.
+
+    Pre-fix this is RED: the door took ``continue``, so the supersede returned
+    success and ``pytest.raises`` cannot pass.
+    """
+    src = lane.create_point("statement", "computed source",
+                            claim_class="derived",
+                            id="0000000001-aaaaaaaaaaaa")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", src, [old], direction="->")
+    # The legacy / pre-guard / migrated shape: NO ``idx`` on any slot edge. This
+    # is a missing property, not a value any writer had to forge.
+    lane._get_proj().g.query(
+        "MATCH (op:Point {id:$op})-[r:IMPL]->() REMOVE r.idx",
+        params={"op": op["id"]})
+    new = lane.create_point("statement", "authored v2",
+                            id="0000000002-bbbbbbbbbbbb")["id"]
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+
+    # Refused BEFORE any mutation, and the refused wiring is not in the graph.
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _operator_rows(lane, old) == [[op["id"], "IMPL", None]]
+    assert _operator_rows(lane, new) == []
 
 
 @pytest.mark.parametrize("int_slot, str_idx", [(1, "1"), (0, "0")])
