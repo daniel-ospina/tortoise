@@ -1664,17 +1664,26 @@ class FakeControlPlane:
         # is re-checked, so the intermediate zero-default state is invisible —
         # this fake keeps the same all-or-nothing shape by validating before
         # mutating and by rolling back on a raise.
-        previous = self._live_default_rows(org_id)
-        if len(previous) > 1:
-            raise RuntimeError(
-                'duplicate key value violates unique constraint '
-                '"uq_graphs_org_default_active"')
+        #
+        # ⛔ The DEMOTE has NO row-count guard, exactly like the SQL: the real
+        # statement demotes EVERY non-deleted `kind='default'` row other than
+        # the target, so PRE-EXISTING duplicate-default drift is CONVERGED by
+        # the call, not refused (uniqueness is a property of the AFTER-state,
+        # and the migration's header lists "pre-existing duplicate-default
+        # drift making the demote touch two rows" among the states its
+        # POST-CONDITION covers). A stricter double would red the verb for a
+        # state Postgres returns `ok` on — the double must model the function,
+        # and the function's "never two" guard is the index, checked after.
+        previous = [r for r in self._live_default_rows(org_id)
+                    if r.get("id") != graph_id]
+        # The receipt names ONE previous id: plpgsql's non-STRICT `RETURNING …
+        # INTO` keeps the FIRST row when the demote touches several.
         prev = previous[0] if previous else None
         snapshot = ([dict(r) for r in self.tables.get("graphs", [])],
                     [dict(o) for o in self.tables.get("organizations", [])])
         try:
-            if prev is not None and prev.get("id") != graph_id:
-                prev["kind"] = "custom"
+            for row in previous:
+                row["kind"] = "custom"
             target["kind"] = "default"
             if target.get("namespace"):
                 for o in self.tables.get("organizations", []):
