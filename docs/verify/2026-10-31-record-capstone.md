@@ -37,14 +37,16 @@ journal row is evidence of anything).
 | store | what landed | Arm A — DSN role **bypasses RLS** (`record`, owner) | Arm B — DSN role `tortoise_record_app` (NOBYPASSRLS) | Arm B′ — Arm B on the **deployed tree** |
 |---|---|---|---|---|
 | `public.point` (the transcript table; `node_key='<sid>_t<i>'`, `is_episodic`) | the two raw turns, verbatim | **0 rows** for `cap9567a-session` | **2 rows**: `_t0` 87 B, `_t1` 45 B | **2 rows**: `_t0` 87 B, `_t1` 45 B |
-| `public.session_narrative` | the S1 narrative prose | 0 rows for that session | **1 row**, 129 B, `left(narrative,60) = 'NARRATIVE-ZEBRA-9567 the connected prose form of this captur'` | **1 row**, 129 B, same prefix |
-| `public.session` | the session row | 0 | 1 | 1 |
+| `public.session_narrative` | the S1 narrative prose | 0 rows for that session | **1 row**, 129 B, `left(narrative,60) = 'NARRATIVE-ZEBRA-9567 the connected prose form of this captur'` | **2 rows**, 129 B each (`cap9567-session`, `cap9567d-session`) |
+| `public.session` | the session row | 0 | 1 | **2** (cumulative: Arm B's + B′'s) |
 | `public.journal_event` | the journal the record folds | **derived**: unchanged (append-only) | 14 | 14 (cumulative 28) |
 | `monitoring.metrics()["record_write_failures"]` | the write's own counter | **`{'write_failed': 14}`** (was `{}`) | **`{}`** — zero | **`{}`** — zero |
 | FalkorDB `_capture_turn_ids(proj, sid)` | the graph-side turn id space | `['cap9567a-session_t0','cap9567a-session_t1']` ← **fell back to the graph** | **`[]`** | **`[]`** |
 
 Per-tenant `public.point` count moved **0 → 3** in Arm B (`_t0`, `_t1` + the extracted claim `pt_f07a…`,
-27 B); `point_episodic` **0 → 2**. Proof commands (owner read, tenant-filtered):
+27 B); `point_episodic` **0 → 2**. The block below is the **deployed-tree arm's** read (B′) — it filters
+on B′'s own session id, so it shows B′'s two turns and nothing of Arm B's; Arm B's rows are the R2 block
+further down. Owner read, tenant-filtered:
 
 ```console
 $ docker exec p10000-record-pg psql -U record -d record -c \
@@ -102,7 +104,8 @@ Q1 every node whose text holds either marker (content | summary | story_arc):
    hits: 3
 ```
 
-Arm A, same probe, same graph, same corpus — **14 nodes**, and the two turn nodes are back:
+Arm A, same probe, same **lane flushed again to 0 nodes** (so its 14 is a fresh 12 + the two fallback
+turn nodes, not Arm B's 12 + 2) — and the two turn nodes are back:
 
 ```
 Q5 after the capture                 : [[14]]
@@ -154,11 +157,14 @@ and **refuses** the bypassing role rather than merely testing under a different 
 ## 4. Residuals measured in the SAME armed run (both already tracked — not new roots)
 
 1. **The narrative is still in BOTH stores.** `public.session_narrative` holds the 129 B (✅) **and**
-   the `:Event` node carries the same 129 B in `story_arc`, as does the transcript `:Source`
-   (`Q1`, `Q3`). Root: the commit phase's raw-Cypher `SET … story_arc=$arc` on two nodes — the change
-   **PR #10389** deletes (`Refs #10000`, `MERGEABLE`; its check surface at 2026-10-31T22:33Z carried a
-   failing `test-slow` on run 41240532814 with others still pending — another lane owns its forward
-   merge, and this artifact does not read that rollup as a verdict). The `create_event` door is tracked
+   the `:Event` node carries the same 129 B in `story_arc`, as does the transcript `:Source` (`Q1` shows
+   the `Source` hit; `Q3` on Arm B reads
+   `[['d8f1e0377…', 129, 'NARRATIVE-ZEBRA-9567 the connected prose form'], ['ev_1a123a32…', 0, ''],
+   ['ev_1edf43f6…', 0, '']]`). Root: the commit phase's raw-Cypher `SET … story_arc=$arc` on two nodes — the change
+   **PR #10389** deletes (`Refs #10000`, `MERGEABLE`; its check surface at 2026-10-31T21:33Z carried two
+   failing `test-slow` shards on run 41240532814 — `(d)` at 21:24:26Z, `(a)` at 21:32:42Z — with others
+   still queued; another lane owns its forward merge, and this artifact does not read that rollup as a
+   verdict). The `create_event` door is tracked
    separately as **#10428**.
 2. **A `:Source` still carries raw TURN text in `summary`** — 80 B, `'TURN-ZEBRA-9567 the raw transcript
    text …'` — written by the capture path itself (`sdk._session_source_metadata`). Not new information:
