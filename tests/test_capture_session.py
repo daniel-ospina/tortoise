@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -219,6 +220,58 @@ def test_capture_session_module_isolates_real_home(tmp_path):
         "capture-consent-notice")
 
 
+def test_the_isolated_home_does_not_isolate_the_model_cache(tmp_path):
+    """#10010: the HOME isolation above must not take the MODEL cache with it.
+
+    ``huggingface_hub`` reads ``HF_HOME`` (default ``~/.cache/huggingface``) at
+    IMPORT time, and ``sentence_transformers`` is imported lazily — inside the
+    first test that needs an embedding. With only ``HOME`` redirected, that
+    first import freezes the cache inside a per-test tmp dir, so the load finds
+    an EMPTY cache and pays the cold path instead of using the copy CI
+    provisioned (``Cache HF embedding model`` + ``Embedding model REQUIRED``).
+
+    Measured on test-slow (e) at 2feca037f (run 41183376264): 120 of 857 items
+    in 2405 s, watchdog-killed with zero failures — a red check no failure
+    identity could explain. Pinned here because the isolation lives HERE; its
+    counterpart that keeps the cache outside it is ``tests/conftest.py``'s
+    ``HF_HOME`` pin, assigned at conftest import (too late for a per-test flag,
+    per the vendor's own "read at import time" contract).
+    """
+    hf_home = os.environ.get("HF_HOME")
+    assert hf_home, (
+        "the suite must pin HF_HOME at conftest import (tests/conftest.py) — a "
+        "lazily imported huggingface_hub would otherwise freeze the model "
+        "cache inside this test's redirected $HOME and every load pays cold")
+    cache = Path(hf_home)
+    assert cache.is_absolute(), f"HF_HOME must be absolute, got {cache}"
+    # The exact shape the leak took: `~/.cache/huggingface` re-resolved under
+    # the isolated HOME.
+    assert cache != Path(os.environ["HOME"]) / ".cache" / "huggingface", (
+        "HF_HOME resolves under the isolated $HOME — the model cache is "
+        "per-test again, which is what made the leg cold-load per test")
+    assert Path(tmp_path) not in cache.parents and cache != Path(tmp_path), (
+        f"HF_HOME ({cache}) must not live in the per-test tmp dir")
+
+
+def test_the_pinned_cache_is_the_one_huggingface_hub_froze():
+    """#10010: the pin must land BEFORE the vendor constants freeze.
+
+    ``huggingface_hub`` documents that its environment is read at import time and
+    "any modification made afterwards will not be taken into account", so an
+    ``HF_HOME`` set per-test would be inert. This asserts the constant the loader
+    actually uses is the pinned one — the difference between a pin and a wish.
+    """
+    from huggingface_hub import constants
+
+    hf_home = Path(os.environ["HF_HOME"])
+    assert Path(constants.HF_HOME) == hf_home, (
+        f"huggingface_hub froze HF_HOME={constants.HF_HOME}, not the pinned "
+        f"{hf_home} — the pin happened after the import, so it is inert")
+    assert Path(constants.HF_HUB_CACHE) == hf_home / "hub", (
+        f"the hub cache ({constants.HF_HUB_CACHE}) is not under the pinned "
+        f"HF_HOME ({hf_home})")
+
+
 # Legacy predicate name for negative-direction tests (#281). Kept as a
 # constant so no edge-syntax literal appears in source (Task 5 sweep requires
 # zero hits) — same pattern as tests/test_ranking.py.
@@ -268,6 +321,11 @@ def _isolated_home(monkeypatch, tmp_path):
     that file's decline matrix), so the consented control test is unaffected.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    # #10010: the MODEL cache is deliberately NOT isolated with it — `HF_HOME` is
+    # pinned to the pre-isolation cache root at conftest import (see
+    # `test_the_isolated_home_does_not_isolate_the_model_cache` for why: the
+    # lazily imported huggingface_hub froze this cache inside this per-test tmp
+    # dir and every load paid the cold path).
 
 
 @pytest.fixture()
