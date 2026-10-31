@@ -97,7 +97,7 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **50 such mutants
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **57 such mutants
 measured at this head: 0 survive**, and the honest document is 0 of 14 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
@@ -158,6 +158,17 @@ _DIRTY_TEST = re.compile(r"^(?:\[\s*-z\s|test\s+-z\s)")
 _MOVES_HEAD = re.compile(r"\bgit\s+(?:switch|checkout)\b")
 
 
+#: A single- or double-quoted span. Blanked (same length, so offsets survive)
+#: before a halt is matched: `|| { echo "main moved — exit 1 and re-baseline" }`
+#: returns `echo`'s 0 and exits nothing, but the raw text contains `exit 1`.
+_QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
+
+
+def _unquoted(code: str) -> str:
+    """``code`` with every quoted span blanked to the same length."""
+    return _QUOTED.sub(lambda match: "-" * len(match.group(0)), code)
+
+
 def _code(line: str) -> str:
     """A fenced line's COMMAND portion — the inline comment stripped first.
 
@@ -178,6 +189,7 @@ def _halts(code: str) -> bool:
     own comment says ``-C`` prevents. `|| true` is the negation of that, so it
     is refused even though it "contains" a halt-looking token.
     """
+    code = _unquoted(code)
     if "|| true" in code:
         return False
     # A halt in a SUBSHELL is not a halt: `… || { echo x; exit 1; } &` and
@@ -234,7 +246,9 @@ def _is_refusal(fence: list[str], i: int) -> bool:
         r"^(?:\[\s*-z\s|test\s+-z\s)", code
     ):
         return False
-    return _ends_at_halt(_block(fence, i), allow=_allows_dirty_test)
+    return _ends_at_halt(
+        _block(fence, i), allow=_allows_dirty_test, subject=_allows_dirty_test
+    )
 
 
 def _re_runnable(code: str) -> bool:
@@ -272,6 +286,17 @@ def _re_runnable(code: str) -> bool:
     return bool(rest) and rest[0].strip('"').strip("'") == "$PINNED"  # START POINT, first token
 
 
+#: A pin create must be the COMMAND, not a word inside another command's
+#: arguments: `/bin/echo 'git switch -C integration/base-check' "$PINNED" || exit 1`
+#: runs `echo`, never pins, and (before this) was selected as the subject.
+_PIN_CREATE_FIRST = re.compile(r"^(?:command\s+|builtin\s+|exec\s+)?git\s+(?:switch|checkout)\b")
+
+
+def _pin_subject(segment: str) -> bool:
+    """Is this segment the pin create itself?"""
+    return bool(_PIN_CREATE_FIRST.match(segment)) and _re_runnable(segment)
+
+
 def _allows_pin_segment(segment: str) -> bool:
     """A segment that may join a pin create: the create itself, or a no-op."""
     return _re_runnable(segment) or bool(_SAFE_SEGMENT.match(segment))
@@ -282,7 +307,7 @@ def _allows_dirty_test(segment: str) -> bool:
     return bool(_DIRTY_TEST.match(segment))
 
 
-def _ends_at_halt(code: str, allow=_allows_pin_segment) -> bool:
+def _ends_at_halt(code: str, allow=_allows_pin_segment, subject=_pin_subject) -> bool:
     """Is the halt REACHABLE from the subject's failure — every separator `&&`?
 
     Two things go wrong without this, and both were measured:
@@ -304,11 +329,14 @@ def _ends_at_halt(code: str, allow=_allows_pin_segment) -> bool:
     legal: their failure is harmless, since the subject is still halted.
     """
     halt = re.fullmatch(
-        r"(?P<head>.*?)\|\|\s*(?:exit\s+[1-9]|\{[^}]*exit\s+[1-9][^}]*\})\s*", code
+        r"(?P<head>.*?)\|\|\s*(?:exit\s+[1-9]|\{[^}]*exit\s+[1-9][^}]*\})\s*",
+        _unquoted(code),
     )
     if halt is None:
         return False
-    parts = re.split(r"(;|&&|\|\||\||&)", halt.group("head"))
+    # Slice the head from the ORIGINAL text: the subject predicates need to see
+    # `"$PINNED"`, which the blanking removed.
+    parts = re.split(r"(;|&&|\|\||\||&)", code[: halt.end("head")])
     segments = [piece.strip() for piece in parts[0::2]]
     separators = parts[1::2]
     if "|" in separators or "&" in separators:
@@ -321,7 +349,7 @@ def _ends_at_halt(code: str, allow=_allows_pin_segment) -> bool:
     subjects = [
         i
         for i, segment in enumerate(segments)
-        if segment and allow(segment) and not _SAFE_SEGMENT.match(segment)
+        if segment and subject(segment) and not _SAFE_SEGMENT.match(segment)
     ]
     if not subjects:
         return False
@@ -837,7 +865,18 @@ def test_landing_asserts_main_is_still_the_pinned_base() -> None:
     # `[ -z "$PINNED" ]` refuses every non-empty one, so landing becomes
     # impossible — the same class as the `--jq -r` defect that made the check
     # unpassable.
-    assert any(
+    pin_guards = [
+        i
+        for i, c in enumerate(landing[0])
+        if re.match(r'\[\s*-n\s+"\$PINNED"\s*\]', _code(c))
+    ]
+    assert pin_guards and all(
+        _halts(_block(landing[0], i)) for i in pin_guards
+    ), (
+        "a guard that is not backed by a halt is an annotation: an empty $PINNED "
+        "must stop the fence here, not merely fail a later comparison"
+    )
+    assert pin_guards and any(
         re.match(r'\[\s*-n\s+"\$PINNED"\s*\]', _code(c)) for c in landing[0]
     ), (
         'the landing fence must guard the pin with `[ -n "$PINNED" ]`: a `-z` '
