@@ -1276,7 +1276,15 @@ which reads exactly like rot.
 **What changed: design document, two cells, no number moved.** Each row now leads with its symbol,
 in the form `tests/test_extractor_v4_citation_rot.py` resolves: `execute_embed` for the
 `_norm(content)`-keyed `point_ids` map, and `classify_consolidation` for the against-priors semantic
-arm (the `_boundary` never-across guard named beside it, as the D12 row already names it). `D-c` was
+arm. ⚠️ **That arm's `_boundary` never-across guard is deliberately NOT named in the cell**, because
+it is not true at the pin the cell's `extractor_v2.py:3021+` number is read at: `_boundary` occurs
+**zero** times in `extractor_v2.py` at `c79ba1cf2`, where the NOOP arm is
+`if sig_equal … / elif ov >= NOOP_MIN_OVERLAP` with no boundary check — the guard landed ~20 h
+*after* the pin (`7c7973cac`, #5080). The D12 row names the guard as a design decision and carries
+no `file.py:NNNN` cite, so it does not license a post-pin symbol inside a pin-scoped code citation,
+and §4.2 is not one of the header's later-pin passages. The paraphrase-NOOP arm alone is pin-true;
+the guard's provenance and mechanism stay recorded in this file and in `near_dup_detect`'s row.
+`D-c` was
 re-verified against the pin and left as written. ⚠️ **The `where` column still has no reader** — no
 guard requires a row's cell to carry a resolvable symbol, which is why two symbol-less cells sat in
 a load-bearing table; the proposal to close that lives on the issue, not in this file.

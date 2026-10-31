@@ -750,7 +750,7 @@ A four-way audit of the write path found **FOUR distinct dedups at FOUR differen
 | **D-a** | **source** | **URL only** | ⚠️ **URL-keyed only** — a content-hash is a provenance anchor (`#4005`), **not a dedup key** |
 | **D-b** | **within-batch exact** | `execute_embed` (`extractor_v2.py:3967-3969`) — the `_norm(content)`-keyed `point_ids` map, first wins | ✅ <!-- v4-mechanism: exact_dedup --> |
 | **D-c** | **vs store, raw content hash** | `sdk.py:12412` (`_find_point_by_content`; the shared predicate builder is `_dedup_match_clauses`, `:12364`) | ✅ |
-| **D-d** | **semantic** | `classify_consolidation` (`extractor_v2.py:3021+`) — the paraphrase NOOP arm, whose fold the `_boundary` never-across guard gates | ✅ <!-- v4-mechanism: against_priors_consolidation --> |
+| **D-d** | **semantic** | `classify_consolidation` (`extractor_v2.py:3021+`) — the paraphrase NOOP arm | ✅ <!-- v4-mechanism: against_priors_consolidation --> |
 
 **⇒ `S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is the largest single volume lever available, and it is mechanical and free: `tortoise/source_identity.py` is its implementation (`normalize_source_url`, `resolve_source_key`), wired in `projection/entities.py` and acceptance-tested by `tests/test_source_dedup_registration.py`, which is why `config/v4-mechanisms.yml` carries it as `implemented`.** Catching the same conversation firehose twice is a **whole-narrative** save, not a claim-level one. What stays absent is narrower than the step: **D-a above is still URL-keyed**, and resolving a spelling to the `:Source` that owns its identity is not hashing the narrative. <!-- v4-mechanism: source_dedup -->
 
