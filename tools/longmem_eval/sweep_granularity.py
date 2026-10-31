@@ -660,6 +660,16 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
                 # refusing cell published a ratio and whose ratio-less cell
                 # refused nothing, which is the same "the diagnostic asserts a
                 # fact its gate does not prove" class this PR removes.
+                #
+                # The same standard applies to the two absent causes (#10356
+                # review P3). "The embedder ran and no cell wrote zero vectors"
+                # asserted more than the gate proves: the zero-coverage arm
+                # fires only on a NUMERIC ``0.0`` over a positive ``int``
+                # total, and a REFUSED census returns ``None/None``, so that
+                # arm cannot fire — while the refused record itself can report
+                # ``points_embedded: 0`` (measured: ``{"points_total": -5,
+                # "points_embedded": 0}`` is refused, and this branch then
+                # claimed no cell wrote zero vectors about exactly that cell).
                 refused_with_ratio, refused_without_ratio = \
                     _census_refusal_coverage(results)
                 if refused_with_ratio and not refused_without_ratio:
@@ -687,10 +697,11 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
                         "Read records_refused per cell on the `dense leg:` "
                         "line to see which census was refused.")
                 print("   the other two causes do NOT hold here: the "
-                      "embedder ran for every cell and no cell wrote zero "
-                      "vectors, so these recall values ARE a hybrid run's "
-                      "— they are refused because the census contradicts "
-                      "itself, not because the leg was missing. "
+                      "embedder reported available for every cell and no "
+                      "cell published a zero-coverage receipt, so these "
+                      "recall values ARE a hybrid run's — they are refused "
+                      "because the census contradicts itself, not because "
+                      "the leg was missing. "
                       + coverage_note,
                       file=sys.stderr)
         remedy = ("→ NOT selected: do NOT feed this to the pilot (step 3) or "

@@ -5263,9 +5263,9 @@ def _option_help_block(help_text, flag):
 
     Width-agnostic: on a narrow terminal argparse prints the option alone on
     its line and starts the help on the next one, so the option line is
-    matched after ``rstrip()`` rather than requiring a trailing space — a
-    required space made this return ```` at ``COLUMNS=30`` and red the test
-    with a misleading "re-anchor this test" message (#10348 review P2)."""
+    matched when the character AFTER the flag is end-of-line or a space — a
+    required trailing space made this return ```` at ``COLUMNS=30`` and red
+    the test with a misleading "re-anchor this test" message (#10348 review P2)."""
     lines = help_text.splitlines()
     start = next((i for i, ln in enumerate(lines)
                   if ln.startswith("  " + flag)
@@ -6105,6 +6105,59 @@ def test_census_refusal_coverage_attributes_the_refusal_per_cell(capsys):
     assert sg._census_refusal_coverage([_sweep_cell()]) == (0, 0)
 
 
+def test_print_winner_never_asserts_a_zero_vector_count_it_cannot_prove(
+        capsys):
+    """#10356 review P3: the census-only branch told the operator "the
+    embedder ran for every cell and no cell wrote zero vectors" as fact, and
+    the gate above it does not prove the second half.
+
+    The gate is ``UNMEASURED_EMBEDDER not in causes and
+    UNMEASURED_ZERO_COVERAGE not in causes``, and those arms prove exactly two
+    things: every cell reported ``vector_strategy == "enabled"``, and no cell
+    PUBLISHED a numeric zero-coverage receipt. They do not prove how many
+    vectors any refused record wrote — a REFUSED census returns ``None/None``,
+    so the zero-coverage arm cannot fire even when the record itself reports
+    ``points_embedded: 0``. The row below is that shape, built through the real
+    ``_points_census`` / ``_aggregate_embedding_coverage`` rather than
+    asserted: a lone impossible half (``points_total: -5``) reporting zero
+    embedded points.
+
+    RED on the pre-fix line: it prints "no cell wrote zero vectors" about a
+    run whose only record reports ``points_embedded: 0``."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    outcomes = [{"points_total": -5, "points_embedded": 0}]
+    census = sg._points_census(outcomes)
+    assert census == {"points_total": None, "points_embedded": None,
+                      "records_refused": 1}
+    coverage = sg._aggregate_embedding_coverage(outcomes)
+    assert coverage is None
+    row = _sweep_cell(embedding_coverage=coverage, **census)
+    assert sg._dense_leg_verified([row]) is False
+    # The census arm is the ONLY one that fires, so the census-only paragraph
+    # is the paragraph that prints.
+    assert sg._unmeasured_causes([row]) == {sg.UNMEASURED_CENSUS}
+    assert row["vector_strategy"] == "enabled"
+
+    capsys.readouterr()
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified([row]), results=[row])
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "REFUSED a census record" in flat, flat
+    # Claim what the cause set proves ...
+    assert "reported available for every cell" in flat, flat
+    assert "no cell published a zero-coverage receipt" in flat, flat
+    # ... and not the zero-write count, which THIS run refutes: the sentence's
+    # own subject reported ``points_embedded: 0``.
+    assert "wrote zero vectors" not in flat, flat
+    assert "no cell wrote zero" not in flat, flat
+
+    # The REMEDY is unaffected — the verdict is still the producer's to fix.
+    assert "Fix the census producer" in flat, flat
+
+
 def test_sweep_readme_enumerates_the_census_refusal_case():
     """#10355 review P3: the README is the surface a producer's author reads
     first, and its "why did my sweep say NOT MEASURED?" enumeration stopped at
@@ -6131,6 +6184,13 @@ def test_sweep_readme_enumerates_the_census_refusal_case():
     fourth = flat.split("fourth case", 1)[1][:700]
     assert "CENSUS refused a record" in fourth, fourth
     assert "census PRODUCER" in fourth, fourth
+    # The case describes a run whose EMBEDDER was fine, so it must not claim
+    # what the gate cannot prove about the refused cell's vector writes — the
+    # same over-claim the winner line carried (#10356 review P3). It claims
+    # the two things the cause set actually proves instead.
+    assert "wrote zero vectors" not in fourth, fourth
+    assert "reported available for every cell" in fourth, fourth
+    assert "zero-coverage receipt" in fourth, fourth
 
 
 def test_sweep_granularity_v2_waived_sweep_never_exits_zero(
