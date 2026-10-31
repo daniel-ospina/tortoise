@@ -540,7 +540,8 @@ def test_4643_sync_re_derives_the_mirror_and_the_pin_byte_for_byte(monkeypatch, 
     _pin_upstream(monkeypatch, manifest, "a" * 40, upstream_bytes)
 
     changed = sp.sync(root, pin, attempts=1, backoff=0).changed
-    assert len(changed) == 3, changed
+    # Counted from the PIN, never a literal: a fourth skill must not red this.
+    assert len(changed) == len(manifest["skills"]), changed
     for name, entry in manifest["skills"].items():
         assert (root / entry["served_path"]).read_bytes() == \
             upstream_bytes[entry["upstream_path"]], f"{name}: not byte-for-byte"
@@ -573,13 +574,32 @@ def test_4643_sync_dry_run_writes_nothing(monkeypatch, tmp_path):
     _pin_upstream(monkeypatch, manifest, "b" * 40, upstream_bytes)
 
     changed = sp.sync(root, pin, attempts=1, backoff=0, dry_run=True).changed
-    assert len(changed) == 3
+    assert len(changed) == len(manifest["skills"])
     assert pin.read_bytes() == before_pin, "--dry-run must not re-cut the pin"
     for entry in manifest["skills"].values():
         assert (root / entry["served_path"]).read_bytes() == b"# stale\n"
 
 
 # ── #10437: `--sync` must also re-derive the `.skill` DOWNLOAD archives ────
+
+def test_10437_the_archive_dir_has_exactly_one_home():
+    """The archive directory must be the one the BUILDER owns (#10437 review).
+
+    The parity tool carries ``ARCHIVES_REL`` as a RELATIVE path because every
+    caller — and every test — joins it to its own root (a `tmp_path`), so it
+    cannot import the builder's absolute constant. What it must not do is
+    re-spell the name: if `tools/build_skill_archives.py`'s ``SKILLS_DIR`` moves
+    and this constant does not, `--sync` derives archives into a directory the
+    gate (`test_9660`) does not read, and every arm stays green.
+
+    This is a DRIFT pin, not a regression guard for the diff that added
+    ``_rebuild_archives`` — it is green before and after that change, and reds
+    the moment the two homes disagree.
+    """
+    bsa = sp._build_skill_archives()
+    assert bsa.SKILLS_DIR.relative_to(bsa.REPO_ROOT) == sp.ARCHIVES_REL, (
+        "the sync's archive directory and the builder's must be one path")
+
 
 def _seed_mirror_and_stale_archives(root: Path, manifest: dict) -> None:
     """The exact #10088 shape: a served copy, and an archive built from the OLD one.
@@ -642,7 +662,7 @@ def test_10437_sync_rebuilds_the_skill_archives_from_the_bytes_it_wrote(
 
     result = sp.sync(root, pin, attempts=1, backoff=0)
 
-    assert len(result.changed) == 3, result.changed
+    assert len(result.changed) == len(manifest["skills"]), result.changed
     # `changed` keeps meaning "served copies" — the archive is reported apart.
     rebuilt = {line.split(" (", 1)[0] for line in result.archives}
     assert rebuilt == {str(sp.ARCHIVES_REL / f"{name}.skill")
@@ -767,7 +787,7 @@ def test_10437_dry_run_names_the_archives_the_real_run_rewrites(
 
     preview = sp.sync(root, pin, attempts=1, backoff=0, dry_run=True)
 
-    assert len(preview.changed) == 3, preview.changed
+    assert len(preview.changed) == len(manifest["skills"]), preview.changed
     assert {line.split(" (", 1)[0] for line in preview.archives} == expected, (
         "the dry run must name every archive the real run would rebuild",
         preview.archives)
