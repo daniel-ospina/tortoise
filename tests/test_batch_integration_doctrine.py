@@ -129,6 +129,51 @@ or facts that were false against the tree they describe:
   (``headRefOid`` == the reviewed head) broken one phase before Landing can see it. The fetch now
   carries ``--force`` **and** a halt, and both are pinned.
 
+* **the landing assertion ran NOWHERE on the merge path.** ``origin/main == $PINNED`` was called "the
+  one mechanical enforcement of the invariant", but it is a bash block in a document: the batch PR is
+  an ordinary PR to ``main``, so the moment it carries the required contexts it satisfies this repo's
+  live queue (``.mergify.yml``: ``queue_conditions: base=main`` + ``-draft`` + the ``check-success``
+  contexts, and ``merge_protections_settings: auto_merge_conditions: true``) and is squash-merged
+  onto **whatever ``main`` is at that moment**, with the assertion never executed. The batch PR is now
+  opened as a **DRAFT** and un-drafted only once the assertion passes — ``-draft`` is itself a queue
+  condition, so a draft is never queued, which is what converts a step someone may remember into a
+  property of the queue. Pinned, because a doctrine whose enforcement never runs is a doctrine whose
+  guard is green about nothing.
+* **a SKIP was invisible to BOTH completion detectors.** Phase 3's "did it actually run" machinery
+  was a status predicate (rc ∈ {0,1}) and a junit test COUNT — and a skipped test is still
+  COLLECTED: it is inside ``tests=``, it contributes no failure id, and rc is 0. The reachable bypass
+  is a socket probe, not an unset variable: ``tests/test_projection.py``'s ``live_proj`` fixture skips
+  when the FalkorDB probe fails, which it does with ``TORTOISE_DB_URI`` correctly exported and the
+  server gone (the private container reaped, a Docker restart) — every live test skips and the
+  verdict is ``BATCH-GREEN`` on a tree where the suite this document exists to gate never ran. This
+  repo already fails closed on the class in CI (``tools/skip-guard.py``, #1382: "the historical
+  silent-green masked the #1382 EP regression class for days"); the batch now records the BASELINE's
+  skip count and reason multiset — cleared first, both carriers — and halts on any skip the baseline
+  did not have. Baseline-diffed, never a whole-run gate, because the batch lane's ``embedded_only``
+  skips are expected.
+* **the blame grader convicted a commit on an INFRASTRUCTURE error.** ``git bisect run``'s protocol is
+  0 = good, **125 = skip this probe**, anything else = bad, and the documented grader was
+  ``… >/dev/null 2>&1 || exit 1`` — which grades pytest 2/3/4/5 (interrupted / usage / internal /
+  misconfigured) and 128+N (SIGKILL/OOM — the class this doctrine measured five times in 23 minutes on
+  #10399) as "this commit is the culprit", contradicting the document's own rule that only 0 and 1 are
+  a COMPLETED run. **Measured** in a scratch repo against a five-commit ``--no-ff`` batch whose probe
+  always exits 2: ``bisect run`` exited 0 and named the OLDEST probe — the batch's first merge — and the
+  next documented step **drops** it, irreversibly within the batch. The grader now accepts exactly 0
+  and 1 and returns 125 for everything else.
+* **the merge line had no halt, and a no-op merge exits ZERO.** ``git merge --no-ff`` on a head that is
+  already contained prints ``Already up to date``, exits 0 and creates **no merge commit** — so the
+  documented ``git log --oneline -1`` was cosmetic, the manifest named a PR whose commits were not in
+  the tree, and Phase 4's ``git revert -m 1`` had no mainline. The fetch directly above it got a halt
+  for the adjacent failure (a REFUSAL exits non-zero); this is the other half, so the status alone
+  cannot catch it and ``git rev-parse -q --verify HEAD^2`` is asserted after the halt.
+* **two hand-written literals of LIVE config**: "``main`` keeps the **seven** required contexts" and
+  ``batch_size: 4``. Both are READINGS of ``.github/settings.yml`` (live-asserted by
+  ``.github/scripts/check-required-set.py --live``) and of ``.mergify.yml``, which itself says
+  ``batch_size`` is a separate lever #5384 owns — the exact class the document forbids four pages
+  earlier for the ``needs: changes`` set, and nothing pinned these. Both numbers are gone; both
+  sections name the source. The **branch** name is stated as fixed (the LEDGER is per-batch, the branch
+  is not), with a second concurrent batch declared out of scope.
+
 WHAT IS PINNED, precisely. The **command fences** are pinned as commands: a
 command edit that would not run reds this file, and a wording edit that keeps the
 commands honest does not. Three things are additionally pinned as **substrings**
@@ -144,34 +189,39 @@ the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-tes
 would make the reproduced/not-reproduced list read as a complete partition, plus the lane
 ASSERTION (``TORTOISE_DB_URI`` or an explicit carve-out, HALTING) in every fence that runs the suite
 — a SELECTION in Phase 0's fence is a different shell's environment, so it cannot substitute for one,
-plus the TREE every full-suite fence runs on (named, un-moved between the name and the run) and the
-BOUNDED WAIT between a detached launch and the first read of the status file it is still writing.
+plus the TREE every full-suite fence runs on (named, un-moved between the name and the run), the
+BOUNDED WAIT between a detached launch and the first read of the status file it is still writing, the
+assembly MERGE (halted, and followed by a halted ``HEAD^2`` merge-commit assertion — a no-op merge
+exits 0), the baseline-diffed SKIP carriers (a skipped test is collected, so neither the status nor
+the count can see it), the GRADED ``git bisect run`` (a non-``COMPLETED`` probe status is git's 125,
+not a culprit), the DRAFT-until-asserted landing rule, and no hand-written number for a live-config
+property (``.github/settings.yml``'s required contexts, ``.mergify.yml``'s ``batch_size``).
 
-Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **27 checks** at this head, **0 red**: **3 of 27** at
-``7fb722a9a`` (this round's three — the gate fence's TREE assertion, the bounded wait before the
-status read, and the reviewed-head fetch's force + halt), **5 of 27** at
-``62c79b0b8`` (those plus the lane assertion and the hand-written ordinal — the two findings of the
-round that preceded it), **6 of 27** at
-``a6a71c1e5`` (the per-batch ledger, added there), **7 of 27**
-at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **9 of 27** at
+Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
+revision rather than asserted — **32 checks**, **0 red**: **5 of 32** at ``4dc214c02`` (this round's
+five and nothing else: the skip carriers, the graded bisect, the halted merge + ``HEAD^2`` assert,
+the draft-until-asserted landing rule, and the live-config literals), **8 of 32** at
+``7fb722a9a`` (those five plus the three that round added — the gate fence's TREE assertion, the
+bounded wait before the status read, and the reviewed-head fetch's force + halt), **10 of 32** at
+``62c79b0b8`` (plus the lane assertion and the hand-written ordinal — the two findings of the round
+that preceded it), **11 of 32** at ``a6a71c1e5`` (the per-batch ledger, added there), **12 of 32**
+at ``a4028e8d7`` (that one plus the ``-m track_b`` instrumentation), **14 of 32** at
 ``a12792afe`` (those plus the two the ``a4028e8d7`` round added — the baseline count's carrier and
-the baseline report's completion check), **23 of 27** at
-``a17576c43``, **20 of 27** at ``f3c6c803b``, **18 of 27** at ``a8be548762``, **16 of 27** at
-``295d6d385``, **15 of 27** at ``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **14 of 27** at
-``ed1c03b82`` and ``c50628450``, and **13 of 27** at ``a888c6980`` / ``aede4190f`` — where three
-are exactly that round's findings (the bisect attribution, the gate run's completion, and
-the omitted ``changes`` member) and the fourth is the exit-status-persistence requirement,
-which landed AFTER those revisions. The fourth is the rule rather than an exception: a check
-added later reds on every revision older than it, so a revision's count is "its own round's
-findings plus the checks that did not exist yet". Every count above is measured at THIS head,
-not carried forward — a carried-forward count drifts silently as checks land (six of them
-were stale here, by exactly the check the status wrapper added), which is the same defect
-class as a hard-coded bare-run ERROR count, and it is why the numbers are re-measured when a
-check is added rather than inherited. Every revision in the list re-read at this head gained
-exactly the THREE checks this round added — the gate fence's tree assertion, the bounded wait before
-the status read, and the reviewed-head fetch's force + halt — because none of those defects was fixed
-before ``7fb722a9a``; that is the same rule, applied to the newest set. Four checks the revision matrix alone cannot red are
+the baseline report's completion check), **28 of 32** at ``a17576c43``, **25 of 32** at
+``f3c6c803b``, **23 of 32** at ``a8be548762``, **21 of 32** at ``295d6d385``, **20 of 32** at
+``32a2dc87d`` / ``ba7f83feb`` / ``64ae70fc5``, **19 of 32** at ``ed1c03b82`` and ``c50628450``, and
+**18 of 32** at ``a888c6980`` / ``aede4190f`` — where three are exactly that round's findings (the
+bisect attribution, the gate run's completion, and the omitted ``changes`` member) and the fourth is
+the exit-status-persistence requirement, which landed AFTER those revisions. The fourth is the rule
+rather than an exception: a check added later reds on every revision older than it, so a revision's
+count is "its own round's findings plus the checks that did not exist yet". Every count above is
+re-measured at THIS head, not carried forward — a carried-forward count drifts silently as checks
+land (six of them were stale by exactly the check the status wrapper added), which is the same defect
+class as a hard-coded bare-run ERROR count, and it is why the numbers are re-measured when a check is
+added rather than inherited. Every revision in the list re-read at this head gained exactly the FIVE
+checks this round added (the same +5 on every entry), because none of those defects was fixed before
+``4dc214c02``; that is the same rule, applied to the newest set. Four checks the revision matrix
+alone cannot red are
 named rather than left implied: the parser-sanity check and the contract sentences (green by
 design — they guard against a re-pointed or deleted document, not against a bad command),
 the header-count check (green on every revision by construction: it reads THIS module's
@@ -248,6 +298,19 @@ pipeline's status is its last command's, so the fetch's failure never reaches it
 ``&& git switch -`` suffix after it. Both HONEST alternative spellings are GREEN, measured — ``-f`` and
 ``origin +pull/<N>/head:…`` — so the check accepts the documented remedy rather than only the spelling
 it was written against (the "the guard refuses its own remedy" shape this file has fixed three times).
+
+**19 more measured with the ``4dc214c02`` round, 19 killed.** Each reds its own check, and the two
+shapes that change a *separator* red the assembly one-command check as well (both are the same defect
+one level up): delete the merge's halt; make it ``|| true``; append a mover after the ``HEAD^2`` assert;
+delete that assert; leave it unhalted. Delete the baseline skip-count carrier; stop clearing it; drop
+the absent-carrier halt; flip the comparison to ``-ge`` (which refuses a clean run and passes a dirty
+one); delete the reason-multiset write; delete the reason diff; neuter the reason halt. Restore the
+pre-fix ``|| exit 1`` bisect grader; keep the grading but drop ``exit 125``. Delete the draft
+paragraph; name a draft rule and a ``queue_conditions`` entry in UNRELATED sentences (so the
+mechanism is not identified — the check reads one sentence, not two words anywhere). Restore "the
+seven required contexts"; restore ``batch_size: 4``; delete the concurrent-batch clause. The honest
+document is **0 of 32 red**, and the review's own head ``4dc214c02`` is **5 of 32** — exactly these
+five findings and nothing else.
 
 **The `7fb722a9a` review's P2 is recorded as MEASURED FALSE, not "fixed".** It reported that
 ``ci-introduced-failure`` and ``DEFERRABLE_LEGS`` "do not exist" and that the leg-table pointer is out
@@ -2997,9 +3060,21 @@ def test_the_batch_pr_is_a_draft_until_the_landing_assertion_passes() -> None:
         "bash block nothing invokes, and the queue auto-merges any non-draft PR that carries its "
         "required contexts"
     )
-    assert "-draft" in landing and ".mergify.yml" in landing, (
-        "the draft rule must name its MECHANISM (`-draft` in `.mergify.yml`'s queue conditions): a "
-        "draft that no queue condition honours is not enforcement"
+    # The MECHANISM, in one sentence: `queue_conditions` and `-draft` together. A draft rule whose
+    # reason is only that drafts are polite is not enforcement — this repo's queue honours `-draft`
+    # (`.mergify.yml`'s `queue_conditions`), and that is the whole lever.
+    mechanism = [
+        sentence
+        for sentence in re.split(r"(?<=\.)\s", landing)
+        if "queue_conditions" in sentence and "-draft" in sentence
+    ]
+    assert mechanism, (
+        "the draft rule must name its MECHANISM in one sentence — `-draft` as a `.mergify.yml` "
+        "`queue_conditions` entry: a draft that no queue condition honours is not enforcement, and "
+        "a mention of each word in unrelated sentences is not the mechanism"
+    )
+    assert ".mergify.yml" in landing, (
+        "the draft rule must name `.mergify.yml`, the live queue that honours `-draft`"
     )
     assert re.search(r"un-draft", landing, re.IGNORECASE), (
         "the Landing section must say WHEN to un-draft (only after the pin still matches, or with "
