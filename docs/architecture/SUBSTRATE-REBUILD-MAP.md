@@ -125,7 +125,7 @@ open **code** family in this workstream with no owner:
 | # | the defect | door |
 |---|---|---|
 | **#9417** | `supersede_point` transfers the **structural** set (`SUPERSEDE_STRUCTURAL_RELS` — the `about*` edges) with a bare `MERGE`, so the binder's confidence is **dropped, not moved** | supersede |
-| **#9727** | the same method re-points the predecessor's operator edges onto the successor with a raw edge `MERGE` that never consults the **targets'** claim classes, minting `derived -[IMPL]-> asserted` | supersede |
+| **#9727** | the same method re-points the predecessor's **direct** `IMPL\|NAND` edges onto the successor with a raw edge `MERGE` that never consults the **targets'** claim classes, minting `derived -[IMPL]-> asserted` (the **operator**-edge arm of the same door is **#10195**) | supersede |
 | **#9819** | an `ingest` can **mutate a TERMINAL (retracted/superseded) point** through the content dedup fold — `create_point(dedup=True)` resolves a content match unconditionally | ingest |
 
 **Why they are one lane and not three issues in three epics:** one file
@@ -417,7 +417,7 @@ Dual-registered on purpose, because the two halves need different checkouts:
 | home | what it proves | why there |
 |---|---|---|
 | `core` + `tier1` (`config/ci-surfaces.yml`) → the `test` shards | everything except the ancestry claim | a **docs-only** edit of this file selects no surface at all and runs `tier1` only, so a `core`-only row would never fire on the diff that actually staled three times |
-| the REQUIRED **`docs`** job (`.github/workflows/ci.yml`, next to the `#4454` generated-artifact drift step) | all six claims, including **`measured_at_commit` is an ancestor of `HEAD`** | `docs` checks out at **`fetch-depth: 0`** and has no `paths:` filter, so it cannot inherit the docs-PR skip **and** it has the history the ancestry probe needs (the `test` job's checkout is depth 1, where the object is absent by construction) |
+| the REQUIRED **`docs`** job (`.github/workflows/ci.yml`, next to the `#4454` generated-artifact drift step) | all five claims, including **`measured_at_commit` is an ancestor of `HEAD`** | `docs` checks out at **`fetch-depth: 0`** and has no `paths:` filter, so it cannot inherit the docs-PR skip **and** it has the history the ancestry probe needs (the `test` job's checkout is depth 1, where the object is absent — or present-and-unreachable under the graft, which git answers as "not an ancestor" about a real ancestor, so neither status is drift there — #10356) |
 | `CORE_ALSO` (`tools/ci_selection.py`) | the same `test`-shard set, on a **tool-only** edit | `tools/` is a flat non-python prefix and matches no `SOURCE_PATTERNS` row, so without that entry an edit to the tool itself selected nothing |
 
 What it checks, and deliberately does not:

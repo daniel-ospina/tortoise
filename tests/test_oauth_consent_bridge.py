@@ -22,9 +22,10 @@ is what stops it from becoming fiction:
     the bridge moves provider sign-in to the app origin. Silence is the defect.
 
 These are STATIC guards on purpose. They assert where behaviour lives, not that it behaves: the
-page's behaviour is EXECUTED by `tests/test_oauth_consent_pkce.py` (node:vm against the vendored
-supabase bundle), and the BFF's by the Pages gates. A guard that cannot fail is not a guard, so
-each one asserts it found its subject.
+page's behaviour is EXECUTED by `tests/test_oauth_consent_page_step4.py` (the rendered page's inline
+script under node, against a fetch/DOM shim — §9 step 4 deleted the supabase client this line used to
+name), and the BFF's by the Pages gates. A guard that cannot fail is not a guard, so each one asserts
+it found its subject.
 
 ⛔ ONE SECTION IS NOT STATIC — `§2 / §9 step 2, EXECUTED` at the end of this file. The sections
 above pin WHERE the contract is written; that one pins THAT IT IS ENFORCED, because §9 orders the
@@ -47,6 +48,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import tempfile
 import time
 import unicodedata
@@ -175,12 +177,14 @@ def test_rfc8414_authorization_endpoint_stays_same_origin() -> None:
 
 # ── Task 3 — the four properties, anchored ──────────────────────────────────
 
-#: property → (file, the token that carries it). Each must have exactly ONE implementation site.
-_PAGE_PROPERTIES = {
-    "single-flight": (OAUTH, "if (previewInFlight) return previewInFlight;"),
-    "refresh-once": (OAUTH, "let staleRefreshes = 0;"),
-    "never-sign-out": (OAUTH, "NEVER call the auth logout API here"),
-    "auto-advance": (OAUTH, "supabaseClient.auth.onAuthStateChange("),
+#: property → (file, the token that carries it) as it was on the PAGE. §9 step 4 DELETED all four page-side
+#: implementations (§7's deletion set), so these are asserted ABSENT — a property that drifted back into the
+#: page would mean a second identity system again, which is the whole of what step 4 removed.
+_RETIRED_PAGE_PROPERTIES = {
+    "single-flight": "if (previewInFlight) return previewInFlight;",
+    "refresh-once": "let staleRefreshes = 0;",
+    "never-sign-out": "NEVER call the auth logout API here",
+    "auto-advance": "supabaseClient.auth.onAuthStateChange(",
 }
 
 #: The same three properties, already re-implemented server-side by the BFF (#3522/#4054), plus
@@ -202,14 +206,18 @@ def test_the_four_properties_have_live_implementation_sites() -> None:
     """Each of SCOPE §4 W3's four properties must exist somewhere that runs.
 
     The properties were the only statement of the working pattern, and the consolidation dropped
-    their citation block. Pinning the carrier token means the anchor can never point at nothing —
-    which is exactly how "the four properties" became an unverifiable claim in the first place.
+    their citation block. Until §9 step 4 the page carried its own copy of all four; step 4 deleted
+    them, so the LIVE implementation is the BFF one and the page-side token must be ABSENT. Both
+    halves are asserted: the BFF anchor must exist, and the page must not have reclaimed it — a
+    property that drifted back into the page is a second identity system, which is exactly what
+    step 4 removed.
     """
-    for prop, (path, token) in _PAGE_PROPERTIES.items():
-        line = _only_line(path, token)
-        assert f"oauth.py:{line}" in SPEC.read_text(), (
-            f"the spec's {prop!r} row no longer cites oauth.py:{line} — the confirmed anchor and "
-            "the guard have drifted apart"
+    page = OAUTH.read_text()
+    for prop, token in _RETIRED_PAGE_PROPERTIES.items():
+        assert token not in page, (
+            f"the consent page carries {prop!r} again ({token!r}) — §9 step 4 deleted the page's own "
+            "implementation of all four properties, and re-introducing one restores the second "
+            "identity system the bridge exists to remove"
         )
 
     for prop, (path, token) in _BFF_PROPERTIES.items():
@@ -270,14 +278,19 @@ def test_the_consent_page_still_does_not_call_any_logout_api() -> None:
 # ── Task 5 — the sign-in fallback origin must be ACCOUNTED FOR ──────────────
 
 def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
-    """The consent page signs in with `redirectTo = window.location.origin + /oauth/authorize`.
+    """Task 5's origin must stay ACCOUNTED FOR — now as a recorded NON-requirement.
 
-    GoTrue refuses a `redirect_to` it does not recognise, and the repo's record of the required
-    allowlist entries (`docs/ops/auth-email-flows.md` §3) does not contain the consent page's
-    origin. Either the allowlist is missing it (provider sign-in on the only working auth flow is
-    refused) or the record is incomplete. Both are defects; silence is the one that is
-    unfalsifiable, so the record must mention the origin — as an entry, or as a recorded
-    non-requirement once the bridge moves provider sign-in to the app origin.
+    The consent page used to sign in with `redirectTo = window.location.origin +
+    /oauth/authorize`, so `api.premiselabs.co` had to be in the GoTrue redirect
+    allowlist or provider sign-in on the only working auth flow was refused. §9
+    step 4 removed the page's sign-in entirely, so the entry is no longer
+    required — and the failure this guard prevents has simply changed shape: an
+    operator reading a STALE "required" row, or a later lane deleting the row
+    with no note, is the same unrecorded state in the other direction.
+
+    So the record must still ADDRESS the origin, and it must say which it is:
+    the row is present AND marked a non-requirement (a bare "required" row is
+    now false; a deleted row is a silent reversal of task 5's finding).
     """
     record = ALLOWLIST_RECORD.read_text()
     section = record.split("## 3. Redirect allowlist", 1)
@@ -289,81 +302,82 @@ def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
     assert "| Entry | Why |" in table, "the required-entries table is gone from §3"
 
     assert "api.premiselabs.co" in table, (
-        "the consent page's sign-in fallback origin (https://api.premiselabs.co/oauth/authorize) "
-        "is absent from the redirect-allowlist record. Add the entry, or record that the bridge "
-        "removed the dependency — do not leave the origin unaddressed (#3524 task 5)."
+        "the consent page's former sign-in origin (https://api.premiselabs.co/oauth/authorize) is "
+        "absent from the redirect-allowlist record. §9 step 4 made it a NON-requirement rather "
+        "than a dependency — record that, do not delete the row silently"
+    )
+    rows = [line for line in table.splitlines() if "api.premiselabs.co" in line]
+    assert rows, table
+    assert any("NO LONGER REQUIRED" in row for row in rows), (
+        "the record still presents api.premiselabs.co as a REQUIRED redirect entry — the consent "
+        "page performs no sign-in since §9 step 4, so the row is a non-requirement and must say "
+        "so (task 5's finding is answered by the record, not erased by it)"
     )
 
 
-# ── §7 — the deletion set's anchors, recomputed not trusted ──────────────────
+# ── §7 — the deletion set: DELETED, and asserted absent ─────────────────────
 
-#: §7's deletion set: (row marker, the token that IS the item) for each anchor the table cites, so
-#: the row's `oauth.py:<n>` can be RECOMPUTED from the source instead of trusted. The marker names
-#: the ROW the citation must appear in: a number that happens to be cited elsewhere in §7 (the
-#: prose above the table cites `oauth.py:2268-2497`, for instance) must not be able to satisfy a
-#: row it does not belong to. Each token must also occur on exactly one line (see `_only_line`), so
-#: a duplicated or renamed site reds here rather than silently re-pointing.
-_DELETION_SET = {
-    ("adapter + the aux-store probe chain", "const auxStores = () => {"),
-    ("`COOKIE_NAME`/`COOKIE_DOMAIN`",
-     'const COOKIE_NAME = "sb-tortoise-auth-token";'),
-    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", 'const COOKIE_PATH = "/";'),
-    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", 'const COOKIE_DOMAIN = ".premiselabs.co";'),
-    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", "const SIZE_GUARD = 3800;"),
-    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", "const SIZE_CAP = COOKIE_LIMIT"),
-    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", 'document.cookie = key + "=" + encoded'),
-    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", 'document.cookie = key + "=;"'),
-    ("supabase-js CDN", "window.supabase.createClient("),
-    ("`pkceIncapable`/`CAPABILITY`", "function pkceIncapable() {"),
-    ("`onAuthStateChange` (property 4", "supabaseClient.auth.onAuthStateChange("),
-}
+#: §7's deletion set, as the tokens that WERE the items. §9 step 4 deleted every one of them, so this
+#: table is now an ABSENCE assertion (the row markers are gone with the anchors, which is why the
+#: tuple shape changed from `<row marker>, <token>` to just `<token>`: there is no line number left to
+#: recompute, and a citation of a deleted line is the one thing this guard must not accept).
+#:
+#: WHY AN ABSENCE TEST AND NOT A DELETED TEST: each of these looked like a feature (a session adapter,
+#: a capability probe, a retry affordance). The whole point of §7 was that the ordering mattered — the
+#: page could not be half-migrated — so the durable guard is "it is gone from the page", which reds the
+#: moment a later change re-introduces one instead of quietly re-creating the second identity system.
+_DELETED_PAGE_ARTEFACTS = [
+    "const auxStores = () => {",
+    'const COOKIE_NAME = "sb-tortoise-auth-token";',
+    'const COOKIE_PATH = "/";',
+    'const COOKIE_DOMAIN = ".premiselabs.co";',
+    "const SIZE_GUARD = 3800;",
+    "const SIZE_CAP = COOKIE_LIMIT",
+    'document.cookie = key + "=" + encoded',
+    'document.cookie = key + "=;"',
+    "window.supabase.createClient(",
+    "function pkceIncapable() {",
+    "supabaseClient.auth.onAuthStateChange(",
+    # §7's other rows, same fate: the sign-in handlers and the fragment sanitiser.
+    'id="btn-github"',
+    'id="btn-google"',
+    "signInWithPassword(",
+    "function sanitiseUrl() {",
+    "function showTerminalFallback() {",
+]
 
 
-def test_the_deletion_set_rows_cite_live_sites() -> None:
-    """§7's deletion-set table must cite the line each item ACTUALLY lives on at this head.
+def test_the_deleted_page_artefacts_are_GONE() -> None:
+    """§7's deletion set is DELETED — recomputed from the source, not trusted.
 
-    This table is the part of the spec that was hand-remapped and got it wrong twice: round 1
-    advanced a block by +171 (`oauth.py` had moved +190), and round 2 rewrote the §7 rows with the
-    PR BASE's numbers, so `:2037` pointed at `_valid_redirect_uri`'s neighbour instead of
-    `COOKIE_NAME`. `test_the_four_properties_have_live_implementation_sites` recomputes only the
-    four property anchors, so nothing caught it: the anchors were wrong and CI was green.
+    Before step 4 this guard obliged §7's rows to cite the line each item ACTUALLY lived on, because
+    the table had been hand-remapped wrong twice (once advancing a block by +171, once rewritten with
+    the PR BASE's numbers). That obligation is discharged by the deletion itself: there is no line
+    left to cite, so the same check now runs in the only direction that is still falsifiable — the
+    token must be ABSENT, and §7 must SAY it is deleted.
 
-    The guard therefore DERIVES the number from `tortoise/oauth.py` and requires the row that names
-    the item to cite it — an anchor is a claim about a live site, and a claim nobody recomputes is
-    exactly how this table came to point at unrelated code.
+    The spec half is asserted too, because a deletion set that still reads as a to-do list is how a
+    later lane "restores" something that was removed on purpose (each item looked like a feature).
     """
-    spec = SPEC.read_text()
-    section = spec.split("## 7. Deletion set", 1)
+    page = OAUTH.read_text()
+    present = [token for token in _DELETED_PAGE_ARTEFACTS if token in page]
+    assert not present, (
+        "§7's deletion set is back in the consent page: " + "; ".join(present) + " — §9 step 4 "
+        "deleted these wholesale, and each one is a piece of the SECOND identity system the bridge "
+        "replaced. If a real need brought one back, it belongs on the server path, not in the page."
+    )
+
+    section = SPEC.read_text().split("## 7. Deletion set", 1)
     assert len(section) == 2, (
-        "the spec no longer has a '## 7. Deletion set' section — the deletion set and its ordering "
-        "guard moved, and this guard is now scanning nothing"
+        "the spec no longer has a '## 7. Deletion set' section — the record of WHAT was deleted and "
+        "why each item was load-bearing is the part a future reader is most likely to undo"
     )
     section_text = section[1].split("## 8.", 1)[0]
-    rows = [line for line in section_text.splitlines() if line.startswith("|")]
-    assert rows, "§7 has no table rows — the guard would pass vacuously"
-
-    stale: list[str] = []
-    for row_marker, token in _DELETION_SET:
-        matching = [row for row in rows if row_marker in row]
-        assert len(matching) == 1, (
-            f"§7 should have exactly one row naming {row_marker!r}, found {len(matching)} — the "
-            "table's shape changed and this guard can no longer tell which row it is checking"
-        )
-        # Both citation forms the spec uses: `oauth.py:<n>` and the bare in-context `:<n>` (§7
-        # only cites `oauth.py`, but the bare form is what the §1 table already uses). The item's
-        # line must be the START of a cited span: a range names the block it opens, and the
-        # singleton anchors name the individual sites INSIDE such a range. Containment is
-        # deliberately not accepted — the round-2 defect was exactly the singletons going stale
-        # while the row's outer range still covered them, so a containment test would have passed
-        # on `(:2037, :2052, :2053, :2054, :2060)`.
-        starts = {int(m.group(1)) for m in re.finditer(r":(\d+)", matching[0])}
-        line = _only_line(OAUTH, token)
-        if line not in starts:
-            stale.append(f"{token!r} is at oauth.py:{line}, but its row starts citing {sorted(starts)}")
-    assert not stale, (
-        "§7's deletion set cites line numbers that do not name the item: " + "; ".join(stale) +
-        " — re-derive them from tortoise/oauth.py AFTER the last source edit (a remap done before "
-        "a later comment edit shifts them again, which is how this table went stale twice)."
+    assert "DELETED by #3524 §9 step 4" in section_text, (
+        "§7 no longer records that the deletion set was DELETED — it would read as outstanding work"
+    )
+    assert "tests/test_oauth_consent_page_step4.py" in section_text, (
+        "§7 no longer names the guard that keeps the deletion deleted"
     )
 
 
@@ -2237,8 +2251,11 @@ def test_a_secret_that_reuses_a_service_key_is_not_a_provisioned_arm(monkeypatch
     """§2.3 — the secret must be DEDICATED. A reused key is treated as unprovisioned.
 
     Without this, `CONSENT_TOKEN_SECRET=<anon key>` makes the verifier a forgery oracle for anyone
-    who has loaded the consent page (the page embeds that key in its HTML) — and `sub` is the only
-    identity input on the token arm, so that is every account. Unit-level on purpose: the arm's
+    holding that key — it is public by construct, in Supabase's model: the low-privilege key is
+    DESIGNED to be shipped to a browser and is bounded only by Row Level Security (§9 step 4
+    removed the one page that used to embed it, and #4054/#4178 keep it out of this app's bundles,
+    which never made it secret) — and `sub`
+    is the only identity input on the token arm, so that is every account. Unit-level on purpose: the arm's
     unavailability already has an end-to-end test, and the operator signal here is the REASON the
     503 carries, which is what distinguishes "unset" from "set to something you must not reuse".
     """
@@ -2253,9 +2270,11 @@ def test_a_secret_that_reuses_a_service_key_is_not_a_provisioned_arm(monkeypatch
     problem = consent_token_secret_problem()
     assert problem and "DEDICATED" in problem and "SUPABASE_SERVICE_ROLE_KEY" in problem, problem
 
-    # ⛔ …and the ANON key, which is the WORSE half (§2.3): it is public by construction, because the
-    # consent page embeds it — `hosted_api.py` reads `SUPABASE_ANON_KEY` into the page's
-    # `__SUPABASE_ANON_KEY__` placeholder, so it IS in this process's environment. An earlier
+    # ⛔ …and the ANON key, which is the WORSE half (§2.3): it is public by construction —
+    # Supabase designs it for browser delivery and bounds it only by Row Level Security — and
+    # `hosted_api.py` reads `SUPABASE_ANON_KEY` into outbound `apikey` headers, so it IS in this
+    # process's environment (the placeholder the deleted inline client used to fill is GONE with
+    # it, §9 step 4 — the env presence is the part this guard needs). An earlier
     # version of this guard claimed it was not, and so left exactly this case unguarded (measured,
     # review round 3).
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -2868,3 +2887,482 @@ def test_the_contract_in_the_code_is_the_contract_in_the_spec() -> None:
         assert section in source, (
             f"tortoise/consent_token.py no longer cites {section} — the guarantee it implements "
             "is then checkable only against the code's own prose")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# the anon-key premise: the FALSE half must not come back
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: The marker above. This file IS in the corpus (it carries two of the corrected §2.3 comments),
+#: so the scan stops at this line — the denylist and the assertions below hold the needles in
+#: quoted form, and a gate that reds on its own denylist is unfixable.
+_PREMISE_GATE_MARKER = "# the anon-key premise: the FALSE half must not come back"
+
+#: ⛔ THE PREMISE THIS PR HAD TO CORRECT TWICE — round 11 of #10346's review found the
+#: first correction had replaced a false premise with another one, in five homes.
+#:
+#: The false claim is that the anon key is public **because this app ships it to every
+#: browser**. That is the property #4054 and #4178 REMOVED on purpose:
+#: `website/apps/dashboard/index.html:12-19` — *"the Supabase JS UMD bundle is GONE from this
+#: page … Dropping it also removes a script that ran same-origin with access to cookies and
+#: **the anon key**"* — and `website/apps/blog-admin/src/lib/backend.ts:48-53` —
+#: *"A placeholder keeps `VITE_SUPABASE_ANON_KEY` out of the browser bundle's requirements
+#: (#4178: it must not stay load-bearing)"*, `PLACEHOLDER_KEY = 'bff-proxy'`. The dashboard SPA
+#: names the key ZERO times. So a doc that tells the next lane "we already publish it" is a
+#: green light to re-add client-side supabase-js and silently reverse #4054.
+#:
+#: The TRUE mechanism, and the only one these homes may state: Supabase's low-privilege key is
+#: public BY CONSTRUCT — it is designed to be shipped to a browser and is bounded only by Row
+#: Level Security — and it is in this API's own environment, so a collision with the HMAC key is
+#: OBSERVABLE. `config/required-bindings.yml` already says exactly that, and nothing about
+#: browser delivery.
+#:
+#: Each needle is a LITERAL paste of what shipped, because this is a denylist and a
+#: grammatical pattern would re-open the hole the docs gate next door was rebuilt to close.
+_FALSE_ANON_KEY_BROWSER_CLAIMS: tuple[tuple[str, str], ...] = (
+    ("ships in every browser that loads the app",
+     "this app deliberately ships it to NO browser (#4054/#4178) — 'public by construct' "
+     "means Supabase designs the key for exposure, and RLS bounds it"),
+    ("ships to every browser that loads the app",
+     "the same claim in the other preposition — and equally false here (#4054/#4178)"),
+    ("independently of whether any one page embeds it",
+     "true of Supabase's model, but as written it excused the app-wide claim above; state the "
+     "mechanism (designed for exposure + RLS-bounded + in this API's env), not browser delivery"),
+    ("the consent page embeds it",
+     "#3524 §9 step 4 DELETED that page and its inline client; nothing embeds the anon key"),
+    # ⛔ The two below are the §8 operator-checklist pair that a previous round reported and round
+    # 11 found STILL unfixed. They are literals, not patterns, for the reason this denylist is
+    # literals: `anyone who loaded the page` is the CONSEQUENCE sentence that made the deleted
+    # page the disclosure vector (`grep -c SUPABASE_ANON_KEY tortoise/oauth.py` is 0), and the
+    # first is the claim that the AS reads the key *in order to render* it. Each was restored
+    # from `37fc5b651^` during review and redded here.
+    ("`supabase_anon_key` itself, for the consent page",
+     "the AS reads `SUPABASE_ANON_KEY` from its OWN environment to REFUSE a collision — never to "
+     "render the page (which no longer exists, §9 step 4)"),
+    ("anyone who loaded the page",
+     "nobody 'loads' the key from this app any more: #4054/#4178 keep it out of the bundles and "
+     "§9 step 4 deleted the page. Say 'anyone who HOLDS that key'"),
+    ("__supabase_anon_key__",
+     "that placeholder died with the page's inline client (§9 step 4) — the key reaches this "
+     "process through the API's environment, not through a rendered page"),
+)
+
+#: Every home the false premise reached, with the substrate each one is. Scanned as prose AND
+#: code because the claim lives in both (three docstrings/comments, two docs, two test comments).
+#: ⛔ This file is in the corpus ONLY above `_PREMISE_GATE_MARKER` (see the scan below).
+_ANON_KEY_PREMISE_CORPUS: tuple[str, ...] = (
+    "tortoise/consent_token.py",                       # §2.3 / §8 operator text + module prose
+    "tortoise/hosted_api.py",                          # the verifier's home
+    "tortoise/oauth.py",                               # the page whose client was deleted
+    "config/required-bindings.yml",                    # the CORRECT wording, canonical
+    "docs/engineering/auth/consent-identity-bridge.md",  # §2.3, §8 checklist, §10
+    "docs/auth-architecture.md",
+    "website/website_architecture.md",
+    "tests/test_pages_bindings.py",
+    "tests/test_oauth_consent_bridge.py",              # this file's own §2.3 comments (2072 chars)
+    # ⛔ The two Supabase homes. Added during THIS PR's review: the sweep corrected the sentence
+    # in nine homes and left the identical claim sitting in the migration's RLS justification and
+    # its pgTAP suite's header — where neither the corpus nor any such scan could see it, so the
+    # gate above reported clean on text carrying its own denylist entry. Round 11's lesson repeats
+    # in a new direction: a corpus is only as good as the homes it enumerates.
+    "supabase/migrations/20261030000001_oauth_consent_tickets.sql",  # the RLS block's premise
+    "supabase/tests/20261030000001_oauth_consent_tickets.sql",       # its pgTAP suite's header
+    # ⛔ The deploy manifest. Twelfth home, found by the completeness scan below (`git ls-files`,
+    # not this tuple) after the two above were added: it is the JUSTIFICATION for
+    # `CONSENT_TOKEN_SECRET` being dedicated, so a reader deciding whether that key may be reused
+    # from the anon key reads it as our own permission slip — the same role that made the two
+    # Supabase homes matter. Kept in the tuple as well as being covered by the derived scan, so
+    # the corpus scan (which reads the whole file, no marker) reds on it too.
+    ".github/scripts/fly-managed-secrets.txt",        # CONSENT_TOKEN_SECRET's DEDICATED note
+)
+
+#: ⛔ THE ONE HOME THAT CANNOT BE CORRECTED WHERE IT SITS — and why this exemption is per-FILE and
+#: per-NEEDLE rather than a blanket "applied migrations are exempt".
+#:
+#: `supabase/migrations/**` is APPEND-ONLY (#1095; the #1001 P0 is the reason). `86f519df3`
+#: corrected the false premise by editing this applied migration's `--` comment block, and the
+#: `migration-append-only` REQUIRED check failed on it exactly as it would have on a DDL edit: the
+#: rule keys on git STATUS, and an M/T/D of a base-tree migration is NEVER exempt (#2240 scope
+#: (a)+(c) — a comment edit carries no destination version to bound). MEASURED on this branch:
+#: `bash .github/scripts/check-migration-append-only diff` → `M<TAB>…/20261030000001_….sql`, exit 1.
+#:
+#: So the file is restored byte-identical to `origin/main`'s blob and the correction lives where a
+#: reader looks — `docs/engineering/auth/consent-identity-bridge.md` §2.3/§8/§10 — while this
+#: record keeps the HOME visible: the file stays in `_ANON_KEY_PREMISE_CORPUS` above, and the exact
+#: sentence it carries is pinned here. Tolerating the recorded sentence is the honest position;
+#: DROPPING the file from the corpus would have reported the tree clean by not looking, which is
+#: the false PASS this whole gate exists to prevent.
+#:
+#: ⛔ Both halves are asserted in
+#: `test_the_immutable_migration_exemption_tolerates_only_the_RECORDED_premise`: a claim that is
+#: NOT recorded reds even in an exempt file (so append-only cannot be used to smuggle a second
+#: claim past this gate), every exempt path must be a file the append-only gate actually covers,
+#: and the sibling pgTAP suite — which is NOT append-only and WAS fixable — must carry no premise
+#: at all.
+
+#: The applied migration that froze the pre-correction sentence: the record's key, and the file
+#: whose real `--`-wrapped shape the leader arm in the corpus test is anchored on.
+_IMMUTABLE_MIGRATION_SAMPLE = "supabase/migrations/20261030000001_oauth_consent_tickets.sql"
+
+_RECORDED_IMMUTABLE_MIGRATION_PREMISES: dict[str, tuple[str, ...]] = {
+    _IMMUTABLE_MIGRATION_SAMPLE: ("the consent page embeds it",),
+}
+
+
+#: A line-leading comment leader in ANY language this corpus holds: SQL `--`, JS `//`, Python
+#: `#`, C-style `*` continuation. ⛔ This is load-bearing, not cosmetic. The corpus now includes
+#: two `.sql` homes whose comments carry `--` on EVERY line, so a claim re-wrapped inside one
+#: reads `… the consent page embeds -- it in its HTML …`. A comparison form that only collapses
+#: whitespace leaves that leader in place and is therefore BLIND in exactly those homes — measured
+#: on `8ed208244`: both SQL files carried the claim and `_flatten` without this strip reported
+#: CLEAN on both. Stripping the leader is what makes a needle span a wrapped comment line.
+_COMMENT_LEADER = re.compile(r"(?m)^[ \t]*(?:--|//|#|\*)[ \t]?")
+
+
+def _flatten(text: str) -> str:
+    """Case-folded, comment-leader-stripped, whitespace-collapsed — the gate's comparison form.
+
+    A claim survives re-wrapping, re-casing AND re-commenting; it does not survive being a paste.
+    Used on BOTH sides so a needle cannot pass by being re-flowed across two lines in the doc, and
+    cannot hide behind a `--`/`#`/`//` leader in the homes written in those dialects.
+    """
+    return re.sub(r"\s+", " ", _COMMENT_LEADER.sub(" ", text)).strip().casefold()
+
+
+def _false_anon_key_claims(text: str) -> list[str]:
+    """Which false premises this text carries (empty == clean)."""
+    flat = _flatten(text)
+    return [why for needle, why in _FALSE_ANON_KEY_BROWSER_CLAIMS if _flatten(needle) in flat]
+
+
+def _false_anon_key_needles(text: str) -> list[str]:
+    """Which denylisted NEEDLES this text carries (empty == clean) — the record's own key form.
+
+    `_false_anon_key_claims` answers "why this is false"; the immutable-home record is written in
+    needles, so the exemption and the thing it tolerates are compared in one vocabulary.
+    """
+    flat = _flatten(text)
+    return [needle for needle, _why in _FALSE_ANON_KEY_BROWSER_CLAIMS if _flatten(needle) in flat]
+
+
+def _unrecorded_anon_key_claims(rel: str, text: str) -> list[str]:
+    """The false premises in `text` that are NOT recorded against an immutable home.
+
+    `rel` decides the record, not the caller: the sentence an APPLIED migration is known to carry
+    (`_RECORDED_IMMUTABLE_MIGRATION_PREMISES`, frozen there by append-only) is tolerated in THAT
+    file and nowhere else, so the exemption can never be borrowed by a home that could still be
+    corrected — and any claim beyond the recorded one still reds, in the exempt file too.
+    """
+    tolerated = _RECORDED_IMMUTABLE_MIGRATION_PREMISES.get(rel, ())
+    flat = _flatten(text)
+    return [
+        why
+        for needle, why in _FALSE_ANON_KEY_BROWSER_CLAIMS
+        if needle not in tolerated and _flatten(needle) in flat
+    ]
+
+
+def test_no_home_claims_this_app_ships_the_anon_key_to_every_browser():
+    """⛔ A claim that contradicts #4054/#4178 must not survive in any of the twelve homes.
+
+    Why this is a test and not a review note: round 11 measured the false premise in FIVE homes
+    after a previous round had already corrected the same family, and it is the *justification*
+    for a real guard (`consent_token_secret_problem`), so a reader deciding whether the app may
+    put the key in a browser reads it as our own permission slip.
+
+    Non-vacuity is asserted three ways, so this cannot become a scan that proves nothing:
+      1. the corpus is real (every file exists, and the total is substantial);
+      2. each needle is PROVEN to bite, by injecting it into a synthetic copy of a corpus file —
+         so a broken comparison form fails here rather than reporting every home clean;
+      3. the TRUE mechanism is still stated where the guard lives (the reasoning must be
+         corrected, never deleted), which is the other direction of the same edit.
+
+    ⛔ ONE corpus entry is tolerated rather than clean: the applied migration whose RLS comment
+    append-only froze (`_RECORDED_IMMUTABLE_MIGRATION_PREMISES` — see its docstring). It is
+    tolerated for the ONE sentence recorded there, in THAT path only, and
+    `test_the_immutable_migration_exemption_tolerates_only_the_RECORDED_premise` pins both halves.
+    """
+    corpus = {rel: (REPO / rel).read_text(encoding="utf-8").split(_PREMISE_GATE_MARKER)[0]
+              for rel in _ANON_KEY_PREMISE_CORPUS}
+    assert sum(len(t) for t in corpus.values()) > 100_000, (
+        f"the corpus is {sum(len(t) for t in corpus.values())} chars — that is not these twelve "
+        "files, so a clean result below would prove nothing")
+
+    for rel, text in corpus.items():
+        assert not _unrecorded_anon_key_claims(rel, text), (
+            f"{rel} still claims the anon key is public BECAUSE this app ships it to browsers:\n  "
+            + "\n  ".join(_unrecorded_anon_key_claims(rel, text))
+            + "\n⛔ #4054 removed the dashboard's UMD bundle and #4178 keeps "
+              "`VITE_SUPABASE_ANON_KEY` non-load-bearing precisely so no browser receives it. "
+              "State the real mechanism instead (Supabase designs the key for browser exposure "
+              "and bounds it only by RLS; it is in this API's env, so a collision is observable) "
+              "— see `config/required-bindings.yml`'s SUPABASE_ANON_KEY note for the wording.")
+
+    # (2) the needles BITE: inject each one into a copy and prove the detector sees it
+    sample = corpus["config/required-bindings.yml"]
+    sample_md = corpus["docs/engineering/auth/consent-identity-bridge.md"]
+    for needle, _why in _FALSE_ANON_KEY_BROWSER_CLAIMS:
+        injected = sample + f"\n# the anon key is public: it {needle}, so reuse cannot matter.\n"
+        assert _false_anon_key_claims(injected), (
+            f"the denylist did not catch {needle!r} — the comparison form is broken and every "
+            "home above was reported clean by a detector that cannot fire")
+        # …and the same needle RE-WRAPPED across a prose line break, which is how a doc paste
+        # survives: markdown re-wraps with a bare newline (no line prefix), so the comparison
+        # form has to collapse it or a re-flowed restore ships green.
+        words = needle.split()
+        rewrapped = sample_md + "\n" + " ".join(words[:len(words) // 2]) + "\n" + \
+            " ".join(words[len(words) // 2:]) + ", so reuse cannot matter.\n"
+        assert _false_anon_key_claims(rewrapped), (
+            f"the denylist missed {needle!r} re-wrapped across a line break")
+
+    # …and re-wrapped across a `--` SQL comment line, which is the shape that ACTUALLY shipped in
+    # the migration: `-- the consent page embeds` / `-- it in its HTML`. A comparison form that
+    # leaves the leader in place turns that into `embeds -- it` and never matches, so without this
+    # arm the two `.sql` homes are in the corpus and still unscanned — a false PASS on the exact
+    # claim the gate names (measured on `8ed208244`, both files, both reported clean).
+    # Read from the tree rather than from `corpus`: the migration is the file whose real shape this
+    # arm is about, and it is the one corpus entry the append-only restoration leaves carrying the
+    # sentence — so it must not be dropped from the arm along with its exemption.
+    sample_sql = (REPO / _IMMUTABLE_MIGRATION_SAMPLE).read_text(encoding="utf-8")
+    for needle, _why in _FALSE_ANON_KEY_BROWSER_CLAIMS:
+        words = needle.split()
+        half = len(words) // 2
+        rewrapped_sql = (
+            sample_sql + "\n-- the anon key is public: it " + " ".join(words[:half])
+            + "\n-- " + " ".join(words[half:]) + ", so reuse cannot matter.\n"
+        )
+        assert _false_anon_key_claims(rewrapped_sql), (
+            f"the denylist missed {needle!r} re-wrapped across a `--` comment line — the two "
+            "`.sql` corpus homes carry a leader on every line, so a form that keeps the leader "
+            "is blind in exactly the homes this PR added")
+
+    # (3) the TRUE mechanism survives — a deletion would pass (1) and lose the reasoning
+    token_src = _flatten(corpus["tortoise/consent_token.py"])
+    assert "row level security" in token_src, (
+        "tortoise/consent_token.py no longer explains WHY the anon key is public (Supabase "
+        "designs it for browser exposure, bounded by Row Level Security) — the false premise "
+        "must be REPLACED by the real mechanism, not deleted, or the next lane re-derives the "
+        "wrong one")
+    assert "observable" in token_src, (
+        "tortoise/consent_token.py no longer states the fact this guard actually rests on: the "
+        "key is in this process's environment, so a collision is OBSERVABLE")
+    bindings = _flatten(corpus["config/required-bindings.yml"])
+    assert "refuse a collision" in bindings, (
+        "config/required-bindings.yml — the canonical wording this PR points every other home "
+        "at — no longer states that the API reads the key to REFUSE a collision")
+
+
+def test_the_immutable_migration_exemption_tolerates_only_the_RECORDED_premise():
+    """The append-only home is tolerated for the ONE sentence it is recorded as carrying.
+
+    Without this test the exemption would be indistinguishable from a hole: a blanket "applied
+    migrations are exempt" would let the next documentation sweep leave the same false premise in
+    a NEW migration (which IS editable — it is this PR's own `A`), and prompt any future lane to
+    drop a home from the corpus instead of correcting it. So the record is asserted three ways:
+
+      1. **narrow** — every exempt path is a file the append-only gate actually covers
+         (`supabase/migrations/`), so the mechanism cannot be reused for a doc that could still be
+         fixed;
+      2. **exactly the recorded needles** — the exempt file carries the recorded sentence and NO
+         other denylisted claim, so the record cannot quietly widen;
+      3. **still biting** — an ADDITIONAL claim injected into that same file is REPORTED, which is
+         what proves the tolerance is per-needle rather than per-file; and the sibling pgTAP
+         suite, which is not append-only and therefore WAS correctable, must carry none at all.
+    """
+    assert _RECORDED_IMMUTABLE_MIGRATION_PREMISES, (
+        "the immutable-home record is empty, so nothing explains why an applied migration is "
+        "allowed to carry a denylisted claim")
+    for rel in _RECORDED_IMMUTABLE_MIGRATION_PREMISES:
+        assert rel.startswith("supabase/migrations/"), (
+            f"{rel} is recorded as an immutable home but is NOT under `supabase/migrations/`, so "
+            "the append-only rule does not make it unfixable — correct the file instead")
+        assert rel in _ANON_KEY_PREMISE_CORPUS, (
+            f"{rel} is tolerated for a denylisted claim but is absent from "
+            "`_ANON_KEY_PREMISE_CORPUS`, so nothing records it as a home of the premise — a "
+            "dropped home is exactly the false PASS this gate exists to prevent")
+
+    source = (REPO / _IMMUTABLE_MIGRATION_SAMPLE).read_text(encoding="utf-8")
+    assert _false_anon_key_needles(source) == list(
+        _RECORDED_IMMUTABLE_MIGRATION_PREMISES[_IMMUTABLE_MIGRATION_SAMPLE]
+    ), (
+        "the applied migration's denylisted claims no longer match the recorded set ("
+        f"{_false_anon_key_needles(source)!r}) — the exemption is recorded for exactly "
+        f"{_RECORDED_IMMUTABLE_MIGRATION_PREMISES[_IMMUTABLE_MIGRATION_SAMPLE]!r}; if main's "
+        "blob changed, append-only was violated, and if a claim was ADDED the record must not be "
+        "widened to cover it")
+
+    # (3) the tolerance is per-NEEDLE: a second, unrecorded claim in the SAME file still reds.
+    extra = next(
+        needle
+        for needle, _why in _FALSE_ANON_KEY_BROWSER_CLAIMS
+        if needle not in _RECORDED_IMMUTABLE_MIGRATION_PREMISES[_IMMUTABLE_MIGRATION_SAMPLE]
+    )
+    assert _unrecorded_anon_key_claims(
+        _IMMUTABLE_MIGRATION_SAMPLE,
+        source + f"\n-- the anon key is public: it {extra}, so reuse cannot matter.\n",
+    ), (
+        f"an unrecorded claim ({extra!r}) added to the exempt migration was NOT reported — the "
+        "exemption is then per-FILE, and append-only becomes a licence to ship new false "
+        "premises in the one tree this gate cannot read back")
+
+    # …and it cannot be borrowed: the SAME sentence in a file that could still be corrected reds.
+    assert _unrecorded_anon_key_claims(
+        "docs/auth-architecture.md", source
+    ), "the recorded tolerance leaked to another home — it must apply to the recorded path only"
+
+    # …and the sibling pgTAP suite is NOT append-only, so it had to be CORRECTED, not tolerated.
+    sibling = (REPO / "supabase/tests/20261030000001_oauth_consent_tickets.sql").read_text(
+        encoding="utf-8"
+    )
+    assert not _false_anon_key_needles(sibling), (
+        "the pgTAP suite beside the migration still carries a denylisted claim "
+        f"({_false_anon_key_needles(sibling)!r}) — it is NOT under `supabase/migrations/`, so "
+        "append-only does not reach it and the sentence must be corrected in place"
+    )
+
+
+#: Every tracked file that is either binary or absent from the tree is counted, not dropped, so a
+#: scan that read nothing cannot present as a scan that found nothing.
+
+
+def _tracked_text_files() -> tuple[dict[str, str], int]:
+    """Every TRACKED file's text, keyed by repo-relative path — the population, DERIVED.
+
+    `git ls-files`, deliberately not the corpus above and deliberately not `os.walk`.
+
+    ⛔ WHY THIS EXISTS. The corpus is an ENUMERATION, and the enumeration is precisely what keeps
+    failing: round 11 measured the false premise in five homes after one sweep had already
+    corrected the family; the review of this PR then found the identical sentence still in the
+    migration and its pgTAP suite (nine homes corrected, two never read); and a third pass (this
+    one) found it again in `.github/scripts/fly-managed-secrets.txt`. Each time the gate reported
+    CLEAN — correctly, about the files it had been handed. **A gate whose population is a hand
+    list is only as good as the list**, so the population here is the tracked set, which cannot
+    go stale: a file added later is in scope on the first run that sees it.
+
+    `os.walk` would be WRONG for the same reason `tests/test_ci_selection.py::_tracked_files`
+    rejects it: this repo carries sibling checkouts under `.worktrees/` (~720k files walked vs
+    ~2.4k tracked), so a walk times out on noise git never ships and still cannot tell a shipped
+    file from a local one.
+
+    Returns `(texts, skipped)`. `skipped` counts tracked files that could not be read as text
+    (a NUL byte, or absent from the tree); bytes are decoded with `errors="replace"` rather than
+    dropped, so a stray non-UTF-8 byte cannot hide an ASCII needle behind it.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=REPO, check=False, capture_output=True
+        )
+    except FileNotFoundError as exc:  # no git binary at all
+        raise AssertionError(
+            f"git is not on PATH, so the tracked set is unknown — a scan here would report "
+            f"every home clean by reading none: {exc}"
+        ) from exc
+    assert proc.returncode == 0, (
+        "git ls-files failed, so the tracked set is unknown — this scan cannot decide anything "
+        "and must not report a clean tree by reading nothing: "
+        + proc.stderr.decode("utf-8", "replace").strip()
+    )
+    texts: dict[str, str] = {}
+    skipped = 0
+    for rel in proc.stdout.decode("utf-8").split("\0"):
+        if not rel:
+            continue
+        try:
+            raw = (REPO / rel).read_bytes()
+        except OSError:  # tracked-but-absent (a sparse export, a wedged checkout)
+            skipped += 1
+            continue
+        if b"\0" in raw:  # binary: no prose needle can live in a file we cannot read
+            skipped += 1
+            continue
+        texts[rel] = raw.decode("utf-8", "replace")
+    return texts, skipped
+
+
+def _claims_beyond_the_corpus(population: dict[str, str]) -> dict[str, list[str]]:
+    """Which non-corpus homes carry a denylisted claim (empty == the corpus is complete).
+
+    Any file may declare the same `_PREMISE_GATE_MARKER` opt-out the corpus files use, so a doc
+    that must QUOTE the false premise (a changelog describing the correction) can still do so
+    below that line. Nothing is exempt by path.
+    """
+    found: dict[str, list[str]] = {}
+    for rel, text in population.items():
+        if rel in _ANON_KEY_PREMISE_CORPUS:
+            continue  # scanned by the corpus test above, which owns its own reporting
+        why = _unrecorded_anon_key_claims(rel, text.split(_PREMISE_GATE_MARKER)[0])
+        if why:
+            found[rel] = why
+    return found
+
+
+def test_no_TRACKED_file_outside_the_corpus_carries_the_false_premise():
+    """⛔ The corpus must ENUMERATE every home, and this is the test that says so.
+
+    The test above can only speak about its tuple. Three passes have now each found the same
+    sentence in a home that tuple did not name — most recently
+    `.github/scripts/fly-managed-secrets.txt`, whose `CONSENT_TOKEN_SECRET` note justified a real
+    guard with "the consent page embeds it in its HTML" (the page #3524 §9 step 4 deleted). So the
+    population is derived from `git ls-files` and the corpus is checked AGAINST it: a home the
+    next doc edit adds is in scope without anyone remembering to register it.
+
+    Non-vacuity, three ways: the population is asserted substantial; the scan is proved to SEE a
+    needle in a file that is outside the corpus (so a clean result is not the scan reading no
+    text); and every corpus entry is asserted TRACKED, so a rename cannot leave the corpus
+    pointing at a path that no longer exists while the corpus test reports clean on the rest.
+    """
+    texts, skipped = _tracked_text_files()
+
+    # (1) the population is real, and the skips are not the whole of it
+    assert len(texts) > 3_000, (
+        f"the tracked set resolved to {len(texts)} text files — that is not this repo, so a "
+        "clean result below would prove nothing about the homes that exist"
+    )
+    assert skipped < len(texts) // 10, (
+        f"{skipped} of {len(texts) + skipped} tracked files could not be read as text — too "
+        "many for the remainder to stand for the tree"
+    )
+
+    # (2) every corpus entry is a TRACKED path: a rename otherwise leaves the corpus test
+    # scanning a file it cannot find while its other homes pass
+    untracked = [rel for rel in _ANON_KEY_PREMISE_CORPUS if rel not in texts]
+    assert not untracked, (
+        "these `_ANON_KEY_PREMISE_CORPUS` entries are not tracked text files, so the scan above "
+        f"cannot have read them: {untracked}"
+    )
+
+    # (3) the claim itself: no TRACKED home outside the corpus may carry it
+    off_corpus = _claims_beyond_the_corpus(texts)
+    assert not off_corpus, (
+        "these tracked files carry the false anon-key premise and are NOT in "
+        "`_ANON_KEY_PREMISE_CORPUS`, so the corpus scan above reported CLEAN without reading "
+        "them — correct the sentence (see `config/required-bindings.yml`'s SUPABASE_ANON_KEY "
+        "note for the wording) and add the file to the corpus:\n  "
+        + "\n  ".join(f"{rel}: {why}" for rel, why in off_corpus.items())
+    )
+
+    # (4) …and the scan BITES outside the corpus, proved on a file it just read
+    victim = next(rel for rel in texts if rel not in _ANON_KEY_PREMISE_CORPUS)
+    injected = dict(texts)
+    injected[victim] += (
+        "\n# the anon key is public: the consent page embeds it, so reuse cannot matter.\n"
+    )
+    assert _claims_beyond_the_corpus(injected) == {
+        victim: [
+            "#3524 §9 step 4 DELETED that page and its inline client; nothing embeds the anon key"
+        ]
+    }, (
+        f"injecting a denylisted claim into {victim!r} (a tracked, non-corpus file) was NOT "
+        "reported — the comparison form is broken, and every home above was cleared by a "
+        "detector that cannot fire"
+    )
+
+    # (5) the marker opt-out is ORDERED, so it cannot be a hole: text ABOVE the marker is
+    # scanned, text BELOW it is exempt. That is what lets a doc QUOTE the premise as a
+    # refutation, and it means an offender cannot escape by appending the marker.
+    assert _claims_beyond_the_corpus(
+        {victim: "# the consent page embeds it\n" + _PREMISE_GATE_MARKER + "\n"}
+    ), "a claim ABOVE the marker must still be caught — the opt-out would be a hole, not a quote"
+    assert _claims_beyond_the_corpus(
+        {victim: _PREMISE_GATE_MARKER + "\n# the consent page embeds it\n"}
+    ) == {}, "text BELOW the marker is the documented opt-out and must be exempt"
