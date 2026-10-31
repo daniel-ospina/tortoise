@@ -1085,12 +1085,101 @@ class TestContentIdentityReadIsBatched:
                             "content": f"BATCH-FRESH-{i}"} for i in range(6)]}
         one_total, one_content = self._count_queries(sdk, one)
         many_total, many_content = self._count_queries(sdk, many)
-        assert many_content == one_content == 1, (
+        assert many_content == one_content, (
             "the content identity is read per item, not once per bundle: "
             f"1 item -> {one_content}, 6 items -> {many_content} (#9819 P2)")
+        assert one_content <= 2, (
+            "the content identity is at most the hash arm plus the GATED "
+            f"legacy arm, never more (got {one_content}) — see "
+            "`TestTheBatchedReadPlansAsASeek` for the plan this protects")
         assert many_total == one_total, (
             f"_validate_bundle cost scales with bundle size: {one_total} -> "
             f"{many_total} queries (#9819 P2)")
+
+
+class TestTheBatchedReadPlansAsASeek:
+    """#9819 review UNVERIFIED 1, SETTLED by measurement: the batched content
+    read must not plan as a scan of the whole ``:Point`` label.
+
+    The single statement this replaced joined the hash identity to the A10
+    hash-less fallback with ``OR``, and the ``OR`` defeated the
+    ``Point.content_hash`` index — ``g.explain`` on an embedded graph returned
+    ``Node By Label Scan | (n:Point)``, i.e. O(all Points) on EVERY
+    ``_validate_bundle``, which is a worse regression than the per-item cost the
+    batching fixed. ``content`` is deliberately NOT indexed (only the identity
+    props are: ``_POINT_RANGE_INDEX_PROPS``), so the fix is not "add an index"
+    — it is two statements, the hash arm index-anchored and the legacy arm
+    GATED to the only case that can read it.
+
+    These pin the SHAPE the method actually issues (captured from the real
+    call, never re-spelled here) so a future "simplification" back into one
+    ``OR`` reds here instead of shipping a graph-sized scan.
+    """
+
+    @staticmethod
+    def _content_identity_statements(sdk, bundle):
+        """``[(cypher, params)]`` for the content-identity reads the REAL
+        ``_validate_bundle`` issues for ``bundle``."""
+        import unittest.mock as mock
+
+        proj = sdk._get_proj()
+        calls: list[tuple[str, dict]] = []
+        real = type(proj.g).query
+
+        def spy(self, q, **kwargs):
+            calls.append((q, kwargs.get("params") or {}))
+            return real(self, q, **kwargs)
+
+        with mock.patch.object(type(proj.g), "query", spy):
+            sdk._validate_bundle(bundle)
+        return [(q, p) for q, p in calls if "content_hash" in q]
+
+    def test_the_hash_arm_is_an_index_seek(self, sdk):
+        """Discriminating: with the single ``OR`` statement this FAILS — the
+        captured plan is ``Node By Label Scan``."""
+        stmts = self._content_identity_statements(
+            sdk, {"points": [{"ref": "p1", "kind": "statement",
+                              "content": "PLAN-SEEK-9819"}]})
+        assert stmts, "no content-identity read was issued at all"
+        plan = str(sdk._get_proj().g.explain(stmts[0][0], params=stmts[0][1]))
+        assert "Node By Index Scan" in plan, (
+            "the batched content read does not seek Point.content_hash — a "
+            f"graph-sized label scan per _validate_bundle:\n{plan}")
+
+    def test_the_legacy_arm_is_skipped_when_every_hash_is_present(self, sdk):
+        """The gated arm must not run on the common re-ingest shape.
+
+        Every wanted hash row exists, so ``_content_candidate_resolution`` can
+        never read the hash-less maps — and the arm is a label scan.
+        Discriminating: pre-fix (the single ``OR`` statement) there is exactly
+        ONE statement here and this asserts one, so this arm needs the
+        ``content_hash IS NULL`` spelling to tell the two apart; the assertion
+        below is that the ONE statement issued is the HASH arm, not the
+        fallback.
+        """
+        sdk.create_point("statement", "PLAN-HIT-9819")
+        stmts = self._content_identity_statements(
+            sdk, {"points": [{"ref": "p1", "kind": "statement",
+                              "content": "PLAN-HIT-9819"}]})
+        assert len(stmts) == 1, (
+            "the hash-less fallback ran although every wanted hash has a row "
+            f"-> {len(stmts)} content-identity statement(s)")
+        assert "n.content_hash IS NULL" not in stmts[0][0], (
+            "the ONE statement issued is the label-scanning legacy arm: "
+            f"{stmts[0][0]}")
+
+    def test_a_fresh_bundle_still_reads_the_legacy_arm_once(self, sdk):
+        """The gate must stay FAIL-CLOSED-safe: fresh content has no hash row,
+        so the writer's own ``_find_point_by_content`` fallback can match a
+        hash-less legacy twin and the guard must see it — one scan for the
+        BUNDLE, not one per item."""
+        stmts = self._content_identity_statements(
+            sdk, {"points": [{"ref": f"p{i}", "kind": "statement",
+                              "content": f"PLAN-FRESH-{i}"}
+                             for i in range(5)]})
+        assert len(stmts) == 2, (
+            f"expected the hash arm + ONE gated legacy arm, got {len(stmts)}")
+        assert sum("n.content_hash IS NULL" in q for q, _ in stmts) == 1
 
 
 class TestNoInBundleDedupEscape:
@@ -1183,8 +1272,8 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
     """#9819 review P2 — the SAFETY NET for the batched content read.
 
     ``_terminal_content_candidates`` + ``_content_candidate_resolution``
-    replaced, in ONE query, what two per-item helpers answered with four graph
-    reads (``_find_terminal_dedup_hit``'s three tiers, and
+    replaced, in at most TWO queries (the hash arm, plus the GATED legacy arm),
+    what two per-item helpers answered with four graph reads (``_find_terminal_dedup_hit``'s three tiers, and
     ``_find_point_by_content``'s "does this item mint?"). ``TestContentIdentity-
     ReadIsBatched`` pins the COST (the query count) and therefore says nothing
     about the ANSWERS; a batched read that resolved a different node set would

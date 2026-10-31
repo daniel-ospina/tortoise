@@ -22632,13 +22632,26 @@ class TortoiseSDK:
         A10 rows — so a caller resolves an item with NO graph read
         (:func:`_content_candidate_resolution` is that resolver).
 
-        ⛔ ONE query for the bundle, not one per item. The per-item helper costs
-        THREE (terminal-hash, unfiltered-hash, hash-less fallback) and
-        ``_check_endpoints`` asked it once per ``points`` item, which is the
+        ⛔ AT MOST TWO queries for the bundle, not one per item. The per-item
+        helper costs THREE (terminal-hash, unfiltered-hash, hash-less fallback)
+        and ``_check_endpoints`` asked it once per ``points`` item, which is the
         #9819 review P2 regression this replaces: measured ``_validate_bundle``
         on 200 fresh-content points went 0.00 s (``origin/main``) → 3.01 s at
         the pre-batch head, and 2.08 s for 200 live-content hits — linear in
         bundle size, on the common ingest path.
+
+        ⛔ TWO STATEMENTS, NOT ONE — and the reason is a MEASURED plan, not
+        taste. The single statement this used to issue joined the hash identity
+        to the hash-less A10 fallback with ``OR``, and that OR defeated the
+        ``Point.content_hash`` index: ``g.explain`` on an embedded graph
+        returned ``Node By Label Scan | (n:Point)``, i.e. O(all Points) per
+        ``_validate_bundle`` — which would have traded the per-item regression
+        for a graph-sized one. Split, the hash arm plans as
+        ``Node By Index Scan`` and the legacy arm (``content`` is not indexed,
+        so it cannot seek) is GATED: it runs only when some wanted pair has no
+        hash row, which is the only condition under which
+        :func:`_content_candidate_resolution` can read it. Pinned by
+        ``TestTheBatchedReadPlansAsASeek``.
 
         ⛔ NOT a forked predicate, which is the whole risk of a batched form.
         The WHERE clause is the SAME ``_dedup_match_clauses`` the writer uses,
@@ -22664,31 +22677,67 @@ class TortoiseSDK:
         """
         if not wanted:
             return {}, set(), {}, set()
-        hashes = sorted({_content_hash(content) for content, _ in wanted})
-        contents = sorted({content for content, _ in wanted})
+        # ONE hash per wanted content, computed once (it is sha256 over the
+        # content, and both the parameter list and the legacy-arm gate read it).
+        wanted_hashes = {content: _content_hash(content) for content, _ in wanted}
+        hashes = sorted(set(wanted_hashes.values()))
         clauses, params = self._dedup_match_clauses()
-        rows = self._get_proj().g.query(
-            "MATCH (n:Point) WHERE "
-            f"{' AND '.join(clauses)} "
-            "AND (n.content_hash IN $hashes "
-            "     OR (n.content_hash IS NULL AND n.content IN $contents)) "
-            "RETURN n.content_hash, n.pointKind, n.content, n.id, "
-            f"{_terminal_expression('n')} AS term",
-            params={**params, "hashes": hashes, "contents": contents},
-        ).result_set
         terminal_by_hash: dict[tuple[str, str], str] = {}
         present_by_hash: set[tuple[str, str]] = set()
         terminal_hashless: dict[tuple[str, str], str] = {}
         present_hashless: set[tuple[str, str]] = set()
-        for raw_hash, kind, content, node_id, terminal in rows:
-            if raw_hash is None:
+        # ── arm 1: the HASH identity — INDEX-ANCHORED.
+        # ⛔ `n.content_hash IN $hashes` seeks `Point.content_hash` (
+        # `_POINT_RANGE_INDEX_PROPS`); measured on a 21-Point embedded graph
+        # with `g.explain`, the plan is `Node By Index Scan`. The single
+        # `... OR (n.content_hash IS NULL AND n.content IN $contents)`
+        # statement this replaces planned as `Node By Label Scan` over EVERY
+        # `:Point` — O(graph) per `_validate_bundle`, i.e. the batching traded
+        # the per-item cost regression for a worse, graph-sized one (#9819
+        # review UNVERIFIED 1, settled by measurement: the OR defeats the
+        # index). Two statements are two index-arms, never a fork: the clauses
+        # are the same `_dedup_match_clauses()` and the same
+        # `live._terminal_expression`, and the arms are disjoint by
+        # construction (a row has a hash or it does not), so their union is
+        # exactly the old result set.
+        rows = self._get_proj().g.query(
+            "MATCH (n:Point) WHERE "
+            f"{' AND '.join(clauses)} "
+            "AND n.content_hash IN $hashes "
+            "RETURN n.content_hash, n.pointKind, n.content, n.id, "
+            f"{_terminal_expression('n')} AS term",
+            params={**params, "hashes": hashes},
+        ).result_set
+        for raw_hash, kind, _content, node_id, terminal in rows:
+            present_by_hash.add((raw_hash, kind))
+            if terminal:
+                terminal_by_hash.setdefault((raw_hash, kind), node_id)
+        # ── arm 2: the A10 hash-less fallback, and ONLY when some item's hash
+        # row is absent. `content` is NOT indexed (only the identity props
+        # are), so this arm is a label scan — the SAME shape the per-item
+        # `_find_point_by_content` fallback runs on a hash miss, but ONE scan
+        # for the bundle instead of one per item. The gate is exact, not an
+        # optimisation heuristic: `_content_candidate_resolution` consults the
+        # hash-less maps only under `(ch, kind) not in present_by_hash`, so
+        # when no wanted pair is missing from that set, no answer can read them
+        # and running the scan would be pure cost — the common re-ingest shape
+        # (every content already in the graph), where the old single statement
+        # scanned the whole label to answer nothing.
+        if any((wanted_hashes[content], kind) not in present_by_hash
+               for content, kind in wanted):
+            contents = sorted({content for content, _ in wanted})
+            rows = self._get_proj().g.query(
+                "MATCH (n:Point) WHERE "
+                f"{' AND '.join(clauses)} "
+                "AND n.content_hash IS NULL AND n.content IN $contents "
+                "RETURN n.content_hash, n.pointKind, n.content, n.id, "
+                f"{_terminal_expression('n')} AS term",
+                params={**params, "contents": contents},
+            ).result_set
+            for _raw_hash, kind, content, node_id, terminal in rows:
                 present_hashless.add((content, kind))
                 if terminal:
                     terminal_hashless.setdefault((content, kind), node_id)
-            else:
-                present_by_hash.add((raw_hash, kind))
-                if terminal:
-                    terminal_by_hash.setdefault((raw_hash, kind), node_id)
         return (terminal_by_hash, present_by_hash,
                 terminal_hashless, present_hashless)
 
@@ -23847,11 +23896,14 @@ class TortoiseSDK:
         # carries the stored one. One kind for both sides is the drift
         # `_item_stored_point_kind` and `_item_point_kind` exist to stop.
         minted_content: dict[tuple[str, str], int] = {}
-        # #9819 review P2: the CONTENT identity is now resolved in ONE query for
-        # the whole bundle instead of three per item (`_find_terminal_dedup_hit`
-        # → any-hash → hash-less fallback), which had made `_validate_bundle`
-        # linear in bundle size — 200 fresh-content points cost 3.01 s here vs
-        # 0.00 s on `origin/main`. A superset is collected (EVERY `points` item
+        # #9819 review P2: the CONTENT identity is now resolved in at most TWO
+        # queries for the whole bundle instead of three per item
+        # (`_find_terminal_dedup_hit` → any-hash → hash-less fallback), which
+        # had made `_validate_bundle` linear in bundle size — 200
+        # fresh-content points cost 3.01 s here vs 0.00 s on `origin/main`. The
+        # hash arm and the gated legacy arm are index-anchored / one-scan-per-
+        # bundle respectively (see `_terminal_content_candidates`). A superset
+        # is collected (EVERY `points` item
         # with a str content, keyed or not) because the per-item key resolution
         # decides LATER whether the content leg is reached at all; an item that
         # never reaches it simply never looks its answer up.
