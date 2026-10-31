@@ -680,8 +680,10 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
             f"      The MIT repo is the AUTHOR: this skill changed there and the "
             f"served copy here was never re-derived.\n"
             f"      Fix: `uv run python tools/served_skills_parity.py --sync` "
-            f"and commit the mirrored skills + the pin. (#4643 target 2 — this "
-            f"is the drift that must not ship behind a green deploy.)")
+            f"and commit the mirrored skills + the pin + the rebuilt "
+            f"website/skills/*.skill downloads (`--sync` derives all three; the "
+            f"archives are not covered by either `--check` arm). (#4643 target "
+            f"2 — this is the drift that must not ship behind a green deploy.)")
     if not drifted and not unread:
         # Green, but say WHY it is green — otherwise a reader sees the pin's
         # commit differ from HEAD and has to re-derive that it is harmless.

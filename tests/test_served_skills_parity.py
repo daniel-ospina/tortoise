@@ -684,6 +684,41 @@ def test_10437_a_second_sync_rewrites_no_archive(monkeypatch, tmp_path):
         assert (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes() == payload
 
 
+def test_10437_a_pinned_skill_with_no_archive_name_is_reported(capsys, tmp_path):
+    """A pinned skill the builder cannot archive must be SAID, not skipped.
+
+    `_rebuild_archives` enumerates `build_skill_archives.SKILL_NAMES` and filters
+    by the pin, so a skill that is PINNED but has no archive name would be
+    dropped by a bare `continue` — a derived artifact silently not derived,
+    which is the exact shape this change exists to close. The note is stderr-only
+    (the `--json` contract) and the fixed point must stay silent, so both
+    directions are pinned here (#10437 cycle-2 review, P2: the first version of
+    the note had no test, and reverting it to `continue` left all 101 cases
+    green).
+    """
+    bsa = sp._build_skill_archives()
+    payloads = {name: b"# body\n" for name in bsa.SKILL_NAMES}
+    pinned = {name: {"served_path": f"served/{name}/SKILL.md"}
+              for name in [*bsa.SKILL_NAMES, "fourth_skill"]}
+
+    moved = sp._rebuild_archives(tmp_path / "root", {"skills": pinned}, payloads)
+    err = capsys.readouterr().err
+
+    assert "fourth_skill" in err, err
+    assert "NOT archivable" in err, err
+    assert not (tmp_path / "root" / sp.ARCHIVES_REL / "fourth_skill.skill").exists(), (
+        "a pinned-but-unarchivable skill must not get an archive invented for it")
+    assert len(moved) == len(bsa.SKILL_NAMES), moved
+
+    # The silent direction: nothing to report when every pinned skill is
+    # archivable, so the note cannot become noise on every --sync.
+    capsys.readouterr()
+    clean = {name: {"served_path": f"served/{name}/SKILL.md"}
+             for name in bsa.SKILL_NAMES}
+    sp._rebuild_archives(tmp_path / "root2", {"skills": clean}, payloads)
+    assert capsys.readouterr().err == ""
+
+
 def test_10437_dry_run_names_the_archives_the_real_run_rewrites(
         monkeypatch, tmp_path):
     """`--dry-run` must not UNDER-report the derived artifacts (review, Issue 2).

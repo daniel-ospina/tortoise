@@ -518,15 +518,17 @@ def test_10437_warning_table_gate_reds_on_a_declared_count_mismatch():
 
 
 def test_10437_warning_table_gate_reds_on_an_undeclared_count():
-    """The fourth arm: a truncated enumeration under a heading that states NO
+    """The fourth arm: the FULL key set under a heading that states NO
     cardinality. Nothing else can catch it — the subset arm is silent (nothing
     advertised) and the count arm has no declaration to compare — so the “no
-    longer states how many keys” branch is the only thing that reds it. Without
-    this case that branch could be deleted with every other test still green
-    (#10437 review, P2).
+    longer states how many keys” branch is the only thing that reds it, which
+    the slice sets below demonstrate rather than assert. Without this case that
+    branch could be deleted with every other test still green (#10437 review,
+    P2; the cycle-1 version of this test used `keys[:-1]`, so the completeness
+    arm fired too and the isolation the docstring claimed was not measured).
     """
     keys = sorted(WARNING_KEYS)
-    section = _synthetic_warnings_section(None, keys[:-1])
+    section = _synthetic_warnings_section(None, keys)
 
     assert _declared_key_count(section) == []
     assert not [key for key in _listed_keys(section) if key not in WARNING_KEYS]
@@ -534,6 +536,9 @@ def test_10437_warning_table_gate_reds_on_an_undeclared_count():
     problems = _warning_table_problems(section)
     assert any("no longer states how many keys" in problem
                for problem in problems), problems
+    # The COMPLETE key set, so the completeness arm is silent and the claim in
+    # the docstring is DEMONSTRATED here (#10437 cycle-2 review, P2).
+    assert not any("INCOMPLETE" in problem for problem in problems), problems
 
 
 def test_10437_warning_table_gate_reds_on_an_unreadable_count():
