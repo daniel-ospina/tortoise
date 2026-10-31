@@ -23,8 +23,15 @@ Three facts decide it, and each is a defect in a naive reading:
    job name)`` and reduced to the NEWEST attempt by ``id`` — never by ``started_at``
    (nullable), never by ``check_suite.id`` (every re-run gets its own suite, which would
    shatter one job into one group per attempt). The reduction is NOT re-implemented here:
-   it is ``ci_verdict.group_latest_attempts``, the repo's one implementation of that rule,
-   so this report cannot drift from the merge rail's reading of the same commit.
+   it is ``ci_verdict.group_latest_attempts``, the repo's one implementation of that rule.
+
+   ⛔ What is NOT the rail's reading: this tool reduces ONE RUN at a time (the run fetch is
+   1 call/run, and GitHub's Jobs API is per run), while the merge rail reduces every
+   check-run on the SHA. So an intra-run re-run reduces exactly like the rail, and a
+   red-then-green across TWO runs on one commit does not: the red stays `CATCH-PR` here
+   (the file DID go red on that PR head — which is this report's question), whereas the
+   rail, seeing the newer green check-run, reads the commit clean. Say it out loud rather
+   than claim a parity the reduction cannot have.
 2. **Failures are attributed to FILES through the JUnit XML the `test-slow` job already
    produces** (its ``junitxml manifest guard`` writes ``/tmp/junit.xml``, uploaded in the
    ``pytest-log-<job>-<leg>`` artifact). No parallel source is invented — the artifact the
@@ -97,9 +104,9 @@ USAGE
     uv run python tools/ci_catch_history.py --offline-dir /tmp/catch-fixture --md-out /tmp/t.md
 
 The offline layout is exactly what a live run reads: ``runs.json`` (concatenated
-``gh api --paginate`` pages of ``actions/runs``), ``check-runs/<sha>.json`` (same, of
-``commits/<sha>/check-runs``), ``artifacts/<run_id>/<artifact-name>.zip`` and an optional
-``retention.json`` (``{"days": 90}``).
+``gh api --paginate`` pages of ``actions/runs``), ``jobs/<run_id>.json`` (same, of
+``actions/runs/<id>/jobs?filter=all``), ``artifacts/<run_id>/<artifact-name>.zip`` and an
+optional ``retention.json`` (``{"days": 90}``).
 
 EXIT CODES: 0 the report was produced · 2 it could not be (a surface could not be read, or
 the offline fixture is incomplete). A partial read is never a clean report: ``UNKNOWN`` is
@@ -968,12 +975,17 @@ class GhClient:
         )
 
     def artifacts(self, run_id: str) -> dict[str, Mapping[str, Any]]:
-        try:
-            items = self._paginated(
-                self.ARTIFACTS_URL.format(repo=self.repo, run_id=run_id), "artifacts"
-            )
-        except BudgetExhausted:
-            return {}
+        """This run's artifact listing.
+
+        ⛔ ``BudgetExhausted`` PROPAGATES: `RunArtifacts` turns it into a note + an empty
+        listing, so the leg's files are UNKNOWN with a reason that names the budget. Swallowing
+        it here (returning ``{}``) made the note unreachable and let every red leg of the run
+        read UNKNOWN for "expired past retention / never produced" — asserting the artifact was
+        gone when it was never looked up.
+        """
+        items = self._paginated(
+            self.ARTIFACTS_URL.format(repo=self.repo, run_id=run_id), "artifacts"
+        )
         return {str(item.get("name")): item for item in items}
 
     def artifact_zip(self, artifact_id: str | int) -> bytes:
@@ -1028,8 +1040,25 @@ class OfflineClient:
     def list_runs(
         self, event: str, branch: str | None, conclusion: str, limit: int
     ) -> list[Mapping[str, Any]]:
+        """The archived runs listing, read AS ARCHIVED.
+
+        ⛔ Deliberately NOT `ci_verdict.collect_items`, which fails closed when the page set is
+        shorter than `total_count`. In an ``actions/runs`` listing ``total_count`` is the size of
+        the POPULATION, not of the archive: the service refuses page >10, so every archived
+        ``--paginate`` read of a busy window is shorter than its own `total_count` — and the live
+        client reads that exact payload happily (a manual pager that never consults the total).
+        Refusing it offline made the reviewer-reproducible path red where the live path is green.
+        Reading fewer runs cannot fabricate a clean surface: an unread run leaves its files
+        UNKNOWN, and `window.populations` still reports the count that was read.
+        """
         pages = self._pages(self.root / "runs.json")
-        runs = ci_verdict.collect_items(pages, ci_verdict.RUNS_KEY, "runs.json")
+        runs: list[Mapping[str, Any]] = []
+        for page in pages:
+            if not isinstance(page, Mapping):
+                raise ReadError("offline fixture runs.json carries a non-object page")
+            batch = page.get(ci_verdict.RUNS_KEY)
+            if isinstance(batch, list):
+                runs.extend(item for item in batch if isinstance(item, Mapping))
         picked = [
             run
             for run in runs
@@ -1040,8 +1069,19 @@ class OfflineClient:
         return picked[:limit]
 
     def jobs(self, run_id: str) -> list[Mapping[str, Any]]:
+        """One run's jobs — fail closed: a truncated job listing is a READ failure.
+
+        Unlike the runs listing, `jobs` is read for ONE run and its `total_count` describes
+        exactly that read, so a short page set means the archive is incomplete and the attempt
+        reduction would be built on a partial surface. `SurfaceReadError` is a `RuntimeError`,
+        so it is translated here into this module's `ReadError` — otherwise it escaped `main`'s
+        handler as a traceback + exit 1 instead of the documented exit 2.
+        """
         pages = self._pages(self.root / "jobs" / f"{run_id}.json")
-        return ci_verdict.collect_items(pages, "jobs", f"jobs/{run_id}.json")
+        try:
+            return ci_verdict.collect_items(pages, "jobs", f"jobs/{run_id}.json")
+        except ci_verdict.SurfaceReadError as exc:
+            raise ReadError(str(exc)) from exc
 
     def artifacts(self, run_id: str) -> dict[str, Mapping[str, Any]]:
         directory = self.root / "artifacts" / run_id
@@ -1269,6 +1309,9 @@ def build_history(
         #: Jobs whose red this run has already read (cited, or marked UNKNOWN). A leftover
         #: red of the same job is the SAME artifact — cited once, not twice.
         red_accounted: set[str] = set()
+        #: ``(run_id, job)`` already cited as flake-cleared. Two cleared attempts of one job
+        #: share the run's ONE artifact, so a second citation would be the same evidence twice.
+        cited_cleared: set[tuple[str, str]] = set()
         #: This run's artifact LISTING, read at most once however many legs it carried.
         artifacts = RunArtifacts(client, ref.run_id, api_notes)
 
@@ -1326,9 +1369,18 @@ def build_history(
                             url=ref.html_url,
                             reason=(
                                 f"artifact {name} is absent or unreadable on run {ref.run_id} "
-                                f"({ref.created_at or 'unknown date'}) — expired past the repo's "
-                                f"{retention or DEFAULT_RETENTION_DAYS}-day retention, never "
-                                f"produced, or not a parsable zip/XML"
+                                f"({ref.created_at or 'unknown date'}) — "
+                                + (
+                                    f"the artifact LISTING for that run could not be read "
+                                    f"({artifacts.listing_failed}), so nothing is known about "
+                                    f"it — UNKNOWN, not an expired artifact"
+                                    if artifacts.listing_failed
+                                    else (
+                                        f"expired past the repo's "
+                                        f"{retention or DEFAULT_RETENTION_DAYS}-day retention, "
+                                        f"never produced, or not a parsable zip/XML"
+                                    )
+                                )
                             ),
                         ),
                     )
@@ -1423,13 +1475,20 @@ def build_history(
                 # LIVE only because `success`-conclusion runs are read: a re-run that turned
                 # the failing job green flips the run's own conclusion to `success`.
                 name = artifact_name(base, leg)
-                cleared_run = (
-                    artifacts
-                    if cleared.run_id == ref.run_id
-                    else RunArtifacts(client, cleared.run_id, api_notes)
-                )
-                evidence = _leg_evidence(client, cleared_run, name, index, api_notes)
-                if evidence is None:
+                # `reduce_attempts` only fills `cleared` with attempts from the SAME run
+                # (`attempt.run_id == run_id`), and GitHub's artifact listing is PER RUN
+                # (`actions/runs/<id>/artifacts`, no attempt parameter) — so this is the
+                # evidence already read for this group, not a second download of it.
+                cleared_evidence = evidence
+                if cleared.run_id != ref.run_id:  # pragma: no cover - unreachable today
+                    cleared_evidence = _leg_evidence(
+                        client,
+                        RunArtifacts(client, cleared.run_id, api_notes),
+                        name,
+                        index,
+                        api_notes,
+                    )
+                if cleared_evidence is None:
                     _mark_unknown(
                         histories,
                         leg_files,
@@ -1453,8 +1512,44 @@ def build_history(
                     )
                     continue
                 cleared_reds += 1
-                if not evidence.failed_paths:
+                if not cleared_evidence.failed_paths:
+                    # ⛔ The commonest LIVE shape, and the one that used to be dropped: the
+                    # artifact is the RUN's, so after the re-run it holds the attempt that
+                    # PASSED — its JUnit names no failure at all. `continue`-ing here left the
+                    # red with no citation, no UNKNOWN and no other trace, so the file read
+                    # `NEVER` ("we ran it and it caught nothing") for a leg that went RED on
+                    # that very PR head, while `coverage.reds_cleared_by_a_rerun` counted the
+                    # red it had just discarded. The attempt's own evidence is gone, so the
+                    # LEG is unattributable: UNKNOWN, never a clean bill.
+                    _mark_unknown(
+                        histories,
+                        leg_files,
+                        base,
+                        leg,
+                        Unknown(
+                            kind=ref.kind,
+                            run_id=cleared.run_id,
+                            job=group.job,
+                            leg=leg,
+                            sha=ref.sha,
+                            pr_number=ref.pr_number,
+                            created_at=ref.created_at,
+                            url=ref.html_url,
+                            reason=(
+                                f"a red at job id {cleared.check_id} on run {cleared.run_id} was "
+                                f"re-measured by a later SUCCESS in the same run, and the "
+                                f"artifact {name} now holds that passing attempt "
+                                f"({cleared_evidence.testcases} testcases, none failing) — the "
+                                f"file the red named cannot be recovered, so this leg's files "
+                                f"are UNKNOWN, not 'never caught anything'"
+                            ),
+                        ),
+                    )
                     continue
+                if (cleared.run_id, group.job) in cited_cleared:
+                    # Two cleared attempts of one job are the SAME run artifact: cite it once.
+                    continue
+                cited_cleared.add((cleared.run_id, group.job))
                 citation = Citation(
                     kind=ref.kind,
                     run_id=cleared.run_id,
@@ -1464,10 +1559,10 @@ def build_history(
                     pr_number=ref.pr_number,
                     created_at=ref.created_at,
                     url=ref.html_url,
-                    files=tuple(sorted(index[p] for p in evidence.failed_paths)),
+                    files=tuple(sorted(index[p] for p in cleared_evidence.failed_paths)),
                     branch=ref.branch,
                 )
-                for path in evidence.failed_paths:
+                for path in cleared_evidence.failed_paths:
                     history = histories.get(path)
                     if history is not None:
                         history.flake_cleared.append(citation)
@@ -1556,12 +1651,17 @@ class RunArtifacts:
         self._run_id = run_id
         self._notes = notes
         self._items: Mapping[str, Mapping[str, Any]] | None = None
+        #: Why the LISTING could not be read, when it could not — distinct from "the artifact
+        #: is not in the listing", which is what an expired/absent artifact looks like. A row
+        #: reason must not claim expiry when the listing was never read.
+        self.listing_failed: str | None = None
 
     def get(self, name: str) -> Mapping[str, Any] | None:
         if self._items is None:
             try:
                 self._items = self._client.artifacts(self._run_id)
-            except BudgetExhausted:
+            except BudgetExhausted as exc:
+                self.listing_failed = f"budget exhausted reading the listing: {exc}"
                 self._notes.append(
                     f"artifact listing for run {self._run_id} not read — budget exhausted"
                 )
@@ -1795,7 +1895,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_seconds=args.max_seconds,
             progress=True,
         )
-    except (ReadError, OSError) as exc:
+    except (ReadError, OSError, ci_verdict.SurfaceReadError, ValueError) as exc:
         print(f"ci_catch_history: could not read a surface: {exc}", file=sys.stderr)
         return 2
 
