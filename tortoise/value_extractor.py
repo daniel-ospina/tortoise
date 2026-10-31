@@ -18,6 +18,7 @@ from pathlib import Path
 
 from tortoise._gate_memo import GateMemo
 from tortoise.commit_schema import EVENT_KINDS as _GATE_EVENT_KINDS
+from tortoise.pack_registry import CORE_KINDS as _CORE_KINDS
 
 # ── The value brief: compiled vocab + semantics (the #954 contract) ─────────
 
@@ -40,7 +41,8 @@ from tortoise.commit_schema import EVENT_KINDS as _GATE_EVENT_KINDS
 RESERVED_BRIEF_KEYS = frozenset({"memory_granularity", "pack_hints", "pack_refs"})
 
 
-def _relation_endpoint_refs(raw: object) -> dict[str, list[str]]:
+def _relation_endpoint_refs(raw: object, namespace: str | None = None) \
+        -> dict[str, list[str]]:
     """``{kind: [every kind its own declared relations pair it with]}`` (#9733).
 
     Compact-mode story selection (``extractor_v2._select_pack_kinds``) narrows
@@ -84,51 +86,83 @@ def _relation_endpoint_refs(raw: object) -> dict[str, list[str]]:
     its own hermetic unit test rather than by the catalog sweep — otherwise
     deleting the site would leave every test green.
 
-    Bare names and ``core:`` refs are dropped, for the same reason: the
-    validator only accepts a PascalCase CORE kind or a ``namespace:kind`` in
-    ``fromKind``/``toKind`` (``pack_registry``: "must be a core PascalCase kind
-    or 'namespace:kind'" — an unprefixed camelCase value is an error), so a bare
-    value here is a core kind, and core is rendered on every path.
+    ``core:`` refs are dropped: core is rendered on every path, so a pairing
+    with it needs no closure. A BARE value means something different on the two
+    sites, because the validator treats the two sites differently (primary
+    source: ``pack_registry``):
+
+    * ``ontology.relations`` — ``_validate`` accepts only a known core
+      PascalCase kind or a ``namespace:kind`` here and REJECTS an unprefixed
+      camelCase value ("must be a core PascalCase kind or 'namespace:kind'"),
+      so a bare value is a CORE kind: dropped, like ``core:``.
+    * ``extraction.relationTemplates`` — ``_validate_cross_pack_refs`` resolves
+      a bare value FIRST against the declaring pack's OWN kinds
+      (``_resolve_kind_ref``: ``ref in pack_kinds`` → ok), so here a bare value
+      is a same-namespace kind spelled short, and ``namespace`` (the declaring
+      pack's) resolves it to ``namespace:kind``. The selector's own membership
+      test confirms it: a bare core kind or a bare cross-pack name stays inert,
+      because it is never a kindDef of this namespace. With no ``namespace``
+      known the bare value is dropped, not guessed.
+
+    Each side of a pair is normalized INDEPENDENTLY, so a side that closes
+    nothing (core, an entity type, a malformed value) no longer discards its
+    partner — before this, ``{fromKind: "valuationMark", toKind:
+    "venture:investment"}`` contributed nothing at all, which is the very defect
+    #9733 removes, surviving on the second declaration site.
     First-seen order, de-duplicated; shape is NOT trusted — this reads raw YAML,
     so a malformed section degrades to nothing rather than raising (the manifest
     validator reports it). ``tests/test_extractor_v2.py
-    ::TestCompactReferenceClosure::test_the_refs_are_undirected_and_drop_core
-    _and_bare`` is the direct pin on this function's contract.
+    ::TestCompactReferenceClosure`` (`test_the_refs_are_undirected_and_drop_core
+    _and_bare`, `test_a_bare_template_endpoint_resolves_against_the_declaring
+    _pack`) is the direct pin on this function's contract.
     """
     if not isinstance(raw, dict):
         return {}
     out: dict[str, list[str]] = {}
 
-    def _add(kind: str, partner: object) -> None:
-        if not isinstance(partner, str):
-            return
-        partner = partner.strip()
-        if ":" not in partner:
-            # a bare endpoint is a CORE PascalCase kind, never a same-namespace
-            # one: `pack_registry._validate` accepts only a known core kind or
-            # `namespace:kind` here and REJECTS an unprefixed camelCase value
-            # ("must be a core PascalCase kind or 'namespace:kind'"). Core is
-            # rendered on every path, so dropping it loses nothing.
-            return
-        target_ns = partner.split(":", 1)[0]
-        if not target_ns or target_ns == "core":
-            return  # core is rendered on every path, always spellable
-        row = out.setdefault(kind, [])
-        if partner not in row:
-            row.append(partner)
+    def _norm(ref: object, site: str) -> str | None:
+        """A usable ``namespace:kind``, or None when this side closes nothing.
 
-    def _pair(a: object, b: object) -> None:
-        # both sides, so the map is undirected: either endpoint catches the other
-        if not isinstance(a, str) or ":" not in a:
+        ``_CORE_KINDS`` is READ from ``pack_registry``, not re-spelled: it is the
+        same set ``_resolve_kind_ref`` tests (``ref in pack_kinds or ref in
+        CORE_KINDS``), and the #1026 residual forbids a second engine-side
+        enumeration of the vocabulary.
+        """
+        if not isinstance(ref, str):
+            return None
+        ref = ref.strip()
+        if not ref:
+            return None
+        if ":" in ref:
+            ns_part = ref.split(":", 1)[0]
+            if not ns_part or ns_part == "core":
+                return None  # core is rendered on every path, always spellable
+            return ref
+        if ref in _CORE_KINDS or site != "template" or not namespace:
+            # `ontology.relations`: a bare value is a CORE PascalCase kind (the
+            # validator REJECTS an unprefixed camelCase here), and core needs no
+            # closure. A template bare value that IS a core kind is core on that
+            # site too (`_resolve_kind_ref`: own kinds, then `CORE_KINDS`). A
+            # template bare value with no namespace to resolve it against is
+            # dropped rather than guessed.
+            return None
+        # `extraction.relationTemplates`: the validator resolves a bare value
+        # against the declaring pack's OWN kinds first (`_resolve_kind_ref`), so
+        # this is a same-namespace kind spelled short.
+        return f"{namespace}:{ref}"
+
+    def _pair(a: object, b: object, site: str) -> None:
+        # Both sides, so the map is undirected — and normalized separately, so a
+        # side that closes nothing cannot discard its partner.
+        a_ref, b_ref = _norm(a, site), _norm(b, site)
+        if a_ref is None or b_ref is None or a_ref == b_ref:
             return
-        a = a.strip()
-        if not a or a.split(":", 1)[0] in ("", "core"):
-            return
-        _add(a, b)
-        if isinstance(b, str) and ":" in b:
-            b = b.strip()
-            if b and b.split(":", 1)[0] not in ("", "core"):
-                _add(b, a)
+        row = out.setdefault(a_ref, [])
+        if b_ref not in row:
+            row.append(b_ref)
+        row = out.setdefault(b_ref, [])
+        if a_ref not in row:
+            row.append(a_ref)
 
     onto = raw.get("ontology")
     onto = onto if isinstance(onto, dict) else {}
@@ -136,14 +170,14 @@ def _relation_endpoint_refs(raw: object) -> dict[str, list[str]]:
     for rel in (relations if isinstance(relations, list) else []):
         if not isinstance(rel, dict):
             continue
-        _pair(rel.get("fromKind"), rel.get("toKind"))
+        _pair(rel.get("fromKind"), rel.get("toKind"), "relation")
     ext = raw.get("extraction")
     templates = (ext.get("relationTemplates")
                  if isinstance(ext, dict) else None)
     for tpl in (templates if isinstance(templates, list) else []):
         if not isinstance(tpl, dict):
             continue
-        _pair(tpl.get("fromKind"), tpl.get("toKind"))
+        _pair(tpl.get("fromKind"), tpl.get("toKind"), "template")
     return out
 
 
@@ -256,7 +290,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     byte-identical to before. The overlay contributes the tenant manifest's
     kindDefs (with nearMisses, same extraction discipline), its
     memory_granularity, its ``extraction`` value-brief hints (``valueGate`` /
-    ``promptFragments`` → the reserved ``pack_hints`` section) and
+    ``promptFragments`` → the reserved ``pack_hints`` section), its relation
+    endpoints (→ the reserved ``pack_refs`` section, #9733, like the filesystem
+    loop) and
     declared-but-kindDefs-less object/document/
     event kinds (empty semantics — the parity surface for the default
     path's FIX M declared-kind acceptance, which is served by the
@@ -349,7 +385,7 @@ def compile_value_brief(packs_dir: Path | str | None = None,
         hints = _extraction_hints(raw.get("extraction"))
         if hints:
             pack_hints[ns] = hints
-        for kind, partners in _relation_endpoint_refs(raw).items():
+        for kind, partners in _relation_endpoint_refs(raw, ns).items():
             row = pack_refs.setdefault(kind, [])
             row.extend(p for p in partners if p not in row)
 
@@ -412,7 +448,7 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                 hints = _extraction_hints(raw.get("extraction"))
                 if hints:
                     pack_hints[ns] = hints
-                for kind, partners in _relation_endpoint_refs(raw).items():
+                for kind, partners in _relation_endpoint_refs(raw, ns).items():
                     row = pack_refs.setdefault(kind, [])
                     row.extend(p for p in partners if p not in row)
             except Exception:  # noqa: BLE001, RUF100 — never let one node

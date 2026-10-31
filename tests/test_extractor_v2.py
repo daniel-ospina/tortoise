@@ -7713,6 +7713,73 @@ class TestCompactReferenceClosure:
                      {"ontology": {"relations": [None, 7, {"fromKind": 3}]}}):
             assert _relation_endpoint_refs(junk) == {}, junk
 
+    def test_a_bare_template_endpoint_resolves_against_the_declaring_pack(self):
+        """The SECOND declaration site resolves bare endpoints; the first does not.
+
+        `pack_registry` treats the two sites differently and this function has to
+        follow it. `ontology.relations` accepts only a known core PascalCase kind
+        or `namespace:kind` — a bare camelCase there is REJECTED, so a bare value
+        is core. `extraction.relationTemplates` is resolved by
+        `_resolve_kind_ref`, whose first rule is `ref in pack_kinds`, i.e. a bare
+        value is THIS pack's own kind spelled short.
+
+        Two defects this row exists for, both of them #9733's own class surviving
+        on that second site: (a) a bare endpoint is a real partner, not core, so
+        dropping it leaves the pairing half-offered; (b) `_pair` used to return
+        early on the bare side and discard the NAMESPACED partner too, so
+        `{fromKind: valuationMark, toKind: venture:investment}` contributed
+        nothing at all — the very defect the fix removes, unclosed.
+
+        Non-vacuous by construction: the pre-fix signature takes no `namespace`
+        (``TypeError``), and neither the bare resolution nor the surviving
+        namespaced partner exists without it.
+        """
+        from tortoise.value_extractor import _relation_endpoint_refs
+
+        raw = {"extraction": {"relationTemplates": [
+            # a SAME-namespace endpoint spelled short, with a foreign partner:
+            # both sides must survive, in both directions
+            {"fromKind": "valuationMark", "toKind": "venture:investment"},
+            # a bare core kind is rendered on every path — no partner to close
+            {"fromKind": "Project", "toKind": "venture:investment"},
+        ]}}
+        assert _relation_endpoint_refs(raw, "portfolio") == {
+            "portfolio:valuationMark": ["venture:investment"],
+            "venture:investment": ["portfolio:valuationMark"],
+        }, _relation_endpoint_refs(raw, "portfolio")
+        # …and the SAME rows under `ontology.relations` still drop the bare side
+        # (the validator rejects that spelling there), while keeping nothing of
+        # its partner: a core-kind pairing needs no closure.
+        onto = {"ontology": {"relations": [
+            {"fromKind": "valuationMark", "toKind": "venture:investment"},
+        ]}}
+        assert _relation_endpoint_refs(onto, "portfolio") == {}, \
+            _relation_endpoint_refs(onto, "portfolio")
+        # With no namespace known the bare side is dropped, never guessed.
+        assert _relation_endpoint_refs(raw) == {}, _relation_endpoint_refs(raw)
+
+    def test_a_bare_relation_pair_adds_nothing_to_the_shipped_catalog(self):
+        """`pack_refs` for the REAL catalog is unchanged by the bare resolution.
+
+        No shipped manifest declares `extraction.relationTemplates` (only
+        `packs/_template` shows it, commented out), so the new namespace-aware
+        branch must be inert on every shipped pack: the derived map over `packs/`
+        is byte-identical whether each pack passes its namespace or not. That is
+        what makes the `zero half-offered relations` measurement independent of
+        this change.
+        """
+        import yaml as _yaml
+
+        from tortoise.pack_registry import default_packs_dir
+        from tortoise.value_extractor import _relation_endpoint_refs
+
+        packs = default_packs_dir()
+        for manifest in sorted(packs.glob("*/manifest.yaml")):
+            raw = _yaml.safe_load(manifest.read_text()) or {}
+            ns = raw.get("namespace") or manifest.parent.name
+            assert _relation_endpoint_refs(raw, str(ns)) == \
+                _relation_endpoint_refs(raw), manifest
+
     def test_the_closure_iterates_to_a_fixpoint(self):
         """A kind the closure ADDS brings the partners of its own declarations.
 
