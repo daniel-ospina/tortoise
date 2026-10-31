@@ -1718,6 +1718,69 @@ def render_table(report: Mapping[str, Any], only: str | None = None) -> str:
     return "\n".join(rows)
 
 
+def render_report(report: Mapping[str, Any]) -> str:
+    """The COMMITTED artifact: window + method + the 74-row table, in one file.
+
+    ⛔ The table alone is not the deliverable: a reader who gets only rows cannot tell what
+    window they cover, which answers are UNKNOWN and why, or how to re-derive them — and
+    #10131's acceptance is "a committed report with the table, its window, its UNKNOWNs and
+    its method". Every number here is read off the report object, so the prose cannot drift
+    from the data.
+    """
+    coverage = report["coverage"]
+    window = report["window"]
+    method = [
+        "One question per row: **has this file ever gone RED on a PULL-REQUEST HEAD**, versus "
+        "only on a push/main run? Nothing here moves a file between lanes — this is the "
+        "evidence a reopen of the `slow_files` placement decision would argue from.",
+        "The newest **ATTEMPT** decides. A re-run ADDS a red, it does not clear one: attempts "
+        "are grouped by `(app, workflow identity, job)` and reduced to the newest by `id` "
+        "(never by `started_at`, never by `check_suite.id`) through "
+        "`ci_verdict.group_latest_attempts` — the same implementation the merge rail uses.",
+        "Failures are attributed to FILES through the JUnit XML and `expected-nodeids.txt` the "
+        "leg already uploads in `pytest-log-<job>-<leg>`; no parallel source is invented.",
+        "Coverage is counted per FILE from that artifact, never from the leg's partition: "
+        "the `test-slow` legs are diff-SCOPED on tier-2, so a leg that ran may have executed "
+        "two of its thirteen files. A file the artifact does not name is `UNKNOWN`.",
+        f"`NEVER` therefore means *attested clean at least once* ({coverage['status_' + NEVER]} "
+        f"rows), not \"the leg ran somewhere\". `UNKNOWN` "
+        f"({coverage['status_' + UNKNOWN]}) is a measurement gap, never a clean bill of health; "
+        f"`NOT-PREMERGE` ({coverage['status_' + NOT_PREMERGE]}) is a RECORDED DECISION "
+        f"({NON_GATING_DECISION}), not a gap.",
+        "The window is bounded by artifact retention (GitHub keeps `junit.xml` for a limited "
+        "time — a red older than that can never be attributed) and by the sample bounds named "
+        "above. A bound that cut the sample is stated, never quietly applied.",
+        f"Re-run: `uv run python tools/ci_catch_history.py --repo {report.get('repo') or 'owner/name'} "
+        f"--json-out docs/ci-slow-catch-history.json --md-out docs/ci-slow-catch-history.md` "
+        "(read-only — every call is a GET).",
+    ]
+    lines = [
+        "# CI slow-file catch history (#10131)",
+        "",
+        f"Generated {report.get('generated_at')} from public Actions data by "
+        "`tools/ci_catch_history.py` (schema "
+        f"{report.get('schema_version')}). This file is GENERATED — regenerate it, do not edit it.",
+        "",
+        "```text",
+        render_summary(report),
+        "```",
+        "",
+        f"Window in one line: {window['pr_runs']} PR-head runs + {window['push_runs']} main push "
+        f"runs, {window['oldest_run'] or '?'} .. {window['newest_run'] or '?'}, "
+        f"{window['runs_detailed']} detailed, {window['api_calls']} API calls"
+        + (f" — TRUNCATED: {window['truncation']}" if window.get("truncation") else ""),
+        "",
+        "## Method",
+        "",
+        *[f"- {item}" for item in method],
+        "",
+        "## Table",
+        "",
+        render_table(report),
+    ]
+    return "\n".join(lines)
+
+
 # --- CLI --------------------------------------------------------------------
 
 
@@ -1804,7 +1867,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
     if args.md_out:
-        Path(args.md_out).write_text(render_table(report) + "\n", encoding="utf-8")
+        # ⛔ The COMMITTED deliverable, so it carries its own window and method — a table
+        # lifted out of context is the shape #10131's acceptance forbids.
+        Path(args.md_out).write_text(render_report(report) + "\n", encoding="utf-8")
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     elif args.summary:
