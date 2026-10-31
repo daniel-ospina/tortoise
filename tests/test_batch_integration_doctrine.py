@@ -1344,7 +1344,11 @@ def test_the_batch_fence_rebuild_is_re_runnable() -> None:
     for fence in batch:
         for command in fence:
             code = _code(command)
-            if _ends_at_halt(code) or _halts(code):
+            # NOT `or _halts(code)`: that is a PRESENCE predicate, so a mover
+            # followed by a legitimate `|| exit 1` would be exempt — the mover has
+            # already run by the time the halt fires, which is the round-26 P1 one
+            # `|| exit 1` away from its own fix.
+            if _ends_at_halt(code):
                 continue
             assert not re.search(r"[;&|]", _unquoted(code)), (
                 "every line of the batch-assembly fence must be one command: a "
