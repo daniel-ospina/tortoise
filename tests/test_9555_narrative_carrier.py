@@ -867,18 +867,28 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
     the isolation is the tenant, which is what the record's own key shape gives.
 
     ``with_source`` adds a SYNTHETIC `SourceCreated` record carrying
-    `story_arc`, i.e. the shape `_upsert_document`'s passthrough would fold onto
-    a `:Source` node. It is deliberately NOT the shape the commit path emits any
-    more (#10000 deleted the raw `s.story_arc=$arc` MERGE), and a real
-    `SourceCreated` carrying the key is DENIED by `_upsert_source`'s
-    `allow_keys` — so this seed stands for the residual hole in the fold
-    (`_upsert_document`'s no-allowlist passthrough, reachable from
-    `tortoise_create_document`, recorded in §9.1), not for live commit
-    behaviour. The cache rebuild needs it: without some record for the narrative
-    there is nothing for the rebuild to reproduce the narrative ON, so "the
-    cache holds the narrative" is
-    unmeasurable and a rebuild that writes only the turn Points satisfies every
-    count.
+    `story_arc`: it stands for **door 2 (`#10394`)**, the RECORD → CACHE
+    restore, and for nothing else. The record's `public.source.story_arc` column
+    is classed PRIMARY in the placement table
+    (`docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md:368`),
+    so `cache_projection.projected_columns("source")` keeps it and
+    `record_restore.restore_from_record_view` writes it back onto `:Source` —
+    which is what `tests/test_9555_narrative_cache_rebuild.py:147/187` measure,
+    in that file, not below.
+
+    ⛔ It is NOT the document fold's shape (#10389 review P3). `_upsert_document`
+    folds `DocumentCreated`, and its open passthrough is CLOSED in this PR
+    (`story_arc` is in `_DOC_PASSTHROUGH_HANDLED`, #10403); `_upsert_source`
+    folds `SourceCreated` and DENIES the key through
+    `allow_keys=_SOURCE_EXTRA_PROPS`. Neither fold runs on this seed at all: it
+    replays into **Postgres** (`rp.replay`), and no graph fold is entered, so a
+    denial is not what any assertion here observes. It is also not the commit
+    path's shape — #10000 deleted the raw `s.story_arc=$arc` MERGE.
+
+    The cache rebuild needs SOME record for the narrative: without one there is
+    nothing for the rebuild to reproduce the narrative ON, so "the cache holds
+    the narrative" is unmeasurable and a rebuild that writes only the turn
+    Points satisfies every count.
     """
     # The record's tenancy parents: `organizations(id)` and `graphs(org_id, id)`.
     # `session_narrative`'s FK is `(org_id, graph_id) -> graphs(org_id, id)`, so
@@ -919,10 +929,11 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
         ]
         if with_source:
             # SYNTHETIC, and named as such (#10000): a `SourceCreated` row
-            # carrying `story_arc`. The commit path no longer writes the key onto
-            # a node, and `_upsert_source` DENIES it here — this seed stands for
-            # the fold's remaining hole (`_upsert_document`'s no-allowlist
-            # passthrough), which the rebuild parity check below measures.
+            # carrying `story_arc`, standing for door 2 — the RECORD → CACHE
+            # restore (#10394), whose PRIMARY `public.source.story_arc` column
+            # `record_restore.restore_from_record_view` re-projects onto
+            # `:Source`. Measured in tests/test_9555_narrative_cache_rebuild.py
+            # (:147/#187), NOT by the fold — no graph fold runs on this seed.
             records.append({
                 "type": "SourceCreated",
                 "id": f"session:{SESSION}",
