@@ -38,8 +38,11 @@ import pytest
 from tortoise.exceptions import BundleValidationError
 from tortoise.sdk import (
     TortoiseSDK,
+    _POINT_ITEM_MINT_STATUS_DEPTH,
     _content_candidate_resolution,
     _content_hash,
+    _item_effective_status,
+    _item_stored_point_kind,
 )
 
 
@@ -550,6 +553,94 @@ class TestPhase1GuardSeesTheContentIdentity:
             "Phase-1 must reject BEFORE any write — the bundle minted a point "
             "and folded onto the terminal one it had just created (#9819)")
 
+    def test_an_item_whose_KEY_folds_mints_nothing_on_the_content_axis(
+            self, sdk):
+        """#9819 review P1: the bundle-order records must describe the WRITE, and
+        the writer resolves the KEY **first**.
+
+        Bundle order: points[0] mints key K live with content "A"; points[1]
+        re-uses K (legal — the key leg refuses only a key minted TERMINAL) and
+        carries fresh content "B", but ``create_point`` resolves K BEFORE
+        content, so points[1] FOLDS onto points[0] by key and never writes
+        "B". The simulation's ``minted_content`` record for points[1] was
+        therefore a phantom, and that phantom then suppressed the terminal
+        record of points[2] — the item that really mints "B" — so points[3]
+        content-folded onto points[2]'s RETRACTED node in Phase 2, with Phase 1
+        certifying the bundle. Measured on the pre-fix head: the bundle
+        COMMITTED (created=2, deduped=2) and points[2]'s node came back with
+        ``batch_id`` stamped and ``confidence`` written, status still
+        ``retracted`` — the exact #8400/#9819 mutation, one statement inside the
+        bundle.
+
+        Discriminating: pre-fix no ``BundleValidationError`` is raised (the
+        bundle commits and mutates), so the ``pytest.raises`` fails on the
+        missing raise and the zero-write assertion fails too.
+        """
+        k = "#9819 key-first phantom mint"
+        with pytest.raises(BundleValidationError, match="reuses content"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p0", "kind": "statement", "content": "PH-A",
+                     "key": k},
+                    {"ref": "p1", "kind": "statement", "content": "PH-B",
+                     "key": k},
+                    {"ref": "p2", "kind": "statement", "content": "PH-B",
+                     "status": "retracted"},
+                    {"ref": "p3", "kind": "statement", "content": "PH-B",
+                     "props": {"confidence": 0.9}},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN ['PH-A','PH-B'] "
+            "OR n.key = $k RETURN n.id",
+            params={"k": k},
+        ).result_set == [], (
+            "Phase-1 must reject BEFORE any write — the phantom content mint "
+            "certified a fold onto a terminal node this bundle minted (#9819)"
+        )
+
+    def test_a_key_fold_declaring_a_terminal_status_is_not_a_terminal_mint(
+            self, sdk):
+        """…and the MIRROR, from the same root cause — an over-reject.
+
+        points[1] re-uses items[0]'s key and declares ``retracted``, but
+        ``create_point`` pops the declared status BEFORE its dedup branch
+        (#1905) and the key hits, so it mints NOTHING terminal: points[0]'s node
+        stays ``live``. Recording ``minted_terminal`` for it refused points[2]
+        (which also key-folds) with *"reuses key K, which points[1] in THIS
+        bundle mints with status 'retracted'"* — a statement that is false about
+        the write, on a bundle ``origin/main`` commits.
+
+        Discriminating: pre-fix this raises ``BundleValidationError`` matching
+        "reuses key" and nothing is written; post-fix it commits with one live
+        carrier of the key.
+        """
+        k = "#9819 key-first phantom terminal"
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p0", "kind": "statement", "content": "PT-A",
+                 "key": k},
+                {"ref": "p1", "kind": "statement", "content": "PT-B",
+                 "key": k, "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "PT-C",
+                 "key": k},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 1, (
+            f"the first item mints and both re-uses key-fold onto it (got {res})")
+        assert res["deduped"]["points"] == 2
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {key:$k}) RETURN n.status, n.content, n.id",
+            params={"k": k},
+        ).result_set
+        assert len(rows) == 1, (
+            f"one carrier of the key — every item folded onto points[0] (got {rows})")
+        assert rows[0][0] == "live", (
+            "the key fold pops the declared status, so no terminal mint ever "
+            f"happens and points[0]'s node stays live (got {rows})")
+
     def test_intra_bundle_content_guard_does_not_over_reject(self, sdk):
         """A terminal item followed by an item with DIFFERENT content is the
         writer's legal path and must commit."""
@@ -715,6 +806,81 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert [r[0] for r in rows] == ["live"], (
             "the double-wrapped status was never stored, so nothing minted "
             "terminal (#9819 P2)")
+
+    def test_the_mint_depth_is_the_depth_the_write_door_folds(self, sdk):
+        """WRITER PARITY for ``_POINT_ITEM_MINT_STATUS_DEPTH`` (#9819 review
+        P1, round 8 — reported as a fail-open, MEASURED as already correct).
+
+        The round-8 finding argued the constant must be 2, on the model that the
+        item's ``props`` value reaches ``create_point`` as ``props=`` and that
+        one ``_coerce_props`` fold then surfaces ``item["props"]["props"]``.
+        The second step is wrong by ONE level: ``**props`` in the signature means
+        the ``props=`` kwarg becomes a KEY called ``props`` INSIDE the
+        passthrough dict, so the fold surfaces ``item["props"]``'s own keys —
+        depth 1 — and the dict one level deeper is stored as a literal ``props``
+        property (which FalkorDB cannot write, so it is degraded to null, #7369).
+
+        Asserted as a WRITE, not as arithmetic on the helper: the call below is
+        the ingest loop's own shape (``create_point(kind, content, dedup=True,
+        **write_item)``), and the node it returns is the writer's answer.
+
+        Discriminating: a lane that "fixes" the constant to 2 to make
+        ``test_double_wrapped_status_is_not_recorded_as_a_terminal_mint`` pass
+        by another route reds the last assertion here, and reads the door's own
+        verdict in the failure message instead of re-deriving the fold model.
+        """
+        item = {"kind": "statement", "content": "MINT-DEPTH-PIN",
+                "props": {"props": {"status": "retracted"}}}
+        # The read the round-8 finding proposed — depth 2 DOES see the inner
+        # spelling, which is exactly why reading it would predict a terminal
+        # mint the writer never performs.
+        assert _item_effective_status(item, 2) == "retracted"
+        # The door's own answer, on the ingest loop's own call shape.
+        minted = sdk.create_point(dedup=True, **item)
+        assert minted["status"] == "live", (
+            "the double-wrapped status is NOT stored: **props puts the item's "
+            "props value one level deeper than the item, so one fold reaches "
+            f"only item['props']'s keys (got {minted['status']!r})")
+        # ONE wrap is one fold deep, so it IS stored — the record must exist.
+        assert sdk.create_point(
+            "statement", "MINT-DEPTH-PIN-1",
+            props={"status": "retracted"})["status"] == "retracted"
+        assert _item_effective_status(
+            item, _POINT_ITEM_MINT_STATUS_DEPTH) is None, (
+            "the guard's mint read must agree with the door: depth "
+            f"{_POINT_ITEM_MINT_STATUS_DEPTH} sees no declared status, and the "
+            "writer stores none — raising the depth re-opens the round-5 "
+            "over-reject (a wrong 'mints with status retracted' refusal on a "
+            "bundle the writer completes)")
+
+    def test_the_stored_kind_read_is_at_the_same_writer_depth(self, sdk):
+        """The ``pointKind`` arm of the same constant (``_item_stored_point_kind``
+        uses ``_POINT_ITEM_MINT_STATUS_DEPTH``): it must be read at the SAME
+        depth as the status, because both answer "what does the MINT store".
+
+        A double-wrapped ``pointKind`` is not stored either — the node keeps the
+        ITEM's positional kind — so keying the minted-node record by the inner
+        spelling would attribute the mint to a ``(kind, content)`` identity no
+        dedup query can resolve (the fail-open direction
+        ``TestTheMintRecordIsKeyedByTheSTOREDKind`` exists to prevent).
+
+        Discriminating: at depth 2 the helper answers ``'decision'`` for this
+        item while the door stores ``'statement'``.
+        """
+        item = {"kind": "statement", "content": "MINT-KIND-DEPTH-PIN",
+                "props": {"props": {"pointKind": "decision"}}}
+        stored = sdk.create_point(dedup=True, **item)
+        assert stored["pointKind"] == "statement", (
+            f"the double-wrapped kind is not stored (got {stored['pointKind']!r})")
+        assert _item_stored_point_kind(item) == stored["pointKind"], (
+            "the record's kind must be the kind the door STORED")
+        # …and the single-wrapped spelling, one fold deep, really does win.
+        single = sdk.create_point("statement", "MINT-KIND-DEPTH-PIN-1",
+                                  props={"pointKind": "decision"})
+        assert single["pointKind"] == "decision"
+        assert _item_stored_point_kind(
+            {"kind": "statement", "props": {"pointKind": "decision"}}
+        ) == "decision"
 
     def test_a_real_one_fold_terminal_mint_is_still_recorded(self, sdk):
         """NEGATIVE CONTROL for the test above: reading the recorded status at
@@ -1374,3 +1540,101 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
                      ("T1-retracted", "T2-live", "T3-hashless-retracted",
                       "T3-hashless-live", "T2-shadows-T3")]:
             assert batched[pair][1] is False, f"{pair} must not mint"
+
+    def test_a_stored_non_string_kind_is_skipped_not_keyed(self, sdk):
+        """#9819 review round 6 — the ROW side's unhashable-kind guard.
+
+        The item side is normalised by ``_item_point_kind`` (a non-string kind
+        falls back to the default), but ``kind`` in the row loop is the node's
+        STORED ``n.pointKind``, which FalkorDB may return as a **list** — and a
+        list is unhashable, so keying the identity maps by it raised a raw
+        ``TypeError: unhashable type: 'list'`` out of Phase 1, bypassing the
+        aggregated ``BundleValidationError`` contract. The state is reachable:
+        ``_refuse_invisible_kind`` admits a non-string kind **by documented
+        decision** (padded strings only are refused), and this tree already
+        seeds an array ``pointKind`` on a ``:Point`` by plain Cypher
+        (``tests/test_consistency_divergence_5011.py``).
+
+        Writer parity — why SKIPPING is the right answer and not a shrug:
+        ``n.pointKind = $kind`` compares a STRING, so an array kind matches no
+        item's dedup query. The row is invisible to the writer, so the item
+        MINTS. Pre-fix this test errors inside
+        ``_terminal_content_candidates``, before it can assert anything.
+        """
+        content = "ARRAY-KIND-9819"
+        pid = sdk.create_point("statement", content)["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.pointKind = ['x']",
+            params={"id": pid})
+
+        cands = sdk._terminal_content_candidates([(content, "statement")])
+        assert _content_candidate_resolution(
+            cands, content, "statement") == (None, True), (
+            "an array-kind row must read as NO terminal hit and MINT — the "
+            "writer's `n.pointKind = $kind` cannot match an array")
+        # …and it agrees with the per-item helpers this batched read replaced.
+        assert sdk._find_terminal_dedup_hit(content, "statement") is None
+        assert sdk._find_point_by_content(
+            content, pointKind="statement") is None
+        # The Phase-1 CONTRACT holds end to end — a zero-violation verdict,
+        # not the raw TypeError a keyed list raised.
+        assert sdk._validate_bundle(
+            {"points": [{"ref": "p1", "kind": "statement",
+                         "content": content}]}) == []
+
+    def test_the_narrow_kind_skip_does_not_blind_the_read(self, sdk):
+        """NEGATIVE CONTROL for the skip above — and the end-to-end ingest leg.
+
+        Two things that test cannot show, and that a lazier fix would fail:
+
+        1. the skip must neither turn an array-kind row into a HIT (a fix that
+           COERCED it — ``str(kind)``, or a fallback to the item's own kind when
+           the stored one is unhashable — would resolve the wrong node and
+           over-block a legal bundle) nor suppress the STRING-kind TERMINAL twin
+           of the same content. That twin must remain the hit and the bundle
+           must still be refused: "skip non-str kinds" must not quietly disable
+           the content leg, which is the fail-open the guard exists to close.
+           Pre-fix this errors (the array-kind row is keyed before the twin is
+           ever reached).
+        2. the defect surfaced through the PUBLIC door, not only in the read:
+           the review's repro was ``sdk.ingest(...)`` raising a bare
+           ``TypeError``. So the legal bundle is committed here, and the
+           collided one raises the STRUCTURED verdict.
+        """
+        hash_ = _content_hash("ARRAY-AND-STRING-9819")
+        # The array-kind row this guard must skip …
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:'arraykind-NEG-9819', "
+            "content:'ARRAY-AND-STRING-9819', content_hash:$ch, "
+            "pointKind:['x'], status:'retracted'})", params={"ch": hash_})
+        # … and a STRING-kind, TERMINAL twin of the SAME content, which is a
+        # real hit (`create_point` cannot fold onto the array-kind node — its
+        # dedup query scopes by the string kind — so this is a second node).
+        live_id = sdk.create_point("statement", "ARRAY-AND-STRING-9819")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'retracted'",
+            params={"id": live_id})
+
+        cands = sdk._terminal_content_candidates(
+            [("ARRAY-AND-STRING-9819", "statement")])
+        hit, mints = _content_candidate_resolution(
+            cands, "ARRAY-AND-STRING-9819", "statement")
+        assert hit == live_id, (
+            "the STRING-kind terminal twin must still be the hit — the skip "
+            f"must not blind the read (got {hit!r})")
+        assert mints is False
+        with pytest.raises(BundleValidationError) as ei:
+            sdk.ingest({"points": [{"content": "ARRAY-AND-STRING-9819"}]})
+        assert "content matches terminal point" in str(ei.value)
+
+        # A bundle whose content's ONLY holder is the array-kind row is legal
+        # and must COMMIT through the public door — the exact shape the review
+        # measured raising a bare TypeError out of `ingest`.
+        only = "ARRAY-ONLY-INGEST-9819"
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:'arraykind-ONLY-9819', content:$c, "
+            "content_hash:$ch, pointKind:['x'], status:'retracted'})",
+            params={"c": only, "ch": _content_hash(only)})
+        assert sdk._validate_bundle({"points": [{"content": only}]}) == []
+        out = sdk.ingest({"points": [{"content": only}]})
+        assert out, "the ingest must commit, not raise"
