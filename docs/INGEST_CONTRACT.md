@@ -652,7 +652,7 @@ live AND the operator itself has been promoted out of draft** — endpoint
 promotion alone does NOT activate a draft operator (see the §11 interim-
 route caveat; zombie-operator auto-resolution ships with the #785 promote
 tools). "Promote a second endpoint and the operator activates" is the
-the #785-era post-resolution statement; pre-#785 the operator's OWN promotion
+#785-era post-resolution statement; pre-#785 the operator's OWN promotion
 is the second required conjunct. Promote a second endpoint and the operator activates; until then it
 cannot propagate belief. This is the derived-liveness rule (A9's selector
 predicate for operator nodes).

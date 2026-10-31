@@ -115,8 +115,12 @@ of these to the public surface is a **new** surface change and needs the owner a
 | `traverse` | Traverse relationships from a Point. | `explore_connections` |
 
 `test_guard` is **not** in this list and was **not** deleted: `beta-sdk-surface.md` rules it *"Kept
-and relocated … it guards the production-wipe incident, so the code must survive"*. It leaves the
-public surface, not the tree.
+and relocated … it guards the production-wipe incident, so the code must survive"*. ⚠️ **But it is
+still ON the public surface today** — it is one of the 124 (`config/sdk-surface.json`,
+`sdk.py::TortoiseSDK.test_guard`), and `tools/sdk_surface.py --check` counts it. The
+`beta-sdk-surface.md` ruling is about the approved 40-method TARGET, where it is relocated rather
+than deleted; on the live surface it remains a *removal candidate* (see the "Candidates for
+removal" row below), not something that has already left.
 
 ## The principle
 
@@ -570,10 +574,10 @@ justified as one.
 |---|---|
 | The **four** new dispatchers (`search`, `get(type=)`, `overview(section=)`, `recall(mode=)`) | approval — additive, but they add names to a frozen surface |
 | `invitation_get` | approval — a new name; the two lookup paths differ (salted-hash verify vs ULID match), so this is a design decision, not a rename |
-| `supersede` / `operator_action` parameter forwarding | `valid_from` and `credibility` must be forwarded before those two collapses are safe — today each is either a `TypeError` or silently ignored |
+| `supersede` parameter forwarding | `valid_from` must be forwarded before the collapse is safe — today it is either a `TypeError` or silently ignored. (`operator_action`, the other half of this row, was DELETED by #4282, so its forwarding question is moot) |
 | **`ingest` needs its own MCP tool name** | It is the only call that writes points + entities + sources + connections atomically — the batch-and-relationships upload — yet it is folded into `capture_knowledge` alongside two session workflows. Rename it out, or rename the container. |
 | `test_guard`, `ulid` | No product justification exists for either. Candidates for removal from the public surface. |
-| `commit_session` | Is it a distinct user action from `capture_session`, or an internal pipeline split? |
+| ~~`commit_session`~~ | **MOOT — #4282 DELETED both it and `capture_session`** (2026-10-27). The question ("a distinct user action, or an internal pipeline split?") is answered by history: it was a split, and the surviving door is the hosted `_capture_session_impl`. |
 | `invitation_*` (8), `signup_token_*` (3) | 11 public methods for administrative flows no competitor models as product API. Keep as namespaced admin, or reduce. |
 | `get_confidence` / `compute_confidence` | **✅ RESOLVED for the MCP surface by #4122** — both are `risk="maintenance"` in `tortoise/tool_registry.py`: `graphs:read` still reaches them (KEY SCOPE unchanged) and the served `readOnlyHint` is now `false`, so no client auto-approves them as a read. What remains is the METHOD-name half (a `get_`/`compute_` name that stores), owned by the rename pass above. |
 | `get_source_reliability` | a decision: fix the declaration, or add a `write_back: bool` parameter — it is `risk="write"` today (a write-through cache refresh), so the read/write guarantee holds for the PERMISSION but a read-named method still writes |
