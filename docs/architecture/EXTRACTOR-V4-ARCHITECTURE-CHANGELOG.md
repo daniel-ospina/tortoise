@@ -1260,3 +1260,23 @@ open is concrete: `criteria` is structural on this request shape — a `choice`'
 a `score`'s level list the request is refused without — so a rule sentence there would enter the set
 the answer is validated against. Since this file is a corpus member of that guard, the retracted
 spelling is described here rather than reprinted, for the reason the entry above gives.
+
+## 2026-10-30 — §4.2's D-b and D-d cells named no symbol, so nothing could resolve them (`#9894`)
+
+The four-dedup audit's `where` column carried a bare `:NNNN` for two of its four rows — `D-b` at
+`:3967-3969` and `D-d` at `:3021+` — while `D-c` named `_find_point_by_content` and read as
+verifiable. ⚠️ **Neither number was stale, and re-deriving them to HEAD would have been the
+regression:** read at the document's own pin (`c79ba1cf2`) they land exactly on the code they name
+(the `_norm(content)`/`point_ids` within-batch fold inside `execute_embed`, and
+`classify_consolidation`). The defect was narrower and worse — neither row named a symbol, so there
+was nothing to check them against at ANY pin, and a re-verify at HEAD lands those two numbers on
+code the rows do not name (a docstring inside `_apply_entity_resolution`, and `render_s4_prompt`),
+which reads exactly like rot.
+
+**What changed: design document, two cells, no number moved.** Each row now leads with its symbol,
+in the form `tests/test_extractor_v4_citation_rot.py` resolves: `execute_embed` for the
+`_norm(content)`-keyed `point_ids` map, and `classify_consolidation` for the against-priors semantic
+arm (the `_boundary` never-across guard named beside it, as the D12 row already names it). `D-c` was
+re-verified against the pin and left as written. ⚠️ **The `where` column still has no reader** — no
+guard requires a row's cell to carry a resolvable symbol, which is why two symbol-less cells sat in
+a load-bearing table; the proposal to close that lives on the issue, not in this file.
