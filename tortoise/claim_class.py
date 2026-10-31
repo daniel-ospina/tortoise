@@ -27,7 +27,14 @@ DERIVED claim may not override an ASSERTED one:
   lowers the target's belief, which is the same override in the other
   direction).
 * ``sdk.supersede_point`` refuses a derived successor replacing an asserted
-  predecessor.
+  predecessor, and refuses a supersede whose **operator re-point** would
+  rebuild an operator's factor as derived-over-asserted (#10195): the
+  supersession moves the predecessor's whole edge set, so the successor
+  inherits its edges at the SAME slot positions — the rebuilt factor is judged
+  with the predicate below rather than a second copy of the rule. The
+  method's direct-edge re-point arm is the same defect class, tracked as #9727.
+* ``sdk.ingest``'s partial-absorb branch refuses to complete an operator's
+  input set into a derived-over-asserted wiring.
 * ``ep.TortoiseEP._affected_factors`` is the BACKSTOP for edges that already
   exist (written before this guard, or bulk-written): it blocks the
   derived→asserted leg of a factor, or drops the factor when that leg is the
@@ -281,6 +288,35 @@ def supersede_refusal(*, old_id: str, new_id: str) -> str:
         f"a computed claim never terminalises an authored belief. Create the "
         f"replacement as an asserted claim (the authored path), or correct the "
         f"authored claim directly."
+    )
+
+
+def repoint_refusal(*, operator_id: str, op_type: str, old_id: str,
+                    new_id: str, source_id: str,
+                    target_ids: Sequence[str]) -> str:
+    """The refusal ``supersede_point``'s OPERATOR re-point raises (#10195).
+
+    A separate message from :func:`override_refusal` because the caller's ways
+    out are different: the wiring is not the thing they asked for — they asked
+    for a SUPERSEDE, and the operator edges are riding along. The predicate is
+    the same one every other door uses (:func:`direction_blocks_create`); only
+    the remedy differs.
+
+    It also states the ORDER, because a refusal that lands after the transfer
+    would be the #329/#4021 partial-mutation defect regardless of what it says.
+    """
+    return (
+        f"supersede_point: re-pointing the OPERATOR {operator_id!r} ({op_type}) "
+        f"from {old_id!r} onto {new_id!r} would leave the claim {source_id!r} "
+        f"DERIVED in the factor's SOURCE slot above the ASSERTED claim(s) "
+        f"{list(target_ids)!r} (#2351). A supersede moves the predecessor's "
+        f"whole edge set, so the successor inherits the factor with its slots "
+        f"rebuilt — and that rebuilt wiring is one create_operator refuses to "
+        f"write. Either create the successor with the class that keeps the "
+        f"factor's slots on one side of the boundary (`claim_class` is a "
+        f"CREATE-time marker — see the supersede refusal above for the "
+        f"override rule itself), or rebuild the operator on the successor "
+        f"before superseding. The supersede was refused BEFORE any mutation."
     )
 
 
