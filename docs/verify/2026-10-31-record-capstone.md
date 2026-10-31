@@ -214,9 +214,11 @@ deployment also prints, so it is not evidence of a write.
 ## 6. Relationship to the 2026-10-26 capstone run (a continuation, not a second opinion)
 
 The committed `tests/test_9567_record_capstone.py` and `docs/verify/2026-10-26-record-capstone.md`
-measured D1–D5, D9 (direct connection) and D10 (with D6's seam half), each with a named red **or a
-cited prior red** — three of those rows (D2, D3, D4) were *not re-mutated in that run* and carry a prior
-run's red. That artifact's own residual list names exactly the gap this run closes:
+measured D1–D5, **D7's raw-turn half** (D7 is `PARTIAL` — measured for the raw turn text, never for the
+narrative — so only that half is in this set, which is what makes the overlap sentence at the end of this
+section consistent with it), D9 (direct connection) and D10 (with D6's seam half), each with a named red
+**or a cited prior red** — three of those rows (D2, D3, D4) were *not re-mutated in that run* and carry a
+prior run's red. That artifact's own residual list names exactly the gap this run closes:
 
 > *"**D7** narrative text — the §9.1 carrier is emitted by the layer-1 commit path, not
 > `capture_session`; the reader returned `narrative=None` on a real capture"* — drive
