@@ -61,7 +61,9 @@ would make the reproduced/not-reproduced list read as a complete partition.
 Non-vacuity, **measured** by pointing this module's ``DOC`` at each pre-fix
 revision rather than asserted — 15 checks at this head: **12 of 15 red** at
 ``a17576c43``, **9 of 15** at ``f3c6c803b``, **6 of 15** at ``a8be548762``, and
-**3 of 15** at ``295d6d385``. The six at ``a8be548762`` are exactly the findings
+**3 of 15** at ``295d6d385`` — the DENOMINATOR is the whole of that correction: the
+red sets at all four revisions are unchanged, and the numerators 5/2 in the older text
+were simply stale. The six at ``a8be548762`` are exactly the findings
 that head's review raised (the landing pin's ``--jq -r``, the baseline's missing
 ``-m track_b`` half, the missing clean-tree precondition, and the two gate test
 legs the URI lane skips) plus the batch fence's own re-runnable-spelling and
@@ -99,7 +101,11 @@ REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
 blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **109 such mutants
-measured at this head: 0 survive**, and the honest document is 0 of 15 red.
+measured at this head. Every one that can certify a wrong tree or a wrong landing is
+killed; the single survivor is `git switch --detach -C <branch> "$PINNED"`, which git
+refuses outright (`fatal: '--detach' cannot be used with '-b/-B/--orphan'`, rc=128) and
+whose `|| exit 1` halts — a predicate-tightness miss, not a broken invariant.** The
+honest document is 0 of 15 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
 session closed when no lane is exported (`_p4_uri_required` → `_assert_p4_uri_required`). Running
@@ -366,6 +372,12 @@ def _lands_on_branch(code: str, branch: str) -> bool:
     """
     code = _code(code)
     code = re.sub(r"\|\|\s*(?:exit\s+[1-9]|\{[^}]*\})\s*$", "", code).strip()
+    # ONE command: `git bisect reset <branch> && git switch main` (or
+    # `… ; git reset --hard main`) names the branch and leaves HEAD somewhere else,
+    # and only the separator shows it. A `;`-appended segment is an in-line attack on
+    # the same line — the same discipline `_ends_at_halt` applies to the pin create.
+    if re.search(r"[;&|]", _unquoted(code)):
+        return False
     if _DETACHES.search(code) or _FORCE_CREATE.search(code):
         return False
     if code.startswith("git bisect reset"):
@@ -796,7 +808,8 @@ def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
     assert started, "no `git bisect start <branch>` found — re-point this guard"
     batch_branch = started.group(1)
     assert re.search(
-        rf"git\s+switch\s+-C\s+{re.escape(batch_branch)}\s+\"?\$PINNED", _text()
+        rf"git\s+(?:switch\s+-C|checkout\s+-B)\s+{re.escape(batch_branch)}\s+\"?\$PINNED",
+        _text(),
     ), (
         f"the bisected branch ({batch_branch}) is not the one Phase 2 creates: the "
         "revert would then land on a branch the gate never built"
@@ -812,12 +825,22 @@ def test_bisect_returns_to_the_batch_branch_before_the_revert() -> None:
     # window, the `git bisect reset` above it satisfied the ordering assert, and the
     # revert committed on `main`. Benign inspection and suite runs are allowed; every
     # other command between the bisect and the revert must land HEAD ON the branch.
+    # ...and a benign line must BE one command too: the old prefix match let
+    # `git log --oneline -1 ; git reset --hard main` through as "benign".
     benign = re.compile(r"^(?:git\s+(?:log|bisect)\b|uv\s+run\s+pytest\b)")
     stray = [
         c
         for i, c in enumerate(commands)
         if min(bisects) < i < min(reverts)
-        and not (_lands_on_branch(c, batch_branch) or benign.match(_code(c)))
+        and not (
+            _lands_on_branch(c, batch_branch)
+            or (
+                benign.match(_code(c))
+                # ...checked on the UNQUOTED text, so `git bisect run sh -c '… || exit 1'`
+                # keeps its separator inside the quotes where it belongs.
+                and not re.search(r"[;&|]", _unquoted(_code(c)))
+            )
+        )
     ]
     assert not stray, (
         "the only commands between the bisect and the revert may be benign "
