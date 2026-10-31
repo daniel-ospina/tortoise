@@ -189,10 +189,15 @@ or facts that were false against the tree they describe:
   batch-diff`` can land with every check in the Landing section green. The document now states that
   residual window, names route 2 (the declared freeze) as the ONLY route that closes it, and — for the
   routes that leave it open — carries a **post-merge tree detector**: a squash onto ``PINNED``
-  reproduces the tested tree exactly, so the landed commit's tree must equal the batch branch's tree,
-  and ``git diff --quiet origin/integration/batch-1 "$LANDED"`` says so or halts. Measured in a scratch
-  remote, both directions: an honest landing (base == pin at merge time) → ``rc=0``; the base moved by
-  an unrelated merge before the landing → ``rc=1``, with the untested ``h.txt`` in the diff.
+  reproduces the tested tree exactly, so the landed commit's tree must equal the tree the suite
+  MEASURED, and the detector compares ``rev-parse "$LANDED"^{tree}`` against the ``tested-tree: <sha>``
+  line Phase 3 records (re-recorded by the post-revert re-check), halting on a mismatch or an absent
+  carrier. It was originally ``git diff --quiet origin/integration/batch-1 "$LANDED"`` — a ref NO step
+  in the doctrine pushes, which is absent on the landing actor's box and stale on the drop path
+  (round 36, F1: a ref also records where the branch is *later*, not what was tested). Measured in a
+  scratch remote, both directions: an honest landing (base == pin at merge time) → the trees match;
+  the base moved by an unrelated merge before the landing → they differ, with the untested ``h.txt``
+  in the diff — and the fence halts on exactly the second.
   ⛔ That bullet's declaration home is named by its LIVE ASSERTION in this file, never by its path:
   clause (viii)(b) of ``tools/mergify_config_guard.py`` treats a ``tests/`` file that spells the path as
   an authoritative READER of it, and this round's first cut spelled it — reddening the REQUIRED
