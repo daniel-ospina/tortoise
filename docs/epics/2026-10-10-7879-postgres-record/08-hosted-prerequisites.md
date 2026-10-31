@@ -497,9 +497,13 @@ learned it (`_supersede_took_this_edge`):
 Measured across 16 combinations (rel × direction × before/after supersede) plus the exists-and-is-re-asserted
 shape: everything agrees live↔rebuild except the residuals below.
 
-- **journal route, `wasDerivedFrom`/`aboutAction`** — **CLOSED by #9836**: MOVED live by 2b, not derivable, and
-  now journalled as the ID-ADDRESSED family (the target is addressed by the node's own `id`, with the label the
-  transfer observed riding `target_label`) — so the journal rebuild has the edge at the successor, as live does.
+- **journal route, `wasDerivedFrom`/`aboutAction`** — **CLOSED by #9836** for every ADDRESSABLE target: MOVED live by
+  2b, not derivable, and now journalled as the ID-ADDRESSED family (the target is addressed by the node's own identity
+  property — `id`, or `eventId` for an `Event` — with the label the transfer observed riding `target_label`) — so the
+  journal rebuild has the edge at the successor, as live does. ⚠️ The residual is a target the family cannot NAME: a
+  `:Source` (url-keyed, outside `RECORD_ADDRESSABLE_EDGE_LABELS`; making it addressable is a FOLD change, **#9834**) or
+  an `Event` the journal never gave an `eventId`. For those NO descriptor is emitted (never half-journaled), so live
+  MOVES the edge while **both** rebuild routes hold nothing.
 - **record route, EVERY moved structural rel** — **CLOSED for the derivable set by #10191**, and closed for the
   ID-ADDRESSED family by #9836:
   the record applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the
@@ -507,7 +511,8 @@ shape: everything agrees live↔rebuild except the residuals below.
   is the PRE-FIX JOURNAL: a supersede journaled before #9836 carries no descriptor for those two rels, so on that
   journal the record keeps the row at the pre-supersede point (live moved it to the successor). A shape the producer DECLINES at the mint (`_record_addressable`) holds
   nothing at all, and the `:Source`-targeted shape is one of those rather than the only one: the same gate also
-  declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`).
+  declines any endpoint whose value is not that node's own `id` (an `Event` the journal never gave an `eventId` — the
+  only remaining such shape, since an Event that HAS one is addressed by it: `ID_ADDRESSED_TARGET_ID_PROPS`).
   ⚠️ The retired claim here read *the record's `DirectEdgeRepoint` is a plain upsert* — true before #10191, and
   it pre-dated #9553 for the families class 1 (`extractedFrom`) and `EntityLinked` already carried.
 

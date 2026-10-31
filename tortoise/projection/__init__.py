@@ -4693,13 +4693,20 @@ def _supersede_moved_rels() -> frozenset[str]:
         (measured: `p2 -[aboutPoint]-> p1`, supersede p1 → live keeps it,
         rebuild lost it).
 
-    ⚠️ RESIDUAL, now CLOSED by #9836: `wasDerivedFrom`/`aboutAction` are moved by
-    2b and are NOT derivable, so before #9836 they journalled no repoint — a
-    pre-supersede creation was still skipped (keeping the `E2E-11.6` no-dead-point
-    invariant rather than minting a phantom at the old point) at the price of
-    losing the edge on the journal route, while the record kept its pre-supersede
-    row. Since #9836 they are the ID-ADDRESSED family and DO carry a descriptor,
-    so the skip below is again exactly the families 2b MOVES.
+    ⚠️ RESIDUAL, now CLOSED for every ADDRESSABLE target by #9836:
+    `wasDerivedFrom`/`aboutAction` are moved by 2b and are NOT derivable, so before
+    #9836 they journalled no repoint — a pre-supersede creation was still skipped
+    (keeping the `E2E-11.6` no-dead-point invariant rather than minting a phantom
+    at the old point) at the price of losing the edge on the journal route, while
+    the record kept its pre-supersede row. Since #9836 they are the ID-ADDRESSED
+    family and DO carry a descriptor, so the skip below is again exactly the
+    families 2b MOVES.
+
+    ⛔ The residual that REMAINS is a target this family cannot NAME: a `:Source`
+    (url-keyed, outside `RECORD_ADDRESSABLE_EDGE_LABELS`) or an `Event` with no
+    `eventId` gets no descriptor (`id_addressed_target` → `None`), so live still
+    MOVES that edge while BOTH rebuild routes hold nothing. Making `:Source`
+    addressable is a FOLD change (#9834), not this leg's.
 
     Late import: `tortoise.projection.edges` imports THIS module (the same reason
     `_structural_edge_write_scope` imports late).
@@ -4739,12 +4746,15 @@ def _supersede_took_this_edge(etype, ev_seq, src, tgt, succ, supersede_last) -> 
     the old point (this fold) and the transferred one at the successor (the
     repoint leg).
 
-    ⚠️ Residual, now CLOSED by #9836: `wasDerivedFrom`/`aboutAction` are moved by
-    2b and are not derivable, so they used to journal no repoint and a
-    PRE-supersede creation was skipped — keeping the `E2E-11.6` no-dead-point
-    invariant at the price of losing the edge on the journal route (`#9836`).
-    They are the ID-ADDRESSED family now and carry one, so the journal route and
-    the record route both keep the edge at the successor.
+    ⚠️ Residual, now CLOSED for every ADDRESSABLE target by #9836:
+    `wasDerivedFrom`/`aboutAction` are moved by 2b and are not derivable, so they
+    used to journal no repoint and a PRE-supersede creation was skipped — keeping
+    the `E2E-11.6` no-dead-point invariant at the price of losing the edge on the
+    journal route (`#9836`). They are the ID-ADDRESSED family now and carry one, so
+    the journal route and the record route both keep the edge at the successor —
+    EXCEPT when the target has no nameable identity (a `:Source`, an `Event` with
+    no `eventId`): there no descriptor exists at all, so live holds the edge at the
+    successor and both rebuild routes hold nothing (#9834 owns `:Source`).
     """
     if etype in SUPERSEDE_DIRECT_RELS:
         return src in succ or tgt in succ
@@ -16640,15 +16650,20 @@ class FalkorProjection(
                     # records did not exist, so this gate could not be wrong; it can
                     # now, and this is where it is narrowed.
                     #
-                    # ⚠️ WAS a residual, CLOSED by #9836: `wasDerivedFrom`/
+                    # ⚠️ WAS a residual, CLOSED for every ADDRESSABLE target by
+                    # #9836: `wasDerivedFrom`/
                     # `aboutAction` are in `SUPERSEDE_STRUCTURAL_RELS` (supersede
                     # MOVES them live) and are NOT derivable, so 2b used to emit
                     # NO repoint descriptor for them — they fell in neither half,
                     # and the record route kept the pre-supersede row at the old
                     # point. They are the ID-ADDRESSED family and DO carry a
-                    # descriptor since #9836 (target keyed by its own `id` under
+                    # descriptor since #9836 (target keyed by its own IDENTITY
+                    # property — `id`, `eventId` for an Event — under
                     # the label it observed live), so this skip is again exactly
-                    # the rels supersede MOVES.
+                    # the rels supersede MOVES. ⛔ The residual is a target with no
+                    # nameable identity (a `:Source`; an `Event` with no
+                    # `eventId`): no descriptor exists for it (#9834), so this skip
+                    # drops the edge on the journal route while live still moved it.
                     continue
                 labels: dict[str, str] = {}
                 for _label in EPISTEMIC_LABELS:
@@ -16861,6 +16876,26 @@ class FalkorProjection(
                     # malformed-isinstance guard: the event carries a literal
                     # LOGICAL tgt id (the direct successor), so it would survive
                     # the isinstance check — but recognition must be explicit.
+                    #
+                    # ⛔ #9836 REVIEW (P2): the rel gate is
+                    # `STRUCTURAL_REPOINT_RELS`, not the DERIVABLE family alone.
+                    # The producer emits this descriptor for EVERY rel that
+                    # carries a repoint descriptor (`sdk.supersede_point`'s
+                    # no-self-edge arm), and the two reason differently: for a
+                    # DERIVABLE rel it exists because pass-2 RE-CREATES the edge
+                    # at old from the point's snapshot, so the delete-leg must
+                    # clean that resurrection; for an ID-ADDRESSED rel
+                    # (`aboutAction`/`wasDerivedFrom`) nothing is resurrected, and
+                    # the descriptor exists for the RECORD leg — where it is the
+                    # only statement that removes the row the pre-supersede
+                    # `DirectEdgeCreated` left at the retired point. Narrowing the
+                    # gate to the derivable set sent that descriptor down the
+                    # `continue` below and the record kept a link incident to a
+                    # superseded point (`live != record-rebuild`, E2E-11.6).
+                    # The delete below is rel-scoped on `src`/`tgt`/`typedef`
+                    # alone, so it is family-agnostic by construction — the only
+                    # thing the widen changes is WHICH journalled descriptors are
+                    # recognised as this shape.
                     # Delete-leg keys the DIRECT successor (the descriptor's
                     # literal logical tgt), NOT _final(src): in a chain (guard
                     # fires supersede(X→Y), then Y→Z is superseded before
@@ -16877,7 +16912,7 @@ class FalkorProjection(
                     if ev.get("delete_only") is True:
                         if (not isinstance(src, str) or not isinstance(tgt, str)
                                 or not isinstance(etype, str)
-                                or etype not in DERIVABLE_STRUCTURAL_RELS):
+                                or etype not in STRUCTURAL_REPOINT_RELS):
                             logger.warning(
                                 "rebuild: malformed delete_only "
                                 "DirectEdgeRepoint event skipped "
@@ -16927,17 +16962,27 @@ class FalkorProjection(
                     # ⛔ #9836: the set is `STRUCTURAL_REPOINT_RELS` — the
                     # snapshot-DERIVABLE family (key-addressed) PLUS the
                     # ID-ADDRESSED family (`aboutAction`/`wasDerivedFrom`,
-                    # `target.id`-addressed). Gating on the derivable set alone was
-                    # #9836: those two rels had a descriptor written by 2b (fix on
-                    # the producer side) that this leg then routed to the
-                    # DIRECT-leg consumer, which would resolve `tgt` as a bare
-                    # node id via `_final` and MERGE a `Point->Point` edge —
-                    # _final(tgt)` is harmless for these rels but the arm below
-                    # resolves the ORIGINAL target, not a successor, and it does
-                    # so by ID; a `wasDerivedFrom` onto an Object would have had
-                    # `(b:Point {id:...})` matched against an Object id and been
-                    # silently dropped. So the family is named, and the resolution
-                    # it needs is named with it.
+                    # `target`-identity-addressed). Gating on the derivable set
+                    # alone routed this family's descriptor to the DIRECT-leg
+                    # consumer below, and that consumer resolves BOTH endpoints
+                    # through `_final(...)` (the terminal node of the supersede
+                    # chain) before it MERGEs. Live does NOT hop the TARGET:
+                    # 2b's transfer MERGEs onto the node the edge points at, so
+                    # when the target was itself superseded first, live keeps
+                    # `p2 -> t1` while the direct leg rebuilds `p2 -> t2` — a
+                    # live != rebuild divergence, measured by
+                    # `tests/test_9836_id_addressed_repoint.py::
+                    # test_the_target_is_NOT_hopped_to_its_own_successor`
+                    # (reverting this gate to `DERIVABLE_STRUCTURAL_RELS` reds it).
+                    # ⚠️ The TARGET LABEL is NOT the reason: the direct leg's
+                    # endpoints go through the #8622 label-agnostic sweep
+                    # (`p.id IN $ids` over `EPISTEMIC_LABELS`), so an Object- or
+                    # Event-targeted `wasDerivedFrom` resolves there too — an
+                    # earlier version of this comment claimed otherwise and was
+                    # measured false. What the routing buys is the ABSENCE of the
+                    # `_final` hop on the target side, and the id/label-keyed
+                    # resolution this family needs (`target_label`-scoped, see the
+                    # arm below).
                     if (isinstance(etype, str) and etype in STRUCTURAL_REPOINT_RELS
                             and isinstance(src, str) and isinstance(tgt, str)):
                         validate_rel_type(etype)
@@ -16952,7 +16997,9 @@ class FalkorProjection(
                         # mint Point stubs by name (absent Point target ⇒ skip).
                         #
                         # ⛔ #9836 ID-ADDRESSED arm: the target is resolved by
-                        # its OWN `id` under the label the DESCRIPTOR carries
+                        # its OWN IDENTITY property (`ID_ADDRESSED_TARGET_ID_PROPS`:
+                        # `id`, or `eventId` for an `Event`) under the label the
+                        # DESCRIPTOR carries
                         # (`target_label`, written from the label the live
                         # transfer observed — the same value the record writes
                         # into `relation.tgt_label`). `by_id` is decided by the

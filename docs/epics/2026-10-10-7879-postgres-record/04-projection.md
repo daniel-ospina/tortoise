@@ -360,19 +360,30 @@ closed at both layers:
   > journal seq with the supersede's and replays it; (3) THE DELETE-LEG'S BLIND SPOT — a replayed post-supersede
   > creation is exempted from the 2b repoint delete-leg (which cleans pass-2's resurrection and cannot tell the
   > two apart) by `(src, edge_type, RESOLVED target node)`, while the successor-side transfer still runs. Residuals:
-  > (a) **CLOSED by #9836** — `wasDerivedFrom`/`aboutAction` are MOVED live by 2b but are not derivable, so 2b
-  > used to journal no repoint and the journal route lost them after a supersede. They now carry a descriptor
-  > too (the ID-ADDRESSED family: the target is addressed by the node's own `id`, with the label the transfer
-  > observed riding `target_label`), and both routes resolve `(label, id)`, so `live == journal-rebuild` for the
-  > whole family. ⛔ The boundary that remains is the PRE-FIX JOURNAL: a supersede journaled before #9836
+  > (a) **CLOSED by #9836** for every ADDRESSABLE target — `wasDerivedFrom`/`aboutAction` are MOVED live by 2b but
+  > are not derivable, so 2b used to journal no repoint and the journal route lost them after a supersede. They now
+  > carry a descriptor too (the ID-ADDRESSED family: the target is addressed by the node's own identity property —
+  > `id`, or `eventId` for an `Event` — with the label the transfer observed riding `target_label`), and both routes
+  > resolve `(label, identity)`, so `live == journal-rebuild` for every shape whose target the fold can NAME.
+  > ⛔ TWO boundaries remain, both stated. (i) **A target with no addressable identity** — a `:Source` (url-keyed,
+  > outside `RECORD_ADDRESSABLE_EDGE_LABELS`) or an `Event` the journal never gave an `eventId` — gets NO descriptor
+  > (it is never half-journaled), so live still MOVES that edge while **both** rebuild routes hold nothing; making
+  > `:Source` addressable is a FOLD change, **#9834**, and the producer's own skip is pinned by
+  > `tests/test_9836_id_addressed_repoint.py::test_the_descriptor_is_NOT_emitted_when_the_target_cannot_be_addressed`.
+  > (ii) The PRE-FIX JOURNAL: a supersede journaled before #9836
   > carries no descriptor for these two rels, so on that journal the record keeps the row at the pre-supersede point
   > while live moved the edge to the successor (a rebuild does not repair historical graphs).
   > (b) **CLOSED for the derivable set by #10191**, and closed for the ID-ADDRESSED family by #9836 — the record
   > applies a 2b descriptor as a MOVE (`DELETE` at the superseded point + `INSERT` at the
   > hop `superseded_by` names — one hop per descriptor, so a chain reaches the terminal row as each hop runs), so the row follows the edge. A shape the producer DECLINES at the mint (`_record_addressable`) holds nothing at all — no
   > snapshot, no row — and the `:Source`-targeted edge is one of those, not the only one: the same gate also
-  > declines any endpoint whose value is not that node's own `id` (an `eventId`-only legacy `Event`), so a
-  > non-`:Source` edge of that shape lands nothing for the same reason.
+  > declines any endpoint whose value is not that node's own `id` — a `:Source` value, an `Event` the journal
+  > never gave an `eventId`, AND an `Event` whose `id` differs from its `eventId` (the guarded-meeting shape,
+  > where `id` stays the shared candidate): the MOVE descriptor addresses an Event by `eventId`
+  > (`ID_ADDRESSED_TARGET_ID_PROPS`), while this CREATION gate and the fold's `p.id IN $ids` creation probe
+  > still speak `id`, so the mint declines the pre-supersede row for that shape. A
+  > non-`:Source` edge of these shapes lands nothing at CREATION for the same reason — the MOVE descriptor
+  > still follows live when it runs.
   >
   > ⚠️ One uncarried writer is OUTSIDE this lane and stays open:
   > `sdk.backfill_about_entities` mints about edges through `_create_about_edges` →

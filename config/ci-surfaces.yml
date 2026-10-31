@@ -2530,12 +2530,20 @@ surfaces:
   # still the only arm that RUNS the live/journal half: the record half is gated
   # by the PGlite cases 13-17 in `supabase/tests/pglite/validate.mjs`
   # (`test-record-postgres`), and no other pytest file pins this family.
-  # Registered on `core` because every subject it drives is `core`-selected:
-  # `tortoise/sdk.py` (the 2b emission), `tortoise/projection/edges.py`,
-  # `tortoise/projection/__init__.py` (the pass-2b replay) and
-  # `tortoise/record_projection.py` all match no narrower `SOURCE_PATTERNS` entry
-  # and take the `core` fallback (measured on this PR: the whole diff selects
-  # `surfaces: ['core']`). Not carve-out and not slow: an embedded graph plus a
+  # Registered on `core` because `tortoise/record_projection.py` (the record half)
+  # alone selects `core`, and `tortoise/projection/edges.py` selects `core` + `sdk`
+  # (`CORE_ALSO`) — so `core` is the surface under which every subject this file
+  # drives is actually run. ⛔ The row is what makes the file RUN, not only what
+  # keeps `--integrity` quiet: `classify_test_file` returns `None` for an
+  # unregistered file, so it would be selected by NO surface even though
+  # `record_projection.py`-only or `edges.py`-only diffs select exactly the
+  # surfaces that need it. ⚠️ MEASURED CORRECTION (#9836 review): this comment used
+  # to claim "the whole diff selects `surfaces: ['core']`" — FALSE. `tortoise/sdk.py`
+  # and `tortoise/projection/__init__.py` are `SHARED_MODULES`, which is a
+  # FULL-MATRIX cause (`select()` → `{"surfaces": [api, battery, core, ep,
+  # onboarding, sdk, classify, eval], "full": true}`), so THIS PR's diff runs the
+  # whole matrix and the `core` row is classification only here (#4348).
+  # Not carve-out and not slow: an embedded graph plus a
   # real JSONL journal, DB-free — see its `durations` row.
   - test_9836_id_addressed_repoint.py
   # #9187 (epic #7879, #9078's foundation child): the RECORD-WRITE SEAM — the one

@@ -17797,6 +17797,7 @@ class TortoiseSDK:
             DERIVABLE_STRUCTURAL_RELS,
             ID_ADDRESSED_STRUCTURAL_RELS,
             STRUCTURAL_REL_LABELS,
+            STRUCTURAL_REPOINT_RELS,
             id_addressed_target,
             stub_key,
         )
@@ -17881,29 +17882,44 @@ class TortoiseSDK:
                 if target_graph_id in succ_internals:
                     # #2489 no-self-edge guard: the structural target IS the
                     # successor node. Delete the old edge ONLY — no transfer (a
-                    # transfer would MERGE the phantom (new)-[:rel]->(new)). For
-                    # DERIVABLE rels emit a DELETE-ONLY descriptor so the pass-2b
-                    # replay deletes the pass-2-resurrected edge at old on the
-                    # NEXT rebuild — old's immutable snapshot re-mints the
-                    # phantom on every rebuild, so without the descriptor
-                    # old-side zero-incident is violated in exactly this lane.
-                    # ⛔ For the ID-ADDRESSED family (#9836) no descriptor is
-                    # needed and none is emitted: nothing ever re-creates their
-                    # old-side edge (they are not snapshot-recreated, and the
-                    # `DirectEdgeCreated` fold skips the creation because the rel
-                    # is in `SUPERSEDE_TRANSFERRED_RELS` with a superseded src),
-                    # so a delete-only descriptor here would journal a permanent
-                    # no-op delete-leg. `aboutAction`/`wasDerivedFrom` therefore
-                    # emit NOTHING on this arm and a repoint on the transfer arm
-                    # below — the two arms are the WHOLE of the family's
-                    # journalling, and the transfer arm is #9836's fix.
-                    if derivable and rel not in emitted_self_deletes:
+                    # transfer would MERGE the phantom (new)-[:rel]->(new)).
+                    # A DELETE-ONLY descriptor is emitted for EVERY rel that
+                    # carries a repoint descriptor (`STRUCTURAL_REPOINT_RELS`),
+                    # because on the RECORD route that descriptor is not a no-op:
+                    # it is the ONLY thing that removes the row the pre-supersede
+                    # `DirectEdgeCreated` wrote at the old point.
+                    # ⛔ #9836 REVIEW (P2) — this arm used to emit for the
+                    # DERIVABLE family only, reasoning that nothing ever re-creates
+                    # an ID-ADDRESSED old-side edge so a delete-leg there would be a
+                    # "permanent no-op". True of the GRAPH leg (pass-2 does not
+                    # resurrect these rels; the `DirectEdgeCreated` fold skips the
+                    # creation outright), and FALSE of the RECORD leg: the record
+                    # holds the flat `DirectEdgeCreated` row at `src=old` (written
+                    # by `_record_structural_edge` when the edge was created), the
+                    # record applies records in ORDER with no graph state, and the
+                    # ONLY statement that removes a relation row at a retired point
+                    # is a descriptor's delete leg (`record_projection:4132`
+                    # honours `delete_only` for ANY rel). So a link from the old
+                    # point to its own successor survived AT the superseded point
+                    # on the record route — `live != record-rebuild`, on the exact
+                    # residual #9836 exists to close.
+                    # `emitted_self_deletes` keys on rel: ONE descriptor per rel
+                    # covers every successor node the fan-out matched (#7822), and
+                    # the replay deletes every (old)-[rel]->(t) edge.
+                    if rel in STRUCTURAL_REPOINT_RELS and rel not in emitted_self_deletes:
                         emitted_self_deletes.add(rel)
                         self._emit_event(
                             "DirectEdgeRepoint",
                             id=f"{old_id}->{new_id}:{rel}:self",
                             src=old_id, tgt=new_id,
-                            target_label=STRUCTURAL_REL_LABELS.get(rel),
+                            # The derivable family's label is a function of the
+                            # rel; the ID-ADDRESSED family's is not, so it rides
+                            # the label the transfer OBSERVED on the target — the
+                            # same value the record files with.
+                            target_label=(
+                                STRUCTURAL_REL_LABELS.get(rel)
+                                or (id_addressed_target(row[2], target_props) or (None,))[0]
+                            ),
                             edge_type=rel, delete_only=True,
                         )
                     proj.g.query(

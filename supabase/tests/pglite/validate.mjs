@@ -2858,6 +2858,62 @@ try {
       + 'old point), never delete it without re-creating it');
   }
 
+  // (17) #9836 review (P2) — the NO-SELF-EDGE guard's descriptor, on the RECORD
+  //      route. When the structural target IS the successor the live leg deletes
+  //      the edge and transfers nothing, and it journals a `delete_only`
+  //      `DirectEdgeRepoint`. For the RECORD that descriptor is not a no-op — it
+  //      is the ONLY statement that removes the row the pre-supersede
+  //      `DirectEdgeCreated` wrote at the retired point (`_relation_delete_statement`
+  //      honours `delete_only` for any rel). Emitted for the ID-ADDRESSED family
+  //      only since the review fix; before it, the row survived at `p1`.
+  //
+  //      ⛔ BOTH HALVES RUN, and the first is the PRE-FIX journal: without the
+  //      descriptor the row stays at the superseded point. Asserting only the
+  //      post-fix half would pass against a harness that deleted the row for some
+  //      other reason.
+  const selfLink = {
+    type: 'DirectEdgeCreated', ts: '2026-10-25T00:15:02Z',
+    id: 'p1:wasDerivedFrom:p2',
+    edge_type: 'wasDerivedFrom', src: 'p1', tgt: 'p2',
+    source_label: 'Point', target_label: 'Point',
+  };
+  // The producer's order, and the pre-fix journal is the SAME list with the
+  // guard's descriptor REMOVED (the `deleteOnly` flag is the only difference) —
+  // built here rather than through `supersedeRecords` because that helper always
+  // appends a MOVE descriptor, and a MOVE is exactly what this arm must not be.
+  const selfEdgeRecords = (deleteOnly) => [
+    { type: 'PointAdded', ts: '2026-10-25T00:15:00Z', id: 'p1',
+      point: { id: 'p1', content: 'the claim', status: 'live' } },
+    { type: 'PointAdded', ts: '2026-10-25T00:15:01Z', id: 'p2',
+      point: { id: 'p2', content: 'the restatement', status: 'live' } },
+    selfLink,
+    { type: 'PointSuperseded', ts: '2026-10-25T00:15:03Z', id: 'p1',
+      new_id: 'p2', valid_from: '2026-10-25T00:15:03Z',
+      valid_to: '2026-10-25T00:15:04Z', expired_at: '2026-10-25T00:15:04Z' },
+    ...(deleteOnly ? [{
+      type: 'DirectEdgeRepoint', ts: '2026-10-25T00:15:04Z',
+      id: 'p1->p2:wasDerivedFrom:p2:self',
+      src: 'p1', tgt: 'p2', target_label: 'Point',
+      edge_type: 'wasDerivedFrom', delete_only: true,
+    }] : []),
+  ];
+  const noDescriptor = await run('9836-self-edge-prefix', selfEdgeRecords(false));
+  if (noDescriptor.length !== 1 || noDescriptor[0].src_key !== 'p1') {
+    throw new Error('#9836 self-edge (pre-fix journal): rows = '
+      + `${JSON.stringify(noDescriptor)} — without a delete-only descriptor the `
+      + 'row the pre-supersede `DirectEdgeCreated` wrote at p1 MUST survive there; '
+      + 'that surviving row is the `live != record-rebuild` divergence the family '
+      + 'now closes, and this half is what proves the next assertion is not vacuous');
+  }
+  const selfEdge = await run('9836-self-edge', selfEdgeRecords(true));
+  if (selfEdge.length !== 0) {
+    throw new Error('#9836 self-edge: rows = '
+      + `${JSON.stringify(selfEdge)} — a \`delete_only\` descriptor must leave the `
+      + 'record with NO row: live deleted the edge (a transfer would mint the '
+      + '(new)->(new) phantom, E2E-11.6) and the successor is the target itself, so '
+      + 'there is nothing to move. 1 row is the pre-fix shape above');
+  }
+
   console.log('✓ #9972: the FOUR resolution arms resolve — Object and Subject by '
     + '`name`, Point by `props->>\'name\'`, Source+extractedFrom by the '
     + 'canonical triple — and a name held by 2+ carriers lands nothing (#5509)');
@@ -2867,6 +2923,9 @@ try {
     + '`aboutAction`) MOVES on the record route too — the target is resolved by '
     + 'the node\'s own `id` under the descriptor\'s label, and a label outside '
     + 'the addressable set is a NO-MOVE, never a delete-without-insert');
+  console.log('✓ #9836: the family\'s NO-SELF-EDGE descriptor removes the row at the '
+    + 'superseded point — the pre-fix journal leaves it there and that row is the '
+    + '`live != record-rebuild` divergence');
   // (12) #10139 review round 4 — the ORDERING of two descriptors that land on
   //      the same successor row. The record moves each descriptor ONE HOP, at
   //      the successor its own supersede named, exactly as the graph's replay
