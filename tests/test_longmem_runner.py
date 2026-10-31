@@ -5930,7 +5930,7 @@ def test_print_winner_claims_numeric_coverage_only_when_it_is(capsys):
     assert refused_only[0]["vector_strategy"] == "enabled"
     assert sg._dense_leg_verified(refused_only) is False
     assert sg._unmeasured_causes(refused_only) == {sg.UNMEASURED_CENSUS}
-    assert sg._published_coverage_is_numeric(refused_only) is False
+    assert sg._census_refusal_coverage(refused_only) == (0, 1)
 
     capsys.readouterr()
     sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
@@ -5950,7 +5950,7 @@ def test_print_winner_claims_numeric_coverage_only_when_it_is(capsys):
     # dropped one bad record and still publishes a real ratio).
     mixed = [_sweep_cell(points_total=3, points_embedded=0,
                          records_refused=1)]
-    assert sg._published_coverage_is_numeric(mixed) is True
+    assert sg._census_refusal_coverage(mixed) == (1, 0)
     capsys.readouterr()
     sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
                       "context_tokens_mean": 10.0},
@@ -5959,6 +5959,72 @@ def test_print_winner_claims_numeric_coverage_only_when_it_is(capsys):
     flat = " ".join(capsys.readouterr().err.split())
     assert "coverage is numeric" in flat, flat
     assert "NO ratio at all" not in flat, flat
+
+
+def test_census_refusal_coverage_attributes_the_refusal_per_cell(capsys):
+    """#10355 review P3: the gate for the "publishes NO ratio at all"
+    sentence was a SWEEP-WIDE ``all(...)`` (``_published_coverage_is_numeric``)
+    while the sentence makes a PER-CELL claim.
+
+    The two questions come apart on the shape below — an ABSENT census
+    (pre-R3 resume: ``None`` coverage, ``records_refused=0``) beside a REFUSED
+    one (numeric coverage, ``records_refused=1``). The cause set is
+    ``{UNMEASURED_CENSUS}`` alone, so the census paragraph prints; the
+    sweep-wide gate then answers ``False`` because the ABSENT cell has no
+    ratio, and printed "a cell whose only record was refused publishes NO
+    ratio at all" — of a run with no such cell, pointing the operator at
+    ``records_refused`` for the cell whose ``records_refused`` is ``0``, while
+    telling them to distrust the wrong cell's coverage.
+
+    RED on the pre-fix code: it prints ``NO ratio at all`` for this sweep and
+    never says that the refusing cell's coverage IS numeric. The contrast
+    arms below red the OPPOSITE way on a sweep-wide gate, so the fix cannot
+    degenerate into "always say numeric" either."""
+    import tools.longmem_eval.sweep_granularity as sg
+
+    absent = _sweep_cell(embedding_coverage=None, points_total=None,
+                         points_embedded=None, records_refused=0)
+    refused = _sweep_cell(points_total=1, points_embedded=1,
+                          records_refused=1)
+    mixed_shapes = [absent, refused]
+    assert sg._dense_leg_verified(mixed_shapes) is False
+    assert sg._unmeasured_causes(mixed_shapes) == {sg.UNMEASURED_CENSUS}
+    # Only the REFUSING cell is in scope — the absence is not a refusal.
+    assert sg._census_refusal_coverage(mixed_shapes) == (1, 0)
+
+    capsys.readouterr()
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified(mixed_shapes),
+                     results=mixed_shapes)
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "NOT A MEASUREMENT" in flat
+    assert "REFUSED a census record" in flat
+    assert "NO ratio at all" not in flat, flat
+    assert "coverage is numeric" in flat, flat
+
+    # Both shapes in ONE sweep: neither sweep-wide answer is true, so the
+    # sentence must name both populations rather than pick one.
+    both = [refused,
+            _sweep_cell(points_total=None, points_embedded=None,
+                        embedding_coverage=None, records_refused=1)]
+    assert sg._census_refusal_coverage(both) == (1, 1)
+    assert sg._unmeasured_causes(both) == {sg.UNMEASURED_CENSUS}
+    capsys.readouterr()
+    sg._print_winner({"chunk_turns": 2, "evidence_recall@10": 0.5,
+                      "context_tokens_mean": 10.0},
+                     ingest_mode="v2", context_cap=8000,
+                     measured=sg._dense_leg_verified(both), results=both)
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "1 of the cells that refused a record still publish a numeric" \
+        in flat, flat
+    assert "1 publish NO ratio at all" in flat, flat
+
+    # A sweep whose census cause cannot be attributed to a row names no
+    # population rather than inventing one (the census arm is absent, so this
+    # is the defensive last arm — reachable only if the two helpers drift).
+    assert sg._census_refusal_coverage([_sweep_cell()]) == (0, 0)
 
 
 def test_sweep_readme_enumerates_the_census_refusal_case():

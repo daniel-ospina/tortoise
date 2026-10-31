@@ -491,27 +491,43 @@ def _unmeasured_causes(results: list[dict]) -> set[str]:
     return causes
 
 
-def _published_coverage_is_numeric(results: list[dict]) -> bool:
-    """Does EVERY cell publish a real ratio on the ``dense leg:`` line?
+def _publishes_a_ratio(row: dict) -> bool:
+    """Does this ONE cell publish a real coverage ratio on the ``dense leg:``
+    line? ``None`` (an absent census) and ``bool`` (not a ratio) do not."""
+    coverage = row.get("embedding_coverage")
+    return isinstance(coverage, (int, float)) and not isinstance(coverage, bool)
 
-    A DIFFERENT question from "did the embedder run" (#10355 review P3,
-    optional). A cell whose only census record was refused publishes NO ratio
-    at all (``points_total=None`` ⇒ ``embedding_coverage=None``), so its cause
-    set can be ``{UNMEASURED_CENSUS}`` alone — exactly the cause set of the
-    common shape, a mixed cell that dropped one bad record and still publishes
-    a numeric ratio. The winner line used to assert "its coverage is numeric"
-    on that cause set unconditionally, which is false for the refused-only
-    cell and is the operator's one cue for telling the two shapes apart.
 
-    Empty is vacuously True (there is no non-numeric ratio to point at), and
-    the caller only reads it under ``not measured`` with a named census cause,
-    which a row-less sweep cannot produce.
+def _census_refusal_coverage(results: list[dict]) -> tuple[int, int]:
+    """Of the cells that REFUSED a census record, how many still publish a
+    real ratio, and how many publish none? ``(with_ratio, without_ratio)``.
+
+    PER CELL, on purpose (#10355 review P3). The question the winner line asks
+    here is "which refusing cell has no ratio to distrust", and that is a
+    per-record question: ``all(...)`` over the sweep — the gate this replaces —
+    answers "no cell failed to publish a ratio", which is a DIFFERENT claim
+    and cannot name the record that failed. It is the same distinction SQL
+    draws between ``bool_and``/``every`` (one boolean over the set, naming no
+    row: "true if all non-null input values are true") and
+    ``count("any")`` ("the number of input rows in which the input value is
+    not null"), and why attributing an exclusion takes a per-row FILTER rather
+    than an aggregate. Concretely, a sweep mixing an ABSENT census
+    (``embedding_coverage=None``, ``records_refused=0`` — a pre-R3 resume) with
+    a REFUSED one (numeric coverage, ``records_refused=1``) has
+    ``_unmeasured_causes(...) == {UNMEASURED_CENSUS}`` and a sweep-wide
+    ``all(...)`` of ``False``, so the sweep-wide gate printed the "a cell whose
+    only record was refused publishes NO ratio" sentence about a run with no
+    such cell — pointing the operator at ``records_refused`` for a cell whose
+    ``records_refused`` is ``0``.
+
+    Mirroring ``_dense_leg_verified``'s census arm in scope: only a cell whose
+    ``records_refused`` is truthy is counted here, so an un-refused absence can
+    never be mistaken for a refusal. ``(0, 0)`` means no cell reported a
+    refusal — the source of the row set is then what to look at, not a cell.
     """
-    return all(
-        isinstance(r.get("embedding_coverage"), (int, float))
-        and not isinstance(r.get("embedding_coverage"), bool)
-        for r in results
-    )
+    refused = [r for r in results if r.get("records_refused")]
+    with_ratio = sum(1 for r in refused if _publishes_a_ratio(r))
+    return with_ratio, len(refused) - with_ratio
 
 
 def _print_winner(winner: dict | None, *, ingest_mode: str,
@@ -585,22 +601,46 @@ def _print_winner(winner: dict | None, *, ingest_mode: str,
             if UNMEASURED_EMBEDDER not in causes \
                     and UNMEASURED_ZERO_COVERAGE not in causes:
                 # "its coverage is numeric" is NOT implied by the cause set
-                # (#10355 review P3, optional): a cell whose ONLY record was
-                # refused publishes no ratio at all, and its cause is this
-                # same one. Claim exactly what the cause set proves, and say
-                # the numeric half only where it holds.
+                # (#10355 review P3): a cell whose ONLY record was refused
+                # publishes no ratio at all, and its cause is this same one.
+                # Claim exactly what the cause set proves — and claim it of the
+                # cells that REFUSED, not of the sweep (#10355 review P3): the
+                # sweep-wide gate printed the no-ratio sentence for a run whose
+                # refusing cell published a ratio and whose ratio-less cell
+                # refused nothing, which is the same "the diagnostic asserts a
+                # fact its gate does not prove" class this PR removes.
+                refused_with_ratio, refused_without_ratio = \
+                    _census_refusal_coverage(results)
+                if refused_with_ratio and not refused_without_ratio:
+                    coverage_note = (
+                        "Each cell that refused a record still publishes a "
+                        "real ratio — its coverage is numeric — so what is "
+                        "contradicted is the census, never the leg.")
+                elif refused_without_ratio and not refused_with_ratio:
+                    coverage_note = (
+                        "A cell whose only record was refused publishes NO "
+                        "ratio at all (embedding_coverage=None), so read "
+                        "records_refused rather than embedding_coverage "
+                        "for it.")
+                elif refused_without_ratio:
+                    coverage_note = (
+                        f"{refused_with_ratio} of the cells that refused a "
+                        f"record still publish a numeric coverage and "
+                        f"{refused_without_ratio} publish NO ratio at all "
+                        "(embedding_coverage=None) — read records_refused "
+                        "per cell: a numeric one was computed over the "
+                        "population its refused record was removed from, "
+                        "and a None one has no ratio to trust.")
+                else:
+                    coverage_note = (
+                        "Read records_refused per cell on the `dense leg:` "
+                        "line to see which census was refused.")
                 print("   the other two causes do NOT hold here: the "
                       "embedder ran for every cell and no cell wrote zero "
                       "vectors, so these recall values ARE a hybrid run's "
                       "— they are refused because the census contradicts "
                       "itself, not because the leg was missing. "
-                      + ("Its coverage is numeric, so what is "
-                         "contradicted is the census, never the leg."
-                         if _published_coverage_is_numeric(results) else
-                         "A cell whose only record was refused publishes "
-                         "NO ratio at all (embedding_coverage=None), so "
-                         "read records_refused rather than "
-                         "embedding_coverage for it."),
+                      + coverage_note,
                       file=sys.stderr)
         remedy = ("→ NOT selected: do NOT feed this to the pilot (step 3) or "
                   "the 500-Q run (step 5).")
