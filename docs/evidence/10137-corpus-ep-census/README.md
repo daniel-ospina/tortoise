@@ -1,6 +1,7 @@
 # #10137 — the corpus census: `questions_with_ep / questions` on frozen LongMemEval-S
 
-**The number this issue was opened to produce, measured.** Until now the instrument
+**The number this issue was opened to produce, measured on a pre-registered 24-question sample.**
+Until now the instrument
 (`#10188`, squash `4b014cdca`) emitted the cells and nobody had ever run them on the corpus; the
 issue's verification comment recorded that as `PARTIAL` and the remaining work as "needs the #8486
 step-5 run". This is a **pre-registered stratified sample**, not the 500-question population — the
@@ -53,8 +54,8 @@ score    = PARTIAL(24 of 500) — a complete sample of a sample, never presented
 `docs/benchmarks/longmemeval-500q/run-report.md:54` both assert that "single-session questions are
 frequently this shape" (no IMPL/NAND ⇒ `no_ep_factors`). On 24 real questions across all six types
 the extraction minted **1,710 operators**, every question's pass wrote posteriors, and **not one
-question** landed in `inert_questions`. The four single-session rows — the population the claim names
-— are 16/16 with EP.
+question** landed in `inert_questions`. The three single-session rows — the population the claim
+names — are 12/12 with EP.
 
 **Not falsified, and now the actual residue:** the belief layer participates on every question but on
 **~10% of the points**. `points_with_ep / (points_with_ep + points_unmeasured)` = 2,696 / 27,608 =
@@ -88,6 +89,12 @@ Two honest limits on that 10%:
   already exist and are published beside the ratio (`points_with_ep`, `points_unmeasured`,
   `points_off_neutral`, `points_moved_off_neutral`). Indicator (a) is satisfied by publishing the
   ratio **with** those cells — which is what this artifact does.
+
+**Disclosure of what this artifact cannot re-derive:** `census.json` carries the run totals and the
+per-question cells but not the per-question graphs, and the corpus cache lives outside the repo — so
+the cells are auditable against the committed sample identity (`census.json.completed`: 24
+`question_id` + `question_type` pairs) and reproducible by re-running the two probes, not
+recomputable from the artifact alone.
 - The issue's **open owner decision** ("should `activated` additionally require contribution?") gains
   data: every question here has `questions_off_neutral == 1` and `points_moved_off_neutral > 0`, so
   on this sample the stricter bar would not change any question's state. It would still be a re-cut

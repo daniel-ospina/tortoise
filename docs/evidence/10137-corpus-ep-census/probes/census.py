@@ -30,13 +30,29 @@ from tools.longmem_eval import measurement_posture as mp  # noqa: E402
 
 def cells(path: str) -> dict:
     doc = json.loads(pathlib.Path(path).read_text())
+    outcomes = doc.get("outcomes") or []
     if "outcomes" in doc and "methodology" in doc:            # a report
-        summary = mp.of_report(doc)["activation"]
+        posture = mp.of_report(doc)
+        if posture is None or posture.get("activation") is None:
+            raise SystemExit(
+                f"{path}: this report records NO measurement posture "
+                "(methodology.measurement_posture absent or activation null) — "
+                "there is no census to read, which is a state, not a zero")
+        summary = posture["activation"]
         source, n = "report", doc.get("n_questions")
-        outcomes = doc.get("outcomes") or []
     else:                                                     # a checkpoint
-        outcomes = doc.get("outcomes") or []
-        summary = mp.summarize_belief_activation(outcomes, requested=True)
+        # ``requested`` is the caller's resolved ARM, never inferred from the
+        # outcomes — but a checkpoint carries it in its fingerprint
+        # (``activate_beliefs``, run.py:1742), so read it when it is there
+        # rather than asserting True: a checkpoint written under a different
+        # arm must not be reported as an armed run.
+        fp = doc.get("fingerprint") or {}
+        if not isinstance(fp, dict) or "activate_beliefs" not in fp:
+            raise SystemExit(
+                f"{path}: checkpoint carries no ``activate_beliefs`` "
+                "fingerprint — the arm is UNKNOWN, not True")
+        requested = bool(fp.get("activate_beliefs"))
+        summary = mp.summarize_belief_activation(outcomes, requested=requested)
         source, n = "checkpoint", len(outcomes)
 
     q = summary.get("questions") or 0
@@ -74,6 +90,21 @@ def cells(path: str) -> dict:
         "completed": [{
             "question_id": o.get("question_id"),
             "question_type": o.get("question_type"),
+        } for o in outcomes if isinstance(o, dict)],
+        # The run's OWN per-question cells, so the artifact can be checked
+        # question by question instead of only in aggregate.
+        "per_question": [{
+            "question_id": o.get("question_id"),
+            "question_type": o.get("question_type"),
+            "operators": (o.get("belief_activation") or {}).get("operators"),
+            "factor_edges": (o.get("belief_activation") or {}).get("factor_edges"),
+            "points_with_ep": (o.get("belief_activation") or {}).get("points_with_ep"),
+            "points_unmeasured": (o.get("belief_activation") or {}).get("points_unmeasured"),
+            "points_off_neutral": (o.get("belief_activation") or {}).get("points_off_neutral"),
+            "points_moved_off_neutral":
+                (o.get("belief_activation") or {}).get("points_moved_off_neutral"),
+            "ep_ran": (o.get("belief_activation") or {}).get("ep_ran"),
+            "no_op_reason": (o.get("belief_activation") or {}).get("no_op_reason"),
         } for o in outcomes if isinstance(o, dict)],
     }
 
