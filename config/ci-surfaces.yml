@@ -1682,6 +1682,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_10000_narrative_record_home.py
   - test_10017_cache_tier.py
   # #10017 R1/R2: the carrier + journaled removal. It drives the capture writer,
   # both replay engines and `record_projection`, so a change to any of

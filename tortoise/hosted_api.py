@@ -182,6 +182,13 @@ from tortoise.quota import with_limit_contact  # #5425 refusal seam
 # differently is the `create_document(type="SourceCreated")` class, which
 # journalled NOTHING.
 from tortoise.record_projection import NARRATIVE_RECORD_TYPE
+
+# #10389 review P3: the seam's own name for "the journal is a scratch buffer",
+# imported rather than re-typed. `_report_narrative_home` branches on it, and a
+# hardcoded copy would drift in the one direction that matters — a renamed token
+# would route a NON-DURABLE journal into the durable branch and downgrade the
+# "stored NOWHERE" ERROR to a WARNING.
+from tortoise.record_writer import NON_DURABLE_JOURNAL_REFUSAL
 from tortoise.retention import RESTORE_WINDOW_HOURS as _RESTORE_WINDOW_HOURS  # #4179
 from tortoise.retrieval_metering import (  # #4489: pure-ASGI retrieval-work flusher
     RetrievalMeteringMiddleware as _RetrievalMeteringMiddleware,
@@ -16731,9 +16738,13 @@ def _commit_response(
     * the payload's DOMAIN integrity warnings, derived from the payload alone
       — deterministic per payload, so an idempotent re-commit returns the
       same ones;
-    * WRITE-TIME advisories (``temporal_not_applied``, #7819) — observed while
-      the writes ran (a dedup fold dropped on an already-terminal claim wrote
-      NOTHING). These are present only on the response to the call that
+    * WRITE-TIME advisories (``temporal_not_applied``, #7819; and
+      ``narrative_not_recorded``, #10000 — observed while the writes ran: a
+      dedup fold dropped on an already-terminal claim wrote NOTHING, and a
+      commit whose `SessionNarrated` carrier did not reach the record left
+      §9.1's narrative outside its home, which `_report_narrative_home` says
+      rather than letting a 200 imply it landed). These are present only on the
+      response to the call that
       PERFORMED the write; a ``duplicate:true`` replay writes nothing, so
       nothing can be dropped, and its ``warnings[]`` is exactly the payload's
       domain warnings (see the inline note in ``commit_session``'s write
@@ -17059,6 +17070,120 @@ def _narrative_carrier(story_arc, summary, *, session_id: str,
     }
 
 
+#: The code the commit receipt's `warnings[]` carries when §9.1's narrative did
+#: not reach its RECORD home (#10000). Advisory-only, like `temporal_not_applied`
+#: (#7819): the graph writes have already landed and nothing is refused — the
+#: point is that a 200 must not imply "your narrative is stored" when it is not.
+NARRATIVE_NOT_RECORDED = "narrative_not_recorded"
+
+
+def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
+    """State WHERE this commit's narrative landed; NAME it when it landed nowhere.
+
+    #10000 deleted the two node writes that used to hold the S1 narrative
+    (``s.story_arc`` / ``e.story_arc``), so the ``SessionNarrated`` carrier is now
+    the narrative's only PRODUCER on the commit path. Its outcome therefore IS
+    the guarantee, and the commit door is the one place that can say so.
+
+    ⛔ IT CANNOT BE ASSUMED. `sdk.py::TortoiseSDK._emit_event` is best-effort by
+    contract ("Both stores are best-effort — failures log and continue (never
+    crash the mutation)", its own docstring), and its RECORD leg is not even
+    reached when no journal is configured (its `if log is None:` arm calls
+    `_record_write_without_journal` and returns before the record) or when the
+    journal append RAISED (its per-call `return False`; the caller's
+    `record_sink` then stays empty). Measured consequence before this report
+    existed: the commit answered 200 with the narrative in no store at all,
+    which is the state the sibling pin calls out — "with the node write gone
+    (#10000) the narrative would then be stored NOWHERE".
+
+    Three destinations, and the returned term is the decision (so a caller or a
+    test reads a term rather than string-matching a log line):
+
+    * ``"record"`` — the Postgres fold APPLIED the carrier: §9.1's one home.
+      ``applied`` alone is not enough; ``statements`` says the fold found
+      something to execute FOR THIS record (the same two-part check
+      ``_write_capture_turns`` gates its own store decision on).
+    * ``"journal"`` — the record did not take it, but a DURABLE journal did, so
+      `record_projection._narrative_statements` heals the record from that same
+      line on the next replay. A ``no_durable_journal`` refusal is deliberately
+      NOT this case: a scratch buffer is not a journal, and nothing about it
+      survives the process.
+    * ``"nowhere"`` — neither store holds the text.
+
+    ⛔ WHY THIS REPORTS RATHER THAN FAILING THE COMMIT. The graph writes of
+    steps 1-2 above have already committed when this runs (step 3's `:Event`
+    MERGE is BELOW this carrier, not above it), so a 5xx here would answer a
+    SUCCESSFUL write with a failure and invite a same-payload retry that lands
+    the same nodes again — and the two lanes that reach ``"nowhere"`` (no
+    journal configured; a non-durable one) are DEPLOYMENT-level shapes, so
+    failing would 5xx every narrative-carrying commit on such a deployment
+    rather than the one write that was lost. `config.ensure_selfhost_event_log`
+    already treats a journal-less hosted deployment as a loud misconfiguration.
+    The narrative is also DERIVED text — it can be re-derived from the source it
+    was distilled from — which is exactly what distinguishes it from the raw
+    turns whose loss `_write_capture_turns` falls back to the GRAPH for. So the
+    honest report is: an ERROR log here and an advisory on the receipt, never a
+    silent 200 and never a false failure.
+    """
+    took = (outcome is not None
+            and getattr(outcome, "applied", False)
+            and getattr(outcome, "statements", 0) >= 1)
+    if took:
+        return "record"
+    #: The seam's own refusal vocabulary, READ rather than re-derived (#10389
+    #: review P3): one word list, not a second thing to drift. The token is
+    #: `NON_DURABLE_JOURNAL_REFUSAL` from `record_writer`, the same name the
+    #: tuple and the verdict are built from — so a rename lands here too, instead
+    #: of silently routing a scratch buffer into the durable branch below.
+    refusal = getattr(outcome, "refusal", None)
+    if journalled and refusal != NON_DURABLE_JOURNAL_REFUSAL:
+        _logger.warning(
+            "commit of session %s: the record did not take the S1 narrative "
+            "(refusal=%s), but the journal append did — the narrative is "
+            "readable from the journal and `record_projection` replay heals "
+            "the record from it. Until that replay runs, §9.4's verbatim fetch "
+            "(public.session_narrative) cannot serve this commit's prose "
+            "(#10000).", session_id, refusal or "unstated")
+        return "journal"
+    _logger.error(
+        "commit of session %s: §9.1's S1 narrative reached NO store — the "
+        "record did not take the `SessionNarrated` carrier (refusal=%s, "
+        "journalled=%s) and the graph writes that used to hold the prose are "
+        "deleted (#10000). The narrative is LOST unless the source is "
+        "re-distilled; arm the journal / TORTOISE_RECORD_DSN, or replay the "
+        "journal once they are.", session_id, refusal or "seam not reached",
+        journalled)
+    return "nowhere"
+
+
+def _narrative_home_advisory(home: str, session_id: str) -> dict:
+    """The `warnings[]` advisory for a narrative that is not in its record home.
+
+    Additive and non-blocking, the same channel #7819's `temporal_not_applied`
+    rides (`_commit_response`): the commit DID write, so this states a residual
+    instead of refusing — but a caller reading `warnings` learns that §9.1's
+    narrative is not (yet) where §9.4 reads it, which a 200 alone would claim
+    it was.
+    """
+    if home == "journal":
+        message = (
+            "the S1 narrative was not written to public.session_narrative on "
+            "this commit; it is in the journal and the record heals on replay "
+            "(#10000). Nothing was refused and nothing else was lost.")
+    else:
+        message = (
+            "the S1 narrative reached NO store on this commit: the record did "
+            "not take it and no durable journal holds it (#10000). The graph "
+            "no longer carries the prose — arm the journal and replay it, or "
+            "re-derive the narrative from the session's source.")
+    return {
+        "code": NARRATIVE_NOT_RECORDED,
+        "session_id": session_id,
+        "message": message,
+        "advisory": True,
+    }
+
+
 def _ambiguous_entity_refusal(exc) -> HTTPException:
     """The ONE 422 body for a create-side ambiguity refusal (#9876 review).
 
@@ -17281,8 +17406,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
 
     # ── 2. Document transcript (D10, ONTOLOGY v3.15 §4.4: a document is a
     # :Source) — deterministic id, replay-safe MERGE. NO content on the
-    # derived path (§4.1: summary/story_arc/sessionId only); doc_status is
-    # retired (§9.5 Q3). ──
+    # derived path: `summary`/`title` are §4.4 METADATA, and the S1 narrative is
+    # ⛔ NOT among them — §9.1/D1 puts it in `public.session_narrative`, and the
+    # `s.story_arc` SET this comment used to include is deleted (#10000; see 2b).
+    # Doc_status is retired (§9.5 Q3). ──
     # #5082 (third writer): `sourceKind='document'` is the document's TYPE
     # axis beside the `documentKind='transcript'` GENRE axis (ONTOLOGY §4.6
     # marks `sourceKind` REQUIRED on every `:Source`; #5013 Q2 keeps both).
@@ -17312,6 +17439,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # on this statement already follow (#5082, #5140 P2 finding 5) — the genre
     # is simply not coalesced because `'transcript'` must stay writable on a
     # node that has none.
+    #
+    # ⛔ NO `story_arc` ON THIS NODE (#10000). §9.1/D1 places the S1 narrative
+    # in Postgres — "not in the graph, not a `Document` node, not a `Point`" —
+    # and this statement used to SET `s.story_arc=$arc` anyway, so every commit
+    # rented RAM for the whole narrative prose in the store §2.1 says can never
+    # unload it. MEASURED on a live FalkorDB before the removal: one commit with
+    # a 167-char narrative left `sum(size(n.story_arc))` = 334 bytes across the
+    # `:Source` and its `:Event` (both carried the full text), and NO production
+    # read path reads the property back — only two tests asserted it was there.
+    # The narrative's home is `public.session_narrative`, written by the
+    # SHAPE-KEYED projection `record_projection._narrative_statements` (any
+    # record naming its session and carrying `story_arc`), whose production
+    # producer below (2b) is the `SessionNarrated` carrier — unchanged, and the
+    # only PRODUCER this path contributes. `summary`/`title` stay: they are §4.4
+    # metadata, not the prose.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
         "SET s.id=coalesce(s.id, $did), "
@@ -17322,23 +17464,25 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         "        THEN s.documentKind "
         "        ELSE 'transcript' END, "
         "    s.title=$title, s.summary=$summary, "
-        "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
+        "    s.sessionId=$sid, s.eventId=$eid, "
         "    s.sourcePath=$srcpath, s.is_episodic=true, "
         "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
         "    s.updatedAt=$now",
         params={"did": doc_id, "title": payload.summary or session_id,
-                "summary": payload.summary, "arc": payload.story_arc,
+                "summary": payload.summary,
                 "sid": session_id, "eid": event_id,
                 "srcpath": document_basename, "now": now},
     )
 
     # ── 2b. THE NARRATIVE'S JOURNAL CARRIER (#9555 / R7, §9.1). ──────────────
-    # The MERGE above writes `s.story_arc` — §9.1's S1 narrative ("the connected
-    # prose form of a captured session") — by RAW CYPHER, and raw Cypher is not
-    # a journal record (§17.1's unjournalled-writer ledger). Measured for #9555:
-    # that left the record's narrative home, `public.session_narrative`, with its
-    # two COUNT columns filled and its two TEXT columns NULL on every live
-    # capture, because the shape-keyed projection that owns that home
+    # This carrier is now the narrative's only PRODUCER on the commit path
+    # (#10000): the raw-Cypher
+    # `s.story_arc=$arc` / `e.story_arc=$arc` writes above it are GONE, because
+    # §9.1/D1 places the S1 narrative outside the graph and the record's own home
+    # for it is `public.session_narrative`. History, kept because it is why this
+    # type exists: measured for #9555 the record's narrative home had its two
+    # COUNT columns filled and its two TEXT columns NULL on every live capture,
+    # because the shape-keyed projection that owns that home
     # (`record_projection._narrative_statements`) reads `story_arc` off a RECORD
     # and no producer ever journalled one. The record could therefore reproduce
     # the rows but not the narrative — exactly the D7 gap (#9567).
@@ -17348,12 +17492,29 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # seam, and its live door (`record_writer.write_live_record`) is the ONE
     # boundary into Postgres, driving the ONE fold (`record_projection.replay`).
     # This adds a RECORD, which is what a producer does; it adds no writer. What
-    # it states is the write that already landed one statement above, which is
-    # §17.1's APPLY-FIRST lane — the record describes the write's own stored
-    # result (`payload.story_arc` is what the MERGE wrote verbatim; nothing in
-    # the payload is read back from the node, and the write's failure is
-    # fail-closed above, so a record can never outlive a write that did not
-    # land).
+    # it states is this commit's narrative (`payload.story_arc`) — read from the
+    # payload, never back from a node.
+    #
+    # ⛔ AND ITS OUTCOME IS REPORTED, NOT ASSUMED (#10389 review P2). Deleting the
+    # node writes made this emit the narrative's ONLY write — and it is NOT
+    # fail-closed, whatever the writes around it are: `sdk._emit_event` is
+    # best-effort by contract ("Both stores are best-effort — failures log and
+    # continue"), its record leg is skipped entirely with no journal configured
+    # (its `if log is None:` arm) and when the append raised (its per-call
+    # `return False`), and this door used to ignore the return. Before #10000
+    # those two lanes degraded to "the prose still sits on the node"; after it
+    # they stored the narrative NOWHERE while the commit answered 200. So the
+    # record's per-call outcome is read here (`record_sink`, the mechanism
+    # `_write_capture_turns` already gates its own store decision on) and
+    # `_report_narrative_home` turns it into an ERROR log plus a
+    # `narrative_not_recorded` advisory on the receipt.
+    # ⚠️ WHAT IS STILL TRUE, AND WHAT IS NOT (#10000). The `:Source` write ABOVE
+    # is fail-closed before this carrier, so a record can never outlive THAT
+    # write. It no longer states a NODE write at all — the key it carries is read
+    # from `payload.story_arc` — and step 3's `:Event` MERGE comes AFTER this
+    # emit, so there is no apply-first ordering to claim for it; what makes a
+    # retry harmless is the content-addressed `id=event_id` (see
+    # `_narrative_carrier`'s docstring), not a write order the code does not have.
     #
     # WHY A DEDICATED TYPE RATHER THAN `SourceCreated`/`EventRecorded`. §9.1
     # places the narrative *outside* the graph — "not in the graph, not a
@@ -17372,7 +17533,22 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         session_id=session_id, event_id=event_id,
         captured_at=payload.captured_at)
     if _carrier is not None:
-        sdk._emit_event(NARRATIVE_RECORD_TYPE, **_carrier)
+        #: PER-CALL, not a counter on the SDK: this SDK is shared by concurrent
+        #: writers (#5612), so the outcome has to travel with the call or "did
+        #: THIS commit's narrative land" is unanswerable.
+        _narrative_record: list = []
+        _journalled = sdk._emit_event(
+            NARRATIVE_RECORD_TYPE, record_sink=_narrative_record, **_carrier)
+        _home = _report_narrative_home(
+            session_id=session_id,
+            outcome=(_narrative_record[0] if _narrative_record else None),
+            journalled=_journalled)
+        if _home != "record":
+            # Caller-visible, not log-only (#7819's additive `warnings[]`): a
+            # client that reads `warnings` is told §9.1's narrative is not (yet)
+            # where §9.4 reads it, instead of a 200 implying that it is.
+            _write_advisories.append(
+                _narrative_home_advisory(_home, session_id))
 
     # ── 3. Event AgentSession (content-addressed eventId — MERGE anchor,
     # amendment §4.3 #3) — produces the Document. Written via raw Cypher:
@@ -17384,12 +17560,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         "MERGE (e:Event {eventId:$eid}) "
         "SET e.id=$eid, e.eventKind='AgentSession', e.name=$name, "
         "    e.capturedAt=$cap, e.startedAt=$cap, e.endedAt=$cap, "
-        "    e.sessionId=$sid, e.summary=$sum, e.story_arc=$arc, "
+        "    e.sessionId=$sid, e.summary=$sum, "
         "    e.is_episodic=true, e.keywords=$kw, e.eventStatus='scheduled', "
         "    e.updatedAt=$now",
         params={"eid": event_id, "name": payload.summary or session_id,
                 "cap": payload.captured_at, "sid": session_id,
-                "sum": payload.summary, "arc": payload.story_arc,
+                "sum": payload.summary,
                 "kw": [session_id], "now": now},
     )
     proj.g.query(
