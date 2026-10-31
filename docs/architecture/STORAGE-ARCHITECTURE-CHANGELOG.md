@@ -1766,7 +1766,9 @@ because the design document is not where the record of the change belongs (#8542
 s.story_arc=$arc` on the transcript `:Source` **and** `e.story_arc=$arc` on the AgentSession
 `:Event` — the whole S1 narrative, twice per commit, in the store §2.1 says can never unload it —
 while **no production read path read it back**. Both SETs are deleted; the narrative's one writer is
-the `SessionNarrated` carrier into `public.session_narrative` (`#9555`), unchanged. MEASURED live on
+the SHAPE-KEYED projection `record_projection._narrative_statements` (any record naming its session and
+carrying `story_arc` lands in `public.session_narrative`), whose production producer for a commit is the
+`SessionNarrated` carrier (`#9555`), unchanged. MEASURED live on
 a FalkorDB, one commit with a 167-char narrative: `sum(size(n.story_arc))` = **334 bytes** before the
 removal (`:Source` 167 + `:Event` 167), **0 bytes** after it, with `public.session_narrative` holding
 the same 167 chars. `summary`/`title` deliberately stay on the node (§4.4 metadata, not the prose).
