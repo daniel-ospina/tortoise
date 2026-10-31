@@ -97,7 +97,7 @@ predicate cannot see. The invariant those last ones taught is **halt
 REACHABILITY**: the halt must be reachable from the SUBJECT's failure, so every
 separator between the last subject segment and the ``||`` is ``&&``, no separator
 is a pipe, and the subject itself is in the chain — a per-segment allowlist alone
-blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **57 such mutants
+blesses ``pin ; true || exit 1``, because ``true`` is a no-op. **66 such mutants
 measured at this head: 0 survive**, and the honest document is 0 of 14 red.
 
 Static, no network / DB / graph — but the MODULE still loads `tests/conftest.py`, which fails the
@@ -246,6 +246,13 @@ def _is_refusal(fence: list[str], i: int) -> bool:
         r"^(?:\[\s*-z\s|test\s+-z\s)", code
     ):
         return False
+    # The INVOCATION is pinned, not just the verb: `git status --porcelain -uno`
+    # prints nothing on a tree whose only dirt is untracked files, and
+    # `git switch -C` carries those into the pinned tree — so the fence measures
+    # the lane under a heading promising `origin/main` ALONE.
+    for match in re.finditer(r"git\s+status\b[^)\"']*", code):
+        if not re.fullmatch(r"git\s+status\s+--porcelain", match.group(0).strip()):
+            return False
     return _ends_at_halt(
         _block(fence, i), allow=_allows_dirty_test, subject=_allows_dirty_test
     )
@@ -617,6 +624,25 @@ def test_the_baseline_refuses_a_dirty_tree() -> None:
     first = _fence_index(lambda fence: any(_FULL_SUITE.search(c) for c in fence))
     assert first >= 0, "no baseline fence found — re-point this guard"
     baseline = fences[first]
+
+    # A STALE base is as bad as a dirty tree: this fence's `PINNED` is the ledger
+    # every later verdict is diffed against. `--dry-run`, `|| true` and a stale
+    # refspec all leave `origin/main` unmoved, so `PINNED` is the OLD main and the
+    # baseline is measured on a tree that is not current `origin/main`.
+    fetches = [
+        i
+        for i, c in enumerate(baseline)
+        if re.fullmatch(r"git\s+fetch\s+origin(?:\s+main)?", _code(c))
+    ]
+    pins = [
+        i for i, c in enumerate(baseline) if re.match(r"^(?:export\s+)?PINNED=", _code(c))
+    ]
+    assert fetches and pins and max(fetches) < min(pins), (
+        "the baseline must fetch origin (a plain `git fetch origin [main]`) BEFORE "
+        "it pins $PINNED: a stale remote-tracking ref makes the pin the OLD main, "
+        f"and the baseline — the ledger — is then measured on the wrong base. "
+        f"fetches={[baseline[i] for i in fetches]}, pins={[baseline[i] for i in pins]}"
+    )
     # A MENTION is not a refusal — `[ -z "$(git status --porcelain)" ]` alone,
     # `|| true`, and an `echo '[ -z … ] || exit 1'` all "contain" the tokens — and
     # a refusal AFTER the suite refuses nothing. Both are pinned: the command must
