@@ -655,13 +655,21 @@ def test_10437_sync_rebuilds_the_skill_archives_from_the_bytes_it_wrote(
         assert payload == upstream_bytes[entry["upstream_path"]]
 
 
-def test_10437_a_second_sync_rewrites_no_archive(monkeypatch, tmp_path):
+def test_10437_a_second_sync_rewrites_no_archive(monkeypatch, tmp_path, capsys):
     """Idempotence, so committing a sync is not a binary churn on every run.
 
     The builder pins `ZipInfo.date_time`, so the archive is byte-stable; this
     asserts the sync path actually exploits that instead of unconditionally
     rewriting — the other direction of the same defect (a remedy that is
     correct but noisy gets reverted).
+
+    It also pins the REPORTING at zero. The archive line used to be printed only
+    when something changed, so a run that rewrote nothing said nothing about
+    archives at all and an operator could not tell “checked, all current” from
+    “this pin has no archives” — the unreported derived artifact this change
+    exists to close. Mutating that print back under `if result.archives:` leaves
+    every other case in this file green (#10437 cycle-3 review, P2), so the zero
+    case is asserted through the real CLI.
     """
     src = REPO / sp.MANIFEST_REL
     pin = tmp_path / "pin.yml"
@@ -682,6 +690,17 @@ def test_10437_a_second_sync_rewrites_no_archive(monkeypatch, tmp_path):
     assert second.archives == (), second.archives
     for name, payload in after_first.items():
         assert (root / sp.ARCHIVES_REL / f"{name}.skill").read_bytes() == payload
+
+    # The ZERO case through the CLI an operator actually runs.
+    capsys.readouterr()
+    rc = sp.main(["--sync", "--root", str(root), "--manifest", str(pin),
+                  "--attempts", "1", "--backoff", "0"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "re-derived 0 served skill(s)" in out, out
+    assert "re-derived 0 .skill archive(s)" in out, (
+        "the archive line must print even at ZERO, or an operator cannot tell "
+        "“checked, all current” from “this pin has no archives”: " + out)
 
 
 def test_10437_a_pinned_skill_with_no_archive_name_is_reported(capsys, tmp_path):

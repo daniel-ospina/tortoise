@@ -552,6 +552,13 @@ def test_10437_warning_table_gate_reds_on_an_unreadable_count():
     problems = _warning_table_problems(section)
     assert any("cannot read as a number" in problem for problem in problems), \
         problems
+    # The section DOES state a size, it just states it unreadably, so the
+    # “no longer states how many keys” arm must stay SILENT. Without this the
+    # `and not unreadable` guard on that branch can be dropped and every test
+    # stays green while the gate emits a false second message (#10437 cycle-3
+    # review, P2).
+    assert not any("no longer states how many keys" in problem
+                   for problem in problems), problems
 
 
 def test_10437_warning_table_gate_is_clean_on_the_mirror_shape():
