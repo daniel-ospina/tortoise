@@ -1791,11 +1791,6 @@ is the record for:
   creation row with no matching retraction — is the repair or should be accepted permanently is the
   open decision on `#10325`, not a settled one. The `EntityMutated` op=delete record the replay folds
   is kept, so a shorter re-capture is durable even though the feed is one-sided.
-
-And the two the CODE settles, which §9.1 deliberately does not restate — they qualify the placement
-rather than being part of it, so each names its own home and a reader re-verifying them must open that
-home, not §9.1 (`#8542` moved design narration out of the document, and did not move this back in):
-
 - **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:204`, step 7's settled answer
   to `#10129`'s placeholder): `_emit_event` returns on an append failure BEFORE the record write, so
   that capture's turn rows **never reached the record either** — its transcript is already lost, and

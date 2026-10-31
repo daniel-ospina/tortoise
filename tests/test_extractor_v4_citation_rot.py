@@ -1174,89 +1174,151 @@ def test_the_changelog_entry_names_the_section_the_stamp_actually_left():
     )
 
 
-_PLACEMENT_FRAMING = re.compile(
-    r"What the design document now says in that place, as design\s*—\s*"
-    r"the statements this entry is the record\s+for:"
-)
-# The two statements the entry once claimed under that framing and §9.1 does NOT
-# carry: the torn-tail TOLERATED decision (its home is `tortoise/log.py:204`) and
-# the tenant precedence the store decision asks (its home is
-# `tortoise/record_writer.py:842`/`:875`). Each token is the statement's own
-# identifier, so the split can be checked without reading prose.
+# The two statements the entry once attributed to §9.1 *"in that place"* and that
+# `STORAGE-ARCHITECTURE.md` does NOT carry: the torn-tail TOLERATED decision (its
+# home is `tortoise/log.py:204`) and the tenant precedence the store decision asks
+# (its home is `tortoise/record_writer.py:842`/`:875`). Each token is the
+# statement's own identifier, so the split can be checked without reading prose.
 _CODE_SETTLED_TOKENS = ("torn", "record_tenant_effective", "is_usable_tenant")
+
+# A lead-in that points the bullets at the design document as their home. It is
+# honest only while every bullet under it IS in that document — `#8542` made the
+# design documents carry the rule and this file the narrative, so a reader who
+# follows the pointer has to land on what is asserted.
+_DESIGN_HOME_LEAD_IN = re.compile(r"design document", re.I)
+# The caveats that make a design-document lead-in honest for a bullet whose home
+# is elsewhere. Either repair the reviewer named satisfies one of these.
+_OUTSIDE_HOME_CAVEAT = re.compile(
+    r"seams it points at|does not restate|the code settles|the CODE settles|"
+    r"outside (?:the|this) design document",
+    re.I,
+)
+_NAME_HOME = re.compile(r"((?:[\w.-]+/)*[\w-]+\.py):(\d+)")
+
+
+def _entry_bullet_blocks(entry: str) -> list[tuple[str, list[str]]]:
+    """`[(lead_in, [bullet, …]), …]` for each bullet list in `entry`, in order.
+
+    A block starts at a line beginning `- ` and runs while lines begin with `- `
+    or are indented continuations; the lead-in is the paragraph immediately above
+    it (blank lines skipped), joined into one string.
+    """
+    lines = entry.splitlines()
+    blocks: list[tuple[str, list[str]]] = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].startswith("- "):
+            i += 1
+            continue
+        bullets: list[str] = []
+        start = i
+        while i < len(lines):
+            if lines[i].startswith("- "):
+                bullets.append(lines[i])
+            elif lines[i].startswith("  ") and bullets:
+                bullets[-1] += "\n" + lines[i]
+            else:
+                break
+            i += 1
+        lead: list[str] = []
+        j = start - 1
+        while j >= 0 and not lines[j].strip():
+            j -= 1
+        while j >= 0 and lines[j].strip() and not lines[j].startswith("- "):
+            lead.insert(0, lines[j])
+            j -= 1
+        blocks.append((" ".join(lead), bullets))
+    return blocks
 
 
 def test_the_carrier_entry_claims_91_only_for_what_91_carries():
-    """The bullets under *"in that place"* have to be statements §9.1 actually carries.
+    """Every statement the entry puts in §9.1's home has to BE in §9.1.
 
     The entry exists to say **what left §9.1 and what §9.1 now carries**
-    (`#8542`: a lane reads this file instead of the design document), and it once
-    introduced five (later six) bullets with *"What the design document now says
-    in that place, as design"* — while two of them, **The torn tail** and **The
-    tenant**, appear in **no** section of `STORAGE-ARCHITECTURE.md`
-    (`record_tenant_effective` / `is_usable_tenant` / the torn-tail tolerance are
-    absent from the whole document). A reader re-verifying the record of a §9.1
-    edit opened §9.1 and found two of the stated design facts not there — the
-    *"a reader who follows the pointer reads exactly what is asserted here"*
-    failure the sibling legs in this file exist for.
+    (`#8542`: a lane reads this file instead of the design document), and it
+    introduced six bullets with *"What the design document now says in that
+    place, as design"* — two of which, **The torn tail** and **The tenant**, are
+    in **no** section of `STORAGE-ARCHITECTURE.md`: `record_tenant_effective`,
+    `is_usable_tenant` and the torn-tail tolerance have zero hits in the whole
+    document. A reader re-verifying the record of a §9.1 edit opened §9.1 and
+    found two of the stated design facts absent — the *"a reader who follows the
+    pointer reads exactly what is asserted here"* failure the sibling legs in this
+    file exist for (`test_the_retracted_passages_do_not_reappear`).
 
-    So the entry splits: the bullets §9.1 carries stay under that framing, and
-    the two the CODE settles are introduced separately, each naming its own home.
-    Non-vacuity: at the pre-fix head (`ccbc0339e7de`) this reds on the first
-    assertion — `The tenant.` sits under the framing and carries
-    `record_tenant_effective` — and it stays green only while §9.1 carries
-    neither token (the second assertion), so the split cannot be reverted by
-    moving the text INTO §9.1 instead.
+    Both repairs the review named pass: separate the two code-settled statements
+    under their own lead-in, or keep one list and say where the bullets' homes
+    are. What neither may do is put a statement in §9.1's home that §9.1 does not
+    hold, and that is what this pin measures — so it does not dictate the wording.
+
+    The statements must also still be REPORTED, with a home that resolves: the
+    repair is to say where they live, not to stop recording them, and not to name
+    a file that does not carry the line.
+
+    Non-vacuity: at `ccbc0339e7de` (the pre-fix head) this reds on the first
+    assertion — all six bullets sit under a lead-in that names the design
+    document and no caveat, and `The torn tail.` carries `torn` — while §9.1
+    carries none of the three tokens. It passes at `7ecf52dbf`, which is the
+    observed direction of the repair.
     """
     entry = _changelog_entry("§9.1's carrier paragraph")
     sec_9_1 = _section_body(STORAGE, "9.1")
 
-    # Premise: the tokens really are absent from §9.1. If a later change puts them
-    # there, the separation below is no longer required — move the bullets back
-    # rather than deleting this pin.
+    # Premise: the tokens really are NOT §9.1's. If a later change puts them
+    # there, the lead-in no longer over-claims and this pin is obsolete — move
+    # the bullets back into the design-document list and delete it, rather than
+    # leaving a green test that measures nothing.
     leaked = [token for token in _CODE_SETTLED_TOKENS if token in sec_9_1]
     assert not leaked, (
-        f"§9.1 now carries {leaked}, so the entry no longer needs to separate these "
-        "two statements — put their bullets back under the *\"in that place\"* "
-        "framing and delete this pin."
+        f"§9.1 now carries {leaked}, so an entry that lists them under a "
+        "design-document lead-in is no longer over-claiming — delete this pin "
+        "rather than keeping a leg whose premise has moved."
     )
 
-    framing = _PLACEMENT_FRAMING.search(entry)
-    assert framing, (
-        "the entry no longer frames its bullet list as what §9.1 says in that "
-        f"place:\n{entry}"
+    blocks = _entry_bullet_blocks(entry)
+    assert blocks, f"the entry carries no bullet list at all:\n{entry}"
+
+    offenders: list[str] = []
+    homes: dict[str, str] = {}
+    for lead_in, bullets in blocks:
+        claims_design_home = bool(_DESIGN_HOME_LEAD_IN.search(lead_in))
+        caveated = bool(_OUTSIDE_HOME_CAVEAT.search(lead_in))
+        for bullet in bullets:
+            carried = [t for t in _CODE_SETTLED_TOKENS if t in bullet]
+            if not carried:
+                continue
+            label = bullet.splitlines()[0][:70]
+            if claims_design_home and not caveated:
+                offenders.append(
+                    f"{label} — {carried} is not in §9.1, but the lead-in "
+                    f"(«{lead_in.strip()[:90]}…») points the whole list at the "
+                    "design document with no caveat")
+                continue
+            named = _NAME_HOME.findall(bullet)
+            if not named:
+                offenders.append(
+                    f"{label} — {carried} is not in §9.1 and this bullet names no "
+                    "`file.py:line` home, so the reader has nowhere to verify it")
+                continue
+            for rel, lineno in named:
+                path = ROOT / rel
+                if not path.is_file():
+                    offenders.append(f"{label} — names `{rel}`, which is not a "
+                                     "file in this repo")
+                    continue
+                total = len(path.read_text(encoding="utf-8").splitlines())
+                if not 1 <= int(lineno) <= total:
+                    offenders.append(
+                        f"{label} — `{path.name}:{lineno}` is past the end of the "
+                        f"file ({total} lines)")
+                    continue
+                homes[carried[0]] = f"{path.name}:{lineno}"
+    assert not offenders, (
+        "the entry puts these statements in §9.1's home, or names no home a "
+        "reader can open — `docs/architecture/STORAGE-ARCHITECTURE.md` §9.1 "
+        "carries none of them:\n  " + "\n  ".join(offenders)
     )
-    under_framing = entry[framing.end():]
-    # The framed list ends at the first line that is neither a bullet nor a
-    # continuation of one — the entry's next paragraph.
-    bullets: list[str] = []
-    for line in under_framing.splitlines()[1:]:
-        if line.startswith("- "):
-            bullets.append(line)
-        elif line.startswith("  ") and bullets:
-            bullets[-1] += "\n" + line
-        elif line.strip():
-            break
-    assert bullets, (
-        "the *\"in that place\"* framing introduces no bullets — this pin cannot "
-        f"tell what it is claiming:\n{entry}"
-    )
-    framed = "\n".join(bullets)
-    misplaced = [token for token in _CODE_SETTLED_TOKENS if token in framed]
-    assert not misplaced, (
-        f"the entry says §9.1 states {misplaced} *\"in that place\"*, but "
-        "`docs/architecture/STORAGE-ARCHITECTURE.md` §9.1 carries none of them — "
-        "their homes are `tortoise/log.py:204` (the torn-tail TOLERATED decision) "
-        "and `tortoise/record_writer.py:842`/`:875` (the tenant precedence). "
-        "Introduce them under their own framing, naming those homes, or add the "
-        "statements to §9.1 — but adding them back to §9.1 is a `#8542` violation, "
-        "so the split is the repair.\n\nframed bullets:\n" + framed
-    )
-    # And the statements must still be REPORTED — the split may not be satisfied
-    # by dropping what the entry was written to record.
-    reported = [token for token in _CODE_SETTLED_TOKENS if token in entry]
-    assert set(reported) == set(_CODE_SETTLED_TOKENS), (
-        f"the entry no longer reports {set(_CODE_SETTLED_TOKENS) - set(reported)} at "
-        "all — the repair is to say WHERE those statements live, not to stop "
-        "recording them"
+    missing = [t for t in _CODE_SETTLED_TOKENS if t not in entry]
+    assert not missing, (
+        f"the entry no longer reports {missing} at all — the repair is to say "
+        "WHERE those statements live, not to stop recording them"
     )
