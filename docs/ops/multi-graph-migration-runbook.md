@@ -106,6 +106,14 @@ Consequences (E2E-5 exit gate):
 
 - **No data move** — tenant points/sessions never touch the registry
   migration; the default graph's namespace is unchanged.
+- **The default is movable, and moving it is one verb.** #10180's
+  `POST /v1/graphs/{graph_id}/promote` (migration `20261102000001`) moves the
+  `kind='default'` row and `organizations.graph_name` to an existing active graph
+  atomically — so "the default graph" in this runbook means *the current* one.
+  The demoted graph keeps its own namespace, so the move copies no data; what it
+  changes is where an ORG-WIDE credential's next capture lands (its record
+  tenant is that row's id). Captures already in flight keep the graph they
+  resolved at admission.
 - **No key rotation** — every pre-epic key is `graph_id NULL` +
   `scopes []` + `delegation_depth NULL` = the `legacy_full_access` class
   (resolution derives full team/default-graph access; byte-identical
@@ -401,3 +409,52 @@ resolved before the commit lands under the old graph, one after under the new.
 organization's own graph" — true at creation, false the moment Fact A and Fact B
 are allowed to diverge.** It now names the row instead (§6's #1), so the
 next lane reads the measured answer rather than the creation-time one.
+
+### What landed: the move is gated on the DATA, so no existing org changes
+
+The verb shipped as `POST /v1/graphs/{graph_id}/promote` (REST-only: no MCP tool,
+no public SDK method — #4282), backed by `public.promote_default_graph` in
+`supabase/migrations/20261102000001_graphs_promote_default.sql`. It moves Fact A
+**and** `organizations.graph_name` in one transaction, so Fact A and Fact B stay
+the same graph.
+
+None of options 1–4 above is what landed, and the difference matters: each of
+them changes the org-wide resolution **unconditionally**, and that is what the
+`hosted_api.py:9788` equality (and #2023's pin) could not survive. The shipped
+shape instead makes the flip **conditional on the DATA having moved**:
+`supabase_control.moved_default_namespace(org_id, namespace)` returns a namespace
+**only** when it is a per-graph namespace of that org — `org_{org_id}_{gid}`, the
+shape `insert_graph`/`_provision_graph` mint, which **only a promotion can put in
+`organizations.graph_name`**. Everything else keeps the historical open:
+
+| shape of `organizations.graph_name` | what the resolver does |
+|---|---|
+| `org_{org_id}` (every org that never promoted, incl. all five provisioning sites) | historical open — `namespace=org_id`, the same SDK shape as before |
+| `team_{org_id}` (pre-#3543) | historical open — #2023's pin holds |
+| `org_{name}` (registry `sdk.org_create`) | historical open, and registry mode never flips at all |
+| `org_{org_id}_{gid}` (a promotion) | opens the promoted graph |
+
+So the answer to the count above (`SELECT count(*) FROM organizations WHERE
+graph_name <> 'org_' || id`) no longer gates this change: a non-zero count
+describes orgs whose default namespace is a legacy name, and those keep the open
+they had. #10361 (nothing pins that equality) is still worth landing, but it is
+no longer a precondition.
+
+**The class is converted, not just the request path.** The inherited attempt
+converted `_data_sdk` alone, which the analysis above already names as worse than
+no verb: eleven other default-graph openers would have kept reading and writing
+the demoted graph while filing record rows under the promoted one. They now
+resolve through ONE function, `hosted_api._org_sdk` (REST: the event-retention
+sweep, the dream drain and its webhook dispatch, the Overview memory count, the
+pack catalog and manifest install, the onboarding-state lanes, the seed/indexing
+runners, and the points/sessions/documents quota count) plus
+`mcp_auth._get_org_sdk` (the MCP lane) — one decision,
+`moved_default_namespace`, shared by all of them.
+`tests/test_10180_promote_default_graph.py` pins the inventory with an AST scan:
+a new `_make_sdk(namespace=<org>)` fails the suite unless it is converted or its
+reason for staying historical is recorded there.
+
+⚠️ **One consequence worth naming for the switchover:** the MCP lane resolves a
+credential through a 60s cache, so a promotion becomes visible to MCP within that
+TTL; a capture admitted before it keeps the graph it resolved. Nothing is
+re-homed, copied or replayed.

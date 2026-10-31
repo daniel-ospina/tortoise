@@ -1585,9 +1585,120 @@ class FakeControlPlane:
                 if t.get("id") != oid
             ]
             return None
+        if fn == "promote_default_graph":
+            # #10180 — the atomic default-graph move (migration
+            # 20261102000001). Modelled as the ONE transaction the real plpgsql
+            # function is: demote → promote → org namespace, with the
+            # one-live-default UNIQUE INDEX checked at the end of every
+            # mutation and a refusal raising BEFORE anything is committed.
+            #
+            # The index check is the point of the emulation. A double that let
+            # two live `kind='default'` rows accumulate would make the
+            # invariant test pass against a state the real database rejects —
+            # a false-green generator for exactly the defect #10180 exists to
+            # close.
+            return self._rpc_promote_default_graph(dict(body or {}))
         if fn != "provision_team":
             return None
         return self._provision_team_emulation(body or {})
+
+    # ── #10180: the default-graph move, emulated ATOMICALLY ────────────────
+    def _live_default_rows(self, org_id: str) -> list[dict]:
+        """`kind='default' AND status <> 'deleted'` rows, in table order.
+
+        The predicate of `uq_graphs_org_default_active` (20261028000001),
+        verbatim — a tombstone beside an active row is legal, two live rows are
+        not.
+        """
+        return [r for r in self.tables.get("graphs", [])
+                if r.get("org_id") == org_id
+                and r.get("kind") == "default"
+                and (r.get("status") or "active") != "deleted"]
+
+    def _assert_one_live_default(self, org_id: str) -> None:
+        """Raise exactly as Postgres would when the partial index is violated."""
+        if len(self._live_default_rows(org_id)) > 1:
+            raise RuntimeError(
+                'duplicate key value violates unique constraint '
+                '"uq_graphs_org_default_active"')
+
+    def _rpc_promote_default_graph(self, p: dict) -> dict:
+        org_id = p.get("p_org_id")
+        graph_id = p.get("p_graph_id")
+        if not org_id or not graph_id:
+            raise RuntimeError(
+                "promote_default_graph: org_id and graph_id are required")
+        if not any(o.get("id") == org_id
+                   for o in self.tables.get("organizations", [])):
+            raise RuntimeError(
+                f"promote_default_graph: unknown organization {org_id}")
+        target = next(
+            (r for r in self.tables.get("graphs", [])
+             if r.get("id") == graph_id and r.get("org_id") == org_id), None)
+        if target is None:
+            raise RuntimeError("promote_default_graph: graph not found")
+        status = target.get("status") or "active"
+        if status == "deleted":
+            raise RuntimeError("promote_default_graph: graph is in the trash")
+        if status != "active":
+            raise RuntimeError("promote_default_graph: graph is not active")
+        if target.get("kind") == "default":
+            # Idempotent success: no GRAPH row moves (so a retry cannot churn).
+            # The one write this arm may make is the §3 repair of a drifted
+            # `organizations.graph_name` — modelled here because the real
+            # function does it and reports `namespace_repaired`.
+            repaired = False
+            ns = target.get("namespace")
+            if ns:
+                for o in self.tables.get("organizations", []):
+                    if o.get("id") == org_id and o.get("graph_name") != ns:
+                        o["graph_name"] = ns
+                        repaired = True
+            return {"ok": True, "already_default": True,
+                    "graph_id": graph_id, "name": target.get("name"),
+                    "namespace": ns,
+                    "previous_default_graph_id": graph_id,
+                    "namespace_repaired": repaired}
+        # Demote-then-promote: the only order the unique index permits (a
+        # UNIQUE INDEX is checked per row). Both rows change before the index
+        # is re-checked, so the intermediate zero-default state is invisible —
+        # this fake keeps the same all-or-nothing shape by validating before
+        # mutating and by rolling back on a raise.
+        previous = self._live_default_rows(org_id)
+        if len(previous) > 1:
+            raise RuntimeError(
+                'duplicate key value violates unique constraint '
+                '"uq_graphs_org_default_active"')
+        prev = previous[0] if previous else None
+        snapshot = ([dict(r) for r in self.tables.get("graphs", [])],
+                    [dict(o) for o in self.tables.get("organizations", [])])
+        try:
+            if prev is not None and prev.get("id") != graph_id:
+                prev["kind"] = "custom"
+            target["kind"] = "default"
+            if target.get("namespace"):
+                for o in self.tables.get("organizations", []):
+                    if o.get("id") == org_id:
+                        o["graph_name"] = target["namespace"]
+            self._assert_one_live_default(org_id)
+            # The real function's POST-CONDITION (see the migration): exactly
+            # one ACTIVE default, and it is the target. Modelled so a double
+            # cannot report `ok` over a state the real RPC would roll back.
+            active = [r for r in self._live_default_rows(org_id)
+                      if (r.get("status") or "active") == "active"]
+            if len(active) != 1 or active[0].get("id") != graph_id:
+                raise RuntimeError(
+                    "promote_default_graph: the default did not move "
+                    f"(org {org_id} has no single active default at "
+                    f"{graph_id} after the move)")
+        except Exception:
+            self.tables["graphs"], self.tables["organizations"] = snapshot
+            raise
+        return {"ok": True, "already_default": False,
+                "graph_id": graph_id, "name": target.get("name"),
+                "namespace": target.get("namespace"),
+                "previous_default_graph_id": (prev or {}).get("id"),
+                "previous_namespace": (prev or {}).get("namespace")}
 
     def _provision_team_emulation(self, p: dict) -> None:
         """The provision_team RPC body (migration 0010) over the in-memory

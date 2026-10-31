@@ -732,6 +732,16 @@ const suites = [
   // mistaken for "the suite passes". Add the entry in the same commit as the
   // file.
   '20261028000001_graphs_default_row_stable_id.sql',  // #10025
+  // #10180 — the verb that MOVES the default graph, driven against real
+  // Postgres: the kind move, the org-namespace move that keeps
+  // `graph_metadata`/the backup sweep naming the same graph as the record
+  // tenant, the refusals (unknown/foreign/trashed/non-active) rolling the move
+  // back, idempotence writing nothing, and the one-live-default index still
+  // rejecting a second row after a promotion. NOTE: this list is EXPLICIT, not
+  // a glob — a suite file that is not named here never runs, and "the suite
+  // exists" is then mistaken for "the suite passes". Add the entry in the same
+  // commit as the file.
+  '20261102000001_graphs_promote_default.sql',  // #10180
   // #4492 — the Postgres storage footprint + per-org analytics row growth,
   // driven against the REAL SQL functions. NOTE: this list is EXPLICIT, not a
   // glob — a suite file that is not named here never runs, and "the suite
