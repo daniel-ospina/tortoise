@@ -6025,6 +6025,31 @@ def _item_dedup_key(item: dict) -> str | None:
     return val if isinstance(val, str) and val.strip() else None
 
 
+def _item_point_kind(item: dict) -> str:
+    """The ``pointKind`` an ingest ``points`` item writes — the value the write
+    loop passes to ``create_point`` as its positional ``kind`` (``statement``
+    when the item declares none).
+
+    One home so the two Phase-1 readers of that value cannot drift: the batched
+    candidate read (:meth:`TortoiseSDK._terminal_content_candidates`) is built
+    BEFORE the ``points`` loop and the loop's own ``pkind`` is read after it, so
+    a guard scoped by a different kind than the write would resolve a different
+    node set (fail-open or over-reject). #9819.
+
+    ⚠️ Always a ``str``, including for a NON-string spelling. Such a kind is
+    already a Phase-1 violation (``_check_kind``: "pointKind must be a string")
+    and ``create_point`` refuses it, so it never reaches a write — but it DOES
+    reach the identity maps the content guard keys by ``(identity, kind)``, and
+    an unhashable spelling (``kind: {"a": 1}``) made those lookups hash a dict:
+    ``ingest`` raised a raw ``TypeError: unhashable type`` out of Phase 1
+    instead of returning the structured verdict the caller is owed (measured;
+    present since the content guard landed). It falls back to the same default
+    an item with no kind gets, and the bundle is still refused.
+    """
+    kind = item.get("kind")
+    return kind if isinstance(kind, str) and kind else "statement"
+
+
 def _item_prop_at_depth(item: dict, key: str, depth: int) -> tuple[bool, object]:
     """``(declares, value)`` for ``key``, read at the depth the ITEM'S WRITE
     DOOR flattens (#7925 review P2).
@@ -23063,7 +23088,7 @@ class TortoiseSDK:
         # decides LATER whether the content leg is reached at all; an item that
         # never reaches it simply never looks its answer up.
         _content_cands = self._terminal_content_candidates([
-            (pitem.get("content"), pitem.get("kind") or "statement")
+            (pitem.get("content"), _item_point_kind(pitem))
             for pitem in (bundle.get("points") or [])
             if isinstance(pitem, dict) and isinstance(pitem.get("content"), str)
         ])
@@ -23072,7 +23097,7 @@ class TortoiseSDK:
                 continue
             pkey = _item_dedup_key(pitem)
             _has_pkey = isinstance(pkey, str) and bool(pkey.strip())
-            pkind = pitem.get("kind") or "statement"
+            pkind = _item_point_kind(pitem)
             holders: list[str] = []
             if _has_pkey:
                 holders, holder = self._key_holder_state(pkind, pkey)

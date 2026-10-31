@@ -819,6 +819,32 @@ class TestTerminalStatusGuard:
         assert _operator_count(sdk) == 0, (
             "Phase-1 must reject BEFORE any write — no operator was wired")
 
+    def test_a_non_string_kind_gets_the_structured_verdict_not_a_typeerror(
+            self, sdk):
+        """#9819 fix round: an UNHASHABLE ``kind`` raised a raw
+        ``TypeError: unhashable type`` out of Phase 1, hiding the structured
+        verdict.
+
+        The content guard keys its identity maps by ``(identity, pointKind)``,
+        and the item's kind came straight from ``item.get("kind")``: a
+        ``kind: {"a": 1}`` made those lookups hash a dict. ``_check_kind``
+        ALREADY refuses such a bundle ("pointKind must be a string"), so
+        nothing was mis-written — but the caller got a ``TypeError`` instead of
+        the violation, and a ``TypeError`` is not the Phase-1 contract (a
+        caller cannot branch on it). ``_item_point_kind`` now always returns a
+        ``str``, so every key hashes.
+
+        RED BEFORE (measured): ``TypeError: unhashable type: 'dict'``.
+        """
+        for kind in ({"a": 1}, ["x"], 5):
+            with pytest.raises(BundleValidationError, match="must be a string"):
+                sdk.ingest({"points": [{"ref": "p1", "kind": kind,
+                                         "content": "NONSTR-KIND",
+                                         "key": "nonstr-k-9819"}]})
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'NONSTR-KIND' RETURN n.id"
+        ).result_set == [], "the bundle wrote a point before refusing"
+
     def test_bundle_local_terminal_dedup_after_rebuild(self, sdk):
         # #2971: a Point can carry `content_hash = NULL` — a crash between the
         # node CREATE and the props SET (a partial write), or a graph written

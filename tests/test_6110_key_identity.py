@@ -33,7 +33,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from tortoise.exceptions import BundleValidationError
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import (
+    TortoiseSDK,
+    _content_candidate_resolution,
+    _content_hash,
+)
 
 
 @pytest.fixture
@@ -523,6 +527,36 @@ class TestPhase1GuardSeesTheContentIdentity:
         ).result_set
         assert {r[0] for r in rows} == {"retracted", "live"}
 
+    def test_a_live_twin_of_a_terminal_point_is_refused(self, sdk):
+        """fix-round-2 P2.3 (the behaviour ``docs/INGEST_CONTRACT.md`` row 7
+        now DISCLOSES, and which nothing pinned): when two points share one
+        content and only ONE is terminal, the guard hits the TERMINAL one while
+        the writer could resolve the LIVE one — so the bundle is refused though
+        the fold it predicts would have been harmless.
+
+        Kept fail-closed on purpose: the writer's pick among duplicates carries
+        no ``ORDER BY`` (``_find_point_by_content`` returns its first row), so
+        WHICH twin a fold lands on is not decidable from the bundle. Pinning it
+        here means a later narrowing is a decision, not a silent drift.
+        """
+        live = sdk.create_point("statement", "TWIN-CONTENT")["id"]
+        terminal = sdk.create_point("statement", "TWIN-CONTENT")["id"]
+        assert live != terminal
+        sdk.retract_point(terminal)
+        before_terminal = sdk.get_point(terminal)
+        before_live = sdk.get_point(live)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": "TWIN-CONTENT"}]})
+
+        after_terminal = sdk.get_point(terminal)
+        assert after_terminal.get("batch_id") is None
+        assert after_terminal.get("updatedAt") == before_terminal.get("updatedAt")
+        assert sdk.get_point(live).get("batch_id") is None, (
+            "Phase-1 must reject before ANY write — neither twin was touched "
+            f"(live point was {before_live.get('batch_id')!r})")
+
     def test_empty_content_matching_a_terminal_point_is_a_phase1_violation(
             self, sdk):
         """#9819 review P1: the content leg must NOT gate on TRUTHINESS.
@@ -585,6 +619,31 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert [r[0] for r in rows] == ["live"], (
             "the double-wrapped status was never stored, so nothing minted "
             "terminal (#9819 P2)")
+
+    def test_a_real_one_fold_terminal_mint_is_still_recorded(self, sdk):
+        """NEGATIVE CONTROL for the test above: reading the recorded status at
+        the MINT depth (1) must not have dropped the record for a status the
+        writer really stores. A single-wrapped (`props: {"status": ...}`) or a
+        top-level terminal declaration IS one fold, so the next same-content
+        item is still refused — without this pair, `test_double_wrapped...`
+        would also pass if the record had been deleted outright."""
+        for j, extra in enumerate(({"props": {"status": "retracted"}},
+                                   {"status": "retracted"})):
+            content = f"ONE-FOLD-{j}"
+            with pytest.raises(BundleValidationError, match="mints with status"):
+                sdk.ingest(
+                    {"points": [
+                        {"ref": "p1", "kind": "statement",
+                         "content": content, **extra},
+                        {"ref": "p2", "kind": "statement", "content": content},
+                    ]},
+                    promotion_policy="auto",
+                )
+            assert sdk._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.content = $c RETURN n.id",
+                params={"c": content},
+            ).result_set == [], (
+                f"Phase-1 must reject before any write for {extra!r}")
 
 
 class TestContentIdentityReadIsBatched:
@@ -722,3 +781,111 @@ def test_key_is_declared_for_point_replay():
     either way), so this pins the declaration, not the persistence."""
     from tortoise.projection.entities import _EntityHandlers
     assert "key" in _EntityHandlers._POINT_DECLARED_PROPS
+
+
+class TestContentCandidateReadMatchesThePerItemHelpers:
+    """#9819 review P2 — the SAFETY NET for the batched content read.
+
+    ``_terminal_content_candidates`` + ``_content_candidate_resolution``
+    replaced, in ONE query, what two per-item helpers answered with four graph
+    reads (``_find_terminal_dedup_hit``'s three tiers, and
+    ``_find_point_by_content``'s "does this item mint?"). ``TestContentIdentity-
+    ReadIsBatched`` pins the COST (the query count) and therefore says nothing
+    about the ANSWERS; a batched read that resolved a different node set would
+    silently move the guard's radius — fail-open on one shape, over-reject on
+    another.
+
+    So this class pins EQUALITY, on the shapes each tier and each arm exists
+    for, against the per-item helpers themselves. `per-item` is the definition;
+    `batched` must agree with it on every pair. Mutation-checked: dropping the
+    #2971 "no hash-present sibling" gate from ``_content_candidate_resolution``
+    reds both tests, naming the disagreeing pair (``T2-shadows-T3``).
+    """
+
+    def _states(self, sdk) -> list[tuple[str, str]]:
+        """One point per tier/leg shape, then the pairs to compare."""
+        # tier 1 — terminal + hash present, in both terminal vocabularies.
+        sdk.create_point("statement", "T1-retracted", status="retracted")
+        sdk.create_point("statement", "T1-superseded", status="superseded")
+        flagged = sdk.create_point("statement", "T1-invalidated")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.outdated = true", params={"id": flagged})
+        # tier 2 — a LIVE hash-present point: no hit, and it must also SUPPRESS
+        # the hash-less scan for the same content (#2971's gate).
+        sdk.create_point("statement", "T2-live")
+        # tier 2 shadowing tier 3: a live hashed point AND a terminal hash-less
+        # twin — the writer resolves the hashed one, so NO hit.
+        sdk.create_point("statement", "T2-shadows-T3")
+        hashless_twin = sdk.create_point("statement", "T2-shadows-T3")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', "
+            "n.content_hash = NULL", params={"id": hashless_twin})
+        # tier 3 — hash-less terminal, no hashed sibling at all; and a hash-less
+        # LIVE one that must stay a miss.
+        for content, status in (("T3-hashless-retracted", "retracted"),
+                                ("T3-hashless-live", "live")):
+            pid = sdk.create_point("statement", content)["id"]
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) SET n.status = $st, "
+                "n.content_hash = NULL", params={"id": pid, "st": status})
+        # kind scoping — same content, terminal point in ANOTHER kind.
+        sdk.create_point("decision", "KIND-scoped", status="retracted")
+        # an operator is not a point-dedup candidate.
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:'op-9819-cand', content:'OP-scoped', "
+            "content_hash:$ch, pointKind:'statement', is_operator:true, "
+            "op_type:'IMPL', status:'retracted'})",
+            params={"ch": _content_hash("OP-scoped")})
+
+        pairs = [("statement", c) for c in
+                 ("T1-retracted", "T1-superseded", "T1-invalidated", "T2-live",
+                  "T2-shadows-T3", "T3-hashless-retracted", "T3-hashless-live",
+                  "ABSENT-9819", "KIND-scoped", "OP-scoped")]
+        pairs.append(("decision", "KIND-scoped"))
+        pairs.append(("observation", "T1-retracted"))
+        return pairs
+
+    def _batched(self, sdk, pairs):
+        cands = sdk._terminal_content_candidates(
+            [(content, kind) for kind, content in pairs])
+        return {pair: _content_candidate_resolution(
+            cands, pair[1], pair[0]) for pair in pairs}
+
+    def test_batched_resolution_equals_the_per_item_helpers(self, sdk):
+        pairs = self._states(sdk)
+        batched = self._batched(sdk, pairs)
+        per_item = {
+            pair: (sdk._find_terminal_dedup_hit(pair[1], pair[0]),
+                   sdk._find_point_by_content(pair[1], pointKind=pair[0]) is None)
+            for pair in pairs
+        }
+        diff = {p: (per_item[p], batched[p]) for p in per_item
+                if per_item[p] != batched[p]}
+        assert not diff, (
+            "the batched content read disagrees with the per-item helpers it "
+            f"replaced — the guard's radius moved (per-item, batched): {diff}")
+
+    def test_the_comparison_is_discriminating(self, sdk):
+        """NEGATIVE CONTROL: the equality above would also hold if BOTH sides
+        returned "no hit, mints" everywhere. Pin the answers the shapes exist
+        to produce."""
+        pairs = self._states(sdk)
+        batched = self._batched(sdk, pairs)
+        must_miss = [("statement", c) for c in
+                     ("T2-live", "T2-shadows-T3", "T3-hashless-live",
+                      "ABSENT-9819", "OP-scoped", "KIND-scoped")]
+        for pair in must_miss:
+            assert batched[pair][0] is None, f"{pair} must not be a terminal hit"
+        for pair in [("statement", c) for c in
+                     ("T1-retracted", "T1-superseded", "T1-invalidated",
+                      "T3-hashless-retracted")] + [("decision", "KIND-scoped")]:
+            assert isinstance(batched[pair][0], str), (
+                f"{pair} must resolve to a terminal point id")
+        # `would_mint` — the writer's own answer, which gates the bundle-order
+        # record. Only ABSENT mints; every shape with a hash-present or
+        # hash-less holder does not.
+        assert batched[("statement", "ABSENT-9819")][1] is True
+        for pair in [("statement", c) for c in
+                     ("T1-retracted", "T2-live", "T3-hashless-retracted",
+                      "T3-hashless-live", "T2-shadows-T3")]:
+            assert batched[pair][1] is False, f"{pair} must not mint"
