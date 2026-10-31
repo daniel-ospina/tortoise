@@ -109,7 +109,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -e '.[test]'
-      - run: python -m playwright install --with-deps chromium
+      - uses: ./.github/actions/playwright-install
 
       - name: Audit the deployed surfaces (CSP violations + beacon contract)
         id: audit
