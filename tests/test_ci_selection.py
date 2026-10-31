@@ -10021,45 +10021,50 @@ def test_tortoise_oauth_change_selects_api_and_core():
     assert "test_control_plane_offload_3498.py" in selected, "api+core pinner must run"
 
 
-def test_vendored_bundle_change_selects_api_and_runs_the_version_pin():
-    # #3496: the consent page pins its browser auth client to a CDN specifier
-    # whose version must equal the VENDORED bundle the behavioural harness
-    # EXECUTES. `website/` is in NON_PYTHON_PREFIXES, so before this entry a
-    # vendor-only bump matched no pattern and fell through to tier-1 smoke: the
-    # version pin (test_oauth_consent_pkce.py::
-    # test_page_specifier_matches_the_vendored_bundle_version) and the harness
-    # that executes the very file being bumped would never run on the PR that
-    # can break them — the #1349/#3332/#4171 silent-drop class.
+def test_vendored_bundle_change_selects_api() -> None:
+    # ⚠️ #3496 registered this entry so a vendored-bundle bump would run the
+    # consent page's CDN-version pin (`test_page_specifier_matches_the_vendored_
+    # bundle_version`, in the now-deleted test_oauth_consent_pkce.py) and the
+    # harness that EXECUTED the bumped file. **#3524 §9 step 4 deleted both**: the
+    # page has no `<script src=`, so it has no CDN specifier to keep equal to a
+    # vendored build, and no Python test executes that bundle.
+    #
+    # The SOURCE_PATTERNS entry stays, for the reason that survives the deletion:
+    # `website/apps/dashboard/public/vendor/supabase-*.min.js` is still a SHIPPED
+    # dashboard artifact pinned by the dashboard's own `src/distBundle.test.js`,
+    # and `website/` is in NON_PYTHON_PREFIXES — so without the entry a vendor-only
+    # bump falls through to tier-1 smoke and NONE of the `api`-registered web
+    # guards (which scan the shipped dashboard tree) run on the PR that changes it.
     #
     # Asserted on the SURFACE, not only on the test-file list: the two derived
-    # ratchets (test_every_source_pattern_is_selectable,
-    # test_source_patterns_all_name_something_real) accept ANY non-empty
-    # surface, so re-pointing this entry at another surface list (e.g.
-    # `onboarding`) keeps them green while the api-registered pin silently
-    # stops running. Same hole `test_tortoise_oauth_change_selects_api_and_core`
-    # closes for tortoise/oauth.py, and the reason it asserts the surface too.
+    # ratchets accept ANY non-empty surface, so re-pointing this entry elsewhere
+    # keeps them green while the guards silently stop running. Same hole
+    # `test_tortoise_oauth_change_selects_api_and_core` closes for
+    # tortoise/oauth.py.
     #
-    # The bundle name is DERIVED from the vendor dir, not written down. The
-    # version in the path is irrelevant to what this test pins — `select()`
-    # matches SOURCE_PATTERNS by prefix and never touches the filesystem, so a
-    # stale or even bogus version still selects the same surface. The derivation
-    # is what makes the `assert bundle` below bite: a hardcoded path would keep
-    # passing against a vendor dir that no longer holds a bundle.
+    # The bundle name is DERIVED from the vendor dir, not written down: `select()`
+    # matches SOURCE_PATTERNS by prefix and never touches the filesystem, so the
+    # derivation is what makes the `assert bundle` below bite — a hardcoded path
+    # would keep passing against a vendor dir that no longer holds a bundle.
     vendor = REPO / "website" / "apps" / "dashboard" / "public" / "vendor"
     bundle = sorted(vendor.glob("supabase-*.min.js"))
-    assert bundle, f"no vendored bundle under {vendor} — the page executes it"
+    assert bundle, f"no vendored bundle under {vendor} — the dashboard still ships it"
     changed = str(bundle[0].relative_to(REPO))
 
     r = _sel([changed])
     assert r["surfaces"] == ["api"], (
         f"a vendored-bundle bump ({changed}) must select `api` — that is the "
-        "surface the version pin and the harness that executes the bundle are "
-        f"registered on; got {r['surfaces']}"
+        f"surface whose registered web guards scan the shipped dashboard tree; "
+        f"got {r['surfaces']}"
     )
     assert r["full"] is False
-    assert "test_oauth_consent_pkce.py" in r["test_files"], (
-        "the behavioural harness that EXECUTES the bumped bundle must run on "
-        f"the bump; selected {sorted(r['test_files'])}"
+    # NON-VACUITY: a surface match that selected nothing would read exactly like
+    # a clean run. (The specific harness this entry was created for is gone with
+    # the inline client — see the header — so the assertion is that the surface
+    # still RUNS something, not that one particular file runs.)
+    assert r["test_files"] or r["slow_selected"], (
+        "a vendored-bundle bump selected the `api` surface but NO test files — the "
+        "registration would be decorative and the bump would run nothing"
     )
 
 
