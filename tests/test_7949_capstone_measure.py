@@ -1912,3 +1912,67 @@ def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     assert owned, "no cite in docs/00_index.md is in scope — the index row is unwatched"
     assert all("#7949" in shipped_rows[shipped.count("\n", 0, m.start())]
                for m in owned)
+
+
+# ── E2's blocker names the LIVE half, not the closed render issue ─────────
+#
+# PR #10382 closed #9775's render half: every path that builds a prompt now
+# carries `STATE_VALUE_CARVE_OUT`, the compact render included. What still blocks
+# E2 is the OTHER half — nothing in the write path ENFORCES retention — plus the
+# 1-of-14 value loss that sits upstream of the filter, and both are #10360. Until
+# this pin, three artifacts still routed a reader to #9775 as an OPEN blocker,
+# i.e. to a lane that had LANDED.
+#
+# This is a different rule from "a row moves to a different verdict only by
+# RE-RUNNING the probe": a verdict is a MEASUREMENT, but a blocker name is a
+# ROUTE. `capstone_run.py::ALSO_BLOCKED_BY` exists for exactly this failure — E5
+# read `#7947` for two commits after that lane closed (#9089) — so the same
+# misattribution in the E2 row is a defect of the same class.
+#
+#: The pre-fix spellings, kept as the mutation this pin catches: each one asserted
+#: an absence that PR #10382 removed, in a bundle whose whole purpose is that a
+#: claim carries an artifact.
+_RETRACTED_E2_RENDER_ABSENCE = (
+    "#9775 records that the state-value carve-out is absent on one render path",
+    "| `#9775` the state-value carve-out on one render path |",
+    "the carve-out is absent on the compact render path",
+)
+
+
+def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
+    """E2 is blocked by the enforcement half, not by the render #10382 fixed.
+
+    Three surfaces say it, and each had to move: the row the probe EMITS
+    (`build_rows`), the E2 row of the audit bundle, and the `docs/00_index.md`
+    "Blockers named per row" line that is the bundle's entry point.
+
+    Non-vacuity: on the pre-fix tree the probe emitted `blocked_by="#9775"` and
+    the README carried both retracted sentences, so legs 1 and 2 both red there.
+    """
+    # 1. The row the probe emits names the live half.
+    by_id = {row["criterion"]: row for row in _rows()}
+    assert by_id["E2"]["blocked_by"] == "#10360", (
+        "the probe still emits E2's blocker as "
+        f"{by_id['E2']['blocked_by']!r} — #9775's render half is CLOSED (PR "
+        "#10382); the live blocker is #10360")
+
+    # 2. No bundle document still asserts the absence the merge removed.
+    for name, path in _BUNDLE_DOCS:
+        text = path.read_text(encoding="utf-8")
+        for phrase in _RETRACTED_E2_RENDER_ABSENCE:
+            assert phrase not in text, (
+                f"{name} still asserts E2's closed render absence: {phrase!r} — "
+                "PR #10382 makes every render path carry the carve-out, so the "
+                "blocker is the enforcement half (#10360)")
+
+    # 3. The two entry points a reader is routed through name it too.
+    proofs = (_REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md").read_text(
+        encoding="utf-8")
+    e2_row = next(line for line in proofs.splitlines() if line.startswith("| E2 |"))
+    assert "`#10360`" in e2_row, e2_row
+
+    index = (_REPO / "docs/00_index.md").read_text(encoding="utf-8")
+    blockers = next(line for line in index.splitlines()
+                    if "Blockers named per row:" in line)
+    assert "`#10360` (E2)" in blockers, blockers[:400]
+    assert "`#9775` (E2)" not in blockers, blockers[:400]
