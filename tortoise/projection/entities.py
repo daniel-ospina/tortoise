@@ -1935,6 +1935,30 @@ class _EntityHandlers:
         # `s.content_hash` property beside the camelCase the readers use
         # (the same snake-door class as `needs_extraction` below).
         "content_hash",
+        # #10000 / D1 (§9.1): §9.1's S1 NARRATIVE is text in Postgres — "not in
+        # the graph, not a `Document` node, not a `Point`" — and this passthrough
+        # is the one route that could still put it on a node. MEASURED at
+        # #10389's review head, before this entry: `create_document(url, kind,
+        # story_arc=<narrative>)` (the SDK door behind the MCP tool
+        # `tortoise_create_document`) left `s.story_arc` = the PROSE on the
+        # `:Source` node verbatim, because this call deliberately passes NO
+        # `allow_keys` and `story_arc` is in none of `_SOURCE_HANDLED`, this set
+        # or `_DOC_RETIRED_KEYS`.
+        #
+        # ⛔ IT STAYS DECLARED in `_SOURCE_NODE_PROPS` (legacy nodes must still
+        # read back) — declared ⇒ readable, listed HERE ⇒ never written from a
+        # payload. That is the #3998/D30 posture exactly, and it ALSO ends a
+        # disagreement: `_upsert_source`'s closed set already DENIED this key,
+        # so the two folds answered the same question differently, which is the
+        # drift class a shared key must not have.
+        #
+        # ⚠️ Deliberate trade, stated: a legacy JOURNAL whose `DocumentCreated`
+        # carried `story_arc` now replays without it, so a rebuild of a graph
+        # holding that property no longer reproduces it. Accepted because the
+        # owner rule says the property must not exist, the destructive purge of
+        # what does exist is #10017, and no in-tree producer ever emitted the key
+        # on this event (`api.add_document` takes no such parameter).
+        "story_arc",
     })
     # #2795 (D2): every key owned by the fixed SET clauses of
     # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
