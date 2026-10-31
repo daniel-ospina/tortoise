@@ -663,10 +663,18 @@ def _default_graph_name(org: dict) -> str | None:
 
     ``graph_namespace`` is carried on the resolved credential by every hosted
     auth seam (``supabase_control.resolve_api_key`` for keys,
-    ``_session_user_org`` for a session) — the same field
-    ``_dispatch_webhooks_sync`` and the dream drain already open by, so this is
-    the third caller of an existing carrier, not a new resolution path.
+    ``_session_user_org`` for a session, ``oauth.resolve_oauth_access_token``
+    for an ``oat_`` token) — the same field ``_dispatch_webhooks_sync`` and the
+    dream drain already open by, so this is the third caller of an existing
+    carrier, not a new resolution path.
+
+    A GRAPH-BOUND credential always answers ``None``: its ``graph_namespace`` is
+    a CUSTOM graph's namespace, and "the default graph" is not the question it
+    asks. Guarded here rather than at each caller, because the gate's shape test
+    cannot tell a custom graph's namespace from a promoted default's.
     """
+    if org.get("graph_id"):
+        return None
     return _moved_default_namespace(org.get("org_id"),
                                     org.get("graph_namespace"))
 
@@ -700,9 +708,10 @@ def _org_default_namespace(org_id: str) -> str | None:
             "organizations", select=["graph_name"],
             filters=[("id", "eq", org_id)])
     except Exception as e:
-        _logger.warning(
-            "default-graph namespace read failed for %s — using the "
-            "historical namespace=org_id open: %s", org_id, e)
+        _logger.error(
+            "default-graph namespace read failed for %s — falling back to the "
+            "historical namespace=org_id open, which is the DEMOTED graph if "
+            "this org was promoted: %s", org_id, e)
         return None
     return _moved_default_namespace(
         org_id, rows[0].get("graph_name") if rows else None)
@@ -721,9 +730,14 @@ def _org_sdk(org_id: str, *, namespace: str | None = None) -> TortoiseSDK:
     (the ``derived != measured`` class #10025 exists to remove).
 
     ``namespace`` is an OPTIONAL shortcut for a caller that already holds the
-    value (the authenticated org dict carries ``graph_name``; a resolved
-    credential carries ``graph_namespace``): passing it skips the read and goes
-    through the same decision. Omitting it costs one primary-key read.
+    value (a resolved credential carries ``graph_namespace``): passing it skips
+    the read and goes through the same decision. Omitting it costs one
+    primary-key read — and a promoted org whose control plane is unreadable then
+    falls back to the historical graph, i.e. the DEMOTED one. That residual is
+    accepted only for the lanes below (see `_org_default_namespace`); the
+    request data plane and the quota gate do NOT come through here — they use
+    the credential's own value (`_default_graph_name` /
+    `_org_sdk_for_credential`), so they cannot fail open.
 
     For every organization that has not promoted, this returns byte-for-byte
     what ``_make_sdk(namespace=org_id)`` returns — same graph, same SDK
@@ -732,6 +746,26 @@ def _org_sdk(org_id: str, *, namespace: str | None = None) -> TortoiseSDK:
     moved = (_moved_default_namespace(org_id, namespace) if namespace is not None
              else _org_default_namespace(org_id))
     return _make_sdk(graph_name=moved) if moved else _make_sdk(namespace=org_id)
+
+
+def _org_sdk_for_credential(org: dict) -> TortoiseSDK:
+    """The DEFAULT-graph SDK for an already-resolved credential dict — NO I/O.
+
+    The credential carries ``graph_namespace`` (resolved once, at auth), so this
+    is the same decision as `_org_sdk` taken from a value already in hand. Used
+    by the quota gate, whose contract is fail-CLOSED (#686): a path that could
+    fail to read the default must never be introduced there, because falling
+    back to the historical open would count the DEMOTED graph — a stale-low
+    count admits an org past its cap (revenue) and a stale-high one 402s writes
+    it is under (customer).
+
+    A GRAPH-BOUND credential answers the historical `namespace=org_id` count
+    `_count_resource` has always done for it — `_default_graph_name` is None
+    there by construction (its `graph_namespace` is a custom graph's).
+    """
+    moved = _default_graph_name(org)
+    return (_make_sdk(graph_name=moved) if moved
+            else _make_sdk(namespace=org["org_id"]))
 
 
 def _data_graph_name(org: dict) -> str | None:
@@ -7765,14 +7799,18 @@ def _check_org_limit(org: dict, resource: str, *,
         # actually land. Without it the gate counts the graph a promotion
         # DEMOTED: a stale-low count admits an org past its real cap (the money
         # gate failing OPEN) and a stale-high one refuses writes it is under.
-        # `org` carries `graph_name` (base-0006, `_ORG_BASE_SELECT`), so the
-        # resolver needs no extra read here. Scoped to the resources that ARE
+        # `org` is the RESOLVED CREDENTIAL (not the org ROW): an org-wide one
+        # carries `graph_namespace` — its default's namespace, resolved once at
+        # auth — so this needs no control-plane read and cannot fail open. (An
+        # earlier draft read `graph_name` here, a key no credential dict has:
+        # every gate then took the I/O branch, i.e. a blocking PostgREST read on
+        # the event loop of the capture path.) Scoped to the resources that ARE
         # counted in the tenant graph — `api_keys`/`users`/`graphs` are counted
         # from the control plane or the registry and must not pay for an SDK
         # they never touch.
         enforce_org_limit(
             org, resource, slot_credit=slot_credit,
-            sdk=(_org_sdk(org_id, namespace=org.get("graph_name"))
+            sdk=(_org_sdk_for_credential(org)
                  if resource in _TENANT_GRAPH_RESOURCES else None))
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
@@ -19168,10 +19206,16 @@ def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
         journal_path = _resolve_event_log_path(
             namespace=None, graph_name=_data_graph_name(org))
     else:
-        # Org-wide key AND session auth: `_data_sdk` opens `namespace=org_id`,
-        # whose journal key the SDK derives from that namespace alone.
+        # Org-wide key AND session auth: the org's DEFAULT graph. #10180: when a
+        # promotion MOVED it, that graph is opened BY NAME (`_org_sdk` /
+        # `_data_sdk`), so the journal key comes from the name; otherwise it is
+        # the historical `namespace=org_id` derivation — exactly the pattern the
+        # graph-bound branch above uses for its own graph, and the same decision
+        # the opener took (one resolver, `_default_graph_name`).
+        _default_ns = _default_graph_name(org)
         journal_path = _resolve_event_log_path(
-            namespace=org.get("org_id"), graph_name=None)
+            namespace=None if _default_ns else org.get("org_id"),
+            graph_name=_default_ns)
     # ⛔ THE WRITE BREAKER IS NOT ASKED HERE (#10000 review P1). `circuit_open`
     # says a connect failed within the last 60 s — a bound on the COST of the
     # write path (one timeout per journal record), and no evidence about where a

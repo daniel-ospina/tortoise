@@ -4779,8 +4779,13 @@ def moved_default_namespace(org_id: str | None,
     checked against this org's ``public.graphs`` ids (that would cost a read on
     the capture path for every request), so nothing here PROVES "only a
     promotion can produce this value" — what makes it true is that
-    ``organizations.graph_name`` has exactly two writers: provisioning, which
-    writes ``org_{org_id}``, and the promotion. The residual is the pre-#1903
+    ``organizations.graph_name`` has no other writer that can land a per-graph
+    namespace: provisioning writes ``org_{org_id}``, and the only other UPDATE
+    path is ``provision_team``'s ``ON CONFLICT (id) DO UPDATE``
+    (``20260915000001``), which re-writes the value provisioning would write
+    anyway (so re-provisioning an org would REVERT a promotion — an operator
+    hazard, not a live path: the checkout replay short-circuits on
+    ``org_by_id``). The residual that remains conceivable is the pre-#1903
     shape: a row whose stored ``graph_name`` is ``org_{name}`` and whose name
     happens to begin ``{org_id}_`` would be indistinguishable from a promotion.
     Org ids are 26-char hex, so that is a hypothetical, not a live shape — and
