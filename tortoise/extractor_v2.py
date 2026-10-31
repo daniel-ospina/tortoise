@@ -1204,9 +1204,10 @@ def _render_master_compact(master: dict, story: str | None,
     selected = _select_pack_kinds(story, master["pack_kinds"])
     lines.append(_group("PACK KINDS", selected, shuffle=True,
                         suffixes=_values))
-    # granularity: matched-domain subsections only (compact). Hint blocks
-    # (memory granularity, user-personal-state, carve-out) are EXCLUDED from
-    # the shuffle — only the kind vocabulary randomizes.
+    # THE COMPACTION RULE — story selection may drop HINTS, never the GUARANTEE
+    # (#9775): the granularity block is story-SELECTED (hint blocks also skip the
+    # A′ shuffle — only the kind vocabulary randomizes); the carve-out and the
+    # vocabulary it names ride `_compact_guarantee_tail` (end of module).
     g = master.get("memory_granularity") or {}
     if story:
         low = story.lower()
@@ -1214,8 +1215,7 @@ def _render_master_compact(master: dict, story: str | None,
                if any(t in low for t in _PACK_TRIGGERS.get("dev:", ()) + _PACK_TRIGGERS.get("product-strategy:", ()))}
         if sub:
             lines.append(_group("MEMORY GRANULARITY", sub))
-    # NO chains section — chains_text renders it once (dedup).
-    return "\n".join(lines)
+    return _compact_guarantee_tail(master, lines)
 
 
 def _render_master_verbose(master: dict, rng=None) -> str:
@@ -10667,3 +10667,48 @@ def _s2_seam_tail_decider():
     from tortoise import s2_decision_seam
 
     return s2_decision_seam.classify_decider()
+
+
+# ── #9775: the compact render's GUARANTEE tail ──────────────────────────────
+#
+# Appended at the END of this module for the same reason the #5087 block above
+# is: `docs/evidence/7949-capstone/` cites ~115 LINE NUMBERS in this file
+# (checked by `tests/test_7949_capstone_measure.py`), and an insertion anywhere
+# above them re-stales every one. `_render_master_compact` therefore keeps its
+# exact line shape and calls this on its existing final line — a function
+# defined after its caller is fine, calls resolve at run time.
+
+
+def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
+    """The compact render's tail: the declared guarantee, on EVERY story (#9775).
+
+    `STATE_VALUE_CARVE_OUT` is not decoration and not a hint. §7 of
+    `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` declares it — *"any
+    mechanical filter MUST carry this carve-out, or it will drop the facts
+    users care about most"* — and the user-personal-state vocabulary is the
+    class it names: S2's Tier-A rule tells the mapper to see "the
+    USER-PERSONAL-STATE VOCABULARY in the master list", so a render that omits
+    the block leaves that instruction pointing at a section the prompt does not
+    carry.
+
+    ⚠️ UNCONDITIONAL is the whole point, so the two blocks stay OUTSIDE the
+    caller's `if story:` gate. The compaction rule may drop a HINT — the
+    story-selected memory-granularity block, the story-selected pack sections —
+    because a missing hint costs precision in one story. It may not drop the
+    GUARANTEE: a story matching no trigger would render without it, and every
+    matched-story assertion would stay green.
+    `_render_master_core_only` and `_render_master_verbose` append the same two
+    blocks unconditionally; this is the compact path reaching the same rule, not
+    a special case for one caller.
+
+    Rendered LAST, so the carve-out is the final rule before generation on all
+    three renders. NO chains section here — `chains_text` renders it once.
+    """
+    ups = master.get("user_personal_state") or {}
+    if ups:
+        lines.append("\nUSER-PERSONAL-STATE VOCABULARY (Tier-A classification "
+                     "hint — the VALUE is the fact, retain verbatim; these are "
+                     "NOT kinds: do NOT emit them as entity/event/point kinds)")
+        lines += [f"- {cat}: {desc}" for cat, desc in ups.items()]
+    lines.append("\n" + STATE_VALUE_CARVE_OUT)
+    return "\n".join(lines)
