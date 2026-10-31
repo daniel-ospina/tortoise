@@ -206,6 +206,40 @@ def test_probe_failure_fails_loud_without_adjacent_log():
         FalkorProjection._probe_ok = orig
 
 
+def test_probe_failure_names_its_cause_in_the_traceback():
+    """A probe failure must not swallow WHY the probe failed.
+
+    FAILS IF: the raised ``RuntimeError`` carries no ``__cause__`` — the pre-fix
+    shape, where the operator (and the CI log reader) saw *"restore from
+    backup"* and nothing about the exception that actually failed the probe.
+    REACHABLE: ``_probe_ok`` records the failure on ``self._probe_error``, so
+    any probe that refuses to answer reaches this branch with a cause set.
+
+    MEASURED cost of the gap (#10437): CI run 41236504180 (``test-slow (c)``)
+    took the *no adjacent JSONL* branch for a store redislite had just spawned
+    — a corruption verdict for a healthy, empty graph — and the swallowed
+    error was two 10 s socket timeouts (the fixture's 20.23 s ``call``), i.e. a
+    slow-starting daemon. The message alone could not say that; the chain does.
+    """
+    db_path = os.path.join(_mk_tmp(), "cause.db")
+    boom = TimeoutError("no answer within 10.0s")
+
+    def _probe_times_out(self):
+        self._probe_error = boom
+        return False
+
+    orig = FalkorProjection._probe_ok
+    FalkorProjection._probe_ok = _probe_times_out
+    try:
+        with pytest.raises(RuntimeError, match="no adjacent JSONL") as excinfo:
+            FalkorProjection(db_path)
+    finally:
+        FalkorProjection._probe_ok = orig
+    assert excinfo.value.__cause__ is boom, (
+        "the probe's own exception must reach the traceback — without it the "
+        "reader cannot tell a slow daemon from a corrupt graph")
+
+
 def test_server_mode_probe_failure_fails_loud():
     """URI/server mode probe failure raises (never auto-rebuilds remotely).
 
