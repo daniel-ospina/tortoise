@@ -333,6 +333,44 @@ class TestPhase1GuardSeesTheKeyIdentity:
         )
         assert after.get("updatedAt") == before.get("updatedAt")
 
+    def test_the_key_refusal_does_not_offer_a_supersede_as_the_remedy(
+            self, sdk):
+        """#9819 review P2 (round 3), key-leg half: the KEY refusal carried the
+        same dead clause (``Supersede-transfer the key first``, and
+        ``docs/INGEST_CONTRACT.md`` row 7's ``or a supersede-transfer that moves
+        the key first``).
+
+        No Point ``key`` transfer exists on that door: ``supersede_point``
+        transfers edges and stamps terminal status/validity and never writes
+        ``key``, and ``create_point`` explicitly refuses to reassign a key on a
+        dedup hit (#6110). So the retired holder keeps the key and the key-first
+        fold resolves it again — superseding is not an escape.
+        """
+        k = "#9819-terminal-key-retired"
+        terminal = sdk.create_point("statement", "KEY-ORIGINAL", key=k,
+                                    dedup=True)["id"]
+        successor = sdk.create_point("statement", "KEY-SUCCESSOR")["id"]
+        sdk.supersede_point(terminal, successor)
+        assert sdk.get_point(terminal).get("key") == k, (
+            "supersede_point must not move the key off the retired row")
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError) as excinfo:
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": "KEY-CHANGED", "key": k}]})
+
+        message = str(excinfo.value)
+        assert "dedup hit" in message
+        assert "supersede-transfer" not in message.lower(), (
+            "the key refusal still offers a supersede-transfer as the remedy, "
+            "but no Point key transfer exists (#9819 review P2)")
+        assert "FRESH key" in message, (
+            "the refusal must still name the remedy that DOES work")
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None
+        assert after.get("updatedAt") == before.get("updatedAt")
+
     def test_key_held_by_terminal_point_is_a_violation_with_no_connection(self, sdk):
         """#8400/#9173: step 3 writes EVERY `points` item, so the fold onto a
         terminal key holder happens with NO connection in the bundle.
@@ -586,6 +624,61 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert after.get("batch_id") is None, (
             "the content fold stamped the retracted empty-content point "
             "(#9819 P1 — the leg gated on truthiness)")
+        assert after.get("updatedAt") == before.get("updatedAt")
+
+    def test_retiring_the_collided_row_does_not_clear_the_content_identity(
+            self, sdk):
+        """#9819 review P2 (round 3): the refusal must not name a remediation
+        that does not remediate.
+
+        The content-leg message used to offer ``or supersede-transfer it first``
+        (and ``docs/INGEST_CONTRACT.md`` row 7 the same). It is dead: the dedup
+        predicate (``_dedup_match_clauses``) carries NO status/validity
+        conjunct, and ``supersede_point`` transfers EDGES and stamps
+        ``status``/``outdated``/``validTo``/``expiredAt``/``decay`` — it never
+        rewrites ``content`` or ``content_hash``. So after a supersede the old
+        row is still the hash-present holder of that content identity, still
+        terminal, and the very next ingest of the same content is refused
+        again: the caller follows the advice, gets the identical refusal, and
+        is told the same dead remedy.
+
+        Asserted in both directions, so this is a behaviour pin and a message
+        pin at once: the re-ingest is STILL refused, the collided row is
+        unmoved, and the message no longer advertises ``supersede-transfer``
+        while still naming the remedy that does work (DIFFERENT content).
+        Discriminating: pre-fix the message assertion fails (the refusal said
+        ``or supersede-transfer it first``).
+        """
+        content = "RETIRED-BUT-STILL-THE-HOLDER-9819"
+        terminal = sdk.create_point("statement", content)["id"]
+        successor = sdk.create_point("statement",
+                                     "SUCCESSOR-OF-THE-RETIRED-9819")["id"]
+        sdk.supersede_point(terminal, successor)
+        before = sdk.get_point(terminal)
+
+        # The premise of the finding, asserted rather than assumed: the
+        # supersede did NOT move the content identity off the retired row.
+        assert before.get("status") == "superseded"
+        assert before.get("content") == content
+        assert before.get("content_hash") == _content_hash(content)
+
+        with pytest.raises(BundleValidationError) as excinfo:
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": content}]})
+
+        message = str(excinfo.value)
+        assert "dedup hit" in message
+        assert "supersede-transfer" not in message, (
+            "the refusal still advertises supersede-transfer as the remedy, "
+            "but superseding does not clear the collided row's content — the "
+            "caller would get this same refusal again (#9819 review P2)")
+        assert "DIFFERENT content" in message, (
+            "the refusal must still name the remedy that DOES work")
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "Phase-1 must reject before ANY write — the post-supersede fold "
+            "stamped the retired point (#9819)")
         assert after.get("updatedAt") == before.get("updatedAt")
 
     def test_double_wrapped_status_is_not_recorded_as_a_terminal_mint(self, sdk):

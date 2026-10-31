@@ -23112,12 +23112,15 @@ class TortoiseSDK:
                                    f"bundle cannot turn that fold off (its "
                                    f"points are written with dedup=True, and a "
                                    f"nested 'dedup' spelling is shadowed and "
-                                   f"dropped). Supersede-transfer the key first, "
-                                   f"or mint the second point OUTSIDE the bundle "
-                                   f"with create_point(..., key=<a FRESH key>, "
-                                   f"dedup=False) — the same key with dedup=False "
-                                   f"would create a second CARRIER of one key "
-                                   f"(#6110) (#8400)",
+                                   f"dropped). Mint the second point OUTSIDE the "
+                                   f"bundle with create_point(..., key=<a FRESH "
+                                   f"key>, dedup=False) — the same key with "
+                                   f"dedup=False would create a second CARRIER of "
+                                   f"one key (#6110). Retiring the holder does "
+                                   f"NOT free the key: supersede_point transfers "
+                                   f"edges and stamps status/validity, and never "
+                                   f"writes key, so the key-first fold resolves "
+                                   f"that terminal holder again (#8400)",
                     })
                     continue
                 earlier = minted_terminal.get((pkind, pkey))
@@ -23187,9 +23190,13 @@ class TortoiseSDK:
                                    f"the fold off (its points are written with "
                                    f"dedup=True, and a nested 'dedup' spelling is "
                                    f"shadowed and dropped). Mint the point "
-                                   f"OUTSIDE the bundle with different content, "
-                                   f"or supersede-transfer it first "
-                                   f"(#8400/#9819)",
+                                   f"OUTSIDE the bundle with DIFFERENT content "
+                                   f"(dedup=False): retiring the collided row "
+                                   f"does NOT free its content — supersede_point "
+                                   f"transfers edges and stamps "
+                                   f"status/validity, and never rewrites content "
+                                   f"or content_hash, so the next ingest of this "
+                                   f"content folds onto it again (#8400/#9819)",
                     })
                     continue
                 minted_c = minted_terminal_content.get((pkind, _content_id))
