@@ -32,6 +32,7 @@ import contextvars
 import hashlib
 import json as _json
 import logging
+import math
 import os
 import re
 import stat
@@ -17734,20 +17735,28 @@ class TortoiseSDK:
                     continue
                 # The rebuilt layout: ``old`` becomes ``new`` AT ITS SLOT, so what
                 # is judged below is the wiring the graph holds AFTER the write.
-                _slots: list[tuple[int | None, str]] = []
+                _slots: list[tuple[float | None, str]] = []
                 for _sidx, _sinp in _srows:
-                    _slot_no: int | None
-                    if isinstance(_sidx, int):
+                    _slot_no: float | None
+                    if isinstance(_sidx, (int, float)):
                         # NB: ``bool`` is an ``int`` here and coerces harmlessly
                         # (``True``→1), which is also how the engine compares it.
-                        _slot_no = int(_sidx)
-                    elif (isinstance(_sidx, str)
-                            and _sidx.strip().lstrip("+-").isdigit()):
+                        _slot_no = float(_sidx)
+                    elif isinstance(_sidx, str):
                         # A NUMERIC STRING names a position (``r.idx='1'``, the
                         # shape a hand/foreign writer leaves in a schemaless
                         # graph): coerce it and JUDGE — ``ep.py`` orders the same
-                        # row and reads the factor all the same.
-                        _slot_no = int(_sidx)
+                        # row and reads the factor all the same. A value that
+                        # names no finite number ('nan'/'inf') orders nothing, so
+                        # it falls through to UNORDERABLE rather than poisoning
+                        # ``min``.
+                        try:
+                            _slot_no = float(_sidx.strip())
+                        except ValueError:
+                            _slot_no = None
+                        else:
+                            if not math.isfinite(_slot_no):
+                                _slot_no = None
                     else:
                         _slot_no = None  # cannot be ordered at all
                     _slots.append((_slot_no, new_id if _sinp == old_id else _sinp))
