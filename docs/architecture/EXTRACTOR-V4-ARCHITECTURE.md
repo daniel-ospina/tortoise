@@ -545,7 +545,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 **✅ `DECIDED (narrowed)` — the owner ruled:** the lookup sits **after** extraction, and it is consumed by the salience judgment and by S3 only. **Extraction does not consume it.** This follows from D4's own stated reason — the extraction consumer was never covered by it.
 
 >
-> ✅ **Note — the lookup bug `#4511` does not gate this design.** It bit *when the lookup sat before extraction* (`_fts_rows` read `r.get("kind")` while the callee emits `point_kind`, so every prior's type returned **blank**). **The lookup sits in S3 (§4.2), so the bug is not a dependency of this design.** ⚠️ **Still unmeasured (§14):** whether giving extraction the neighbourhood ever reduced what it created.
+> ✅ **Note — the lookup bug `#4511` does not gate this design.** It bit *when the lookup sat before extraction* (`_fts_rows` read `r.get("kind")` while the callee emits `point_kind`, so every prior's type returned **blank**). **The lookup sits in S3 (§4.2), so the bug is not a dependency of this design.** ✅ **MEASURED 2026-11-01 (§10, `#10463`) — and the answer is NO by the margin the design assumed:** giving extraction the neighbourhood cut created nodes **284 → 247 (−13 %)** against a pre-registered **≥ 25 %** bar, while recovering **fewer** real facts (47 → 40) and **fewer** operator edges (171 → 139) — a smaller extraction, not a leaner one. Bundle: `docs/evidence/5087-hypothesis/`.
 
 ### S2.1 — EXTRACT
 
@@ -1544,6 +1544,43 @@ Hindsight is the first system found with a *stated* reason, and it supports **Op
 
 **⇒ Option 4 is evidence-backed.** The narrative stays the cheap searchable tier and a *focus*; extraction keeps access to raw as the source.
 
+### ⛔ The S3 prior-injection hypothesis — TESTED 2026-11-01, and it is FALSE (`#10463`)
+
+`#5087`'s central hypothesis — *"telling extraction what already exists in the graph (S3
+prior-injection) reduces what it creates"* — was unmeasured. It is measured now, as a pre-registered
+two-arm ablation on the frozen `tests/eval/write_path` corpus (`fixtures_hash
+sha256:dd7e8520…`, 7 sessions), pre-registration commit `a1075dfc2`, bundle
+`docs/evidence/5087-hypothesis/`.
+
+**RESULT: `HYPOTHESIS-FALSIFIED (ratio 0.870)`.**
+
+| | S3-OFF | S3-ON | bar |
+|---|---:|---:|---|
+| `created_new_nodes` (extraction claims + minted Object/Event) | 284 | 247 | ratio `<= 0.75` → **0.870, NOT met** |
+| planted units recovered (of 90) | 47 | 40 | must not fall → **FELL** |
+| operator-type edges | 171 | 139 | must not fall → **FELL** |
+| model calls | 21 | 27 | `<= 2.00 ×` → 1.29 × |
+| arm integrity | 7/7 suppressed | 7/7 resolved | 14/14 |
+
+**What this changes.** S3's prior injection does **not** reduce what extraction creates by the margin
+the design assumed: it cuts created nodes **13 %** and recovered real content **15 %**, so
+created-per-real-fact moves 6.04 → 6.18 — a smaller extraction, not a leaner one — and it costs
+**more** (21 → 27 model calls) because S4 has more to review. The per-session picture is not uniform
+(range 0.706–1.029; 5 of 7 sessions fell, one rose, one flat), and the one session that is blind in both arms
+(`wp01`, fresh graph) still shows −13 %, which is the run-to-run noise floor at this n.
+
+⚠️ **A verdict is a verdict, not a prompt for a re-run.** `#10463`'s own falsifier rule applies: a
+ratio near 1.0 closes the issue and changes the epic's plan. It is **never re-run until it agrees**.
+The epic's plan point that assumed prior-injection buys volume must now argue from something else —
+and the tension rule it registered as a guard is exactly what failed: the smaller writes were
+smaller, not better.
+
+⚠️ **One instrument gap this run found and did NOT fix here** (it is a follow-up, not a production
+edit in the measurement PR): the `capture_session` lane's receipt carries **no `search` block**, so
+`#5087`'s indicator 3 — S3 state "asserted from the run receipt" — is not satisfiable on that lane at
+this head. The probe asserts it from the value the S3 function actually returned per session
+(recorded by a wrapper around the real function / the OFF stub), which the bundle discloses.
+
 ---
 
 ## 11. Verification against Hindsight (Vectorize) — 2026-09-23
@@ -1727,7 +1764,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 ## 14. Not established — do not treat as known
 
-- **Whether the neighbourhood lookup changes extraction's output is UNMEASURED — and it is moot by design.** The lookup is not load-bearing: S3 resolves the entity authoritatively instead (§4.2), so extraction does not need to emit *"attach to A"*. **What IS still unmeasured: whether S3's disambiguation is accurate**, and the cheap test is to replay a handful of real sessions **by hand** and show the candidates matched vs created (small-sample-first).
+- **Whether the neighbourhood lookup changes extraction's output is MEASURED — it does not, by the margin the design assumed (§10, `#10463`).** Created nodes fell **284 → 247 (−13 %)** against the pre-registered **≥ 25 %** bar, with both guards — recovered real facts (47 → 40) and operator edges (171 → 139) — falling in the same direction, so *"extraction no longer consumes the lookup"* is now backed by a number rather than by an argument. The lookup is not load-bearing either: S3 resolves the entity authoritatively instead (§4.2), so extraction does not need to emit *"attach to A"*. **What IS still unmeasured: whether S3's disambiguation is accurate**, and the cheap test is to replay a handful of real sessions **by hand** and show the candidates matched vs created (small-sample-first).
 - The `~8.6 Objects/session` figure is **inferred**, not directly measured — `extractedFrom` points at `:Source`, which carries no `id`, so Objects could not be grouped per session.
 - **Nothing measures how much of the surviving 2,963 non-`the` Objects is still junk** — `PR #465` proves a non-`the` Object can also be a bare reference.
 - The `^the <X>` **pattern** is a **floor**, not the whole fix.
