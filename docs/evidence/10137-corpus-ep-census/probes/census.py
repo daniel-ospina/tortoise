@@ -9,12 +9,22 @@ ones the report would carry.
     PYTHONPATH=. python \
       docs/evidence/10137-corpus-ep-census/probes/census.py <report.json|checkpoint.json>
 
-Also prints the CLAIM-LEVEL coverage the question-level ratio cannot show:
+Also prints the POINT-level coverage the question-level ratio cannot show:
 ``points_with_ep / (points_with_ep + points_unmeasured)``. The per-question
 ratio answers "did the belief layer participate on this question at all"; the
-claim ratio answers "on what share of claims". A run can read 24/24 on the
+point ratio answers "on what share of the graph". A run can read 24/24 on the
 first and 9% on the second, and the second is the honest denominator for
 "how much of this answer came from our epistemic layer".
+
+⛔ It is a **FLOOR on claim coverage, NOT claim coverage** (#10137 review, P2).
+The denominator is ``_COUNT_POINTS_TOTAL`` — every non-operator ``Point`` — and
+the v2 ingest also writes episodic turn points and session-transcript chunks
+(``ingest_v2.py:611-618``, ``:637-643``), which are not claims and can never
+carry EP state, while the numerator can only ever be claims. A claim-only
+denominator does not exist as a cell, so the key is published as
+``point_coverage`` — a name that asserts only what was measured. (It shipped
+as ``claim_coverage`` until that review: a machine-readable key asserting a
+denominator the bundle's own README denies.)
 
 The per-question block is published only when the input CARRIES the manifests
 (``outcome.belief_activation``): an input with none reports
@@ -39,6 +49,55 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 from tools.longmem_eval import measurement_posture as mp
 
 
+def _census_unread(manifest: object) -> bool:
+    """Is this manifest's graph census UNREAD (absent, fail-open, or ``None``)?
+
+    One rule for all four cells, taken from ``measurement_posture`` rather than
+    re-derived here: a key in ``_UNKNOWN_PER_MANIFEST_KEYS`` is UNKNOWN when
+    absent or ``None`` — AND by the module's own coercion, which refuses a
+    ``bool`` and any non-numeric value (``_optional_int``: "a bool is not a
+    count"). ``value is None`` alone was not the same predicate (#10137
+    review, P3): a manifest carrying ``operators: true`` read as READ here and
+    UNREAD for ``cells.operators_unread``, which is the disagreement this
+    function exists to end. A manifest that is not a dict at all (no manifest)
+    is unread by definition.
+    """
+    if not isinstance(manifest, dict):
+        return True
+    return any(mp._optional_int(manifest.get(k)) is None
+               for k in mp._UNKNOWN_PER_MANIFEST_KEYS)
+
+
+def _qid_key(qid: object) -> tuple | str:
+    """A HASHABLE identity for a ``question_id`` read out of untrusted JSON.
+
+    Hashing the id directly killed the probe with a bare ``TypeError:
+    unhashable type: 'list'`` on any input whose ``question_id`` is a list or
+    an object (#10137 follow-up review, P3). That is a real shape for THIS
+    instrument: a spec-legal JSON value (RFC 8259 §3 lets a value be an array
+    or an object — only object NAMES are strings, §4), off this producer's
+    contract, so it arrives as hand-built or foreign JSON — which is exactly
+    what a probe reads. It also broke the module's own stated contract, pinned
+    by ``test_census_probe_refuses_a_report_with_no_posture``: a message, never
+    a traceback.
+
+    A non-str id is keyed under a TYPE-TAGGED tuple, the rule
+    ``report.py:580 _qid_key`` already applies to the same problem: a str qid
+    keys BY VALUE (the string itself) and every other type under a tuple, so a
+    crafted STRING qid (``"['q0']"``) can never collide with the ``repr`` of a
+    list qid (``["q0"]``) — a collision folds two distinct questions into one
+    and silently drops the ablation. ``repr`` is the fallback for the same
+    reason it is there: it is the only stable spelling an arbitrary JSON value
+    has. Value-identical non-str ids therefore dedupe only when their ``repr``
+    agrees — the direction that costs is a MISSED dedupe (a question counted
+    twice) only when one question is spelled two ways, never a fabricated
+    ablation.
+    """
+    if isinstance(qid, str):
+        return qid
+    return (type(qid).__name__, repr(qid))
+
+
 def cells(path: str) -> dict:
     doc = json.loads(pathlib.Path(path).read_text())
     outcomes = doc.get("outcomes") or []
@@ -50,7 +109,13 @@ def cells(path: str) -> dict:
                 "(methodology.measurement_posture absent or activation null) — "
                 "there is no census to read, which is a state, not a zero")
         summary = posture["activation"]
-        source, n = "report", doc.get("n_questions")
+        source = "report"
+        # ``n_failed`` is ``len(failures)`` on a report (``report.py:1898``,
+        # ``:2793``) and the list itself rides the report too
+        # (``report.py:2792``). Read BOTH: the list gives the ids the union
+        # below needs, the count is the authority when a list was pruned.
+        reported_failed = doc.get("n_failed")
+        failures = [f for f in (doc.get("failures") or []) if isinstance(f, dict)]
     else:                                                     # a checkpoint
         # ``requested`` is the caller's resolved ARM, never inferred from the
         # outcomes — but a checkpoint carries it in its fingerprint
@@ -64,7 +129,71 @@ def cells(path: str) -> dict:
                 "fingerprint — the arm is UNKNOWN, not True")
         requested = bool(fp.get("activate_beliefs"))
         summary = mp.summarize_belief_activation(outcomes, requested=requested)
-        source, n = "checkpoint", len(outcomes)
+        source = "checkpoint"
+        # The checkpoint's own failure list (``run.py:2797`` writes
+        # ``"failures": failures`` at the top level). It is read HERE and not
+        # left to the reader (#10137 review, P2): ``summarize_belief_activation``
+        # only ever sees ``outcomes``, so a checkpoint from a CRASHED run — the
+        # normal case for this probe, whose own bundle came from one — would
+        # otherwise publish ``questions_with_ep / questions = N/N = 1.00`` and
+        # ``activated`` over the survivors, with the ablation invisible. The
+        # ratio's denominator is still the outcomes (that is the runner's own
+        # aggregate); ``questions_in_run`` below is what makes the difference
+        # between the two READABLE.
+        failures = [f for f in (doc.get("failures") or []) if isinstance(f, dict)]
+        # The checkpoint's list IS the authority here (``run.py:2797``); it is
+        # never short of the truth, so no separate count is carried.
+        reported_failed = None
+
+    # EVERY question the run covered: the ratio's own denominator PLUS the
+    # questions it excludes. The failure ids are counted as DISTINCT ids over
+    # the two lists — never ``len(outcomes) + len(failures)`` (#10137 review,
+    # P2). The overlap is a documented real shape, not a hypothetical: a qid
+    # completed by one worker and failed by another lands in BOTH lists
+    # (``report.py:1407-1410``), and ``_merge_checkpoint`` unions the two
+    # independently, tombstones being present only when the writer knew it was
+    # a ``--retry-failed`` re-attempt (``run.py:2699-2729``). Summing the
+    # lengths published a 2-question population as a 3-question run, and the
+    # gap the README calls "the disclosure" hid it — the gap was
+    # ``questions_failed`` BY CONSTRUCTION.
+    #
+    # ``questions_failed`` is therefore the count of failures that actually
+    # ABLATE the ratio: a qid that failed and then produced an outcome counts
+    # once, as an outcome (it was recovered, and it is in the denominator).
+    #
+    # ⛔ The report arm's own ``n_questions`` is NOT used as the total: it is
+    # ``len(outcomes)`` (``report.py:1106`` -> ``:2376``), so overriding with it
+    # silently dropped the failure population in the arm that produces the
+    # published artifact — F3 fixed nothing there (#10137 review, P2).
+    # ``_qid_key`` and not the raw id: the ids come out of an untrusted
+    # document and an unhashable one used to end the probe in a ``TypeError``
+    # (#10137 follow-up review, P3).
+    outcome_ids = {_qid_key(o.get("question_id")) for o in outcomes
+                   if isinstance(o, dict) and o.get("question_id")}
+    failed_ids = {_qid_key(f.get("question_id"))
+                  for f in failures if f.get("question_id")}
+    # A reported count larger than the list is a failure population whose ENTRY
+    # list the input pruned. Those ids cannot be matched against an outcome, so
+    # they are added rather than dropped — undercounting the ablation is the one
+    # direction that resurrects ``N/N = 1.00``.
+    unlisted = 0
+    if isinstance(reported_failed, int) and reported_failed > len(failed_ids):
+        unlisted = reported_failed - len(failed_ids)
+    questions_failed = len(failed_ids - outcome_ids) + unlisted
+    # DERIVED from the two published figures — never a second, independent count
+    # of "how many questions". ``summary["questions"]`` is the runner's own
+    # ``len(rows)`` (``measurement_posture.py:353``), i.e. ROWS, while the id sets
+    # above are distinct non-empty ids; an input with a duplicate or absent
+    # ``question_id`` therefore made the two disagree and could publish a total
+    # SMALLER than the ratio's own denominator (#10137 review, P3 — reachable
+    # from hand-built/foreign JSON only: ``run.py``'s loader builds both lists
+    # dict-by-qid, and the vendored ``report.py`` grades per-qid precisely
+    # because duplicate outcome entries are a documented shape there, ``:1407-
+    # 1412``). Adding the ablation to the denominator instead makes the
+    # invariant ``questions_in_run - questions == questions_failed`` hold BY
+    # CONSTRUCTION for every input, which is what the disclosure claims.
+    n = (summary.get("questions") if isinstance(summary.get("questions"), int)
+         else len(outcome_ids)) + questions_failed
 
     # NOT ``or 0``: an ABSENT cell is UNKNOWN, and coercing it would publish a
     # fabricated "measured zero" — the rule ``measurement_posture`` states for
@@ -81,7 +210,20 @@ def cells(path: str) -> dict:
 
     rows = [o for o in outcomes if isinstance(o, dict)]
     manifests = [o for o in rows if isinstance(o.get("belief_activation"), dict)]
-    per_question_unread = len(rows) - len(manifests)
+    # A manifest PRESENT is not a census READ (#10137 review, P2). The
+    # producer's fail-open shape (``{"ep_ran": False, "error": ...}`` — the one
+    # ``measurement_posture`` documents at :85-94) carries a manifest and NO
+    # census cells, so counting manifests published ``per_question_unread: 0``
+    # over rows whose ``operators``/``points_with_ep`` are all ``null``, while
+    # the SAME input's summed cells published ``points_with_ep_unread: >0`` —
+    # two disclosures of one fact, disagreeing. Count the rows whose census was
+    # NOT READ, by the summed cells' own rule: a key in
+    # ``_UNKNOWN_PER_MANIFEST_KEYS`` is UNKNOWN when absent or ``None``. The
+    # private constant and ``_optional_int`` are imported deliberately — they
+    # are the ONE definition, and a change there must red this probe loudly
+    # rather than drift from it.
+    per_question_unread = sum(
+        1 for o in rows if _census_unread(o.get("belief_activation")))
     if not manifests:
         # ``not manifests``, NOT ``rows and not manifests`` (#10137 review, P3):
         # an empty population has no manifest either, and the ``else`` branch
@@ -109,18 +251,26 @@ def cells(path: str) -> dict:
                 (o.get("belief_activation") or {}).get("points_moved_off_neutral"),
             "ep_ran": (o.get("belief_activation") or {}).get("ep_ran"),
             "no_op_reason": (o.get("belief_activation") or {}).get("no_op_reason"),
+            # A fail-open manifest's own diagnosis. Without it the row is
+            # indistinguishable from a measured-and-null one except through
+            # ``per_question_unread``; with it the reason the census is missing
+            # is readable per question (#10137 review, P2).
+            "error": (o.get("belief_activation") or {}).get("error"),
         } for o in rows]
         per_question_source = "outcome.belief_activation"
 
     return {
         "source": source,
         "questions_in_run": n,
+        "questions_failed": questions_failed,
         "questions": q,
         "questions_with_ep": with_ep,
         "questions_with_ep_ratio": (
             (with_ep / q) if isinstance(with_ep, int) and isinstance(q, int)
             and q else None),
-        "claim_coverage": {
+        # A FLOOR on claim coverage, not claim coverage (see the module
+        # docstring); the name says only what the denominator is.
+        "point_coverage": {
             "points_with_ep": covered,
             "points_unmeasured": unmeasured,
             "ratio": claim_ratio,
