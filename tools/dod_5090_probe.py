@@ -832,16 +832,15 @@ def score_v1_bullet() -> Row:
         "creates the follow-up work; this row can only see the record)",
     ]
     notes += [f"open: {ln}" for ln in open_lines[:3]]
-    # The bullet is "decided AND implemented": with the implementation half
-    # unmeasurable, a record can only carry the row to PARTIAL — never MET — and
-    # a surface that still says OPEN holds it there (a doc QUOTING the bullet
-    # must not flip the row).
-    if not decided:
-        verdict = "NOT MET"
-    elif open_lines:
-        verdict = "PARTIAL"
-    else:
-        verdict = "PARTIAL"
+    # The bullet is "decided AND implemented", and the implementation half is
+    # unmeasurable here (nothing a decision RECORD contains proves what shipped),
+    # so a record caps this row at PARTIAL however many decided markers it
+    # carries — MET is unreachable by construction. The opposite direction is
+    # equally flat: a surface that still says OPEN does NOT lower the row, so a
+    # doc QUOTING the bullet cannot flip it to `NOT MET`. `open_lines` therefore
+    # decides nothing about the verdict — it is carried in `notes` (review, P3:
+    # the branch used to claim a distinction it did not make).
+    verdict = "NOT MET" if not decided else "PARTIAL"
     return Row(
         bullet=4,
         text=BULLETS[3],

@@ -14,7 +14,8 @@ claims:
 | `test_the_four_bullets_are_scored_verbatim` | nothing is silently dropped | a bullet stops being scored, or is re-worded so the table scores something the epic does not say |
 | `test_the_embed_decision_has_exactly_one_predicate` | §12.2a's target of ONE predicate | a second pattern-owning module appears on the embed path, or the gate copies `value_gate.RULES` instead of sharing it |
 | `test_a_second_pattern_list_in_the_embed_gate_reads_as_drift` | the predicate count can FAIL | the count is hard-wired to 1 (mutation: a fake tree WITH a second pattern list must read `DRIFT`) |
-| `test_every_embedding_write_path_reaches_the_gate_seam` | bullet 1's `enforced` half | a writer stops calling `encode_for_row` (the point of #5008), or a new one appears unmapped |
+| `test_every_embedding_write_path_reaches_the_gate_seam` | bullet 1's `enforced` half, REMOVAL direction only | a named writer stops calling `encode_for_row` (the point of #5008) |
+| `test_an_unresolved_writer_is_reported_and_holds_bullet_two_at_partial` | bullet 2's honesty, on an INJECTED map | an unresolved write path is dropped from the written set, or stops holding the row at `PARTIAL` |
 | `test_every_embedded_label_has_a_query_path` | bullet 2 | an embedding write path serves a label `run_vector_query` cannot query |
 | `test_all_three_mechanisms_are_visible_to_the_caller` | bullet 3 (`#4999`) | the fallback stops announcing itself, or two paths report the same mechanism |
 | `test_the_census_refuses_to_report_zero_for_an_unreadable_store` | the 2026-09-24 error (`stored`-only / silent 0) | a store that could not be read is reported as `0` anything |
@@ -154,21 +155,48 @@ def test_every_embedding_write_path_reaches_the_gate_seam():
             f"{writer} embeds a written row without reaching encode_for_row — "
             f"the ungated-primitive state #5008 closed. Measured seams: {sorted(seams)}"
         )
-    # And every UNRESOLVED writer is REPORTED (it holds bullet 2 at PARTIAL),
-    # never silently dropped from the written set.
+    # ⛔ This test claims the REMOVAL direction only, and deliberately asserts
+    # nothing about TODAY's unresolved set: `#5090`'s remaining work is to
+    # resolve those writers, so `assert unresolved` would red on a CORRECT
+    # change and its cheapest-looking repair would be to delete it (review, P2).
+    # The BYPASS direction is bullet 1's own `OUTSIDE the gate` count
+    # (`score_rule_bullet`), and the "an unresolved writer is REPORTED, never
+    # dropped" property is pinned on an injected map in
+    # `test_an_unresolved_writer_is_reported_and_holds_bullet_two_at_partial`
+    # and `test_a_duplicate_writer_identity_holds_bullet_two_at_partial`.
+
+
+def test_an_unresolved_writer_is_reported_and_holds_bullet_two_at_partial(monkeypatch):
+    """Bullet 2 must never read `MET` over a write path whose label it lost.
+
+    The map is INJECTED, so this is a durable property rather than a reading of
+    this head: resolving every unresolved writer in the tree turns the real row
+    `MET` without touching this test (review, P2 — the sibling assertion that
+    read the live tree was exactly that trap).
+    """
+    writers = {
+        "tortoise.z::_store_without_a_producer": {
+            "callee": "unrecognised", "at": "tortoise/z.py:3",
+            "kind": "unresolved_write",
+            "label": "UNKNOWN(unresolved producer)",
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
     written = probe.written_labels()
-    unresolved = [w for w, v in written.items() if v.startswith("UNKNOWN")]
-    assert unresolved, written
-    assert probe.score_path_bullet().verdict == "PARTIAL"
+    assert written == {
+        "tortoise.z::_store_without_a_producer": "UNKNOWN(unresolved producer)"
+    }, f"an unresolved write path must be REPORTED, never dropped: {written}"
+    row = probe.score_path_bullet()   # every resolved label IS served here
+    assert row.verdict == "PARTIAL", row.observed
+    assert any("unresolved writers" in n for n in row.notes), row.notes
 
 
 def test_every_embedded_label_has_a_query_path():
     """Bullet 2: nothing is STORED that `run_vector_query` cannot query.
 
-    At HEAD the row is `PARTIAL` — not because a stored label is unserved (none
-    is), but because 14 write paths write an embedding with no recognised
-    producer call, so their label cannot be resolved and the row must not claim
-    a complete measurement over them.
+    The assertions below are an IMPLICATION, never this head's classification:
+    the row can only be `PARTIAL` while a write path's label is unresolved, and
+    resolving them all (`#5090`) turns it `MET` without reddening this test.
     """
     row = probe.score_path_bullet()
     assert row.verdict in ("MET", "PARTIAL"), row.observed
