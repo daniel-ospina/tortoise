@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: ci-runner-pool, ci-headroom-guards
 aboutObjects: tortoise, tools/install-ci-runner-x64.sh, scripts/ci_runner_gate.sh
 created: 2026-10-22
-updated: 2026-10-30
+updated: 2026-11-01
 ---
 
 # x86_64 CI runners — the fallback pool's second architecture
@@ -25,7 +25,7 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 | `ubuntu-latest` | 75 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
 | `ubuntu-24.04` | 9 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
-Counts are JOBS (not files), re-measured 2026-10-30 at this head (`yaml.safe_load` each workflow,
+Counts are JOBS (not files), re-measured 2026-11-01 at this head (`yaml.safe_load` each workflow,
 count each job's `runs-on`): **75 / 9** — the label classes `--status`'s `label-coverage` block
 measures, though that block reports RUNNER counts per label, not job counts: measured on the live
 pool on 2026-10-29 it printed `ubuntu-24.04 = 7 of 7
@@ -63,8 +63,8 @@ and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`
   never to `self-hosted`", and the reason is recorded at `:1863-1865` — a `self-hosted` pin removes
   the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS and "the
   aggregate stays pending — not answered yet" instead of being answered by the pool.
-  **One opt-in departure exists and is recorded below** — `CI_SHARD_ROUTING=pool-split` names
-  `[self-hosted, self-hosted-x64]` on the ODD rows (`OVERRIDES:` + outage-wait exposure in that section).
+  **Two departures are recorded below** — `CI_SHARD_ROUTING=pool-split` names
+  `[self-hosted, self-hosted-x64]` on the ODD rows (OPT-IN), and the #10237 canary pins it by DEFAULT on a non-required job (both carry `OVERRIDES:` + outage-wait exposure).
 - `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
   (`fallback_on`) attaches it, `:292` (`fallback_off`) detaches it.
 - The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an

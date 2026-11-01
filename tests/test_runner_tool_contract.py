@@ -586,7 +586,8 @@ def _poolable_label(text: str) -> bool:
     inline arm text-searches the whole rest of the line, while the BLOCK one stops at
     `group:` — no `- ` item matches, the item loop breaks, and the job comes back
     invisible although `ubuntu-24.04` is named one line below in `labels:`. None is
-    used in the tree today — all 86 `runs-on:` keys are inline scalars, so the miss is
+    used in the tree today — all 86 `runs-on:` keys are single-line values (one of
+    them, `ci.yml:1534`, an inline FLOW list the inline arm answers), so the miss is
     latent, not live — and they are named here so the next author writing one of them
     knows the scan is a text reader rather than a YAML parser, and adds the shape
     instead of assuming coverage.
