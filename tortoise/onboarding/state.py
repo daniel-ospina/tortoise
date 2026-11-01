@@ -1118,6 +1118,89 @@ def backfill_org(graph: Any, org_id: str, legacy_complete: bool, *,
     return {"org_id": org_id, "action": "created-complete"}
 
 
+def copy_org_state(src_graph: Any, dst_graph: Any, org_id: str) -> dict[str, Any]:
+    """Carry this org's ``:OnboardingState`` into another graph (#10180).
+
+    WHY THIS EXISTS. ``:OnboardingState`` and its ``COMPLETED_STEP`` edges are
+    ORG-LEVEL state that happens to be STORED IN THE DEFAULT GRAPH — the one
+    org-level store that lives in a tenant graph. #10180's promote verb MOVES
+    the default graph, and the other #10180 lanes (the projection, the
+    completion gate, ``patch_onboarding_state``, the harness-connected filing)
+    now open the promoted one. Without a carry the record stays in the graph the
+    promotion DEMOTED while every reader has been converted onto the promoted
+    one: the node reads ABSENT, ``flow_defaults()`` is served, the wire answer
+    falls back to the legacy jsonb flag — so a promotion silently RE-OPENS
+    onboarding (the onboarding tool group is re-exposed to agents and the
+    dashboard wizard re-opens), loses the org's ``fork``/``compact`` choice, and
+    does it to an org whose status this module documents as MONOTONIC.
+
+    ORDER IS LOAD-BEARING: the node (carrying its status) is created FIRST,
+    then the step edges, then the FLOW keys. A copy that dies half-way must
+    never leave a graph where onboarding reads as INCOMPLETE — that failure is
+    the exact thing this function exists to prevent. Every write goes through
+    this module's own idempotent keyed-MERGE writers, so a replay CONVERGES
+    (steps are a set; ``write_status`` is monotonic; nothing is duplicated).
+
+    It is deliberately a UNION-style merge, not a wipe: a target that already
+    holds a node keeps the more-advanced state (``write_status`` never regresses
+    ``complete``, and the step edges only ever gain), because the alternative —
+    leaving a stale node while the real history stays behind — is the wrong-graph
+    write this whole change exists to remove.
+
+    Deliberately NOT copied, and why:
+
+    - ``operational_state`` — a SELF-HOST-only property (see
+      ``OPERATIONAL_PROP``); hosted keeps those keys in the team's jsonb, and
+      the verb that calls this is hosted-only (it moves a ``public.graphs``
+      row), so copying it would mint a second, driftable store.
+    - ``DECIDE_COMPLETED_REMOVED_AT`` — the #3912 repair stamp. A copy would
+      claim a repair happened to a node it never repaired.
+
+    Returns the report the caller puts in its response: ``migrated`` (a source
+    node existed), ``reason``, the copied ``steps`` and the node's flow summary.
+    """
+    node = read_onboarding_node(src_graph, org_id)
+    if node is None:
+        return {"migrated": False, "reason": "absent", "steps": [],
+                "status": None, "fork": None, "compact": False}
+    status = node.get("status")
+    if status not in STATUS_VALUES:
+        status = STATUS_ACTIVE
+    complete = status == STATUS_COMPLETE
+    fork = node.get("fork") if node.get("fork") in FORK_VALUES else None
+    compact = bool(node.get("compact"))
+    steps = sorted({s for s in completed_steps(src_graph, org_id)
+                    if validate_step_id(s)})
+    # 1. the NODE (and its monotonic status) first — a partial copy must not
+    #    re-open an org that had completed.
+    ensure_onboarding_state_node(dst_graph, org_id, fork=fork, compact=compact,
+                                 status_from_mirror=complete)
+    write_status(dst_graph, org_id, status, status_from_mirror=complete)
+    # 2. the step edges — the canonical store of "what is done".
+    for step_id in steps:
+        write_completed_step(dst_graph, org_id, step_id,
+                             status_from_mirror=complete)
+    # 3. the remaining FLOW keys the projection serves.
+    if fork is None and node.get("fork_unsure_at"):
+        write_fork_unsure_at(dst_graph, org_id, str(node["fork_unsure_at"]),
+                             compact=compact, status_from_mirror=complete)
+    attempt = node.get("last_decide_attempt")
+    if attempt in ("failed", "dismissed"):
+        write_last_decide_attempt(dst_graph, org_id, attempt,
+                                  status_from_mirror=complete)
+    for user_id, member_steps in parse_member_progress(
+            node.get("member_progress")).items():
+        write_member_progress(dst_graph, org_id, user_id, member_steps,
+                              status_from_mirror=complete)
+    subject_id = node.get("org_subject_id")
+    if subject_id:
+        # The DM-1 anchor (W3): the node tracks its Organization Subject. MERGE
+        # keyed, so a target that already holds the real Subject links to it.
+        write_onboards_edge(dst_graph, org_id, str(subject_id))
+    return {"migrated": True, "reason": "copied", "steps": steps,
+            "status": status, "fork": fork, "compact": compact}
+
+
 def recompute_completion(graph: Any, org_id: str,
                          legacy_complete: bool | None) -> str:
     """T7 recompute sweep per org (plan T7, cycle-2 P3-1 fix):
