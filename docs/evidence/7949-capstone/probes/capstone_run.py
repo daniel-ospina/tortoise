@@ -374,6 +374,145 @@ def observe_steps(result: dict) -> dict[str, str]:
     return seen
 
 
+# ── #10215: the CONDITIONAL steps, and how a run accounts for them ───────
+
+#: The record key that declares which of the eight steps are conditional.
+#: Read from the FROZEN pre-registration commit (never the worktree), so a step
+#: can only become conditional by a reviewed edit to a hash-pinned artefact.
+STEPS_BLOCK = "steps"
+
+#: The failure text each surface's fail-open path writes (#10215). ⛔ This is why
+#: an idle step needs a WITNESS and not just an empty stats block: a pass that
+#: CRASHED leaves ``{"enabled": true, "s2": {}, "union": {}}`` — literally the
+#: same block as a pass with nothing to do. The difference is only visible in the
+#: extractor's own error/warning lists, so those are read here. Declared per
+#: surface (never one pass's text templated over the other's) so a surface added
+#: to :func:`observe_idle` without its markers fails LOUDLY.
+_IDLE_FAILURE_MARKERS: dict[str, tuple[str, ...]] = {
+    "classify_later": ("classify(S2) failed", "classify(union) failed",
+                       "classify-later init failed"),
+    "vet": ("vet failed (",),
+}
+
+#: Which readable surface accounts for each step, and the reverse lookup G5 uses
+#: to say WHERE it looked when a conditional step is neither observed nor idle.
+_IDLE_SURFACES = {"classify_later": "S2.3", "vet": "S2.2"}
+_SURFACE_FOR_STEP = {step: key for key, step in _IDLE_SURFACES.items()}
+
+
+def declared_conditional(prereg_record: dict | None) -> tuple[dict[str, dict], str]:
+    """The steps the FROZEN record declares CONDITIONAL, as ``{step: entry}``.
+
+    Three outcomes, kept apart on purpose:
+
+    * the record carries no ``steps`` block → ``({}, "")``: the pre-#10215 shape,
+      where all eight are required (a refusal here would red every run made
+      against an older record);
+    * the block is present and READABLE → the declared map;
+    * the block is present and MALFORMED → ``({}, why)``, and the caller REFUSES:
+      the record's producer is another lane, so its shape is untrusted input, and
+      a malformed declaration must not silently degrade to "all eight required"
+      (which would look exactly like correct behaviour).
+    """
+    if not isinstance(prereg_record, dict):
+        return {}, ""
+    block = prereg_record.get(STEPS_BLOCK)
+    if block is None:
+        return {}, ""
+    if not isinstance(block, dict):
+        return {}, (f"the pre-registration's {STEPS_BLOCK!r} block is a "
+                    f"{type(block).__name__}, expected an object")
+    entries = block.get("conditional") or []
+    if not isinstance(entries, list):
+        return {}, (f"the pre-registration's {STEPS_BLOCK}.conditional is a "
+                    f"{type(entries).__name__}, expected a list")
+    declared: dict[str, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("step"), str):
+            return {}, ("the pre-registration's steps.conditional carries an entry "
+                        f"that is not a {{'step': …}} object ({entry!r})")
+        step = entry["step"]
+        if step not in STEPS:
+            return {}, (f"the pre-registration declares {step!r} conditional, and it "
+                        f"is not one of the epic's eight steps ({', '.join(STEPS)})")
+        declared[step] = entry
+    return declared, ""
+
+
+def observe_idle(result: dict) -> dict[str, str]:
+    """Which CONDITIONAL steps were ENABLED, did NO work, and did NOT FAIL.
+
+    This is the distinction the gate could not previously make (#10215, and the
+    flag-on/no-activity measurement pinned in #9823): an empty stats block means
+    one of three different things, and only one of them is "the pass had nothing
+    to do".
+
+    * **flag OFF** — ``enabled`` is not ``True``: the pass was not asked to run.
+      NOT idle (nothing was enabled), and not a witness either.
+    * **FAILED** — the surface's fail-open path fired, which leaves the SAME empty
+      ``s2``/``union`` as an idle pass. The extractor says so in ``errors``/
+      ``diagnostics``/``warnings``, so any failure marker for that surface
+      disqualifies the idle claim. This is the arm that keeps the restatement
+      from handing a crashed pass a GREEN.
+    * **IDLE** — ``enabled`` is ``True``, both pass counters are empty, and no
+      failure marker is present: ``_collect_classify_items`` found no candidate
+      whose kind was missing or ``unclassified``, i.e. the map already typed
+      everything. That is a property of the candidate set, not a defect.
+
+    Nothing here is a wrapper's memory: the block is read off the pipeline's own
+    return (top level) or the receipt's forwarded witness sub-key, and the
+    failure text off the receipt's own error surfaces.
+    """
+    stats = result.get("stats") or {}
+    witness = stats.get("step_witness") if isinstance(stats, dict) else None
+    witness = witness if isinstance(witness, dict) else {}
+    failure_text = " ".join(
+        str(entry)
+        for key in ("errors", "diagnostics", "warnings")
+        for entry in (result.get(key) or ()))
+
+    idle: dict[str, str] = {}
+    for key, step in _IDLE_SURFACES.items():
+        block = result.get(key)
+        if not isinstance(block, dict) or not block:
+            block = witness.get(key)
+        if not isinstance(block, dict) or not block:
+            continue                      # no surface at all: nothing to claim
+        if block.get("enabled") is not True:
+            continue                      # the flag was off — not idle, not ran
+        if block.get("s2") or block.get("union"):
+            continue                      # the pass DID work — observe_steps'
+        markers = _IDLE_FAILURE_MARKERS[key]   # KeyError is the contract: loud
+        hit = [m for m in markers if m in failure_text]
+        if hit:
+            continue                      # fail-open fired: indistinguishable
+        idle[step] = (
+            "the pass was ENABLED and did NO work: its stats block reads "
+            f"{_summary_block(block)} and the receipt's own error/warning "
+            "surfaces carry no failure marker for it "
+            f"({', '.join(markers)}), so it was gated out by an EMPTY ITEM SET "
+            "rather than by a failure — the map had already typed every "
+            "candidate, so there was nothing for this pass to assign")
+    return idle
+
+
+def _summary_block(block: dict) -> str:
+    """A compact, honest rendering of a stats block for a verdict's reason text."""
+    parts = []
+    for key in ("enabled", "s2", "union"):
+        if key not in block:
+            continue
+        value = block.get(key)
+        if value is True or value is False:
+            shown = "true" if value else "false"
+        elif isinstance(value, dict):
+            shown = "{}" if not value else f"<{len(value)} key(s)>"
+        else:
+            shown = repr(value)
+        parts.append(f"{key}={shown}")
+    return "{" + ", ".join(parts) + "}"
+
+
 def e4_receipt(stats: dict) -> dict:
     """E4's receipt — the no-silent-drop proof (`_s4_merge_stats`).
 
@@ -591,12 +730,19 @@ def emit_log(*, head: str, prereg: dict, corpus: dict, run: dict,
         f"# run: {run.get('status')} — {run.get('reason')}",
     ]
     observed = run.get("steps_observed") or []
+    required = run.get("steps_required") or list(STEPS)
     lines.append("# steps observed: "
                  + (" ".join(observed) if observed else "(none)")
-                 + f"  required: {' '.join(STEPS)}")
-    missing = [s for s in STEPS if s not in observed]
+                 + f"  required: {' '.join(required)}")
+    missing = [s for s in required if s not in observed]
     if missing:
         lines.append("# steps MISSING: " + " ".join(missing))
+    # #10215: a conditional step is accounted separately, so "the pass was enabled
+    # and had nothing to do" never reads as "the run skipped a step".
+    for entry in run.get("steps_conditional") or []:
+        if isinstance(entry, dict):
+            lines.append(f"# conditional {entry.get('step')}: {entry.get('state')}"
+                         f" — {entry.get('basis')}")
     lines += ["", "## Verdict", "",
               "| criterion | verdict | evidence | blocked_by | note |",
               "|---|---|---|---|---|"]
@@ -1007,9 +1153,26 @@ def main(argv: list[str] | None = None) -> int:
             f"{captured.get('extraction_mode')!r}); no step can be observed",
             prereg_ok=True, code=4, corpus=corpus)
 
-    # G5 — EIGHT steps, or the table is not the epic's table
+    # G5 — the EIGHT steps, or the table is not the epic's table.
+    #
+    # #10215: seven of the eight are UNCONDITIONAL and must be observed; the
+    # record may declare a step CONDITIONAL (S2.3 is, because a corpus whose S2
+    # map kinds every candidate gives the classify pass nothing to do). A
+    # conditional step is still ACCOUNTED — observed, or witnessed IDLE by
+    # `observe_idle` — and never simply waived: requiring all eight
+    # unconditionally was false by construction, while dropping a step outright
+    # would hand a crashed fail-open pass the same green as an idle one.
+    conditional, steps_error = declared_conditional(prereg_record)
+    if steps_error:
+        return refuse(
+            f"the pre-registration's step declaration is unreadable: "
+            f"{steps_error} — G5 cannot tell which steps are unconditional, and "
+            "a malformed declaration must not silently mean 'all eight'",
+            prereg_ok=True, code=5, corpus=corpus)
+    required = [s for s in STEPS if s not in conditional]
     observed = observe_steps(result)
-    missing = [s for s in STEPS if s not in observed]
+    idle = observe_idle(result)
+    missing = [s for s in required if s not in observed]
     if missing:
         # THREE findings, not two (#9116). A receipt with NO step_witness at
         # all is the INSTRUMENT: the seam never delivered, so nothing down
@@ -1057,6 +1220,50 @@ def main(argv: list[str] | None = None) -> int:
             " forbids a table assembled from a subset",
             prereg_ok=True, code=5, corpus=corpus)
 
+    accounts: dict[str, dict] = {}
+    for step in STEPS:
+        if step not in conditional:
+            continue
+        if step in observed:
+            accounts[step] = {"step": step, "state": "observed",
+                              "basis": observed[step]}
+            continue
+        if step in idle:
+            accounts[step] = {"step": step, "state": "idle",
+                              "basis": idle[step]}
+            continue
+        # Neither ran nor proven idle. Two very different causes, kept apart: a
+        # receipt with NO surface is still the #9116 instrument gap; a surface
+        # that is PRESENT and says the flag was off, or that the pass failed
+        # fail-open, is a PIPELINE finding this probe can support.
+        surface = _SURFACE_FOR_STEP.get(step)
+        block = result.get(surface) if surface else None
+        if not isinstance(block, dict) or not block:
+            witness = (result.get("stats") or {}).get("step_witness") or {}
+            block = witness.get(surface) if isinstance(witness, dict) else None
+        if not isinstance(block, dict) or not block:
+            return refuse(
+                f"the conditional step {step} is neither observed nor witnessed "
+                "idle: its surface does not exist on this receipt, which is the "
+                "INSTRUMENT gap (#9116) and NOT a claim that the pass was idle — "
+                "an absent surface cannot distinguish 'nothing to do' from "
+                "'never ran'", prereg_ok=True, code=5, corpus=corpus)
+        # Name the CAUSE, not the union of the possibilities: #9823's whole point
+        # is that "flag off", "failed" and "nothing to do" send a reader to three
+        # different places, and one message for all of them is how #9116 was
+        # mis-blamed the first time. By elimination here the block either says the
+        # flag was off, or a failure marker is present.
+        cause = ("its own `enabled` reads False — the pass was not enabled, so it "
+                 "was never idled"
+                 if block.get("enabled") is not True else
+                 "a failure marker for it IS present on the receipt, so the "
+                 "fail-open path fired rather than the pass finding nothing to do")
+        return refuse(
+            f"the conditional step {step} is neither observed nor idle: its "
+            f"surface IS present and reads {_summary_block(block)}, and {cause}. "
+            "Neither state is a step with nothing to do", prereg_ok=True, code=5,
+            corpus=corpus)
+
     # G6 — per-criterion evidence
     receipt = e4_receipt(result.get("stats") or {})
     rows = completed_rows(head=head, corpus_sha=sha, receipt=receipt,
@@ -1066,12 +1273,23 @@ def main(argv: list[str] | None = None) -> int:
         prereg={"sha": args.prereg, "status": "OK",
                 "artifact": args.prereg_artifact},
         corpus=corpus,
-        run={"status": "COMPLETED", "reason": "eight steps observed in one pass",
+        run={"status": "COMPLETED", "reason": _completed_reason(required, accounts),
              "steps_observed": [s for s in STEPS if s in observed],
-             "steps_required": list(STEPS), "gate_failed": None,
+             "steps_required": required,
+             "steps_conditional": [accounts[s] for s in STEPS if s in accounts],
+             "gate_failed": None,
              "session_id": session_id, "e4_receipt": receipt},
         rows=rows, out=out))
     return 0
+
+
+def _completed_reason(required: list[str], accounts: dict[str, dict]) -> str:
+    """The run's own one-line statement of what its step accounting claims."""
+    reason = f"{len(required)} unconditional step(s) observed in one pass"
+    if accounts:
+        reason += "; conditional " + ", ".join(
+            f"{step}={accounts[step].get('state')}" for step in sorted(accounts))
+    return reason
 
 
 if __name__ == "__main__":

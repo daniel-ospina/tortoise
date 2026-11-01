@@ -43,7 +43,14 @@ marked green off closed children, with no artifact at all. This closes that.
     V4  every row's evidence path exists (repo-relative, no escape)
     V5  GREEN requires: evidence_kind=measurement, 0 < numerator <= denominator,
         blocked_by null, a FROZEN pre-registration sha, and run.status=COMPLETED
-        with ALL eight steps observed in one pass. Its ancestry half (evidence
+        with ALL eight steps ACCOUNTED FOR in one pass — the seven UNCONDITIONAL
+        steps observed, plus every CONDITIONAL step (as the frozen
+        pre-registration declares them, #10215) either observed or witnessed
+        IDLE with its basis stated. A conditional step may not be dropped by
+        omission, and a log may not declare a step conditional on its own: the
+        declaration is read from the record at the pre-registration commit, so
+        the only way a step becomes conditional is a reviewed edit to a
+        hash-pinned artefact. Its ancestry half (evidence
         does not predate the pre-registration) is answerable only where the
         measured commit is still reachable — see V11 for why that is reported
         rather than fatal by default.
@@ -108,6 +115,11 @@ from pathlib import Path
 SCHEMA = "capstone-verdict-v1"
 CRITERIA = ("E1", "E2", "E3", "E4", "E5")
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
+#: The two states a CONDITIONAL step may be accounted in (#10215). ``observed``
+#: means the pass did work; ``idle`` means its flag was ON, it did no work, and
+#: its fail-open path was NOT taken — the pass had nothing to do, which is a
+#: property of the candidate set (``_collect_classify_items``), not a defect.
+STEP_STATES = ("observed", "idle")
 VERDICTS = ("GREEN", "RED", "BLOCKED", "UNPREREGISTERED")
 EVIDENCE_KINDS = ("measurement", "refusal")
 
@@ -303,6 +315,158 @@ class Findings:
         return "\n".join(f"  [{c}] {w}: {m}" for c, w, m in self.items)
 
 
+#: Where the frozen record's OWN step declaration lives (#10215). The log's
+#: ``run.steps_conditional`` is cross-checked against this, so conditionality is
+#: a reviewed edit to a hash-pinned artefact rather than a lane's local choice.
+RECORD_STEPS_KEY = "steps"
+
+
+def _record_conditional(repo: Path, prereg_sha: str | None,
+                        artifact: str) -> tuple[set[str] | None, str]:
+    """The conditional steps the FROZEN record declares, or ``(None, why not)``.
+
+    Read out of the pre-registration COMMIT (``git show <sha>:<artifact>``) for
+    the same reason the run probe reads it that way: a record edited after the
+    numbers are in is not a pre-registration, and a worktree read would serve
+    that edit.
+    """
+    if not prereg_sha or not isinstance(prereg_sha, str):
+        return None, "the log names no pre-registration sha"
+    if not artifact or not isinstance(artifact, str):
+        return None, "the log names no pre-registration artifact"
+    blob = _git(repo, "show", f"{prereg_sha}:{artifact}")
+    if blob.returncode != 0:
+        return None, f"{prereg_sha}:{artifact} does not resolve in this checkout"
+    try:
+        record = json.loads(blob.stdout)
+    except json.JSONDecodeError as exc:
+        return None, f"{artifact} at {prereg_sha} is not JSON: {exc}"
+    if not isinstance(record, dict):
+        return None, f"{artifact} at {prereg_sha} is a {type(record).__name__}, not an object"
+    block = record.get(RECORD_STEPS_KEY)
+    if not isinstance(block, dict):
+        return None, (f"{artifact} at {prereg_sha} carries no {RECORD_STEPS_KEY!r} "
+                      "block, so no step is declared conditional")
+    entries = block.get("conditional")
+    if not isinstance(entries, list):
+        return None, (f"{RECORD_STEPS_KEY}.conditional in {artifact} at {prereg_sha} "
+                      f"is {type(entries).__name__}, expected a list")
+    steps: set[str] = set()
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("step"), str):
+            steps.add(entry["step"])
+    return steps, ""
+
+
+def _step_accounting(repo: Path, run: dict, observed: tuple,
+                     prereg_sha: str | None, artifact: str) -> list[tuple[str, str]]:
+    """V5's step half: every one of the eight ACCOUNTED FOR, never dropped (#10215).
+
+    Four rules, all of them conservative:
+
+    1. ``steps_required`` and ``steps_conditional`` are a strict PARTITION of the
+       eight step ids. A log that removes a step from ``steps_required`` without
+       declaring it conditional is the silent-drop shape this rule exists to
+       refuse — otherwise "we dropped S2.3" and "S2.3 was conditional" read
+       identically.
+    2. Every required step is observed in the one pass (unchanged from before).
+    3. Every conditional step is either observed, or declared ``idle`` with a
+       NON-EMPTY basis. A bare ``{"step": "S2.3", "state": "idle"}`` is a
+       claim with no artefact and is refused.
+    4. The conditional SET must equal the frozen record's declaration. A log may
+       not promote a step to conditional on its own authority, and where the
+       record cannot be read the claim is REFUSED rather than trusted — a
+       conditionality nobody can check is not a recorded decision.
+    """
+    required_raw = run.get("steps_required")
+    required = (list(required_raw) if isinstance(required_raw, (list, tuple))
+                else list(STEPS))
+    entries = run.get("steps_conditional") or []
+    out: list[tuple[str, str]] = []
+    if not isinstance(entries, (list, tuple)):
+        # A green row cannot lean on a conditional declaration that is not a list:
+        # report it and fall back to "nothing is conditional" (rule 2 then applies).
+        out.append(("V5", "steps_conditional is "
+                          f"{type(entries).__name__}, expected a list — "
+                          "no step can be accounted conditional through it"))
+        entries = []
+    accounts: dict[str, dict] = {}
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("step"), str):
+            accounts[entry["step"]] = entry
+        else:
+            out.append(("V5", "steps_conditional carries an entry that is "
+                              f"not a {{'step': …}} object ({entry!r}) — unreadable "
+                              "as an accounting"))
+    conditional = set(accounts)
+
+    # 1 — a strict partition of the eight. `steps_required` gates this only for KEYS
+    # the log actually declares; a log with no such key is read as "the eight" (the
+    # pre-#10215 shape), so an older log's verdict is unchanged.
+    dropped = [s for s in STEPS if s not in required and s not in conditional]
+    invent = [s for s in list(required) + list(conditional) if s not in STEPS]
+    overlap = [s for s in required if s in conditional]
+    if dropped:
+        out.append(("V5", "GREEN with steps neither observed-required nor declared "
+                           f"conditional: {', '.join(dropped)} — a step cannot leave "
+                           "the gate by being omitted from both lists"))
+    if invent:
+        out.append(("V5", "GREEN with step ids that are not part of the epic's "
+                           f"eight: {', '.join(sorted(set(invent)))} — the step list "
+                           "is fixed (§4.1: S0, S1, S2.1, S2.2, S2.3, S3, S5, S6)"))
+    if overlap:
+        out.append(("V5", "GREEN with steps declared BOTH required and conditional: "
+                           f"{', '.join(overlap)} — conditionality is not an escape "
+                           "hatch for a step that did not run"))
+
+    # 4 — the conditional set is the FROZEN record's, not the log's. Checked before
+    # the observation rules so a fabricated conditionality is reported as exactly
+    # that rather than as a missing step.
+    if conditional:
+        declared, why = _record_conditional(repo, prereg_sha, artifact)
+        if declared is None:
+            out.append(("V5", "GREEN with steps declared conditional "
+                               f"({', '.join(sorted(conditional))}) while the frozen "
+                               f"pre-registration cannot confirm it — {why}. A "
+                               "conditionality the record does not declare is not a "
+                               "recorded decision, so it is refused rather than "
+                               "trusted"))
+        elif conditional != declared:
+            out.append(("V5", "GREEN with conditional steps "
+                               f"{', '.join(sorted(conditional))} but the frozen "
+                               f"pre-registration declares "
+                               f"{', '.join(sorted(declared)) or 'none'} — the log may "
+                               "not change which steps are conditional"))
+
+    # 2 — every required step observed.
+    missing = [s for s in required if s not in observed]
+    if missing:
+        out.append(("V5", "GREEN with steps not observed in the run: "
+                           f"{', '.join(missing)} — the epic measures the pipeline "
+                           "end to end, not a step probe"))
+
+    # 3 — every conditional step ACCOUNTED. Observed outranks idle (a pass that ran
+    # is a pass that ran); an idle claim needs a basis, and its state vocabulary is
+    # closed for the same reason every other one here is.
+    for step in sorted(conditional):
+        if step in observed:
+            continue
+        entry = accounts.get(step) or {}
+        state = entry.get("state")
+        basis = str(entry.get("basis") or "").strip()
+        if state not in STEP_STATES:
+            out.append(("V5", f"GREEN with conditional step {step} accounted as "
+                               f"state={state!r} — the vocabulary is "
+                               f"{', '.join(STEP_STATES)}; a conditional step must "
+                               "say whether it ran or had nothing to do"))
+        elif state == "idle" and not basis:
+            out.append(("V5", f"GREEN with conditional step {step} declared idle "
+                               "with no basis — an idle claim without the run's own "
+                               "evidence (flag ON, no activity, no fail-open error) "
+                               "is a claim, not a witness"))
+    return out
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
                           text=True, check=False)
@@ -495,11 +659,19 @@ def check(record: dict, *, repo: Path,
             # non-list value observes nothing, which is what this finding says.
             observed = (tuple(observed_raw)
                         if isinstance(observed_raw, (list, tuple)) else ())
-            missing = [s for s in STEPS if s not in observed]
-            if missing:
-                f.add("V5", where, "GREEN with steps not observed in the run: "
-                                   f"{', '.join(missing)} — the epic measures "
-                                   "the pipeline end to end, not a step probe")
+            # ── the step ACCOUNTING (#10215). S2.3 is conditional: it has work
+            # only when some candidate's kind is missing or the `unclassified`
+            # sentinel, so a corpus whose S2 map kinds every candidate legitimately
+            # idles it. Requiring all eight UNCONDITIONALLY was false by
+            # construction — no run could ever satisfy V5 — which is the inert
+            # form of this rule. The restatement is NOT a relaxation: every one of
+            # the eight still has to be accounted for, the conditional set comes
+            # from the frozen record (never from the log), and an idle step must
+            # carry the run's own basis (its flag ON, no activity, no fail-open
+            # error — a crashed pass leaves the SAME empty counters).
+            for code, msg in _step_accounting(repo, run, observed,
+                                             prereg_sha, prereg.get("artifact")):
+                f.add(code, where, msg)
             if sha and isinstance(sha, str) and _SHA_RE.match(sha):
                 # The FROZEN-THRESHOLD check needs no git at all, so it must not
                 # sit behind resolvability: a 5/5-green table with NO frozen

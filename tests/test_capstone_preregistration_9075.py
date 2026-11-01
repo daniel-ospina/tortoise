@@ -2595,3 +2595,102 @@ def test_a_multi_bundle_json_error_names_the_bundle_it_came_from(tmp_path, capsy
     assert payload["reports"], "the readable bundle's report must survive the other's error"
     assert [e["directory"] for e in payload["errors"]] == [str(empty)]
     assert f"no {check.PREREG_NAME}" in payload["errors"][0]["error"]
+
+
+# ── #10215: the step set the capstone's gate reads ────────────────────────────
+#
+# V5 (`tools/capstone_verdict_check.py`) and G5 (`probes/capstone_run.py`) read
+# the REQUIRED step set out of the frozen record, so this block decides whether
+# a step is required. A silent edit here is a silent weakening of the epic's own
+# gate — which is why the split is checked from both sides and against §4.1's
+# eight ids rather than against itself.
+
+
+def _pins_with_steps(**steps) -> dict:
+    pins = check.parse_pins(PREREG.read_text())
+    block = dict(pins["steps"])
+    block.update(steps)
+    pins = dict(pins, steps=block)
+    return pins
+
+
+def _record_with_steps(**steps) -> dict:
+    rec = _record()
+    rec["steps"] = dict(check.parse_pins(PREREG.read_text())["steps"])
+    rec["steps"].update(steps)
+    return rec
+
+
+def test_the_real_step_declaration_is_a_partition_of_the_eight():
+    """The shipped document + record split §4.1's eight, and they agree."""
+    pins = check.parse_pins(PREREG.read_text())
+    record = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    assert check.check_step_partition(pins, record) == []
+    declared = set(pins["steps"]["unconditional"]) | {
+        e["step"] for e in pins["steps"]["conditional"]}
+    assert declared == set(check.CAPSTONE_STEPS)
+
+
+def test_the_conditional_step_is_s2_3_and_says_when_it_does_not_apply():
+    """The declaration is a CONDITION, not a waiver: it names why, how it is witnessed, and where
+    the measurement lives. Removing any of the three leaves an assertion nobody can check."""
+    entry = check.parse_pins(PREREG.read_text())["steps"]["conditional"][0]
+    assert entry["step"] == "S2.3"
+    for field in check.CONDITIONAL_STEP_FIELDS:
+        assert str(entry[field]).strip(), field
+    assert check._issue_number(entry["evidence_issue"]) == 10215
+    # and the reason it is conditional is the collector's item set, cited in place
+    assert "_collect_classify_items" in entry["condition"]
+    assert "enabled=true" in entry["idle_evidence"]
+
+
+def test_a_step_dropped_from_both_lists_fails():
+    pins = _pins_with_steps(conditional=[])
+    failures = check.check_step_partition(pins, _record_with_steps(conditional=[]))
+    assert any("drops step(s) ['S2.3']" in f for f in failures), failures
+
+
+def test_a_step_declared_both_ways_fails():
+    pins = check.parse_pins(PREREG.read_text())
+    pins["steps"]["unconditional"] = list(pins["steps"]["unconditional"]) + ["S2.3"]
+    failures = check.check_step_partition(pins, _record_with_steps())
+    assert any("BOTH unconditional and conditional" in f for f in failures), failures
+
+
+def test_a_step_id_outside_the_eight_fails():
+    pins = _pins_with_steps(
+        unconditional=list(check.CAPSTONE_STEPS[:3]) + ["S4"])
+    failures = check.check_step_partition(pins, _record_with_steps())
+    assert any("not part of the epic's eight" in f for f in failures), failures
+
+
+def test_a_conditional_entry_without_its_evidence_fails():
+    pins = check.parse_pins(PREREG.read_text())
+    entry = dict(pins["steps"]["conditional"][0])
+    entry.pop("idle_evidence")
+    pins["steps"]["conditional"] = [entry]
+    failures = check.check_step_partition(pins, _record_with_steps())
+    assert any("omits 'idle_evidence'" in f for f in failures), failures
+
+
+def test_a_document_without_the_steps_block_fails():
+    """No declaration means the required step set can change without a reviewable diff."""
+    pins = dict(check.parse_pins(PREREG.read_text()))
+    pins.pop("steps")
+    failures = check.check_step_partition(pins, _record_with_steps())
+    assert any("pins.steps is empty" in f for f in failures), failures
+
+
+def test_a_record_that_diverges_from_the_document_fails():
+    """The probe freezes the RECORD, so a divergence means the gate enforces something the
+    argument never argued."""
+    rec = _record_with_steps()
+    rec["steps"]["unconditional"] = ["S0", "S1"] + list(rec["steps"]["unconditional"])
+    failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert any("steps.unconditional" in f and "can disagree" in f for f in failures), failures
+
+
+def test_a_conditional_step_without_a_record_block_fails():
+    rec = _record()
+    failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert any("carries no steps block" in f for f in failures), failures
