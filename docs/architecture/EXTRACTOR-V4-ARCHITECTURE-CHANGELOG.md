@@ -1503,7 +1503,11 @@ census does not lose a judgeable point to a full stop). The refused point's `sup
 the shared drop report (`_carry_fold_supersede` with no survivor), so it is named, not lost — `#9906`'s
 no-silent-drop rule. `_mint_endpoint` (`#2552`'s mint-before-wire path) reads the recorded refusals and
 will not re-mint one, because building the endpoint Point from the model's text undid the refusal one
-step later.
+step later — and it cuts with `_write_span` for the same reason (review cycle 15, measured: a HARD
+`[:cap]` there stored `… p95 hit 4` out of `… p95 hit 4.0 seconds` as a quote-less endpoint Point, a
+value the model never wrote, and — the stored content being the token-safe span — made a byte-identical
+operator ref miss the `n in point_ids` dedup and mint a DUPLICATE beside the point it named). One
+truncation helper for both halves, so the two strings cannot disagree.
 
 **What it does NOT enforce — and the row, not this page, is the list.** The engine is the production
 one (`_value_slots` reads `_value_bindings`, the E5/E7 contradiction engine; no second value

@@ -967,6 +967,78 @@ def test_a_whitespace_collapsed_over_cap_refusal_still_blocks_the_mint():
         [p["content"][:44] for p in result["payload"]["points"]])
 
 
+# ── 7b. the MINT's own cut, which cycle 14 left on the old hard clamp ──────
+
+#: A content whose `[:_MAX_CONTENT]` cut lands INSIDE the value and whose
+#: discarded remainder starts with an ALPHANUMERIC (`0`). That is the branch
+#: `_write_span` resolves by dropping the split token WHOLE, so the token-safe
+#: span carries no value while the HARD clamp carries `… p95 hit 4`.
+_SPLIT_VALUE_PAD = v2._MAX_CONTENT - 10
+_SPLIT_VALUE_CONTENT = "z" * _SPLIT_VALUE_PAD + " p95 hit 4.0 seconds"
+
+
+def _split_value_embed() -> dict:
+    """One point plus an operator whose `src` is that point's OWN content."""
+    return {
+        "entities": [],
+        "points": [{"content": _SPLIT_VALUE_CONTENT, "pointKind": "statement",
+                    "about_entities": [], "quote": "p95 hit 4.2 seconds"}],
+        "events": [], "operators": [{
+            "src": _SPLIT_VALUE_CONTENT,
+            "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}],
+        "chain_notes": [], "link_before_create": [],
+    }
+
+
+def test_the_MINT_cuts_at_a_TOKEN_boundary_so_it_cannot_FABRICATE_a_value():
+    """Review cycle 15, P2: the write was moved to `_write_span` and the MINT
+    was left on the hard clamp, so the module still fabricated a value.
+
+    Measured pre-fix on this shape: `_mint_endpoint` built a quote-less Point
+    whose content ended `… p95 hit 4` — a value the model never wrote, out of a
+    text whose own token-safe span carries no value at all (`… p95 hit `) — and
+    the point was written to the graph. The helper is now the module's ONE
+    truncation, so the mint cannot invent a value the write would have dropped.
+
+    Non-vacuous: the assertion names the exact fabricated string, and the mint
+    does produce it pre-fix.
+    """
+    hard = _SPLIT_VALUE_CONTENT.strip()[:v2._MAX_CONTENT]
+    # the shape is only interesting because the two cuts DIFFER:
+    assert hard.endswith("hit 4"), hard[-12:]
+    assert v2._write_span(_SPLIT_VALUE_CONTENT, v2._MAX_CONTENT) != hard
+    result = v2.execute_embed(_split_value_embed(), {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert hard not in contents, (
+        "the mint stored the HARD-clamped text — a value the model never wrote "
+        f"({hard[-12:]!r})")
+    assert all(not c.endswith("hit 4") for c in contents), [c[-14:] for c in contents]
+
+
+def test_a_ref_that_matches_the_stored_content_RESOLVES_instead_of_minting_a_DUPLICATE():
+    """Review cycle 15, P2: ONE truncation helper, or the dedup breaks.
+
+    `_mint_endpoint` keys the already-emitted check on `_norm(content)` of its
+    OWN cut (`:8907`). While the write stored the hard clamp and the mint
+    computed the same hard clamp, a byte-identical operator ref hit that dedup
+    and minted nothing. Moving the WRITE to the token-safe span without moving
+    the mint made the two strings differ, so the same ref missed the dedup and
+    minted a second, quote-less Point beside the one it was naming — measured
+    pre-fix: 3 points and an `operator endpoint minted` warning for a ref that
+    is the point's own content, verbatim.
+
+    Non-vacuous: pre-fix this reds on both the count and the mint warning.
+    """
+    result = v2.execute_embed(_split_value_embed(), {}, session_id="s_10360")
+    points = result["payload"]["points"]
+    # scoped to the SRC (the ref that IS the point's own content): the `dst`
+    # endpoint is genuinely new, so its mint is correct and unrelated here.
+    minted = [w for w in (result.get("warnings") or [])
+              if "operator endpoint minted" in w and "src named" in w]
+    assert not minted, (minted, [p["content"][-14:] for p in points])
+    assert len(points) == 1, (len(points), [p["content"][-14:] for p in points])
+
+
 # ── 8. the rule's own BOUND, and the residual it still carries ─────────────
 
 def test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded():

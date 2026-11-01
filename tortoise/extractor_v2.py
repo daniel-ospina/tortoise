@@ -4533,6 +4533,14 @@ def _write_span(text: object, cap: int) -> str:
 
     When the cut lands on a token boundary the span is ``text[:cap]`` unchanged,
     so ordinary (under-cap) pairs are byte-identical to before this helper.
+
+    ⛔ **This is the module's ONE truncation helper** — `_mint_endpoint` cuts with
+    it too (review cycle 15, measured): leaving the mint on the HARD `[:cap]` cut
+    made it fabricate a value the model never wrote (`… p95 hit 4` out of
+    `… p95 hit 4.0 seconds`, minted quote-less) AND, because the stored content
+    is now the token-safe span, made a byte-identical operator ref miss the
+    `n in point_ids` dedup and mint a DUPLICATE point. Two truncations of one
+    string cannot disagree; one helper, so they cannot.
     """
     s = str(text or "")
     if len(s) <= cap:
@@ -8844,12 +8852,22 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     minted_endpoints: list[str] = []
 
     def _mint_endpoint(ref: str, where: str) -> str:
-        content = str(ref or "").strip()[:_MAX_CONTENT]
+        # ⛔ `_write_span`, never `[:cap]` (review cycle 15, measured): a HARD cut
+        # stores the truncated prefix of a split token, so `_mint_endpoint`
+        # fabricated the value `… p95 hit 4` out of `… p95 hit 4.0 seconds` and
+        # minted it as a quote-less Point the model never wrote — the same class
+        # of module-fabricated value cycle 14 removed from the WRITE, left on the
+        # mint. It also broke dedup: the stored content is the token-safe span, so
+        # `n in point_ids` below missed a byte-identical ref and minted a
+        # DUPLICATE point beside it (measured: 3 points where the pre-cycle-14
+        # tree produced 1). One truncation helper for both halves, so the two
+        # strings cannot disagree.
+        content = _write_span(str(ref or "").strip(), _MAX_CONTENT)
         if not content:
             return ""
         # The `point_ids` clause is a WARNING fix, not a resolution fix: an
         # operator naming an already-emitted point resolves through `_resolve`
-        # before minting is ever reached, and this guard runs on the clamped
+        # before minting is ever reached, and this guard runs on the truncated
         # text. Its only reachable shape is the >cap full-vs-clamped divergence,
         # where suppressing it keeps a truthful ref from being reported as
         # "refused" (review cycle 5 measured both branches: the edge drops the
