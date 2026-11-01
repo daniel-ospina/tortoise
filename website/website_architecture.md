@@ -37,13 +37,22 @@ Host routing lives in `website/functions/_middleware.ts`:
 - **a stray authorization response is refused, not rendered or forwarded** (`?code=…`, #10088 ask 3):
   a 400 with a named error page, on BOTH hosts, and **ahead of the company-host consolidation 301s**
   — the one refusal-shaped branch that supersedes the general "consolidate to the canonical host"
-  rule, because a `Location` would carry the credential to a second URL. The **exception** is the
+  rule, because a `Location` would carry the credential to a second URL. (The one branch it does NOT
+  supersede is the company-host `/product` + `/product.html` 404, which sits above the guard and
+  forwards nothing and renders nothing, so `premiselabs.co/product?code=…` answers a bare 404 —
+  recorded, and pinned so a reordering is visible.) The **exception** is the
   surfaces whose redirects are pinned decisions — `/auth`, `/auth/*` (where `/auth/callback` is the
   one shape that actually redeems a code; its wrong-origin allow-list entry is the OPEN audit
   #8680), `/admin`, and the `APP_ONLY` pages the company host 301s to the app origin — which **skip**
   the guard and return their pinned 30x **below** it. The reason is the pinned decision, NOT
   redemption: only `/auth/callback` exchanges a code, and refusing one on the others would replace a
-  decided redirect with a 400 (the signup funnel, the operator console, a stale bookmark — #4328)
+  decided redirect with a 400 (the signup funnel, the operator console, a stale bookmark — #4328).
+  **The exemption is host-split, and only the company host has a pinned redirect to preserve:** on the
+  exact `premiselabs.co` host those shapes keep their 301 to the app origin (and its `Location` does
+  carry the code — the recorded residual); on `tortoise.*`/previews there is no middleware redirect
+  to keep, so an exempt-shaped request carrying a `code` falls through to the **backstop** at
+  `_middleware.ts:432` and is refused with the same 400 (`/signup?code=…` on the tortoise host —
+  pinned by the suite)
 - **auth surfaces redirect to the app origin — and WHICH layer does it depends on the host:**
   - the middleware's `APP_ONLY` branch (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`),
@@ -55,7 +64,11 @@ Host routing lives in `website/functions/_middleware.ts`:
     Three surfaces, two answers, and the difference is deliberate
   - on the tortoise host the other three (`/signup`, `/welcome`, `/invite-accept` + twins) are 301'd
     by the **static** `website/_redirects`, not by the middleware. Deleting those rules breaks the
-    tortoise host — the middleware does not cover it.
+    tortoise host — the middleware does not cover it **for an ordinary request**. It DOES answer
+    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:432`
+    returns the 400 before `context.next()` reaches `_redirects`, so `tortoise…/signup?code=…` is a
+    refusal, not a 301. Do not "fix" that by adding a middleware redirect for it — the backstop's
+    own comment forbids reversing the exemption that way
   A Function beats `_redirects` for inbound routing, so a route with a Function is never affected by
   a static rule; `_redirects` is what covers the paths without one
 - HSTS stamped on every middleware response (matches the API's value, #1003)
