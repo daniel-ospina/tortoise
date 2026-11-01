@@ -1018,3 +1018,41 @@ def test_a_record_leg_refusal_reaches_exit_three(monkeypatch):
                         lambda *a, **k: {"nodes": {"s1_t0": _graph_node(
                             "s1_t0", "s1")}})
     assert tpc.main(_argv()) == 3
+
+
+# ── the empty key set: an empty read, and nothing leaked ──────────────────
+#
+# `node_keys=[]` is a SUPPORTED input ("an EMPTY key set is an empty read"),
+# but its early `return` sat between `open_record` and the `try/finally` that
+# closes the connection — so the one input that reads nothing leaked a bounded
+# record connection every time it was called (#10483 review round 4, P2).
+
+def test_an_empty_key_set_reads_nothing_and_opens_no_connection(monkeypatch):
+    """Hoisted above the open: with no connection there is nothing to close."""
+    calls, _conn = _stub_record(monkeypatch)
+    from tortoise import record_serve
+
+    def _never(dsn):
+        raise AssertionError(
+            "an empty key set must not open a record connection")
+
+    monkeypatch.setattr(record_serve, "open_record", _never)
+
+    out = tpc.read_record_turns("postgresql://x", "org", "graph",
+                                node_keys=[])
+
+    assert out == {"rows_by_key": {}, "non_turn_shaped": 0}
+    assert calls == {}       # no dsn, no scope, no close — nothing happened
+
+
+def test_a_generator_key_set_is_consumed_exactly_once(monkeypatch):
+    """The emptiness decision must not consume a one-shot iterable and leave
+    the query with an empty key list (which would read nothing, silently)."""
+    calls, _conn = _stub_record(monkeypatch,
+                                rows=[_record_row_tuple("s1_t0")])
+
+    out = tpc.read_record_turns("postgresql://x", "org", "graph",
+                                node_keys=(k for k in ["s1_t0"]))
+
+    assert "s1_t0" in out["rows_by_key"]
+    assert calls["params"][2] == ["s1_t0"]
