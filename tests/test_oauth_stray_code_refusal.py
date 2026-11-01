@@ -399,7 +399,7 @@ def test_an_app_only_page_forwards_on_the_company_host_and_the_BACKSTOP_refuses_
     company-host `/signup?code=…` keeps its #4054 301 to `app.premiselabs.co`
     instead of being refused — the signup funnel. (b) On a host the
     consolidation block does not handle, the same path is exempt from the
-    PRIMARY guard and reaches the BACKSTOP at `_middleware.ts:406-417`, which
+    PRIMARY guard and reaches the BACKSTOP at `_middleware.ts:423-435`, which
     refuses it. PR #10514 review, finding 1: deleting the whole 789-character
     backstop block changed **0** of the suite's 17 cases, so the branch the
     comment credits with order-independence was deletable machinery.
