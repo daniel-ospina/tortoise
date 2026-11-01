@@ -2490,7 +2490,8 @@ def test_the_registry_lane_publishes_no_default_namespace_for_a_graph_bound_key(
     # accounting + the actor alias) — stubbed so the lane is exercised for the
     # publish alone, exactly as the sibling tests patch `_make_sdk`.
     monkeypatch.setattr(ha, "first_api_call_pending", lambda _org: False)
-    async def _noop(*_a, **_k):  # noqa: E306 - local stub
+
+    async def _noop(*_a, **_k):  # local stub
         return None
     monkeypatch.setattr(ha, "_abuse_post_auth", _noop)
     monkeypatch.setattr(sdk_mod, "_alias_actor_user_id", lambda x: x)
@@ -2555,7 +2556,7 @@ def test_the_runbook_lists_exactly_the_carry_reasons_the_code_returns():
         for sub in ast.walk(node.value):
             if not isinstance(sub, ast.Dict):
                 continue
-            for k, v in zip(sub.keys, sub.values):
+            for k, v in zip(sub.keys, sub.values, strict=True):
                 if (isinstance(k, ast.Constant) and k.value == "reason"
                         and isinstance(v, ast.Constant)
                         and isinstance(v.value, str)):
