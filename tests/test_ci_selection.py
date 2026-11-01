@@ -919,6 +919,52 @@ def test_the_9572_seed_surface_pins_are_selected_on_their_own_modules():
         )
 
 
+def test_the_10180_carry_pin_runs_on_the_module_that_carries_it():
+    """#10180 review P2: the promote carry must be pinned where it is written.
+
+    `tests/test_10180_promote_default_graph.py` was registered on `api` ONLY,
+    and its row's own standing instruction is "Re-derive if a further source
+    file joins the diff." A fifth source then did: `tortoise/onboarding/state.py`,
+    which carries the carry's two writers (`carry_onboards_edge`,
+    `copy_org_state`, commits `adbae1bce`/`41e7bc7b2`/`0c615d9ac`).
+
+    That module is an `onboarding` `SOURCE_PATTERNS` PREFIX match, and in
+    `select()` a named-surface match REPLACES the `core` fallback — so a
+    state.py-only diff selected `['onboarding']` and never the `api` arm.
+    Measured before the `onboarding` entry: 145 `test_files`, this suite
+    ABSENT. The sibling on that surface,
+    `test_9079_onboarding_declared_lane.py`, is NOT a substitute: it walks the
+    carry's STATEMENT SHAPES (§17.1 write doors), not its semantics —
+    union/no-regress, `already_present` never overwrites, `not_in_target`
+    declines, and the reported reason set — which this suite is the only pin for.
+
+    Same #1349/#2938/#3154 silent-drop class as the #9572 pin above; asserted on
+    the FILE, not on non-emptiness, because `onboarding` is selected either way.
+    Mutation check: removing the `onboarding` entry fails the second assert.
+    """
+    guard = "test_10180_promote_default_graph.py"
+    carry_module = "tortoise/onboarding/state.py"
+    assert (REPO / carry_module).exists(), f"pinned file is gone: {carry_module}"
+    r = _sel([carry_module])
+    assert "onboarding" in r["surfaces"], (
+        f"{carry_module} selects {r['surfaces']}, not onboarding — the premise "
+        "of this pin changed; re-derive it"
+    )
+    assert guard in r["test_files"], (
+        f"{carry_module} does not select {guard} — the carry's only semantic "
+        "pin sleeps on the one diff that can regress it (a copy that stops "
+        "regressing `status`, an id-only `:Subject` stub, a decline arm that "
+        f"starts writing). selected {len(r['test_files'])} files"
+    )
+    # The `api` arm is not replaced by this one: the promote verb's own modules
+    # must still reach the suite (the row that existed before the carry landed).
+    api = _sel(["tortoise/hosted_api.py"])
+    assert guard in api["test_files"], (
+        f"the api registration regressed — {guard} absent from a hosted_api.py "
+        "diff's selection"
+    )
+
+
 def test_the_4282_durability_suite_is_selected_on_the_modules_it_guards():
     """#10053 review P2: a durability invariant must run on the modules it pins.
 
