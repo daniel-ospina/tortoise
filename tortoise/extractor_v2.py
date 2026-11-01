@@ -4109,6 +4109,22 @@ _LEADING_DOT = re.compile(r"(?<![\d.])\.(\d)")
 #: The unit identities this module can compare — the VALUES of the table.
 _KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
 
+#: Units in the table above that are really a MAGNITUDE PREFIX, not a unit.
+#: `k` is SI's symbol for x1000 (https://en.wikipedia.org/wiki/Kilo-: "Kilo is a
+#: unit prefix ... denoting multiplication by one thousand"), and `_UNIT_EQUIV`
+#: ALSO carries it as a unit identity because it is a unit `_value_bindings`
+#: fuses, so `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` needs the key. One symbol,
+#: two jobs: when the two sides DISAGREE about which job it did, the pair is
+#: unjudgeable and fails OPEN — the direction every unjudgeable input here takes
+#: (#10513 review P1, measured: `20k`/`20km` and `5k QPS`/`5,000 QPS` both
+#: REFUSED before this arm existed, withholding a durable memory over a spelling
+#: the rule had no business judging).
+#: ⛔ `M`/`m` is the same collision one letter over and is NOT in this set:
+#: `_value_core` lowercases the suffix, so an uppercase `M` is indistinguishable
+#: from metres there. Stated as residual (i) in `config/v4-mechanisms.yml`
+#: rather than widened here on a guess.
+_MAGNITUDE_PREFIXES = frozenset({"k"})
+
 #: Every unit spelling this module can compare. A unit OUTSIDE this set is
 #: treated as "unit not stated" by `_value_identity_matches` (fail open), and
 #: `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` is asserted by the test file so a unit
@@ -4180,6 +4196,15 @@ def _value_identity_matches(a: tuple[str, str, str | None],
     state, and that this module knows how to spell-normalise, must be the SAME
     unit — so a minutes→hours rewrite does not fold.
     """
+    # DELIBERATELY BEFORE the numeric-core comparison: `20k`/`20km` bind cores
+    # `20`/`20`, but `5k`/`5,000` bind `5`/`5000`, so a check placed after the
+    # core comparison would rescue only half the false refusals it exists for.
+    # And DELIBERATELY NARROW: it fires only when the two sides DISAGREE about
+    # the unit, so `5k` vs `6k` — two bare-magnitude values, a real rewrite —
+    # still reaches the core comparison and still refuses. A blanket waiver of
+    # anything carrying `k` would buy the tolerance by losing that detection.
+    if a[2] != b[2] and _MAGNITUDE_PREFIXES & {a[2], b[2]}:
+        return True
     if a[0] != b[0] or a[1] != b[1]:
         return False
     # A unit the SPELLING table does not know cannot be compared mechanically:

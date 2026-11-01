@@ -91,6 +91,17 @@ BATTERY = (
     ("the drive is 20 km", "the drive is 20 mi", True, "unit rewritten 3"),
     ("the weight is 20 kg", "the weight is 20 lb", True, "unit rewritten 4"),
     ("the TTL is 20 min", "the TTL is 20 m", True, "unit rewritten 5"),
+    # A BARE MAGNITUDE PREFIX is not a unit (#10513 review P1, MEASURED: both of
+    # the first two rows REFUSED before `_MAGNITUDE_PREFIXES` existed). `k` is
+    # SI's x1000 symbol and the table ALSO carries it as a unit identity, so a
+    # pair that DISAGREES about which job it did is unjudgeable and fails OPEN.
+    ("I ran 20k", "I ran 20km", False, "magnitude prefix vs unit"),
+    ("we saw 5k QPS", "we saw 5,000 QPS", False, "magnitude prefix vs scaled"),
+    # ...and the tolerance is NARROW, which is what keeps it from being a waiver:
+    # a bare-magnitude rewrite is still refused, because both sides agree the
+    # suffix is `k` and only the number moved. Delete the narrowness (widen the
+    # arm to `a[2] in _MAGNITUDE_PREFIXES or b[2] in ...`) and THIS row reds.
+    ("the load was 5k QPS", "the load was 6k QPS", True, "magnitude rewritten"),
 )
 
 
@@ -105,6 +116,27 @@ def test_the_rule_fires_on_a_same_slot_rewrite_and_fails_open_on_form(
         # run without the original session.
         _anchor, point_value, quote_value = diverged[0]
         assert point_value and quote_value and point_value != quote_value
+
+
+def test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit():
+    """The `k` arm is a tolerance on AMBIGUITY, not a waiver on `k` (#10513 P1).
+
+    `k` is SI's x1000 prefix AND a unit identity in `_UNIT_EQUIV` (it is a unit the
+    engine fuses, so the table must carry the key). The two jobs are only
+    confusable when the two sides DISAGREE about which one it was, and that is
+    the only case the arm returns on — asserted here directly, so a future lane
+    that widens it to `a[2] in _MAGNITUDE_PREFIXES or b[2] in ...` reds this test
+    as well as the battery's `magnitude rewritten` row.
+    """
+    # The set may not name a symbol the module has no identity for: a magnitude
+    # prefix that is not also a unit identity would make this arm unreachable.
+    assert v2._MAGNITUDE_PREFIXES <= v2._KNOWN_UNITS
+    # Ambiguous unit: unjudgeable, so it fails OPEN (the refusal direction this
+    # rule must never take is the one that withholds a truthful memory).
+    assert v2._value_slot_divergence("I ran 20k", "I ran 20km") == ()
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5,000 QPS") == ()
+    # Same unit on both sides: still judged, and a moved number is a rewrite.
+    assert v2._value_slot_divergence("the load was 5k QPS", "the load was 6k QPS")
 
 
 def test_the_one_classifier_is_the_production_value_engine():

@@ -575,6 +575,24 @@ mechanisms:
       clamped: a cut value reads as a DIFFERENT value, the false-accusation
       direction this rule must never take (pinned by
       `test_an_over_long_side_is_not_tokenised_at_all`).
+      (i) A BARE MAGNITUDE PREFIX IS NOT JUDGED AGAINST A DIFFERENT UNIT, and a
+      `k`-suffix is not SCALED. `k` is SI's x1000 prefix (`5k` IS `5,000`) and it
+      is also a unit identity in `_UNIT_EQUIV`, because it is a unit
+      `_value_bindings` fuses; the single symbol serves both jobs, so where the
+      two sides disagree about the job it did the pair is unjudgeable and fails
+      OPEN (`_MAGNITUDE_PREFIXES`, `20k`/`20km`, `5k QPS`/`5,000 QPS` — both
+      REFUSED before the arm existed, and the false-refusal direction is the one
+      this rule must never take). The tolerance is narrow on purpose: `5k`/`6k`
+      agrees on the unit and is still refused. Still NOT caught, and named rather
+      than implied: a bare magnitude is never multiplied into the core, so
+      `5k`/`5,000` is TOLERATED rather than proven equal; and `M`/`m` carries the
+      same prefix-vs-unit collision one letter over while `_value_core` lowercases
+      the suffix, so an uppercase `M` (millions) is read as metres — widening the
+      set to `m` would cost the real `20m`/`20km` rewrite detection, so it is a
+      residual with a stated trade, not a silent gap. Pinned by
+      `tests/test_state_value_verbatim_10360.py::test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit`
+      and by the battery's `magnitude prefix vs unit` / `magnitude prefix vs
+      scaled` / `magnitude rewritten` rows.
       THE RENDER HALF is unchanged and stays pinned where #9775 left it.
       `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered into S1
       (`_granularity_text`), S2/S4 (`_render_master_core_only`,
