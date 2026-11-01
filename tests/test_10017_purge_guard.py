@@ -21,6 +21,7 @@ replaced with fakes that record the statements they are asked to run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -101,11 +102,28 @@ def _target(graph_name: str | None = None) -> dict:
 _TARGET_ARGV = ["--uri", "docker://:pw@127.0.0.1:1/x",
                 "--org-id", "org", "--graph-id", "graph"]
 
+#: The record DSN this "run" reads. Its FINGERPRINT is the address the armed
+#: evidence has to carry (`record.dsn`, #9548) — the only deployment handle a
+#: real `/health` body publishes.
+_DSN = "postgresql://record_app:pw@127.0.0.1:5432/tortoise"
+_FINGERPRINT = hashlib.sha256(_DSN.encode()).hexdigest()[:8]
 
-def _health(armed=True, age: float = 60) -> dict:
-    return {"record": {"armed": armed, "ok": True,
-                       "org_id": "org", "graph_id": "graph",
-                       "recorded_at": _ts(age)}}
+
+def _health(armed: bool = True, age: float = 60,
+            fingerprint: str | None = _FINGERPRINT,
+            fetched_at: object = "default") -> dict:
+    """A REAL `/health` record block (#9548) — the shape the endpoint emits.
+
+    `armed`, `dsn` (the DSN FINGERPRINT, never the value) and `fetched_at`;
+    and NO `org_id`/`graph_id`, because a multi-tenant process does not know
+    the tenant. The previous fixture built the invented shape the guard
+    demanded, which is how a requirement no real body could satisfy stayed
+    green here and refused every real deployment (#10483 review round 4, P1).
+    """
+    block = {"armed": armed, "ok": True, "dsn": fingerprint,
+             "fetched_at": (_ts(age) if fetched_at == "default"
+                            else fetched_at)}
+    return {"status": "ok", "db": {"ok": True}, "record": block}
 
 
 def _proof(session: str = "s1", age: float = 60, org: str = "org",
@@ -133,7 +151,8 @@ def _plan(clean, *, journal_path: str | None = "/tmp/journal.jsonl") -> dict:
 
 
 def _gate(plan, live=None, health=None, proof=None, confirm=None,
-          note="test target", live_target=None, approval=None):
+          note="test target", live_target=None, approval=None,
+          record_dsn: str = _DSN):
     return purge.evaluate_gate(
         plan=plan, live_report=live,
         health=_health() if health is None else health,
@@ -143,6 +162,7 @@ def _gate(plan, live=None, health=None, proof=None, confirm=None,
         confirm_digest=(plan["plan_digest"] if confirm is None else confirm),
         target_note=note,
         live_target=(plan["target"] if live_target is None else live_target),
+        record_dsn=record_dsn,
     )
 
 
@@ -654,7 +674,7 @@ def _write(tmp_path, name: str, obj) -> str:
 
 def _cli_execute(tmp_path, monkeypatch, *, report, plan=None, health=None,
                  proof=None, approval=None, note="test target",
-                 digest=None, journal_lines=1):
+                 digest=None, journal_lines=1, health_url=None):
     _patch_live_census(monkeypatch, report)
     called: list[dict] = []
     monkeypatch.setattr(purge, "_execute",
@@ -666,15 +686,18 @@ def _cli_execute(tmp_path, monkeypatch, *, report, plan=None, health=None,
         plan = _plan([_clean_with_ids("s1", ["s1_t0"])],
                      journal_path=str(journal))
     argv = [*_TARGET_ARGV, "--target-note", note, "--execute",
-            "--record-dsn", "postgresql://record",
+            "--record-dsn", _DSN,
             "--event-log-path", str(journal),
             "--plan", _write(tmp_path, "plan.json", plan),
             "--confirm-plan-digest", plan["plan_digest"] if digest is None
-            else digest,
-            "--health-json", _write(tmp_path, "health.json",
-                                    _health() if health is None else health),
-            "--restore-proof", _write(tmp_path, "proof.json",
-                                      _proof() if proof is None else proof)]
+            else digest]
+    if health_url:
+        argv += ["--health-url", health_url]
+    else:
+        argv += ["--health-json", _write(tmp_path, "health.json",
+                                         _health() if health is None else health)]
+    argv += ["--restore-proof", _write(tmp_path, "proof.json",
+                                       _proof() if proof is None else proof)]
     if approval is not False:
         argv += ["--approval-record", _write(
             tmp_path, "approval.json",
@@ -705,7 +728,7 @@ def test_execute_wiring_refuses_a_record_behind_target_before_any_delete(
     journal.write_text("{}\n", encoding="utf-8")
     plan = _plan([_clean_with_ids("s1", ids)], journal_path=str(journal))
     rc = purge.main([*_TARGET_ARGV, "--target-note", "test target", "--execute",
-                     "--record-dsn", "postgresql://record",
+                     "--record-dsn", _DSN,
                      "--event-log-path", str(journal),
                      "--plan", _write(tmp_path, "plan.json", plan),
                      "--confirm-plan-digest", plan["plan_digest"],
@@ -1037,8 +1060,9 @@ def test_armed_evidence_is_bounded_in_time(age, code):
 
 def test_armed_evidence_from_another_tenant_is_not_evidence_for_this_one():
     plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
-    foreign = {"record": {"armed": True, "org_id": "someone-else",
-                          "graph_id": "graph", "recorded_at": _ts(60)}}
+    foreign = {"record": {"armed": True, "dsn": _FINGERPRINT,
+                          "org_id": "someone-else", "graph_id": "graph",
+                          "fetched_at": _ts(60)}}
     code, message = _gate(plan, live=_report(
         clean=[_clean_with_ids("s1", ["s1_t0"])]), health=foreign)
     assert code == purge.REFUSE_TARGET_DRIFT
@@ -1047,11 +1071,11 @@ def test_armed_evidence_from_another_tenant_is_not_evidence_for_this_one():
 
 def test_armed_evidence_without_a_read_time_cannot_be_dated():
     plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
-    undated = {"record": {"armed": True, "org_id": "org", "graph_id": "graph"}}
+    undated = {"record": {"armed": True, "dsn": _FINGERPRINT}}
     code, message = _gate(plan, live=_report(
         clean=[_clean_with_ids("s1", ["s1_t0"])]), health=undated)
-    assert code == purge.REFUSE_RECORD_NOT_ARMED
-    assert "recorded_at" in message
+    assert code == purge.REFUSE_ARMED_EVIDENCE_STALE
+    assert "fetched_at" in message and "--health-url" in message
 
 
 def test_a_plan_without_armed_evidence_cannot_authorise_a_delete():
@@ -1100,3 +1124,146 @@ def test_every_flag_the_docstring_names_exists_in_the_parser():
              if f not in _NON_FLAGS}
     assert named <= known, named - known
     assert "no `--dry-run` flag" in (purge.__doc__ or "")
+
+
+# ── round 4: the ARMED evidence must be satisfiable by the REAL /health ──
+#
+# The guard demanded `org_id`, `graph_id` and `recorded_at` INSIDE the body.
+# `_record_health()` (tortoise/hosted_api.py) emits none of the first two — a
+# multi-tenant process does not know the tenant — and published no read
+# instant, so every real body was refused and the only passing input was a
+# hand-written file. The ADDRESS is `record.dsn` (the fingerprint of the record
+# DSN the deployment is armed with) and the read instant is the endpoint's own
+# `fetched_at` or this run's `read_at`.
+
+def test_a_real_health_body_satisfies_the_armed_precondition():
+    """The body the deployment actually serves must PASS — the defect was that
+    it could not, which left hand-authoring as the only passing input."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    body = _health()
+    # The shape the endpoint emits: armed + the DSN fingerprint + fetched_at,
+    # and NO tenant (a multi-tenant deployment serves several).
+    assert body["record"]["armed"] is True
+    assert body["record"]["dsn"] == _FINGERPRINT
+    assert "org_id" not in body["record"] and "graph_id" not in body["record"]
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), health=body)
+    assert code == "", message
+    assert "every precondition asserted" in message
+
+
+def test_armed_evidence_is_bound_to_the_record_this_run_reads():
+    """The address is the RECORD, not the tenant: two records can serve one
+    graph, so a body armed with another DSN proves nothing about this one."""
+    other_fingerprint = hashlib.sha256(b"postgresql://other").hexdigest()[:8]
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        health=_health(fingerprint=other_fingerprint))
+    assert code == purge.REFUSE_TARGET_DRIFT
+    assert other_fingerprint in message and _FINGERPRINT in message
+
+
+def test_an_armed_body_that_names_no_record_fingerprint_is_not_evidence():
+    """The invented shape (tenant + armed, no `dsn`) is exactly what an
+    operator had to write by hand to get past the old check."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    invented = {"record": {"armed": True, "org_id": "org", "graph_id": "graph",
+                           "fetched_at": _ts(60)}}
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), health=invented)
+    assert code == purge.REFUSE_RECORD_NOT_ARMED
+    assert "record.dsn" in message
+
+
+def test_the_live_health_read_stamps_its_own_instant_and_drops_credentials(
+        monkeypatch):
+    """`--health-url` makes the arming fact and its AGE a measurement: the read
+    instant is ours, and the URL's userinfo never reaches the plan artefact
+    (the same credential leak the target block already refuses)."""
+    payload = _health()
+    del payload["record"]["fetched_at"]        # nothing from the producer
+
+    class _Response:
+        def read(self):
+            return json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda url, timeout=None: _Response())
+    body = purge._fetch_health("https://user:SEKRIT@tortoise.example/health")
+
+    assert purge._age_seconds(body["read_at"]) is not None   # stamped NOW
+    assert body["health_url"] == "tortoise.example"
+    assert "SEKRIT" not in json.dumps(body)
+
+
+def test_execute_wiring_reads_the_health_from_the_deployment_when_given_a_url(
+        tmp_path, monkeypatch):
+    """The strong path through `main`: no operator-authored file at all."""
+    seen: list[str] = []
+
+    def _fetch(url, **_kwargs):
+        seen.append(url)
+        body = _health()
+        del body["record"]["fetched_at"]      # the live read supplies the age
+        body["read_at"] = _ts(1)
+        return body
+
+    monkeypatch.setattr(purge, "_fetch_health", _fetch)
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        health_url="https://tortoise.example/health")
+    assert rc == 0
+    assert len(called) == 1
+    assert seen == ["https://tortoise.example/health"]
+
+
+def test_a_health_url_that_cannot_be_read_is_exit_three_not_a_refusal(
+        tmp_path, monkeypatch, capsys):
+    """An unreadable deployment is NOT "unarmed": that would be a different,
+    false fact. Exit 3, the unreadable-side code."""
+    def _boom(url, **_kwargs):
+        raise purge._HealthUnreadable("URLError: connection refused")
+
+    monkeypatch.setattr(purge, "_fetch_health", _boom)
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        health_url="https://down.example/health")
+    assert rc == 3
+    assert called == []                      # nothing was ever deleted
+    assert "ARMED" in capsys.readouterr().err
+
+
+def test_both_health_sources_at_once_is_a_usage_error(tmp_path, capsys):
+    """Two sources for one fact: refuse rather than silently pick one."""
+    argv = [*_TARGET_ARGV, "--target-note", "t",
+            "--census-json", _write(tmp_path, "c.json", _report()),
+            "--health-json", _write(tmp_path, "h.json", _health()),
+            "--health-url", "https://tortoise.example/health"]
+    assert purge.main(argv) == 1
+    assert "not both" in capsys.readouterr().err
+
+
+def test_the_preview_closing_line_names_every_flag_execute_requires(tmp_path,
+                                                                   capsys):
+    """An operator following the preview's own last line was refused
+    `no-approval`: `--approval-record` was named nowhere in the output
+    (#10483 review round 4, P2)."""
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t",
+                     "--census-json", _write(tmp_path, "c.json", _report()),
+                     "--plan-out", str(tmp_path / "plan.json")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    closing = [line for line in out.splitlines() if line.startswith("dry run")]
+    assert closing, out
+    for flag in ("--execute", "--approval-record", "--health-url",
+                 "--restore-proof"):
+        assert flag in closing[0], (flag, closing[0])

@@ -521,6 +521,20 @@ def read_record_turns(record_dsn: str, org_id: str,
     rather than through a second statement of the record query. `None` (the
     census's own call) reads the whole tenant, unchanged.
     """
+    # ⛔ AN EMPTY KEY SET IS AN EMPTY READ, AND IT COSTS NOTHING — not even a
+    # connection. This decision sat BELOW `open_record` and returned past the
+    # `try/finally` that closes it, so the one supported input that reads
+    # nothing leaked a bounded record connection every time it was called
+    # (#10483 review round 4, P2). Hoisted above the open it needs: with no
+    # connection there is nothing to close, nothing to tenant-scope, and no
+    # schema to assert about a page of rows that will never be fetched.
+    # Normalised ONCE here, so a generator argument cannot be consumed by the
+    # emptiness test and then read back as empty by the query.
+    keys: list[str] | None = None
+    if node_keys is not None:
+        keys = [str(k) for k in node_keys]
+        if not keys:
+            return {"rows_by_key": {}, "non_turn_shaped": 0}
     try:
         import psycopg2  # noqa: F401 - availability probe, record's own driver
     except ImportError as exc:
@@ -542,12 +556,7 @@ def read_record_turns(record_dsn: str, org_id: str,
             f"the record could not be opened ({type(exc).__name__}: {exc}) — "
             "an absence is NOT established") from exc
     sql, params = _RECORD_TURNS_SQL, (org_id, graph_id)
-    if node_keys is not None:
-        keys = [str(k) for k in node_keys]
-        if not keys:
-            # An EMPTY key set is an empty read — never a whole-tenant read
-            # that a caller could mistake for "nothing was asked".
-            return {"rows_by_key": {}, "non_turn_shaped": 0}
+    if keys is not None:
         sql = _RECORD_TURNS_SQL + " AND node_key = ANY(%s)"
         params = (org_id, graph_id, keys)
     try:

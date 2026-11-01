@@ -5731,6 +5731,15 @@ def _record_health() -> dict:
         publishing it for a read that failed would render a broken safety check
         as a pass — the same fail-open shape as an unread counter, one field
         over (#9548 review P2).
+      * ``fetched_at`` — WHEN this block was read, ISO-8601 UTC. It exists
+        because the block is EVIDENCE that is meant to be kept: #10017's purge
+        guard refuses to delete a turn the record cannot serve back, and one of
+        its preconditions is "the record is armed" (``/health`` reports it).
+        A captured body with no read instant satisfies that precondition for
+        ever, so the age has to be a fact of the artefact. ⚠️ It is the only
+        address-adjacent fact available: the block states the record's ``dsn``
+        FINGERPRINT and cannot state the tenant, because a multi-tenant process
+        serves several.
 
     ``ok`` is False when the value was SET and refused, when the counters could
     not be read, and when the tenancy resolution could not be read — a
@@ -5762,6 +5771,7 @@ def _record_health() -> dict:
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
                 "counters_error": reason, "tenancy_error": reason,
+                "fetched_at": datetime.now(UTC).isoformat(),
                 "error": reason}
     # NOTE the shape: keys are assigned, never `**counters`-spread. A spread
     # placed after `"error": None` silently OVERWROTE the record-level error
@@ -5778,6 +5788,14 @@ def _record_health() -> dict:
         "counters_error": None,
         "tenancy_error": None,
         "error": None,
+        # WHEN this block was read. A consumer that keeps the body (an operator
+        # capturing the arming evidence for a destructive run, #10017's purge
+        # guard) otherwise holds only the capturer's word for the age of the
+        # claim, and an artefact with no age satisfies its reader for ever. The
+        # endpoint can state this one fact; it CANNOT state the tenant, which is
+        # why the purge guard binds the record by `dsn` and not by org/graph
+        # (#10483 review round 4, P1).
+        "fetched_at": datetime.now(UTC).isoformat(),
     }
     try:
         block["record_write_failures"] = record_write_failure_counts()

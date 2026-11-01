@@ -152,7 +152,7 @@ USAGE
         --uri '<target FalkorDB URI>' --graph-name <graph> \
         --record-dsn "$TORTOISE_RECORD_DSN" \
         --org-id <org> --graph-id <graph> \
-        --health-json /tmp/health.json \
+        --health-url https://<the deployment's own host>/health \
         --event-log-path '<the JSONL journal a rebuild of THIS graph replays>' \
         --target-note 'prod: tortoise-y4mjjq, approved by <owner> <date>' \
         --plan-out /tmp/purge-plan.json [--json /tmp/census.json]
@@ -168,20 +168,41 @@ USAGE
     python tools/purge_legacy_turns.py --execute --plan /tmp/purge-plan.json \
         --confirm-plan-digest <the digest the plan states> \
         --approval-record /tmp/approval.json \
-        --restore-proof /tmp/restore-proof.json --health-json /tmp/health.json \
+        --restore-proof /tmp/restore-proof.json \
+        --health-url https://<the deployment's own host>/health \
         --event-log-path '<the same journal the plan names>' \
         ... (the same target flags, re-derived live)
 
 EVIDENCE HAS AN AGE AND AN ADDRESS
 =================================
-`--health-json` and `--restore-proof` are CALLER-SUPPLIED artefacts, so each
+`--health-url`/`--health-json` and `--restore-proof` are both EVIDENCE, so each
 must say (a) WHEN it was read and (b) WHICH deployment it describes, or it is
 not evidence for this run:
 
-  * `/health` — `record.armed` must be the boolean `true`; the artefact must
-    state `org_id`, `graph_id` and `recorded_at`, the tenant must equal the
-    live target's, and the read must be at most `_HEALTH_MAX_AGE_SECONDS` old
-    (`REFUSE_ARMED_EVIDENCE_STALE`; a file from whenever the record was last
+  * `/health` — TWO ways in, and they are not equally strong:
+
+    - `--health-url` — THIS RUN reads the deployment's own `/health` and
+      stamps `read_at` with its own clock. Preferred for `--execute`: the
+      arming fact and its age are then a measurement, not a claim.
+    - `--health-json` — a captured body. It carries the deployment's own
+      `fetched_at` (#9548 added it for exactly this reader); a capture that
+      states no instant at all (a body saved before that field existed) is
+      refused `REFUSE_ARMED_EVIDENCE_STALE` — re-read the endpoint, or pass
+      `--health-url` and let this run read it.
+
+    Either way `record.armed` must be the boolean `true`, and the body must
+    state `record.dsn` — the fingerprint of the record DSN the deployment is
+    armed with — which must be the fingerprint of the DSN this run reads and
+    deletes around (`REFUSE_TARGET_DRIFT`). That fingerprint is the ADDRESS a
+    real `/health` actually carries: the endpoint does not know the tenant (a
+    multi-tenant deployment serves several) and publishes no other identity, so
+    a guard that demanded `org_id`/`graph_id` from it refused every real body
+    and could only ever be satisfied by a hand-written file (#10483 review
+    round 4, P1). Those two fields are still honoured when a collector adds
+    them — and must match the live target when present.
+
+    The read must be at most `_HEALTH_MAX_AGE_SECONDS` old
+    (`REFUSE_ARMED_EVIDENCE_STALE`; a body from whenever the record was last
     armed would otherwise satisfy precondition 1 forever).
   * restore proof — `scratch_session` (one this plan purges),
     `served_from_record: true`, `org_id`, `graph_id`, `graph`/`uri_host`, and
@@ -192,8 +213,9 @@ The two bounds are not measured safe intervals — they exist so that "when was
 this read, and about what?" has an answer. Raising one is a one-line diff
 someone reviews; omitting the check is what let a foreign file pass.
 
-A plan generated WITHOUT `--health-json` records no armed evidence, and then
-cannot authorise an execute even if a fresh `/health` passes today
+A plan generated WITHOUT `--health-url`/`--health-json` records no armed
+evidence, and then cannot authorise an execute even if a fresh `/health` passes
+today
 (`REFUSE_NO_ARMED_EVIDENCE`): what the human approved is the artefact set, and
 an unarmed record at approval time is not repaired by arming it afterwards.
 
@@ -481,7 +503,8 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
 def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                   health: dict | None, restore_proof: dict | None,
                   approval: dict | None, confirm_digest: str,
-                  target_note: str, live_target: dict) -> tuple[str, str]:
+                  target_note: str, live_target: dict,
+                  record_dsn: str = "") -> tuple[str, str]:
     """The `--execute` gate. Pure: no I/O, no deletion, one verdict.
 
     Returns `(refusal_code, message)` where an EMPTY code means "every
@@ -522,7 +545,8 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                 "no live target was supplied, so the plan cannot be compared "
                 "to the deployment this run would mutate — an unverified "
                 "target is not the approved target")
-    armed_code, armed_problem = _armed_evidence_problem(health, live_target)
+    armed_code, armed_problem = _armed_evidence_problem(
+        health, live_target, record_dsn=record_dsn)
     if armed_code:
         return (armed_code, armed_problem)
     if not restore_proof:
@@ -572,17 +596,24 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                 "the plan records no armed evidence — it was generated "
                 "without a /health artefact, so the record was not proven "
                 "ARMED when it was approved. Regenerate it with "
-                "--health-json and re-approve")
-    plan_armed_identity = _evidence_identity(approved_armed)
-    live_armed_identity = _evidence_identity(health)
-    armed_drift = [k for k in ("org_id", "graph_id")
-                   if plan_armed_identity.get(k) != live_armed_identity.get(k)]
+                "--health-url and re-approve")
+    plan_armed_address = _evidence_address(approved_armed)
+    if not plan_armed_address.get("record_dsn_fingerprint"):
+        return (REFUSE_NO_ARMED_EVIDENCE,
+                "the plan's approved armed evidence names no record "
+                "fingerprint (record.dsn), so it cannot be tied to the record "
+                "this run deletes around — regenerate the plan against the "
+                "deployment's own /health and re-approve")
+    live_armed_address = _evidence_address(health)
+    armed_drift = [k for k in ("record_dsn_fingerprint", "org_id", "graph_id")
+                   if k in plan_armed_address and k in live_armed_address
+                   and plan_armed_address.get(k) != live_armed_address.get(k)]
     if armed_drift:
         return (REFUSE_TARGET_DRIFT,
                 "the ARMED evidence in this run was read from a DIFFERENT "
                 "deployment than the one the plan was approved against: "
-                + ", ".join(f"{k} (plan {plan_armed_identity.get(k)!r} vs "
-                            f"live {live_armed_identity.get(k)!r})"
+                + ", ".join(f"{k} (plan {plan_armed_address.get(k)!r} vs "
+                            f"live {live_armed_address.get(k)!r})"
                             for k in armed_drift))
 
     approved = plan.get("plan_digest") or ""
@@ -783,63 +814,132 @@ def _age_seconds(value) -> float | None:
     return (datetime.now(UTC) - stamp).total_seconds()
 
 
-def _evidence_identity(artifact) -> dict:
-    """The deployment a caller-supplied artefact describes.
+def _evidence_address(artifact) -> dict:
+    """The deployment a `/health` body says it is, as far as it CAN say.
 
-    A `/health` payload may nest its facts under `target` or `record`, or carry
-    them at the top level; the FIRST block that names an `org_id` wins, so the
-    identity is read from one place per artefact — never merged from several,
-    which would let two half-blind artefacts add up to a whole one.
+    `record.dsn` is the handle the endpoint really publishes: the 8-hex
+    fingerprint of the record DSN the process is armed with (#9548 /
+    `record_writer.dsn_fingerprint`), which names the record without disclosing
+    it. `org_id`/`graph_id` are read too, but OPTIONALLY — a multi-tenant
+    deployment does not know the tenant, so demanding those two fields refused
+    every real body and could only be satisfied by a hand-written file (#10483
+    review round 4, P1).
     """
     if not isinstance(artifact, dict):
         return {}
-    for block in (artifact.get("target"), artifact.get("record"), artifact):
-        if isinstance(block, dict) and block.get("org_id"):
-            return {k: block.get(k)
-                    for k in ("org_id", "graph_id", "recorded_at")}
-    return {}
+    block = (artifact.get("record")
+             if isinstance(artifact.get("record"), dict) else artifact)
+    address = {"record_dsn_fingerprint": block.get("dsn")}
+    for key in ("org_id", "graph_id"):
+        if block.get(key):
+            address[key] = block.get(key)
+    return address
 
 
-def _armed_evidence_problem(health, live_target: dict) -> tuple[str, str]:
+def _read_instant(artifact) -> object:
+    """WHEN the artefact was read: this run's own stamp first, then its claim.
+
+    `read_at` is written by this tool when it fetches `/health` itself
+    (`--health-url`), so it cannot predate the run. `fetched_at` is the
+    endpoint's own serve time (added in #9548 for exactly this reader) and is
+    what a captured body carries; `recorded_at` is accepted for a collector
+    that says it that way.
+    """
+    if not isinstance(artifact, dict):
+        return None
+    blocks = [artifact]
+    for key in ("record", "target"):
+        if isinstance(artifact.get(key), dict):
+            blocks.append(artifact[key])
+    for name in ("read_at", "fetched_at", "recorded_at"):
+        for block in blocks:
+            if block.get(name):
+                return block.get(name)
+    return None
+
+
+def _record_fingerprint(dsn: str) -> str | None:
+    """The seam's OWN `dsn_fingerprint`, or `None` when it cannot be imported.
+
+    Imported, never re-derived: its docstring says the copy that drifts is the
+    one that prints a DSN.
+    """
+    if not dsn:
+        return None
+    try:
+        from tortoise.record_writer import dsn_fingerprint
+    except Exception:  # pragma: no cover - the record seam always imports
+        return None
+    try:
+        return dsn_fingerprint(dsn)
+    except Exception:  # pragma: no cover - a gate never crashes on a string
+        return None
+
+
+def _armed_evidence_problem(health, live_target: dict, *,
+                           record_dsn: str = "") -> tuple[str, str]:
     """The ARMED precondition, with its AGE and its ADDRESS (#10483, P1).
 
-    Returns `("", "")` when the evidence stands. Three defects are refused,
-    each with its own code: not armed at all, armed for some OTHER deployment,
-    and armed so long ago that it no longer describes the record this run would
-    delete from. A caller-supplied file has no other way to be tied to a run.
+    Returns `("", "")` when the evidence stands. Each defect has its own code:
+    not armed at all, armed for some OTHER record, and armed so long ago that it
+    no longer describes the record this run would delete from.
+
+    ⛔ THE ADDRESS IS `record.dsn`, NOT THE TENANT. `record.dsn` is the
+    fingerprint of the record DSN the deployment is armed with; it must be the
+    fingerprint of the DSN this run reads and deletes around. That binds the
+    arming evidence to the RECORD, which `plan["target"]` cannot: two
+    deployments can target one graph, and one record can serve several graphs.
+    The previous requirement (`org_id`/`graph_id` INSIDE the body) was a
+    category error — `/health` serves a multi-tenant process and carries
+    neither — so it refused every real body and left hand-authoring as the only
+    passing input (#10483 review round 4, P1).
     """
     if not isinstance(health, dict):
         return (REFUSE_RECORD_NOT_ARMED,
-                "no --health-json artefact was supplied, so the record is not "
-                "proven ARMED for this deployment (#9548 / PR #9989). An "
-                "unarmed record holds no turns, so the delete would have no "
-                "surviving copy")
+                "no /health evidence was supplied (--health-url or "
+                "--health-json), so the record is not proven ARMED for this "
+                "deployment (#9548 / PR #9989). An unarmed record holds no "
+                "turns, so the delete would have no surviving copy")
     if not _health_armed(health):
         return (REFUSE_RECORD_NOT_ARMED,
                 "the /health artefact does not report record.armed as the "
                 "boolean true (#9548 / PR #9989). An unarmed record holds no "
                 "turns, so the delete would have no surviving copy")
-    identity = _evidence_identity(health)
-    missing = [k for k in ("org_id", "graph_id", "recorded_at")
-               if not identity.get(k)]
-    if missing:
+    address = _evidence_address(health)
+    fingerprint = address.get("record_dsn_fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint.strip():
         return (REFUSE_RECORD_NOT_ARMED,
-                "the /health artefact does not state "
-                f"{', '.join(missing)} — without the tenant and the read time "
-                "it cannot be tied to the deployment this run mutates, and a "
-                "caller-supplied file is otherwise evidence for any target")
+                "the /health artefact is armed but does not state record.dsn "
+                "— the fingerprint of the record DSN it is armed with — so "
+                "nothing ties it to the record this run reads and deletes "
+                "around. Re-read /health for this target")
+    expected = _record_fingerprint(record_dsn)
+    if expected is not None and fingerprint.strip() != expected:
+        return (REFUSE_TARGET_DRIFT,
+                "the ARMED evidence describes a DIFFERENT record: /health is "
+                f"armed with dsn={fingerprint.strip()}, and this run reads "
+                f"dsn={expected}. Passing the second would delete around a "
+                "record nobody proved armed — pass the DSN the deployment is "
+                "armed with")
     drift = [k for k in ("org_id", "graph_id")
-             if identity.get(k) != live_target.get(k)]
+             if address.get(k) and address.get(k) != live_target.get(k)]
     if drift:
         return (REFUSE_TARGET_DRIFT,
                 "the ARMED evidence was read from a DIFFERENT deployment: "
-                + ", ".join(f"{k} (health {identity.get(k)!r} vs live "
+                + ", ".join(f"{k} (health {address.get(k)!r} vs live "
                             f"{live_target.get(k)!r})" for k in drift))
-    age = _age_seconds(identity.get("recorded_at"))
+    instant = _read_instant(health)
+    if instant is None:
+        return (REFUSE_ARMED_EVIDENCE_STALE,
+                "the /health artefact states no read instant (fetched_at or "
+                "recorded_at), so when it was read is not established and it "
+                "would describe any run for ever. Re-read /health (it stamps "
+                "fetched_at), or pass --health-url so this run reads it")
+    age = _age_seconds(instant)
     if age is None:
         return (REFUSE_ARMED_EVIDENCE_STALE,
-                "the /health artefact's recorded_at is not an ISO-8601 "
-                "timestamp, so its age is not established")
+                f"the /health artefact's read instant ({instant!r}) is not an "
+                "ISO-8601 timestamp, so its age is not established")
     if age < -_CLOCK_SKEW_TOLERANCE_SECONDS:
         return (REFUSE_ARMED_EVIDENCE_STALE,
                 f"the /health artefact is dated {abs(age):.0f}s in the FUTURE "
@@ -936,6 +1036,38 @@ def _plan_problem(plan) -> str:
             return (f"purge.sessions[{index}] ({session}) has no `ids` list of "
                     "strings — the digest and the delete both dereference it")
     return ""
+
+
+class _HealthUnreadable(Exception):
+    """`--health-url` could not be read — exit 3, an absence is NOT established."""
+
+
+def _fetch_health(url: str, *, timeout: float = 10.0) -> dict:
+    """Read the deployment's own `/health` AT RUN TIME and stamp the read.
+
+    This is the strong form of precondition (a): the arming fact comes from the
+    deployment, and the age is this run's own clock (`read_at`), not something
+    the operator wrote. A captured body (`--health-json`) can only carry the
+    capturer's word for both — which is why a file is the fallback and this is
+    the documented path for `--execute`.
+
+    Only `host[:port]` is published onto the evidence (`health_url`): a URL can
+    carry credentials in its userinfo, and a plan artefact is shared — the same
+    leak the target block already refuses (#10483 review round 2, P1-B).
+    """
+    import urllib.request
+    from datetime import UTC, datetime
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise _HealthUnreadable(f"{type(exc).__name__}: {exc}") from exc
+    if not isinstance(body, dict):
+        raise _HealthUnreadable(
+            f"the response was a {type(body).__name__}, not a JSON object")
+    body["read_at"] = datetime.now(UTC).isoformat()
+    body["health_url"] = _uri_host(url)
+    return body
 
 
 def _load_json(path: str | None) -> dict | None:
@@ -1061,7 +1193,14 @@ def _build_parser() -> _UsageParser:
                         help="REQUIRED: name the deployment this plan is for "
                              "(recorded verbatim in the plan)")
     parser.add_argument("--health-json", default=None,
-                        help="a /health artefact (record.armed evidence)")
+                        help="a CAPTURED /health body (record.armed evidence) — "
+                             "it must state when it was read (fetched_at / "
+                             "recorded_at). Preferred for --execute: "
+                             "--health-url, which this run reads live")
+    parser.add_argument("--health-url", default=None,
+                        help="read the deployment's own /health at RUN time "
+                             "(strongest armed-record evidence: the fact and "
+                             "its age are measured by this run)")
     parser.add_argument("--restore-proof", default=None,
                         help="a restore-proof artefact (issue precondition 3)")
     parser.add_argument("--approval-record", default=None,
@@ -1172,16 +1311,33 @@ def main(argv: list[str] | None = None) -> int:
             f"Nothing was deleted and no plan was written.\n")
         return 3
 
+    if args.health_url and args.health_json:
+        sys.stderr.write(
+            "purge_legacy_turns: --health-url and --health-json are two "
+            "sources for ONE fact — pass the live one (--health-url) or the "
+            "captured one, not both. Nothing was read and nothing was "
+            "deleted.\n")
+        return 1
     try:
-        health = _load_json(args.health_json)
+        health = (_fetch_health(args.health_url) if args.health_url
+                  else _load_json(args.health_json))
         restore_proof = _load_json(args.restore_proof)
         approval = _load_json(args.approval_record)
+    except _HealthUnreadable as exc:
+        # A deployment whose own /health cannot be read has NOT shown its record
+        # armed: exit 3, never "unarmed" (which would be a different, false
+        # fact) and never a pass.
+        sys.stderr.write(
+            f"purge_legacy_turns: --health-url could not be read ({exc}) — "
+            f"an absence is NOT established, so the record is not proven "
+            f"ARMED. Nothing was deleted.\n")
+        return 3
     except Exception as exc:
         # A mistyped path or malformed JSON is a CONFIG fault: exit 3 (a side
         # could not be read), never an uncaught traceback a caller reads as a
         # crash.
         sys.stderr.write(
-            f"purge_legacy_turns: --health-json/--restore-proof/"
+            f"purge_legacy_turns: --health-json/--health-url/--restore-proof/"
             f"--approval-record could not be read ({type(exc).__name__}: "
             f"{exc}) — an absence is NOT established.\n")
         return 3
@@ -1199,7 +1355,8 @@ def main(argv: list[str] | None = None) -> int:
             plan=plan, live_report=report, health=health,
             restore_proof=restore_proof, approval=approval,
             confirm_digest=args.confirm_plan_digest or "",
-            target_note=args.target_note, live_target=target)
+            target_note=args.target_note, live_target=target,
+            record_dsn=record_dsn)
         if code:
             sys.stderr.write(f"purge_legacy_turns: REFUSED {code}: "
                              f"{message}\nNothing was deleted.\n")
@@ -1253,8 +1410,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"journal    : "
           f"{plan['journal']['path'] or '<NOT NAMED — --execute will refuse>'}")
     print("dry run    : NOTHING WAS DELETED. This is a preview; the purge "
-          "requires --execute with the digest above, a restore proof and an "
-          "armed-record artefact.")
+          "requires --execute with the digest above, --restore-proof, an "
+          "armed-record artefact (--health-url) and an out-of-band approval "
+          "(--approval-record, kept outside the plan file).")
     return 0
 
 
