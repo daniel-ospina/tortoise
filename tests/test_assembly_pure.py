@@ -3470,7 +3470,14 @@ def test_render_nary_dropped_subject_keeps_the_chain_not_the_binary_claim():
         "couch came first on 2026-08-10, then dog bed on 2026-08-14"), \
         f"a dropped subject must keep the chain, not the binary claim: " \
         f"{chain[0]['content']!r}"
-    assert "phantom shelf" not in chain[0]["content"]
+    # …and the dropped subject contributes NOTHING AT ALL: not the chain line
+    # and not a section of its own either. Both the chain and the sections
+    # below iterate `order`, which excludes an oid with no rows and no state
+    # name — so "carried by its own section" would be a false claim, and this
+    # pins the true one (no fabricated row, no section, no mention).
+    assert not [h for h in hits if "phantom shelf" in str(h.get("content"))], \
+        hits
+    assert len(hits) == 3, hits        # chain + one section per SURVIVOR
 
 
 def test_render_nary_first_day_group_of_three_says_all_three():

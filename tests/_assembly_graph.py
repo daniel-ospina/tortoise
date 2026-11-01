@@ -479,6 +479,11 @@ def build_nary_ordering_substrate(sdk: TortoiseSDK,
     record that this engine's tied-row order is authoring-dependent, which is
     exactly why the crowd is not offered here as an admission mechanism.
 
+    Both halves of that statement are PINNED, not narrated, in
+    ``test_nary_ordering_chain_admits_every_gold_vs_legacy``: the A arm's 3/3
+    admission and the fired block's zero crowd rows. If either moves, the
+    test fails and this docstring must be revised with it.
+
     The crowd rows are deliberately NOT aboutObject-linked: they are ordinary
     chatter, so they cannot enter any subject slice and cannot alter the
     chain's anchors (each subject's earliest dated row stays its gold, and

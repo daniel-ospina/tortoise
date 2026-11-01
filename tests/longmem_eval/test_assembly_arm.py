@@ -438,6 +438,31 @@ def test_nary_ordering_chain_admits_every_gold_vs_legacy(sdk, monkeypatch):
         f"gold admission regressed against the A arm: B={b_golds} "
         f"A={a_golds}")
 
+    # (5) THE SUBSTRATE'S OWN GEOMETRY, PINNED — the two claims its docstring
+    # makes are checked here rather than narrated, so a future drift in either
+    # direction FAILS instead of leaving two contradictory sentences in the
+    # tree:
+    #   (a) ADMISSION PARITY is the measured geometry: legacy's entity-anchored
+    #       leg reaches all three golds even with the window full of crowd rows.
+    #       This pins a MEASUREMENT, not an engine invariant — if legacy ever
+    #       becomes genuinely starved, this fails and the substrate's docstring
+    #       ("measures PRECISION, not admission") must be revisited with it,
+    #       which is exactly the arbitration the docstring could not do alone.
+    #   (b) PRECISION is what the arm buys: the fired block carries ZERO crowd
+    #       rows, against the A window's crowd-filled one.
+    assert len(a_golds) == 3, (
+        f"the substrate's stated geometry says BOTH arms admit 3/3; legacy "
+        f"admitted {a_golds}. If legacy is now starved, this substrate "
+        f"measures ADMISSION and its docstring must say so.")
+    b_chunks = ag.evidence_chunks(aa.evidence)
+    b_crowd = [c for c in b_chunks if d["crowd_marker"] in c]
+    assert not b_crowd, (
+        f"the N-ary fired block must carry ZERO crowd rows; got "
+        f"{len(b_crowd)} of {len(b_chunks)}: {b_crowd[:2]}")
+    assert len(b_chunks) < len(a_chunks), (
+        f"the precision claim needs the fired block smaller than the legacy "
+        f"window: B={len(b_chunks)} A={len(a_chunks)}")
+
     # (5) THE CHAIN ITSELF — one line, earliest first, every subject named,
     #     the three dates strictly ascending in the order stated.
     chain = next((ln for ln in aa.evidence.splitlines()

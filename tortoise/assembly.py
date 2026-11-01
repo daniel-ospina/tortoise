@@ -3053,12 +3053,17 @@ def synthesize_hits(
             # a 3-way question rendered as "... came first" states a two-subject
             # winner the question never asked for.
             # WHAT SHIPS (state it as it is, not as stronger than it is): the
-            # chain is stated over the subjects that REACHED the slices, so
-            # `came first` is scoped to that surviving set and the dropped
-            # subject is carried by its own section below (no fabricated row,
-            # no claim about it). Only when the chain cannot be stated at all
-            # — a surviving subject with no dated row — does this emit
-            # nothing and leave the evidence entirely to the sections.
+            # chain is stated over the subjects that REACHED the slices. Both
+            # the chain and the per-subject sections below iterate `order`,
+            # which holds only an oid with a timeline row or a state name — so
+            # `came first` is scoped to that surviving set, and a subject
+            # dropped for having no rows contributes NOTHING AT ALL: no
+            # fabricated row, no section of its own, and no claim about it.
+            # (A second term deduped onto an already-present oid is carried by
+            # that oid's single section.) The chain is withheld — nothing
+            # emitted here, all evidence left to the sections — only when a
+            # SURVIVING subject has no dated row, since a chain missing a
+            # member states a confidently wrong order.
             # Chain over the SAME dated spine (earliest dated row per
             # subject — the binary path's own anchor). The FULL order is
             # claimed ONLY when EVERY subject is dated: a chain missing a
