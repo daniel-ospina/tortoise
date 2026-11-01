@@ -132,6 +132,15 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+#: Imported AFTER the sys.path fix above (this file runs as a script from ``probes/``), and through
+#: a FUNCTION so the import sits where the path is already correct rather than mid-module: a
+#: module-level ``from tortoise...`` here is E402, and ruff runs over this file in CI.
+def _derivation_label_classes() -> frozenset[str]:
+    """The LINK-anchored derivation classes, from the writer's own constant (#9736)."""
+    from tortoise.projection.edges import _DERIVATION_REFERENCES_LABELS
+
+    return frozenset(_DERIVATION_REFERENCES_LABELS)
+
 
 def _sdk_line(code: str) -> int:
     """The ONE line of ``tortoise/sdk.py`` carrying ``code`` — READ, never typed.
@@ -201,9 +210,17 @@ END = "=== CAPSTONE-VERDICT-END ==="
 CRITERIA = ("E1", "E2", "E3", "E4", "E5")
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 
-#: The node classes the pre-registration's E3 denominator names (``Point + Object
-#: + Event``) — not a choice this probe makes.
-DERIVED_LABELS = ("Point", "Object", "Event")
+#: The node classes the pre-registration's E3 denominator names: ``Point`` (the anchor sits on the
+#: node, #5038) plus the LINK-anchored classes the writer itself names —
+#: ``_DERIVATION_REFERENCES_LABELS`` (``Event``, ``Document``; ``edges.py:747``).
+#: ⛔ DERIVED, not hardcoded (#9736). This constant used to read ``("Point", "Object", "Event")``
+#: with the comment "not a choice this probe makes" — and that WAS a choice: ``:Object`` mention
+#: links carry no ``sourceVersion`` BY DESIGN (#5199 option A — ``Object`` is deliberately ABSENT
+#: from ``_DERIVATION_REFERENCES_LABELS``'s own comment block, cited by SYMBOL not by line), so counting
+#: them made E3's ``= 1.000`` unreachable and a re-run would report ``148/433`` while the registration
+#: now names ``148/383``. A probe that disagrees with the registration measures a criterion nobody
+#: registered, so the set follows the writer's constant and the gate derives the same one.
+DERIVED_LABELS = ("Point", *sorted(_derivation_label_classes()))
 
 #: The relationship type that points FROM a derived node at its source. The
 #: anchor is a property of that DERIVATION LINK, so the derived node is its
@@ -221,7 +238,8 @@ ANCHOR_OUT = ("extractedFrom",)
 ANCHOR_IN = ("references",)
 
 E3_RULE = (
-    "a derived node (Point/Object/Event) carries a version anchor iff it is the "
+    "a derived node (Point/Event/Document — the classes the model anchors; see DERIVED_LABELS) "
+    "carries a version anchor iff it is the "
     "SOURCE of at least one extractedFrom relationship whose sourceVersion is a "
     "non-empty string, OR the TARGET of at least one references relationship "
     "whose sourceVersion is a non-empty string. The two directions are NOT "

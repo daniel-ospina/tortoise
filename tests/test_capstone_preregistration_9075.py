@@ -2482,3 +2482,208 @@ def test_an_exempted_log_is_named_in_the_report_not_waived_silently(tmp_path, mo
     exempted: list[str] = []
     assert check.check_ordering(prereg, [log], None, exempted) == []
     assert exempted == ["capstone.log"], exempted
+
+
+# ── the registry may not contradict the history or the model (#9736, #9738) ──
+
+
+def _record_copy(tmp_path: Path, **patches) -> Path:
+    """A throwaway evidence directory: the REAL document + a MUTATED copy of the real record."""
+    (tmp_path / check.PREREG_NAME).write_text(PREREG.read_text())
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    rec.update(patches)
+    (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    return tmp_path
+
+
+def _crit(rec: dict, cid: str) -> dict:
+    return next(c for c in rec["criteria"] if c["id"] == cid)
+
+
+def _contradictions(directory: Path) -> list[str]:
+    text = (directory / check.PREREG_NAME).read_text()
+    return check.check_registry_contradictions(
+        directory, check.parse_criteria_rows(text), check.parse_pins(text)
+    )
+
+
+def test_the_real_record_discloses_every_visible_measurement():
+    """The committed pair, held to itself: every `true` is cited and every citation is `true`."""
+    assert _contradictions(PREREG_DIR) == []
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    assert _crit(rec, "E5")["measurement_visible_to_author"] is True
+    assert rec["prior_measurements"]["E5"]["commit"] == "ecc7bc8ca"
+    # E3's measurement POSTDATES the registration, so the field is honestly false and carries no
+    # `prior_measurements` entry — the distinction the two fields exist to keep apart.
+    assert _crit(rec, "E3")["measurement_visible_to_author"] is False
+    assert "E3" not in rec["prior_measurements"]
+    assert _crit(rec, "E3")["post_registration_measurement"]
+
+
+def test_e5_flipped_back_to_false_is_refused(tmp_path):
+    """THE MUTATION PROOF for #9738: flip the field back and the gate goes RED.
+
+    This is the node the issue names — the shipped pair used to read exactly this — so the test
+    recreates it rather than reasoning about it.
+    """
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    _crit(rec, "E5")["measurement_visible_to_author"] = False
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("E5" in f and "falsified" in f for f in failures), failures
+    assert any("ecc7bc8ca" in f for f in failures), failures
+
+
+def test_a_visible_measurement_with_no_citation_is_refused(tmp_path):
+    """The other direction: a `true` no artefact backs is the same sentence minus the evidence."""
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    rec["prior_measurements"].pop("E5")
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("E5" in f and "uncheckable" in f for f in failures), failures
+
+
+def test_a_pins_record_commit_disagreement_is_refused(tmp_path):
+    """Two copies of a commit pin that can disagree sends a reader to the wrong history."""
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    rec["prior_measurements"]["E5"]["commit"] = "deadbeef0"
+    rec["prior_measurements"]["E5"]["artifact"] = "nowhere.md"
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("pins.prior_measurements" in f for f in failures), failures
+
+
+def test_the_e3_class_set_is_derived_from_the_writer_constant():
+    """E3's `Event`/`Document` are not prose choices: they are the writer's own constant (#9736)."""
+    labels = check.derivation_label_classes()
+    assert {"Event", "Document"} <= set(labels), labels
+    assert "Object" not in labels, labels
+
+
+def test_the_real_e3_row_names_exactly_the_anchored_classes():
+    rows = {r["id"]: r for r in check.parse_criteria_rows(PREREG.read_text())}
+    anchored = set(check.SELF_ANCHORED_CLASSES) | check.derivation_label_classes()
+    named = check._classes_named(rows["E3"]["metric"]) | check._classes_named(
+        rows["E3"]["denominator"]
+    )
+    assert named == anchored, (sorted(named), sorted(anchored))
+
+
+def test_e3_counting_an_unanchored_class_is_refused(tmp_path):
+    """THE MUTATION PROOF for #9736: put `:Object` back and the gate goes RED.
+
+    `:Object` mention links carry no `sourceVersion` by design (#5199 option A), so a denominator
+    counting them makes `= 1.000` unreachable — the exact row the shipped registration carried.
+    """
+    text = PREREG.read_text()
+    mutated = text.replace(
+        "| **E3** | derived nodes written by the run (`Point` + `Event` + `Document`) carrying a version anchor |",
+        "| **E3** | derived nodes written by the run (`Point` + `Object` + `Event`) carrying a version anchor |",
+    )
+    assert mutated != text, "the shipped E3 metric row moved — this mutation test is stale"
+    target = tmp_path / check.PREREG_NAME
+    target.write_text(mutated)
+    # the record must be READABLE for the rule to run at all: an absent record is
+    # `check_machine_record`'s failure, and this rule stays silent rather than doubling it.
+    (tmp_path / check.MACHINE_RECORD).write_text((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    pins = check.parse_pins(mutated)
+    failures = check.check_registry_contradictions(
+        tmp_path, check.parse_criteria_rows(mutated), pins
+    )
+    assert any("E3" in f and "Object" in f and "#9736" in f for f in failures), failures
+
+
+def test_e3_omitting_an_anchored_class_is_refused():
+    """Symmetric arm: a numerator that cannot count an anchored class cannot reach its denominator.
+
+    Built as a ROW rather than by editing the document: the shipped denominator also names
+    `Document` in its explanatory clause, so a text mutation that drops the list entry still names
+    the class — and this arm is about the rule, not about the document's phrasing.
+    """
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event`) carrying a version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` (floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
+    )
+    assert any("E3" in f and "omits" in f for f in failures), failures
+
+
+def test_an_unreadable_derivation_constant_is_an_error_not_a_pass(monkeypatch):
+    """A gate that cannot see the model must never green the row it was written to refuse."""
+    monkeypatch.setattr(check, "DERIVATION_LABELS_PATH", Path("tortoise/projection/absent.py"))
+    with pytest.raises(check.CheckError):
+        check.derivation_label_classes()
+
+
+def test_a_colon_spelled_class_is_visible_to_the_rule():
+    """#9736 review P2, MEASURED: `(?<![\\w:])` made the canonical `:Object` spelling invisible.
+
+    Two failures in opposite directions, both from one lookbehind: a row written
+    `Point` + `:Object` + `Event` (the spelling §3.4 itself uses) named only `{Point, Event}` and
+    PASSED the rule written to refuse it, while a correct row spelled entirely with colons named
+    nothing and was FALSELY red-ed for omitting all three classes.
+    """
+    assert check._classes_named("`Point` + `:Event` + `:Document`") == {"Point", "Event", "Document"}
+    assert check._classes_named("`Point` + `:Object` + `Event`") == {"Point", "Object", "Event"}
+    # a word that merely CONTAINS a class name is still not a class
+    assert check._classes_named("the fooObject list, and the pointed remark") == set()
+
+
+def test_a_colon_spelled_object_re_reds_the_e3_rule():
+    """The mutation that survived the first pass: the refused class, written the canonical way."""
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `:Object` + `:Event`) carrying an anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `:Event` (`:Document` too); floor ≥ 30",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
+    )
+    assert any("E3" in f and "Object" in f for f in failures), failures
+
+
+def test_the_measurement_probe_derives_the_same_class_set():
+    """#9736 must not be fixed on paper only — the INSTRUMENT's set is the same set.
+
+    `probes/capstone_measure.py` hardcoded `("Point", "Object", "Event")` with the comment "not a
+    choice this probe makes", and that WAS a choice: a re-run emitted `148/433` while the
+    registration now names `148/383`. A single measured criterion may not be computed two ways.
+    """
+    import ast
+
+    source = (PREREG_DIR / "probes" / "capstone_measure.py").read_text()
+    assert "_DERIVATION_REFERENCES_LABELS" in source
+    tree = ast.parse(source)
+    assignments = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(getattr(t, "id", "") == "DERIVED_LABELS" for t in node.targets)
+    ]
+    assert assignments, "the probe no longer defines DERIVED_LABELS — this test is stale"
+    for node in assignments:
+        hardcoded = isinstance(node.value, ast.Tuple) and all(
+            isinstance(e, ast.Constant) for e in node.value.elts
+        )
+        assert not hardcoded, (
+            "DERIVED_LABELS is a hardcoded literal again — it must follow "
+            "`_DERIVATION_REFERENCES_LABELS` + Point, or the probe and the registration measure "
+            "different criteria (#9736)"
+        )

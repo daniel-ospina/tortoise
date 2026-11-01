@@ -6,7 +6,7 @@ the discipline that made `#3011` usable."* A registration that is a document onl
 can be edited after the numbers land, and a threshold chosen after the run is the exact failure the
 constraint exists to prevent. This tool is what makes the artefact executable.
 
-It verifies five things, and it fails on each of them for a specific reason:
+It verifies six things, and it fails on each of them for a specific reason:
 
 1. **Every criteria row carries a metric, a denominator AND a numeric threshold.** A row with a
    placeholder (*"to be decided"*, *"TBD"*, an em dash) is a row that will be decided later — which is
@@ -75,6 +75,21 @@ It verifies five things, and it fails on each of them for a specific reason:
    reads one while a reviewer reads the other. It must also pin ``document_sha256``: the record is
    the artefact the run probe freezes, so an argument re-edited without the record moving with it is
    a document the record no longer describes (#9075 review r3 P3).
+
+6. **The record may not contradict the history or the model it describes.** Two contradictions, one
+   rule, because both are the same defect: a frozen artefact asserting something the tree already
+   refutes, with no number changing to reveal it.
+
+   * ``measurement_visible_to_author`` is a claim about **history** — the one thing a registry can be
+     wrong about while staying internally consistent. E5 read ``false`` for a metric whose
+     measurement had landed two days BEFORE the record (#9738). The field is therefore held to
+     ``prior_measurements`` in BOTH directions: ``false`` with a citation is the falsified claim, and
+     ``true`` with none is a claim no artefact backs.
+   * **E3's class set** is re-derived from ``_DERIVATION_REFERENCES_LABELS`` in
+     ``tortoise/projection/edges.py`` (plus ``Point``, which carries the anchor on the node). Naming
+     ``:Object`` counts a class the model leaves unanchored BY DESIGN (#5199 option A), so ``= 1.000``
+     is unreachable as registered and a run would report a recorded decision as a defect (#9736).
+     Omitting an anchored class fails symmetrically.
 
 What it deliberately does NOT do: it does not judge whether the thresholds are *right*. That is the
 argument in the document, and an argument is reviewed, not grepped.
@@ -178,6 +193,28 @@ EXIT_KEY = re.compile(r"(?<!\w)exit\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
 
 #: Punctuation a value may be glued to at end-of-token (``result=UNPREREGISTERED,``).
 VALUE_TRAILING = ",;."
+
+#: Where the writer states WHICH node classes carry a version anchor on their DERIVATION LINK —
+#: ``_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`` at
+#: ``tortoise/projection/edges.py``. E3's class set is re-derived from this constant rather than from
+#: the registration's prose (#9736): the constant is what the model does, and the row must follow it.
+DERIVATION_LABELS_PATH = Path("tortoise/projection/edges.py")
+DERIVATION_LABELS_NAME = "_DERIVATION_REFERENCES_LABELS"
+
+#: ``:Point`` carries the anchor on the NODE (#5038, ``extractedFrom``), so it is a derived class that
+#: is not a *link* label — E3's numerator is ``Point`` plus every entry in the constant above.
+SELF_ANCHORED_CLASSES = ("Point",)
+
+#: Every node class E3's metric/denominator may NAME, keyed by the token that appears in prose. A
+#: class outside ``{Point} | labels`` is a class the model does not anchor for this criterion: naming
+#: it makes the row's own numerator unable to reach its denominator (#9736, #5199 option A).
+NODE_CLASS_TOKENS = {
+    "point": "Point",
+    "event": "Event",
+    "document": "Document",
+    "object": "Object",
+    "source": "Source",
+}
 
 #: The capstone verdict bundle's machine record, as the log carries it. Read from the LOG's own
 #: bytes — never from a pin — so a log edited into a scored one cannot keep riding an exemption.
@@ -663,6 +700,189 @@ def _list(container: dict, key: str, where: str) -> list:
 
 def _pins_mapping(pins: dict, key: str) -> dict:
     return _mapping(pins, key, "pins")
+
+
+def derivation_label_classes() -> frozenset[str]:
+    """The link-anchored derivation classes, read from the writer's OWN constant (#9736).
+
+    Read with :mod:`ast`, not by importing ``tortoise``: this rule must run in the CI job that does
+    NOT install the package (``--no-corpus``), and an import constraint would make the rule skip in
+    exactly the cheap place it should always run. A constant this reader cannot find is a check that
+    could not read its subject — ``CheckError`` (exit 2), never a silent pass, because a gate that
+    cannot see the model would green every row it was written to refuse.
+    """
+    import ast
+
+    path = REPO_ROOT / DERIVATION_LABELS_PATH
+    try:
+        tree = ast.parse(path.read_text())
+    except OSError as exc:
+        raise CheckError(
+            f"cannot read {DERIVATION_LABELS_PATH} to derive E3's class set ({exc}) — the rule "
+            "that E3's denominator follows the model cannot be performed"
+        ) from exc
+    except SyntaxError as exc:  # pragma: no cover - a broken writer module is a tree problem
+        raise CheckError(f"{DERIVATION_LABELS_PATH} does not parse: {exc}") from exc
+
+    found: set[str] | None = None
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if not any(isinstance(t, ast.Name) and t.id == DERIVATION_LABELS_NAME for t in targets):
+            continue
+        call = value
+        if isinstance(call, ast.Call) and call.args:
+            call = call.args[0]
+        if isinstance(call, (ast.Set, ast.List, ast.Tuple)):
+            literals = {
+                elt.value
+                for elt in call.elts
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            }
+            if literals:
+                found = literals
+    if not found:
+        raise CheckError(
+            f"{DERIVATION_LABELS_PATH} carries no readable {DERIVATION_LABELS_NAME} — E3's class "
+            "set is derived from it, so a constant that cannot be read is not a passing row"
+        )
+    return frozenset(found)
+
+
+def _classes_named(cell: str) -> set[str]:
+    """Which graph classes a cell NAMES, by the prose tokens above (``:Object`` folded in).
+
+    ⚠️ THE ANCHOR IS ``(?<![\w])``, NOT ``(?<![\w:])`` (#9736 review P2). A previous revision
+    excluded a preceding colon to avoid matching ``tuple:point``-shaped words — which made the
+    CANONICAL ``:Object`` spelling invisible: a row written ``Point`` + ``:Object`` + ``Event`` (the
+    spelling §3.4 itself uses) named only ``{Point, Event}`` and PASSED the very rule written to
+    refuse it, while a correct row spelled entirely with colons named nothing and was FALSELY red-ed
+    for omitting all three classes. A colon is exactly the markdown/Cypher class prefix, so it must
+    not block a match; ``fooObject`` still does not match because ``o`` is a word character.
+    """
+    plain = _plain(cell).casefold()
+    return {
+        canonical
+        for token, canonical in NODE_CLASS_TOKENS.items()
+        if re.search(rf"(?<![\w]){token}s?(?![\w])", plain)
+    }
+
+
+def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
+                                  pins: dict) -> list[str]:
+    """The registry may not contradict the history it describes — nor the model it scores (#9736).
+
+    TWO CONTRADICTIONS, one rule, because both are the same defect: a frozen artefact asserting
+    something the tree already refutes, with no number changing to reveal it.
+
+    1. **``measurement_visible_to_author`` versus ``prior_measurements``.** The field is a claim about
+       HISTORY, and history is the one thing a registry can be wrong about at zero cost to its own
+       consistency. E5 was: the field read ``false`` for a metric whose measurement had landed two
+       days BEFORE the record (#9738). A claim is therefore held to a citation in both directions —
+       ``false`` with a citation is the falsified claim, and ``true`` with none is a claim no artefact
+       backs (uncheckable is not harmless: it is the same sentence, minus the evidence).
+    2. **E3's class set versus the model.** ``_DERIVATION_REFERENCES_LABELS`` is what the writer
+       actually anchors; a denominator naming ``:Object`` counts a class the model leaves unanchored
+       BY DESIGN (#5199 option A), which makes ``= 1.000`` unreachable as registered and reports a
+       recorded decision as a defect (#9736). Omitting an anchored class fails symmetrically: the
+       numerator then cannot reach a denominator it must equal.
+
+    ```[]`` when the record cannot be read at all: ``check_machine_record`` owns that failure, and
+    reporting it twice would make one defect look like two.
+    """
+    failures: list[str] = []
+    path = directory / MACHINE_RECORD
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        record = None
+    if not isinstance(record, dict):
+        return []
+
+    criteria = [c for c in _list(record, "criteria", MACHINE_RECORD) if isinstance(c, dict)]
+    prior = _mapping(record, "prior_measurements", MACHINE_RECORD)
+    by_id = {str(c.get("id") or ""): c for c in criteria}
+
+    for cid in sorted(prior):
+        entry = prior[cid]
+        where = f"{MACHINE_RECORD} prior_measurements[{cid!r}]"
+        if cid not in by_id:
+            failures.append(
+                f"{where} names a criterion the record does not carry — a citation for nothing"
+            )
+            continue
+        if not isinstance(entry, dict):
+            failures.append(f"{where} is {type(entry).__name__}, expected a mapping of its provenance")
+            continue
+        for part in ("artifact", "commit", "date"):
+            if not str(entry.get(part) or "").strip():
+                failures.append(
+                    f"{where} carries no {part} — a prior measurement a reader cannot date or locate "
+                    "cannot carry the disclosure it exists for"
+                )
+        if by_id[cid].get("measurement_visible_to_author") is False:
+            failures.append(
+                f"criterion {cid} declares measurement_visible_to_author=false while "
+                f"prior_measurements cites {entry.get('artifact')!r} at {entry.get('commit')!r} "
+                f"({entry.get('date')!r}) — a measurement EXISTS, so the claim is falsified "
+                "(#9738). Either disclose it (flip the field and record what was known and when) "
+                "or delete the citation; the two may not stand together"
+            )
+
+    for cid, crit in by_id.items():
+        visible = crit.get("measurement_visible_to_author")
+        if not isinstance(visible, bool):
+            failures.append(
+                f"criterion {cid} carries measurement_visible_to_author={visible!r}, which is not a "
+                "boolean — the field is what a machine consumer reads to learn whether the bar's "
+                "author could see a number"
+            )
+            continue
+        if visible and cid not in prior:
+            failures.append(
+                f"criterion {cid} declares measurement_visible_to_author=true and names no "
+                "prior_measurements entry — an undisclosed disclosure is uncheckable, and this "
+                "field's whole value is that a reader can follow it to the artefact"
+            )
+
+    pins_prior = _pins_mapping(pins, "prior_measurements")
+    pins_map = {str(k): str(v) for k, v in pins_prior.items()}
+    rec_map = {
+        str(k): str((v or {}).get("commit")) if isinstance(v, dict) else ""
+        for k, v in prior.items()
+    }
+    if pins_map != rec_map:
+        failures.append(
+            f"pins.prior_measurements is {pins_map!r} but {MACHINE_RECORD} cites {rec_map!r} — two "
+            "copies of a commit pin that can disagree is how a reader is sent to the wrong history"
+        )
+
+    anchored = frozenset(SELF_ANCHORED_CLASSES) | derivation_label_classes()
+    e3 = [r for r in rows if r["id"] == "E3"]
+    if not e3:
+        failures.append("no E3 row — its class set cannot be compared with the model")
+    for row in e3:
+        named = _classes_named(row["metric"]) | _classes_named(row["denominator"])
+        extra = sorted(named - anchored)
+        missing = sorted(anchored - named)
+        if extra:
+            failures.append(
+                f"E3 (line {row['line']}) counts {extra} among its derived nodes, but the model "
+                f"anchors only {sorted(anchored)} ({DERIVATION_LABELS_NAME} + {list(SELF_ANCHORED_CLASSES)}) "
+                "— an unanchored class in the numerator makes `= 1.000` unreachable as registered, "
+                "and reports a recorded decision (#5199 option A) as a defect (#9736)"
+            )
+        if missing:
+            failures.append(
+                f"E3 (line {row['line']}) omits {missing} from its derived nodes, but the model "
+                f"anchors {sorted(anchored)} — a numerator that cannot count an anchored class "
+                "cannot reach the denominator it must equal (#9736)"
+            )
+    return failures
 
 
 def _measured_locations(record: dict) -> list[str]:
@@ -1317,6 +1537,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     failures: list[str] = []
     failures += check_completeness(rows)
     failures += check_e4_denominator(rows, text, pins)
+    failures += check_registry_contradictions(directory, rows, pins)
 
     logs = sorted(directory.glob(EVIDENCE_LOG_GLOB))
     report["evidence_logs"] = [p.name for p in logs]
