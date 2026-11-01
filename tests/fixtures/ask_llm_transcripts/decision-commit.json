@@ -3,7 +3,7 @@
   "expect_superseded_markers": false,
   "expected_abstained": false,
   "fixture": "decision-commit",
-  "prompt_hash": "28b9a5d845a0e1e1399b29cff731a74dd46e3aa268e079437ae7b6b33225f888",
+  "prompt_hash": "d76abb4cdfff30334715fc82987e68dee1ad558fbb9ed6fb5e96a546e8ba4e59",
   "qtype": null,
   "question": "did we decide on the apartment near the park?",
   "question_date": "2026-08-29",

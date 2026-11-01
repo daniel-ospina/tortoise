@@ -109,6 +109,47 @@ def test_non_aggregative_question_gets_no_counting_discipline(q):
     assert DISCIPLINE_MARKER not in _prompt(q).lower()
 
 
+#: Cycle-4 finding: `is_aggregative` is the detector's SURFACE-ONLY flag, and
+#: every other in-repo consumer runs it behind #2521's double gate (corpus text
+#: gate + Object-anchor index gate) precisely because the quantifier vocabulary
+#: matches non-counting English. The reader path is the FIRST ungated consumer,
+#: so these surface true positives must be neutralized by the fragment's own
+#: self-guard rather than by a second predicate (#1178).
+_QUANTIFIER_FALSE_POSITIVES = [
+    "What is the phone number of my dentist?",
+    "What is my account number of the savings account?",
+    "Do I take my vitamins every morning?",
+    "What time do I usually wake up every day?",
+    "Which cafe did I go to each morning?",
+    "Did my sister and I call each other every week?",
+    "How much do I like my new apartment?",
+]
+
+
+@pytest.mark.parametrize("q", _QUANTIFIER_FALSE_POSITIVES)
+def test_surface_quantifier_questions_are_told_to_ignore_the_section(q):
+    """These DO trip the surface detector, so the fragment will be appended —
+    the fragment must therefore carry its own scope guard, telling the reader to
+    ignore the section when the question is not a count. Without that guard a
+    phone-number or an every-morning question is instructed to "answer with the
+    aggregate" and to report a counting basis."""
+    assert detect_aggregative_intent(q).is_aggregative is True  # the surface hit
+    prompt = _prompt(q).lower()
+    assert DISCIPLINE_MARKER in prompt
+    assert "ignore this section entirely" in prompt, (
+        "a surface-only quantifier hit reached the reader without a self-guard: "
+        f"{q!r}")
+    assert "ignore this section entirely" in _AGGREGATION_FRAGMENT.lower()
+
+
+def test_the_fragment_is_scoped_to_counts_not_asserted_as_a_fact():
+    """The clause must not begin by ASSERTING the question is a count — that is
+    the shape that turned a surface false positive into a wrong instruction.
+    It must open conditionally ("applies ONLY IF")."""
+    frag = _AGGREGATION_FRAGMENT.lower()
+    assert "only if this question asks for a count" in frag
+
+
 @pytest.mark.parametrize("q", [
     "How many days ago did I buy the bike?",
     "How many weeks have I been a member?",
