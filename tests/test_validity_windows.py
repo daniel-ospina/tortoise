@@ -2389,8 +2389,92 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
     ``valid_to_shaped`` turned the empty result into a truthy dict:
     a caller's existence check (``if not sdk.update_point(id, ...)``) silently
     passed, and the receipt reported a shaping that never reached the record.
+
+    #10119 — THE REPLY IS NOT THE WHOLE CONTRACT. This test used to pin the
+    reply SHAPE only, which is why the door could return ``{}`` while it had
+    already journalled a revision, advanced the graph-wide EP epoch and
+    stranded a dirty root that no sweep could converge (a typo'd id pinning
+    the instance into local dream mode). Each of the three is now measured
+    DIRECTLY here, so the reply cannot be honest and the effects dishonest
+    again.
     """
+    # A real point first, so the epoch baseline is a real number rather than
+    # the cold-start ``None`` — a delta assertion against ``None`` would pass
+    # for a door that never touched the epoch at all.
+    sdk.create_point("statement", "anchor for the absent-id contract")
+
+    # ⛔ WIRE THE JOURNAL, or the row assertions below are VACUOUS. This
+    # fixture's SDK has no ``event_log_path``, so ``_emit_event`` returns
+    # ``None`` ("no journal configured") and the pre-fix tree would also read
+    # ``[] == []`` — a test that passes with the guard deleted proves nothing.
+    # The handle is lazy (``_event_log is None``), so setting the path is
+    # enough to make ``_emit_event`` journal.
+    #
+    # ⚠️ HONEST LIMIT: this is set AFTER the projection was created, so
+    # ``_proj._bind_journal(...)`` (run once, at projection creation) already
+    # bound ``None`` and the #7951 single-writer guard is NOT armed here — a
+    # different regime from an SDK built with ``event_log_path=`` (the shape
+    # `tests/test_7951_update_point_outbox.py` uses). This test measures what
+    # the DOOR commits to (its own ``_emit_event`` call), which is the surface
+    # the defect lives on; it does not claim to cover the guard.
+    _journal_dir = tempfile.mkdtemp(prefix="tortoise_validity_journal_")
+    _journal_path = os.path.join(_journal_dir, "events.jsonl")
+    sdk._event_log_path = _journal_path
+    sdk._event_log = None
+    try:
+        _assert_absent_takes_no_work(sdk, _journal_path)
+    finally:
+        shutil.rmtree(_journal_dir, ignore_errors=True)
+
+
+def _assert_absent_takes_no_work(sdk, _journal_path):
+    """The body of the #10119 side-effect assertions (own function so the
+    journal tree is reclaimed on FAILURE, not only on success — the #4096
+    hygiene class this file pins for its own fixture)."""
+    import json
+
+    def _ep_version():
+        rows = sdk._get_proj().g.query(
+            "MATCH (m:EpMeta) RETURN m.ep_version").result_set
+        return rows[0][0] if rows else None
+
+    def _journal_rows(pid):
+        if not os.path.exists(_journal_path):
+            return []
+        out = []
+        with open(_journal_path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                if row.get("type") == "PointRevised" and row.get("id") == pid:
+                    out.append(row)
+        return out
+
     missing = "no-such-point-9202"
+
+    def _assert_no_side_effects(pid):
+        """The three effects #10119 measured, each on its own surface."""
+        assert _journal_rows(pid) == [], (
+            f"an absent id journalled a revision it cannot have: "
+            f"{_journal_rows(pid)!r}")
+        assert _ep_version() == _ep_before, (
+            "an absent id advanced the graph-wide EP epoch: "
+            f"{_ep_before!r} -> {_ep_version()!r}")
+        assert pid not in sdk._dirty_roots, (
+            f"an absent id entered the dirty set: {sorted(sdk._dirty_roots)!r}")
+
+    _ep_before = _ep_version()
+
+    # ── the HEADLINE path: NO temporal prop (the issue's own repro) ──────
+    # This call did NOT reach the guard before #10119 (the gate was scoped to
+    # `_TEMPORAL_RESTAMP_PROPS`), so it is the only shape whose side effects
+    # this fix newly closes. Without it, a regression that re-scopes the gate
+    # leaves this test green.
+    assert sdk.update_point(missing, confidence=0.5) == {}
+    _assert_no_side_effects(missing)
+
     # the non-shaping case pins the pre-existing contract, so a failure below
     # cannot be blamed on the verb having changed shape generally
     assert sdk.update_point(missing, validTo="2026-06-10") == {}
@@ -2399,3 +2483,28 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
 
     assert reply == {}, f"an absent id returned a truthy reply: {reply!r}"
     assert "valid_to_shaped" not in reply
+
+    # ── the SIDE EFFECTS, each measured directly (#10119) ─────────────
+    _assert_no_side_effects(missing)
+    # and the stranded-root harm itself: a sweep over every REAL id converges.
+    real_ids = [r[0] for r in sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN n.id").result_set]
+    sdk._sweep_dirty_roots(set(real_ids))
+    assert missing not in sdk._dirty_roots, (
+        "the absent id survived a converged sweep — it pins the instance out "
+        f"of full dream mode: {sorted(sdk._dirty_roots)!r}")
+    assert sdk._auto_dream_mode() == "full"
+
+    # ── the positive control: a REAL revision still journals + advances ──
+    # Without this, every assertion above would also pass for a door that had
+    # simply stopped journalling and stopped advancing the epoch at all.
+    real = sdk.create_point("statement", "a real revision target")["id"]
+    _ep_real_before = _ep_version()
+    sdk.update_point(real, confidence=0.42)
+    assert len(_journal_rows(real)) == 1, (
+        "a real revision did not journal — the absent-id assertions above "
+        "are then not measuring the guard")
+    assert _ep_version() != _ep_real_before, (
+        "a real revision did not advance the EP epoch")
+    assert real in sdk._dirty_roots
+
