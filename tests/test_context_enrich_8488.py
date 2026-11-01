@@ -435,3 +435,66 @@ def test_turn_discrimination_survives_enrichment():
     assert _worst_pairwise_similarity(model, prepended) > on, (
         "the declined fixed-blurb variant did not raise within-session "
         "similarity above the approved rewrite on this fixture")
+
+
+# ── 9. The preserve arm is LOAD-BEARING (review round 2, P2) ───────────────
+
+def _no_embedder(monkeypatch):
+    """The documented `_capture_turn_embeddings` no-vector path: the embedder is
+    unavailable for the whole capture, so `turn.emb` is NULL and the write's
+    ``CASE`` reaches its preserve/clear arm instead of the new-vector branch."""
+    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: None))
+    EmbeddingModel._reset()
+
+
+def test_recapture_on_with_a_different_rewrite_clears_the_stale_vector(
+        sdk, embedder, enrichment_on, monkeypatch):
+    """#4194 on the preserve arm: with no new vector, the stored one may be kept
+    ONLY while the text it describes is unchanged. The first test in this file
+    that would red if the `prior_et` half of that guard were removed."""
+    sdk.capture_session(CONV, session_id="sess-on2")
+    on_rows = _turn_rows(sdk, "sess-on2")
+    assert all(r[2] is not None for r in on_rows), on_rows
+    assert all(r[3] is not None for r in on_rows), on_rows
+
+    # The embedder disappears (the keyword-only install), and the rewrite
+    # changes: turn 0 becomes "the billing flow is blocked". The stored vector
+    # describes the OLD embeddingText, so it must be CLEARED, not preserved.
+    from tortoise import model_adapters
+
+    class _BillingRewriter:
+        def complete(self, *, system, user):
+            target = user.split("TARGET turn (rewrite this one):\n", 1)[1]
+            target = target.split("\n\n", 1)[0]
+            return target.replace("the release is blocked",
+                                  "the billing flow is blocked")
+
+    _no_embedder(monkeypatch)
+    monkeypatch.setattr(model_adapters, "build_extractor_model",
+                        lambda *a, **kw: _BillingRewriter())
+    sdk.capture_session(CONV, session_id="sess-on2")
+
+    rows = _turn_rows(sdk, "sess-on2")
+    t0 = rows[0]
+    assert t0[2] == "[user] the billing flow is blocked", t0
+    assert t0[3] is None, (
+        "the stored vector describes the PREVIOUS embeddingText and was "
+        "preserved beside a new one — the #4194 lie (prior_et guard missing)")
+
+
+def test_content_edit_clears_the_enriched_text(sdk, embedder, enrichment_on):
+    """`update_point(content=…)` re-derives the vector from `content`, so the
+    node must not keep an `embeddingText` no vector was computed from
+    (review round 2, P1 — the other write door into the same #4194 rule)."""
+    sdk.capture_session(CONV, session_id="sess-edit")
+    t0 = _turn_rows(sdk, "sess-edit")[0]
+    assert t0[2] == "[user] the auth flow is blocked", t0
+
+    sdk.update_point(t0[0], content="the billing migration is blocked")
+    after = _turn_rows(sdk, "sess-edit")[0]
+    assert after[2] is None, (
+        "a stale embeddingText survived a content edit that re-encoded the "
+        "vector from the new content (#4194)")
+    assert np.allclose(after[3], compute_embedding("the billing migration is blocked"),
+                       atol=1e-6), after

@@ -20067,6 +20067,12 @@ class FalkorProjection(
                 embed_clear = clear_then_set_prefix("n")
                 set_clauses.append(
                     set_embedding_clause("n", preserve_on_null=False))
+                # #8488 scope 1 (review round 2, P1): this branch re-encodes the
+                # vector from `content`, so the node must not keep the OLD
+                # enriched text — `embeddingText` describes the vector that was
+                # just replaced. Mirrors `update_point`'s re-derive branch
+                # exactly, so a rebuild and the live write agree (#4194).
+                set_clauses.append("n.embeddingText = NULL")
                 wrote_embedding = True
             if not skip_hash:
                 # #2795: content_hash is derived from content — mirror the live

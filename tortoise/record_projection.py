@@ -564,6 +564,14 @@ TURNS_SNAPSHOT_KEYS: frozenset[str] = frozenset({
 TURNS_SNAPSHOT_OPTIONAL_KEYS: frozenset[str] = frozenset({
     "embedding_preserved",
     "embedding_model", "embedding_revision", "embedding_text_hash",
+    # #8488 scope 1: the enriched text the turn's vector describes rides the
+    # snapshot ONLY on the branch where the gate was ON and the enrichment
+    # produced a text. It stays OPTIONAL because the OFF branch is byte-identical
+    # to pre-#8488 (no key at all). ⛔ Step 7 carries it VERBATIM for the same
+    # reason as the identity stamps: a carrier that kept the vector and dropped
+    # the text it describes would replay exactly the #4194 lie the field exists
+    # to close.
+    "embeddingText",
 })
 #: The keys a snapshot MAY OMIT — TOGETHER — when the writer could not attest the
 #: stored value (#10021 review P3). ``sdk._write_capture_turns`` journals

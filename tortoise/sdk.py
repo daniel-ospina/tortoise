@@ -3961,12 +3961,18 @@ def _write_session_and_turns(
             _enriched = None
         if _enriched is not None and len(_enriched) == len(turn_texts):
             embedding_texts = list(_enriched)
-        else:
+        elif _enriched is not None:
+            # #8488 review round 2 (P2): ``None`` is the DOCUMENTED "the arm did
+            # not run" answer (`_capture_enriched_texts` returns it whenever the
+            # gate is off, and the model-cannot-be-built path logs its own
+            # warning) — warning on it fired once per capture on the hottest
+            # write path in the shipped configuration, conflating a deliberate
+            # no-op with an anomaly. Only a non-None list of the WRONG LENGTH is
+            # an anomaly.
             _logger.warning(
-                "context enrichment returned %s for %d turns — embedding the "
-                "raw stored text instead (#8488)",
-                type(_enriched).__name__ if _enriched is not None else "None",
-                len(turn_texts))
+                "context enrichment returned %d rows for %d turns — embedding "
+                "the raw stored text instead (#8488)",
+                len(_enriched), len(turn_texts))
     texts_to_embed = embedding_texts if embedding_texts is not None else turn_texts
     if embed_fn is not None:
         turn_embs = embed_fn(texts_to_embed)
@@ -16755,6 +16761,13 @@ class TortoiseSDK:
             # a rebuild drops it (`_revise_point` re-encodes and never reads
             # the marker) — live != rebuild, the round-6 false-verbatim class.
             props["embedding_verbatim"] = None
+            # #8488 scope 1 (review round 2, P1): the enriched text described the
+            # OLD vector. This branch re-encodes from `content`, so the node must
+            # not keep an `embeddingText` that no vector was computed from — the
+            # exact #4194 lie the capture path's `prior_et` arm exists to prevent,
+            # reached through the other write door. `None` REMOVES the property;
+            # the replay's `_revise_point` clears it under the same condition.
+            props["embeddingText"] = None
 
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
