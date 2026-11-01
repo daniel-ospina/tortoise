@@ -24,6 +24,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,49 @@ def _label_hits() -> tuple[int, int, int]:
         lines += len(hits)
         narrow += sum(1 for line in hits if re.search(r"\(\w*:Document", line))
     return lines, files, narrow
+
+
+def _label_population_reads(monkeypatch, fn=None) -> list[Path]:
+    """Paths `fn` (default `_label_hits`) reads **on the calling thread**.
+
+    Thread-scoped on purpose, and that is not a weakening of the control — it is
+    what makes the control measurable at all. `Path.read_text` is process-global,
+    so a spy on it records EVERY thread's reads, and in CI that attributed a
+    foreign read to `_label_hits()`: the `test (a)` shard red at `6a938c002` with
+    `/proc/3049/stat` in the population, a path `_label_hits` cannot produce (its
+    file list is `git ls-files -- tortoise`) — written by
+    `tortoise/embedded_reaper._pid_alive` (`:991`) from another thread alive in
+    the process. `_label_hits` is synchronous, so every read IT performs is
+    performed by the thread that called it; a read on any other thread belongs to
+    a different code path, and counting it reds the guard on an artifact.
+
+    Both directions are pinned: a same-thread read outside the index is still
+    drift (`test_a_same_thread_read_outside_the_index_is_still_drift`), and a
+    foreign thread's read does not enter the population
+    (`test_a_foreign_threads_read_does_not_enter_the_population`).
+    """
+    reader = threading.get_ident()
+    read: list[Path] = []
+    real_read_text = Path.read_text
+
+    def _spy(self, *args, **kwargs):
+        if threading.get_ident() == reader:
+            read.append(self)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _spy)
+    (fn or _label_hits)()
+    return read
+
+
+def _population_drift(read: list[Path]) -> list[Path]:
+    """Every path in `read` that is not a tracked file under `tortoise/`.
+
+    Sorted, so a failure names the offender instead of rendering a set diff the
+    reader has to reconstruct from two truncated reprs.
+    """
+    tracked = set(_tracked_files_under(_TRACKED_DIR))
+    return sorted({p for p in read if p not in tracked})
 
 
 def _checkout_history_is_complete() -> bool:
@@ -1096,16 +1140,12 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
     count matches either way and the latent false CLEAN survives behind a green
     suite. A control on the helper is not a control on the count (#5086 review
     P2, cycle 5).
+
+    The recording is scoped to the CALLING THREAD (`_label_population_reads`),
+    because a thread-blind spy reports other threads' reads as this function's
+    population — the artifact that red the CI `test (a)` shard at `6a938c0`.
     """
-    read: list[Path] = []
-    real_read_text = Path.read_text
-
-    def _spy(self, *args, **kwargs):
-        read.append(self)
-        return real_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", _spy)
-    _label_hits()
+    read = _label_population_reads(monkeypatch)
 
     assert read, "`_label_hits` read no files at all"
     non_py = [p for p in read if p.suffix != ".py"]
@@ -1115,10 +1155,62 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
         "figure while this check keeps reporting the old number and PASSES — "
         "exactly the latent false CLEAN the index-derived population closed"
     )
-    assert set(read) <= set(_tracked_files_under(_TRACKED_DIR)), (
+    drifted = _population_drift(read)
+    assert not drifted, (
         "`_label_hits` read a file that is not tracked under tortoise/ — the "
-        "population drifted off the one §5's `git grep` sentence is stated in"
+        "population drifted off the one §5's `git grep` sentence is stated in: "
+        + ", ".join(str(p) for p in drifted[:5])
     )
+
+
+def test_a_foreign_threads_read_does_not_enter_the_population(monkeypatch, tmp_path: Path) -> None:
+    """Fails if the population spy records a read made by ANOTHER thread.
+
+    Reachable, and it IS the shipped state: the CI `test (a)` shard red at
+    `6a938c002` on `test_the_label_population_is_every_tracked_file_not_just_py`
+    with `PosixPath('/proc/3049/stat')` as the extra item. That path CANNOT come
+    from `_label_hits` (its list is `git ls-files -- tortoise`); it is written by
+    `tortoise/embedded_reaper._pid_alive` (`:991`), a liveness probe reached from
+    another thread alive in the same process. A thread-blind spy turns any
+    concurrent read in the process into "the population drifted", so the guard
+    reds on a measurement artifact and says nothing about the tree — and a red
+    that cannot be attributed is as useless as a false CLEAN.
+    """
+    decoy = tmp_path / "another-threads-read.txt"
+    decoy.write_text(":Document\n", encoding="utf-8")
+
+    def _label_hits_beside_a_foreign_read() -> None:
+        other = threading.Thread(target=lambda: decoy.read_text(encoding="utf-8"))
+        other.start()
+        other.join()
+        _label_hits()
+
+    read = _label_population_reads(monkeypatch, _label_hits_beside_a_foreign_read)
+    assert decoy not in read, (
+        "a read made on ANOTHER thread entered the population `_label_hits` is "
+        "measured over — the artifact that red the `test (a)` shard with "
+        "`/proc/<pid>/stat`, a path this function cannot read"
+    )
+    assert _population_drift(read) == [], _population_drift(read)
+
+
+def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> None:
+    """Non-vacuity for the thread scoping.
+
+    Scoping the recording to one thread would be a way to make the population
+    control unfalsifiable — record nothing, assert nothing. It is not: a read of
+    a path outside the index made on the SAME thread is still recorded and still
+    reported as drift, so the guard keeps its discriminating power over exactly
+    the reads `_label_hits` itself performs.
+    """
+    stray = REPO / "tests" / "test_substrate_map.py"
+
+    def _label_hits_and_a_stray_read() -> None:
+        _label_hits()
+        stray.read_text(encoding="utf-8")
+
+    drifted = _population_drift(_label_population_reads(monkeypatch, _label_hits_and_a_stray_read))
+    assert drifted == [stray], drifted
 
 
 def test_an_index_git_that_cannot_answer_is_a_state_error_not_an_empty_population(
