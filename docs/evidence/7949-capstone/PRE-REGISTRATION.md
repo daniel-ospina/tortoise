@@ -911,4 +911,3 @@ The reason is measurable rather than stylistic: E4's field was **right**, and it
 reviewer reading three files to establish that — with the reason unstated, no reader and no arm could
 tell it from a `false` nobody had revalidated. A claim about history has to carry its evidence in the
 place a machine reads it.
-
