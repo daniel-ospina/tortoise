@@ -161,9 +161,10 @@ def test_a_venice_only_deployment_extracts(monkeypatch):
         resolve_extractor_provider(): ('venice', ['venice'])   <- v2 says ready
         _session_llm_provider():      None                     <- lane gate
         _build_session_llm_extractor(): None
-the capture then stored its turns and reported ``extraction_mode:
-"no-provider"`` — silently, while the receipt blamed a key the operator HAD
-configured. The three readings must agree, and agree on venice.
+
+    The capture then stored its turns and reported ``extraction_mode:
+    "no-provider"`` — silently, while the receipt blamed a key the operator HAD
+    configured. The three readings must agree, and agree on venice.
 
     ``resolve_extractor_provider()``'s standalone-venice branch is the recorded
     decision (#1549, on main), so the fix is to make the lane gate see what the

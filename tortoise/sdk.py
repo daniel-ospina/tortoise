@@ -799,14 +799,13 @@ INGEST_PROMOTION_POLICIES = ("gated", "auto")
 
 # Provider priority when MULTIPLE keys are set (first configured wins — the
 # deploy-time decision is which key is present; a key is only ever sent to the
-# provider that issued it, #329). Mirrors tortoise.ingest._PROVIDERS. ``venice``
-# is LAST on purpose (#8133): a venice-ONLY deployment must extract, and
-# appending keeps every multi-key deployment's serving provider byte-identical.
+# provider that issued it, #329). Mirrors ingest._PROVIDERS; venice is LAST (#8133).
 _SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini", "venice")
 
 # Default model per provider when TORTOISE_SESSION_LLM_MODEL is unset — a
 # deploy-time product decision; cheap-tier defaults matching analyze.py
-# _LLM_PROVIDERS and session_indexer's whitelist family.
+# _LLM_PROVIDERS and session_indexer's whitelist family. ``venice`` serves
+# deepseek-v4-flash (the id its adapter's docstring documents, sent verbatim).
 #
 # #4129: every id here must be one the provider actually SERVES, because a
 # provider answers 200 to a retired id and silently serves a different model.
@@ -820,7 +819,6 @@ _SESSION_LLM_DEFAULT_MODELS = {
     "deepseek": "deepseek-flash",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
-    # #8133: venice serves this documented flash model (VeniceModel docstring).
     "venice": "deepseek-v4-flash",
 }
 
