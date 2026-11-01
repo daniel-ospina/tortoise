@@ -711,3 +711,37 @@ which is the fail-open shape a gate may not have. The failure is visible: the ex
 and does not make the epic closeable: a run still has to produce five measured rows. It removes one
 **impossible** requirement from the step gate so that the gate can answer the question it was built
 to answer.
+
+## Deviations
+
+A protocol deviation is a change made **after** the first scored evidence log (§8). Each entry
+carries the date, the original value, the new value and the reason; the original wording is struck
+through rather than edited. This section was missing until `#10215`'s review caught it — which is
+itself the entry below.
+
+### D1 — 2026-11-01 — the step set: "all eight observed" became "seven required + S2.3 conditional"
+
+- **Original rule** (§4.1 as V5/G5 read it): *"ALL eight steps observed in one pass"* —
+  `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5 both required the eight
+  step ids in `steps_observed`, with no state other than observed.
+- **New rule** (§10 above, `steps` in `preregistration.json`, the `steps:` pins block): seven steps
+  are **unconditional** and must be observed; `S2.3` is **conditional on the candidate set** and must
+  be either observed or witnessed **idle** with a basis. The conditional set is read from this record
+  at the pre-registration commit; a run log may not declare it.
+- **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:8666-8690`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:9209`, `:9341`).
+  The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
+  so the gate could not return a verdict at all (§10.2's four ordered refusals). Every one of the
+  eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
+  no activity, **no fail-open marker**, and a positive candidate count.
+- **Why it is honest to change it now**: the numbers are unaffected. No E1–E5 threshold, denominator
+  or evidence row moves; `capstone.log` keeps its `GREEN=0, RED=0, BLOCKED=3, UNPREREGISTERED=2`
+  census, and the epic is still not closeable until five measured rows exist.
+- **The claim this entry corrects**: `written_before_any_scored_run: true` describes this record's
+  ORIGINAL freeze, and it remains true of it — but the `steps` block is **not** original. It was
+  authored while `capstone-measured-e0fc940b.log` (a COMPLETED run carrying E3/E4/E5 rows, added on
+  `main` by `260903907`, 2026-10-23) already existed. A blanket pre-scored claim cannot cover content
+  added after the number was seen, so the record now names the log it postdates in
+  `steps_pinned_after_scored_log` and `tools/capstone_preregistration_check.py` **refuses** a `steps`
+  block that does not.
