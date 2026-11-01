@@ -110,10 +110,11 @@ Consequences (E2E-5 exit gate):
   `POST /v1/graphs/{graph_id}/promote` (migration `20261102000001`) moves the
   `kind='default'` row and `organizations.graph_name` to an existing active graph
   atomically — so "the default graph" in this runbook means *the current* one.
-  The demoted graph keeps its own namespace, so the move copies no data; what it
-  changes is where an ORG-WIDE credential's next capture lands (its record
-  tenant is that row's id). Captures already in flight keep the graph they
-  resolved at admission.
+  The demoted graph keeps its own namespace, so the move copies no tenant data;
+  what it changes is where an ORG-WIDE credential's next capture lands (its
+  record tenant is that row's id). Captures already in flight keep the graph they
+  resolved at admission. The ONE org-level record that lives inside a graph —
+  `:OnboardingState` — IS carried (see §6), and the response reports it.
 - **No key rotation** — every pre-epic key is `graph_id NULL` +
   `scopes []` + `delegation_depth NULL` = the `legacy_full_access` class
   (resolution derives full team/default-graph access; byte-identical
@@ -465,3 +466,37 @@ reason for staying historical is recorded there.
 credential through a 60s cache, so a promotion becomes visible to MCP within that
 TTL; a capture admitted before it keeps the graph it resolved. Nothing is
 re-homed, copied or replayed.
+
+#### The org's onboarding record follows the move (it is the one org-level store
+kept INSIDE the default graph)
+
+The conversion above is right for graph DATA and wrong for `:OnboardingState`,
+the one org-level record stored in a tenant graph: every org-level reader now
+opens the promoted default, so a move that left the node behind would serve
+`flow_defaults()` over an org that had completed — `onboarding_complete` falls
+back to the legacy jsonb answer, the onboarding tool group is re-exposed to
+agents, the dashboard wizard re-opens, and the recorded `fork`/`compact` is lost.
+So the verb **carries** the record (`hosted_api._carry_onboarding_state` ->
+`onboarding.state.copy_org_state`) from the namespace of the row the same
+transaction demoted, and reports the outcome in the response:
+
+```json
+"onboarding_state": {"migrated": true, "reason": "copied",
+                     "from": "org_<org_id>", "to": "org_<org_id>_<gid>",
+                     "steps": 4, "status": "complete"}
+```
+
+It cannot join the SQL transaction (a graph is a second store), so the response
+is where its verdict lives. Read `reason` on every promotion:
+
+| `reason` | meaning | what to do |
+|---|---|---|
+| `copied` | the record moved | nothing |
+| `absent` | the previous default had no node (org never onboarded) | nothing |
+| `already_present` / `no_source` / `no_move` | nothing to carry (idempotent promote, or no historical graph listed) | nothing |
+| `carry_failed` | **the record is still in the demoted graph** | re-promote the CURRENT default (`POST /v1/graphs/default/promote`): the idempotent arm repairs an absent record from the listed historical name. It never overwrites a present node. |
+
+`_graph_has_org_namespace` follows the default too (a promoted org's existence
+verdict is about its default namespace, not `org_{org_id}`), so deleting the
+demoted graph — an ordinary custom graph after the move — no longer sends the
+onboarding projection down its no-write defaults path.
