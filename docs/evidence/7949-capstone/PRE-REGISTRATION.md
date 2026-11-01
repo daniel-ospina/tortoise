@@ -525,7 +525,14 @@ Exit 0 only when **all** of these hold:
 
    **E3's class set is re-derived, not read from this prose.** The same rule parses
    `tortoise/projection/edges.py`'s `_DERIVATION_REFERENCES_LABELS` and requires E3's metric and
-   denominator — **each cell on its own, not their union** — to name **exactly** `{Point} ∪ that set`.
+   denominator — **each cell on its own, not their union** — to name `Point`, `Event`, and the
+   document-derivation class. That last class may be spelled **either** `Document` (the writer's
+   retained relation spelling) **or** `Source` (the node label the document is stored on once the
+   `Document` label retires), and accepting both is deliberate: **which spelling is honest is
+   #9736's owner-gated question, not this rule's**, so the rule refuses a cell that names NEITHER
+   and settles nothing. A registration that spells it `Source` also moves the probe's
+   `DERIVED_LABELS` with it (§10.1) — otherwise the registration and the measurement part company,
+   which is the very divergence this rule exists to refuse.
    A denominator naming a class the model
    leaves unanchored by design (`:Object`, #5199 option A) **fails** — that is an unreachable
    `= 1.000`, and it would report the decision as a defect (§10.1) — and a denominator that *omits*
@@ -777,9 +784,9 @@ incapable* of carrying the anchor this row demands, and no denominator can make 
 while they are counted as derivations. The same log computes the writer-class figure — anchored / the
 class that is *expected to* derive — at **141/150 = 0.940000**. **This amendment does NOT adopt that
 denominator**: `Point` is in the class set by the issue's own resolution, and switching to a
-"expected-to-derive" subset would be exactly the re-definition §7 item 6 refuses (it requires E3's
-cells to name *exactly* `{Point} ∪ _DERIVATION_REFERENCES_LABELS`, so a subset fails the rule rather
-than satisfying it). It is recorded as the
+"expected-to-derive" subset would be exactly the re-definition §7 item 6 refuses (it requires every
+cell to name **every** anchored class — `Point`, `Event`, and the document class in either
+spelling — so a subset fails the rule rather than satisfying it). It is recorded as the
 finding that #9736's remaining attribution — *lost link, or a writer that never derives?* — still owns.
 `measurement_visible_to_author` for E3 therefore stays **`false`**: the field asks whether the
 measurement was visible to the **registration's** author, and this one postdates the registration by two

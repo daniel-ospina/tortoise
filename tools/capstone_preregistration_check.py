@@ -878,7 +878,7 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
        The gate settles nothing here; it refuses a cell that names NEITHER, and a cell that names an
        unanchored class.
 
-    ```[]`` when the record cannot be read at all: ``check_machine_record`` owns that failure, and
+    ``[]`` when the record cannot be read at all: ``check_machine_record`` owns that failure, and
     reporting it twice would make one defect look like two.
 
     ⛔ SCOPE — AN ARM IS ASKED ONLY OF A BUNDLE THAT MAKES ITS CLAIM (#10525 review, MEASURED).
@@ -894,11 +894,12 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
         the per-criterion field on at least one criterion. Deleting ONE criterion's field does not
         opt out: the record still declares the schema, so the deleted one fails as a non-boolean;
       * the class-set arm is asked of an E3 row that names at least one graph class. A row naming
-        none is declared in ``scopes`` instead. A row that names classes must name exactly the
-        anchored set in EVERY cell (see ``_e3_class_set_failures``), so narrowing the numerator to
-        escape it is itself a failure.
+        none is declared in ``scopes`` instead. A row that names classes must name every anchored
+        CLASS in EVERY cell — either spelling of the document-derivation class counts, neither
+        being what #9736's ruling picks (see ``e3_required_class_groups``) — so narrowing the
+        numerator to escape it is itself a failure.
 
-    ```scopes``, when given, collects one human-readable line per arm NOT applied to this bundle. A
+    ``scopes``, when given, collects one human-readable line per arm NOT applied to this bundle. A
     skip that is not declared is the silent-green shape this tool exists to refuse, so the caller
     prints them (``--json`` carries them as ``registry_scopes``); a bundle that declares nothing is
     told so rather than passed quietly.
@@ -923,10 +924,10 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
         "measurement_visible_to_author" in c for c in criteria
     )
     if not declares_visibility and by_id:
-        _note(scopes, "the record carries no `prior_measurements` block and no criterion carries "
-                      "`measurement_visible_to_author`, so the #9738 rule is not asked of it — a "
-                      "record that makes no visibility claim has no claim to contradict "
-                      "(measured: docs/evidence/5087-hypothesis predates the field)")
+        _note(scopes, f"{directory.name}: the record carries no `prior_measurements` block and no "
+                      "criterion carries `measurement_visible_to_author`, so the #9738 rule is not "
+                      "asked of it — a record that makes no visibility claim has no claim to "
+                      f"contradict{_skip_evidence(directory, 'visibility')}")
 
     for cid in sorted(prior):
         entry = prior[cid]
@@ -1039,10 +1040,10 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
                     "Spell the label, or declare a criterion that is not a class-set row"
                 )
                 continue
-            _note(scopes, f"E3 (line {row['line']}) names no graph class at all, so the anchor "
-                          "model does not apply to it — a criterion measured over something other "
-                          "than written nodes (measured: docs/evidence/5087-hypothesis's E3 is a "
-                          "session-arm receipt check) is not a class-set row")
+            _note(scopes, f"{directory.name}: E3 (line {row['line']}) names no graph class at "
+                          "all, so the anchor model does not apply to it — a criterion measured "
+                          "over something other than written nodes is not a class-set"
+                          f" row{_skip_evidence(directory, 'class_set')}")
             continue
         if groups is None:
             groups = e3_required_class_groups()
@@ -1140,6 +1141,28 @@ def _note(scopes: list[str] | None, message: str) -> None:
     """Declare an arm this bundle is NOT asked — never a silent skip (see the caller's docstring)."""
     if scopes is not None:
         scopes.append(message)
+
+
+#: The MEASURED ground for an arm a NAMED bundle is not asked, keyed by (bundle directory, arm).
+#:
+#: ⛔ KEYED BY BUNDLE, NOT BAKED INTO THE MESSAGE (#10525 review P3, MEASURED). The note is emitted
+#: for WHICHEVER bundle skipped the arm, so a sibling's evidence written into the sentence explained
+#: the capstone's own skip with `docs/evidence/5087-hypothesis`'s receipt criterion — reproduced by
+#: stripping the class names from the capstone's E3 row, which the gate then explained as the
+#: sibling's criterion. A declared skip whose declaration names the wrong subject reads as a checked
+#: one, which is the class this tool exists to refuse. A bundle with NO entry here still gets the
+#: note (naming it is what makes the skip checkable); it gets no evidence clause rather than
+#: somebody else's.
+_BUNDLE_SKIP_EVIDENCE = {
+    ("5087-hypothesis", "visibility"): "this bundle's record predates the field",
+    ("5087-hypothesis", "class_set"): "this bundle's E3 is a session-arm receipt check",
+}
+
+
+def _skip_evidence(directory: Path, arm: str) -> str:
+    """The measured clause for THIS bundle's skip — empty when nobody measured one for it."""
+    measured = _BUNDLE_SKIP_EVIDENCE.get((directory.name, arm))
+    return f" (measured: {measured})" if measured else ""
 
 
 
