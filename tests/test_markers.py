@@ -54,6 +54,21 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
+    # #10180: `_registry_with_bound_and_wide_keys` builds a REAL embedded
+    # registry (`TortoiseSDK(db_path=..., namespace="registry")`) because the
+    # behaviour under test is `get_current_org`'s REGISTRY branch: the test
+    # mints an org, a custom graph and the two key shapes, then drives the real
+    # auth dependency so the publish decision is measured rather than read. The
+    # literal IS the namespace that branch resolves in production, so a `test_*`
+    # rename would seed a graph the resolver never reads and the test would pass
+    # over nothing — the `prod-coupled` class exactly like test_github_connect /
+    # test_9664_capstone_connector_to_record above. The db_path is tmp_path-bound
+    # (`TORTOISE_DB_PATH` per test), so the shared-graph hazard is closed by the
+    # redirect's per-path derivation, not by a rename.
+    # MEASURED: without this row the literal reds
+    # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (e)`
+    # shard, which is how it was found (the module landed in `516af8e42`).
+    "test_10180_promote_default_graph.py": {"registry": "prod-coupled"},
     # The seed helper does `_make_sdk(namespace="registry")._get_registry()
     # .query(CREATE :Team ...)` — i.e. it seeds a Team through the CANONICAL
     # namespace PROD code resolves, the same `prod-coupled` class as the

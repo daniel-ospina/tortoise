@@ -519,7 +519,8 @@ transaction demoted, and reports the outcome in the response:
 ```json
 "onboarding_state": {"migrated": true, "reason": "copied",
                      "from": "org_<org_id>", "to": "org_<org_id>_<gid>",
-                     "steps": 4, "status": "complete"}
+                     "steps": 4, "status": "complete",
+                     "subject_anchor": "carried"}
 ```
 
 It cannot join the SQL transaction (a graph is a second store), so the response
@@ -536,6 +537,25 @@ arm cannot ship undocumented (and a documented arm cannot outlive its code):
 | `already_present` / `no_source` | nothing to carry (idempotent promote, or no historical graph listed) | nothing |
 | `no_namespace` | the promotion reported no target namespace, so there is nowhere to carry to (a defensive branch — the RPC names one for every real move) | nothing |
 | `carry_failed` | **the record is still in the demoted graph** | re-promote the CURRENT default (`POST /v1/graphs/default/promote`): the idempotent arm repairs an absent record from the listed historical name. It never overwrites a present node. |
+
+**`subject_anchor`** — the same response carries it on the `copied` arm, and it
+answers a question `reason` does not: the org's DM-1 identity anchor (the
+`:Subject` its onboarding node points at) is the OTHER org-level thing that
+lives inside a tenant graph, and a copy that left a nameless stub of it in the
+new default graph would be worse than one that carried nothing. Read it
+whenever `reason` is `copied`. The values below are exactly the ones the code
+can return — pinned against `onboarding.state.carry_onboards_edge`'s own return
+statements plus `copy_org_state`'s `absent` assignment by
+`test_the_runbook_documents_exactly_the_subject_anchor_states_the_code_returns`,
+so a new arm cannot ship undocumented (and a documented arm cannot outlive its
+code):
+
+| `subject_anchor` | meaning | what to do |
+|---|---|---|
+| `linked` | the new default graph already held the anchor, with its identity; the carried node now points at it | nothing |
+| `carried` | the new default graph held no anchor, so its identity (same `id`, same `name` / `subjectKind` / `org_id`) was copied over from the demoted graph | nothing |
+| `not_in_target` | **the new default graph holds no anchor** — the demoted graph had none to carry, or its name is already taken there under another id — so the node's `org_subject_id` is left UNSET rather than minting an anonymous `:Subject` | nothing, and nothing is broken: the next seed (`_run_onboarding_seed`, `import_org`, a re-seed after a restart) mints the real anchor. Until it runs, `find_subject_by_name` cannot resolve the org's subject in its DEFAULT graph, and `_count_resource("points")` does not count a phantom point |
+| `absent` | the onboarding node carried no `org_subject_id` at all (an org onboarded before the DM-1 anchor existed), so there was nothing to follow | nothing |
 
 `_graph_has_org_namespace` follows the default too (a promoted org's existence
 verdict is about its default namespace, not `org_{org_id}`), so deleting the

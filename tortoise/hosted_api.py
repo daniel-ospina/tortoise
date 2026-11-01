@@ -653,6 +653,25 @@ def _moved_default_namespace(org_id: str | None,
     return moved_default_namespace(org_id, namespace)
 
 
+class _NamespaceNotResolved:
+    """Sentinel type for the ``moved=`` argument (#10180).
+
+    ``None`` already MEANS something there — "this org's default graph was never
+    promoted, open the historical namespace" — so it cannot double as "the
+    caller did not resolve it". Without the distinction a caller could not hand
+    a resolved ``None`` down without making the callee resolve again, which is
+    the double read this argument exists to remove.
+
+    ⚠️ DEFINED HERE, next to the resolver whose answers it marks, because it is
+    a DEFAULT ARGUMENT VALUE: a default is evaluated when its ``def`` is, so
+    every function that takes this sentinel must be defined after it. The two
+    consumers are far apart in this file (``_eager_provision_org_graph`` at the
+    org-create lane, ``_open_org_graph_sdk`` / ``_graph_has_org_namespace`` at
+    the graph-open gate) and the earlier one wins.
+    """
+_NAMESPACE_NOT_RESOLVED = _NamespaceNotResolved()
+
+
 def _default_graph_name(org: dict) -> str | None:
     """The FULL DB graph name this credential's DEFAULT graph resolves to (#10180).
 
@@ -22268,7 +22287,9 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
 
 
 def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
-                               prior_org_ids: list[str] | None = None) -> str:
+                               prior_org_ids: list[str] | None = None,
+                               prior_moved: str | None | _NamespaceNotResolved
+                               = _NAMESPACE_NOT_RESOLVED) -> str:
     """Effect the eager default-graph TeamMeta + OnboardingState init for an
     org that is about to be provisioned; return its graph name.
 
@@ -22291,6 +22312,20 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
     does not issue the same control-plane read a second time on the request.
     ``None`` keeps the legacy behaviour — read it here — for the checkout
     replay lane, which has no caller-side read to reuse.
+
+    ``prior_moved`` (#10452 review, P2): the PRIOR org's already-resolved
+    default namespace, read by an ASYNC caller in its ``_cp_offload`` worker.
+    ⛔ Every argument above is a value the caller already holds; this one is
+    the same rule, and it exists because the alternative violated it: the
+    prior-org open used to go through ``_open_org_graph_sdk``, which probes the
+    server-wide graph listing (``db.list_graphs()`` — a graph read) AND reads
+    ``organizations.graph_name`` (a control plane read) — and this helper is
+    SYNC, called DIRECTLY from ``_create_org_supabase_lane``, so both ran on
+    the event loop of the org-create request. That is the exact class two
+    earlier rounds of this PR removed from request sites.
+    ``_NAMESPACE_NOT_RESOLVED`` (the default) keeps the legacy behaviour —
+    resolve it here — for the checkout-replay lane, which is sync and already
+    issues its control-plane calls inline.
     """
     from tortoise.onboarding import state as _os
     graph_name = f"org_{org_id}"
@@ -22329,21 +22364,33 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
         # answers None, and the new org silently starts in a different
         # onboarding mode (`fork='self'`) than the creator chose — the
         # "org-level state stored in the default graph" class this change
-        # converts everywhere else. It is also the SAFE door: `namespace=`
-        # re-derives the name and MINTs a graph the listing never had (read-path
-        # write pin 4), which `_open_org_graph_sdk` gates on the listing.
-        # The MINT above (`namespace=org_id`) is the org being CREATED and stays
-        # — no promotion can predate it.
-        prior_sdk = _open_org_graph_sdk(prior_org_ids[0])
-        if prior_sdk is not None:
-            try:
-                prior_fork = _os.read_prior_org_fork(
-                    prior_sdk._get_proj(), prior_org_ids[0])
-            except Exception:
-                prior_fork = None
-            finally:
-                with contextlib.suppress(Exception):
-                    prior_sdk.close()
+        # converts everywhere else.
+        # ⛔ The NAME is resolved by the CALLER when it has a worker to do it in
+        # (`prior_moved`), and opened here with `_org_sdk_from_name` — NO I/O.
+        # Opening through `_open_org_graph_sdk` instead would re-probe the
+        # server-wide listing and re-read the control plane ON THE EVENT LOOP
+        # of an async org-create request (see `prior_moved` above).
+        # For an org that has not promoted, `_org_sdk_from_name` is byte-
+        # identical to the `namespace=` open this used to pass through
+        # `_open_org_graph_sdk` to, so nothing changes for them.
+        # (`namespace=` is also the read-path WRITE pin 4 hazard: it re-derives
+        # `org_{prior}` and MINTs a graph the listing never had. That argument
+        # is why the name is resolved first and the historical arm is not a
+        # `namespace=` guess.)
+        moved = prior_moved
+        if isinstance(moved, _NamespaceNotResolved):
+            # The legacy (checkout-replay) lane: it is sync and already calls
+            # the control plane inline, so it resolves in place.
+            moved = _org_default_namespace(prior_org_ids[0])
+        prior_sdk = _org_sdk_from_name(prior_org_ids[0], moved)
+        try:
+            prior_fork = _os.read_prior_org_fork(
+                prior_sdk._get_proj(), prior_org_ids[0])
+        except Exception:
+            prior_fork = None
+        finally:
+            with contextlib.suppress(Exception):
+                prior_sdk.close()
     init_fork, init_compact = _os.resolve_init_fork_compact(
         bool(prior_org_ids), prior_fork)
     _init_q, _init_p = _os.eager_init_query(
@@ -22446,10 +22493,25 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     prior_org_ids = await _cp_offload(
         lambda: active_membership_org_ids(cp, user["user_id"]),
         op="active_membership_org_ids", pool="org")
+    # #10180 (review P2): resolve the PRIOR org's default namespace HERE, in a
+    # worker, and hand it to the sync eager-init helper below. That helper is
+    # called directly from this coroutine, so every control-plane read it
+    # issues runs ON THE EVENT LOOP; the two it needs for the prior org — the
+    # server-wide graph listing probe and the `organizations.graph_name` read —
+    # are exactly the class two earlier rounds of this PR removed from request
+    # sites (#3834/#4816: this lane is the one whose own comment measures a
+    # ~9.5 s pass against the 10 s transport bound). One off-loop read here
+    # replaces two on-loop ones, and `None` (no prior org) costs nothing.
+    prior_moved = (
+        await _cp_offload(
+            lambda: _org_default_namespace(prior_org_ids[0]),
+            op="org_default_namespace", pool="org")
+        if prior_org_ids else None)
     # Eager default-graph TeamMeta FIRST (see _eager_provision_org_graph) — the
     # helper returns the graph name (f"org_{org_id}", the convention above).
     graph_name = _eager_provision_org_graph(cp, org_id, name, user["user_id"],
-                                            prior_org_ids=prior_org_ids)
+                                            prior_org_ids=prior_org_ids,
+                                            prior_moved=prior_moved)
     try:
         # #1921: all-NULL key params → the RPC writes orgs + membership but
         # NO api_keys row (all-or-none guard, migration 20260825214233) —
@@ -33101,18 +33163,6 @@ class _ProbeNotSampled:
 
 
 _PROBE_NOT_SAMPLED = _ProbeNotSampled()
-
-
-class _NamespaceNotResolved:
-    """Sentinel type for the ``moved=`` argument (#10180).
-
-    ``None`` already MEANS something there — "this org's default graph was never
-    promoted, open the historical namespace" — so it cannot double as "the
-    caller did not resolve it". Without the distinction a caller could not hand
-    a resolved ``None`` down without making the callee resolve again, which is
-    the double read this argument exists to remove.
-    """
-_NAMESPACE_NOT_RESOLVED = _NamespaceNotResolved()
 
 
 def _graph_has_org_namespace(

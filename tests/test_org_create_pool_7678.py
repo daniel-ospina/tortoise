@@ -110,10 +110,10 @@ def test_create_org_supabase_lane_routes_every_call_to_the_org_pool(monkeypatch)
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
 
-    eager_seen: list[list[str] | None] = []
+    eager_seen: list[tuple] = []
 
-    def _eager(cp, org_id, name, uid, prior_org_ids=None):
-        eager_seen.append(prior_org_ids)
+    def _eager(cp, org_id, name, uid, prior_org_ids=None, prior_moved=None):
+        eager_seen.append((prior_org_ids, prior_moved))
         return f"org_{org_id}"
 
     provision_seen: dict = {}
@@ -143,10 +143,16 @@ def test_create_org_supabase_lane_routes_every_call_to_the_org_pool(monkeypatch)
         "org_by_name",
         "owned_free_org_ids",
         "active_membership_org_ids",
+        # #10452 review P2: the PRIOR org's default namespace is resolved HERE,
+        # off-loop on the same pool, and handed to the eager init — which is
+        # sync and called directly from this coroutine, so a read it issued
+        # would have run on the event loop (two of them: the listing probe and
+        # the `organizations.graph_name` read).
+        "org_default_namespace",
         "provision_org",
     ], seen
     # the one membership read is handed to BOTH consumers (no second read)
-    assert eager_seen == [["prior-org"]], eager_seen
+    assert eager_seen == [(["prior-org"], None)], eager_seen
     assert provision_seen.get("prior_org_ids") == ["prior-org"], provision_seen
 
 
@@ -238,7 +244,8 @@ def test_org_create_active_membership_is_read_once_end_to_end(monkeypatch):
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(ha, "_eager_provision_org_graph",
-                        lambda cp, org_id, name, uid, prior_org_ids=None:
+                        lambda cp, org_id, name, uid, prior_org_ids=None,
+                        prior_moved=None:
                         f"org_{org_id}")
 
     calls: list[str] = []

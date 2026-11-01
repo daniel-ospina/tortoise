@@ -1012,9 +1012,13 @@ _ORG_WIDE_OPENER_ALLOWLIST = {
     #   `_eager_provision_org_graph`'s remaining site is the org being CREATED
     #   (`namespace=org_id`, materialized on purpose). Its SECOND site used to
     #   read the PRIOR org — a pre-existing org a promotion CAN predate — and
-    #   was converted to `_open_org_graph_sdk` (which resolves the moved
-    #   namespace and gates on the listing), so the count is 1 and the reason
-    #   now covers only the mint. Review P3 at `93697f51e895`.
+    #   was converted (review P3 at `93697f51e895`), so the count is 1 and the
+    #   reason now covers only the mint. ⚠️ That prior-org open went through
+    #   `_open_org_graph_sdk` first, which cost a listing probe AND a
+    #   control-plane read ON THE EVENT LOOP (the helper is sync and the
+    #   org-create lane calls it directly); it now opens the resolved name with
+    #   `_org_sdk_from_name`, and the name is resolved in the caller's
+    #   `_cp_offload` worker (review P2 at `50f0a9c53`).
     "provision_tenant": 1,
     "register_user": 3,
     "_eager_provision_org_graph": 1,
@@ -2577,3 +2581,147 @@ def test_the_runbook_lists_exactly_the_carry_reasons_the_code_returns():
         f"returned but undocumented: {sorted(returned - documented)}")
     assert "no_move" not in documented, (
         "the runbook documents `no_move`, which the code never returns")
+
+
+# ── 17. The same table, for the anchor the copy leaves in the NEW default ───
+
+def test_the_runbook_documents_exactly_the_subject_anchor_states_the_code_returns():
+    """FAIL-ON: `41e7bc7b2` added `"subject_anchor"` to the promotion response
+    (values `linked | carried | not_in_target | absent`) and documented neither
+    the key nor its states — `git grep subject_anchor -- docs/` returned nothing
+    at the reviewed head. An operator diagnosing a promotion then sees
+    `subject_anchor: "not_in_target"` — the state in which the org's DEFAULT
+    graph holds no identity anchor at all — with no place in the playbook that
+    says what it means or whether anything must be done about it.
+
+    Pinned against `carry_onboards_edge`'s RETURN statements (the three values
+    that arm can produce) plus `copy_org_state`'s `absent` assignment (the state
+    where there was nothing to follow), so the table cannot silently drift in
+    either direction: a new arm must be documented, a retired one must be
+    removed."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    state_src = (root / "tortoise" / "onboarding" / "state.py").read_text(
+        encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(state_src))
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "carry_onboards_edge")
+    returned = {n.value.value for n in ast.walk(fn)
+                if isinstance(n, ast.Return)
+                and isinstance(n.value, ast.Constant)
+                and isinstance(n.value.value, str)}
+    assert returned == {"linked", "carried", "not_in_target"}, returned
+    # The fourth state is NOT a return of `carry_onboards_edge`: `copy_org_state`
+    # reports it when the node carries no `org_subject_id` to follow.
+    assert 'anchor = "absent"' in state_src, (
+        "`copy_org_state` no longer starts the anchor verdict at \"absent\" — "
+        "the runbook's fourth state has lost its code")
+
+    doc = (root / "docs" / "ops" / "multi-graph-migration-runbook.md").read_text(
+        encoding="utf-8")
+    start = doc.index("| `subject_anchor` |")
+    table = doc[start:doc.index("\n\n", start)]
+    documented = set()
+    for line in table.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        head = cells[0].strip("`").strip() if cells else ""
+        if head and head != "subject_anchor" and " " not in head \
+                and set(head) != {"-"}:
+            documented.add(head)
+    assert documented == returned | {"absent"}, (
+        "the runbook's `subject_anchor` table does not match the code: "
+        f"undocumented={sorted((returned | {'absent'}) - documented)}, "
+        f"documented-but-impossible={sorted(documented - (returned | {'absent'}))}")
+
+
+# ── 18. The org-create lane resolves the PRIOR org's default OFF the loop ───
+# Review P2 at `50f0a9c53`. `_eager_provision_org_graph` is SYNC and
+# `_create_org_supabase_lane` calls it DIRECTLY (not off-loaded), so the two
+# round trips the prior-org open cost ran ON THE EVENT LOOP of an org-create
+# request: `_open_org_graph_sdk`'s server-wide listing probe
+# (`db.list_graphs()`) and `_org_default_namespace`'s primary-key read of
+# `organizations.graph_name`. That is the class two earlier rounds of this PR
+# removed from request sites, on the lane whose own comment measures a ~9.5 s
+# pass against the 10 s transport bound under load (#4816), so it must not be
+# reintroduced by the fix for the fork inheritance.
+
+def test_the_org_create_lane_resolves_the_prior_default_off_the_loop(sb, monkeypatch):
+    """FAIL-ON: restore `_open_org_graph_sdk(prior_org_ids[0])` in
+    `_eager_provision_org_graph` and BOTH assertions below go red — the listing
+    probe runs at all, and the namespace read is seen from a thread that has a
+    running loop.
+
+    The check is the call's OWN view of the loop (a worker thread has no running
+    loop), not a source grep for `to_thread`, so a differently-spelled refactor
+    that puts the read back on the loop fails here too."""
+    import asyncio
+
+    tc, fake, _ = sb
+    # The prior org's default has MOVED, so the namespace the eager init owes
+    # cannot be re-derived from `org_{prior}`: it has to be resolved.
+    _as_session()
+    assert tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}").status_code == 200
+    moved = f"org_{TEAM}_{NEW_ID}"
+    assert fake.tables["organizations"][0]["graph_name"] == moved
+
+    def _on_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return True
+
+    probes: list[bool] = []
+    monkeypatch.setattr(ha, "_registry_existing_graphs",
+                        lambda *a, **k: probes.append(_on_loop()))
+
+    namespace_reads: list[tuple[str | None, bool]] = []
+    real_query = fake.query
+
+    def _query(table, *, select=None, filters=None, **kwargs):
+        if table == "organizations" and select == ["graph_name"]:
+            wanted = {f[0]: f[2] for f in (filters or ()) if len(f) == 3}
+            namespace_reads.append((wanted.get("id"), _on_loop()))
+        return real_query(table, select=select, filters=filters, **kwargs)
+
+    monkeypatch.setattr(fake, "query", _query)
+
+    # Which name the prior-org open actually used — the value must be THREADED,
+    # not merely resolved.
+    opened: list[tuple[str, str | None]] = []
+    real_from_name = ha._org_sdk_from_name
+
+    def _record_from_name(org_id, moved_ns):
+        opened.append((org_id, moved_ns))
+        return real_from_name(org_id, moved_ns)
+
+    monkeypatch.setattr(ha, "_org_sdk_from_name", _record_from_name)
+
+    # MEMBER owns no org (ownership, not membership, is what the one-free-org
+    # gate counts), so this is an ordinary create by a user with a prior org.
+    out = asyncio.run(ha._create_org_supabase_lane(
+        fake, "Second Org", {"user_id": MEMBER}))
+
+    assert out["name"] == "Second Org"
+    # The PRIOR org's reads. TWO are owed and both must be off-loop: the eager
+    # init's (this finding) and the post-RPC hook's (`provision_org` ->
+    # `_ensure_onboarding_node_after_provision`, already off-loaded). A count is
+    # deliberately NOT pinned here — this test is about WHERE they run, and the
+    # read-once property is pinned by tests/test_org_create_pool_7678.py.
+    prior_reads = [on_loop for org_id, on_loop in namespace_reads if org_id == TEAM]
+    assert prior_reads, (
+        "the prior org's default namespace was never resolved — with nothing "
+        f"resolved this test proves nothing: {namespace_reads}")
+    assert not any(prior_reads), (
+        "a prior-org default-namespace read ran ON THE EVENT LOOP "
+        f"(loop-presence per read: {prior_reads}, all: {namespace_reads}) — the "
+        "eager init is sync and called from the loop, so it belongs in the "
+        "caller's `_cp_offload` block")
+    assert probes == [], (
+        "the lane probed the server-wide graph listing — the prior-org open is "
+        f"built from an already-resolved name and needs no probe ({probes})")
+    assert opened and opened[0] == (TEAM, moved), (
+        "the eager init opened the prior org somewhere other than the resolved "
+        f"default: {opened}")
