@@ -236,3 +236,67 @@ def test_a_first_sighting_is_loud(caplog):
     hits = [r for r in caplog.records if "vocabulary gap" in r.getMessage()]
     assert len(hits) == 1
     assert "hardly" in hits[0].getMessage()
+
+
+def test_the_log_line_carries_only_tokens_no_vocabulary_names(caplog):
+    """The egress trade is stated — so the egress is pinned, not assumed.
+
+    The first-sighting WARNING is a DELIBERATE exception to "the census never
+    leaves the process": the token NAMES are what make the alarm actionable
+    (review cycle 2), and the census cannot localise a silent loss without
+    them. That justification holds only while the line carries the UNNAMED
+    population — a pair-read token (`because`, `off`) is already NAMED by a
+    closed vocabulary, so shipping it off-box buys nothing, and an oversize
+    token is exactly the claim-sized blob ``_VOCABULARY_GAP_MAX_TOKEN``
+    refuses to retain and warns about nowhere else.
+
+    Without this leg, moving the ``new.append(t)`` above the bucket / oversize
+    checks would quietly widen what leaves the box, and every existing test
+    stays green. Non-vacuity: pre-fix the census does not exist, so this
+    errors rather than passing.
+    """
+    blob = "z" * (v2._VOCABULARY_GAP_MAX_TOKEN + 10)
+    with caplog.at_level(logging.WARNING, logger="tortoise.extractor_v2"):
+        assert v2.fold_allowed("we ship because tests pass",
+                               "we ship tests pass")
+        assert v2.fold_allowed(f"we ship {blob} tonight", "we ship")
+    shipped = " ".join(r.getMessage() for r in caplog.records
+                       if "vocabulary gap" in r.getMessage())
+    assert "tonight" in shipped, (
+        "an UNNAMED marker did not reach the alarm — the egress buys nothing "
+        f"then; shipped={shipped!r}")
+    assert "because" not in shipped, (
+        "a token a closed pair-read vocabulary NAMES was shipped off-box: the "
+        f"egress is no longer limited to the unnamed population: {shipped!r}")
+    assert blob not in shipped, (
+        "an oversize blob was shipped in full — the bound the trade relies on "
+        f"(`_VOCABULARY_GAP_MAX_TOKEN`) was not applied to the log line: {shipped!r}")
+
+
+def test_the_log_egress_is_bounded_at_the_log_cap(caplog):
+    """``_VOCABULARY_GAP_LOG_CAP`` is the whole claimed bound on the egress.
+
+    The trade is defensible because the EXPOSURE is capped, not because the
+    tokens are harmless: at most that many distinct token names per process
+    reach every configured handler. A bound stated in a comment and never
+    exercised is a claim, so exercise it: more distinct tokens than the cap
+    must produce exactly ``cap`` WARNINGs — and the census must still count
+    all of them, because the log is the alarm and the census is the record.
+    """
+    cap = v2._VOCABULARY_GAP_LOG_CAP
+    tokens = ["qw" + "".join(chr(97 + (i // 26 ** k) % 26) for k in range(3))
+              for i in range(cap + 8)]
+    assert len(set(tokens)) == len(tokens), "the fixture tokens must be distinct"
+    with caplog.at_level(logging.WARNING, logger="tortoise.extractor_v2"):
+        for tok in tokens:
+            assert v2.fold_allowed(f"we ship {tok} now", "we ship now")
+    hits = [r.getMessage() for r in caplog.records
+            if "vocabulary gap" in r.getMessage()]
+    assert len(hits) == cap, (
+        f"{len(hits)} token names reached the log for {len(tokens)} distinct "
+        f"tokens — the egress bound is {cap}, not 'bounded'")
+    snap = v2.vocabulary_gap_snapshot()
+    assert all(t in snap["tokens"] for t in tokens), (
+        "the census dropped observations the alarm did not report — the log "
+        "bound must not become a counting bound")
+    assert snap["truncated_observations"] == 0
