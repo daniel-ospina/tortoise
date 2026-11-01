@@ -2427,7 +2427,11 @@ export function spoolSaturated(
   // `repair: false` keeps the meta scan from MUTATING the spool (no ledger line,
   // no quarantine, no unlink): the health line must describe the spool it reads
   // (`listSpoolEntries` is the drain's repairing scanner — the same rule
-  // `countPendingEntries` follows). The write path keeps the repairing scan.
+  // `countPendingEntries` follows). The WRITE path calls `admissionSaturated`
+  // instead, which answers the two hard cases without scanning and leaves the
+  // repair to the `pruneSpool` scan after an admitted write and to `flushSpool`
+  // (both scan with repair on). A refused write repairs nothing itself: a refusal
+  // is not a change to the spool, and the next drain is the surface that heals it.
   const { metas } = listSpoolEntries(dir, opts);
   return saturatedForMetas(dir, metas, bounds, projection);
 }

@@ -2003,8 +2003,13 @@ def spool_saturated(
     ``repair=False`` keeps the meta scan from MUTATING the spool (no ledger
     line, no quarantine, no unlink): the health line must describe the spool it
     reads, and ``list_spool_metas`` is the drain's repairing scanner
-    (``count_pending_captures`` states the same rule). The write path keeps the
-    repairing scan it already paid for.
+    (``count_pending_captures`` states the same rule). The WRITE path does not
+    call this directly — it calls ``_admission_saturated``, which answers the two
+    hard cases (provably saturated, definitely not saturated) without scanning and
+    leaves the repair to the ``prune_spool`` scan that follows an admitted write
+    and to the drain (`flush_spool`), both of which scan with ``repair=True``. A
+    refused write therefore repairs nothing itself: nothing about a refusal is a
+    change to the spool, and the next drain is the surface that heals it.
 
     One spool directory, two legs: the Pi leg's ``spoolSaturated`` is the twin
     and states the same rule.

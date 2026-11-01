@@ -4306,7 +4306,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: ceiling this PR raises 20x. Behaviour moved (the guard's cost, and the two
 #: fast paths' precondition checks), so the generation moved with it.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    18, "55159011b451812d3055f8e0d7264f0ab77a1fc4f6c142e2c3f8f23087400b2b")
+    18, "981a7ce6b153e313197c7e276e7b0f50f2996007ac7b0f809a8788fc1b0c0648")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4413,7 +4413,7 @@ _GENERATION_DIGESTS = {
     # Generation 17: the refusal-ledger dedupe (bounded map + one cross-leg key).
     17: "f6aa65ab47fd4779fd9b11a055c86be1ad790a88c8bd7cd6c5456c185c809560",
     # Generation 18: the admission guard answers without re-parsing every meta.
-    18: "55159011b451812d3055f8e0d7264f0ab77a1fc4f6c142e2c3f8f23087400b2b",
+    18: "981a7ce6b153e313197c7e276e7b0f50f2996007ac7b0f809a8788fc1b0c0648",
 }
 
 
