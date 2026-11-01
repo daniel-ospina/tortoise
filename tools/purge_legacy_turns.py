@@ -814,6 +814,28 @@ def _age_seconds(value) -> float | None:
     return (datetime.now(UTC) - stamp).total_seconds()
 
 
+def _evidence_block(artifact) -> dict:
+    """The `/health` record fields, in whichever shape the caller holds.
+
+    The endpoint emits `{"record": {"armed": …, "dsn": …}}`; `_health_armed`
+    ALSO accepts the flattened `{"record.armed": …}` some collectors produce.
+    Accepting a shape in one reader and refusing it in another made a preview
+    certify an arming fact `--execute` then rejected — so every reader that
+    follows `_health_armed` honours the same tolerance (#10483 review round 5,
+    P2).
+    """
+    if not isinstance(artifact, dict):
+        return {}
+    nested = artifact.get("record")
+    block = dict(nested) if isinstance(nested, dict) else {}
+    for key, value in artifact.items():
+        if not isinstance(key, str) or value in (None, ""):
+            continue
+        name = key[len("record."):] if key.startswith("record.") else key
+        block.setdefault(name, value)
+    return block
+
+
 def _evidence_address(artifact) -> dict:
     """The deployment a `/health` body says it is, as far as it CAN say.
 
@@ -825,10 +847,7 @@ def _evidence_address(artifact) -> dict:
     every real body and could only be satisfied by a hand-written file (#10483
     review round 4, P1).
     """
-    if not isinstance(artifact, dict):
-        return {}
-    block = (artifact.get("record")
-             if isinstance(artifact.get("record"), dict) else artifact)
+    block = _evidence_block(artifact)
     address = {"record_dsn_fingerprint": block.get("dsn")}
     for key in ("org_id", "graph_id"):
         if block.get(key):
@@ -847,10 +866,9 @@ def _read_instant(artifact) -> object:
     """
     if not isinstance(artifact, dict):
         return None
-    blocks = [artifact]
-    for key in ("record", "target"):
-        if isinstance(artifact.get(key), dict):
-            blocks.append(artifact[key])
+    blocks = [artifact, _evidence_block(artifact)]
+    if isinstance(artifact.get("target"), dict):
+        blocks.append(artifact["target"])
     for name in ("read_at", "fetched_at", "recorded_at"):
         for block in blocks:
             if block.get(name):
@@ -858,22 +876,82 @@ def _read_instant(artifact) -> object:
     return None
 
 
+class _FingerprintUnavailable(Exception):
+    """A record DSN WAS supplied, and the seam could not fingerprint it.
+
+    ⛔ NOT the same answer as "no DSN was supplied". One `None` used to mean
+    both, and the caller read either as "skip the record binding" — so a record
+    seam that could not answer silently turned OFF the strongest check in
+    `_armed_evidence_problem`, which is the opt-out-by-omission shape this
+    module condemns everywhere else (#10483 review round 5, P2).
+    """
+
+
 def _record_fingerprint(dsn: str) -> str | None:
-    """The seam's OWN `dsn_fingerprint`, or `None` when it cannot be imported.
+    """The seam's OWN `dsn_fingerprint` of the STRIPPED DSN; `None` for no DSN.
 
     Imported, never re-derived: its docstring says the copy that drifts is the
     one that prints a DSN.
+
+    ⛔ STRIPPED, because that is the contract of the function this calls.
+    `dsn_fingerprint`'s docstring says it "is handed an already-stripped value
+    (`record_dsn()`'s ``.strip()``)", and `/health` publishes
+    `dsn_fingerprint(record_dsn())` — the fingerprint of the stripped value.
+    Hashing the RAW one made a correctly-armed run compare `sha256(dsn + "\n")`
+    against `sha256(dsn)`, refuse `target-drift`, and print a message asserting
+    the operator had passed the wrong DSN when they had not (#10483 review round
+    5, P2). libpq reads a conninfo string as settings "separated by
+    whitespace", so surrounding whitespace is not part of the value: it is the
+    same record either way.
+
+    An EMPTY DSN is `None` — "nothing to compare", and `_execute` refuses it on
+    its own (exit 3). A non-empty DSN the seam cannot fingerprint raises
+    `_FingerprintUnavailable`, never `None`: an unanswered question is not a
+    passed one.
     """
     if not dsn:
         return None
     try:
         from tortoise.record_writer import dsn_fingerprint
-    except Exception:  # pragma: no cover - the record seam always imports
-        return None
+    except Exception as exc:
+        raise _FingerprintUnavailable(f"{type(exc).__name__}: {exc}") from exc
     try:
-        return dsn_fingerprint(dsn)
-    except Exception:  # pragma: no cover - a gate never crashes on a string
-        return None
+        return dsn_fingerprint(dsn.strip())
+    except Exception as exc:
+        raise _FingerprintUnavailable(f"{type(exc).__name__}: {exc}") from exc
+
+
+def _armed_evidence_gap(health) -> str:
+    """Why this artefact does not establish ARMED-for-a-named-record — or `""`.
+
+    ⛔ ONE QUESTION, ASKED BY BOTH ARMS. `_recovery_missing` (the preview) asked
+    only `_health_armed`, so a preview printed RECOVERY-PATH-STATED and wrote an
+    approvable plan over an artefact `--execute` refused one precondition later:
+    a body that is armed but names no `record.dsn`, in either accepted shape
+    (#10483 review round 5, P2). Sharing this function is what stops the two
+    from disagreeing about what the evidence proves — a preview that certifies
+    a precondition the destructive arm rejects is worse than no preview.
+
+    The AGE and the TENANT stay in `_armed_evidence_problem`: those are facts
+    about the run that executes, not about whether the artefact is evidence at
+    all.
+    """
+    if not isinstance(health, dict):
+        return ("no /health evidence was supplied (--health-url or "
+                "--health-json), so the record is not proven ARMED for this "
+                "deployment (#9548 / PR #9989). An unarmed record holds no "
+                "turns, so the delete would have no surviving copy")
+    if not _health_armed(health):
+        return ("the /health artefact does not report record.armed as the "
+                "boolean true (#9548 / PR #9989). An unarmed record holds no "
+                "turns, so the delete would have no surviving copy")
+    fingerprint = _evidence_address(health).get("record_dsn_fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint.strip():
+        return ("the /health artefact is armed but does not state record.dsn "
+                "— the fingerprint of the record DSN it is armed with — so "
+                "nothing ties it to the record this run reads and deletes "
+                "around. Re-read /health for this target")
+    return ""
 
 
 def _armed_evidence_problem(health, live_target: dict, *,
@@ -894,26 +972,19 @@ def _armed_evidence_problem(health, live_target: dict, *,
     neither — so it refused every real body and left hand-authoring as the only
     passing input (#10483 review round 4, P1).
     """
-    if not isinstance(health, dict):
-        return (REFUSE_RECORD_NOT_ARMED,
-                "no /health evidence was supplied (--health-url or "
-                "--health-json), so the record is not proven ARMED for this "
-                "deployment (#9548 / PR #9989). An unarmed record holds no "
-                "turns, so the delete would have no surviving copy")
-    if not _health_armed(health):
-        return (REFUSE_RECORD_NOT_ARMED,
-                "the /health artefact does not report record.armed as the "
-                "boolean true (#9548 / PR #9989). An unarmed record holds no "
-                "turns, so the delete would have no surviving copy")
+    gap = _armed_evidence_gap(health)
+    if gap:
+        return (REFUSE_RECORD_NOT_ARMED, gap)
     address = _evidence_address(health)
     fingerprint = address.get("record_dsn_fingerprint")
-    if not isinstance(fingerprint, str) or not fingerprint.strip():
+    try:
+        expected = _record_fingerprint(record_dsn)
+    except _FingerprintUnavailable as exc:
         return (REFUSE_RECORD_NOT_ARMED,
-                "the /health artefact is armed but does not state record.dsn "
-                "— the fingerprint of the record DSN it is armed with — so "
-                "nothing ties it to the record this run reads and deletes "
-                "around. Re-read /health for this target")
-    expected = _record_fingerprint(record_dsn)
+                "a record DSN WAS supplied but the record seam could not "
+                f"fingerprint it ({exc}), so the /health evidence cannot be "
+                "tied to the record this run reads and deletes around. An "
+                "unanswerable binding question is not a satisfied one")
     if expected is not None and fingerprint.strip() != expected:
         return (REFUSE_TARGET_DRIFT,
                 "the ARMED evidence describes a DIFFERENT record: /health is "
@@ -1146,10 +1217,13 @@ def _recovery_missing(args, restore_proof: dict | None,
             "no --restore-proof artefact: #10017 precondition 3 (one sampled "
             "session deleted from a scratch graph and re-served from the "
             "record) has not been run for this target")
-    if not _health_armed(health):
+    # The SAME question the destructive arm asks: an artefact can be armed and
+    # still prove nothing about the record (#10483 review round 5, P2).
+    armed_gap = _armed_evidence_gap(health)
+    if armed_gap:
         missing.append(
-            "no /health artefact showing record.armed=true for this target "
-            "(#9548 / PR #9989)")
+            "no usable /health ARMED evidence for this target (#9548 / PR "
+            f"#9989): {armed_gap}")
     if not getattr(args, "event_log_path", None):
         missing.append(
             "no --event-log-path: the journal the target's rebuild replays is "

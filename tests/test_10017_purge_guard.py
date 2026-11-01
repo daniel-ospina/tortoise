@@ -674,7 +674,8 @@ def _write(tmp_path, name: str, obj) -> str:
 
 def _cli_execute(tmp_path, monkeypatch, *, report, plan=None, health=None,
                  proof=None, approval=None, note="test target",
-                 digest=None, journal_lines=1, health_url=None):
+                 digest=None, journal_lines=1, health_url=None,
+                 record_dsn: str = _DSN):
     _patch_live_census(monkeypatch, report)
     called: list[dict] = []
     monkeypatch.setattr(purge, "_execute",
@@ -686,7 +687,7 @@ def _cli_execute(tmp_path, monkeypatch, *, report, plan=None, health=None,
         plan = _plan([_clean_with_ids("s1", ["s1_t0"])],
                      journal_path=str(journal))
     argv = [*_TARGET_ARGV, "--target-note", note, "--execute",
-            "--record-dsn", _DSN,
+            "--record-dsn", record_dsn,
             "--event-log-path", str(journal),
             "--plan", _write(tmp_path, "plan.json", plan),
             "--confirm-plan-digest", plan["plan_digest"] if digest is None
@@ -1267,3 +1268,154 @@ def test_the_preview_closing_line_names_every_flag_execute_requires(tmp_path,
     for flag in ("--execute", "--approval-record", "--health-url",
                  "--restore-proof"):
         assert flag in closing[0], (flag, closing[0])
+
+
+# ── round 5: the ARMED evidence's own inputs ──────────────────────────────
+#
+# Three defects in the `_armed_evidence_problem` family, all of the "the guard
+# refuses real evidence / accepts invented evidence" class that round 4 named:
+#
+#   1. the fingerprint hashed the RAW DSN while `/health` publishes the
+#      fingerprint of the STRIPPED one, so a correctly-armed run was refused
+#      `target-drift` with a message asserting the operator was wrong;
+#   2. `_health_armed` accepted a flattened body the address reader could not
+#      read, so a PREVIEW certified an arming fact `--execute` then rejected;
+#   3. `None` from `_record_fingerprint` meant both "no DSN" and "the seam could
+#      not answer", and the gate read either as "skip the record binding".
+
+def test_a_padded_record_dsn_names_the_same_record():
+    """`/health` fingerprints the STRIPPED DSN (`record_dsn()`'s `.strip()`),
+    so the guard must compare like with like. libpq reads a conninfo string as
+    settings separated by whitespace: a trailing newline from a secret file or
+    a `fly secret` is not a different record, and refusing it told a correctly
+    armed operator to "pass the DSN the deployment is armed with" — which they
+    had (#10483 review round 5, P2)."""
+    assert purge._record_fingerprint(_DSN + "\n") == _FINGERPRINT
+    assert purge._record_fingerprint(" " + _DSN + "  ") == _FINGERPRINT
+    # An EMPTY DSN is still "nothing to compare" — not a fingerprint failure.
+    assert purge._record_fingerprint("") is None
+
+
+def test_a_padded_record_dsn_passes_the_gate_instead_of_reporting_target_drift():
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), record_dsn=_DSN + "\n")
+    assert code == "", message
+    assert "every precondition asserted" in message
+
+
+def test_a_padded_record_dsn_does_not_stop_execute_at_the_wiring(
+        tmp_path, monkeypatch):
+    """The same fact through `main`: no delete is refused for a trailing
+    newline, and a node really is deleted (the positive arm)."""
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        record_dsn=_DSN + "\n")
+    assert rc == 0
+    assert len(called) == 1
+
+
+def test_a_flattened_health_body_is_readable_by_every_reader():
+    """`_health_armed` accepts `{"record.armed": true}`; the ADDRESS reader did
+    not, so the gate refused a body it had just called armed, with the false
+    statement "does not state record.dsn" (#10483 review round 5, P2)."""
+    flat = {"record.armed": True, "record.dsn": _FINGERPRINT,
+            "fetched_at": _ts(60)}
+    assert purge._health_armed(flat) is True
+    assert purge._evidence_address(flat)["record_dsn_fingerprint"] == _FINGERPRINT
+    assert purge._read_instant(flat) == flat["fetched_at"]
+    code, message = purge._armed_evidence_problem(
+        flat, _target(), record_dsn=_DSN)
+    assert (code, message) == ("", "")
+
+
+def test_a_flattened_health_body_passes_the_gate():
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    flat = {"record.armed": True, "record.dsn": _FINGERPRINT,
+            "fetched_at": _ts(60)}
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), health=flat)
+    assert code == "", message
+
+
+def test_a_flattened_body_that_names_no_record_is_refused_in_both_shapes():
+    """The tolerance must not become a hole: neither shape may pass without an
+    address, and both must refuse identically."""
+    for body in ({"record.armed": True, "fetched_at": _ts(60)},
+                 {"record": {"armed": True, "fetched_at": _ts(60)}}):
+        assert purge._health_armed(body) is True
+        assert purge._armed_evidence_gap(body), body
+        code, _ = purge._armed_evidence_problem(
+            body, _target(), record_dsn=_DSN)
+        assert code == purge.REFUSE_RECORD_NOT_ARMED
+
+
+def _arming_missing(health) -> list[str]:
+    """The preview's arming entries, isolated from the two unconditional notes
+    `_recovery_missing` always adds (record-backup drill, reverse graph path)."""
+    missing = purge._recovery_missing(
+        purge._build_parser().parse_args(
+            [*_TARGET_ARGV, "--target-note", "t", "--event-log-path", "j.jsonl"]),
+        _proof(), health)
+    return [m for m in missing if "ARMED" in m]
+
+
+def test_the_preview_and_the_execute_gate_ask_the_same_arming_question():
+    """A preview that certifies a precondition `--execute` rejects is worse than
+    no preview: the operator produces the artefact the tool asked for, signs the
+    digest, and only then learns the plan can never authorise anything (#10483
+    review round 5, P2). Every body is judged by BOTH arms and must agree."""
+    bodies = [
+        ("real", _health()),
+        ("flattened", {"record.armed": True, "record.dsn": _FINGERPRINT,
+                       "fetched_at": _ts(60)}),
+        ("armed-no-dsn", {"record": {"armed": True, "fetched_at": _ts(60)}}),
+        ("flattened-no-dsn", {"record.armed": True, "fetched_at": _ts(60)}),
+        ("unarmed", _health(armed=False)),
+        ("absent", None),
+    ]
+    for name, body in bodies:
+        preview_gap = bool(_arming_missing(body))
+        code, _ = purge._armed_evidence_problem(
+            body, _target(), record_dsn=_DSN)
+        assert preview_gap == bool(code), (name, preview_gap, code)
+
+
+def test_an_armed_body_without_a_record_fingerprint_is_named_by_the_preview():
+    """The specific case round 5 named: a preview over this body printed
+    RECOVERY-PATH-STATED and exited 0 while `--execute` refused it."""
+    body = {"record": {"armed": True, "fetched_at": _ts(60)}}
+    arming = _arming_missing(body)
+    assert arming, "the preview must not certify an arming fact it cannot use"
+    assert "record.dsn" in arming[0]
+
+
+def test_a_real_health_body_is_not_named_by_the_preview():
+    """The positive arm: the fix must not turn every preview red."""
+    assert _arming_missing(_health()) == []
+
+
+def test_an_unfingerprintable_record_dsn_is_refused_not_skipped(monkeypatch):
+    """`None` used to mean BOTH "no DSN" and "the seam could not answer", and the
+    gate read either as "skip the record binding" — so a broken record seam
+    silently disabled the check that binds the arming evidence to the record
+    (#10483 review round 5, P2). An unanswered question is not a passed one."""
+    def _boom(dsn):
+        raise RuntimeError("record seam unavailable")
+
+    monkeypatch.setattr("tortoise.record_writer.dsn_fingerprint", _boom)
+    with pytest.raises(purge._FingerprintUnavailable):
+        purge._record_fingerprint(_DSN)
+    code, message = purge._armed_evidence_problem(
+        _health(), _target(), record_dsn=_DSN)
+    assert code == purge.REFUSE_RECORD_NOT_ARMED
+    assert "could not fingerprint" in message
+
+
+def test_no_record_dsn_at_all_still_skips_the_binding():
+    """Case (a) is legitimate and must stay: `_execute` refuses a missing DSN on
+    its own (exit 3), so the gate does not need to refuse it twice."""
+    code, message = purge._armed_evidence_problem(
+        _health(), _target(), record_dsn="")
+    assert (code, message) == ("", "")
