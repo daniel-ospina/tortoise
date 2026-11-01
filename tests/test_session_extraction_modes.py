@@ -19,7 +19,7 @@ import tempfile
 import pytest
 
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._provider_env import pin_provider_routing_env
+from tests._provider_env import pin_provider_routing_env, provider_key_envs
 
 
 @pytest.fixture(autouse=True)
@@ -150,6 +150,253 @@ def test_sdk_priority_covers_all_registry_providers():
             f"{key_env} (ingest provider {provider!r}) missing from "
             f"hosted_api._LLM_PROVIDER_KEYS — the gate would not see it"
         )
+
+
+def test_every_priority_provider_has_a_default_model():
+    """#8133 review: a provider in the PRIORITY tuple without a
+    ``_SESSION_LLM_DEFAULT_MODELS`` entry raises ``KeyError`` on the first
+    capture — not a gateway message, not a receipt.
+
+    ``sdk._build_session_llm_extractor`` indexes the dict DIRECTLY
+    (``model_id = _SESSION_LLM_DEFAULT_MODELS[provider]``, sdk.py:1136), so this
+    is the one registration axis a missing entry turns into an uncaught
+    exception rather than a wrong branch. ``test_sdk_priority_covers_all_
+    registry_providers`` pins the KEY axis only (priority + hosted key set), and
+    ``test_the_lane_gate_registry_covers_the_v2_extractor_registry`` compares
+    key sets — neither reaches the model id.
+
+    Non-vacuity (measured, not argued): popping any one entry from
+    ``_SESSION_LLM_DEFAULT_MODELS`` — e.g. ``venice``, which #8133 added — reds
+    this test; the priority tuple still names the provider, so the KeyError it
+    prevents is reachable.
+    """
+    from tortoise.sdk import (
+        _SESSION_LLM_DEFAULT_MODELS,
+        _SESSION_LLM_PROVIDER_PRIORITY,
+    )
+
+    # Every DEFAULT_MODELS entry must be served by a registered provider (a
+    # model id for a provider nothing can select is dead config, and hides the
+    # real answer when the two tuples are compared only one way round).
+    stray = set(_SESSION_LLM_DEFAULT_MODELS) - set(_SESSION_LLM_PROVIDER_PRIORITY)
+    assert not stray, (
+        f"_SESSION_LLM_DEFAULT_MODELS names provider(s) {sorted(stray)} that are "
+        f"not in _SESSION_LLM_PROVIDER_PRIORITY — no capture can ever select "
+        f"them, so the model id is dead config (#8133)"
+    )
+    missing = set(_SESSION_LLM_PROVIDER_PRIORITY) - set(_SESSION_LLM_DEFAULT_MODELS)
+    assert not missing, (
+        f"provider(s) {sorted(missing)} are in _SESSION_LLM_PROVIDER_PRIORITY "
+        f"but have no _SESSION_LLM_DEFAULT_MODELS entry — "
+        f"sdk._build_session_llm_extractor raises an uncaught KeyError on the "
+        f"first capture of a deployment configured with only that provider "
+        f"(#8133; the exact 'gate says configured, builder cannot build' "
+        f"divergence this PR exists to close)"
+    )
+
+
+def test_a_venice_only_deployment_extracts(monkeypatch):
+    """#8133: venice-only is a SUPPORTED configuration and must EXTRACT.
+
+    Reproduced on main before the fix (venice-only env, every other provider
+    key unset):::
+
+        resolve_extractor_provider(): ('venice', ['venice'])   <- v2 says ready
+        _session_llm_provider():      None                     <- lane gate
+        _build_session_llm_extractor(): None
+
+    The capture then stored its turns and reported ``extraction_mode:
+    "no-provider"`` — silently, while the receipt blamed a key the operator HAD
+    configured. The three readings must agree, and agree on venice.
+
+    ``resolve_extractor_provider()``'s standalone-venice branch is what the tree
+    does today (#1549, on main) — PRECEDENT, not a recorded decision. No
+    recorded decision reaches this: #8133 records the product question as OPEN
+    ("needs the owner's call on one question … is ``venice`` a supported
+    standalone primary, or is it intentionally fallback-only?"), and its
+    2026-11-01 relay comment states in terms that venice-primary behaviour is
+    "a thing the code does today … precedent, not a decision". The direction is
+    nonetheless the one #8133's Objective and Targets direct — make the lane
+    gate agree with the v2 resolver — so the fix is to make the lane gate see
+    what the v2 extractor can already serve, not to refuse venice-only
+    deployments. A fallback-only RULING would reopen that, and would say so on
+    #8133.
+    """
+    from tortoise import hosted_api
+    from tortoise.model_adapters import resolve_extractor_provider
+    from tortoise.sdk import (
+        _build_session_llm_extractor,
+        _session_llm_provider,
+    )
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MODEL", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
+    for k in hosted_api._LLM_PROVIDER_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("VENICE_API_KEY", "sk-test-8133")
+
+    # The v2 extractor's own registry: venice is a standalone primary.
+    assert resolve_extractor_provider() == ("venice", ["venice"])
+    # The lane gates must now agree with it (they reported None/False before).
+    assert hosted_api._llm_provider_available() is True
+    assert _session_llm_provider() == "venice"
+    extractor = _build_session_llm_extractor()
+    assert extractor is not None, (
+        "venice-only: the lane gate says a provider is configured but no "
+        "extractor can be built — the capture would skip extraction silently"
+    )
+    # ...and a venice-only capture is no longer a 'no-provider' capture.
+    assert hosted_api._llm_provider_available() == (
+        _build_session_llm_extractor() is not None)
+
+
+def test_a_venice_key_does_not_take_over_a_multi_key_deployment(monkeypatch):
+    """#8133 discriminator: the fix must NOT change which provider SERVES a
+    deployment that already had a legacy key.
+
+    A naive fix (prepending venice to ``_SESSION_LLM_PROVIDER_PRIORITY`` to
+    "make venice work") would silently re-route every multi-key deployment's
+    session extraction onto venice. venice is appended LAST so only a
+    venice-ONLY deployment changes behaviour.
+    """
+    from tortoise import hosted_api
+    from tortoise.sdk import _session_llm_provider
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in hosted_api._LLM_PROVIDER_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("VENICE_API_KEY", "sk-test-8133")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-8133")
+    assert _session_llm_provider() == "openrouter"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-8133")
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    assert _session_llm_provider() == "deepseek"
+
+
+def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
+    """#8133 Indicator 2: the lane-gate key set must be a SUPERSET of the
+    provider key map the v2/ask lanes route over (``_PROVIDER_KEY_ENV``), so a
+    provider added there cannot land in one registry only (the #1549 venice
+    drift).
+
+    ⚠️ Scope, stated so the guard is not over-claimed (review cycle 1): what is
+    pinned is the KEY MAP, not ``resolve_extractor_provider``, which reads
+    ``DEEPSEEK_API_KEY``/``OPENROUTER_API_KEY``/``VENICE_API_KEY`` INLINE
+    (``model_adapters.py:591-593``) rather than through this map. A provider
+    added by editing only the resolver's inline reads stays green here — that
+    residual is why ``test_a_venice_only_deployment_extracts`` asserts all
+    three readings agree end-to-end on a venice-only env, which a registry-only
+    drift cannot satisfy.
+
+    ``test_sdk_priority_covers_all_registry_providers`` guards the other
+    direction (ingest -> priority/hosted); this guards the key map -> lane gate.
+    """
+    from tortoise import hosted_api
+    from tortoise.model_adapters import _PROVIDER_KEY_ENV
+
+    lane_keys = set(hosted_api._LLM_PROVIDER_KEYS)
+    v2_keys = set(_PROVIDER_KEY_ENV.values())
+    missing = v2_keys - lane_keys
+    assert not missing, (
+        f"v2 extractor provider key(s) {sorted(missing)} are invisible to the "
+        f"capture lane gate — a deployment configured with only those would "
+        f"silently skip extraction (#8133); register the provider in "
+        f"tortoise.ingest._PROVIDERS"
+    )
+
+
+# ── The "keyless capture" helpers must scrub the DERIVED provider set ──────
+#
+# #8133 registered ``venice`` in ``ingest._PROVIDERS``, which is the registry
+# these helpers' four-key hand-lists had never heard of. Three modules whose
+# whole premise is "no LLM extraction runs (no network, no mock)" therefore
+# started building a REAL ``OpenAICompatModel`` against
+# ``https://api.venice.ai/api/v1`` on any box with an ambient ``VENICE_API_KEY``
+# — and issuing a billed request — while staying green in CI, which has none.
+# That is the #3695 / #5477 class verbatim (``tests/conftest.py``: "green in CI
+# and red on a venice-configured box").
+#
+# The guard below is the durable half: the helpers must scrub the set the
+# REGISTRIES define, so a fifth provider cannot re-open the hole, and the
+# scrub must be observable from outside the helper (the ambient key really is
+# gone), not just asserted inside its own docstring.
+
+#: ``(module, helper)`` for every module that declares a keyless capture as a
+#: callable helper. The helper name differs per module, so it is named rather
+#: than guessed. ``tests/test_capture_backlog_4197.py`` scrubs inside its
+#: ``places`` fixture (it needs ``tmp_path``) and is covered by its own
+#: behaviour test instead —
+#: ``test_backlog_process_notes_a_missing_key_only_for_a_self_hosted_target``,
+#: which is red on a venice-configured box with the hand-list and green with the
+#: derived set.
+#:
+#: ``tests/test_8501_capture_path_anchor.py`` was the module this sweep first
+#: missed (review round 4): it declared no helper at all — the four-key hand-list
+#: was INLINED in two test bodies, so a guard keyed on ``(module, helper)`` could
+#: not see it. Its new ``_keyless`` helper plus this entry are the repair, which
+#: is why the durability claim above now holds for that module too.
+_KEYLESS_CAPTURE_HELPERS = (
+    ("tests.test_turn_embedding_write_path_4194", "_keyless"),
+    ("tests.test_capture_secret_redaction_4911", "_keyless"),
+    ("tests.test_capture_redaction_sinks_5445", "_keyless"),
+    ("tests.test_session_semantic_retrieval", "_keyless"),
+    ("tests.test_4199_dense_scope_coverage", "_offline_llm"),
+    ("tests.test_8501_capture_path_anchor", "_keyless"),
+)
+
+
+def _derived_provider_key_envs() -> tuple[str, ...]:
+    """Every provider API-key env var — the SHARED derivation.
+
+    ``tests/_provider_env.py::provider_key_envs`` is the one copy of
+    ``_llm_provider_keys() | _PROVIDER_KEY_ENV.values()``; ``conftest`` calls the
+    same function. It is NOT ``from tests.conftest import provider_key_envs`` —
+    that re-executes conftest's top-level code mid-session and re-points the
+    journal (``tests/_embedded.py`` review P0) — which is why the derivation
+    lives in the stdlib-only helper module rather than in conftest.
+
+    Keys-only on purpose: the whole routing set also carries the four SELECTOR
+    envs, and clearing ``TORTOISE_SESSION_LLM_MOCK`` would make this guard pass
+    for the wrong reason (the mock seam, not the key scrub).
+    """
+    return provider_key_envs()
+
+
+@pytest.mark.parametrize("module_name,helper_name", _KEYLESS_CAPTURE_HELPERS)
+def test_a_keyless_capture_helper_scrubs_every_registered_provider_key(
+        monkeypatch, module_name, helper_name):
+    """An ambient key for ANY registered provider must not survive the helper.
+
+    Every key is set ambient (as a developer box or a cell would have it), then
+    the module's own keyless helper is called and the extractor must still be
+    unbuildable. On the pre-#8133 helpers this fails on ``VENICE_API_KEY``: the
+    hand-list omits it, so ``_build_session_llm_extractor()`` returns a live
+    billed extractor instead of ``None``.
+    """
+    import importlib
+
+    module = importlib.import_module(module_name)
+    helper = getattr(module, helper_name)
+
+    keys = _derived_provider_key_envs()
+    assert "VENICE_API_KEY" in keys, (
+        "the derived provider-key set lost VENICE_API_KEY — the #8133 "
+        "registration regressed, so this guard would be vacuous"
+    )
+    for name in keys:
+        monkeypatch.setenv(name, "ambient-from-the-box")
+
+    helper(monkeypatch)
+
+    from tortoise.sdk import _build_session_llm_extractor
+
+    assert _build_session_llm_extractor() is None, (
+        f"{module_name}.{helper_name} leaves an extraction path open on an "
+        f"ambient provider key — the module's premise is 'no network, no "
+        f"mock', so this is a billed egress event in a test that promises "
+        f"none (#8133 review; #3695 / #5477 class)"
+    )
 
 
 def test_analyze_keys_subset_of_session_keys():

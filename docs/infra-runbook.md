@@ -1125,11 +1125,13 @@ enabled.
 | `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-flash` | Cheapest-tier default, and the analyzer's model too (`analyze._LLM_PROVIDERS`). NOT `deepseek-chat`: that id is retired and the provider answers 200 while silently serving `deepseek-flash`, so naming it made the configured model differ from the model used (#4129) |
 | `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` | |
 | `GEMINI_API_KEY` | Google Gemini | `gemini-2.0-flash` | Also used by MCP tooling — its presence here does NOT alone prove session capture is enabled |
+| `VENICE_API_KEY` | Venice.ai | `deepseek-v4-flash` | The #1549 rotation lane, OpenAI-compatible at `/v1`; serves the same documented flash model as the direct DeepSeek lane. ⚠️ **Last** in priority (#8133): a venice-ONLY deployment captures and extracts (it is a standalone primary in `model_adapters.resolve_extractor_provider`), but a venice key present alongside a legacy key never takes the capture over |
 | `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set. **On the hosted deployment `deploy-hosted.yml` now sets this unconditionally** — from the GitHub secret if present, else the versioned default `openrouter:google/gemini-2.5-flash` — so hosted extraction requires `OPENROUTER_API_KEY` (or a GitHub secret overriding the model). It is deliberately NOT left optional: an absent GitHub secret used to leave the hand-set Fly value in place forever (#4126). Unset for self-hosters, where the per-provider default applies. |
 | `TORTOISE_SESSION_LLM_MOCK` | — | unset | **TEST-ONLY** seam (`1` = offline MockModel). **NEVER set on Fly** — it counts as *configured* for the extraction gate, so a deploy with it set passes the gate while captures silently write offline MockModel points (see Verification procedure step 1) |
 
 Provider priority when MULTIPLE keys are set (first configured wins):
-`openrouter → deepseek → openai → gemini` (`sdk._SESSION_LLM_PROVIDER_PRIORITY`).
+`openrouter → deepseek → openai → gemini → venice`
+(`sdk._SESSION_LLM_PROVIDER_PRIORITY`, #8133).
 A key is only ever sent to the provider that issued it (#329).
 `ANTHROPIC_API_KEY` is deliberately NOT consumed (#722) — its presence must
 never be assumed to enable capture. `tortoise doctor` reports the resolved
