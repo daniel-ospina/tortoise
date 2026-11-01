@@ -511,6 +511,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VENICE_API_KEY: ${{ secrets.VENICE_API_KEY }}
           STRIPE_PRICE_IDS: ${{ secrets.STRIPE_PRICE_IDS }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           BILLING_NOTIFY_TO: ${{ secrets.BILLING_NOTIFY_TO }}
@@ -562,8 +563,9 @@ jobs:
           if [ -z "$OPENROUTER_API_KEY" ] && \
              [ -z "$DEEPSEEK_API_KEY" ] && \
              [ -z "$OPENAI_API_KEY" ] && \
-             [ -z "$GEMINI_API_KEY" ]; then
-            echo "::warning::No LLM provider key set — POST /v1/sessions stores captures but skips LLM extraction into memory until configured. Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY (docs/infra-runbook.md §4.6)"
+             [ -z "$GEMINI_API_KEY" ] && \
+             [ -z "$VENICE_API_KEY" ]; then
+            echo "::warning::No LLM provider key set — POST /v1/sessions stores captures but skips LLM extraction into memory until configured. Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / VENICE_API_KEY (docs/infra-runbook.md §4.6)"
           fi
           if [ -z "$STRIPE_PRICE_IDS" ]; then
             echo "::warning::STRIPE_PRICE_IDS not set — checkout/webhook tier resolution disabled until configured"
@@ -643,6 +645,7 @@ jobs:
           [ -n "$GH_CLIENT_SECRET" ] && GH_PRESENT="$GH_PRESENT GH_CLIENT_SECRET"
           [ -n "$OPENAI_API_KEY" ] && GH_PRESENT="$GH_PRESENT OPENAI_API_KEY"
           [ -n "$OPENROUTER_API_KEY" ] && GH_PRESENT="$GH_PRESENT OPENROUTER_API_KEY"
+          [ -n "$VENICE_API_KEY" ] && GH_PRESENT="$GH_PRESENT VENICE_API_KEY"
           [ -n "$POSTHOG_API_KEY" ] && GH_PRESENT="$GH_PRESENT POSTHOG_API_KEY"
           [ -n "$POSTHOG_HOST" ] && GH_PRESENT="$GH_PRESENT POSTHOG_HOST"
           [ -n "$R2_ACCESS_KEY_ID" ] && GH_PRESENT="$GH_PRESENT R2_ACCESS_KEY_ID"
@@ -756,6 +759,11 @@ jobs:
           TORTOISE_RECORD_DSN: ${{ secrets.TORTOISE_RECORD_DSN }}
           TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          # #8133: the probe above reads $VENICE_API_KEY, so the step must bind
+          # it — an unbound variable expands to the empty string, the probe
+          # reports the name ABSENT, and the gate fails a deploy for a secret
+          # that IS configured (the #4334 "reference it but never wire it" drift).
+          VENICE_API_KEY: ${{ secrets.VENICE_API_KEY }}
           # #4759: the bypass report's window start and its per-job audit marker.
           SKIP_FLY_SECRET_PROVENANCE_SET_AT: ${{ vars.SKIP_FLY_SECRET_PROVENANCE_SET_AT }}
           DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt
@@ -858,6 +866,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VENICE_API_KEY: ${{ secrets.VENICE_API_KEY }}
           TORTOISE_SESSION_LLM_MODEL: ${{ secrets.TORTOISE_SESSION_LLM_MODEL }}
           TORTOISE_BACKUP_KEY: ${{ secrets.TORTOISE_BACKUP_KEY }}
           TORTOISE_BACKUP_KEY_PREVIOUS: ${{ secrets.TORTOISE_BACKUP_KEY_PREVIOUS }}
@@ -919,15 +928,20 @@ jobs:
           [ -n "$BILLING_FROM_EMAIL" ] && ARGS+=(BILLING_FROM_EMAIL="$BILLING_FROM_EMAIL")
           [ -n "$BILLING_SUCCESS_URL" ] && ARGS+=(BILLING_SUCCESS_URL="$BILLING_SUCCESS_URL")
           [ -n "$BILLING_CANCEL_URL" ] && ARGS+=(BILLING_CANCEL_URL="$BILLING_CANCEL_URL")
-          # Session-capture LLM provider (#1197): propagate the four provider
-          # keys so the verify-secrets gate above and the shipped app AGREE —
+          # Session-capture LLM provider (#1197): propagate the provider keys
+          # so the verify-secrets gate above and the shipped app AGREE —
           # a key present in GH secrets never reaches Fly otherwise (and every
           # capture would store turns but never extract them, even though the
-          # gate passed).
+          # gate passed). VENICE_API_KEY is here for #8133: without it a hosted
+          # venice-only deployment still reports no-provider and skips
+          # extraction, which is the defect the ingest._PROVIDERS entry closes
+          # for the code path alone (tests/test_deploy_workflow.py pins this
+          # list against hosted_api._LLM_PROVIDER_KEYS).
           [ -n "$OPENROUTER_API_KEY" ] && ARGS+=(OPENROUTER_API_KEY="$OPENROUTER_API_KEY")
           [ -n "$DEEPSEEK_API_KEY" ] && ARGS+=(DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY")
           [ -n "$OPENAI_API_KEY" ] && ARGS+=(OPENAI_API_KEY="$OPENAI_API_KEY")
           [ -n "$GEMINI_API_KEY" ] && ARGS+=(GEMINI_API_KEY="$GEMINI_API_KEY")
+          [ -n "$VENICE_API_KEY" ] && ARGS+=(VENICE_API_KEY="$VENICE_API_KEY")
           # Session-capture extraction model (#1197/#1358, #4126): the model id
           # is NOT a credential, so the default lives HERE — in version control,
           # where a reviewer can see it — and is assigned UNCONDITIONALLY. Before

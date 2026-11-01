@@ -101,7 +101,12 @@ from tortoise.entity_identity import (  # #3590: identity is a minted id, a name
     refuse_ambiguous_create,  # the READ-ONLY pre-flight twin of that refusal
     resolve_fold_name,  # #3590 fold-side name resolution
 )
-from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+from tortoise.env_truthy import (  # #4097: the declared truthy contract
+    FALSY,
+    TRUTHY,
+    env_flag,
+    is_truthy,
+)
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
     provenance_basename,
@@ -5901,6 +5906,20 @@ async def health():
     durability seam whose "off" state must be distinguishable from "on"). See
     ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
     counter snapshot, or an unread tenancy resolution degrades ``status``.
+
+    Build check (#10447): ``build`` names the build that is SERVING — commit,
+    package version, whether the tree was dirty at build time (`null` until the
+    deploy stamps `TORTOISE_GIT_DIRTY`; see `_build_identity`), process start
+    time, and the highest schema migration this image carries. It is the same
+    VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
+    "is this deployed?" was previously unanswerable from this endpoint: a stale
+    build served ``status: ok`` and every other block happily. Like
+    ``change_feed`` and ``record`` it does NOT fold into ``status`` — a stale
+    deploy is up, and calling it degraded would make Fly restart a healthy
+    process forever. Currency is a COMPARISON (``check-deploy-staleness.sh``
+    against ``origin/main``); this block publishes the datum that comparison
+    needs, plus ``build_identified`` so an unstamped deployment is readable as
+    unstamped rather than as current.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -5920,7 +5939,7 @@ async def health():
             else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
             "backup_watcher": watcher, "change_feed": _change_feed_health(),
-            "record": record}
+            "record": record, "build": _build_identity()}
 
 
 @app.get("/health/ready")
@@ -6021,6 +6040,198 @@ async def health_security():
     }
 
 
+#: #10447: when THIS PROCESS started serving. Constant per process, so a reader
+#: can see a restart (a deploy that landed) without a log grep — and can see that
+#: a build is OLD by comparing it to the deploy it was supposed to pick up.
+#:
+#: `commit_dirty` is published but is NULL on every real deployment today:
+#: nothing stamps `TORTOISE_GIT_DIRTY`. The deploy workflow's propagation block is
+#: pinned by `tests/test_fly_secret_drift.py` (whose harness stubs PATH to
+#: fly/flyctl only) and a new stamp would also need a declaration in
+#: `.github/scripts/fly-managed-secrets.txt` or the drift check blocks every later
+#: deploy — a deploy-surface change, filed separately rather than smuggled in here.
+#: A `null` here is the honest reading; it must not be read as "clean".
+_PROCESS_STARTED_AT: str = datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _migrations_head() -> tuple[str | None, str | None]:
+    """`(highest schema migration this image carries, WHERE it was read from)`.
+
+    CARRIED, NOT APPLIED — and the field does not claim otherwise (review P2).
+    This is the highest migration-shaped file THE IMAGE CARRIES: the build's own
+    inventory, read from the tree the image ships. It is NOT the answer to
+    "which migration has been APPLIED to the database", and publishing it as
+    though it were would be a false PASS on the question #10447 exists to make
+    answerable. The two diverge in practice, not in theory: this process never
+    applies a schema migration (``entrypoint.sh`` has no migration step —
+    ``supabase/migrations`` is applied by the separate ``supabase-deploy.yml``
+    workflow — "Deploy Supabase migrations + edge functions", ``:1``), and the
+    deploy's own gate classes index-only drift as WARN-class, exit 0
+    (``.github/scripts/check-migration-drift:25-26``), so an index-only
+    migration can land on main,
+    be carried by the next image, and still not be applied in prod. The APPLIED
+    set is a database fact and lives in the database; reading it here would be
+    exactly the DB work on ``/health`` that the issue's anti-goal forbids, so it
+    is declared OUT OF SCOPE (PR body, ``## PARTIAL``) instead of implied by a
+    field that cannot answer it.
+
+    Resolved through
+    ``record_projection._migrations_dir()`` — the ONE existing resolver (checkout
+    first, wheel second) — so there is no second opinion about where the schema
+    lives. No database query: the issue's anti-goal is explicit that ``/health``
+    must not grow database work.
+
+    ORDERING IS NUMERIC, NOT LEXICOGRAPHIC (review P2). The names are
+    ``<YYYYMMDDnnnnnn>_<slug>.sql``, and ``sorted()`` puts any file whose stem
+    starts with ``_`` or a letter AFTER every date-prefixed one (``_seed`` >
+    ``9…``), so a stray ``seed.sql`` would have published itself as the schema
+    head. Only a ``<digits>_`` prefix counts as a migration, and the maximum is
+    taken over the parsed integer.
+
+    THE SECOND ELEMENT IS NOT DECORATION (review P2). A WHEEL ships only the
+    record migrations, so it reports the highest of THOSE — a number that is
+    plausible, wrong for the inventory question ("which schema migrations does
+    this image carry"), and indistinguishable from the checkout's answer unless
+    the reader is told which population it came from. Publishing the source makes the difference visible
+    where the datum is, instead of only in a docstring.
+
+    ``None`` HEAD HAS TWO CAUSES AND THE PAYLOAD NAMES WHICH (review P2). A
+    ``None`` head with ``source == "error"`` means the RESOLVER RAISED — the
+    image may well carry all 77 migrations and the reading is what is broken; a
+    ``None`` head with ``source is None`` means no migration-shaped file was
+    found (a stripped install). Collapsing both to ``(None, None)`` is the same
+    failure class this whole change is about: an operator (or a staleness probe)
+    reads "this image carries no migrations" — a plausible absence — when the
+    truth is "the resolver is broken". The broad ``except`` below has to stay
+    broad (a raise here would 5xx the liveness probe); what it must not do is
+    answer the same thing as a real absence.
+
+    ``source`` is therefore ``"checkout"``, ``"package"``, ``"error"`` (the
+    resolver raised) or ``None`` (the ``realpath`` comparison itself failed).
+    ``"checkout"`` means the CHECKOUT tree was chosen — not that all 77 files
+    were present in it.
+    """
+    try:
+        # Local on purpose, and NOT for import cost: `tortoise.record_projection`
+        # is already in `sys.modules` (this file imports a name from it at module
+        # scope), so the deferral saves nothing at import time. What the local
+        # binding buys is that `_migrations_dir` is looked up on the MODULE at
+        # call time — which is what lets a test substitute the resolver without
+        # reloading this 43k-line module.
+        from tortoise import (
+            record_projection,
+        )
+        base = record_projection._migrations_dir()
+        heads = [
+            (int(m.group(1)), p.stem)
+            for p in base.glob("*.sql")
+            if (m := re.match(r"(\d+)_", p.name)) is not None
+        ]
+        packaged = str(getattr(record_projection, "PACKAGED_MIGRATIONS", ""))
+    except Exception:
+        # ⛔ THIS SWALLOW HIDES A REAL BUG IF IT IS TOO BROAD, and it did once:
+        # `Path` is not imported at module scope in this file, so `Path(base)`
+        # raised NameError and this branch answered "no migrations" for a
+        # checkout that carries 77 — a plausible absence, which is the exact
+        # failure class #10447 is about. The pins forbid it passing:
+        # `test_migrations_head_is_the_highest_migration_the_image_carries`
+        # asserts the REAL tree's head is not None, so an over-broad swallow reds
+        # the suite instead of reading as "absent".
+        #
+        # `"error"`, never `None` (review P2): `None` is already the value a
+        # genuinely-empty image reports, and answering both with one reading is
+        # how a broken resolver passes for a plausible absence.
+        return None, "error"
+    if not heads:
+        return None, None
+    try:
+        source = "package" if os.path.realpath(base) == os.path.realpath(packaged) else "checkout"
+    except (OSError, ValueError):
+        source = None
+    return max(heads)[1], source
+
+
+#: #10447: resolved ONCE per process, at import — never per request. The value
+#: cannot change while the image runs, and `/health`'s contract is that the
+#: handler "collects NO I/O" (a distribution gate,
+#: `.github/scripts/deploy-health-gate.sh`, states the same: "phase 1 hits
+#: /health — an in-memory snapshot, no I/O"). `_migrations_dir()` alone does 13
+#: `Path.exists()` stats before the glob, which is exactly the kind of work the
+#: #2850 fix removed from the request path (review P2).
+_MIGRATIONS_HEAD, _MIGRATIONS_SOURCE = _migrations_head()
+
+
+def _build_identity() -> dict:
+    """The ONE resolver for "which build is serving" (#10447).
+
+    ``/health`` and ``/v1/version`` both call this, so the two public surfaces
+    cannot disagree about the deployed commit — a divergence between them would
+    be a second opinion about identity, and the reader would have no way to pick.
+
+    THE FAILURE THIS CLOSES (#10447). ``/health`` answered ``status: ok`` plus its
+    checks and named NO build, so "is this deployed?" could not be answered from
+    the endpoint every watchdog and every census actually probes: measured
+    against production, the keys were ``status``, ``db``, ``probe``,
+    ``loop_stale_ms``, ``backup_watcher``, ``change_feed``, ``record`` — and a
+    stale build serves every one of them happily. The reading existed on
+    ``/v1/version`` (#2208) but a reader who probed ``/health`` concluded nothing
+    was published, which is the same class as a version that was never published.
+
+    ``commit_sha`` comes from the DEPLOY (``TORTOISE_GIT_SHA``, stamped by
+    ``deploy-hosted.yml`` from ``GITHUB_SHA``) — never from a constant an agent
+    can edit, because a version string a human can change is not a version. When
+    nothing stamped it (selfhost, local dev, a stripped deploy) the field is
+    ``None`` and ``build_identified`` is ``False``: an ABSENCE that says so,
+    which a probe can refuse on, instead of a value that looks current.
+
+    ``stale`` cannot be decided here — it is a comparison against the commit the
+    reader EXPECTS (``check-deploy-staleness.sh`` compares against
+    ``origin/main`` with ``git merge-base --is-ancestor``), and an endpoint that
+    guessed would be exactly the false-PASS this issue is about. What this
+    publishes is the datum that comparison needs, on every surface that answers
+    "is it up".
+    """
+    sha = (os.environ.get("TORTOISE_GIT_SHA") or "").strip() or None
+    # THE VOCABULARY IS THE REPO'S, NOT A SIXTH ONE (review P2). A bare
+    # `{"1": True, "0": False}` map published `null` for `true`/`True`/`yes`/
+    # `on` — and `true` is the spelling this fleet's own deploy already uses
+    # (`BACKUP_SWEEP_ENABLED=true`), so a stamped dirty build read as "not
+    # claimed". `tortoise/env_truthy.py` is the declared single contract (#4097);
+    # unset/blank/garbage stays `None` ("not stated"), never `False`.
+    norm = (os.environ.get("TORTOISE_GIT_DIRTY") or "").strip().lower()
+    dirty_flag = True if norm in TRUTHY else (False if norm in FALSY else None)
+    # `build_identified` is a POLARITY ALLOW-LIST, not `sha is not None` (review
+    # P2). Any non-empty stamp used to claim an identified build — `unknown`,
+    # `main`, `dev`, or a literally unexpanded `${GITHUB_SHA}` — and a reader keyed
+    # on it was told "we know which commit" about a value that cannot be compared
+    # to `origin/main`. A commit is 7-40 lowercase hex; anything else is a stamp we
+    # cannot reason with, and it says so.
+    #
+    # A DIRTY BUILD IS ALSO NOT THE COMMIT IT NAMES (review P2): the sha matches a
+    # commit, but the tree it was built from did not, so the field answers False —
+    # which is what the pin's own title claims and what a reader keyed on
+    # `build_identified` alone must not be told the opposite of. `commit_sha` stays
+    # RAW so `/v1/version`'s two-key contract carries exactly what the deploy staged.
+    identified = (bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
+                  and not dirty_flag)
+    return {
+        "version": tortoise.__version__,
+        "commit_sha": sha,
+        "commit_dirty": dirty_flag,
+        "build_identified": identified,
+        "started_at": _PROCESS_STARTED_AT,
+        # CARRIED by this image, never "applied in the database" — see
+        # `_migrations_head`'s docstring for why the two diverge and why the
+        # applied set is declared out of scope rather than implied here.
+        "migrations_head": _MIGRATIONS_HEAD,
+        # WHICH population `migrations_head` was read from (review P2): the
+        # checkout tree (the schema, all 77 migrations) or the packaged wheel
+        # (only the record lineage). Without this the two answers are
+        # indistinguishable, and the packaged one is plausible and wrong.
+        "migrations_source": _MIGRATIONS_SOURCE,
+    }
+
+
 @app.get("/v1/version")
 async def version_info() -> dict:
     """Deployed build surface — clients detect an outdated server (#2208).
@@ -6034,11 +6245,15 @@ async def version_info() -> dict:
     deploy time by deploy-hosted.yml
     (TORTOISE_GIT_SHA=${GITHUB_SHA} staged into the release env). Null when
     no deploy pipeline set it (selfhost / local dev). Never touches the DB.
+
+    #10447: the VALUES come from ``_build_identity()`` — the same resolver
+    ``/health`` now uses — while this endpoint's two contract keys stay exactly
+    as clients already read them. ``/health`` carries the same block under
+    ``build``, so one curl answers "what is running" and the two surfaces cannot
+    drift apart.
     """
-    return {
-        "version": tortoise.__version__,
-        "commit_sha": os.environ.get("TORTOISE_GIT_SHA") or None,
-    }
+    ident = _build_identity()
+    return {"version": ident["version"], "commit_sha": ident["commit_sha"]}
 
 
 # ── Phase 1a: Core Endpoints ──────────────────────────────────────
@@ -42054,7 +42269,13 @@ async def oauth_authorize(request: Request):
             f"The consent bridge's signing key is unusable ({secret_problem}) — "
             "retry shortly."))
     html, nonce = consent_page_html(
-        client_name=client.get("client_name") or client["id"],
+        # #8218: `client_name` is the REGISTRY's stored name, and the identity
+        # decision is made inside `consent_page_html` (`client_identity`), so a
+        # DCR client that named itself "Claude" renders as an unverified app
+        # with its client_id as the handle. `client_id` is passed explicitly so
+        # the decision never depends on a request param.
+        client_id=client["id"],
+        client_name=client.get("client_name"),
         # #3443: `redirect_target` rides along with the raw params — the page
         # navigates THAT (deny included, which has no server round trip) and
         # posts `redirect_uri` back for validation as before.

@@ -1097,6 +1097,25 @@ SOURCE_PATTERNS = {
             # core-registered guard. Pinned by tests/test_ci_selection.py::
             # test_a_consent_token_only_diff_runs_the_bridge_guard.
             "tortoise/consent_token.py",
+            # #8218 review (finding 3): `tortoise/client_identity.py` OWNS the
+            # consent screen's identity decision (which name, if any, the page
+            # may print), and it matched no pattern — so a diff that touched
+            # ONLY the rule selected `core` and ran no consent test at all,
+            # while a diff to the render site that merely CALLS it
+            # (`tortoise/oauth.py`, above) ran two. That is the #2938/#3154/#4367
+            # silent-drop class on the module a follow-up like the CIMD
+            # brand-prefix residual would change. MEASURED before this entry:
+            # `--changed-files tortoise/client_identity.py --event pull_request`
+            # -> surfaces ['core'], full=false, with NEITHER
+            # `test_oauth_consent_client_identity_8218.py` NOR `test_oauth_mcp.py`
+            # selected. No CORE_ALSO entry: the count invariant is registered
+            # `api` + `core` (the `core` arm carries its AST-enumeration half),
+            # so the named-surface match still selects it through `api`, and
+            # `test_oauth_mcp.py` is an `api` registration (plus `slow_files`) —
+            # the `core` fallback adds nothing either suite needs. Pinned by
+            # tests/test_ci_selection.py::test_a_client_identity_only_diff_runs_
+            # the_consent_identity_guards.
+            "tortoise/client_identity.py",
             # #3496 put this entry here so a vendored-bundle bump would run the
             # consent page's CDN-version pin and the harness that executed the
             # bumped file. **#3524 §9 step 4 deleted both** (the page has no
@@ -1939,6 +1958,41 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # entry) it is a cost/home fix rather than a hole fix, which is
              # stated so the polarity is not misread later.
              "docs/evidence/7949-capstone/",
+             # #10484 / PR #10495 review P2: the W1b evidence bundle
+             # (`docs/evidence/8607-w1b/` — README, `seed.py`, `measure.py`,
+             # `verify-revert.py`) owns the pin
+             # `tests/test_8607_legacy_id_normaliser.py`,
+             # `::test_each_evidence_script_puts_THE_REPO_ROOT_on_sys_path`,
+             # which reads each script BY PATH and executes its own
+             # `sys.path.insert` line. `docs/` is a flat NON_PYTHON_PREFIXES
+             # entry and no SOURCE_PATTERNS row matches these files, so a
+             # script-only diff came back with `changed == []`, took the
+             # docs-only early return and selected tier-1 smoke — where that
+             # pin is NOT registered.
+             #
+             # MEASURED before this entry (2026-11-01, `select()` in-process at
+             # `30f9b85ec`): `select(["docs/evidence/8607-w1b/seed.py"],
+             # "pull_request", …)` -> `surfaces=[]`, `full=False`, 70 files,
+             # `test_8607_legacy_id_normaliser.py` ABSENT. So a PR that reverted
+             # `seed.py`'s bootstrap to `parents[2]` — the inert-bootstrap
+             # defect the README and `docs/00_index.md` advertise as pinned —
+             # would have merged with the pin NEVER RUN: the
+             # #1349/#3332/#3616 silent-drop class, on the one diff that can
+             # disarm the pin, and newly introduced here because BOTH the
+             # bundle and its pin are added by this PR.
+             #
+             # A SOURCE_PATTERNS row could not fix it: `_selection_relevant()`
+             # deliberately skips the `core` surface, and the pin is
+             # `core`-registered. Same shape and remedy as
+             # `docs/evidence/7950-capstone/`, `docs/evidence/7949-capstone/`
+             # and `docs/evidence/5612-journal-growth/probes/` above; the whole
+             # bundle prefix (not a narrower `probes/`-style row) because the
+             # pin's subjects are every script in it. No broader
+             # `docs/evidence/` entry exists, so
+             # `test_no_core_also_entry_is_shadowed_by_a_parent_prefix` is
+             # unaffected. Pinned by tests/test_ci_selection.py::
+             # test_the_8607_evidence_bundle_selects_core_not_tier1.
+             "docs/evidence/8607-w1b/",
              # #9695: the Step-1 eval's EVIDENCE DOC
              # (`docs/ax/how-to-use-tortoise-step1-eval.md`) publishes every
              # measured number of that eval — the aggregate headline, all ten

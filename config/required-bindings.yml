@@ -413,3 +413,21 @@ projects:
           A preview deployment must set it to its OWN origin so the AS it talks
           to accepts the mint; the value must match CONSENT_TOKEN_ISSUER on
           that API or every redemption is `401 invalid_token`.
+
+      # ⛔ NOT HERE — `TORTOISE_OAUTH_ATTESTED_CLIENTS` (#8218, the consent
+      # screen's client-identity allowlist). This manifest is the CLOUDFLARE
+      # PAGES surface, and that knob's only reader is
+      # `tortoise/client_identity.py` in the Fly-hosted authorization server: no
+      # Pages Function imports it, so a `recommended` entry here could never be
+      # satisfied — it warned on every dashboard deploy for a project that must
+      # not carry it, and pointed the operator at a deployment that cannot read
+      # the value (#10472 review). Its home is the AS's own env:
+      # `fly.toml [env]`, declared `fly-toml-env` in
+      # `.github/scripts/fly-managed-secrets.txt`, documented in
+      # `docs/oauth-mcp.md` §"Knobs".
+      #
+      # THE RULE THAT ENTRY VIOLATED, now a test:
+      # `tests/test_pages_bindings.py::test_every_Pages_env_var_is_read_by_Pages_code`
+      # — an `env_vars` binding is declared for a Pages project only if some file
+      # under `website/` reads the name. A binding nothing there reads is not a
+      # knob, it is a warning that can never be satisfied.

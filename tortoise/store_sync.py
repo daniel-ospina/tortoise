@@ -238,7 +238,8 @@ def run_sweep(
     markers into the spool — an irreversible mutation of the very substrate the
     plan was asked to REPORT on, which made the plan unreproducible.
     """
-    receipt: dict[str, Any] = {"spool": None, "log": None, "ok": True}
+    receipt: dict[str, Any] = {"spool": None, "session_events": None,
+                              "log": None, "ok": True}
     # `--file` names ONE session file for the LOG half; for the spool half the
     # equivalent is that session's spool entry. Both filters are forwarded so
     # neither flag is silently half-applied (#3515 review: `--exclude-session-id`
@@ -308,6 +309,80 @@ def run_sweep(
         except Exception as exc:  # a broken spool must not kill the log half
             receipt["spool"] = {"error": f"{type(exc).__name__}: {exc}"}
             receipt["ok"] = False
+    # ── #6388: the THIRD substrate ───────────────────────────────────────────
+    # `~/.tortoise/session-events/` — the day-addressed JSONL `reflect-hook`
+    # appends on shutdown. This module's own docstring has named it as item 1
+    # since #3515 while the spool leg only ever walked `<spool>/entries/`, so the
+    # substrate had a writer and NO drain (#6388: 61,997 records / 516 MB, and
+    # `~/.tortoise/store-sync/` never existed as proof that nothing consumed it).
+    #
+    # It is a LEG of this sweep, not a second drainer (#1178): the same consent
+    # gate, the same credential, and the same transport callable the spool leg
+    # files through. A dry run reports without moving its cursor, exactly like
+    # the spool leg above.
+    try:
+        from tortoise.capture_consent import (
+            capture_consent_enabled,
+            capture_declined_reason,
+        )
+        from tortoise.session_events_drain import drain_session_events
+
+        if dry_run:
+            # A PLAN still answers "how big is the backlog": the leg counts what
+            # it would drain and moves nothing.
+            receipt["session_events"] = drain_session_events(
+                lambda _payload: None, dry_run=True,
+                store=cursor_dir if cursor_dir is not None else default_cursor_dir(),
+                only_session_id=only_session_id)
+        elif not capture_consent_enabled():
+            receipt["session_events"] = {
+                "status": "declined",
+                "detail": capture_declined_reason()
+                or "capture is off — the session-events leg was not drained",
+            }
+        else:
+            transport = post
+            if transport is None:
+                if not api_key:
+                    receipt["session_events"] = {
+                        "status": "no_credential",
+                        "detail": ("no API key — the session-events leg was not "
+                                   "drained"),
+                    }
+                    # A substrate that was NOT drained is not a success — the
+                    # same verdict the spool leg above records.
+                    receipt["ok"] = False
+                else:
+                    from tortoise.__main__ import _session_post
+
+                    transport = _session_post(api_key, api_url or "")
+            if transport is not None:
+                summary_events = drain_session_events(
+                    transport,
+                    store=cursor_dir if cursor_dir is not None
+                    else default_cursor_dir(),
+                    exclude_session_id=exclude_session_id,
+                    # BOTH filters, for the reason the comment above gives: a
+                    # `--file <session>` run that forwarded `exclude` only would
+                    # drain every session's records from this substrate — the
+                    # flag silently half-applied, which is the class that
+                    # comment was written for (#3515 review).
+                    only_session_id=only_session_id,
+                )
+                receipt["session_events"] = summary_events
+                if summary_events.get("cursor_error"):
+                    # The backlog moved but its position could not be saved: the
+                    # next sweep re-POSTs it. Reported, never swallowed.
+                    receipt["ok"] = False
+                # A record that can never be filed is dead-lettered, not a lost
+                # capture and not a failure of the sweep; a TRANSIENT refusal
+                # that stopped the leg is the same class as the log half's
+                # `withheld` and does not fail the sweep either (the cursor did
+                # not move, so nothing was lost).
+    except Exception as exc:  # a broken substrate must not kill the other legs
+        receipt["session_events"] = {"error": f"{type(exc).__name__}: {exc}"}
+        receipt["ok"] = False
+
     receipt["log"] = run_worker(
         session_dir=session_dir if session_dir is not None else default_session_dir(),
         cursor_dir=cursor_dir if cursor_dir is not None else default_cursor_dir(),
@@ -473,6 +548,38 @@ def _sanitise_reason(text: str) -> str:
     return " ".join(cleaned.split())[:80]
 
 
+#: The ``status`` values the session-events leg reports when it did NOT drain
+#: anything — the leg's own verdict, not an exception. Read by
+#: :func:`_events_failure_reason` so a non-zero sweep can NAME this leg.
+_EVENTS_NOT_DRAINED = frozenset({"declined", "no_credential"})
+
+
+def _events_failure_reason(events: Any) -> str | None:
+    """Why the SESSION-EVENTS leg did not drain, as a token — or ``None``.
+
+    The reason chain in :func:`write_sweep_status` could only see the LOG half
+    (``worker_status``/``withheld``/``errors``) and the SPOOL half
+    (``spool.error``), so a failure that came ONLY from the events leg fell
+    through to the generic ``"worker exited non-zero"`` — naming the node
+    worker, a component that exited 0 and delivered its turns.
+
+    Under ``--no-spool`` (the Pi extension's own cadence) the spool half is
+    ``None`` entirely, so the generic fallback was the ONLY case there was: an
+    events-leg failure read as a worker crash, and the leg that actually failed
+    was named nowhere on the health line.
+
+    ``status`` is consulted only for the NOT-DRAINED verdicts: a real pass
+    reports ``"drained"`` / ``"dry_run"``, which are not failures. A real
+    failure is the exception arm (``error``) or a cursor that could not be
+    written (``cursor_error``).
+    """
+    if not isinstance(events, dict):
+        return None
+    return (events.get("cursor_error") or events.get("error")
+            or (events.get("status") if events.get("status") in _EVENTS_NOT_DRAINED
+                else None))
+
+
 def _reason_token(errors: list[Any]) -> str | None:
     """The first error, as a known-class TOKEN or as its raw text (sanitised later)."""
     if not errors:
@@ -540,14 +647,40 @@ def write_sweep_status(receipt: dict, cursor_dir: Path | str | None) -> None:
             spool = receipt.get("spool") or {}
             reason = spool.get("error") if isinstance(spool, dict) else None
         if not reason and receipt.get("ok") is False:
+            # #6388: the third leg, BEFORE the generic fallback — otherwise an
+            # events-only failure is persisted as a worker crash it is not.
+            reason = _events_failure_reason(receipt.get("session_events"))
+        if not reason and receipt.get("ok") is False:
             reason = "worker exited non-zero"
         # ONE place, after all three sources are resolved: `errors[]`,
         # `worker_status`, and `spool.error` (a raw exception message, which is
         # how a comma and an em-dash reached the line in generation 13).
         if reason:
             reason = _sanitise_reason(str(reason))
+        # #6388: how far the session-events backlog moved in this sweep. The
+        # absence of a per-run count is why tens of thousands of records
+        # accumulated invisibly; `queued` is the number an operator watches.
+        events = receipt.get("session_events")
+        events_counts = events if isinstance(events, dict) else {}
         payload = {
             "version": 1,
+            "session_events": {
+                "filed": events_counts.get("filed", 0),
+                "dead_lettered": events_counts.get("dead_lettered", 0),
+                "deferred": events_counts.get("deferred", 0),
+                # `held` (a live session, left queued by design) and
+                # `unselected` (another session under `--file`) were computed
+                # every pass and persisted NOWHERE, so the health line could not
+                # distinguish "nothing left" from "everything withheld".
+                "held": events_counts.get("held", 0),
+                "unselected": events_counts.get("unselected", 0),
+                "degraded": events_counts.get("degraded", 0),
+                "queued": events_counts.get("queued", 0),
+                "stuck": events_counts.get("stuck", 0),
+                "stopped": events_counts.get("stopped"),
+                "cursor_error": events_counts.get("cursor_error"),
+                "unreadable": len(events_counts.get("unreadable") or []),
+            },
             # `at` is consumed for PRECEDENCE, not for freshness: the extension
             # reads it to decide whether a record is the CLI's own name for THIS
             # sweep (and must not be replaced by its exit code). What it does
@@ -624,6 +757,27 @@ def main(args) -> int:
                   file=sys.stderr)
         if receipt.get("spool"):
             print(f"store-sync: spool — {receipt['spool']}", file=sys.stderr)
+        # #6388: the third leg reports on the human path too. It was persisted
+        # in `sweep-status.json` and printed by `session drain`, but NEVER here —
+        # so the Pi cadence (`store-sync --no-spool`, stdio ignored) and any
+        # human `tortoise store-sync` got no line at all, including for `stuck`,
+        # `held`, `unreadable` and `cursor_error`. A count that reaches only
+        # `--json` is a count nobody reads.
+        if receipt.get("session_events"):
+            events = receipt["session_events"]
+            if not isinstance(events, dict):
+                events = {}
+            if events.get("error"):
+                print(f"store-sync: session-events FAILED — {events['error']}",
+                      file=sys.stderr)
+            elif events.get("status") in _EVENTS_NOT_DRAINED:
+                print(f"store-sync: session-events not drained — "
+                      f"{events.get('status')}: {events.get('detail', '')}",
+                      file=sys.stderr)
+            else:
+                from tortoise.session_events_drain import format_progress
+
+                print(format_progress(events), file=sys.stderr)
     if not getattr(args, "dry_run", False):
         # A `--dry-run` is a PLAN, not an outcome. `main` used to write the
         # status unconditionally, so a human running `tortoise store-sync

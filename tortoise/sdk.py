@@ -799,27 +799,27 @@ INGEST_PROMOTION_POLICIES = ("gated", "auto")
 
 # Provider priority when MULTIPLE keys are set (first configured wins — the
 # deploy-time decision is which key is present; a key is only ever sent to the
-# provider that issued it, #329). Order mirrors tortoise.ingest._PROVIDERS.
-_SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini")
+# provider that issued it, #329). Mirrors ingest._PROVIDERS; venice is LAST (#8133).
+_SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini", "venice")
 
-# Default model per provider when TORTOISE_SESSION_LLM_MODEL is unset. The
-# provider/model choice is a product decision (deploy-time) — these are
-# cheap-tier defaults matching the analyzer's model choices (analyze.py
-# _LLM_PROVIDERS) and session_indexer's whitelist family.
+# Default model per provider when TORTOISE_SESSION_LLM_MODEL is unset — a
+# deploy-time product decision; cheap-tier defaults matching analyze.py
+# _LLM_PROVIDERS and session_indexer's whitelist family. ``venice`` serves
+# deepseek-v4-flash (the id its adapter's docstring documents, sent verbatim).
 #
 # #4129: every id here must be one the provider actually SERVES, because a
 # provider answers 200 to a retired id and silently serves a different model.
 # api.deepseek.com still accepts "deepseek-chat" and serves "deepseek-flash",
 # so naming the retired id did not fail — it silently ran a model nobody
-# configured. Verified against GET /models on 2026-10-05, which serves exactly
-# ["deepseek-flash", "deepseek-v4-pro"]. Re-check with that endpoint before
-# changing an id; models.OpenAICompatModel also warns at call time when the
-# served id diverges from the requested one.
+# configured. Verified against GET /models on 2026-10-05: ["deepseek-flash",
+# "deepseek-v4-pro"]. Re-check there before changing an id; OpenAICompatModel
+# also warns at call time when the served id diverges from the one requested.
 _SESSION_LLM_DEFAULT_MODELS = {
     "openrouter": "deepseek/deepseek-chat",
     "deepseek": "deepseek-flash",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
+    "venice": "deepseek-v4-flash",
 }
 
 #: #3892 (owner ruling 2026-09-18): the additive warning a KEYLESS capture
@@ -5267,8 +5267,14 @@ class _WriteNotLanded(Exception):
     **Scope: the graph-abort family only.** ``retryable_aborted_write`` also
     admits the write-slot arm (ordinary multi-writer contention) and MISCONF,
     and NEITHER says anything about whether the target existed — so arming this
-    sentinel on those would turn a benign ``update_point(<missing id>)`` into a
-    stale ``ResponseError`` after four attempts. The gate in
+    sentinel on those would turn a benign ``update_point`` on a target that
+    VANISHED between the guard read and the write (or on any door whose write
+    legitimately matches zero rows) into a stale ``ResponseError`` after four
+    attempts. (Pre-#10119 the same sentence named a ``<missing id>``; the
+    NON-STATUS shape is now refused at the guard read before any write, while a
+    STATUS-carrying call still takes the guarded promote write — so the absent
+    shape this latch can still meet is the status-carrying one, plus the target
+    that vanished.) The gate in
     ``_graph_write_with_retry`` therefore LATCHES the first
     graph-deleted-or-replaced abort of the call (a later write-slot abort must
     neither arm it nor disarm it — a rebuild is itself a concurrent writer) and
@@ -9643,9 +9649,16 @@ class TortoiseSDK:
         "the caller's target never existed". The write-slot / MISCONF arms are
         retried without arming it, so their benign zero-row outcomes are
         unchanged, and a LATER one cannot disarm it. On exhaustion the abandoned
-        abort is re-raised. A first attempt is never consulted, so verbs that
-        return a benign empty result (``update_point`` on a missing id) keep
-        that contract.
+        abort is re-raised. A first attempt is never consulted, so a benign
+        zero-row result keeps that contract. ⛔ #10119 moved the reachable
+        shape of that case for ``update_point``: an id ABSENT at its guard read
+        is refused before any WRITE statement (that read still issues its
+        own), so the observed shape is a target
+        PRESENT at that read that vanishes before the write — an absent-at-entry
+        id is no longer an example of a benign zero row here, and a write-slot
+        abort on the vanished target must stay armed-free so the empty contract
+        survives (``test_a_write_slot_abort_on_a_vanished_target_keeps_the_``
+        ``empty_contract``, #8854 review round 10).
 
         A witness for a multi-statement ``fn`` whose own return value is not a
         landing proof (the tag arm: ``_sync() -> None``), or a witness that
@@ -9768,9 +9781,10 @@ class TortoiseSDK:
                 #
                 # The latch is load-bearing in BOTH directions: the
                 # write-slot and MISCONF arms are retried too and say nothing
-                # about node existence, so they must not ARM the witness
-                # (`update_point(<missing id>)` keeps returning `{}`), and a
-                # later one must not DISARM it either.
+                # about node existence, so they must not ARM the witness (a
+                # target that VANISHED between the guard read and the write
+                # keeps returning `{}`), and a later one must not DISARM it
+                # either.
                 raise _WriteNotLanded(armed_abort)
             return result
 
@@ -16376,51 +16390,6 @@ class TortoiseSDK:
         elif "embedding" in props:
             props["embedding_verbatim"] = None
 
-        # #4208: a content edit must recompute the DERIVED vector in the SAME
-        # write, exactly as it already recomputes the derived `content_hash`
-        # (#1904). Before this, `update_point(content=B)` left the node holding
-        # content B with `vec(A)` — the dense leg then ranked it by text no
-        # longer on the node, and live != rebuild, because the replay's
-        # `_revise_point` DOES re-encode. Same rule as the hash, and the same
-        # rule #19 set for the revise fold: recompute from the new content, or
-        # WIPE it when the embedder is unavailable (`None`) — never preserve a
-        # vector the new content did not produce (a vector for different text
-        # is worse than none). #4194/#4280: route through `encode_for_store`
-        # (the store-width-declaring seam) so the stored width matches the
-        # Point HNSW index this store created; the seam is still
-        # `compute_embedding` (module global), so installed doubles intercept.
-        #
-        # A CALLER-supplied vector is deliberately NOT recomputed: the caller
-        # owns that write, the verbatim marker above already describes it, and
-        # the record/replay treatment of a caller vector on a revise is the
-        # separate declared gap #5046. Gated on the KEY, so this fires only
-        # when the caller supplied none.
-        _derived_embedding = False
-        _new_content = props.get("content")
-        if ("content" in props and "embedding" not in props
-                and _new_content is not None):
-            # `_new_content is not None` mirrors `_revise_point`'s own boundary
-            # — a `None` new_content is "no content edit" there, so it must not
-            # derive (or wipe) a vector either.
-            try:
-                from .embeddings import encode_for_row
-                props["embedding"] = (
-                    encode_for_row(_new_content, proj.required_embedding_dim)
-                    if _new_content else None)
-            except Exception:
-                props["embedding"] = None
-            _derived_embedding = True
-            # #5238 review P3: the vector just derived is NOT caller-owned, so
-            # a node that previously held a CALLER-supplied vector (and still
-            # carries `embedding_verbatim=true`) must have that marker cleared —
-            # exactly as the `embedding=None` path above does. Left set, the
-            # node advertises a SERVER-derived vector as caller-owned: the
-            # marker selects raw-vs-`vecf32` storage on every later re-emit and
-            # flips the consistency comparison to an exact-float compare, while
-            # a rebuild drops it (`_revise_point` re-encodes and never reads
-            # the marker) — live != rebuild, the round-6 false-verbatim class.
-            props["embedding_verbatim"] = None
-
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
             raise TypeError(
@@ -16520,16 +16489,28 @@ class TortoiseSDK:
         # shared guard for their lifecycle writes; this verb did not, and it
         # writes the same window the temporal read surfaces answer from.
         #
-        # THE GATE IS SCOPED to `_TEMPORAL_RESTAMP_PROPS` (see that constant for
-        # why a blanket refusal is wrong here: #3305's post-terminalization
-        # revisions are a recorded capability). A call with no temporal prop in
-        # it does not reach this guard at all, so:
-        #   * a status-carrying call keeps the promote path unchanged —
-        #     `update_point(terminal, status='live')` still raises the #432
-        #     "Illegal status transition", and an already-LIVE node is still the
-        #     #1088 idempotent no-op;
-        #   * `missing_ok=True` keeps the absent-id contract: this verb returns
-        #     `{}` for a missing id (measured on both trees);
+        # THE TERMINAL GATE IS SCOPED to `_TEMPORAL_RESTAMP_PROPS` (see that
+        # constant for why a blanket refusal is wrong here: #3305's
+        # post-terminalization revisions are a recorded capability). The GATE
+        # ITSELF now runs on every call that reaches the write path — the #1088
+        # status-only-on-live no-op returns above it, taking no work — and what
+        # is scoped is its terminal RAISE, passed as `refuse_terminal`, so:
+        #   * a call carrying a temporal prop is refused on a terminal node
+        #     exactly as before — including a STATUS-carrying one, which keeps
+        #     #7819 whole: `update_point(terminal, status='live', validTo=…)`
+        #     still raises `already terminal`, it does NOT reach the #432
+        #     promote message (that message is for the status-only shape);
+        #   * a call with NO temporal prop asks the terminality question but is
+        #     not refused on it, so `update_point(terminal, status='live')`
+        #     still raises the #432 "Illegal status transition", and an
+        #     already-LIVE node is still the #1088 idempotent no-op;
+        #   * `missing_ok=True` makes the ABSENT verdict a `None` rather than a
+        #     raise, and the caller turns that into the documented `{}` reply
+        #     with NO side effects (#10119). A status-carrying call is the one
+        #     absent shape that keeps its pre-existing behaviour — it falls
+        #     through to the guarded promote write and raises `No point <id>`
+        #     (no side effects either way; the asymmetry is the promote
+        #     contract's, #432);
         #   * `allow_operator=True` keeps operator points writable: this verb is
         #     what `annotate_operator` delegates to, and a caller may pass a
         #     window for an operator. A TERMINAL operator is still refused, pinned
@@ -16546,9 +16527,119 @@ class TortoiseSDK:
         # can still be given `status='live'` (the flag keeps it terminal for
         # readers, and the status then contradicts it). That predates this
         # change; the promote contract and its message are #432's.
-        if _TEMPORAL_RESTAMP_PROPS & set(props):
-            self._assert_lifecycle_guard(id, method="update", missing_ok=True,
-                                         allow_operator=True)
+        # ── #10119: the ABSENT arm takes no receipt, and now no WORK ──────────
+        # Measured on the pre-fix tree: `update_point("no-such-point-9202",
+        # confidence=0.5)` returned `{}` — the documented absent-id contract —
+        # and yet appended a `PointRevised` journal row, advanced
+        # `:EpMeta.ep_version` (0 -> 1 from cold), and put the ABSENT id into
+        # `_dirty_roots`, where it SURVIVED `_sweep_dirty_roots(all real ids)`
+        # and held `_auto_dream_mode()` at `'local'` for the life of the
+        # instance — a typo'd id pinning the instance out of its dream cycle
+        # (#2422 / #7505 / #9269). The reply was honest; the side effects were
+        # not.
+        #
+        # THE GATE IS THE EXISTING INSTRUMENT, NOT A SECOND ONE. #8854 round 9
+        # closed this exact shape on the PROMOTE no-op arm by returning before
+        # `_mark_dirty`; the ABSENT arm had no such exit even though this door
+        # already performed existence reads it could gate on. The predicate
+        # lives in `_assert_lifecycle_guard` (the #2498/#7819 instrument: one
+        # statement, one classifier, over the whole fan-out — #7822), so this
+        # door now consults it on every call that reaches the write path (the
+        # #1088 status-only-on-live no-op returns above it) instead of only when
+        # a temporal prop is present. It must run HERE — after the refusals above (so a
+        # refused call is reported as itself, not as absent) and BEFORE the
+        # journal append and every write (the append is the commit point,
+        # #7951 §17.1; an append for a node that is not there is a record of a
+        # revision that cannot exist).
+        #
+        # `refuse_terminal` is FALSE unless the call carries a temporal prop:
+        # #7819 scoped THIS door's terminal refusal deliberately (a generic
+        # re-assertion of a dead claim is the recorded capability pinned by
+        # `tests/test_lifecycle_guards.py::
+        # test_create_point_dedup_without_a_window_still_folds`).
+        #
+        # ⛔ THE STATUS-CARRYING CALL IS *NOT* SKIPPED. A first cut of this fix
+        # read `if 'status' not in props:` around the whole guard and thereby
+        # DELETED an existing refusal (#7819 review): measured on a flag-dead
+        # point (`status=null, outdated=true`), `update_point(p,
+        # status='live', validTo=…)` LANDED — status flipped to `live` and the
+        # window stored — where the pre-fix tree raised `already terminal
+        # (outdated)`. Only the ABSENT early return is status-gated (the
+        # promote arm owns the absent shape, raising `No point <id>`).
+        # ⚠️ THE TRADE THIS MAKES, STATED (#7405). During a rebuild the engine
+        # aborts writes while the target is legitimately absent from the LIVE
+        # graph but present in the journal. Pre-fix the non-promote arm appended
+        # `PointRevised` first (the §17.1 commit point), so such a revision was
+        # durable and a replay could pick it up, and the write rode the 7-14 s
+        # `_graph_write_with_retry` window. Post-fix, a target absent at THIS
+        # read gets no retry and no record: the typo and the mid-rebuild
+        # absence are the SAME read, and the typo harm (a stranded dirty root,
+        # #10119) is the one that persists, so this is the intended trade — but
+        # the #7405 window no longer covers that shape. Do not "restore"
+        # journal-first for absent ids to get the window back.
+        _temporal_restamp = bool(_TEMPORAL_RESTAMP_PROPS & set(props))
+        _verdict = self._assert_lifecycle_guard(
+            id, method="update", missing_ok=True, allow_operator=True,
+            refuse_terminal=_temporal_restamp)
+        if _verdict is None and 'status' not in props:
+            # ABSENT. Zero side effects, and the same `{}` the documented
+            # contract already returns — no journal row, no epoch advance,
+            # no dirty root, so a typo cannot strand the instance.
+            return {}
+        # ⛔ ORDERING (#10495 review P3). This block runs AFTER the ABSENT
+        # early return above, not before it. `encode_for_row` is a real
+        # inference (a model round-trip, or a timeout on a wedged one), so
+        # running it above the guard made a write that CANNOT land pay for
+        # one and then throw the vector away — measured on the pre-fix tree
+        # with a spy on `tortoise.embeddings.encode_for_row`:
+        # `update_point("typo-4", content="…")` -> `embedder called for an
+        # ABSENT id: 1`. The status-carrying absent shape still reaches this
+        # block (it does not take the early return; the promote arm owns it),
+        # so nothing is skipped that used to run.
+        # #4208: a content edit must recompute the DERIVED vector in the SAME
+        # write, exactly as it already recomputes the derived `content_hash`
+        # (#1904). Before this, `update_point(content=B)` left the node holding
+        # content B with `vec(A)` — the dense leg then ranked it by text no
+        # longer on the node, and live != rebuild, because the replay's
+        # `_revise_point` DOES re-encode. Same rule as the hash, and the same
+        # rule #19 set for the revise fold: recompute from the new content, or
+        # WIPE it when the embedder is unavailable (`None`) — never preserve a
+        # vector the new content did not produce (a vector for different text
+        # is worse than none). #4194/#4280: route through `encode_for_store`
+        # (the store-width-declaring seam) so the stored width matches the
+        # Point HNSW index this store created; the seam is still
+        # `compute_embedding` (module global), so installed doubles intercept.
+        #
+        # A CALLER-supplied vector is deliberately NOT recomputed: the caller
+        # owns that write, the verbatim marker above already describes it, and
+        # the record/replay treatment of a caller vector on a revise is the
+        # separate declared gap #5046. Gated on the KEY, so this fires only
+        # when the caller supplied none.
+        _derived_embedding = False
+        _new_content = props.get("content")
+        if ("content" in props and "embedding" not in props
+                and _new_content is not None):
+            # `_new_content is not None` mirrors `_revise_point`'s own boundary
+            # — a `None` new_content is "no content edit" there, so it must not
+            # derive (or wipe) a vector either.
+            try:
+                from .embeddings import encode_for_row
+                props["embedding"] = (
+                    encode_for_row(_new_content, proj.required_embedding_dim)
+                    if _new_content else None)
+            except Exception:
+                props["embedding"] = None
+            _derived_embedding = True
+            # #5238 review P3: the vector just derived is NOT caller-owned, so
+            # a node that previously held a CALLER-supplied vector (and still
+            # carries `embedding_verbatim=true`) must have that marker cleared —
+            # exactly as the `embedding=None` path above does. Left set, the
+            # node advertises a SERVER-derived vector as caller-owned: the
+            # marker selects raw-vs-`vecf32` storage on every later re-emit and
+            # flips the consistency comparison to an exact-float compare, while
+            # a rebuild drops it (`_revise_point` re-encodes and never reads
+            # the marker) — live != rebuild, the round-6 false-verbatim class.
+            props["embedding_verbatim"] = None
 
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
@@ -16819,6 +16910,42 @@ class TortoiseSDK:
             return False  # pragma: no cover — every other outcome of the
             # diagnostic raises, so only the flip above reaches here.
 
+        # ── #10473 — DID THE CONDITIONAL WRITE LAND? ────────────────────────
+        # "Was the target present?" is answered by `has_object` ABOVE, i.e. by
+        # a READ that the write does not share a lock with, so its answer can
+        # be stale by the time the write runs. The statements below are each a
+        # CONDITIONAL write in the one form this store offers: a single
+        # `MATCH (n:Point {id:$id}) … SET … RETURN count(n)` re-reads presence
+        # and mutates under the same statement, so a zero count is POSITIVE
+        # evidence the precondition failed AT WRITE TIME — not a stale answer
+        # from a second read. That evidence used to be discarded on the
+        # non-abort path: `_graph_write_with_retry`'s ``witness`` is consulted
+        # only after a GRAPH-REPLACED abort latches (its own docstring), so a
+        # plain zero-row match was swallowed and the door fell through to
+        # ``_mark_dirty``. Measured on a target deleted between the guard read
+        # and the write (a proxy that removes the node on the first matching
+        # write statement): reply ``{}``, ``:EpMeta.ep_version`` 1 -> 2, and
+        # the vanished id left in ``_dirty_roots`` where no sweep can ever
+        # converge it (``_prune_nonexistent_dirty_roots`` runs only inside a
+        # dream, and the stranded root keeps ``_auto_dream_mode`` on 'local') —
+        # the #2422/#7505/#9269 pinning harm, one race window away from
+        # #10119's absent-at-entry arm.
+        #
+        # ⛔ A RE-READ WOULD NOT CLOSE IT. Re-checking presence just before the
+        # write narrows the window to a narrower one; the delete can land in
+        # the gap again. Only the statement that would MUTATE can answer
+        # "did I mutate", because its read and its write are one operation.
+        #
+        # ⛔ THE JOURNAL ROW IS DELIBERATELY NOT SUPPRESSED. The append above is
+        # the commit point (§17.1), and the SAME zero-row shape covers two
+        # different realities this door cannot tell apart without the journal
+        # read #10473 reserves as its own decision: a target DELETED
+        # concurrently (whose revision row is inert — a replay's
+        # `_revise_point` re-matches nothing) and a target not yet REPLAYED
+        # mid-rebuild, where that row is the only copy of the caller's revision
+        # and #7405's window exists precisely to preserve it. Dropping the
+        # append here would trade a stranded EP root for a LOST revision.
+        _target_landed = True
         if has_object:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2:
@@ -16863,23 +16990,27 @@ class TortoiseSDK:
                 # below can strand it (#7951 2b — see `_record_promote`).
                 _record_promote()
             else:
-                self._graph_write_with_retry(
-                    lambda: proj.g.query(
-                        "MATCH (n:Point:Object {id:$id}) " + _embed_clear
-                        + "SET n += $props, "
-                        "n.version = coalesce(n.version, 0) + 1, "
-                        "n.updatedAt = $now" + _embed_set
-                        # #8854 review P1: a row to testify with. A bare SET
-                        # returns nothing, so a re-issue that matched nothing
-                        # (rebuild still replaying) was indistinguishable from
-                        # a landed write.
-                        + " RETURN count(n)",
-                        params={"id": id, "props": _props_param, "now": now,
-                                **_embed_params},
-                    ),
-                    what="update_point SET (Object)",
-                    witness=_landed_at_least_one,
-                )
+                # #10473: the returned ``RETURN count(n)`` IS the conditional
+                # write's answer, so it is consumed instead of dropped — the
+                # ``witness`` above only ever sees it after an abort.
+                _target_landed = _landed_at_least_one(
+                    self._graph_write_with_retry(
+                        lambda: proj.g.query(
+                            "MATCH (n:Point:Object {id:$id}) " + _embed_clear
+                            + "SET n += $props, "
+                            "n.version = coalesce(n.version, 0) + 1, "
+                            "n.updatedAt = $now" + _embed_set
+                            # #8854 review P1: a row to testify with. A bare SET
+                            # returns nothing, so a re-issue that matched nothing
+                            # (rebuild still replaying) was indistinguishable from
+                            # a landed write.
+                            + " RETURN count(n)",
+                            params={"id": id, "props": _props_param, "now": now,
+                                    **_embed_params},
+                        ),
+                        what="update_point SET (Object)",
+                        witness=_landed_at_least_one,
+                    ))
         else:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2).
@@ -16953,20 +17084,28 @@ class TortoiseSDK:
                             applied = False
                     return applied
 
-                self._graph_write_with_retry(
+                # #10473: ``_write_props`` already returns the per-key loop's
+                # matched outcome, so the conditional write's answer is
+                # CONSUMED here rather than dropped on the non-abort path.
+                _target_landed = bool(self._graph_write_with_retry(
                     _write_props, what="update_point SET (per-key)",
                     # EVERY key must match. A sum would let one key matched
                     # by duplicate ids mask a sibling key that matched none
                     # (#8854 review P2: ids are not unique — the duplicate
                     # fan-out is a tested shape).
-                    witness=bool)
+                    witness=bool))
                 if _derived_embedding:
                     # The clear and the set are ONE atomic query, so a crash
                     # between them cannot leave the node vectorless. This arm
                     # is already per-key (not one statement), so the added
                     # embedding write introduces no new non-atomicity.
                     # #7405: absolute clear+set, converged by a re-issue.
-                    self._graph_write_with_retry(
+                    # #10473: its `RETURN count(n)` is consumed for the same
+                    # reason as the per-key loop's — a target that vanished
+                    # between the property write and this one must not fall
+                    # through to the EP side effects below.
+                    _embed_landed = _landed_at_least_one(
+                        self._graph_write_with_retry(
                         lambda: proj.g.query(
                             "MATCH (n:Point {id:$id}) " + _embed_clear
                             + "SET " + set_embedding_clause(
@@ -16974,9 +17113,69 @@ class TortoiseSDK:
                             + " RETURN count(n)",
                             params={"id": id, **_embed_params},
                         ),
-                        what="update_point SET (embedding)",
-                        witness=_landed_at_least_one,
-                    )
+                            what="update_point SET (embedding)",
+                            witness=_landed_at_least_one,
+                        ))
+                    if not _embed_landed:
+                        _target_landed = False
+
+        if not _target_landed:
+            # ── #10473: THE CONDITIONAL WRITE PROVED THE TARGET GONE ────────
+            # Zero rows matched and nothing raised: the node the guard read saw
+            # is not there any more (a concurrent delete, or a rebuild whose
+            # replay has not reached it). Both of this door's remaining effects
+            # would be spent on a target that cannot receive them:
+            #   * `_mark_dirty` advances the graph-wide `:EpMeta.ep_version` and
+            #     "persists" a dirty flag that matches nothing, then classifies
+            #     the id as a delete zombie and KEEPS it in `_dirty_roots` —
+            #     where `_sweep_dirty_roots` can never converge it and
+            #     `_prune_nonexistent_dirty_roots` only runs inside a dream, so
+            #     `_auto_dream_mode` stays 'local' (#2422/#7505/#9269) while the
+            #     point it names does not exist;
+            #   * the tag sync would issue one `MATCH (p:Point {id}) MERGE
+            #     (t:Tag) …` statement per tag against a Point that is not
+            #     there. MEASURED: it mints nothing (the MERGE is anchored on
+            #     the MATCH, so a missing Point creates no orphan `:Tag`), so
+            #     skipping it is spent work avoided, not a leak closed.
+            # The reply is whatever `get_point` answers, and — #10079 — with
+            # NO end receipt: `{}` when the id no longer resolves at all, and
+            # the STORED (un-revised) point when a duplicate-id twin still
+            # carries it (`MATCH (n:Point {id})` fans out over every node with
+            # that id — a tested shape, #8854 P2). On the fan-out the caller
+            # gets a truthy dict whose props were NOT written, which is the same
+            # answer the pre-fix door gave; the fix does not invent a refusal
+            # for it, because the vanishing twin is not the caller's target.
+            #
+            # ⛔ NOT A REFUSAL. A legitimately-absent mid-rebuild target must not
+            # be turned away (#7405's window exists for it), and the journal row
+            # already appended above is what carries its revision to the replay.
+            #
+            # ⚠️ TWO RESIDUALS, stated rather than implied:
+            #  * a call that issues NO property statement has no conditional
+            #    write to consult — `_write_props` returns True early for an
+            #    empty `_props_param`, so `update_point(<absent id>)` (and the
+            #    `content=None` / `is_episodic=None` shapes that normalise to
+            #    nothing) still reaches `_mark_dirty` and still strands a root.
+            #    That shape has no write to prove anything with; it belongs to
+            #    the absent-at-entry arm (#10119 / PR #10470), not to this one.
+            #  * `_target_landed` is AND over the per-key loop, so a loop that
+            #    landed keys 1..k and then lost the node reports False and the
+            #    landed keys do not dirty EP. That can only matter if the node
+            #    still exists (the marking would have matched), i.e. a replay
+            #    landing mid-loop, and the alternative — marking dirty on a
+            #    target that is gone — is the strand this closes.
+            #  * the derived-embedding consumer below is the same rule applied to
+            #    the door's second statement; the per-key arm's pin covers the
+            #    mechanism, and the embedding arm is not separately pinned.
+            # Pinned by `tests/test_7405_update_point_writes.py`'s #10473
+            # section: `test_a_target_that_vanishes_at_the_write_strands_no_
+            # dirty_root` (both arms), `test_the_vanish_shape_keeps_the_JOURNAL_
+            # record_that_carries_the_revision`,
+            # `test_a_vanished_tagged_target_issues_no_tag_sync` and the
+            # negative control `test_a_LANDED_update_still_runs_the_ep_side_
+            # effects`.
+            return self.get_point(id)
+
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
         # stale, so query_points_by_tag missed updated points. Falsy tag
@@ -17553,7 +17752,8 @@ class TortoiseSDK:
     def _assert_lifecycle_guard(self, point_id: str, *, method: str,
                                 role: str = "point",
                                 missing_ok: bool = False,
-                                allow_operator: bool = False) -> dict | None:
+                                allow_operator: bool = False,
+                                refuse_terminal: bool = True) -> dict | None:
         """Single authoritative terminal/operator guard for point lifecycle
         transitions (#2498).
 
@@ -17595,6 +17795,19 @@ class TortoiseSDK:
         the shared ``live.classify_lifecycle_fanout`` (the hosted commit
         pre-check runs the same statement and the same classifier, so the two
         cannot disagree).
+
+        ``refuse_terminal`` (#10119) lets a door that has its OWN narrower
+        terminal policy ASK the terminality question without pre-empting it.
+        ``update_point`` is the one such door: #7819 scoped its terminal
+        refusal to `_TEMPORAL_RESTAMP_PROPS` because a generic re-assertion of
+        a dead claim is a recorded capability (see the scope note at the call
+        site), so on that door a terminal verdict must be RETURNED, not raised
+        — while the ABSENT verdict is the same for every caller and must be
+        answered here, once, from the same read (#7822: one statement, one
+        classifier). Passing ``False`` suppresses the terminal RAISE only; the
+        caller is then responsible for its own terminal policy —
+        ``update_point`` permits a generic revision and leaves the
+        status-carrying shape to the promote arm's own guarded write.
         """
         rows = self._get_proj().g.query(
             LIFECYCLE_FANOUT_QUERY, params={"id": point_id},
@@ -17614,7 +17827,7 @@ class TortoiseSDK:
         # once — the operator branch of the classifier outranks terminal, so
         # its `status`/`outdated` are not the terminality answer.
         marker = self._lifecycle_terminal_marker(point_id, rows)
-        if marker is not None:
+        if marker is not None and refuse_terminal:
             # Neither verb of the two families (#7819): ``update_point``
             # re-stamps a prop/window without terminalizing, while
             # ``retract_point`` / ``supersede_point`` / ``invalidate_point``
