@@ -1077,7 +1077,13 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
         f"unclassified by the #10541 census: {unclassified}")
     bad = {w: census[w][0] for w in unresolved if census[w][0] not in classes}
     assert not bad, f"census class outside {classes}: {bad}"
-    bypasses = [w for w in unresolved if census[w][0] == "bypass"]
+    # The class string comes from the tool's OWN constant, never a local mirror:
+    # a hardcoded "bypass" here would stop firing the day the constant is
+    # renamed, and nothing else guards it (measured: this module refuses the
+    # same mirror-duplication elsewhere). Pre-fix the constant is absent and the
+    # literal fallback is what makes the RED run below a plain assertion.
+    bypass_cls = getattr(probe, "CENSUS_BYPASS", "bypass")
+    bypasses = [w for w in unresolved if census[w][0] == bypass_cls]
     assert not bypasses, (
         "a REAL bypass must be fixed or filed, not parked in the census: "
         f"{bypasses}")

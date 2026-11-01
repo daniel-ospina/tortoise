@@ -224,8 +224,10 @@ CENSUS_CLASSES = (CENSUS_RECOGNISED, CENSUS_EXEMPT, CENSUS_BYPASS)
 WRITER_CENSUS: dict[str, tuple[str, str]] = {
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
-        "issues no write; the only embedding text is a COMMENT at "
-        "tortoise/consistency.py:859 quoting what the view cannot produce"),
+        "issues no write; the only WRITE-SHAPED text is a COMMENT at "
+        "tortoise/consistency.py:859 quoting what the view cannot produce "
+        "(the function reads `embedding` at :826/:856 and names it in a field "
+        "list at :873/:877/:881 — reads, not writes)"),
     "tortoise.hosted_backup::restore_graph": (
         CENSUS_RECOGNISED,
         "tortoise/hosted_backup.py:1026 writes through the canonical clause "
