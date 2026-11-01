@@ -284,7 +284,7 @@ def test_a_dead_letter_that_cannot_be_written_is_a_deferral_not_a_verdict(
     summary = _drain(root, store, post)
 
     assert summary["dead_lettered"] == 0
-    assert summary["stopped"] == "refused"
+    assert summary["stopped"] == "dead_letter_unwritable"
     assert summary["deferred"] >= 1
     assert summary["consumed"] == 0
     # The pass DEFERRED at the unfileable line — it did not cross it, and the
@@ -349,3 +349,55 @@ def test_a_torn_tail_on_a_fresh_file_is_deferred_not_dead_lettered(
     second = _drain(root, store, post)
     assert second["filed"] == 1
     assert "s1" in post.session_ids
+
+
+def test_a_stuck_record_is_not_crossed_by_the_record_behind_it(
+        tmp_path: Path) -> None:
+    """P0 from re-review: `consume(index+1)` must not silently cross a skipped record."""
+    from tortoise.session_events_drain import MAX_STRIKES
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    _write_day(root, "2026-10-01.jsonl",
+               [_record("s-blocked"), _record("s-behind-1"), _record("s-behind-2")])
+
+    class RefusesOne(Recorder):
+        def __call__(self, payload: dict):
+            if payload.get("session_id") == "s-blocked":
+                self.posted.append(payload)
+                return PostOutcome(ok=False, status=402, detail="quota_exceeded")
+            return super().__call__(payload)
+
+    post = RefusesOne()
+    for _ in range(MAX_STRIKES - 1):
+        _drain(root, store, post)
+    escape = _drain(root, store, post)
+    assert escape["stuck"] == 1
+    assert escape["filed"] == 2
+    # The blocked record is STILL QUEUED — not crossed by its neighbours, never
+    # dead-lettered, and retried on the next pass.
+    assert escape["queued"] == 1
+    before = post.session_ids.count("s-blocked")
+    later = _drain(root, store, post)
+    assert later["queued"] == 1
+    assert post.session_ids.count("s-blocked") == before + 1  # retried, not lost
+    assert later["dead_lettered"] == 0
+
+
+def test_the_bound_caps_posts_even_when_every_record_proceeds_to_stuck(
+        tmp_path: Path) -> None:
+    """P1 from re-review: the bound must count POSTs, not terminal verdicts."""
+    from tortoise.session_events_drain import MAX_RECORDS_PER_RUN
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    _write_day(root, "2026-10-01.jsonl",
+               [_record(f"s{i}") for i in range(MAX_RECORDS_PER_RUN + 100)])
+    down = Recorder(default=PostOutcome(ok=False, status=503, detail="unavailable"))
+
+    for _ in range(4):
+        run = _drain(root, store, down)
+
+    # Never more POSTs in one pass than the bound: an outage must not turn into
+    # an unbounded hammer.
+    assert run["posts"] <= MAX_RECORDS_PER_RUN
+    assert run["filed"] == 0
+    assert run["queued"] == MAX_RECORDS_PER_RUN + 100  # nothing crossed

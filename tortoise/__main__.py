@@ -6343,7 +6343,15 @@ def _cmd_session_drain(api_key: str, api_url: str,
             _session_post(api_key, api_url),
             exclude_session_id=exclude_session_id,
         )
-        if events.get("consumed") or events.get("queued") or events.get("dead_lettered"):
+        # Print whenever ANYTHING is worth saying — including the states that
+        # produce no progress at all (an unreadable day, an unwritable
+        # dead-letter substrate, a cursor that could not be written, a record
+        # held for the live session). Gating on `consumed` alone printed nothing
+        # in exactly those states.
+        if (events.get("posts") or events.get("consumed") or events.get("queued")
+                or events.get("dead_lettered") or events.get("held")
+                or events.get("stuck") or events.get("unreadable")
+                or events.get("cursor_error") or events.get("stopped")):
             print(format_progress(events), file=_sys.stderr)
     except Exception as exc:  # a broken substrate must not fail a background drain
         print(f"session-events drain: nothing filed — {exc}", file=_sys.stderr)

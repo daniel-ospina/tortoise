@@ -297,11 +297,17 @@ class _Cursor:
                     continue
                 consumed = value.get("consumed")
                 strikes = value.get("strikes")
+                crossed = value.get("crossed")
+                total = value.get("total")
                 days[str(key)] = {
                     # A hand-edited / corrupt count is read as "nothing
                     # consumed": the safe direction is a re-POST (idempotent
                     # upsert), never a silently skipped record.
                     "consumed": consumed if isinstance(consumed, int) and consumed >= 0 else 0,
+                    "crossed": sorted({int(i) for i in crossed
+                                       if isinstance(i, int) and i >= 0})
+                    if isinstance(crossed, list) else [],
+                    "total": total if isinstance(total, int) and total >= 0 else -1,
                     "strikes": {
                         str(k): v for k, v in (strikes or {}).items()
                         if isinstance(v, int) and v > 0
@@ -310,10 +316,25 @@ class _Cursor:
         return cls(str(root), days)
 
     def day(self, key: str) -> dict:
-        return self.days.setdefault(key, {"consumed": 0, "strikes": {}})
+        return self.days.setdefault(key, {"consumed": 0, "crossed": [], "strikes": {},
+                                          "total": -1})
 
     def consumed(self, key: str) -> int:
         return int(self.day(key).get("consumed") or 0)
+
+    def crossed(self, key: str) -> set[int]:
+        return {int(i) for i in (self.day(key).get("crossed") or [])}
+
+    def is_done(self, key: str, index: int) -> bool:
+        """Already FILED or DEAD-LETTERED in an earlier pass — never re-POSTed.
+
+        ``consumed`` is the contiguous prefix; ``crossed`` holds the indices
+        crossed OUT of order (a record that drew a strike and was skipped while
+        the ones behind it filed). Without the second half, ``consume(index+1)``
+        on the record after a skipped one silently crosses the SKIPPED record —
+        leaving it in neither state, reported green (found in re-review).
+        """
+        return index < self.consumed(key) or index in self.crossed(key)
 
     def strike(self, key: str, index: int) -> int:
         strikes = self.day(key)["strikes"]
@@ -324,8 +345,42 @@ class _Cursor:
         self.day(key)["strikes"].pop(str(index), None)
 
     def consume(self, key: str, index: int) -> None:
-        self.day(key)["consumed"] = index + 1
+        """Mark one record FILED or DEAD-LETTERED.
+
+        Never advances the prefix past a record that is not crossed: the prefix
+        absorbs only the contiguous run, and anything ahead of it waits in
+        ``crossed`` until the gap fills.
+        """
+        day = self.day(key)
         self.clear_strike(key, index)
+        consumed = int(day.get("consumed") or 0)
+        if index < consumed:
+            return
+        crossed = {int(i) for i in (day.get("crossed") or [])}
+        if index == consumed:
+            consumed += 1
+            while consumed in crossed:
+                crossed.discard(consumed)
+                consumed += 1
+            day["consumed"] = consumed
+        else:
+            crossed.add(index)
+        day["crossed"] = sorted(crossed)
+
+    def set_total(self, key: str, total: int) -> None:
+        self.day(key)["total"] = int(total)
+
+    def queued(self, key: str, total: int) -> int:
+        """Records of this day that are NEITHER filed nor dead-lettered.
+
+        Computed from the cursor, not by subtracting a strike count: a struck
+        record that was skipped is still queued, and a crossed one is not, so
+        subtracting `stuck` (as a first cut did) both under- and over-counted.
+        """
+        consumed = self.consumed(key)
+        crossed = self.crossed(key)
+        done = consumed + sum(1 for i in crossed if i >= consumed)
+        return max(0, total - done)
 
     def serialise(self) -> str:
         return json.dumps(
@@ -421,6 +476,7 @@ def drain_session_events(
         "consumed": 0,
         "queued": 0,
         "stuck": 0,
+        "posts": 0,
         "unreadable": [],
         "stopped": None,
         "dead_letters_total": 0,
@@ -452,7 +508,6 @@ def drain_session_events(
         summary["dead_letters_total"] = read_dead_letter_count(store_path)
         return summary
 
-    attempted = 0
     stopped: str | None = None
 
     for path in files:
@@ -465,30 +520,41 @@ def drain_session_events(
             summary["unreadable"].append(str(path))
             stopped = "unreadable"
             continue
-        consumed = cursor.consumed(key)
-        if consumed > len(lines):
+        total = len(lines)
+        cursor.set_total(key, total)
+        if cursor.consumed(key) > total:
             # The file is SHORTER than the cursor claims (a restored or rewritten
             # day). The safe reading is "nothing is known about these records":
             # re-file the day rather than cross records that were never filed.
-            cursor.day(key)["consumed"] = consumed = 0
+            cursor.day(key)["consumed"] = 0
+            cursor.day(key)["crossed"] = []
             summary["detail"] = f"{key}: cursor exceeded the file, re-filing"
         settled = _file_age(path) > SETTLE_GRACE_SECONDS
         index = -1
         for line in lines:
             index += 1
-            if index < consumed:
+            if cursor.is_done(key, index):
                 continue
-            if attempted >= cap:
+            if summary["posts"] >= cap:
                 stopped = stopped or "batch"
                 break
             verdict, session_id = _file_one(
                 post, store_path, key, index, line, summary,
-                is_last=index == len(lines) - 1, settled=settled,
+                is_last=index == total - 1, settled=settled,
                 exclude_session_id=exclude_session_id,
             )
             if verdict == "held":
                 summary["held"] += 1
                 continue
+            if verdict == "local_error":
+                # The DEAD-LETTER SUBSTRATE could not be written. That is a local
+                # fault, not a server verdict, so it is NOT charged a strike (a
+                # strike would let the record be skipped later without a row ever
+                # landing — the limbo this module forbids) and the pass stops so
+                # the operator fixes it.
+                summary["deferred"] += 1
+                stopped = "dead_letter_unwritable"
+                break
             if verdict == "retry":
                 summary["deferred"] += 1
                 strikes = cursor.strike(key, index)
@@ -496,7 +562,9 @@ def drain_session_events(
                     # This record has ended MAX_STRIKES passes. Skipping it for
                     # the rest of THIS pass is the only way a record the server
                     # will not take (a 402 the tier never satisfies, a payload
-                    # the transport always throws on) cannot gate the queue.
+                    # the transport always throws on) cannot gate the queue —
+                    # and because it stays OUT of `crossed`/`consumed`, it is
+                    # still queued and still retried on later passes.
                     summary["stuck"] += 1
                     continue
                 # TRANSIENT: leave the record un-consumed (retried next pass) and
@@ -504,44 +572,43 @@ def drain_session_events(
                 # by the remaining 61,997.
                 stopped = "refused"
                 break
-            attempted += 1
             # filed / dead-lettered: both are terminal for this record, so the
             # cursor crosses it. A dead letter is a FILING verdict, never a drop
             # — the record itself stays in its day file, untouched.
             cursor.consume(key, index)
             summary["consumed"] += 1
-        if stopped in ("refused", "batch"):
+        if stopped in ("refused", "batch", "dead_letter_unwritable"):
             break
 
-    # How much is still undelivered — asked only when a pass stopped early,
-    # because it is a full scan of the substrate and a healthy pass already knows
-    # the answer is "what the cursor says is left".
-    if stopped:
-        queued = 0
-        for path in files:
-            total = _count_records(path)
-            if total is None:
+    # The queue depth, EVERY pass — a green line over a stuck record hiding an
+    # unfiled backlog is the failure #6388 exists to end. Totals are cached in
+    # the cursor for days this pass did not read (they can only have GROWN, so a
+    # stale total under-counts, and the next pass corrects it).
+    queued = 0
+    for path in files:
+        key = _day_key(path)
+        total = cursor.day(key).get("total", -1)
+        if not isinstance(total, int) or total < 0:
+            counted = _count_records(path)
+            if counted is None:
                 continue
-            key = _day_key(path)
-            queued += max(0, total - cursor.consumed(key) - _stuck_count(cursor, key, total))
-        summary["queued"] = queued
+            total = counted
+            cursor.set_total(key, total)
+        queued += cursor.queued(key, total)
+    summary["queued"] = queued
     summary["stopped"] = stopped
     try:
         _write_cursor(store_path, cursor)
     except OSError as exc:
         # A cursor that could not be persisted is REPORTED by every caller: the
         # next pass then re-files (idempotent, but a re-POST storm) and an
-        # operator has to be able to see why.
+        # operator has to be able to see why. Stated residual: strikes live only
+        # in the cursor, so on a permanently unwritable store a record drawing a
+        # transient refusal keeps ending each pass — reported here, on the
+        # health line and as `ok: false`, never silent.
         summary["cursor_error"] = f"{type(exc).__name__}: {exc}"
     summary["dead_letters_total"] = read_dead_letter_count(store_path)
     return summary
-
-
-def _stuck_count(cursor: _Cursor, key: str, total: int) -> int:
-    """Records of a day that are currently over their strike limit."""
-    strikes = cursor.day(key).get("strikes") or {}
-    return sum(1 for idx, count in strikes.items()
-               if int(count) >= MAX_STRIKES and 0 <= int(idx) < total)
 
 
 def _file_age(path: Path) -> float:
@@ -582,7 +649,7 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
             # (found in review: an unwritable substrate reported every record as
             # dead-lettered, crossed them, and lost all of them silently).
             summary["detail"] = "dead-letter substrate is not writable"
-            return "retry", session_id
+            return "local_error", session_id
         summary["dead_lettered"] += 1
         return "dead", session_id
 
@@ -633,6 +700,7 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
     if model:
         payload["model"] = model
 
+    summary["posts"] += 1
     try:
         outcome = post(payload)
     except Exception as exc:  # a transport bug is a DEFERRAL, never a loss
@@ -670,6 +738,8 @@ def format_progress(summary: dict[str, Any]) -> str:
         line += f", held {summary['held']} (live session)"
     if summary.get("stopped"):
         line += f" (stopped {summary['stopped']})"
+    if summary.get("posts"):
+        line += f", posted {summary['posts']}"
     if summary.get("unreadable"):
         line += f" [unreadable days: {len(summary['unreadable'])}]"
     if summary.get("cursor_error"):

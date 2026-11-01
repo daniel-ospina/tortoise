@@ -328,11 +328,12 @@ def run_sweep(
         from tortoise.session_events_drain import drain_session_events
 
         if dry_run:
-            receipt["session_events"] = {
-                "status": "dry_run",
-                "detail": ("plan only — the session-events leg was not drained; "
-                           "nothing was posted and no cursor moved"),
-            }
+            # A PLAN still answers "how big is the backlog": the leg counts what
+            # it would drain and moves nothing.
+            from tortoise.session_events_drain import drain_session_events
+
+            receipt["session_events"] = drain_session_events(
+                lambda _payload: None, dry_run=True)
         elif not capture_consent_enabled():
             receipt["session_events"] = {
                 "status": "declined",
@@ -629,6 +630,7 @@ def write_sweep_status(receipt: dict, cursor_dir: Path | str | None) -> None:
                 "stuck": events_counts.get("stuck", 0),
                 "stopped": events_counts.get("stopped"),
                 "cursor_error": events_counts.get("cursor_error"),
+                "unreadable": len(events_counts.get("unreadable") or []),
             },
             # `at` is consumed for PRECEDENCE, not for freshness: the extension
             # reads it to decide whether a record is the CLI's own name for THIS
