@@ -2772,7 +2772,7 @@ def test_a_pre_3543_prior_org_is_opened_through_its_legacy_graph(sb):
     opens, and so MINTS, the absent `org_{prior}` (read-path write pin 4), where
     there is no `:OnboardingState`, so the creator's fork is lost and the new
     org starts `fork='self'`."""
-    tc, fake, _ = sb
+    _tc, fake, _ = sb
     legacy = f"team_{TEAM}"
     fake.tables["organizations"][0]["graph_name"] = legacy
     _seed_onboarding(legacy, steps=_COMPLETE_STEPS, status="complete",
@@ -2856,7 +2856,7 @@ def test_an_unlisted_prior_org_skips_the_fork_read_instead_of_minting(sb, monkey
     alone leaves it green, because `None._get_proj()` raises `AttributeError`
     and the surrounding `except Exception` swallows it. The GATE is what
     prevents the mint; the guard is the readable statement of the skip."""
-    tc, fake, _ = sb
+    _tc, fake, _ = sb
     _os = _onboarding_state()
     reads: list[str] = []
     real_read = _os.read_prior_org_fork
