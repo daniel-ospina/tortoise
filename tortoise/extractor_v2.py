@@ -6167,6 +6167,8 @@ def _marker_scope(content: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+
+
 def _scripts(content: str) -> frozenset[str]:
     """Scripts the claim's letters are drawn from — a language difference in
     the one form decidable without a model."""
@@ -6183,7 +6185,7 @@ def _scripts(content: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def _identity_differences(a: str, b: str) -> frozenset[str]:
+def _identity_differences(a: str, b: str, absorbed: list[str] | None = None) -> frozenset[str]:
     """Every identity dimension in which ``a`` and ``b`` differ.
 
     Deliberately independent of the value dimensions.  Asking only for the
@@ -6191,6 +6193,10 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     "the deploy succeeded at 3pm" and "the deploy failed at 5pm" differ in a
     number and in the predicate, and returning the number would license
     superseding the predicate — the harm this boundary exists to prevent.
+
+    ``absorbed`` (#5329 out-param, never read by this function's answer): the
+    pair's ONE-SIDED content tokens, which a fold therefore discards.  See the
+    vocabulary-gap census appended at the end of this module.
     """
     out: set[str] = set()
     neg_a, neg_b = _negation_markers(a), _negation_markers(b)
@@ -6205,6 +6211,8 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     content_a, content_b = _content_tokens(a), _content_tokens(b)
     only_a, only_b = content_a - content_b, content_b - content_a
     one_sided = only_a | only_b
+    if absorbed is not None:  # #5329: deterministic order; never a decision
+        absorbed.extend(sorted(one_sided))
     named = _proper_nouns(a) | _proper_nouns(b)
     if only_a and only_b:
         out.add("substituted_content")
@@ -6271,13 +6279,20 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
     Total and fail-closed — every input is coerced by ``_norm`` and every
     operation is a string, regex or set operation, so LLM-shaped input cannot
     raise here; if anything does, the sentinel reads as a difference.
+
+    #5329: a FOLD's absorbed one-sided tokens are counted (see the census at
+    the end of this module); the decision itself is unchanged.
     """
+    absorbed: list[str] = []
+    absorbed_fold = False
     try:
         ta, tb = _guard_tokens(a), _guard_tokens(b)
         if not ta or not tb:
             # Nothing to compare: refuse the fold rather than assume agreement.
             return "unreadable", _UNREADABLE
-        identity = _identity_differences(a, b)
+        absorbed: list[str] = []
+        absorbed: list[str] = []
+        identity = _identity_differences(a, b, absorbed=absorbed)
         dimension: str | None = None
         # The identity dimensions come first, because they are the ones that
         # constrain BOTH decisions; a value dimension is reported only when no
@@ -6298,9 +6313,14 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
                 dimension = "number"
             elif _date_tokens(a) != _date_tokens(b):
                 dimension = "date"
+            if dimension is None:
+                absorbed_fold = True  # #5329: a fold — count what it absorbed
         return dimension, identity
     except Exception:  # noqa: BLE001, RUF100
         return "unreadable", _UNREADABLE
+    finally:
+        if absorbed_fold:
+            _VOCABULARY_GAPS.record(absorbed)
 
 
 def distinguishing_difference(a: str, b: str) -> str | None:
@@ -11242,3 +11262,181 @@ def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
         lines += [f"- {cat}: {desc}" for cat, desc in ups.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
     return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# APPENDED AT THE END OF THIS MODULE ON PURPOSE — see the #7949 capstone note:
+# docs/evidence/7949-capstone/ types this module's live `file.py:line` cites, so
+# an insertion ANYWHERE ABOVE them re-stales all of them. New code goes here.
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Vocabulary gap census (#5329) — see the append note above ──────────────────────────────────────────────
+#
+# The boundary refuses a fold on differences read from CLOSED, hand-written
+# word lists: ``_NEGATION_MARKERS``, ``_CONDITION_MARKERS`` /
+# ``_CONDITION_PHRASES``, ``_DATE_WORDS``, ``_CLOCK_UNITS``, ``_SCRIPT_BLOCKS``.
+# Every one is finite, and a marker the lists do not name reaches NO identity
+# dimension — the pair then reads as a one-sided broadening and FOLDS (memory
+# loss: a wrong keep is noise, a wrong drop is a deleted claim).
+#
+# The lists are not the bug: closing the class needs a model, not a longer list
+# (#5329's own recommendation), and failing closed on any unknown token would
+# over-block every legitimate broadening. The bug was that the fold happened
+# SILENTLY — nothing anywhere said "this token reached no identity dimension".
+# This census is that statement: it counts, per token, the fold decisions that
+# absorbed it, so the tokens that fell off the end of the vocabularies are
+# nameable and countable instead of invisible. It never changes a decision.
+#
+# WHAT IT DOES NOT CLAIM (review F2): it does not classify. A token here is
+# "one-sided content that reached no identity dimension" — the population a
+# marker gap HIDES IN, not proof of one. Ordinary dropped details land here too
+# ("the team meets weekly in main office" ← "the team meets weekly" absorbs
+# `main`, `office`), and so does nothing at all for a token the PAIR-READ
+# vocabularies already account for (`_CONNECTIVE_MEMBERS`, `_POLARITY_MEMBERS`)
+# — those are subtracted before recording, because the boundary really did
+# understand them. Recurrence is the operator's signal: a genuine marker recurs
+# across many claims, a one-off detail does not.
+#
+# Read it with ``vocabulary_gap_report()``; reset it with
+# ``reset_vocabulary_gap_census()`` between measurement windows.
+
+#: Distinct absorbed tokens retained (a report is a SAMPLE of the tail, and
+#: says so; the running total is exact regardless).  Bounded so a long-lived
+#: process cannot grow this without limit.
+_VOCABULARY_GAP_CAP = 512
+#: Distinct tokens logged at WARNING on first sight.  Bounded for the same
+#: reason — the census is the durable record, the log line is the alarm.
+_VOCABULARY_GAP_LOG_CAP = 32
+#: Longest token retained, in characters (review F4). A token comes from
+#: ``_content_tokens``, so an unlucky claim can carry a URL or a base64 blob;
+#: un-truncated it would pin claim-sized strings for the process's lifetime and
+#: emit claim-sized log records. Longer ones are counted, not retained.
+_VOCABULARY_GAP_MAX_TOKEN = 64
+#: Tokens the boundary ALREADY understands through a pair-read vocabulary, so a
+#: fold that carries one is not a vocabulary gap. `off`/`because` live here:
+#: they are named, and reading them needs the PAIR (the #5134/#5139 guards),
+#: not another list entry.
+_VOCABULARY_GAP_UNDERSTOOD = _CONNECTIVE_MEMBERS | _POLARITY_MEMBERS
+
+
+class _VocabularyGapCensus:
+    """Per-token count of the fold decisions that absorbed a token (#5329).
+
+    Thread-safe (the boundary runs on extractor worker threads), bounded, and
+    never read by any decision — ``_boundary`` calls ``record`` after it has
+    computed its answer, in a ``finally`` that cannot alter the returned value,
+    and ``record`` itself swallows everything (a raising logging handler must
+    not turn a fold into a refusal — review F1).
+    """
+
+    __slots__ = ("_counts", "_folds", "_lock", "_logged", "_oversize",
+                 "_truncated")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: Counter[str] = Counter()
+        self._logged = 0
+        self._truncated = 0
+        self._oversize = 0
+        self._folds = 0
+
+    def record(self, tokens) -> None:
+        """Count one fold decision and the tokens it absorbed.
+
+        NEVER raises: it is called from the boundary's fail-closed path, where
+        an escaping exception would be read as an unreadable pair and refuse a
+        fold the pair is entitled to.
+        """
+        with contextlib.suppress(Exception):  # observability never decides
+            self._record(tokens)
+
+    def _record(self, tokens) -> None:
+        new: list[str] = []
+        with self._lock:
+            self._folds += 1
+            for t in tokens:
+                if t in _VOCABULARY_GAP_UNDERSTOOD:
+                    continue
+                if len(t) > _VOCABULARY_GAP_MAX_TOKEN:
+                    self._oversize += 1
+                    continue
+                if t in self._counts or len(self._counts) < _VOCABULARY_GAP_CAP:
+                    if t not in self._counts and self._logged < _VOCABULARY_GAP_LOG_CAP:
+                        new.append(t)
+                        self._logged += 1
+                    self._counts[t] += 1
+                else:
+                    self._truncated += 1
+        if new:
+            # LOUD, once per newly-seen token: a token the boundary could not
+            # read as identity announces itself the first time it is absorbed.
+            # Guarded: a handler that raises (structured/JSON/Sentry handlers
+            # do) must not reach the boundary's fail-closed branch.
+            with contextlib.suppress(Exception):  # a raising handler must not decide
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "boundary vocabulary gap (#5329): a fold absorbed "
+                    "one-sided token(s) %s that reached NO identity dimension "
+                    "(read as an added detail, then discarded). A marker among "
+                    "them lost its difference; a recurring token is the "
+                    "signal. Counts: extractor_v2.vocabulary_gap_report()", new)
+
+    def report(self) -> dict[str, int]:
+        """``{token: fold decisions absorbing it}``, commonest first."""
+        with self._lock:
+            return dict(sorted(self._counts.items(),
+                               key=lambda kv: (-kv[1], kv[0])))
+
+    def snapshot(self) -> dict[str, Any]:
+        """The report plus the bounds actually hit (so a sample reads as one)."""
+        with self._lock:
+            return {
+                "tokens": dict(sorted(self._counts.items(),
+                                      key=lambda kv: (-kv[1], kv[0]))),
+                "distinct_tokens": len(self._counts),
+                # NOT "claims folded": this counts BOUNDARY CALLS that returned
+                # a fold decision. A consumer that asks both `fold_allowed` and
+                # `supersede_allowed` about one pair counts it twice, and a
+                # speculative call counts once (review F3).
+                "fold_decisions": self._folds,
+                "truncated_observations": self._truncated,
+                "oversize_tokens_omitted": self._oversize,
+                "cap": _VOCABULARY_GAP_CAP,
+                "max_token_chars": _VOCABULARY_GAP_MAX_TOKEN,
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._counts.clear()
+            self._logged = 0
+            self._truncated = 0
+            self._oversize = 0
+            self._folds = 0
+
+
+_VOCABULARY_GAPS = _VocabularyGapCensus()
+
+
+def vocabulary_gap_report() -> dict[str, int]:
+    """Every one-sided token a fold decision absorbed (#5329), counted.
+
+    ``{token: number of fold decisions that absorbed it}``, commonest first.
+    These are the tokens the boundary read as "a detail added to one side" and
+    dropped — the population in which an unlisted negator, condition or date
+    word hides, so it is the count of what the marker vocabularies did not
+    understand, minus the tokens the pair-read vocabularies do understand
+    (``_VOCABULARY_GAP_UNDERSTOOD``).  It also contains ordinary dropped
+    details; the census does not classify (see the section comment above).
+    """
+    return _VOCABULARY_GAPS.report()
+
+
+def vocabulary_gap_snapshot() -> dict[str, Any]:
+    """``vocabulary_gap_report()`` plus the census's bounds and call count."""
+    return _VOCABULARY_GAPS.snapshot()
+
+
+def reset_vocabulary_gap_census() -> None:
+    """Clear the census (a measurement window boundary; never a decision)."""
+    _VOCABULARY_GAPS.reset()
