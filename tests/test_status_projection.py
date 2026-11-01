@@ -1580,6 +1580,29 @@ class TestAbsentStatusRendering:
             assert status_as_reported(value) == value, value
             assert status_as_reported(value, label="Event") == value, value
 
+    def test_recall_subgraph_renders_an_absent_status_as_live(self, tmp_path):
+        """The FIFTH read surface (#9974 R1 review P2). ``ranking``'s subgraph
+        expansion rendered ``coalesce(n.status, '')`` and only set the key
+        ``if status:`` — so a status-less Object/Subject DROPPED the ``status``
+        key entirely, where it carried ``"live"`` before the fabrication was
+        removed. ``SUBNODE_LABELS`` includes ``Object``/``Subject``, and
+        ``recall_subgraph`` is a public MCP tool (``tortoise_recall(mode="subgraph")``):
+        a consumer reading ``node["status"]`` raised.
+
+        RED on the pre-fix rendering (the key is absent), so this leg is the
+        surface's own guard rather than a restatement of the helper's.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "g.db"))
+        created = sdk.create_object("statusless-object", objectKind="core:strategy")
+        oid = (created.get("node") or created)["id"]
+        res = sdk.recall_subgraph(oid, depth=1)
+        nodes = {n["id"]: n for n in res["nodes"]}
+        node = nodes[oid]
+        assert node["type"] == "object", node
+        assert node["status"] == "live", (
+            "an absent stored status must RENDER live on the subgraph surface, "
+            f"not vanish from the payload: {node!r}")
+
     def test_the_status_carrying_set_is_a_partition_of_the_epistemic_labels(self):
         """A new epistemic label forces a decision here instead of silently
         inheriting "absent reads live" (or the Event carve-out)."""
