@@ -18,6 +18,8 @@ claims:
 | `test_every_embedded_label_has_a_query_path` | bullet 2 | an embedding write path serves a label `run_vector_query` cannot query |
 | `test_all_three_mechanisms_are_visible_to_the_caller` | bullet 3 (`#4999`) | the fallback stops announcing itself, or two paths report the same mechanism |
 | `test_the_census_refuses_to_report_zero_for_an_unreadable_store` | the 2026-09-24 error (`stored`-only / silent 0) | a store that could not be read is reported as `0` anything |
+| `test_an_unmeasurable_run_exits_two` | the documented exit-code contract | a run that could not measure exits 0 or 1, so a caller reads "could not measure" as "a row was NOT MET" |
+| `test_the_instrument_is_selected_by_its_own_subjects` | the pins above actually RUN in CI | a subject diff stops selecting this file — a falsifier that never executes |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
 measurement-only; the instrument is read-only and its pin must be too.
@@ -212,8 +214,71 @@ def test_the_census_never_touches_a_graph_that_does_not_exist():
 def test_the_census_refuses_an_embedded_engine():
     """Embedded has no index API — a census there would read `indexed: False`
     for every label, which is not the same fact as "nothing is indexed"."""
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as raised:
         probe._connect("file:///tmp/whatever.db")
+    # ⛔ The documented contract, not merely "it raised": a non-int SystemExit
+    # argument exits 1, and this refusal MEANS "could not measure" (review P3).
+    assert raised.value.code == 2, raised.value.code
+
+
+# ── The exit contract the docstring promises ───────────────────────
+
+
+def test_an_unmeasurable_run_exits_two(monkeypatch):
+    """
+
+    `0 = ran` (whatever the verdicts), `2 = could not measure`. The docstring
+    promised `2` and two of the three routes returned `1`, which is the same
+    class of defect as the epic body this PR repaired: a contract in prose the
+    code never implements (review P3). All three routes are pinned here.
+    """
+    # (a) a gate module the instrument scores that will not import.
+    def _no_gate():
+        raise ImportError("no module named 'tortoise.embed_gate'")
+
+    monkeypatch.setattr(probe, "score_rule_bullet", _no_gate)
+    assert probe.main(["--json"]) == 2
+    monkeypatch.undo()
+
+    # (b) a census URI whose engine has no index API (the `_connect` refusal).
+    with pytest.raises(SystemExit) as raised:
+        probe.main(["--census", "--uri", "file:///tmp/whatever.db"])
+    assert raised.value.code == 2, raised.value.code
+
+    # (c) AND a run that DID measure is `0` even when a row is NOT MET or
+    # PARTIAL — a caller must never read a red verdict as "the tool failed".
+    assert probe.main(["--json"]) == 0
+
+
+# ── The pins must actually RUN (review P1) ─────────────────────────
+
+
+def test_the_instrument_is_selected_by_its_own_subjects():
+    """
+
+    A falsifier that never executes is not a falsifier (review P1).
+
+    Registration alone is CLASSIFICATION (#4348): it satisfies
+    `ci_selection.py --integrity` but does not make a diff SELECT this file. Each
+    subject below must select it, or the pins this instrument exists to install
+    never run on the change that can break them. Two named-surface matches
+    REPLACE the `core` fallback (#2938), which is why the file is registered in
+    `eval` as well as `core` (`tortoise/embeddings.py` — the seam — selects
+    `eval`), and why `tools/dod_5090_probe.py` needs a `CORE_ALSO` entry (a
+    `tools/`-only diff is swallowed by NON_PYTHON_PREFIXES before the fallback
+    runs, so it selected 70 unrelated files and not this one).
+    """
+    import ci_selection
+
+    manifest = ci_selection.load_manifest()
+    for subject in ("tortoise/embed_gate.py", "tortoise/value_gate.py",
+                    "tortoise/embeddings.py", "tortoise/search_engine.py",
+                    "tortoise/security.py", "tools/dod_5090_probe.py"):
+        selected = ci_selection.select([subject], "pull_request", manifest)
+        assert "test_dod_5090_probe.py" in selected["test_files"], (
+            f"a {subject}-only diff does not select this file — its falsifiers "
+            f"never run: surfaces={selected['surfaces']} full={selected['full']}"
+        )
 
 
 # ── The falsifiers the review asked for ────────────────────────────────────
