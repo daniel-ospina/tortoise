@@ -48,6 +48,11 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# The corpus package is imported from the repo root, so the root must be on sys.path when this
+# file is run as a script (`tools/` would otherwise be the only entry) — the same reason
+# capstone_measure.py inserts it.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 EVIDENCE_DIR = ROOT / "docs/evidence/5087-hypothesis"
 PREREG_REL = "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md"
 CAPSTONE_CENSUS = ROOT / "docs/evidence/7949-capstone/probes/capstone_measure.py"
@@ -250,7 +255,7 @@ def off_arm_stub(mode: str) -> dict:
     }
 
 
-def arm_s3_state(arm: str, search: dict) -> dict:
+def arm_s3_state(arm: str, search: dict, witness_source: str = "receipt") -> dict:
     """The receipt's S3 state, and whether it PROVES the arm it claims to be."""
     search = search or {}
     queries_run = int(search.get("queries_run") or 0)
@@ -278,13 +283,22 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
 
     real_search = ev.search_graph
     calls = {"real": 0}
+    witness: dict = {}
 
     def counting(*args, **kwargs):
         calls["real"] += 1
-        return real_search(*args, **kwargs)
+        result = real_search(*args, **kwargs)
+        witness.clear()
+        witness.update(result or {})
+        return result
 
-    ev.search_graph = counting if arm == "ON" else (
-        lambda *a, **k: off_arm_stub(ev.resolve_backend_mode()))
+    def off_stub(*args, **kwargs):
+        result = off_arm_stub(ev.resolve_backend_mode())
+        witness.clear()
+        witness.update(result)
+        return result
+
+    ev.search_graph = counting if arm == "ON" else off_stub
     base_uri = os.environ["TORTOISE_DB_URI"]
     uri = graph_uri(base_uri, graph)
     rows: list[dict] = []
@@ -295,6 +309,15 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
             started = time.time()
             receipt = sdk.capture_session(_turns(sid), session_id=sid)
             stats = receipt.get("stats") or {}
+            # ⚠️ THE RECEIPT CARRIES NO `search` BLOCK ON THIS LANE. `capture_session` ->
+            # `_extract_session_v2` never surfaces S3's report onto the meta it returns (only
+            # `_commit_session_v2` does), so the arm's S3 state is witnessed from the value the
+            # S3 function ACTUALLY RETURNED during this session — recorded by the wrapper above,
+            # which is the real function's own output, not a flag. The receipt is used when it
+            # does carry the block, so this probe cannot be accused of preferring its own copy.
+            receipt_search = receipt.get("search") or {}
+            witness_source = "receipt" if receipt_search else "search_graph-return"
+            s3_blob = receipt_search or dict(witness)
             after = created_counts(census(uri))
             created = {key: after[key] - before[key] for key in after}
             rows.append({
@@ -302,7 +325,7 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
                 "ok": bool(receipt.get("ok")),
                 "created": created,
                 "llm_calls": int(((stats.get("llm") or {}).get("calls") or 0)),
-                "s3": arm_s3_state(arm, receipt.get("search") or {}),
+                "s3": {**arm_s3_state(arm, s3_blob), "witness_source": witness_source},
                 "errors": list(receipt.get("errors") or [])[:3],
                 "elapsed_s": round(time.time() - started, 1),
             })
@@ -487,7 +510,13 @@ def main(argv: list[str] | None = None) -> int:
     log(f"floors: {floors}")
     log("queries_failed: the receipt carries no such field at this head; search_graph degrades "
         "the WHOLE search on the first query failure, so queries_failed==0 is asserted as "
-        "degraded==False (stated here, not implied)\n")
+        "degraded==False (stated here, not implied)")
+    log("S3 WITNESS: the `capture_session` lane's receipt carries NO `search` block (only "
+        "`_commit_session_v2` surfaces one), so each session's S3 state is asserted from the "
+        "value the S3 function ACTUALLY RETURNED during that session — recorded by the probe's "
+        "wrapper around the real function (ON) / stub (OFF), never from a flag. This is a "
+        "disclosed deviation from the pre-registration's wording 'asserted from the run receipt' "
+        "and an instrument finding for #5087 indicator 3.")
 
     if not (os.environ.get("DEEPSEEK_API_KEY") or "").strip():
         raise SystemExit("s3-ablation: REFUSED — DEEPSEEK_API_KEY is unset; a keyless capture "
@@ -508,16 +537,16 @@ def main(argv: list[str] | None = None) -> int:
         graph = f"{prefix}_{arm.lower()}"
         log(f"--- ARM {arm} — fresh graph {graph} ---")
         arms[arm] = run_arm(arm, graph, sessions, census, golds, log)
-        arm = arms[arm["arm"]]
-        log(f"  [{arm['arm']}] real search_graph calls: {arm['real_search_calls']} "
+        data = arms[arm]
+        log(f"  [{data['arm']}] real search_graph calls: {data['real_search_calls']} "
             f"(OFF arm must be 0)")
-        log(f"  [{arm['arm']}] created extraction nodes: {arm['totals']['extraction_nodes']} "
-            f"| aside Σlabel_counts delta: {arm['totals']['label_instances']}")
-        log(f"  [{arm['arm']}] real facts: {arm['real_facts']['survived']}"
-            f"/{arm['real_facts']['total']} planted units recovered")
-        log(f"  [{arm['arm']}] operator edges: {arm['totals']['operator_edges']} "
+        log(f"  [{data['arm']}] created extraction nodes: {data['totals']['extraction_nodes']} "
+            f"| aside Σlabel_counts delta: {data['totals']['label_instances']}")
+        log(f"  [{data['arm']}] real facts: {data['real_facts']['survived']}"
+            f"/{data['real_facts']['total']} planted units recovered")
+        log(f"  [{data['arm']}] operator edges: {data['totals']['operator_edges']} "
             f"(graph-wide IMPL/NAND/SUPPORTS/MITIGATES/NEGATE/SUPERSEDE/INPUT)")
-        log(f"  [{arm['arm']}] model calls: {arm['llm_calls']}\n")
+        log(f"  [{data['arm']}] model calls: {data['llm_calls']}\n")
 
     if "OFF" not in arms or "ON" not in arms:
         raise SystemExit("s3-ablation: REFUSED — both arms are required; a single-arm result is "

@@ -1535,6 +1535,43 @@ Hindsight is the first system found with a *stated* reason, and it supports **Op
 
 **⇒ Option 4 is evidence-backed.** The narrative stays the cheap searchable tier and a *focus*; extraction keeps access to raw as the source.
 
+### ⛔ The S3 prior-injection hypothesis — TESTED 2026-11-01, and it is FALSE (`#10463`)
+
+`#5087`'s central hypothesis — *"telling extraction what already exists in the graph (S3
+prior-injection) reduces what it creates"* — was unmeasured. It is measured now, as a pre-registered
+two-arm ablation on the frozen `tests/eval/write_path` corpus (`fixtures_hash
+sha256:dd7e8520…`, 7 sessions), pre-registration commit `a1075dfc2`, bundle
+`docs/evidence/5087-hypothesis/`.
+
+**RESULT: `HYPOTHESIS-FALSIFIED (ratio 0.870)`.**
+
+| | S3-OFF | S3-ON | bar |
+|---|---:|---:|---|
+| `created_new_nodes` (extraction claims + minted Object/Event) | 284 | 247 | ratio `<= 0.75` → **0.870, NOT met** |
+| planted units recovered (of 90) | 47 | 40 | must not fall → **FELL** |
+| operator-type edges | 171 | 139 | must not fall → **FELL** |
+| model calls | 21 | 27 | `<= 2.00 ×` → 1.29 × |
+| arm integrity | 7/7 suppressed | 7/7 resolved | 14/14 |
+
+**What this changes.** S3's prior injection does **not** reduce what extraction creates by the margin
+the design assumed: it cuts created nodes **13 %** and recovered real content **15 %**, so
+created-per-real-fact moves 6.04 → 6.18 — a smaller extraction, not a leaner one — and it costs
+**more** (21 → 27 model calls) because S4 has more to review. The per-session picture is not uniform
+(range 0.706–1.029; 5 of 7 sessions fell, one rose, one flat), and the one session that is blind in both arms
+(`wp01`, fresh graph) still shows −13 %, which is the run-to-run noise floor at this n.
+
+⚠️ **A verdict is a verdict, not a prompt for a re-run.** `#10463`'s own falsifier rule applies: a
+ratio near 1.0 closes the issue and changes the epic's plan. It is **never re-run until it agrees**.
+The epic's plan point that assumed prior-injection buys volume must now argue from something else —
+and the tension rule it registered as a guard is exactly what failed: the smaller writes were
+smaller, not better.
+
+⚠️ **One instrument gap this run found and did NOT fix here** (it is a follow-up, not a production
+edit in the measurement PR): the `capture_session` lane's receipt carries **no `search` block**, so
+`#5087`'s indicator 3 — S3 state "asserted from the run receipt" — is not satisfiable on that lane at
+this head. The probe asserts it from the value the S3 function actually returned per session
+(recorded by a wrapper around the real function / the OFF stub), which the bundle discloses.
+
 ---
 
 ## 11. Verification against Hindsight (Vectorize) — 2026-09-23
