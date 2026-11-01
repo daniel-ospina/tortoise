@@ -599,7 +599,7 @@ EVENT_STREAM_FOLDS: dict[str, tuple[str, ...]] = {
     # absent: `status` on both (a projection-owned cache)"). And an
     # explicit state-op write reaches `:Subject` through the same `_ENTITY_MUTATION_
     # STATE_OPS` arm as `:Object` — leaving Subject out would close #9974 for one
-    # of the two labels §2.6 rules on. #9974's own Subject evidence is the
+    # of the two labels that carry the field. #9974's own Subject evidence is the
     # `record_projection.mutations_for({… "label": "Subject", "state":
     # {"status": "archived"}})` measurement on the issue (its headline
     # reproduction is the Object), so this is a member of the ruled field, not a
@@ -665,15 +665,16 @@ class LifecycleEvent:
     event_kind: str
     object_name: str | None = None
     about_names: tuple[str, ...] = ()
-    #: `restatus` only — the value the caller wrote, from the record's own
-    #: `state` map. `None` means "this record carries no status write". ⚠️ It does
+    #: ANY `EntityMutated` carrying a `state.status` — NOT "restatus only": the
+    #: reader never inspects `op` (see the class docstring). Value the caller
+    #: wrote, from the record's own `state` map. `None` means "this record carries no status write". ⚠️ It does
     #: NOT mean the caller cleared the field: `update_entity(obj, status=None)` is
     #: a real clear (`sdk.py`: "a null REMOVES the property … a clear is CALLER
     #: intent") and that shape is R4's declared bound, not a representable state
     #: here. A caller who wants a live value writes `status='live'`, which IS
     #: carried.
     restatus_status: str | None = None
-    #: `restatus` only — the `(label, id)` the live fold matches on. The label is
+    #: Any state op — the `(label, id)` the live fold matches on. The label is
     #: carried so a state op cannot fold onto the other family's node of the same
     #: id (ids are per-label, not global).
     target_id: str | None = None
@@ -1220,14 +1221,15 @@ _LIFECYCLE_EVENTS_SQL = (
     # PAYLOAD, exactly as `projection/__init__.py::classify_entity_mutation_op`
     # says: a consumer wanting every status transition must read `state["status"]`
     # and must NOT filter on `op`.
-    # `<> ''` is NOT decoration: `update_entity(obj, status='')` is accepted on
-    # `:Object`, the graph stores the empty string, and `_is_terminal_status('')`
-    # is false — so the graph reads LIVE. A reader that SELECTED it and then
-    # skipped it in Python would say "this is a status" and discard it, silently
-    # keeping an earlier terminal fold (the hide-a-live-name direction). One
-    # predicate, in one place.
-    "           AND jsonb_typeof(payload -> 'state' -> 'status') = 'string'"
-    "           AND payload -> 'state' ->> 'status' <> ''))"
+    # ⛔ NO `<> ''` HERE, deliberately (#9974 review round 7, P1 — the first
+    # draft added one and it CREATED the divergence it claimed to avoid).
+    # `update_entity(obj, status='')` is accepted on `:Object` and the graph
+    # STORES the empty string, where `_is_terminal_status('')` is false — i.e. the
+    # graph reads LIVE. Excluding it at the reader then keeps an earlier terminal
+    # fold, so the rebuilt cache HIDES a name the graph resolves: the same
+    # hide-a-live-name direction, produced by the "repair". Folding `''` as the
+    # value it is reproduces the graph exactly.
+    "           AND jsonb_typeof(payload -> 'state' -> 'status') = 'string'))"
 )
 
 #: The same statement narrowed to the events that could name ONE Object. The
@@ -1271,7 +1273,7 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
     """The record's lifecycle rows as fold inputs, ordered by `seq`.
 
     `target` narrows by NAME (the connector/pack fold's coordinate), `target_id`
-    by the stable id (the `restatus` state op's coordinate). Both may be given;
+    by the stable id (the state-op coordinate). Both may be given;
     they are OR-ed by the SQL, and a caller that holds both must pass both or the
     single-row fold disagrees with the rebuild (#9974 — a `restatus` names its
     target by id only).
@@ -1296,7 +1298,11 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
             # to be a value the caller wrote — an empty/absent one is not a
             # status and must not fold as one.
             node_id = row.get("node_id")
-            if not isinstance(restatus, str) or not restatus:
+            # ⚠️ `''` IS a value here: the graph stores it (`status=''` is an
+            # accepted write) and `_is_terminal_status('')` is false, so a reader
+            # that skipped it would keep an earlier terminal fold and hide a name
+            # the graph resolves. Only a NON-STRING is skipped (R4's bound).
+            if not isinstance(restatus, str):
                 continue
             if not isinstance(node_id, str) or not node_id:
                 continue

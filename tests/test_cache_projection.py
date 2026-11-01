@@ -1940,10 +1940,12 @@ def test_the_fold_vocabulary_is_status_folds_one_home_and_not_a_copy():
                                      "Subject": ("status",)}, (
         "EVENT_STREAM_FOLDS gained or lost a derived property — every member "
         "needs its own evidence that the record's event stream decides it. "
-        "`Subject` joined at #9974: its `status` is a projection-owned cache on "
-        "the same §2.6 row and reaches the record only through the same "
-        "`state.status` write, so leaving it out left the label whose own "
-        "reproduction opened the issue still divergent")
+        "`Subject` joined at #9974: its `status` is the projection-owned cache "
+        "`ONTOLOGY.md:421` reaches (\"Projection-owned since #1423 — the Subject "
+        "twin of the Object status cache\"; §2.6 rules on the Object half), it "
+        "reaches the record only through the same `state.status` write, and "
+        "leaving it out left one of the two labels that carry the field "
+        "divergent")
 
 
 def test_the_record_read_door_answers_the_same_status_the_rebuild_writes():
@@ -2200,3 +2202,37 @@ def test_a_status_only_restatus_carries_no_supersession_column():
             f"{table} ({sql!r}) — `superseded` would leave the NOT-DERIVED "
             "residue and a rebuild would hide a live name"
         )
+
+
+def test_an_empty_string_status_is_folded_because_the_graph_stores_it():
+    """Parity, not tidiness: `status=''` is a value the graph holds.
+
+    `update_entity(obj, status='')` is accepted on `:Object` and the graph stores
+    the empty string; `_is_terminal_status('')` is false, so the graph reads LIVE.
+    Excluding `''` at the reader (the first draft's "repair") kept an earlier
+    terminal fold, so the rebuilt cache HID a name the graph resolves — the very
+    direction the exclusion claimed to avoid. Folding it reproduces the graph.
+    """
+    import ast as _ast, inspect as _inspect
+
+    src = _inspect.getsource(cp._lifecycle_events)
+    assert "or not restatus" not in src, (
+        "the reader drops the empty string again — `''` is a stored value, and "
+        "skipping it makes the rebuild keep an earlier terminal fold"
+    )
+    assert "<> ''" not in cp._LIFECYCLE_EVENTS_SQL, (
+        "the SQL excludes the empty string — same defect, one layer down"
+    )
+    # …and the fold applies it, over an earlier terminal value.
+    row = {"id": "o-5", "name": "acme-5", "object_kind": "service"}
+    folded = cp.apply_event_stream_folds(
+        (cp.node_from_row("Object", row),),
+        (cp.LifecycleEvent(seq=1, event_kind="", restatus_status="archived",
+                           target_id="o-5", target_label="Object"),
+         cp.LifecycleEvent(seq=2, event_kind="", restatus_status="",
+                           target_id="o-5", target_label="Object")),
+    )[0]
+    assert folded.props.get("status") == "", (
+        f"the rebuild answered {folded.props.get('status')!r} where the graph "
+        "holds '' — an empty status reads LIVE, so this hides a live name"
+    )
