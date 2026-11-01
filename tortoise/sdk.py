@@ -6447,6 +6447,21 @@ def _item_stored_key(item: dict) -> str | None:
     side of the same question — ``_terminal_content_candidates``'s
     ``keys_by_hash`` — filters with this identical truthiness test, and says so
     in place; a ``strip()`` on either side would disagree with the writer.
+
+    ⛔ Do NOT "tidy" the blank/padded case here into a strip or a refusal. A
+    padded-but-REAL identity (``"  s1  "``) is a RECORDED POSITION — #9599's
+    body records those as legitimate identities, and trimming or refusing one
+    REOPENS that position, so the answer is an OPEN OWNER QUESTION on #9599
+    (comment 6342343424: refuse / trim / store-verbatim, with their measured
+    consequences), not a caller's choice. It is sharp for THIS field because
+    ``key`` is index-backed (``_POINT_RANGE_INDEX_PROPS``) and the engine's
+    equality seek does not trim the query side while the index stores the
+    trimmed term: measured on the embedded engine here, ``"  PK  "`` is
+    invisible to ``_find_points_by_key`` (empty) and findable only by the
+    trimmed spelling, so two ``create_point(dedup=True, key="  PK  ")`` calls
+    mint TWO carriers of one key. That is the #6110 duplicate this repo exists
+    to prevent — it is filed, not absorbed, and this simulation must model the
+    writer AS IT IS until the owner rules. (#9819 review P2.)
     """
     val = _item_supplied_key(item)
     return val if isinstance(val, str) and val else None
