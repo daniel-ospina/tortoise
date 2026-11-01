@@ -6897,8 +6897,11 @@ def _content_candidate_resolution(cands, content: str,
     resolved a hash-present sibling instead, while the writer takes any
     hash-less match it finds. Each arm mirrors its own site.
     """
+    # The fifth element (`content_keys`, the STORED `n.key` per identity) is
+    # read by :func:`_content_key_lands`, not by this resolver — the
+    # "does it mint?" and "does the key land?" questions are different ones.
     (terminal_by_hash, present_by_hash,
-     terminal_hashless, present_hashless) = cands
+     terminal_hashless, present_hashless, _content_keys) = cands
     ch = _content_hash(content)
     hit = terminal_by_hash.get((ch, kind))
     if hit is None and (ch, kind) not in present_by_hash:
@@ -6906,6 +6909,72 @@ def _content_candidate_resolution(cands, content: str,
     mints = ((ch, kind) not in present_by_hash
              and (content, kind) not in present_hashless)
     return hit, mints
+
+
+def _content_key_lands(cands, content, kind: str, key: str) -> bool:
+    """Did the WRITE apply ``key`` on an item that resolves by CONTENT?
+
+    :func:`_content_candidate_resolution` answers "does this item MINT?" — a
+    graph read. The bundle-order KEY record needs a DIFFERENT question, and it
+    is not the same one: an item can miss BOTH identities of its key and still
+    never WRITE it. On a content hit ``create_point`` drops the supplied key
+    when the resolved node already holds a different, non-empty one —
+
+        ``_existing_key = _existing.get("key")``; if it is a non-empty ``str``
+        different from the supplied key, ``props.pop("key", None)`` (#6110: a
+        dedup hit never reassigns an existing key).
+
+    Recording that key as minted anyway is a PHANTOM record, and it is not the
+    benign over-reject it resembles: every later item under the key reads
+    ``_key_folds_here = True`` and therefore records NOTHING on either identity,
+    so the item that really DOES mint that key's terminal point is never
+    recorded and a third item folds onto it with Phase 1 certifying the bundle
+    (the fail-open #9819 review P1 measured).
+
+    Three answers, each a fact about the WRITE:
+
+    * **no holder on either identity** — the item MINTS a fresh point, and a
+      mint writes the key: ``True``.
+    * **every holder carries no key, a blank one, or this same key** — the
+      writer's guard falls through and the key IS written onto whichever node it
+      resolved (the #6110 adoption pinned by
+      ``test_content_hit_on_unkeyed_point_adopts_the_key``): ``True``.
+    * **SOME holder carries a different non-empty key** — ``False``.
+
+    ⛔ ``False`` on SOME, not on ALL, is deliberate and it is the FAIL-CLOSED
+    direction. When one content has several holders the writer's pick among them
+    is UNSPECIFIED — ``_find_point_by_content`` returns ``rows[0][0]`` from a
+    query carrying no ``ORDER BY`` — so "at least one holder would have accepted
+    the key" does NOT mean the key landed. Assuming it landed is the phantom
+    above (fail-OPEN); assuming it did not is at worst an over-reject on a later
+    item under that key, which is the same posture this guard already takes for
+    the terminal-twin ambiguity (``docs/INGEST_CONTRACT.md`` row 7). Stated as a
+    rule so it is not "tidied" into an ``all()``.
+
+    A non-``str`` stored key is NOT a blocker, mirroring the writer's
+    ``isinstance(_existing_key, str)`` test — which is also why the raw values
+    are compared here instead of being hashed: a list-valued ``key`` (FalkorDB
+    returns it as a list) must not raise ``TypeError: unhashable type`` out of
+    Phase 1, the same defect class the kind skip in
+    :meth:`TortoiseSDK._terminal_content_candidates` closes.
+
+    ``content``/``kind`` are the item's POSITIONAL pair — the identity the
+    writer's dedup query scopes by — and the hash identity is consulted first,
+    exactly as the writer's hash-then-A10 order does.
+    """
+    if not isinstance(content, str):
+        # No content identity, so no content fold: the write mints and the key
+        # is written. (Reached only on a shape violation the caller already
+        # reported; kept in writer parity rather than raising.)
+        return True
+    keys = cands[4].get((_content_hash(content), kind))
+    if keys is None:
+        keys = cands[4].get((content, kind))
+    if keys is None:
+        # No holder on either identity: this item mints.
+        return True
+    return not any(isinstance(stored, str) and stored and stored != key
+                   for stored in keys)
 
 
 # #2335 WI-2: the "file a report" hook target — the bug_report.yml template
@@ -22651,15 +22720,27 @@ class TortoiseSDK:
     def _terminal_content_candidates(
         self, wanted: list[tuple[str, str]],
     ) -> tuple[dict[tuple[str, str], str], set[tuple[str, str]],
-               dict[tuple[str, str], str], set[tuple[str, str]]]:
+               dict[tuple[str, str], str], set[tuple[str, str]],
+               dict[tuple[str, str], list]]:
         """Batched twin of :meth:`_find_terminal_dedup_hit` for a WHOLE bundle.
 
         ``wanted`` is one ``(content, pointKind)`` per candidate item. Returns
         ``(terminal_by_hash, present_by_hash, terminal_hashless,
-        present_hashless)``, every one keyed ``(identity, pointKind)`` — the
-        identity being the content HASH, or the CONTENT itself for the hash-less
-        A10 rows — so a caller resolves an item with NO graph read
-        (:func:`_content_candidate_resolution` is that resolver).
+        present_hashless, content_keys)``, every one keyed ``(identity,
+        pointKind)`` — the identity being the content HASH, or the CONTENT itself
+        for the hash-less A10 rows — so a caller resolves an item with NO graph
+        read (:func:`_content_candidate_resolution` is that resolver, and
+        :func:`_content_key_lands` is the third question this read answers).
+
+        ``content_keys`` is the STORED ``n.key`` of every row in the same
+        identity space, as a LIST per identity (a property may be a list, so a
+        set would raise ``TypeError: unhashable type`` on exactly the shape the
+        kind skip below exists for — see :func:`_content_key_lands`). It exists
+        because "did this item's write APPLY its key" is NOT answerable from
+        presence/terminality: on a content hit ``create_point`` DROPS the
+        supplied key when the resolved node already holds a different, non-empty
+        one (``props.pop("key", None)``, #6110). Projecting it here is the same
+        two statements, one extra column (#9819 review P1).
 
         ⛔ AT MOST TWO queries for the bundle, not one per item. The per-item
         helper costs THREE (terminal-hash, unfiltered-hash, hash-less fallback)
@@ -22715,7 +22796,7 @@ class TortoiseSDK:
         side already closes in :func:`_item_point_kind`.
         """
         if not wanted:
-            return {}, set(), {}, set()
+            return {}, set(), {}, set(), {}
         # ONE hash per wanted content, computed once (it is sha256 over the
         # content, and both the parameter list and the legacy-arm gate read it).
         wanted_hashes = {content: _content_hash(content) for content, _ in wanted}
@@ -22725,6 +22806,7 @@ class TortoiseSDK:
         present_by_hash: set[tuple[str, str]] = set()
         terminal_hashless: dict[tuple[str, str], str] = {}
         present_hashless: set[tuple[str, str]] = set()
+        content_keys: dict[tuple[str, str], list] = {}
         # ── arm 1: the HASH identity — INDEX-ANCHORED.
         # ⛔ `n.content_hash IN $hashes` seeks `Point.content_hash` (
         # `_POINT_RANGE_INDEX_PROPS`); measured on a 21-Point embedded graph
@@ -22743,11 +22825,11 @@ class TortoiseSDK:
             "MATCH (n:Point) WHERE "
             f"{' AND '.join(clauses)} "
             "AND n.content_hash IN $hashes "
-            "RETURN n.content_hash, n.pointKind, n.content, n.id, "
+            "RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "
             f"{_terminal_expression('n')} AS term",
             params={**params, "hashes": hashes},
         ).result_set
-        for raw_hash, kind, _content, node_id, terminal in rows:
+        for raw_hash, kind, _content, node_id, stored_key, terminal in rows:
             if not isinstance(kind, str):
                 # ✋ Unhashable (and unaddressable) — see the docstring. `raw_hash`
                 # need no such test for the mirror-image reason: the WHERE admits
@@ -22755,6 +22837,7 @@ class TortoiseSDK:
                 # (`content_hash IN $hashes`), so it cannot be a non-string here.
                 continue
             present_by_hash.add((raw_hash, kind))
+            content_keys.setdefault((raw_hash, kind), []).append(stored_key)
             if terminal:
                 terminal_by_hash.setdefault((raw_hash, kind), node_id)
         # ── arm 2: the A10 hash-less fallback, and ONLY when some item's hash
@@ -22775,11 +22858,11 @@ class TortoiseSDK:
                 "MATCH (n:Point) WHERE "
                 f"{' AND '.join(clauses)} "
                 "AND n.content_hash IS NULL AND n.content IN $contents "
-                "RETURN n.content_hash, n.pointKind, n.content, n.id, "
+                "RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "
                 f"{_terminal_expression('n')} AS term",
                 params={**params, "contents": contents},
             ).result_set
-            for _raw_hash, kind, content, node_id, terminal in rows:
+            for _raw_hash, kind, content, node_id, stored_key, terminal in rows:
                 if not isinstance(kind, str):
                     # ✋ Unhashable (and unaddressable) — see the docstring. The
                     # WHERE admits only a value that EQUALS one of the bundle's
@@ -22787,10 +22870,11 @@ class TortoiseSDK:
                     # neither can be a non-string here.
                     continue
                 present_hashless.add((content, kind))
+                content_keys.setdefault((content, kind), []).append(stored_key)
                 if terminal:
                     terminal_hashless.setdefault((content, kind), node_id)
         return (terminal_by_hash, present_by_hash,
-                terminal_hashless, present_hashless)
+                terminal_hashless, present_hashless, content_keys)
 
     def _entity_name_holders(
         self, label: str, name: str,
@@ -23954,8 +24038,11 @@ class TortoiseSDK:
         # carries the stored one. One kind for both sides is the drift
         # `_item_stored_point_kind` and `_item_point_kind` exist to stop.
         minted_content: dict[tuple[str, str], int] = {}
-        # FIRST-WRITER-WINS on the KEY identity, recorded for EVERY minting item
-        # (unlike `minted_terminal`, which records only a TERMINAL mint). The
+        # FIRST-WRITER-WINS on the KEY identity, recorded for every item whose
+        # write actually APPLIES the key (unlike `minted_terminal`, which records
+        # only a TERMINAL mint). "Applies" is the writer's own decision, not the
+        # key's mere freedom — `_content_key_lands`; recording a dropped key
+        # fails OPEN, see the site. The
         # writer resolves the key FIRST (`_resolve_dedup_hit`), so an item whose
         # key an EARLIER item of this bundle minted does NOT write content at
         # all — it folds onto that node by key. Without this map the simulation
@@ -24144,8 +24231,19 @@ class TortoiseSDK:
             # CONTENT axis (`_key_folds_here`). Recording it was a phantom mint
             # on BOTH axes — the fail-open above and its mirror over-reject.
             _key_folds_here = _has_pkey and (pkind, pkey) in minted_keys
+            # ⛔ "The key is FREE" is not "the item WRITES it". On a content
+            # hit the writer DROPS the supplied key when the resolved node
+            # already holds a different, non-empty one (#6110), so a record
+            # written on presence alone is a PHANTOM — and a phantom here is a
+            # FAIL-OPEN, not the benign over-reject it resembles: every later
+            # item under that key reads `_key_folds_here` and records nothing,
+            # so the item that really mints that key's terminal point goes
+            # unrecorded and a third item folds onto it. `_content_key_lands`
+            # is the writer's own answer (#9819 review P1).
             _key_mints_here = (_has_pkey and not _key_folds_here
-                               and mkind is not None)
+                               and mkind is not None
+                               and _content_key_lands(
+                                   _content_cands, content, pkind, pkey))
             # ⛔ The TERMINAL record is still written by the FIRST minting item,
             # so a fold onto an intra-bundle TERMINAL point stays refused. Its
             # key is the STORED kind (`mkind`) — see the map declarations.
