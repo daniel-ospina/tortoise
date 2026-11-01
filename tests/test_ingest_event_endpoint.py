@@ -698,12 +698,19 @@ def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
 
     Only `:Subject`'s writer validates its `status` vocabulary. The `:Object`
     and `:Event` writers do NOT: a NON-PERSISTABLE value (a dict, bytes, a set)
-    is **dropped** by the writer — measured on this head, the node keeps
-    `status = 'live'` — so refusing it would reject a bundle the writer
+    is **dropped** by the writer — measured on this head, the node carries NO
+    `status` at all — so refusing it would reject a bundle the writer
     accepts. That is the over-rejection class round 4 of this PR already fixed
     once, and it is why the array refusal (a PERSISTABLE unhashable value,
     which IS stored and then breaks the direct-edge terminal check) is scoped by
     `_status_is_stored_unhashable` rather than by "not a string".
+
+    ⛔ PREMISE CHANGE (#9974 R1): the dropped value used to leave the node at a
+    FABRICATED `status = 'live'` (the door's `out["status"] = "live"`, now
+    deleted, and the fold's `coalesce($st,'live')`, now `$st`). An Object is now
+    born DERIVED-OR-ABSENT, so "the dict was DROPPED" is pinned as the property
+    being ABSENT (`[[None]]`) — strictly stronger than `'live'`, which a
+    reinstated fabrication would still satisfy.
 
     Pre-fix this test fails too: the frozenset membership test raised
     `TypeError` before any of these writes could be reached.
@@ -727,9 +734,10 @@ def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
     assert created["created"]["connections"] == 1
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 1
     # The dict is DROPPED, not stored verbatim — the mechanism the scoping
-    # above depends on, so it is asserted rather than described.
+    # above depends on, so it is asserted rather than described. #9974 R1:
+    # nothing replaces it, so the property is ABSENT (and absent reads live).
     assert sdk._get_proj().g.query(
-        "MATCH (n:Object {name:'Alpha'}) RETURN n.status").result_set == [["live"]]
+        "MATCH (n:Object {name:'Alpha'}) RETURN n.status").result_set == [[None]]
     assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 1
 
 
@@ -1888,9 +1896,15 @@ def test_object_item_status_is_accepted_when_a_holder_owns_the_name(sdk):
     The merge does not overwrite an existing node's `status` (it is
     projection-owned for `:Object`), so an item re-declaring a status for a name
     that already has a holder is DROPPED and the writer accepts it — measured:
-    `create_object("Held", status=["retracted"])` stores `'live'`. Refusing the
+    `create_object("Held", status=["retracted"])` leaves the node with NO stored
+    status. Refusing the
     bundle here would reject a write the writer performs, and the HOLDER's own
     array status is the case the direct-route leg catches.
+
+    ⛔ PREMISE CHANGE (#9974 R1): the holder used to carry a FABRICATED
+    `status = 'live'` seeded by the door/fold default; that default is gone, so
+    the holder is born DERIVED-OR-ABSENT and the merge still writes nothing.
+    Pinned as ABSENCE — strictly stronger than `'live'`.
     """
     sdk.create_object("Held")
     bundle = {
@@ -1903,7 +1917,7 @@ def test_object_item_status_is_accepted_when_a_holder_owns_the_name(sdk):
     created = sdk.ingest(bundle)
     assert created["created"]["connections"] == 1
     assert sdk._get_proj().g.query(
-        "MATCH (n:Object {name:'Held'}) RETURN n.status").result_set == [["live"]]
+        "MATCH (n:Object {name:'Held'}) RETURN n.status").result_set == [[None]]
 
 
 def test_operator_shaped_holder_with_array_status_is_refused_in_phase1(sdk):
@@ -2327,7 +2341,13 @@ def test_second_same_name_item_declaring_array_is_dropped(sdk):
     because a name 2+ LIVE carriers hold is now REFUSED (R8) rather than minted
     past, which would test the ambiguity arm instead of this one. Refusing the
     declaration rejected a bundle the writer performs (measured at the writer:
-    one node, status `live`, array not stored).
+    one node, array not stored).
+
+    ⛔ PREMISE CHANGE (#9974 R1): "the writer performs it" used to leave a
+    FABRICATED `status = 'live'` on the node. The door/fold default is gone, so
+    the first item mints a status-less node and the second item's `status` is
+    still dropped — the claim is now pinned as ABSENCE (`None`), which a
+    reinstated fabrication would fail.
     """
     bundle = {
         "entities": [
@@ -2344,7 +2364,7 @@ def test_second_same_name_item_declaring_array_is_dropped(sdk):
     rows = sdk._get_proj().g.query(
         "MATCH (o:Object {name:'Acme'}) RETURN o.id, o.status").result_set
     assert len(rows) == 1, rows
-    assert rows[0][1] == "live", rows
+    assert rows[0][1] is None, rows
 
 
 def test_two_bundle_refs_to_one_shared_name_are_a_self_edge(sdk):
