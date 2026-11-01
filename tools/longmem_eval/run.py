@@ -6080,6 +6080,21 @@ def outcomes_to_report(
                 # s4_reemit reads them from the published outcomes).
                 "s2_out_tokens", "s4_out_tokens", "s4_merge",
             )} | {"legs": list(o.get("legs") or []),
+                  # #10137 (report path): the per-question belief manifest the
+                  # methodology's aggregate is SUMMED from
+                  # (``measurement_posture.summarize_belief_activation``) rides
+                  # the projection — conditional, exactly like the checkpoint
+                  # write (:5115-5116) and the #2578/#2976 arms, so an UNARMED
+                  # outcome never gains a null key and its published shape stays
+                  # byte-compatible. Without it a report published
+                  # ``methodology.measurement_posture.activation.
+                  # questions_with_ep`` and DROPPED the cells it was counted
+                  # from, so no reader could audit the census question by
+                  # question — the per-question block silently degraded to 24
+                  # rows of nulls while the aggregate still looked right
+                  # (#10137 review, P2).
+                  **({"belief_activation": o["belief_activation"]}
+                     if isinstance(o.get("belief_activation"), dict) else {}),
                   # #2976: the temporal retrieval-leg arm + per-question
                   # markers are projected ONLY when the outcome carries them
                   # (conditional pattern, like rerank_pass/measure_facts — a

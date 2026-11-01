@@ -206,6 +206,40 @@ def test_probe_failure_fails_loud_without_adjacent_log():
         FalkorProjection._probe_ok = orig
 
 
+def test_probe_failure_names_its_cause_in_the_traceback():
+    """A probe failure must not swallow WHY the probe failed.
+
+    FAILS IF: the raised ``RuntimeError`` carries no ``__cause__`` — the pre-fix
+    shape, where the operator (and the CI log reader) saw *"restore from
+    backup"* and nothing about the exception that actually failed the probe.
+    REACHABLE: ``_probe_ok`` records the failure on ``self._probe_error``, so
+    any probe that refuses to answer reaches this branch with a cause set.
+
+    MEASURED cost of the gap (#10437): CI run 41236504180 (``test-slow (c)``)
+    took the *no adjacent JSONL* branch for a store redislite had just spawned
+    — a corruption verdict for a healthy, empty graph — and the swallowed
+    error was two 10 s socket timeouts (the fixture's 20.23 s ``call``), i.e. a
+    slow-starting daemon. The message alone could not say that; the chain does.
+    """
+    db_path = os.path.join(_mk_tmp(), "cause.db")
+    boom = TimeoutError("no answer within 10.0s")
+
+    def _probe_times_out(self):
+        self._probe_error = boom
+        return False
+
+    orig = FalkorProjection._probe_ok
+    FalkorProjection._probe_ok = _probe_times_out
+    try:
+        with pytest.raises(RuntimeError, match="no adjacent JSONL") as excinfo:
+            FalkorProjection(db_path)
+    finally:
+        FalkorProjection._probe_ok = orig
+    assert excinfo.value.__cause__ is boom, (
+        "the probe's own exception must reach the traceback — without it the "
+        "reader cannot tell a slow daemon from a corrupt graph")
+
+
 def test_server_mode_probe_failure_fails_loud():
     """URI/server mode probe failure raises (never auto-rebuilds remotely).
 
@@ -213,22 +247,44 @@ def test_server_mode_probe_failure_fails_loud():
     ConnectionError at construction (pre-existing fail-loud). Exercise the
     branch directly: a live connection whose probe fails (e.g. wrong module,
     broken graph) must raise, not attempt a local-log rebuild.
+
+    AND it must carry the probe's own exception as ``__cause__``. Both generic
+    branches chain (``#10437``), but this one — ``is_prod or not
+    self._is_embedded`` — is a DIFFERENT branch from the embedded one pinned by
+    ``test_probe_failure_names_its_cause_in_the_traceback`` (which matches on
+    *no adjacent JSONL*), so without this assertion the server/production chain
+    could be deleted with the suite green: the "removable branch" class earlier
+    cycles of this PR closed three times. A server-mode failure with a bare
+    message sends the operator to "recover manually" while the actual reason
+    (here a probe timeout) stays unreachable from the traceback. FAILS IF:
+    either the raise loses ``from self._probe_error`` or the cause is not the
+    probe's own exception.
     """
     db_path = os.path.join(_mk_tmp(), "server.db")
     log = EventLog(os.path.join(db_path.rsplit("/", 1)[0], "events.jsonl"))
     log.append(_point_event(0))
+    boom = TimeoutError("no answer within 10.0s")
+
+    def _probe_times_out(self):
+        self._probe_error = boom
+        return False
+
     orig = FalkorProjection._probe_ok
-    FalkorProjection._probe_ok = lambda self: False
+    FalkorProjection._probe_ok = _probe_times_out
     try:
         proj = FalkorProjection(db_path)
         try:
             proj._is_embedded = False  # simulate server-mode guard policy
-            with pytest.raises(RuntimeError, match="health check failed"):
+            with pytest.raises(RuntimeError, match="health check failed") as excinfo:
                 proj._auto_health_recover()
         finally:
             proj.close()
     finally:
         FalkorProjection._probe_ok = orig
+    assert excinfo.value.__cause__ is boom, (
+        "the server/production branch must chain the probe's own exception — "
+        "without it the operator sees \"recover manually\" and nothing about "
+        f"why the probe failed ({excinfo.value.__cause__!r})")
 
 
 # ── CLI escape hatch ──────────────────────────────────────────────────────

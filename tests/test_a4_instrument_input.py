@@ -122,24 +122,26 @@ def keyword_lane(monkeypatch):
     pinned by ``tests/test_bm25_lexical_8488.py::TestReadPath::
     test_expansion_passes_stand_the_arm_down``), because a later pass *would*
     overwrite the slot the arm writes: the stand-down keys on the FLAG
-    (``sdk.py:33038-33040``), not on a replacement actually happening — which is
-    exactly the open question in #10436, since on a store with no ``search_keys``
-    the expansion returns ``None`` and nothing is overwritten. So ON vs OFF of
-    this file's lever changed the lexical SCORER as well as the expansion, and an
-    ordered-hit-list comparison across it stopped being an A4 measurement — it
-    measured the arm.
+    (``sdk.py``'s ``_SDK_ANCHORS["stand_down_flag"]``), not on a replacement
+    actually happening — which is exactly the open question in #10436, since on
+    a store with no ``search_keys`` the expansion returns ``None`` and nothing
+    is overwritten. So ON vs OFF of this file's lever changed the lexical
+    SCORER as well as the expansion, and an ordered-hit-list comparison across
+    it stopped being an A4 measurement — it measured the arm.
 
     LANE: the divergence needs ``is_embedded`` (the arm gate is embedded-only,
-    ``sdk.py:32946/33041``). In a URI-SET pytest session that ``is_embedded``
-    comes from ``FalkorProjection``'s test redirect (``explicit_path and
-    TORTOISE_DB_URI and TORTOISE_TEST_MODE == "1" and not exempt`` — see
-    ``tests/test_markers.py`` and ``tests/conftest.py``), which NULLS this
-    fixture's explicit ``db_path``; #139's path-wins precedence would otherwise
-    make the fixture embedded on every lane. This file's stem is deliberately NOT
-    in ``TEST_NO_REDIRECT_STEMS`` (``tests/_embedded.py``) — unlike
-    ``test_bm25_lexical_8488``, which is registered so its embedded constructions
-    survive an out-of-band URI run — so under a docker URI the arm never runs and
-    this pin is a NO-OP there; do not read that as the premise being false.
+    ``sdk.py``'s ``_SDK_ANCHORS["embedded_gate"]``). In a URI-SET pytest
+    session that ``is_embedded`` comes from ``FalkorProjection``'s test
+    redirect (``explicit_path and TORTOISE_DB_URI and
+    TORTOISE_TEST_MODE == "1" and not exempt`` — see ``tests/test_markers.py``
+    and ``tests/conftest.py``), which NULLS this fixture's explicit
+    ``db_path``; #139's path-wins precedence would otherwise make the fixture
+    embedded on every lane. This file's stem is deliberately NOT in
+    ``TEST_NO_REDIRECT_STEMS`` (``tests/_embedded.py``) — unlike
+    ``test_bm25_lexical_8488``, which is registered so its embedded
+    constructions survive an out-of-band URI run — so under a docker URI the
+    arm never runs and this pin is a NO-OP there; do not read that as the
+    premise being false.
 
     Reproduce it on the PRE-FIX tree (``main@2487e7e1f``; on this tree the pin
     makes it green) with:
@@ -149,9 +151,21 @@ def keyword_lane(monkeypatch):
             test_seed_without_search_keys_reproduces_5534
 
         E  At index 1 diff: 'a4-s2_t0' != 'a4-s0_t0'
-        W  tortoise.sdk:sdk.py:33054: #8488: BM25 lexical arm standing down —
+        W  tortoise.sdk:sdk.py:<line>: #8488: BM25 lexical arm standing down —
            search_keys_prf replaces the lexical slot after the arm would have
            written it
+
+    The ``<line>`` is printed by pytest at emission and is deliberately NOT
+    pinned here: ``origin/main`` merges move ``tortoise/sdk.py`` (the previous
+    numeric citations in this docstring went 610 lines stale on one merge,
+    which is a claim that can only re-stale). The seams this docstring rests
+    on are therefore named by SOURCE SNIPPET in ``_SDK_ANCHORS`` below —
+    ``stand_down_flag`` and ``embedded_gate`` quoted by name above,
+    ``stand_down_warning`` as pytest renders it in the reproduction block
+    (the `%s` filled in — the anchor is the format string), and
+    ``arm_gate_flag`` as the read the stand-down keys on — and
+    ``test_the_sdk_anchors_this_docstring_cites_still_resolve`` proves each of
+    those four still exists — a rename reds it, a re-ordering does not.
 
     A4 itself is provably inert without aliases (``_search_keys_prf_expansion``
     returns ``None`` — "nothing to expand" — and the caller keeps the ORIGINAL
@@ -169,6 +183,59 @@ def keyword_lane(monkeypatch):
 
 
 # ── the lane: one lever at a time ──────────────────────────────────────
+
+#: The ``tortoise/sdk.py`` seams ``keyword_lane``'s docstring cites, as exact
+#: source snippets rather than line numbers. A line number is a claim that can
+#: only re-stale: one ``origin/main`` merge moved every one of these by ~610
+#: lines and left three citations pointing at unrelated statements. Each
+#: snippet is asserted to occur EXACTLY ONCE, so it identifies one statement
+#: and a rename/removal reds the guard instead of silently validating nothing.
+_SDK_ANCHORS: dict[str, str] = {
+    # the stand-down keys on the FLAG, not on a replacement happening
+    "stand_down_flag": "_prf_supersedes_the_arm = bool(",
+    # ... and that flag is what takes the arm's slot away
+    "arm_gate_flag": "and _bm25_enabled and not _prf_supersedes_the_arm",
+    # the arm gate itself is embedded-only
+    "embedded_gate": "and is_embedded and not is_full_scan",
+    # the warning the reproduction block quotes
+    "stand_down_warning": '"#8488: BM25 lexical arm standing down — %s replaces the "',
+}
+
+
+def test_the_sdk_anchors_this_docstring_cites_still_resolve():
+    """Every ``sdk.py`` seam the docstrings above cite must still EXIST.
+
+    Non-vacuity is against the pre-fix shape: those citations were line
+    numbers (``sdk.py:32946/33038-33040/33054``) which one ``origin/main``
+    merge left pointing ~610 lines off — at unrelated statements — while every
+    test stayed green, because a stale pointer is prose. Mutation: rename any
+    anchored symbol (or re-pin the docstring to a line number) → red.
+    """
+    import re
+
+    from tortoise import sdk as sdk_module
+
+    source = Path(sdk_module.__file__).read_text(encoding="utf-8")
+    for name, snippet in _SDK_ANCHORS.items():
+        assert source.count(snippet) == 1, (
+            f"the sdk.py anchor {name!r} no longer identifies exactly one "
+            f"statement ({source.count(snippet)} hits) — the docstring's claim "
+            f"about the stand-down is unverifiable: {snippet!r}")
+
+    # The guard must guard the DOCSTRING too, not a private copy of it: the
+    # reproduction block and the two mechanism paragraphs are what a fixer
+    # reads. A numeric ``sdk.py:NNNN`` citation is the shape that re-stales.
+    docstrings = "\n".join(
+        obj.__doc__ or "" for obj in (keyword_lane,)
+    )
+    stale = re.findall(r"sdk\.py:\d", docstrings)
+    assert not stale, (
+        "keyword_lane's docstring is back to citing sdk.py by LINE NUMBER "
+        f"({stale}) — those go stale on the next origin/main merge; cite the "
+        "snippet in _SDK_ANCHORS instead")
+    assert "_SDK_ANCHORS" in docstrings, (
+        "keyword_lane's docstring no longer names _SDK_ANCHORS — the anchors "
+        "above would then guard nothing that is actually cited")
 
 
 def test_keyword_lane_pins_the_bm25_arm_off(keyword_lane):
