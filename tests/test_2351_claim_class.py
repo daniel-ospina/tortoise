@@ -1322,6 +1322,60 @@ def test_supersede_repoint_survives_a_unhashable_stored_direction(lane):
     assert _direct_rows(lane, new)[0][0] == new
 
 
+def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
+        lane):
+    """#10512 review P2 — REFUTED by measurement; the two doors already agree.
+
+    A review round raised a P2 saying that judging a direction-absent NAND's
+    re-point with ``_canonical_direction`` (``unidirectional``) let a supersede
+    mint ``asserted -[NAND]-> derived``, a wiring it claimed
+    ``create_direct_edge('NAND', new, t)`` refuses. MEASURED HERE, against the
+    door the finding names — both halves of it are false:
+
+      * ``create_direct_edge`` CANONICALIZES an absent direction BEFORE it
+        guards and before it writes (NAND -> ``unidirectional``, IMPL ->
+        ``bidirectional``), so the edge the reproduction writes carries an
+        EXPLICIT token and is never direction-absent on disk.
+      * On that stored token the pair ``asserted -> derived`` crosses no class
+        boundary FORWARD, and the edge is one-way, so the creation door ACCEPTS
+        the exact pair the re-point leaves behind.
+
+    So the re-point's verdict (allow), the creation door's verdict (allow) and
+    the token actually written all agree: there is no door/load divergence to
+    close here, and #9727's stated invariant is not broken by this arm. The
+    review's suggested remedy (default an ABSENT direction to the direct-edge
+    ``bidirectional``) was implemented and measured against this shape: it is a
+    NO-OP here, because the reproduction's token is a string and therefore never
+    takes the absent branch. What it does change is the raw-written
+    absent/JUNK branch, where it flips an absent NAND to both-ways — refusing a
+    transfer the load side would keep (``ep.py`` narrows that same edge to
+    ``->`` rather than dropping it) and breaking the existing
+    ``test_supersede_repoint_reads_a_junk_direction_as_absent`` pin, whose point
+    is that a junk token must not abort a supersede. That is the over-refusal
+    this test guards against — kept so a later lane reading that finding does
+    not "fix" it twice.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "authored v2")["id"]  # asserted
+    t = lane.create_point("statement", "computed peer",
+                          claim_class="derived")["id"]
+    lane.create_direct_edge("NAND", old, t)   # no direction given
+    # The door's canonical form is WRITTEN: absent never reaches disk.
+    assert _direct_rows(lane, old)[0][2] == "unidirectional", \
+        _direct_rows(lane, old)
+
+    lane.supersede_point(old, new)            # must not raise
+
+    _rows = _direct_rows(lane, new)
+    assert _rows and _rows[0][0] == new, _rows
+    assert _rows[0][2] == "unidirectional", _rows
+    # …and the creation door ACCEPTS the pair the re-point left behind, so the
+    # re-point mints nothing that door would refuse — the invariant the P2
+    # said was broken.
+    lane.create_direct_edge("NAND", new, t)
+
+
 def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
     """A resolvable NON-STRING id must still be judged, not skipped.
 
