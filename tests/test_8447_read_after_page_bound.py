@@ -31,6 +31,8 @@ narrower claim than "they pass on the pre-fix tree": two of them name
 ``MAX_PAGE``, which does not exist at ``7df48ec7c``, so against that tree they
 ERROR.
 """
+from datetime import datetime, timezone
+
 import pytest
 
 from tortoise import event_store
@@ -59,12 +61,18 @@ def _seed(proj, n: int) -> None:
     the READ seam's parameter domain, and the dedup test in
     `tests/test_event_store.py` seeds the same way. `read_after` needs no
     index (its `seq` ordering comes from ORDER BY, not the range index).
+
+    ``ts`` is stamped LIVE, not fixed: `poll_events` lazily runs
+    `purge_expired(30d)` once per process, and a fixed 2026-01-01 stamp makes
+    every seeded row retention bait — the at-cap poll test then returns `[]`
+    whenever it happens to be the first poll in the process (measured).
     """
     proj.g.query(
         "UNWIND range(1, $n) AS i CREATE (:GraphEvent {seq: i, "
         "event_id: 'e' + toString(i), type: 'PointAdded', "
-        "ts: '2026-01-01T00:00:00+00:00', payload: '{}'})",
-        params={"n": int(n)},
+        "ts: $ts, payload: '{}'})",
+        params={"n": int(n),
+                "ts": datetime.now(timezone.utc).isoformat()},
     )
 
 
@@ -97,9 +105,22 @@ def test_a_fractional_ask_refuses_instead_of_being_floored(sdk_factory, tmp_path
     sdk = sdk_factory(tmp_path)
     proj = sdk._get_proj()
     _seed(proj, 5)
+    for bad in (2.9, "5000"):
+        with pytest.raises(ValueError) as exc:
+            event_store.read_after(proj, 0, limit=bad)
+        assert "whole number" in str(exc.value), str(exc.value)
+    # values int() also floors but `isinstance(x, float)` does NOT catch
+    from decimal import Decimal
+
     with pytest.raises(ValueError) as exc:
-        event_store.read_after(proj, 0, limit=2.9)
-    assert "whole number" in str(exc.value) and "2.9" in str(exc.value)
+        event_store.read_after(proj, 0, limit=Decimal("2.9"))
+    assert "2.9" in str(exc.value), str(exc.value)
+    # and `inf` is the seam's refusal, not an OverflowError a ValueError
+    # caller would miss
+    with pytest.raises(ValueError):
+        event_store.read_after(proj, 0, limit=float("inf"))
+    # an integral float is NOT refused (no false refusal)
+    assert len(event_store.read_after(proj, 0, limit=3.0)) == 3
 
 
 def test_a_duplicate_event_id_inside_a_full_page_shrinks_it(sdk_factory, tmp_path):

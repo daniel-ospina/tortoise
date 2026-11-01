@@ -1263,11 +1263,17 @@ def test_more_pending_compares_against_the_page_that_was_read(sdk_factory):
 
     sdk = sdk_factory(ensure_schema=True)
     proj = sdk._get_proj()
+    # LIVE ts, not a fixed stamp: `poll_events` purges rows older than the
+    # retention window, and a fixed date would make the seed retention bait
+    # (see tests/test_8447_read_after_page_bound.py's `_seed`).
+    from datetime import datetime, timezone
+
     proj.g.query(
         "UNWIND range(1, $n) AS i CREATE (:GraphEvent {seq: i, "
         "event_id: 'e' + toString(i), type: 'PointAdded', "
-        "ts: '2026-01-01T00:00:00+00:00', payload: '{}'})",
-        params={"n": event_store.MAX_PAGE + 1},
+        "ts: $ts, payload: '{}'})",
+        params={"n": event_store.MAX_PAGE + 1,
+                "ts": datetime.now(timezone.utc).isoformat()},
     )
     wd.create_subscription(proj, url="https://hooks.example.com/cb",
                            types=["PointAdded"])

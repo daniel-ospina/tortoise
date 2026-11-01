@@ -922,12 +922,19 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
     normally prevents them) keeps the FIRST occurrence.
     """
     raw = limit
-    limit = int(limit)
-    if isinstance(raw, float) and raw != limit:
-        # A fractional ask cannot be honoured without silently shrinking it,
-        # and the shrink then reads as a short page (the inference removed
-        # above). Refuse it, and name the value the CALLER passed — reporting
-        # the floored int would describe a call that never happened.
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        # `int()` alone leaves the seam's own refusal un-named: `inf` used to
+        # escape as OverflowError, which a caller catching ValueError (the
+        # documented answer) would miss.
+        raise ValueError(f"limit must be a whole number, got {raw!r}") from None
+    if limit != raw:
+        # A VALUE comparison, not an isinstance check: `int()` also floors
+        # `Decimal('2.9')` and `np.float32(2.9)`, which are not `float`
+        # instances — the silent shrink this refuses. `"5000"` is refused too:
+        # reporting the converted 5000 would describe a call that never
+        # happened (the same rule as the range message below).
         raise ValueError(f"limit must be a whole number, got {raw!r}")
     if not 1 <= limit <= MAX_PAGE:
         raise ValueError(
