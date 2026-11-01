@@ -3341,14 +3341,32 @@ def _install_dead_socket_guard() -> None:
 # suites (`other_suites=2`). A loaded host is exactly when bind->listen (and
 # backlog) stops being instantaneous.
 #
-# WHAT THIS PATCH DOES, and its two limits: it re-runs the ORIGINAL wait while
+# WHAT THIS PATCH DOES, and its limits: it re-runs the ORIGINAL wait while
 # the failure is a REFUSED connect and the total wall time is still inside the
 # server's OWN declared `start_timeout` budget, then re-raises the last
 # connection error unchanged. So (a) it can never turn a real failure into a
-# pass — a dead server, a missing socket file (ENOENT, the #3653/#4961
-# signature; "Connection refused" is not in that message) and an exhausted
-# budget all raise exactly what they raise today, and (b) it adds no new knob
-# and no new bound: the ceiling is redislite's own `start_timeout`.
+# pass — a missing socket file (ENOENT, the #3653/#4961 signature; "Connection
+# refused" is not in that message) and an exhausted budget both raise exactly
+# what they raise today, and (b) it adds no new knob: the budget is read from
+# the server's own `start_timeout`.
+#
+# WHAT THE CEILING ACTUALLY IS (review P2 — this comment used to overstate it).
+# The deadline is only tested when an attempt RETURNS, so the real bound is
+# `start_timeout` + ONE in-flight attempt, not `start_timeout` exactly: a
+# refusal that lands a millisecond before the deadline is followed by one more
+# attempt before the guard gives up. That overshoot is inherent to bounding a
+# call you cannot interrupt mid-flight, and it is bounded (one attempt, then
+# `raise`). The pin in `tests/test_embedded_lifecycle.py` asserts it by ATTEMPT
+# COUNT for that reason, not only against the clock.
+#
+# THE RESIDUAL, stated rather than denied: a socket FILE with no listener is
+# `ECONNREFUSED` — the same errno as "starting, not listening yet" — so a
+# genuinely dead server now costs up to that budget before raising the SAME
+# error, instead of failing in milliseconds. It stays bounded, it stays
+# fail-closed (raw error, no re-wrap), and the #4879 dead-socket guard above is
+# what removes the recorded-socket replay that made this instant before; but the
+# added latency on that failure path is real and is not something this guard can
+# distinguish.
 
 #: Bounded pause between refused-connect attempts; the same 0.1 s redislite's
 #: own wait loop sleeps between pings.
@@ -3404,9 +3422,10 @@ def _install_boot_window_guard() -> None:
     _ORIGINAL_WAIT_FOR_SERVER_START = original
 
     def _wait_for_server_start(self, *args, **kwargs):
-        # The budget is measured from the FIRST attempt, not per attempt, so
-        # the ceiling stays the server's declared start_timeout even if the
-        # original wait returns instantly on every refusal.
+        # The budget is measured from the FIRST attempt, not per attempt, so the
+        # bound is the server's declared `start_timeout` plus at most ONE
+        # in-flight attempt (see the ceiling note above), never a fresh budget
+        # per retry.
         try:
             budget = float(getattr(self, "start_timeout", 10) or 10)
         except (TypeError, ValueError):  # pragma: no cover — a broken override
@@ -3420,9 +3439,15 @@ def _install_boot_window_guard() -> None:
                 # signature: the #4879 docstring cites the raw
                 # "ConnectionError: Error 2 ... No such file or directory"
                 # that this must keep producing.
-                if not _is_refused_connect(exc) or time.monotonic() >= deadline:
+                if not _is_refused_connect(exc):
                     raise
-                time.sleep(_REFUSED_CONNECT_RETRY_S)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                # Never sleep PAST the deadline: the pause is capped by what is
+                # left of the budget, so the loop cannot overshoot by a sleep on
+                # top of the one attempt it already paid for.
+                time.sleep(min(_REFUSED_CONNECT_RETRY_S, remaining))
 
     RedisMixin._wait_for_server_start = _wait_for_server_start
     RedisMixin._tortoise_boot_window_guard = True

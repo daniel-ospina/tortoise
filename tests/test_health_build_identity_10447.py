@@ -345,6 +345,39 @@ def test_migrations_source_names_the_population_it_read(monkeypatch, tmp_path):
     assert source == "package", source
 
 
+def test_a_broken_resolver_is_not_readable_as_an_empty_image(monkeypatch):
+    """`migrations_head: null` has TWO causes; the payload must say which.
+
+    The broad `except` in `_migrations_head` has to stay broad — a raise on the
+    liveness path would 5xx `/health` — so a resolver that blows up is
+    *expected* to publish a null head. What it must NOT do is publish the same
+    `source` a genuinely-empty image publishes: that is a plausible absence
+    standing in for a broken reading, which is the exact failure class #10447
+    exists to remove (review P2; the same shape the docstring records — `Path`
+    was not imported at module scope, so the swallow answered "no migrations"
+    for a checkout carrying 77).
+
+    Mutation: reverting the `except` branch to `return None, None` reds this and
+    leaves every other pin green — which is why it is a separate arm.
+    """
+    from tortoise import hosted_api as api
+    from tortoise import record_projection
+
+    def _boom():
+        raise RuntimeError("the resolver is broken")
+
+    monkeypatch.setattr(record_projection, "_migrations_dir", _boom)
+    head, source = api._migrations_head()
+    assert head is None, (
+        "a broken resolver must not invent a head — it publishes the absence")
+    assert source == "error", (
+        f"a raised resolver reported source={source!r}; `None` here is what a "
+        f"genuinely empty image reports, so the reader cannot tell a broken "
+        f"reading from 'this image carries no migrations'")
+    assert source != None, (  # noqa: E711 — the distinction is the whole point
+        "the error reading collapsed into the empty-image reading")
+
+
 def test_the_migrations_head_is_resolved_once_not_per_request(sha_env, monkeypatch):
     """`/health` must do no I/O per request (#2850's contract, restated in
     `.github/scripts/deploy-health-gate.sh`): the resolver is memoised at import,

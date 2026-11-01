@@ -5037,6 +5037,7 @@ import redislite.client as _redislite_client  # noqa: E402
 
 from tortoise.embedded_lifecycle import (  # noqa: E402
     _ORIGINAL_WAIT_FOR_SERVER_START,
+    _REFUSED_CONNECT_RETRY_S as _RETRY_S,
 )
 
 
@@ -5090,11 +5091,21 @@ def test_a_refused_connect_during_the_boot_window_is_waited_out():
 def test_the_boot_window_guard_still_fails_loudly_once_the_budget_is_spent():
     """Fail CLOSED: a server that never answers still raises, bounded.
 
-    The ceiling is the server's OWN `start_timeout` (the guard adds no knob),
-    and the error the caller sees is the raw connection error — not a swallow,
-    not a re-wrap.
+    The budget is read from the server's OWN `start_timeout` (the guard adds no
+    knob), and the error the caller sees is the raw connection error — not a
+    swallow, not a re-wrap.
+
+    ⛔ THE BOUND IS PINNED BY ATTEMPT COUNT, NOT BY THE CLOCK (review P2). The
+    real ceiling is `start_timeout` + at most ONE in-flight attempt, and the
+    round-2 version of this test asserted only `elapsed < 5.0` against a 1 s
+    budget — 5x the claimed bound, so an implementation that spent double the
+    budget passed it. The attempt count is deterministic (a 1 s budget with a
+    0.1 s pause cannot admit more than ~11 attempts) and it reds both for an
+    unbounded loop and for a 2x-budget one; the wall clock stays only as a
+    flake-tolerant runaway guard.
     """
-    stuck = _FakeBootClient(refusals=-1, start_timeout=1)
+    budget = 1
+    stuck = _FakeBootClient(refusals=-1, start_timeout=budget)
     started = time.monotonic()
     with pytest.raises(_rex.ConnectionError) as excinfo:
         _redislite_client.RedisMixin._wait_for_server_start(stuck)
@@ -5105,9 +5116,13 @@ def test_the_boot_window_guard_still_fails_loudly_once_the_budget_is_spent():
     assert elapsed >= 0.9, (
         f"the guard gave up after {elapsed:.2f}s, before the declared "
         f"start_timeout budget")
+    max_attempts = int(budget / _RETRY_S) + 2
+    assert stuck.pings <= max_attempts, (
+        f"{stuck.pings} attempts inside a {budget}s budget (ceiling "
+        f"{max_attempts}) — the guard is spending a fresh budget per retry "
+        f"or not checking the deadline at all")
     assert elapsed < 5.0, (
-        f"the guard kept retrying for {elapsed:.2f}s — the bound is the "
-        f"server's own start_timeout, not an unbounded wait")
+        f"the guard kept retrying for {elapsed:.2f}s — runaway, not bounded")
 
 
 def test_a_missing_socket_file_still_fails_immediately():

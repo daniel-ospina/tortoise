@@ -6077,9 +6077,21 @@ def _migrations_head() -> tuple[str | None, str | None]:
     the reader is told which population it came from. Publishing the source makes the difference visible
     where the datum is, instead of only in a docstring.
 
-    ``(None, None)`` when no migration-shaped file is present (a stripped
-    install) — the same "absent, and it says so" contract as ``commit_sha``,
-    never a plausible fake.
+    ``None`` HEAD HAS TWO CAUSES AND THE PAYLOAD NAMES WHICH (review P2). A
+    ``None`` head with ``source == "error"`` means the RESOLVER RAISED — the
+    image may well carry all 77 migrations and the reading is what is broken; a
+    ``None`` head with ``source is None`` means no migration-shaped file was
+    found (a stripped install). Collapsing both to ``(None, None)`` is the same
+    failure class this whole change is about: an operator (or a staleness probe)
+    reads "this image carries no migrations" — a plausible absence — when the
+    truth is "the resolver is broken". The broad ``except`` below has to stay
+    broad (a raise here would 5xx the liveness probe); what it must not do is
+    answer the same thing as a real absence.
+
+    ``source`` is therefore ``"checkout"``, ``"package"``, ``"error"`` (the
+    resolver raised) or ``None`` (the ``realpath`` comparison itself failed).
+    ``"checkout"`` means the CHECKOUT tree was chosen — not that all 77 files
+    were present in it.
     """
     try:
         # Local on purpose, and NOT for import cost: `tortoise.record_projection`
@@ -6107,7 +6119,11 @@ def _migrations_head() -> tuple[str | None, str | None]:
         # `test_migrations_head_is_the_highest_migration_the_image_carries`
         # asserts the REAL tree's head is not None, so an over-broad swallow reds
         # the suite instead of reading as "absent".
-        return None, None
+        #
+        # `"error"`, never `None` (review P2): `None` is already the value a
+        # genuinely-empty image reports, and answering both with one reading is
+        # how a broken resolver passes for a plausible absence.
+        return None, "error"
     if not heads:
         return None, None
     try:
