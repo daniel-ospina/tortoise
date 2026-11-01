@@ -222,7 +222,10 @@ and file:line — and any table the probe emits records `steps_observed` **and**
 `#9116`'s seam has since landed, so a re-run at a post-seam head can witness **S2.2**; **S2.3**
 moves only once its classify pass carries a non-empty `s2`/`union` — on the measured corpus that
 pass is IDLE (`enabled: true`, both counters empty), so a re-run there still reports S2.3
-unobserved and G5 still refuses. The two scored rows above keep the count the run measured.
+**unobserved** — and since `#10215` that is a **witnessed idle**, not a refusal: `observe_idle`
+accounts it from the receipt's own facts and G5/V5 accept the accounting because the frozen
+pre-registration declares the step conditional. The two scored rows above keep the count the run
+measured.
 
 ⛔ **The count is a measurement, not a constant.** `observe_steps` looks for a `vet` /
 `classify_later` surface in what the run actually holds (the receipt's top-level keys and its
@@ -235,7 +238,7 @@ V5, all eight steps **accounted for** — stays reachable: `#9116`'s seam makes 
 (each step's own block is on the receipt), and S2.2 then flips on a re-run at a post-seam head
 (S2.3 flips only once its pass does work, which the measured corpus' idle classify pass does not —
 which is why `#10215` restated the requirement as seven observed + S2.3 observed-or-witnessed-idle
-from the frozen record; see §10 there and §10.3 below). It
+from the frozen record; see `PRE-REGISTRATION.md` §10 and §10.3). It
 did **not** come for free and this bundle does not claim it did: the seam landed with this probe's
 observer rewritten (`observe_steps` reads `stats['step_witness']` instead of guessing at a surface
 the receipt never carried) and with the pin that certified the old unreachability replaced by the
@@ -585,8 +588,9 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   every stage's own facts — and the probe's `observe_steps` was rewritten to read it (the observer
   is part of this change, not something a re-run gets for free). A re-run at a post-seam head moves
   **S2.2**; **S2.3 does not flip**, because its classify pass is IDLE on this corpus and the witness
-  says so (`enabled: true`, empty `s2`/`union`), so G5 still refuses there (see "The eight steps"
-  above).
+  says so (`enabled: true`, empty `s2`/`union`) — since `#10215` that is accounted as a **witnessed
+  idle** (flag ON, no activity, no fail-open marker, a positive candidate count) rather than refused,
+  so G5/V5 accept it where the frozen pre-registration declares the step conditional.
 
 ## Reproduce
 
@@ -600,7 +604,9 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
 # seam has LANDED: the receipt carries stats["step_witness"], and the probe reads
 # S2.2/S2.3 there (it still recovers S3/S6 from the live graph). What still bounds a
 # re-run is the CORPUS, not the receipt — the classify pass is IDLE on it, so S2.3
-# is unobserved and G5 still refuses. It writes its own file — never over capstone.log.
+# is witnessed IDLE and accounted, never observed (since #10215 the gate requires it
+# ACCOUNTED, not observed; the conditional set comes from the frozen record).
+# It writes its own file — never over capstone.log.
 # ⛔ AND THE FILE IT SUPERSEDES IS DELETED: exactly ONE scored log may exist, and
 # both the test and the pre-registration gate refuse a second one.
 # NO ARM EXPORTS: the probe forces TORTOISE_VET/TORTOISE_CLASSIFY_LATER itself,
