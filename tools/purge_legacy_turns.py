@@ -298,6 +298,20 @@ REFUSE_RECORD_BEHIND = "record-behind"
 REFUSE_MISMATCH = "mismatch"
 REFUSE_NOT_IN_PLAN = "session-not-in-plan"
 REFUSE_JOURNAL_UNCONFIRMED = "journal-unconfirmed"
+# The post-effect family (#10483 review, P2 — the half-purge between the DELETE
+# and `_journal_turn_removal`). These are NOT preconditions: by the time any of
+# them is raised the delete MAY have landed, so each names a DIFFERENT action:
+#   delete-failed      — the store proves nothing moved. Retry; nothing changed.
+#   delete-unrecorded  — the delete landed and the journal does not confirm it.
+#                        The ids are named; re-journal them, do not re-run.
+#   delete-interrupted — the delete landed and every removal IS journaled; only
+#                        the run stopped. Re-census and re-approve the rest.
+#   delete-unverified  — the delete may have landed by an unknown amount. Do not
+#                        re-run and do not re-journal: re-census first.
+REFUSE_DELETE_FAILED = "delete-failed"
+REFUSE_DELETE_UNRECORDED = "delete-unrecorded"
+REFUSE_DELETE_INTERRUPTED = "delete-interrupted"
+REFUSE_DELETE_UNVERIFIED = "delete-unverified"
 REFUSE_NO_JOURNAL = "no-journal"
 REFUSE_JOURNAL_UNUSABLE = "journal-unusable"
 REFUSE_CENSUS_NOT_CLEAN = "census-not-clean"
@@ -1772,6 +1786,181 @@ def _recheck_problems(recheck: dict, planned_ids: list[str]
     return sorted(lost & planned), sorted(drifted & planned), sorted(uncompared)
 
 
+def _read_survivors(proj, ids) -> tuple[set[str] | None, str]:
+    """Ask the STORE which planned ids are still standing — after a failure.
+
+    `None` and `set()` are DIFFERENT answers and the difference is the whole
+    point: an empty survivor set says "every planned id is gone", an
+    unreadable one says "which ids are gone is not established". Reporting the
+    second as the first is how a truncated read becomes a purge that claims
+    more than it knows, so the caller decides on the answer, never on the
+    absence of one. The same `RESULTSET_SIZE` guard the census uses applies
+    here too: one aggregate row is cap-immune, so a row list that disagrees
+    with `count(t)` was truncated, not empty.
+    """
+    try:
+        rows = proj.g.query(
+            "MATCH (t:Point) WHERE t.id IN $ids RETURN t.id",
+            params={"ids": list(ids)},
+        ).result_set
+        counted = int(proj.g.query(
+            "MATCH (t:Point) WHERE t.id IN $ids RETURN count(t)",
+            params={"ids": list(ids)},
+        ).result_set[0][0])
+        survivors = {str(row[0]) for row in rows or ()}
+        if len(survivors) != counted:
+            return None, (
+                f"the survivor read returned {len(survivors)} row(s) but the "
+                f"store counts {counted} — the read was TRUNCATED, so which "
+                f"ids are gone is not established")
+    except Exception as exc:
+        # ⛔ THE WHOLE READ IS INSIDE THE GUARD, not only the two `query` calls
+        # (#10483 review, P3-3). This function IS the handler's evidence and the
+        # handler runs inside an `except` clause, so a raise in the row
+        # materialisation (or the length compare) would escape `_execute` from
+        # there and re-create the very traceback it exists to prevent.
+        return None, f"the survivor read could not be re-issued ({exc})"
+    return survivors, ""
+
+
+def _report_after_a_raised_purge(*, sid: str, ids: list[str], reason: str,
+                                 proj, sdk, deleted_total: int) -> int:
+    """The post-effect report: a raise AFTER the delete was issued.
+
+    WHY NOT WRITE-AHEAD. The standard ordering for a destructive operation is to
+    log the intent first, and it is the ordering this repo deliberately does NOT
+    use on this door. Three reasons, in the order they bind:
+
+      * **A recorded decision.** #9207 reversed `delete_point`'s journal-first
+        order: the delete lands first, so a record can never claim a destroy
+        the cache did not perform. `hosted.delete_session` states the same
+        trade in its own words — *"a record for a destroy the cache never
+        performed is worse than a reported window"*. Adopting write-ahead here
+        would be a reopen of #9207, not a fix.
+      * **`_journal_turn_removal`'s contract** is *"After the delete has proven
+        it landed, never before"*, and `_apply_first_write_scope` is the lane
+        that says so. A record written before the delete would be a claim
+        nothing verified — the exact `derived = replay(journal)` divergence the
+        delete's own gate exists to prevent, in the other direction.
+      * **Nothing reads an intent row.** No reader, no repair tool and no fold
+        consumes a "pending removal"; writing one earlier would be theatre,
+        and it would need a new record shape (a second event vocabulary) to say
+        something the store can already answer by being asked.
+
+    And a single transaction is not available: the delete is a Cypher statement
+    against FalkorDB and the record is an append to a local JSONL file
+    (`EventLog.append`, or the record's own `journal_event` row) — two stores
+    with no shared commit, no two-phase protocol and no ordering primitive
+    between them. That is why the effect is REPORTED rather than presumed
+    undone.
+
+    So the mechanism is the third candidate: the journal row is a RECORD OF
+    EFFECT, and a failure records the FAILURE. The store — the only witness of
+    an irreversible effect that outlives the exception — is asked what is still
+    standing, and the ids it proves absent are journaled ONE AT A TIME (a
+    per-id call, because a batched call that raises discards the outcomes of
+    the ids it had already appended: `_journal_turn_removal`'s own body is a
+    dict comprehension). Re-journaling an id that landed is idempotent — the
+    fold is `UPDATE public.point SET cache_tier = 'record_only' WHERE …` — so a
+    duplicate is harmless, while an unjournaled removal is the #3316
+    resurrection. Which direction a failure leaves the two stores is stated in
+    the message the operator gets, never assumed here.
+
+    ⛔ RESIDUAL — what this CANNOT reach, stated rather than left implied.
+    Three windows survive, and none of them is closable from inside a process:
+
+      1. **A signal or a power loss.** The boundary is `except Exception`; a
+         `KeyboardInterrupt`/`SystemExit` or a SIGKILL between the DELETE and
+         the last append is out of its hands — nodes gone, no
+         `EntityMutated op=delete`, no report. The durable detector is a FRESH
+         CENSUS (the stripped session reads as RECORD-AHEAD, never as a purge
+         fault) and the repair is either re-issuing the removals for the ids
+         that diff names, or `record-backup --drill` (`docs/infra-runbook.md`
+         §3.5) to restore the record's copy. Nothing here does that for you.
+      2. **A statement the server applies AFTER the client's read failed.**
+         Every message below is scoped to *the read that ended this run*: it
+         cannot prove a failed `DETACH DELETE` never landed on the server, so
+         an id deleted after the snapshot is unrecorded and this report will
+         not claim otherwise. The same fresh census is the detector.
+      3. **A handler that raises.** `_read_survivors` guards its WHOLE body (a
+         raise there would escape from inside an `except` clause), the per-id
+         journal loop guards each call, and ids are `str()`-ed before joining —
+         but this function is called from an `except` clause, so any future
+         statement added to it must keep that property.
+    """
+    survivors, unreadable = _read_survivors(proj, ids)
+    if survivors is None:
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_DELETE_UNVERIFIED}: the "
+            f"purge of session {sid} RAISED after its DELETE was issued "
+            f"({reason}) and {unreadable} — so whether these nodes are gone "
+            f"is NOT established, and nothing was journaled by this report. "
+            f"Do NOT re-run this plan and do not re-journal from it: re-census "
+            f"the target and diff it against the plan's ids for {sid} first. "
+            f"{deleted_total} node(s) in EARLIER sessions were deleted and "
+            f"their removals journaled. This session's planned ids: "
+            f"{', '.join(str(i) for i in ids[:10])}{' …' if len(ids) > 10 else ''}\n")
+        return 3
+    absent = [tid for tid in ids if tid not in survivors]
+    if not absent:
+        # The read that ended this run found every planned node standing.
+        # That is evidence about THAT READ, never a proof about the statement
+        # before it — a statement the server went on to apply after the
+        # client's read failed is outside what any read here can exclude, so
+        # the wording is scoped to the read (#10483 review, P2-1).
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_DELETE_FAILED}: the purge "
+            f"of session {sid} RAISED ({reason}) and the read that ended this "
+            f"run found ALL {len(ids)} planned node(s) still standing, so "
+            f"nothing was journaled and nothing needed to be. "
+            f"{deleted_total} node(s) in EARLIER sessions were deleted and "
+            f"their removals journaled. Re-running the same plan is safe for "
+            f"this session AS OF that read; a statement the server applied "
+            f"after the read failed would show up as a RECORD-AHEAD session in "
+            f"the fresh census this run's exit forces.\n")
+        return 2
+    journaled: list[str] = []
+    unconfirmed: list[str] = []
+    for tid in absent:
+        try:
+            outcome = (sdk._journal_turn_removal([tid]) or {}).get(tid)
+        except Exception:
+            outcome = None
+        (journaled if outcome is True else unconfirmed).append(tid)
+    if not unconfirmed:
+        # Every proven-absent removal IS now in the journal: the irreversible
+        # half of this session is complete and recorded, and only the RUN
+        # stopped. Its own code, because the operator's next step is
+        # `partial-sweep`'s (re-census and re-approve the remainder) and never
+        # "re-journal" — which is what `delete-unrecorded` would send them to do.
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_DELETE_INTERRUPTED}: the "
+            f"purge of session {sid} DELETED {len(absent)} node(s) and then "
+            f"RAISED ({reason}). All {len(absent)} removal(s) are journaled "
+            f"(by this report: {', '.join(str(j) for j in journaled[:10])}"
+            f"{' …' if len(journaled) > 10 else ''}), so nothing is "
+            f"resurrectable, but the run stopped here and the plan's remaining "
+            f"sessions are untouched. {deleted_total} node(s) in EARLIER "
+            f"sessions were deleted and journaled. Re-run the plan from a "
+            f"fresh census: re-running THIS plan will not finish it.\n")
+        return 2
+    sys.stderr.write(
+        f"purge_legacy_turns: REFUSED {REFUSE_DELETE_UNRECORDED}: the purge of "
+        f"session {sid} DELETED {len(absent)} node(s) and then RAISED "
+        f"({reason}). The deletes are IRREVERSIBLE and already on the target: "
+        f"this report journaled {len(journaled)} of those removal(s) and "
+        f"{len(unconfirmed)} are STILL NOT RECORDED, so a rebuild would "
+        f"resurrect them (#3316). Not recorded: "
+        f"{', '.join(str(i) for i in unconfirmed[:10])}"
+        f"{' …' if len(unconfirmed) > 10 else ''}. "
+        f"{deleted_total} node(s) in EARLIER sessions were deleted and "
+        f"their removals journaled, and this run stops here. Do NOT re-run "
+        f"this plan — these "
+        f"deletes already happened; re-census, and re-issue the removal "
+        f"records named above.\n")
+    return 2
+
+
 def _execute(plan: dict, args, target: dict) -> int:
     """The destructive arm. ⛔ NEVER RUN IN THE LANE THAT WROTE IT (#10017).
 
@@ -1819,6 +2008,21 @@ def _execute(plan: dict, args, target: dict) -> int:
             `_journal_turn_removal` (#10076), the ONE removal record, and
             refuse if the journal cannot carry the removal, all INSIDE the same
             declaration;
+        3.5 ANY raise between step 2's DELETE and step 3's last append is
+            caught and reported BY EFFECT (`_report_after_a_raised_purge`): the
+            store is re-asked what is still standing, the ids it proves absent
+            are journaled one at a time, and the run exits with a named code
+            (`delete-failed` / `delete-interrupted` / `delete-unrecorded` /
+            `delete-unverified`) instead of a traceback. It does NOT undo the
+            delete — nothing can — and it does not claim to; what it buys is
+            that the one state this tool could create and not report is gone
+            FOR ANY `Exception`. ⛔ Its reach ends there: a `BaseException`
+            (`KeyboardInterrupt`/`SystemExit`) or a SIGKILL in the window is
+            out of every Python handler's hands, and then the state is
+            exactly the one described above — nodes gone, no record, nothing
+            on screen. The durable repair for THAT case is a fresh census
+            (the session reads as RECORD-AHEAD) plus `record-backup --drill`;
+            see `_report_after_a_raised_purge`'s RESIDUAL;
         4. fail unless the deleted total equals the plan's stated total, with
             its OWN code (`partial-sweep`): "the set drifted before the delete"
             and "only part of the set is gone after it" are different
@@ -2053,76 +2257,99 @@ def _execute(plan: dict, args, target: dict) -> int:
         # landed, never before") and exactly the class #9206 created this lane
         # for. It therefore states the WEAKER claim deliberately; the stronger
         # journal-first claim would be false here.
-        with _apply_first_write_scope(
-                "10017 purge: DETACH DELETE then _journal_turn_removal"):
-            # EXACT-SET DELETE: the id list is the approved one, and the
-            # statement is scoped both by the session wiring and by
-            # `t.id IN $ids`, so a turn that appeared after the census is not
-            # swept in.
-            proj.g.query(
-                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-                "WHERE t.is_episodic = true AND t.id IN $ids "
-                "DETACH DELETE t",
-                params={"sid": sid, "ids": ids},
-            )
-            remaining = proj.g.query(
-                "MATCH (t:Point) WHERE t.id IN $ids RETURN t.id",
-                params={"ids": ids},
-            ).result_set
-            # The same RESULTSET_SIZE guard the census uses: a SILENTLY
-            # truncated survivor list would report fewer survivors than exist,
-            # journal ids that still stand, and print a false "purged". One
-            # aggregate row is cap-immune, so the two must agree.
-            counted = int(proj.g.query(
-                "MATCH (t:Point) WHERE t.id IN $ids RETURN count(t)",
-                params={"ids": ids},
-            ).result_set[0][0])
-            survivors = {str(row[0]) for row in remaining or ()}
-            if len(survivors) != counted:
-                sys.stderr.write(
-                    f"purge_legacy_turns: REFUSED "
-                    f"{REFUSE_EXACT_SET_MISMATCH}: the survivor read for "
-                    f"session {sid} returned {len(survivors)} row(s) but the "
-                    f"store counts {counted} — the read was TRUNCATED, so "
-                    f"which ids are gone is not established. No removal in "
-                    f"this session was journaled.\n")
-                return 2
-            # A partially failing session still deleted SOME ids: those are
-            # journaled (they are gone from the graph, so a rebuild must not
-            # resurrect them), and the survivors are named and never journaled
-            # — journaling an id whose node still stands claims a removal that
-            # did not happen.
-            absent = [tid for tid in ids if tid not in survivors]
-            if absent:
-                outcomes = sdk._journal_turn_removal(absent)
-                # ⛔ COVERAGE, NOT ONLY SUCCESS. `outcomes.items()` iterates
-                # what the journal REPORTED, so an id it simply omitted was
-                # never looked at: a partially-filled result balanced the
-                # totals below and exited 0 "purged" with an unjournaled
-                # removal on the books — the #3316 resurrection class
-                # (#10483 review, P3-2). The question is asked per ABSENT id,
-                # so an omission is as visible as a `False`.
-                failed = [tid for tid in absent
-                          if outcomes.get(tid) is not True]
-                if failed:
-                    sys.stderr.write(
-                        f"purge_legacy_turns: REFUSED "
-                        f"{REFUSE_JOURNAL_UNCONFIRMED}: {len(failed)} "
-                        f"removal(s) in session {sid} were deleted from the "
-                        f"graph but NOT journaled (a rebuild would resurrect "
-                        f"them — an omitted id is an unrecorded removal, not "
-                        f"a success). {deleted_total} node(s) were deleted and "
-                        f"journaled BEFORE this failure, and this run stops "
-                        f"here: {', '.join(failed[:10])}\n")
-                    return 2
-                deleted_total += len(absent)
-                journaled_total += len(absent)
-            if survivors:
-                survivors_left.extend(sorted(survivors))
-                sys.stderr.write(
-                    f"purge_legacy_turns: session {sid}: {len(survivors)} "
-                    f"planned node(s) SURVIVED the delete (and were NOT "
-                    f"journaled): {', '.join(sorted(survivors)[:10])}\n")
+        # ⛔ THE EXCEPTION BOUNDARY (#10483 review, P2 — the half-purge).
+        # From the `DETACH DELETE` below to the last journal append there is an
+        # IRREVERSIBLE effect in flight and no way to roll it back: the two
+        # stores cannot share a transaction (a Cypher statement against
+        # FalkorDB and an append to a local JSONL file — no two-phase commit
+        # exists across them, and pretending one does is how a "safe" delete
+        # gets written), and journaling BEFORE the delete would reverse the
+        # recorded ordering decision (#9207: `delete_point` deletes first so a
+        # record never claims a destroy the cache did not perform; the same
+        # order as `hosted.delete_session`, whose own comment says a record for
+        # a destroy that never happened is worse than *a reported window*).
+        # Nothing reads an intent record either, so a write-ahead row here would
+        # be theatre — and a second ordering would make `_journal_turn_removal`'s
+        # own contract ("After the delete has proven it landed, never before")
+        # false.
+        #
+        # So the window is not removed; it is REPORTED BY EFFECT. A raise here
+        # used to escape as a traceback with the accounting in local variables:
+        # nodes gone from the graph, nothing in the journal, nothing on screen
+        # saying which ids — the one state this tool could create and not
+        # report. The handler re-asks the STORE what is still standing and
+        # journals what it can prove, because the store is the only witness of
+        # an irreversible effect that survives the exception.
+        try:
+            absent: list[str] = []
+            survivors: set[str] = set()
+            with _apply_first_write_scope(
+                    "10017 purge: DETACH DELETE then _journal_turn_removal"):
+                # EXACT-SET DELETE: the id list is the approved one, and the
+                # statement is scoped both by the session wiring and by
+                # `t.id IN $ids`, so a turn that appeared after the census is not
+                # swept in.
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                    "WHERE t.is_episodic = true AND t.id IN $ids "
+                    "DETACH DELETE t",
+                    params={"sid": sid, "ids": ids},
+                )
+                survivors, unreadable = _read_survivors(proj, ids)
+                if survivors is None:
+                    # The delete HAS landed and the survivor read could not
+                    # answer: reported by the same post-effect handler as a
+                    # raised statement, because it is the same state ("the
+                    # delete is done and what it removed is not established").
+                    # It used to refuse `exact-set-mismatch`, which is a
+                    # diagnosis of a set that DIFFERS; this is a set that could
+                    # not be READ.
+                    return _report_after_a_raised_purge(
+                        sid=sid, ids=ids, reason=unreadable, proj=proj,
+                        sdk=sdk, deleted_total=deleted_total)
+                # A partially failing session still deleted SOME ids: those are
+                # journaled (they are gone from the graph, so a rebuild must not
+                # resurrect them), and the survivors are named and never
+                # journaled — journaling an id whose node still stands claims a
+                # removal that did not happen.
+                absent = [tid for tid in ids if tid not in survivors]
+                if absent:
+                    outcomes = sdk._journal_turn_removal(absent)
+                    # ⛔ COVERAGE, NOT ONLY SUCCESS. `outcomes.items()` iterates
+                    # what the journal REPORTED, so an id it simply omitted was
+                    # never looked at: a partially-filled result balanced the
+                    # totals below and exited 0 "purged" with an unjournaled
+                    # removal on the books — the #3316 resurrection class
+                    # (#10483 review, P3-2). The question is asked per ABSENT id,
+                    # so an omission is as visible as a `False`.
+                    failed = [tid for tid in absent
+                              if outcomes.get(tid) is not True]
+                    if failed:
+                        sys.stderr.write(
+                            f"purge_legacy_turns: REFUSED "
+                            f"{REFUSE_JOURNAL_UNCONFIRMED}: {len(failed)} "
+                            f"removal(s) in session {sid} were deleted from the "
+                            f"graph but NOT journaled (a rebuild would resurrect "
+                            f"them — an omitted id is an unrecorded removal, not "
+                            f"a success). {deleted_total} node(s) were deleted and "
+                            f"journaled BEFORE this failure, and this run stops "
+                            f"here: {', '.join(failed[:10])}\n")
+                        return 2
+        except Exception as exc:
+            return _report_after_a_raised_purge(
+                sid=sid, ids=ids,
+                reason=f"{type(exc).__name__}: {exc}", proj=proj, sdk=sdk,
+                deleted_total=deleted_total)
+        # The boundary closed with no exception: the removals are recorded, so
+        # the accounting can be advanced and the survivors reported.
+        deleted_total += len(absent)
+        journaled_total += len(absent)
+        if survivors:
+            survivors_left.extend(sorted(survivors))
+            sys.stderr.write(
+                f"purge_legacy_turns: session {sid}: {len(survivors)} "
+                f"planned node(s) SURVIVED the delete (and were NOT "
+                f"journaled): {', '.join(sorted(survivors)[:10])}\n")
 
     if deleted_total != planned_total:
         # ⛔ ITS OWN CODE. "The set drifted before the delete" (the

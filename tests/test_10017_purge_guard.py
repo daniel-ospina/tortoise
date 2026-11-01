@@ -561,29 +561,82 @@ class _FakeGraph:
     partial sweep is expressible without a store. `lanes` pairs each statement
     with the §17.1 write lane in flight when it was issued, so a test can pin
     that the DELETE was DECLARED rather than merely asserted about.
+
+    `raise_after_delete` models the ENGINE failing after the DELETE committed
+    (`"survivors"` / `"count"` / `"all"`): `raise_once` fails the FIRST such
+    read only (a dropped connection that the report can then re-issue), and
+    without it every read fails (the store is gone, so which ids are absent is
+    NOT established). `raise_on_delete` fails the DELETE itself, which is the
+    case where nothing landed. `truncate_survivors` makes `count(t)` disagree
+    with the row list — the `RESULTSET_SIZE` truncation the census also guards.
     """
 
-    def __init__(self, survivors_after=()):
+    def __init__(self, survivors_after=(), *, raise_after_delete=None,
+                 raise_once=False, raise_on_delete=False,
+                 truncate_survivors=False):
         self.queries: list[str] = []
+        self.params: list[dict | None] = []
         self.lanes: list[tuple[str, object]] = []
         self.survivors_after = list(survivors_after)
+        self.raise_after_delete = raise_after_delete
+        self.raise_once = raise_once
+        self.raise_on_delete = raise_on_delete
+        self.truncate_survivors = truncate_survivors
+        self.deleted = False
+        self.raised = False
 
     def statements(self, needle: str) -> list[str]:
         return [q for q in self.queries if needle in q]
 
+    def deleted_ids(self) -> list[str]:
+        """The ids the tool ASKED the store to delete (`params['ids']` on each
+        `DETACH DELETE` it issued).
+
+        ⛔ It is the REQUESTED set, not the removed set: `raise_on_delete`
+        models a DELETE the fake REFUSED, and `survivors_after` models a
+        partial sweep — so a test that wants "what the store actually removed"
+        must say so itself (which is exactly what the mixed-session cases below
+        do). Asserting the journaled set against THIS would conflate the two
+        (#10483 review round 3, P3-2).
+        """
+        out: list[str] = []
+        for cypher, params in zip(self.queries, self.params, strict=True):
+            if "DETACH DELETE" in cypher and params:
+                out.extend(params.get("ids") or ())
+        return out
+
+    def _maybe_raise(self, kind: str) -> None:
+        if not self.deleted or self.raise_after_delete not in (kind, "all"):
+            return
+        if self.raise_once and self.raised:
+            return
+        self.raised = True
+        raise ConnectionError(
+            f"the graph connection dropped on the POST-DELETE {kind} read")
+
     def query(self, cypher: str, params=None):
         self.queries.append(cypher)
+        self.params.append(params)
         self.lanes.append((cypher, _lane_in_flight()))
         if "count(t)" in cypher:
-            return _Result([[len(self.survivors_after)]])
+            self._maybe_raise("count")
+            extra = 1 if self.truncate_survivors else 0
+            return _Result([[len(self.survivors_after) + extra]])
         if "DETACH DELETE" in cypher:
+            if self.raise_on_delete:
+                raise ConnectionError("the DELETE never reached the engine")
+            self.deleted = True
             return _Result([])
+        self._maybe_raise("survivors")
         return _Result([(tid,) for tid in self.survivors_after])
 
 
 def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
                  journal_configured=True, journal_result=True,
-                 graph_fields=None, graph_missing=(), journal_omit=()):
+                 graph_fields=None, graph_missing=(), journal_omit=(),
+                 raise_after_delete=None, raise_once=False,
+                 raise_on_delete=False, truncate_survivors=False,
+                 journal_raise_first=False, journal_raise_after=None):
     """Replace the SDK / projection seams `_execute` imports, and record what
     they were asked to do.
 
@@ -600,12 +653,17 @@ def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
     returns. The fake mirrors the real leg's return shape, so the census's OWN
     comparison decides parity — this fixture never spells a verdict.
     """
-    graph = _FakeGraph(survivors_after)
+    graph = _FakeGraph(survivors_after,
+                       raise_after_delete=raise_after_delete,
+                       raise_once=raise_once,
+                       raise_on_delete=raise_on_delete,
+                       truncate_survivors=truncate_survivors)
     journaled: list[str] = []
     handed_graph_names: list = []
     overrides = dict(graph_fields or {})
     absent = {str(t) for t in graph_missing}
     omit = {str(t) for t in journal_omit}
+    journal_calls = [0]
 
     def fake_read_graph(uri=None, db_path=None, graph_name=None, *,
                         node_ids=None, g=None):
@@ -651,11 +709,24 @@ def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
                 graph_name=sdk_graph if sdk_graph is not None else derived)
 
         def _journal_turn_removal(self, ids):
-            journaled.extend(ids)
-            # `journal_omit` models a result that SILENTLY drops an id — the
-            # shape a `set(outcomes) == set(absent)` assertion exists for.
-            return {tid: journal_result for tid in ids
-                    if tid not in omit}
+            ids = list(ids)
+            journal_calls[0] += 1
+            if journal_raise_first and journal_calls[0] == 1:
+                # The journal itself RAISES (not a `False`): a backend defect or
+                # a future caller that forgot `_emit_event`'s fail-soft contract.
+                raise RuntimeError("the journal append raised")
+            out = {}
+            for i, tid in enumerate(ids):
+                journaled.append(tid)
+                if (journal_raise_after is not None and i == journal_raise_after
+                        and len(ids) > 1):
+                    # RAISES PART-WAY through a BATCH call — the dict
+                    # comprehension in `_journal_turn_removal` that discards the
+                    # outcomes of the ids it had already appended.
+                    raise RuntimeError(
+                        "the journal append raised part-way through the batch")
+                out[tid] = journal_result if tid not in omit else None
+            return out
 
     monkeypatch.setattr("tortoise.projection.FalkorProjection", _Proj)
     monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _SDK)
@@ -713,7 +784,10 @@ def _exec_setup(tmp_path, monkeypatch, *, ids=("s1_t0",), session="s1",
                 journal_lines=1, plan_journal="same", argv_journal="same",
                 survivors_after=(), sdk_graph="g", journal_configured=True,
                 journal_result=True, record_keys=None, graph_name="g",
-                graph_fields=None, graph_missing=(), journal_omit=()):
+                graph_fields=None, graph_missing=(), journal_omit=(),
+                raise_after_delete=None, raise_once=False,
+                raise_on_delete=False, truncate_survivors=False,
+                journal_raise_first=False, journal_raise_after=None):
     """A hermetic `_execute` call: real args, real plan, fake stores.
 
     `graph_name=None` OMITS `--graph-name`, which is the case the SDK/census
@@ -745,7 +819,13 @@ def _exec_setup(tmp_path, monkeypatch, *, ids=("s1_t0",), session="s1",
                                     journal_result=journal_result,
                                     graph_fields=graph_fields,
                                     graph_missing=graph_missing,
-                                    journal_omit=journal_omit)
+                                    journal_omit=journal_omit,
+                                    raise_after_delete=raise_after_delete,
+                                    raise_once=raise_once,
+                                    raise_on_delete=raise_on_delete,
+                                    truncate_survivors=truncate_survivors,
+                                    journal_raise_first=journal_raise_first,
+                                    journal_raise_after=journal_raise_after)
     if record_keys is None:
         record_keys = {tid: _record_row(tid) for tid in ids}
     record_calls = _patch_record(monkeypatch, record_keys)
@@ -2088,3 +2168,178 @@ def test_no_record_dsn_at_all_still_skips_the_binding():
     code, message = purge._armed_evidence_problem(
         _health(), _target(), record_dsn="")
     assert (code, message) == ("", "")
+
+
+# ── the half-purge: a raise between the DELETE and the journal ────────────
+#
+# #10483 review, P2. The delete is IRREVERSIBLE and the journal append is a
+# SECOND store, so there is a window with a landed effect and no record of it.
+# These cases drive the window from both sides — the engine failing after the
+# delete, the journal raising, the journal raising PART-WAY through a batch, and
+# the delete never landing at all — and assert three things every time:
+#
+#   1. `_execute` RETURNS an exit code and prints a NAMED refusal. It never lets
+#      a traceback out of the destructive region (that was the defect: the
+#      accounting lived only in local variables, so the operator learned
+#      neither which ids were gone nor that the graph had moved);
+#   2. the code names the operator's NEXT ACTION, per id, not a shared "error";
+#   3. the journal ends up holding exactly the ids the store PROVES absent —
+#      never one it did not verify, and never none of them where the effect
+#      could be re-journaled.
+
+def test_a_raise_between_the_delete_and_the_journal_is_a_named_refusal(
+        tmp_path, monkeypatch, capsys):
+    """The reviewer's window, verbatim: the DELETE commits, the very next read
+    raises. Before the boundary existed this escaped `_execute` as a traceback
+    with `journaled == []` — nodes gone, journal silent, nothing on screen."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        raise_after_delete="survivors", raise_once=True)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    err = capsys.readouterr().err
+    assert setup.graph.statements("DETACH DELETE"), "the delete must have landed"
+    assert rc == 2
+    assert purge.REFUSE_DELETE_INTERRUPTED in err
+    # The removals are BACKED, not lost: the report re-issued one call per id
+    # and the store proved both absent.
+    assert sorted(set(setup.journaled)) == ["s1_t0", "s1_t1"]
+    assert "s1_t0" in err
+
+
+def test_the_half_purge_names_the_ids_it_could_NOT_record(
+        tmp_path, monkeypatch, capsys):
+    """The journal refuses every append (a `False`, not a raise): the delete is
+    still landed, so the refusal must name exactly which removals are
+    unrecorded and send the operator to re-journal them — never to re-run."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        raise_after_delete="survivors", raise_once=True,
+                        journal_result=False)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    captured = capsys.readouterr()
+    err = captured.err
+    assert rc == 2
+    assert purge.REFUSE_DELETE_UNRECORDED in err
+    assert "s1_t0" in err and "s1_t1" in err
+    # `_report_after_a_raised_purge` says which ids are NOT recorded...
+    assert "Not recorded: s1_t0, s1_t1" in err
+    # ...and it never reports the purge. ⛔ ON **STDOUT**: `purged     :` is a
+    # `print`, so asserting its absence from `err` was unfalsifiable (#10483
+    # review round 3, P3-1 — a test that cannot fail is a false PASS).
+    assert "purged     :" not in captured.out
+    assert "purged" not in captured.out
+
+
+def test_a_store_that_cannot_be_re_read_does_not_claim_what_it_deleted(
+        tmp_path, monkeypatch, capsys):
+    """Every post-delete read fails (the connection is gone). `None` and `set()`
+    are different answers: nothing may be journaled on a guess, and the refusal
+    must NOT be the reassuring one — `delete-unverified`, exit 3, ids listed as
+    the CANDIDATE set, and "do not re-run"."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        raise_after_delete="all")
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    err = capsys.readouterr().err
+    assert rc == 3
+    assert purge.REFUSE_DELETE_UNVERIFIED in err
+    assert setup.journaled == [], "an unread store cannot justify a record"
+    assert "s1_t0" in err and "NOT established" in err
+
+
+def test_the_journal_raising_is_not_a_half_purge_when_it_can_be_reissued(
+        tmp_path, monkeypatch, capsys):
+    """`_journal_turn_removal` RAISES (not `False`). The batch call's dict
+    comprehension discards the outcomes of the ids it had already appended, so
+    the report re-issues one id at a time — and the removals land."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        journal_raise_first=True)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert purge.REFUSE_DELETE_INTERRUPTED in err
+    assert sorted(setup.journaled) == ["s1_t0", "s1_t1"]
+
+
+def test_a_journal_that_raises_PART_WAY_loses_no_removal(
+        tmp_path, monkeypatch, capsys):
+    """The nastiest shape: id 0 is appended, id 1 raises, and the caller's dict
+    is discarded — so `s1_t0` is in the journal while the run believes the batch
+    failed. The report re-journals BY ID, and a duplicate demote is idempotent
+    (`UPDATE public.point SET cache_tier = …`), so both end up recorded."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        journal_raise_after=1)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert purge.REFUSE_DELETE_INTERRUPTED in err
+    assert sorted(set(setup.journaled)) == ["s1_t0", "s1_t1"]
+
+
+def test_a_delete_that_never_landed_is_its_own_code_and_journals_nothing(
+        tmp_path, monkeypatch, capsys):
+    """The mirror case, and the reason the report asks the STORE instead of
+    assuming: the DELETE itself raised, every planned node is still standing, so
+    there is no half-purge — a plain `delete-failed` and a retry that is safe."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        survivors_after=("s1_t0", "s1_t1"),
+                        raise_on_delete=True)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert purge.REFUSE_DELETE_FAILED in err
+    assert setup.journaled == []
+    assert "still standing" in err
+
+
+def test_a_truncated_survivor_read_is_not_established_not_a_mismatch(
+        tmp_path, monkeypatch, capsys):
+    """The post-delete row list disagrees with `count(t)`: the read was
+    truncated, so which ids are gone is unknown. It used to refuse
+    `exact-set-mismatch` — a diagnosis of a set that DIFFERS — and it journaled
+    nothing at all; now it says what it knows (nothing) and refuses on that."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0",),
+                        truncate_survivors=True)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    err = capsys.readouterr().err
+    assert rc == 3
+    assert purge.REFUSE_DELETE_UNVERIFIED in err
+    assert setup.journaled == []
+
+
+def test_a_MIXED_session_after_a_raise_journals_only_the_PROVEN_absent(
+        tmp_path, monkeypatch, capsys):
+    """The discriminating case (#10483 review round 2, P2-2): one id is gone
+    from the store and one is still standing, and the statement after the
+    delete raised. The report must journal `s1_t0` and ONLY `s1_t0` — journaling
+    the surviving node claims a removal that did not happen (`_journal_turn_
+    removal`'s own contract), and journaling nothing resurrects the deleted one.
+
+    Every other raise case in this file has an ALL-absent or an ALL-standing
+    store, so an implementation that journals the first N ids of the PLAN
+    instead of the proved-absent set passes them all. This one does not: the
+    absent id is `s1_t0` while a wrong-index implementation would take
+    `s1_t0` only by luck when the survivor is the LAST id, so the session is
+    also asserted field-for-field on the survivor's identity.
+    """
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        survivors_after=("s1_t1",),
+                        raise_after_delete="survivors", raise_once=True)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert purge.REFUSE_DELETE_INTERRUPTED in err
+    # The tool ASKED for the whole approved set...
+    assert sorted(setup.graph.deleted_ids()) == ["s1_t0", "s1_t1"]
+    # ...and journaled only the id the store proved absent.
+    assert setup.journaled == ["s1_t0"], "only the proved-absent id"
+    assert "s1_t1" not in setup.journaled, "a surviving node is never journaled"
+
+
+def test_a_MIXED_session_where_the_survivor_is_not_last(
+        tmp_path, monkeypatch, capsys):
+    """The same shape with the survivor FIRST, so an off-by-index report that
+    journals the first N planned ids is caught in the other direction."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        survivors_after=("s1_t0",),
+                        raise_after_delete="survivors", raise_once=True)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.journaled == ["s1_t1"]
