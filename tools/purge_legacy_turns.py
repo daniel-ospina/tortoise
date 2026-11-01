@@ -421,7 +421,8 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
 
 def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                   armed: bool, restore_proof: dict | None,
-                  confirm_digest: str, target_note: str) -> tuple[str, str]:
+                  confirm_digest: str, target_note: str,
+                  live_target: dict | None = None) -> tuple[str, str]:
     """The `--execute` gate. Pure: no I/O, no deletion, one verdict.
 
     Returns `(refusal_code, message)` where an EMPTY code means "every
@@ -460,6 +461,23 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                 f"the restore proof does not establish precondition 3: "
                 f"{proof_problem}")
 
+    # ⛔ THE PLAN IS BOUND TO A DEPLOYMENT, NOT ONLY TO A SET. The digest covers
+    # (session, node) pairs, and those are not unique to a host: a restored
+    # snapshot, a staging clone or a re-provisioned graph re-derives a
+    # BYTE-IDENTICAL digest. Executing an approval given for one of those
+    # against another is the same set applied to the wrong store, so the target
+    # block is compared field by field (#10483 review round 2, P1-A).
+    if live_target is not None:
+        approved_target = plan.get("target") or {}
+        drift = [k for k in ("graph", "uri_host", "db_path", "org_id",
+                             "graph_id")
+                 if approved_target.get(k) != live_target.get(k)]
+        if drift:
+            return (REFUSE_TARGET_DRIFT,
+                    "the plan was approved for a DIFFERENT deployment: "
+                    + ", ".join(f"{k} (plan {approved_target.get(k)!r} vs live "
+                                f"{live_target.get(k)!r})" for k in drift))
+
     approved = plan.get("plan_digest") or ""
     # ⛔ THE ARTEFACT MUST BE SELF-CONSISTENT. The digest is what a human
     # approved; the `purge.sessions` list is what `_execute` deletes. They are
@@ -467,11 +485,34 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
     # could carry a set that never serialised to the digest it still displays —
     # and every check below compares the LIVE set to that digest, never the
     # list to it. Re-derive it here, first, before anything trusts either.
-    if plan_digest(plan.get("purge", {}).get("sessions") or []) != approved:
+    purge_block = plan.get("purge", {}) or {}
+    if plan_digest(purge_block.get("sessions") or []) != approved:
         return (REFUSE_NOT_IN_PLAN,
                 "the plan's own purge.sessions do not serialise to the "
                 "digest it states — the artefact has been edited since it "
                 "was approved; regenerate it and re-approve")
+    # …and the rest of `purge` that the run DEREFERENCES must agree with the
+    # ids too. A plan whose `turn_node_total` was edited down would otherwise
+    # delete the whole set and refuse afterwards — acting first, refusing
+    # second, which is the shape P0-1 was.
+    entries = purge_block.get("sessions") or []
+    id_total = sum(len(e.get("ids") or ()) for e in entries)
+    inconsistent = []
+    if int(purge_block.get("turn_node_total") or 0) != id_total:
+        inconsistent.append(f"turn_node_total {purge_block.get('turn_node_total')}"
+                            f" != {id_total} id(s)")
+    if int(purge_block.get("session_count") or 0) != len(entries):
+        inconsistent.append(f"session_count {purge_block.get('session_count')}"
+                            f" != {len(entries)} session(s)")
+    for entry in entries:
+        if int(entry.get("graph_turn_nodes") or 0) != len(entry.get("ids") or ()):
+            inconsistent.append(f"session {entry.get('session')}: "
+                                f"graph_turn_nodes != id count")
+    if inconsistent:
+        return (REFUSE_NOT_IN_PLAN,
+                "the plan's counts do not agree with its own id list "
+                f"({'; '.join(inconsistent)}) — a run would act on one and "
+                "report the other. Regenerate the plan and re-approve")
     if not confirm_digest or confirm_digest != approved:
         return (REFUSE_CONFIRMATION_MISMATCH,
                 f"--confirm-plan-digest does not match the approved plan "
@@ -607,13 +648,23 @@ def _target_from_args(args) -> dict:
 
 
 def _uri_host(uri: str | None) -> str | None:
+    """`host[:port]` — NEVER `netloc`.
+
+    `urlparse(uri).netloc` carries the USERINFO, i.e. the FalkorDB password, and
+    a plan artefact is a file meant to be shared and attached (#10483 review
+    round 2, P1-B). The plan states the presence of a credential, never the
+    credential.
+    """
     if not uri:
         return None
     from urllib.parse import urlparse
     try:
-        return urlparse(uri).netloc or None
+        parts = urlparse(uri)
     except Exception:  # pragma: no cover - malformed URI
         return None
+    if not parts.hostname:
+        return None
+    return f"{parts.hostname}:{parts.port}" if parts.port else parts.hostname
 
 
 class _UsageParser(argparse.ArgumentParser):
@@ -772,18 +823,27 @@ def main(argv: list[str] | None = None) -> int:
             plan=plan, live_report=report, armed=_health_armed(health),
             restore_proof=restore_proof,
             confirm_digest=args.confirm_plan_digest or "",
-            target_note=args.target_note)
+            target_note=args.target_note, live_target=target)
         if code:
             sys.stderr.write(f"purge_legacy_turns: REFUSED {code}: "
                              f"{message}\nNothing was deleted.\n")
             return 2
         return _execute(plan, args, target)
 
-    plan = build_plan(report, target=target, health=health,
-                      restore_proof=restore_proof,
-                      target_note=args.target_note,
-                      recovery_missing=_recovery_missing(args, restore_proof,
-                                                         health))
+    try:
+        plan = build_plan(report, target=target, health=health,
+                          restore_proof=restore_proof,
+                          target_note=args.target_note,
+                          recovery_missing=_recovery_missing(args, restore_proof,
+                                                             health))
+    except (ValueError, KeyError) as exc:
+        # A census report whose counts and id lists disagree cannot describe a
+        # purge set. Named refusal, never an uncaught traceback (`main`'s own
+        # contract: the guard's refusals are names).
+        sys.stderr.write(f"purge_legacy_turns: REFUSED "
+                         f"{REFUSE_CENSUS_NOT_CLEAN}: the census report cannot "
+                         f"be turned into a purge set ({exc}).\n")
+        return 3
     if args.json:
         Path(args.json).write_text(
             json.dumps(report, indent=2, default=str), encoding="utf-8")
@@ -898,7 +958,23 @@ def _execute(plan: dict, args, target: dict) -> int:
             "MATCH (t:Point) WHERE t.id IN $ids RETURN t.id",
             params={"ids": ids},
         ).result_set
+        # The same RESULTSET_SIZE guard the census uses: a SILENTLY truncated
+        # survivor list would report fewer survivors than exist, journal ids
+        # that still stand, and print a false "purged". One aggregate row is
+        # cap-immune, so the two must agree.
+        counted = int(proj.g.query(
+            "MATCH (t:Point) WHERE t.id IN $ids RETURN count(t)",
+            params={"ids": ids},
+        ).result_set[0][0])
         survivors = {str(row[0]) for row in remaining or ()}
+        if len(survivors) != counted:
+            sys.stderr.write(
+                f"purge_legacy_turns: REFUSED {REFUSE_EXACT_SET_MISMATCH}: the "
+                f"survivor read for session {sid} returned {len(survivors)} "
+                f"row(s) but the store counts {counted} — the read was "
+                f"TRUNCATED, so which ids are gone is not established. No "
+                f"removal in this session was journaled.\n")
+            return 2
         # A partially failing session still deleted SOME ids: those are journaled
         # (they are gone from the graph, so a rebuild must not resurrect them),
         # and the survivors are named and never journaled — journaling an id

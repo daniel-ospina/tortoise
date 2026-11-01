@@ -92,12 +92,13 @@ def _plan(clean) -> dict:
 
 
 def _gate(plan, live=None, armed=True, proof=None, confirm=None,
-          note="test target"):
+          note="test target", live_target=None):
     return purge.evaluate_gate(
         plan=plan, live_report=live, armed=armed,
         restore_proof=_proof() if proof is None else proof,
         confirm_digest=(plan["plan_digest"] if confirm is None else confirm),
         target_note=note,
+        live_target=(plan["target"] if live_target is None else live_target),
     )
 
 
@@ -395,3 +396,35 @@ def test_a_session_whose_count_and_id_list_disagree_cannot_be_planned():
     report["dry_run"]["would_delete_ids"] = ["s1_t0"]      # one id lost
     with pytest.raises(ValueError, match="not the same set"):
         purge.classify_sessions(report)
+
+
+# ── review round 2: the deployment binding and the credential ──────────
+
+def test_execute_refuses_a_plan_approved_for_another_deployment():
+    """The digest covers (session, node) pairs, which a restored copy or a
+    staging clone re-derives BYTE-IDENTICALLY. Only the target block can tell
+    the two deployments apart."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    live = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    elsewhere = dict(plan["target"], uri_host="prod.host:6379")
+    code, message = _gate(plan, live=live, live_target=elsewhere)
+    assert code == purge.REFUSE_TARGET_DRIFT
+    assert "uri_host" in message and "DIFFERENT deployment" in message
+
+
+def test_the_plan_never_carries_a_credential():
+    """`netloc` carries the userinfo — i.e. the FalkorDB password — and a plan
+    artefact is a file meant to be shared."""
+    host = purge._uri_host("docker://:s3cret@127.0.0.1:16417/tortoise_test_matrix")
+    assert host == "127.0.0.1:16417"
+    assert "s3cret" not in host
+    assert purge._uri_host("redis://user:pw@h.example") == "h.example"
+
+
+def test_execute_refuses_a_plan_whose_counts_disagree_with_its_ids():
+    plan = _plan([_clean_with_ids("s1", ["s1_t0", "s1_t1"])])
+    live = _report(clean=[_clean_with_ids("s1", ["s1_t0", "s1_t1"])])
+    plan["purge"]["turn_node_total"] = 1          # edited after approval
+    code, message = _gate(plan, live=live)
+    assert code == purge.REFUSE_NOT_IN_PLAN
+    assert "turn_node_total" in message
