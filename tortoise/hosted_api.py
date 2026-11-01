@@ -22327,12 +22327,28 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
         prior_org_ids = active_membership_org_ids(cp, user_id)
     prior_fork = None
     if prior_org_ids:
-        try:
-            prior_fork = _os.read_prior_org_fork(
-                _make_sdk(namespace=prior_org_ids[0])._get_proj(),
-                prior_org_ids[0])
-        except Exception:
-            prior_fork = None
+        # #10180: the prior org's `:OnboardingState` lives in ITS DEFAULT graph,
+        # and a promotion MOVES that default — so this read resolves through the
+        # default-graph door instead of re-deriving `org_{prior}`. After a
+        # promotion the historical name holds no node, `read_prior_org_fork`
+        # answers None, and the new org silently starts in a different
+        # onboarding mode (`fork='self'`) than the creator chose — the
+        # "org-level state stored in the default graph" class this change
+        # converts everywhere else. It is also the SAFE door: `namespace=`
+        # re-derives the name and MINTs a graph the listing never had (read-path
+        # write pin 4), which `_open_org_graph_sdk` gates on the listing.
+        # The MINT above (`namespace=org_id`) is the org being CREATED and stays
+        # — no promotion can predate it.
+        prior_sdk = _open_org_graph_sdk(prior_org_ids[0])
+        if prior_sdk is not None:
+            try:
+                prior_fork = _os.read_prior_org_fork(
+                    prior_sdk._get_proj(), prior_org_ids[0])
+            except Exception:
+                prior_fork = None
+            finally:
+                with contextlib.suppress(Exception):
+                    prior_sdk.close()
     init_fork, init_compact = _os.resolve_init_fork_compact(
         bool(prior_org_ids), prior_fork)
     _init_q, _init_p = _os.eager_init_query(
@@ -23995,7 +24011,15 @@ def _carry_onboarding_state(org_id: str, previous_ns: str | None,
         return {"migrated": True, "reason": "copied", "from": source,
                 "to": namespace,
                 "steps": len(carried.get("steps") or []),
-                "status": carried.get("status")}
+                "status": carried.get("status"),
+                # Which graph the org's DM-1 anchor landed in, and whether the
+                # target already held it ("linked"), had to receive its
+                # identity from the demoted graph ("carried"), or holds none
+                # ("not_in_target" / "absent" — the next seed mints the real
+                # anchor). Reported because the target is now the org's DEFAULT
+                # graph: an anonymous Subject standing in for the org's
+                # identity there is state a caller must be able to see.
+                "subject_anchor": carried.get("subject_anchor")}
     except Exception as e:  # the move already committed — report, never raise
         _logger.error(
             "onboarding carry failed for %s (%s -> %s): the org's onboarding "
