@@ -72,8 +72,8 @@ original keys back.
 
 ## The mapping, and why it is not a new id scheme
 
-``new = _derived_legacy_handle(label, old)`` — a MIGRATION-ONLY handle
-(``tortoise/ids.py``), applied to the node's already-unique key. §1.4 rule 1:
+``new = _derived_legacy_handle(label, old)`` — a MIGRATION-ONLY handle defined
+**in this module**, applied to the node's already-unique key. §1.4 rule 1:
 *"the legacy id is already the node's unique key; the rewrite is a rename of
 the key value, not a merge"*. So the target is one a reader can recompute, and
 there is no second MINTER to drift. The resulting handle is canonical by
@@ -244,8 +244,26 @@ DECLARED_OUT_OF_SCOPE: dict[str, str] = {
         "mints the default, otherwise the customer's own id), i.e. content the "
         "harness will supply again — §1.4: opaque and valid"
     ),
-    "Subject": "keyed on `name` (§1.1); §1.2 clause 2 — a rename of a name is a NEW node",
-    "Object": "keyed on `name` (§1.1); §1.2 clause 2 — a rename of a name is a NEW node",
+    # ⚠️ The key cited here is `id`, NOT `name`. §1.1's `:Subject`/`:Object` row is
+    # the pre-#3590 key and carries a CORRECTION (2026-10-24, #9881): #3590 made
+    # `name` a MUTABLE natural key two live entities may share, and #9881 moved the
+    # record with it — `public.subject.node_key` / `public.object.node_key` ARE the
+    # `id` (the `node_key = id` conjunct of
+    # `CHECK (name IS NOT NULL AND id IS NOT NULL AND node_key = id)`), and
+    # ``cache_projection.KEY_PROPERTY`` reads `id` for both labels. So they are
+    # re-keyable BY THE CONTRACT and are excluded by the SCOPE RULING alone —
+    # quoting the retired ground would leave a reader unable to tell whether the
+    # exclusion is a decision or a stale inference. It is a decision (2026-10-10).
+    "Subject": (
+        "excluded by the 2026-10-10 scope ruling, not by its key: §1.1's name-keyed "
+        "row is superseded (#9881) and the contract key is `id`, so a rename here "
+        "would be in-contract — it is out of THIS pass by decision"
+    ),
+    "Object": (
+        "excluded by the 2026-10-10 scope ruling, not by its key: §1.1's name-keyed "
+        "row is superseded (#9881) and the contract key is `id`, so a rename here "
+        "would be in-contract — it is out of THIS pass by decision"
+    ),
     "Source": "keyed on `url` (§1.1)",
 }
 
@@ -687,11 +705,53 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
     #: ``(label, key)`` of every node as it will be AFTER the pass — the
     #: collision universe, and the thing invariant 3 is checked against.
     final_keys: dict[tuple[str, str], int] = {}
+    #: ``(label, key) -> [dump_id, …]`` for EVERY holder, so the duplicate
+    #: report can ask the only question that matters: do two nodes STILL share
+    #: this key once the renames have been applied?
+    holders: dict[tuple[str, str], list[int]] = {}
     #: ``(label, legacy id) -> dump_id``: two nodes sharing one legacy id under
     #: one label are ONE identity to the write path already, so renaming both
     #: to the same canonical id would merge them (invariant 2).
     legacy_seen: dict[tuple[str, str], int] = {}
     seen_dump_ids: dict[int, str] = {}
+
+    # ⛔ Invariant 3 must cover EVERY contract key in the post-pass key space, not
+    # only the key of the ONE label `_node_label` picked. A `:Point`+`:Session`
+    # node is skipped by the scope branch below (the picked label may be the
+    # out-of-scope `:Session`), yet its `id` IS a `:Point` key that a rename can
+    # land on — and a real `dump_graph` artifact carries multi-label nodes.
+    # Measured before this pass: a dump of `[Point{p-0000001}, Point+Session{
+    # poi-b3c35c6d…}]` was ACCEPTED and both nodes left carrying one `id`.
+    # A legacy old key registered here cannot produce a false collision: every
+    # rename target is canonical and no legacy key is.
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue          # counted by the malformed/skip branches below
+        dump_id = node.get("dump_id")
+        if not isinstance(dump_id, int) or isinstance(dump_id, bool):
+            continue
+        # `dict.fromkeys` DEDUPES: a hand-built dump may repeat a label
+        # (`["Point", "Point"]`), and registering the same node twice under one
+        # key made the survivor test see two holders and refuse the node as its
+        # own merge. `hosted_backup` dedupes `labels(n)` on the real export path,
+        # so this is a foreign-artifact guard, not a live one.
+        for node_label in dict.fromkeys(_labels(node)):
+            key_prop = KEY_PROPERTY.get(node_label)
+            if key_prop is None:
+                continue
+            value = _props(node).get(key_prop)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            # Every holder is recorded. Whether a duplicate is a PROBLEM is
+            # answered after the plan is built: it is a problem only if two
+            # holders SURVIVE the pass. Asking at registration time is a FALSE
+            # BLOCK in two measured ways — a duplicate on an out-of-scope label
+            # (no rename can ever target it), and `[Point+Session{id: p-5},
+            # Point{id: p-5}]`, where the rename of the plain :Point RESOLVES
+            # the shared key. Over-blocking refuses a fully normalisable dump.
+            holders.setdefault((node_label, value), []).append(dump_id)
+            if (node_label, value) not in final_keys:
+                final_keys[(node_label, value)] = dump_id
 
     for node in nodes:
         if not isinstance(node, dict):
@@ -750,16 +810,9 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
             continue
         value = raw
         if is_canonical(value):
-            # Invariant 4: a canonical id is never a candidate. A snapshot that
-            # carries the same canonical id twice is a duplicate identity, not
-            # a rename.
-            if (label, value) in final_keys:
-                problems.append(
-                    f"duplicate identity: :{label} {value!r} is carried by both "
-                    f"dump_id {final_keys[(label, value)]} and {dump_id} — two "
-                    "nodes already share one key, which no rename can fix"
-                )
-            final_keys[(label, value)] = dump_id
+            # Invariant 4: a canonical id is never a candidate. The key space
+            # above already registered this (label, key) and its duplicate
+            # check, so there is nothing left to add here.
             continue
         if (label, value) in legacy_seen:
             problems.append(
@@ -778,6 +831,21 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
                 new=canonical_id(label, value),
             )
         )
+
+    # Invariant 2, asked of the POST-pass key space: a duplicate is a problem
+    # only when two holders survive the plan. A rename removes its node's old
+    # key, so it can legitimately RESOLVE a shared key.
+    renamed_dump_ids = {r.dump_id for r in renames}
+    for (node_label, value), held_by in holders.items():
+        if len(held_by) < 2 or node_label not in REKEY_SCOPE:
+            continue
+        survivors = [d for d in held_by if d not in renamed_dump_ids]
+        if len(survivors) >= 2:
+            problems.append(
+                f"duplicate identity: :{node_label} {value!r} is carried by "
+                f"dump_id {survivors[0]} and {survivors[1]} after the pass — "
+                "two nodes share one key and no rename in this plan resolves it"
+            )
 
     # Invariants 2 and 3, checked over the FINAL key space (a mapped id may
     # collide with an untouched canonical id, or with another mapped id).

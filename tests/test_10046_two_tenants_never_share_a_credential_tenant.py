@@ -1,0 +1,487 @@
+"""#10046: two organizations in one process never share a SESSION/OAuth tenant.
+
+The sibling module (`test_10046_session_oauth_record_tenant.py`) pins the
+WIRING: a session/JWT credential and an OAuth ``oat_`` token each name the
+org's default-graph row, so their armed record writes stop being refused
+``no_tenant``. It pins that for ONE organization at a time.
+
+This module is the other half of the question #10046's acceptance never asked,
+and the one that matters once a second tenant exists:
+
+    with TWO organizations live in one process, can org A's credential come
+    back carrying org B's tenant?
+
+``record_tenant_for`` is a pure function of the credential dict, so a leaked
+tenant cannot come from it — it has to come from the RESOLVER that built the
+dict (``hosted_api._session_user_org``, ``oauth.resolve_oauth_access_token``):
+a module-level cache, a ContextVar outliving its request, or an org that
+defaults to "the first membership" instead of the resolved one. So every test
+here ALTERNATES between the two tenants (A, B, A again) instead of resolving
+each once: a value that leaked out of A's resolution surfaces on the SECOND or
+THIRD read, which a single-shot assertion cannot see.
+
+⚠️ ALTERNATION IS ONLY HALF OF IT — THE CONTEXT THE READS SHARE IS THE OTHER
+HALF, and it differs per carrier. A module-level cache and a first-membership
+default are visible from ANY read, so the alternation alone catches them. A
+``contextvars.ContextVar`` is visible only WITHIN ONE ``contextvars.Context``,
+and ``asyncio.run`` — which the session lane needs, ``_session_user_org`` is a
+coroutine — builds a NEW ``asyncio.Runner`` per call, whose ``_lazy_init`` takes
+``contextvars.copy_context()`` and hands that one context to the task it
+creates (``Lib/asyncio/runners.py``; the docs say the loop "is closed at the
+end", and ``Runner`` exists so that "several top-level async functions should
+be called in the same event loop and ``contextvars.Context``" —
+`https://docs.python.org/3/library/asyncio-runner.html`). A ``set()`` made
+inside one call therefore dies with its runner. So a tenant cached in a
+ContextVar and never reset is INVISIBLE to a test that gives each resolution
+its own ``asyncio.run``, and that — not the alternation — is why a second shape
+is pinned per lane:
+
+* the SESSION lane resolves all three reads in ONE ``asyncio.run``
+  (``test_two_credentials_resolved_in_one_event_loop_never_share_a_tenant``),
+  so the run's single context is the one the leak would ride. The test after
+  it MEASURES that this is the difference: under an injected leak of exactly
+  that shape the per-call tests stay green and the single-loop one reddens;
+* the ``oat_`` lane needs no such treatment: ``resolve_oauth_access_token`` is
+  a SYNCHRONOUS resolver, so its alternation test already runs every read in
+  the caller's one context.
+
+WHY NO MIGRATION IS PINNED HERE (the #10046 framing, measured). The record has
+no credential-side tenant column to backfill: `supabase/migrations/
+20261012000001_record_event_stream.sql:53-54` makes `org_id text NOT NULL` and
+`graph_id text NOT NULL` on every record table, with the FK
+`(org_id, graph_id) -> public.graphs (org_id, id)` (a unique index on
+`public.graphs (org_id, id)` is created for it, `:50`). A tenantless record row
+is therefore not representable, and org erasure is a CASCADE from
+`public.organizations` (`20261012000005_record_org_purge_rpc.sql`), so no row
+can be missed for want of a tenant to scope the delete by. What CAN be missing
+is a credential that names no tenant at all — and that direction is
+`record_tenant_for` returning ``None`` ⇒ the write is REFUSED and counted
+``no_tenant``, never filed under a guessed one (`record_writer.py:709-780`).
+The refusal direction is pinned in the sibling module for ONE org; what is
+pinned HERE is that the same refusal, with two tenants live, is never resolved
+into the OTHER one.
+"""
+import asyncio
+import contextvars
+
+import pytest
+
+from tests.fake_control_plane import FakeControlPlane
+
+ORG_A = "org-10046-a"
+ORG_B = "org-10046-b"
+ROW_A = "g_aaaaaaaaaaaaaaaa"
+ROW_B = "g_bbbbbbbbbbbbbbbb"
+USER_BOTH = "11111111-1111-1111-1111-111111111111"
+USER_A_ONLY = "22222222-2222-2222-2222-222222222222"
+TOKEN_A = "oat_" + "a" * 40
+TOKEN_B = "oat_" + "b" * 40
+
+#: BOTH orgs deliberately share one `organizations.graph_name`, and that pair is
+#: SYNTHETIC — do not read it as a reachable production state. Production keeps
+#: orgs' data-plane namespaces unique (`0011_teams_name_unique.sql`, on a name
+#: the provisioning RPCs derive as `team_{name}` / `team_{team_id}`), because two
+#: orgs sharing one namespace is interleaved points and quota between distinct
+#: tenants. The USER-EDITABLE label is `public.graphs.name`, renamed by
+#: `supabase_control.set_graph_name`, and `20261028000001` states a rename never
+#: touches the namespace.
+#:
+#: So why share it? Because a collision is the only way to make this module's
+#: claimed mutation KILLABLE. Deriving the label per org ("org_" + org_id) means
+#: a `graph_name`-keyed memo of the resolved default row can never collide, and
+#: that mutation then ships green through both alternation tests (measured in
+#: review: the memo reddens the test with this shared value and stays green when
+#: the label is derived). The tenants are still distinguished by `org_id` and by
+#: their DISTINCT `graphs.id` (`ROW_A`/`ROW_B`) — the pair the record's FK keys on
+#: — and the shared label is inert on this lane: `_session_user_org` reads only
+#: the default row's ID, never its namespace (the fixture's per-org
+#: `graphs.namespace` exists only to keep the fake's rows well-formed).
+SHARED_GRAPH_NAME = "org_shared_label"
+
+
+def _org_row(org_id: str) -> dict:
+    return {
+        "id": org_id, "tier": "team", "graph_name": SHARED_GRAPH_NAME,
+        "max_users": 5, "max_graphs": 3, "graph_size_cap": 1000,
+        "max_points": 1000, "suspended_at": None, "flagged_at": None,
+        "email": "owner@example.test", "dashboard_key_login": True,
+        "backup_enabled": True,
+    }
+
+
+def _default_row(org_id: str, row_id: str) -> dict:
+    """Each org's default row carries a DISTINCT id.
+
+    Both tenants share one id in the sibling module's fixture, which is fine
+    for a single-tenant assertion and useless here: a shared id would make
+    "A named B's row" unobservable.
+    """
+    return {
+        "id": row_id, "org_id": org_id, "kind": "default",
+        "status": "active", "namespace": "org_" + org_id, "name": "default",
+    }
+
+
+class _Request:
+    def __init__(self, org_id: str | None = None) -> None:
+        self.query_params: dict = {} if org_id is None else {"org_id": org_id}
+        self.state = type("S", (), {})()
+        self.headers: dict = {}
+
+
+def _two_tenant_cp() -> FakeControlPlane:
+    """Both orgs materialised: orgs rows, default-graph rows, memberships."""
+    cp = FakeControlPlane()
+    cp.seed("organizations", [_org_row(ORG_A), _org_row(ORG_B)])
+    cp.seed("graphs", [_default_row(ORG_A, ROW_A), _default_row(ORG_B, ROW_B)])
+    cp.seed("org_memberships", [
+        {"user_id": USER_BOTH, "org_id": ORG_A, "role": "owner",
+         "status": "active"},
+        {"user_id": USER_BOTH, "org_id": ORG_B, "role": "owner",
+         "status": "active"},
+        {"user_id": USER_A_ONLY, "org_id": ORG_A, "role": "owner",
+         "status": "active"},
+    ])
+    return cp
+
+
+def _wire(monkeypatch, cp) -> None:
+    """Install `cp` as the control plane and stub the non-auth side effects."""
+    from tortoise import hosted_api as ha
+    from tortoise import supabase_control as sc
+
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
+    monkeypatch.setattr(ha, "_org_node_sync_limits", lambda oid: {})
+
+    async def _noop(*a, **kw):
+        return None
+
+    monkeypatch.setattr(ha, "_abuse_post_auth", _noop)
+
+
+def _session_org(monkeypatch, cp, *, user: str = USER_BOTH,
+                 pin: str | None = None) -> dict:
+    from tortoise import hosted_api as ha
+
+    _wire(monkeypatch, cp)
+    return asyncio.run(ha._session_user_org(_Request(pin), {"user_id": user}))
+
+
+def _session_orgs_in_one_run(monkeypatch, cp, pins) -> list[dict]:
+    """Resolve SEVERAL session credentials inside ONE ``asyncio.run``.
+
+    The whole point of this helper over ``_session_org``: ``asyncio.run`` gives
+    each call its own context (a fresh ``contextvars.copy_context()`` whose task
+    dies with the runner), so a ContextVar a resolver leaves set is discarded
+    before the next call. One run means ONE context, so a tenant cached there
+    without its ``reset()`` is still set when the next credential resolves — the
+    leak named in this module's docstring, made observable.
+    """
+    from tortoise import hosted_api as ha
+
+    _wire(monkeypatch, cp)
+
+    async def _resolve_all() -> list[dict]:
+        return [await ha._session_user_org(_Request(pin), {"user_id": USER_BOTH})
+                for pin in pins]
+
+    return asyncio.run(_resolve_all())
+
+
+def _oauth_org(monkeypatch, cp, token: str, org_id: str) -> dict:
+    from tortoise import oauth
+
+    cp.seed("oauth_access_tokens", [{
+        "token_hash": oauth._sha256(token), "client_id": "client-10046",
+        "user_id": USER_BOTH, "org_id": org_id, "scope": "mcp",
+        "expires_at": "2099-01-01T00:00:00+00:00", "revoked_at": None,
+    }])
+    _wire(monkeypatch, cp)
+    return oauth.resolve_oauth_access_token(cp, token)
+
+
+#: The ContextVar `_install_leaky_pin` caches the resolved org in, and never
+#: resets — the defect `test_a_contextvar_leak_outliving_one_resolution_reddens_
+#: only_the_single_loop_test` injects. Module level so the mutation is one object
+#: rather than a closure per call; its value does NOT outlive a test, because
+#: every value is set inside an `asyncio.run` context that is discarded at its
+#: end (which is exactly what makes the per-call path blind to it).
+_LEAKED_PIN: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "test_10046_leaked_pin", default=None)
+
+
+def _install_leaky_pin(monkeypatch) -> None:
+    """Mutate the session lane into a ContextVar that outlives its request.
+
+    First resolution: cache the org in `_LEAKED_PIN` and never `reset()` it.
+    Every later resolution in the SAME context then answers tenant A — the
+    cross-tenant direction this module exists to refuse.
+    """
+    from tortoise import hosted_api as ha
+
+    real = ha._session_pinned_org
+
+    def _leaky(pinned, *, memberships):
+        seen = _LEAKED_PIN.get()
+        if seen is not None:
+            return seen
+        resolved = real(pinned, memberships=memberships) or memberships[0]["org_id"]
+        _LEAKED_PIN.set(resolved)   # ⛔ no reset: this IS the leak
+        return resolved
+
+    monkeypatch.setattr(ha, "_session_pinned_org", _leaky)
+
+
+def _assert_names_its_own(resolved: dict, *, org_id: str, row_id: str,
+                          other_org: str, other_row: str, label: str) -> None:
+    """The cross-tenant checker BOTH directions, in one place.
+
+    A checker that only asserted "the tenant is not None" would pass on the
+    WRONG tenant, so the absent half (never the other org's pair) is asserted
+    alongside the present half (exactly this org's pair).
+    """
+    from tortoise import hosted_api as ha
+
+    assert resolved["org_id"] == org_id, (
+        f"{label}: the credential resolved to {resolved['org_id']!r}, not "
+        f"{org_id!r} — a credential naming another tenant's organization")
+    assert resolved["default_graph_id"] == row_id, (
+        f"{label}: default_graph_id is {resolved['default_graph_id']!r}, not "
+        f"{row_id!r} — the tenant is not the tenant's own default row")
+    assert resolved["default_graph_id"] != other_row, (
+        f"{label}: default_graph_id is the OTHER tenant's row ({other_row!r}) "
+        "— a cross-tenant record tenant, the write this seam exists to prevent")
+    tenant = ha._resolve_record_tenant(resolved)
+    assert tenant == (org_id, row_id), (
+        f"{label}: record_tenant_for gave {tenant!r}, not {(org_id, row_id)!r}")
+    assert tenant != (other_org, other_row), (
+        f"{label}: record_tenant_for gave the OTHER tenant's pair {tenant!r}")
+
+
+def test_two_session_credentials_never_share_a_tenant(monkeypatch):
+    """A, then B, then A again — each session names its OWN default graph.
+
+    Mutation this discriminates: a memo of the resolved default row keyed on
+    anything that is NOT `org_id` — this fixture shares `graph_name` across both
+    tenants precisely so a name-keyed memo CAN collide (see
+    `SHARED_GRAPH_NAME`) — or a module global → the third read (A again, after
+    B) returns B's row and the checker reddens. Single-shot resolution cannot
+    catch it, which is why the alternation is the test.
+    """
+    cp = _two_tenant_cp()
+
+    a1 = _session_org(monkeypatch, cp, pin=ORG_A)
+    b = _session_org(monkeypatch, cp, pin=ORG_B)
+    a2 = _session_org(monkeypatch, cp, pin=ORG_A)
+
+    _assert_names_its_own(a1, org_id=ORG_A, row_id=ROW_A,
+                          other_org=ORG_B, other_row=ROW_B, label="A first")
+    _assert_names_its_own(b, org_id=ORG_B, row_id=ROW_B,
+                          other_org=ORG_A, other_row=ROW_A, label="B")
+    _assert_names_its_own(a2, org_id=ORG_A, row_id=ROW_A,
+                          other_org=ORG_B, other_row=ROW_B, label="A again")
+
+
+def test_two_credentials_resolved_in_one_event_loop_never_share_a_tenant(
+        monkeypatch):
+    """The SESSION lane under the carrier a ContextVar leak would ride.
+
+    Same A → B → A alternation as the test above, but all three resolutions
+    share ONE ``asyncio.run`` and therefore one ``contextvars.Context``. That
+    is the only shape in which a tenant cached in a ContextVar and never reset
+    is observable (see this module's docstring): the per-call test above gives
+    each read a fresh context and is provably blind to it — measured by
+    ``test_a_contextvar_leak_outliving_one_resolution_reddens_only_the_single_
+    loop_test``.
+
+    Mutation this discriminates: a ContextVar holding the resolved org (or the
+    resolved default row) that is ``set()`` and never ``reset()`` → B's read
+    inherits A's tenant on the SECOND read and the checker reddens.
+    """
+    cp = _two_tenant_cp()
+
+    a1, b, a2 = _session_orgs_in_one_run(monkeypatch, cp, (ORG_A, ORG_B, ORG_A))
+
+    _assert_names_its_own(a1, org_id=ORG_A, row_id=ROW_A,
+                          other_org=ORG_B, other_row=ROW_B,
+                          label="A first, shared loop")
+    _assert_names_its_own(b, org_id=ORG_B, row_id=ROW_B,
+                          other_org=ORG_A, other_row=ROW_A,
+                          label="B, shared loop")
+    _assert_names_its_own(a2, org_id=ORG_A, row_id=ROW_A,
+                          other_org=ORG_B, other_row=ROW_B,
+                          label="A again, shared loop")
+
+
+def test_a_contextvar_leak_outliving_one_resolution_reddens_only_the_single_loop_test(
+        monkeypatch):
+    """The ContextVar clause in this module's docstring, MEASURED both ways.
+
+    ``_install_leaky_pin`` injects the exact defect the docstring names: the
+    session lane caches the resolved org in a ``contextvars.ContextVar`` and
+    never resets it — the shape `hosted_api._bind_record_tenant` calls "the
+    leak that files tenant A's rows under tenant B".
+
+    Under that leak:
+
+    * ONE ``asyncio.run`` PER RESOLUTION stays GREEN — each call gets a fresh
+      ``contextvars.Context``, so the third read never inherits anything. This
+      is the blindness review found: before the single-loop test existed, the
+      module claimed ContextVar coverage it did not have.
+    * ONE ``asyncio.run`` FOR ALL THREE READS goes RED — B inherits A's org.
+
+    Without the injected leak the same single-loop shape is green (the test
+    above), so what reddens here is the leak, not the harness.
+    """
+    cp = _two_tenant_cp()
+    _install_leaky_pin(monkeypatch)
+
+    # (1) Per-call runs: the leak cannot cross a fresh context — GREEN.
+    per_call = [_session_org(monkeypatch, cp, pin=pin)
+                for pin in (ORG_A, ORG_B, ORG_A)]
+    _assert_names_its_own(per_call[1], org_id=ORG_B, row_id=ROW_B,
+                          other_org=ORG_A, other_row=ROW_A,
+                          label="per-call B (blind to the leak)")
+
+    # (2) One shared loop: the leak crosses — B names A's tenant.
+    shared = _session_orgs_in_one_run(monkeypatch, cp, (ORG_A, ORG_B, ORG_A))
+    assert shared[1]["org_id"] == ORG_A, (
+        "the injected ContextVar leak did not take effect in the shared "
+        f"context (B resolved {shared[1]['org_id']!r}, expected the leaked "
+        f"{ORG_A!r}) — this control proves nothing until it does")
+    with pytest.raises(AssertionError):
+        _assert_names_its_own(shared[1], org_id=ORG_B, row_id=ROW_B,
+                              other_org=ORG_A, other_row=ROW_A,
+                              label="shared loop B (leaked)")
+
+
+def test_two_oauth_tokens_never_share_a_tenant(monkeypatch):
+    """The `oat_` class, same alternation — it resolves through its own seam.
+
+    Mutation this discriminates: resolving the OAuth tenant from the process's
+    first/named org, or reusing a previously introspected token's org → B's
+    token comes back with A's row (or the reverse) and the checker reddens.
+    """
+    cp = _two_tenant_cp()
+
+    a1 = _oauth_org(monkeypatch, cp, TOKEN_A, ORG_A)
+    b = _oauth_org(monkeypatch, cp, TOKEN_B, ORG_B)
+    a2 = _oauth_org(monkeypatch, cp, TOKEN_A, ORG_A)
+
+    _assert_names_its_own(a1, org_id=ORG_A, row_id=ROW_A,
+                          other_org=ORG_B, other_row=ROW_B, label="token A")
+    _assert_names_its_own(b, org_id=ORG_B, row_id=ROW_B,
+                          other_org=ORG_A, other_row=ROW_A, label="token B")
+    _assert_names_its_own(a2, org_id=ORG_A, row_id=ROW_A,
+                          other_org=ORG_B, other_row=ROW_B, label="token A again")
+
+
+def test_a_session_cannot_be_pinned_to_a_tenant_it_does_not_belong_to(monkeypatch):
+    """`?org_id=` is the ONE client-supplied tenant input on this lane.
+
+    It is a membership question, and the answer is a 403 — never auth as the
+    requested org, and never a silent downgrade to the caller's first
+    membership (which would file A's rows under an org the request never asked
+    for, and hide the attempt).
+
+    Mutation this discriminates: dropping the `_session_pinned_org` gate in
+    `_session_user_org` → a user who belongs only to A gets org B's tenant.
+    """
+    from fastapi import HTTPException
+
+    from tortoise import hosted_api as ha
+
+    cp = _two_tenant_cp()
+    _wire(monkeypatch, cp)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            ha._session_user_org(_Request(ORG_B), {"user_id": USER_A_ONLY}))
+    assert excinfo.value.status_code == 403, excinfo.value
+    assert "membership" in str(excinfo.value.detail).lower(), excinfo.value.detail
+
+    # The SAME user pinned to the org it does belong to still resolves — the
+    # refusal is the pin's, not the user's.
+    org = _session_org(monkeypatch, cp, user=USER_A_ONLY, pin=ORG_A)
+    _assert_names_its_own(org, org_id=ORG_A, row_id=ROW_A,
+                          other_org=ORG_B, other_row=ROW_B, label="member pin")
+
+
+def test_a_tenantless_credential_is_never_resolved_into_the_other_tenant(
+        monkeypatch):
+    """The REFUSAL direction, alternated across the SAME two tenants.
+
+    B resolves first, so any cached/"last seen"/process-global tenant is B's.
+    Then A resolves on a control plane that cannot name A's default row — the
+    absent/tombstoned/unreadable arm — and A must name NO tenant. Falling back
+    to B's would be the cross-tenant record write this whole seam exists to
+    prevent, and it is the one shape a positive-path test cannot see.
+
+    Mutation this discriminates (measured): making `record_tenant_for`'s
+    tenantless arm (`record_writer.py:793`) return a last-seen tenant leaves
+    every other test in this module green — it reddens only here.
+    """
+    from tortoise import hosted_api as ha
+    from tortoise import record_writer
+    from tortoise import supabase_control as sc
+
+    cp = _two_tenant_cp()
+    _wire(monkeypatch, cp)
+    real = sc.default_graph_id_for_credential
+
+    def _a_is_unnameable(control_plane, org_id, *a, **kw):
+        if org_id == ORG_A:
+            return None          # no active default row this lane can read
+        return real(control_plane, org_id, *a, **kw)
+
+    monkeypatch.setattr(sc, "default_graph_id_for_credential",
+                        _a_is_unnameable)
+
+    b = _session_org(monkeypatch, cp, pin=ORG_B)
+    _assert_names_its_own(b, org_id=ORG_B, row_id=ROW_B,
+                          other_org=ORG_A, other_row=ROW_A, label="B first")
+
+    a = _session_org(monkeypatch, cp, pin=ORG_A)
+    assert a["org_id"] == ORG_A            # the request still succeeds
+    assert a["default_graph_id"] is None, (
+        f"an unnameable default produced {a['default_graph_id']!r} — a guess, "
+        "or another tenant's row")
+    assert ha._resolve_record_tenant(a) is None, (
+        "the tenantless credential resolved to a tenant — with B live in this "
+        "process, that tenant is another org's, and the row it files is a "
+        "cross-tenant write")
+    assert record_writer.record_tenant_for(a, control_plane_ids=True) is None, (
+        "record_tenant_for named a tenant for a credential that has none")
+
+
+def test_negative_control_a_swapped_resolution_reddens_the_checker(monkeypatch):
+    """The checker must be able to FAIL, or the three tests above prove nothing.
+
+    This is the B5 exit-evidence rule the repository already applies to its
+    cross-tenant read suite (`tests/test_cross_tenant_read_isolation.py`
+    `test_negative_control_*`): break ONE seam — here the default-row
+    resolution, made to hand org A the row that belongs to org B — and assert
+    the very checker the green tests use goes RED.
+    """
+    from tortoise import supabase_control as sc
+
+    cp = _two_tenant_cp()
+    _wire(monkeypatch, cp)
+
+    real = sc.default_graph_id_for_credential
+
+    def _swapped(control_plane, org_id, *a, **kw):
+        return ROW_B if org_id == ORG_A else real(control_plane, org_id, *a, **kw)
+
+    monkeypatch.setattr(sc, "default_graph_id_for_credential", _swapped)
+
+    a = _session_org(monkeypatch, cp, pin=ORG_A)
+    assert a["default_graph_id"] == ROW_B, (
+        "the negative control did not take effect — it must hand A the OTHER "
+        "tenant's row, or it is not breaking the seam it claims to break")
+
+    with pytest.raises(AssertionError):
+        _assert_names_its_own(a, org_id=ORG_A, row_id=ROW_A,
+                              other_org=ORG_B, other_row=ROW_B,
+                              label="swapped")

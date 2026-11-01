@@ -65,6 +65,7 @@ import uuid
 import pytest
 import redis.exceptions as redis_exc
 
+from tortoise import embeddings
 from tortoise.sdk import TortoiseSDK
 
 # The MEASURED v6 literal (see #7685): one sentence for two realities — a
@@ -980,51 +981,239 @@ def test_retract_does_not_claim_already_terminal_after_a_retry(
             sdk.close()
 
 
+_WRITE_SLOT = "another write is in progress, retry the query"
+
+
+class _TargetVanishesBeforeTheWrite:
+    """The target is PRESENT at the guard read and gone by the write.
+
+    This is the ONE shape on the NON-PROMOTE arm in which a zero-row statement
+    is a legitimate, NON-RAISING outcome for ``update_point`` (#8854 review
+    round 10, I1): #10119 refuses an id absent AT the guard read before any
+    WRITE statement is issued, so the reachable benign-zero-row case here is a
+    point that existed at that read and was removed (rebuild / replay) before
+    the write ran.
+
+    Other zero-row shapes are NOT this one, and the difference is the outcome:
+    on the promote arm a zero-row statement either RAISES (an absent id gets
+    `No point`; a terminal one gets the #432 Illegal-status error) or returns
+    the POINT as the #1088 idempotent success once the node has gone live
+    between the #1088 probe and the guarded ``SET``. None of them returns the
+    empty ``{}`` this arm's vanished-target case does.
+
+    Two polarities, and the difference is the whole point:
+
+    - ``abort_message=None`` — the first matching statement simply runs and
+      matches nothing. No abort, so the retry wrapper is never consulted and
+      its witness is never called: a first attempt is never witnessed.
+    - ``abort_message=_WRITE_SLOT`` — the first matching statement aborts with
+      the write-slot arm, which is RETRYABLE but state-INDEPENDENT: it says
+      nothing about whether the target exists, so it must not ARM the witness.
+      The re-issue then reports zero rows, and a mis-armed witness would turn
+      that into a ``_WriteNotLanded`` surfacing the bare write-slot text
+      ("retry the query") on a target that is simply gone — never the
+      corruption-flavoured graph-replaced diagnosis, which belongs to the
+      LATCH family only (``_GraphAbortThenSlotAbortEmptyGraph``).
+
+    ``matched_rows`` counts what the statements ACTUALLY matched, so "nothing
+    landed" is measured rather than assumed.
+    """
+
+    def __init__(self, real, needle: str, *, abort_message: str | None = None
+                 ) -> None:
+        self._real = real
+        self._needle = needle
+        self._abort_message = abort_message
+        self.matching = 0
+        self.matched_rows = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                # the target is gone before the statement runs
+                self._real.query("MATCH (n:Point) DETACH DELETE n")
+                if self._abort_message is not None:
+                    raise redis_exc.ResponseError(self._abort_message)
+            res = self._real.query(cypher, params=params, timeout=timeout)
+            self.matched_rows += (res.result_set[0][0]
+                                  if res.result_set else 0)
+            return res
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 def test_a_first_attempt_that_matches_nothing_keeps_the_empty_contract(
         tmp_path):
     """The witness must NOT change a legitimate zero-row FIRST attempt.
 
-    ``update_point`` on a missing id historically returns ``{}`` without
-    raising. A first attempt never consults the witness, so this stays true.
-    (The GATE itself — "only a graph-replaced abort arms it" — is pinned by
-    ``test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract``;
-    this test alone cannot observe it, since ``origin/main`` passes it too.)
+    ``update_point`` returns ``{}`` when its statement matches nothing, and a
+    first attempt never consults the witness, so this stays true.
+
+    ⛔ #10119 moved WHERE that shape is reachable: an id absent at the guard
+    read now issues no WRITE statement (pinned by
+    ``test_an_absent_id_issues_no_statement_for_the_write``), so this test
+    reaches it the only way left — the target is PRESENT at that read and
+    vanishes before the write. Do NOT "restore" a write for an id that is
+    absent at entry to make this look like the old shape: that would re-open
+    #10119 (an absent id journalling a revision, advancing the EP epoch and
+    stranding a dirty root). The GATE itself — "only a graph-replaced abort
+    arms the witness" — is pinned by
+    ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``.
     """
-    sdk = _sdk(tmp_path, "missing")
+    sdk = _sdk(tmp_path, "vanished")
     try:
-        missing = str(uuid.uuid4())
-        assert sdk.update_point(missing, confidence=0.5) == {}
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _TargetVanishesBeforeTheWrite(
+            proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+
+        assert sdk.update_point(pid, confidence=0.5) == {}
+        assert proxy.matching == 1, (
+            "a target present at the guard read must still take its write "
+            f"({proxy.matching} statements)")
+        assert proxy.matched_rows == 0, (
+            "the statement must have matched nothing — otherwise this test "
+            "is not the benign zero-row shape")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
 
 
-_WRITE_SLOT = "another write is in progress, retry the query"
-
-
-def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
+def test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract(
         tmp_path, monkeypatch):
     """A non-rebuild abort must NOT arm the witness (#8854 review P1).
 
     ``retryable_aborted_write`` also admits the write-slot arm — ordinary
     multi-writer contention — which says nothing about whether the TARGET
-    exists. Arming the witness on it turned ``update_point(<missing id>)`` into
-    a stale ``ResponseError`` after four attempts, where the documented answer
-    is ``{}``. Only the graph-deleted-or-replaced family can mean "not
-    replayed yet", so only that family arms the witness.
+    exists. Arming the witness on it turns a re-issue that legitimately matches
+    nothing into a stale ``ResponseError`` (the bare write-slot text, "retry
+    the query") where the documented answer for a write that lands nowhere is
+    ``{}``. Only the graph-deleted-or-replaced family can mean "not replayed
+    yet", so only that family arms the witness.
+
+    ⛔ #10119 RE-BASED THIS TEST, and it is not the same test it was: it used to
+    abort on an id absent at ENTRY, which is now refused before any WRITE
+    statement is issued (so its write-slot injection could never fire and its
+    assertion silently became "no write statement reached"). The invariant it names is still
+    reachable, and this is the shape that reaches it — the target is PRESENT at
+    the guard read, the FIRST statement aborts write-slot, the target vanishes
+    so the RE-ISSUE matches zero rows. Nothing may report that as a landing,
+    and nothing may report it as a graph replacement either: the caller gets
+    the same empty contract, because a state-independent abort never armed the
+    witness.
+
+    ⚠️ A PREDECESSOR REVISION'S CLAIM HERE WAS MEASURED FALSE — read this
+    before deleting the test. `784d0c26a` concluded that "a present target
+    matches", so a PRESENT-target replacement would pass on both trees and
+    nothing should be added. That reasoning misses the window this gate exists
+    for: a target PRESENT at the guard read can VANISH before the write
+    (rebuild / replay), and the write then legitimately matches zero rows —
+    the shape below. Measured on that revision's tree, with the arming gate
+    mutated to `if keep:`: THIS test fails (the aborted statement is re-issued
+    three times and the bare write-slot ``ResponseError`` escapes). It is not a
+    test that passes with the guard deleted.
     """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
-    sdk = _sdk(tmp_path, "lockslot")
+    sdk = _sdk(tmp_path, "vanishedslot")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _TargetVanishesBeforeTheWrite(
+            proj.g, _POINT_PROP_SET_NEEDLE, abort_message=_WRITE_SLOT)
+        proj.g = proxy
+
+        # No ``pytest.raises``: a witness armed by the write-slot abort would
+        # surface ``_WRITE_SLOT`` here after the retry budget, and the
+        # graph-replaced family would append its rebuild diagnosis — neither is
+        # what a vanished target under contention may produce.
+        assert sdk.update_point(pid, confidence=0.5) == {}
+        assert proxy.matching >= 2, (
+            "the aborted statement must be RE-ISSUED — otherwise the witness "
+            "was never reachable and this test proves nothing")
+        assert proxy.matched_rows == 0, (
+            "the re-issue matched a row, so it was not the zero-row shape")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_absent_id_issues_no_statement_for_the_write(tmp_path):
+    """#10119: an id absent at the guard read is refused BEFORE the write.
+
+    This is where the #8854 witness question used to be tested, and it can no
+    longer be: the door reads the target's existence from the lifecycle guard
+    BEFORE the journal append and BEFORE any write, so an absent id issues NO
+    WRITE statement — ``proxy.matching == 0`` — and there is no first attempt
+    to abort and retry. The witness gate itself is now pinned on the shape that
+    still issues a statement,
+    ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``.
+
+    The proxy injects the graph-replaced abort by default precisely so a
+    regression that re-opens the write for an absent id cannot pass quietly: it
+    would be aborted and retried, and ``matching`` would leave zero.
+    """
+    sdk = _sdk(tmp_path, "absentwrite")
     try:
         missing = str(uuid.uuid4())
         proj = sdk._get_proj()
-        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE,
-                               message=_WRITE_SLOT)
+        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE)
         proj.g = proxy
 
         assert sdk.update_point(missing, confidence=0.5) == {}
-        assert proxy.matching >= 2, "the aborted statement was never re-issued"
+        assert proxy.matching == 0, (
+            "an ABSENT id issued a write statement (#10119: the guard read "
+            "must precede the append and every write)")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_absent_id_is_not_embedded_at_all(tmp_path, monkeypatch):
+    """#10495 review P3: the derived-embedding seam runs AFTER the guard read.
+
+    ``update_point(content=…)`` re-encodes the row through ``encode_for_row``,
+    which is a real inference — a model round-trip, or a timeout on a wedged
+    one. The seam used to sit ABOVE the lifecycle guard (#10119's read), so an
+    id that is ABSENT — the typo case that guard exists for — paid for a full
+    encode whose vector the early return then DISCARDED: work on a write that
+    cannot land. Measured on the pre-fix tree with this same spy:
+    ``update_point("typo-4", content=…)`` -> the embedder was called once.
+
+    Discriminating: on the pre-fix tree the first assertion fails with
+    ``['a revision that cannot land']``. The POSITIVE CONTROL keeps the spy
+    honest — if the content-edit arm stopped deriving a vector at all (a
+    regression of #4208), the second half fails instead of passing quietly.
+    """
+    sdk = _sdk(tmp_path, "absentembed")
+    try:
+        calls: list[str] = []
+        real = embeddings.encode_for_row
+
+        def _spy(content, expected_dim):
+            calls.append(content)
+            return real(content, expected_dim)
+
+        monkeypatch.setattr(embeddings, "encode_for_row", _spy)
+
+        missing = str(uuid.uuid4())
+        assert sdk.update_point(
+            missing, content="a revision that cannot land") == {}
+        assert calls == [], (
+            "an ABSENT id paid for an embedding the early return then threw "
+            f"away (#10495 review P3): {calls}")
+
+        # POSITIVE CONTROL: a real point's content edit must still derive.
+        pid = _pid(sdk)
+        calls.clear()
+        sdk.update_point(pid, content="a revision that lands")
+        assert calls == ["a revision that lands"], (
+            "the derived-embedding arm no longer re-encodes a content edit "
+            f"(#4208): {calls}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
