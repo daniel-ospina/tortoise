@@ -360,7 +360,7 @@ def test_ordering_fails_when_the_log_predates_the_registration(tmp_path, monkeyp
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log])
     assert len(failures) == 1
-    assert "not strictly after" in failures[0], failures
+    assert "is an ANCESTOR of the pre-registration's add-commit" in failures[0], failures
 
 
 def _atomic_pins(name: str, **overrides) -> dict:
@@ -407,10 +407,10 @@ def test_a_same_second_attack_is_still_a_hard_failure(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _two_commits_same_second(repo, log_first=True)
     failures = check.check_ordering(prereg, [log])
-    assert any("not strictly after" in f for f in failures), failures
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
     # A disclosure must not launder it.
     failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
-    assert any("not strictly after" in f for f in failures), failures
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
 
 
 def test_a_correctly_ordered_same_second_pair_needs_no_disclosure(tmp_path, monkeypatch):
@@ -437,7 +437,7 @@ def test_a_future_dated_log_that_is_a_true_ancestor_still_hard_fails(tmp_path, m
     log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_500)
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
     failures = check.check_ordering(prereg, [log])
-    assert any("not strictly after" in f for f in failures), failures
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
 
 
 def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_path, monkeypatch):
@@ -457,6 +457,27 @@ def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_p
         assert failures, entry
         assert any("not a usable disclosure" in f for f in failures), failures
         assert added == [] and detail == {}, (added, detail)
+
+
+def test_a_proven_order_is_not_reported_as_a_content_waiver(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-6 P2): a waiver reported where none was granted teaches that they
+    are routine. Git PROVED the order, so no arm may record an exemption."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_000)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    exempted: list[str] = []
+    assert check.check_ordering(prereg, [log], None, exempted) == []
+    assert exempted == [], exempted
+
+
+def test_an_unreadable_record_does_not_add_a_wrong_instruction(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-6 P2): 'disclose it under X' is the wrong repair when X cannot be read."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    failures = check.check_ordering(prereg, [log], None, None, None, None, None,
+                                    record_unreadable=True)
+    assert not any("Disclose it under" in f for f in failures), failures
 
 
 def test_a_report_never_claims_a_declaration_the_record_does_not_carry(tmp_path, monkeypatch):
@@ -633,7 +654,7 @@ def test_the_attack_is_still_undeclarable(tmp_path, monkeypatch):
     log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_000)
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
-    assert any("not strictly after" in f for f in failures), failures
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
     assert any("not one" in f for f in failures), failures
 
 
@@ -2764,7 +2785,7 @@ def test_the_content_arm_stops_covering_the_log_the_moment_it_could_score(
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log])
     assert len(failures) == 1, failures
-    assert "not strictly after" in failures[0], failures
+    assert "is an ANCESTOR of the pre-registration's add-commit" in failures[0], failures
     assert "does not prove it measured nothing" in failures[0], failures
 
 
