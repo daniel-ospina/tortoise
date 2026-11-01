@@ -29,7 +29,7 @@ deliberately mechanical so a later lane re-runs it instead of re-reading prose:
 
 | bullet | the command | what makes it `MET` |
 |---|---|---|
-| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate) | a stated predicate exists, ONE rule set (identity, not a copy), AND every embedding write path reaches it with the gate ON by default |
+| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate, AND the write paths that reach a raw primitive instead) | a stated predicate exists, ONE rule set (identity, not a copy), every embedding write path reaches the seam, no UNDESIGNED `BYPASS(...)`, AND the gate is ON by default |
 | 2 | same (`written labels ⊆ served labels`) | every label a write path embeds is one `run_vector_query` serves |
 | 3 | same (forces all three mechanisms through `run_vector_query`) | `index` / `scan` / `scan_fallback` are distinguishable in the caller's trace |
 | 4 | same (searches for a V1 ruling) | a decision record exists AND the code implements it |
@@ -77,9 +77,12 @@ Usage::
         --uri docker://:pw@localhost:6379/<graph> --graph <graph>
 
 Exit status: `0` when the instrument ran (whatever the verdicts — a red row is a
-successful measurement), `2` when the instrument itself could not measure
-(a missing gate module, an unreadable graph). Never a verdict-derived code: a
-caller must not be able to read `NOT MET` as "the tool failed".
+successful measurement), `2` when the instrument itself could not measure (a
+gate module that will not import, or a census URI whose engine has no index
+API). Never a verdict-derived code: a caller must not be able to read
+`NOT MET` as "the tool failed". ⚠️ An UNREADABLE GRAPH is *not* a `2`: it is a
+successful measurement that reports `UNMEASURED(<why>)` inside the report, which
+is the whole point of the census. The two are different facts.
 """
 
 from __future__ import annotations
@@ -101,9 +104,13 @@ if str(REPO_ROOT) not in sys.path:
 VERDICTS = ("MET", "PARTIAL", "NOT MET")
 
 #: `#5090`'s four bullets, verbatim from the epic body. Held here so the table
-#: cannot silently score a re-worded bullet: the pin
+#: cannot silently score a re-worded bullet. The pin
 #: `tests/test_dod_5090_probe.py::test_the_four_bullets_are_scored_verbatim`
-#: reads them back and the epic body is the source of truth.
+#: compares this tuple against the epic strings pinned as LITERALS IN THE TEST —
+#: never against this module, which would make the pin a self-comparison that
+#: passes on any re-wording (a falsifier that cannot fail). The epic body
+#: (`#5090`) is the source of truth; the literal is that body's copy in-tree, so
+#: a lane that re-words either side reds, and this comment then names the edit.
 BULLETS: tuple[str, ...] = (
     "A stated, enforced rule for what earns an embedding.",
     "No vector is stored without a path to query it.",
@@ -118,6 +125,36 @@ PREDICATE_NAME = "value_gate.identifier_only"
 #: The one enforcement seam. Every embedding write path must reach THIS
 #: function, not the raw primitive — the seam `#5008` built.
 SEAM = "tortoise/embeddings.py::encode_for_row"
+SEAM_CALLEE = SEAM.rsplit("::", 1)[-1]
+
+#: The RAW primitives — what a write path reaches when it bypasses the seam.
+#: `encode_for_store` is the dim-declaring encoder (reads, backfills and repairs
+#: call it by design); `encode_batch_for_store` is its batched form (the session
+#: TURN writers). Naming them here is what lets the instrument derive a write
+#: population POSITIVELY instead of only from calls of the gate.
+RAW_PRIMITIVES: tuple[str, ...] = ("encode_for_store", "encode_batch_for_store")
+
+#: Functions that reach a RAW primitive without `encode_for_row`, BY DESIGN, each
+#: with the reason it is exempt. This is `encode_for_row`'s own boundary note
+#: (`tortoise/embeddings.py`, "Deliberately NOT routed through here"), made
+#: executable — every other function that reaches a raw primitive is an UNGATED
+#: write path, the state `#5008` closed, and is reported as `BYPASS(<fn>)`.
+#: ⚠️ Adding an entry here is a DELIBERATE act, so it has to be edited on purpose;
+#: that is the point. An exemption that arrived by omission is exactly how bullet
+#: 1's `enforced` half stopped being true the first time.
+#: (`graph-scripts/backfill_embeddings.py` — the re-encode tool, also named in
+#: that boundary note — is outside the walked tree (`tortoise/`), the same scope
+#: `_write_seams_that_embed` uses for the seam map.)
+DESIGNED_BYPASSES: dict[str, str] = {
+    "encode_for_row": (
+        "the seam ITSELF — its EMBED arm delegates to encode_for_store, "
+        "which is the gate being applied, not a path around it"
+    ),
+    "_capture_turn_embeddings": (
+        "the session TURN writers: a Turn is not an extracted row, and the "
+        "batched form carries one vector per windowed turn (#5008 boundary)"
+    ),
+}
 
 #: The command that produced a census row — printed WITH the row, so a figure
 #: quoted into an epic body carries the way it was produced (#10465 target 1:
@@ -147,44 +184,148 @@ class Row:
 # ── Bullet 1 — "a stated, enforced rule" ───────────────────────────────────
 
 
-def _write_seams_that_embed() -> dict[str, str]:
-    """Map each function that embeds a written row -> the file:line of its call.
+def _callee_name(func: ast.expr) -> str | None:
+    """The called name — bare OR module-qualified.
 
-    Derived from the source, not from a hand-kept list: a write path that stops
-    calling the seam (or a NEW one that calls the raw primitive instead)
-    changes this map, which is how bullet 1's `enforced` half is measured.
-    Only an actual CALL of `encode_for_row` counts — `encode_for_store` is the
-    ungated primitive reads, backfills and repairs use by design (`#5008`), and
-    a mention in a docstring or a comment is not a call (measured the hard way:
-    a substring scan reported 10 seams including `encode_for_row`'s own `def`
-    line and five docstring mentions, and bullet 2 then read `PARTIAL` on no
-    evidence).
+    `encode_for_row(...)` is an `ast.Name` (its name is `.id`), while
+    `embeddings.encode_for_row(...)` is an `ast.Attribute` (its name is `.attr`)
+    — https://docs.python.org/3/library/ast.html#abstract-grammar. Reading only
+    `.id` silently DROPS every qualified call site, so a writer that imported
+    the module rather than the name would vanish from the seam map and bullet
+    1's `enforced` half would read as though it were gated.
     """
-    import ast
+    return getattr(func, "id", None) or getattr(func, "attr", None)
 
-    seams: dict[str, str] = {}
+
+#: One walk per source tree, shared by both write populations below. The walk
+#: parses every `tortoise/**/*.py` with the AST, which measures at ~5 s on a
+#: loaded host — and `measure()` asks for it from three rows, so without this the
+#: instrument pays it three times for one answer. Keyed on the tree so a test
+#: that scores a synthetic root cannot poison the real one (and vice versa).
+_CALLS_BY_FUNCTION: dict[str, dict[str, dict[str, str]]] = {}
+
+
+def _calls_by_function(root: Path | None = None) -> dict[str, dict[str, str]]:
+    """Map each OUTERMOST function -> {callee name: `path:line` of its call}.
+
+    The OUTERMOST named function owns a call: a nested helper (`_point` inside
+    `_revise_point`) is part of that writer's path, not a writer of its own.
+    Both write populations below are derived from this one walk, so the seam
+    map and the bypass map cannot drift apart.
+    """
+    base = REPO_ROOT if root is None else root
+    key = str(base)
+    if key in _CALLS_BY_FUNCTION:
+        return _CALLS_BY_FUNCTION[key]
+    calls: dict[str, dict[str, str]] = {}
 
     def _visit(node: ast.AST, owner: str | None, path: Path) -> None:
         for child in ast.iter_child_nodes(node):
             name = owner
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                # The OUTERMOST named function owns the call: a nested helper
-                # (`_point` inside `_revise_point`) is part of that writer's
-                # path, not a writer of its own.
                 name = owner or child.name
-            elif (isinstance(child, ast.Call)
-                  and getattr(child.func, "id", None) == "encode_for_row"
-                  and owner):
-                seams[owner] = f"{path.relative_to(REPO_ROOT)}:{child.lineno}"
+            elif isinstance(child, ast.Call) and owner:
+                callee = _callee_name(child.func)
+                if callee:
+                    calls.setdefault(owner, {}).setdefault(
+                        callee, f"{path.relative_to(base)}:{child.lineno}")
             _visit(child, name, path)
 
-    for path in sorted((REPO_ROOT / "tortoise").rglob("*.py")):
+    for path in sorted((base / "tortoise").rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):
             continue
         _visit(tree, None, path)
-    return seams
+    _CALLS_BY_FUNCTION[key] = calls
+    return calls
+
+
+def _write_seams_that_embed(root: Path | None = None) -> dict[str, str]:
+    """Map each function that embeds a written row -> the file:line of its call.
+
+    Derived from the source, not from a hand-kept list: a write path that stops
+    calling the seam changes this map, which is how bullet 1's `enforced` half
+    is measured in the REMOVAL direction (`write_bypasses` measures the other
+    one). Only an actual CALL of `encode_for_row` counts — `encode_for_store`
+    is the ungated primitive reads, backfills and repairs use by design
+    (`#5008`), and a mention in a docstring or a comment is not a call
+    (measured the hard way: a substring scan reported 10 seams including
+    `encode_for_row`'s own `def` line and five docstring mentions, and bullet 2
+    then read `PARTIAL` on no evidence).
+    """
+    return {fn: callees[SEAM_CALLEE]
+            for fn, callees in _calls_by_function(root).items()
+            if SEAM_CALLEE in callees}
+
+
+def write_bypasses(seams: dict[str, str] | None = None,
+                   root: Path | None = None) -> dict[str, str]:
+    """Write paths that reach a RAW primitive without the gate — `BYPASS(<fn>)`.
+
+    The seam map can only see a function that USED TO call `encode_for_row` and
+    stopped. It is blind, by construction, to the inverse: a NEW writer calling
+    `encode_for_store` / `encode_batch_for_store` directly adds nothing to it,
+    so `len(seams)` is unchanged, bullet 1's `enforced` half reads exactly as
+    before, and "every embedding write path reaches the gate" is false while
+    the instrument still reports `PARTIAL`/`MET` — `#5008`'s whole subject.
+
+    So the population is derived a SECOND time, positively, from the raw
+    primitives instead of from the seam. Every hit is reported; the ones in
+    `DESIGNED_BYPASSES` are documented exemptions and the rest are ungated write
+    paths, which hold bullet 1 at `PARTIAL` the way an `UNKNOWN` label holds
+    bullet 2.
+
+    Returns ``{function: 'path:line' of its raw call}``. The walked tree is
+    `tortoise/`, so `graph-scripts/backfill_embeddings.py` (a documented exempt
+    re-encode tool) is out of scope by construction, not by an entry here.
+    """
+    seams = _write_seams_that_embed(root) if seams is None else seams
+    out: dict[str, str] = {}
+    for fn, callees in _calls_by_function(root).items():
+        if fn in seams:
+            continue  # reaches the gate; whatever else it calls is fine
+        for raw in RAW_PRIMITIVES:
+            if raw in callees:
+                out[fn] = callees[raw]
+                break
+    return out
+
+
+def undesigned_bypasses(
+    bypasses: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """The bypasses that are NOT in `DESIGNED_BYPASSES` — the ungated writers.
+
+    Split out because it is the value bullet 1 is scored on: every bypass is
+    reported, but only an UNDESIGNED one is evidence that the rule stopped being
+    enforced. A designed bypass (`encode_for_row`'s own delegation, the session
+    TURN batch) is a documented boundary, not a regression.
+    """
+    bypasses = write_bypasses() if bypasses is None else bypasses
+    return {fn: site for fn, site in bypasses.items() if fn not in DESIGNED_BYPASSES}
+
+
+def rule_verdict(*, stated: bool, shared: bool, seams: dict[str, str],
+                 undesigned: dict[str, str], on_by_default: bool) -> str:
+    """Bullet 1's verdict TABLE, isolated so the consequence is testable.
+
+    Each input is a distinct measured fact, and each can only make the row
+    WORSE — there is no path from "fewer write paths reach the seam" to `MET`:
+
+    * not stated, or the rule set is a COPY, or NO writer reaches the seam
+      → `NOT MET` (the rule does not operate on the write path at all);
+    * an UNDESIGNED `BYPASS(...)` → `PARTIAL` — a writer that reaches a raw
+      primitive is an ungated write path (`#5008`'s exact subject), and the
+      seam map alone cannot see it because it is built from seam CALLS;
+    * the gate is off by default → `PARTIAL` (the rule is stated and wired but
+      not operative, which is what `#5008`'s ordering chose).
+    """
+    if not stated or not shared or not seams:
+        return "NOT MET"
+    if undesigned or not on_by_default:
+        return "PARTIAL"
+    return "MET"
 
 
 def score_rule_bullet() -> Row:
@@ -199,7 +340,11 @@ def score_rule_bullet() -> Row:
     shared = embed_gate.RULE_SET is value_gate.RULES
     seams = _write_seams_that_embed()
     on_by_default = embed_gate.embed_gate_enabled()  # env-cleared by the caller
-    notes.append(f"stated: {stated} ({SEAM.rsplit('::', 1)[-1]} asks the predicate)")
+    bypasses = write_bypasses(seams)
+    undesigned = undesigned_bypasses(bypasses)
+    verdict = rule_verdict(stated=stated, shared=shared, seams=seams,
+                           undesigned=undesigned, on_by_default=on_by_default)
+    notes.append(f"stated: {stated} ({SEAM_CALLEE} asks the predicate)")
     notes.append(
         f"one rule set: {shared} (embed_gate.RULE_SET is value_gate.RULES; "
         f"ids={len(value_gate.RULES)})"
@@ -208,16 +353,22 @@ def score_rule_bullet() -> Row:
         f"write paths reaching the seam: {len(seams)} "
         f"({', '.join(sorted(seams)) or 'none'})"
     )
+    # The OTHER direction: a write path that reaches a raw primitive instead.
+    # Undesigned ones hold this row at PARTIAL — an ungated write path is the
+    # exact state #5008 closed, and it is invisible to the seam map above.
+    notes.append(
+        f"BYPASS (raw primitive, no gate): {len(bypasses)} "
+        f"({', '.join(f'BYPASS({fn}) {site}' for fn, site in sorted(bypasses.items())) or 'none'})"
+    )
+    if undesigned:
+        notes.append(
+            "UNDESIGNED bypasses (not in DESIGNED_BYPASSES): "
+            + ", ".join(f"BYPASS({fn}) {site}" for fn, site in sorted(undesigned.items()))
+        )
     notes.append(
         f"gate enabled by default: {on_by_default} "
         f"(TORTOISE_EMBED_GATE={os.environ.get(embed_gate.ENV_FLAG, '')!r})"
     )
-    if not stated or not shared or not seams:
-        verdict = "NOT MET"
-    elif not on_by_default:
-        verdict = "PARTIAL"
-    else:
-        verdict = "MET"
     return Row(
         bullet=1,
         text=BULLETS[0],
@@ -601,11 +752,17 @@ def _connect(uri: str):
 
     u = urlparse(uri)
     if u.scheme in ("", "file") or not u.hostname:
-        raise SystemExit(
+        # Exit 2 = the instrument itself could not measure (the docstring's
+        # contract). A non-int SystemExit argument exits 1, so the message is
+        # PRINTED and the code passed explicitly — otherwise the documented `2`
+        # is a contract the code never implements.
+        print(
             "census: an embedded/absent engine has no index API — pass a "
             "docker:// or bolt:// URI (embedded would report indexed=False for "
-            "every label, which is NOT the same fact)"
+            "every label, which is NOT the same fact)",
+            file=sys.stderr,
         )
+        raise SystemExit(2)
     from falkordb import FalkorDB
 
     db = FalkorDB(host=u.hostname, port=u.port or 6379, password=u.password or "")
@@ -635,6 +792,7 @@ def measure() -> dict:
         "rows": [asdict(r) for r in rows],
         "predicates": count_embed_predicates(),
         "seams": _write_seams_that_embed(),
+        "bypasses": write_bypasses(),
     }
 
 
@@ -674,7 +832,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="the graph NAME to census (default $TORTOISE_GRAPH_NAME)")
     args = ap.parse_args(argv)
 
-    report = measure()
+    try:
+        report = measure()
+    except ImportError as e:
+        # The other half of the documented `2`: a gate module the instrument
+        # scores that will not import. Without this the traceback exits 1 and a
+        # caller cannot tell "could not measure" from "a verdict was NOT MET".
+        print(f"could not measure: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
     if args.census:
         if not args.uri:
             report["census"] = {"error": "UNMEASURED(no --uri and no TORTOISE_DB_URI)"}
