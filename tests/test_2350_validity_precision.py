@@ -919,23 +919,23 @@ def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_it_sees():
     assert effective_precision("2024-01-01", None) == "day"
 
 
-def test_an_epoch_zero_start_renders_no_window_is_recorded():
-    """#9730 P3: the ONE recorded residual of the parity claim — pinned so a
-    future change cannot silently keep the docstring that says otherwise.
+def test_an_epoch_zero_start_renders_its_day():
+    """#9730 P3 → #9741: the residual is CLOSED — an epoch-0 start is a start.
 
-    ``(raw_vf or "")`` drops a FALSEY numeric (``0``/``False``) before the gate
-    ever sees it, while ``validity.effective_precision(0, None)`` reads
-    ``"day"`` (epoch 0 IS an instant). So for a stored epoch-0 start the marker
-    renders no window at all and the precision beside it names one.
+    This test used to pin the residual: ``(raw_vf or "")`` dropped a FALSEY
+    numeric (``0``/``0.0``/``False``) before the orderability gate ever saw it,
+    while ``validity.effective_precision(0, None)`` read ``"day"`` (epoch 0 IS
+    an instant, 1970-01-01T00:00:00Z) — the marker rendered no window and the
+    precision beside it named one. It also pinned the crash for a TRUTHY
+    numeric (``pytest.raises(AttributeError)`` on ``1735689600``), i.e. the
+    suite was green BECAUSE the defect was expected.
 
-    That truthiness trap is the same one ``sdk._supersede_window_start``
-    records fixing, and it is a WRITE/RENDER contract question owned by #9741 —
-    not by the orderability gate, which is why this test asserts today's
-    answer rather than the eventual one. It is green on both sides of #9730
-    (the pre-fix renderer also rendered nothing here), so it is a lock, not a
-    catch: if #9741 makes an epoch-0 start render a start clause, this test
-    goes red and the fixer must also widen ``_bounds_an_instant``'s scoping
-    paragraph.
+    #9741 removed the truthiness trap (bounds are read through
+    ``retrieval._display_bound`` and gated on ``_bounds_an_instant`` over the
+    RAW value), so both halves now assert the fixed reading: an epoch-0 start
+    renders its own calendar day, and the precision beside it agrees. The
+    falsy ``False`` case is the same epoch (``bool`` is an ``int``) and is kept
+    for the trap's other spelling.
     """
     from tortoise.retrieval import _validity_marker
     from tortoise.validity import effective_precision
@@ -943,11 +943,154 @@ def test_an_epoch_zero_start_renders_no_window_is_recorded():
     for epoch_zero in (0, 0.0, False):
         assert effective_precision(epoch_zero, None) == "day", epoch_zero
         assert _validity_marker({"valid_from": epoch_zero,
-                                 "end_state": "open"}) == "", epoch_zero
-        # a TRUTHY numeric does not even get this far — it raises at
-        # ``.strip()`` (#9741), so neither surface renders a start today.
-        with pytest.raises(AttributeError):
-            _validity_marker({"valid_from": 1735689600, "end_state": "open"})
+                                 "end_state": "open"}) == \
+            "[valid since 1970-01-01]", epoch_zero
+    # a TRUTHY numeric renders its calendar day instead of raising (#9741)
+    assert _validity_marker({"valid_from": 1735689600,
+                             "end_state": "open"}) == "[valid since 2025-01-01]"
+
+
+# ── #9741: a NUMBER is a legal bound; one bad point never denies the read ──
+
+def test_a_numeric_start_renders_its_utc_day_in_both_epoch_units():
+    """#9741: the reported defect — a NUMERIC ``validFrom``, which the write
+    boundary accepts, raised ``AttributeError: 'int' object has no attribute
+    'strip'`` at ``retrieval._validity_marker``'s bound extraction.
+
+    Both epoch units a stored graph can hold must render the SAME calendar day:
+    seconds (``1735689600``) and millis (``1735689600000``) both name
+    2025-01-01T00:00:00Z, and reading one as the other would state a date off
+    by a factor of 1000. The ISO sibling is the control: the marker text is
+    byte-identical, so the reader cannot tell which storage form it read.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    iso = _validity_marker({"id": "p", "valid_from": "2025-01-01",
+                            "end_state": "open"})
+    from tortoise.retrieval import BOUND_RENDER_OUTCOMES
+    millis_before = BOUND_RENDER_OUTCOMES["epoch_read_as_millis"]
+    for epoch in (1735689600, 1735689600000, 1735689600.0, 1735689600000.0):
+        assert _validity_marker({"id": "p", "valid_from": epoch,
+                                 "end_state": "open"}) == iso, epoch
+    assert iso == "[valid since 2025-01-01]"
+    # the millis reinterpretation is OBSERVABLE (it is this marker's alone:
+    # ``_created_sort_key`` and ``time_aware._as_date`` read a NUMBER as seconds)
+    assert BOUND_RENDER_OUTCOMES["epoch_read_as_millis"] == millis_before + 2
+    # the END half goes through the same normaliser (one boundary, not one
+    # call site): a numeric validTo renders a date instead of raising.
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                             "valid_to": 1735689600000,
+                             "end_state": "known"}) == \
+        "[valid 2024-06-01 → 2025-01-01]"
+
+
+def test_a_numeric_start_through_the_public_write_renders_the_start(lane):
+    """#9741 through the PUBLIC write, on the real read path.
+
+    ``create_point(validFrom=<epoch seconds>)`` is ACCEPTED by the write
+    boundary (``validate_validity_window`` orders it with the same
+    ``_created_sort_key`` the read path orders with), so the reader must render
+    it. Asserts the OBSERVABLE — the returned text states the stored instant —
+    and the ISO sibling's block is byte-identical apart from the id/content,
+    which is the no-regression control for the existing ISO rendering.
+    """
+    from tortoise.retrieval import render_context
+
+    sdk, _events = lane
+    epoch = sdk.create_point("statement", "epoch start", validFrom=1735689600)
+    iso = sdk.create_point("statement", "iso start", validFrom="2025-01-01")
+    assert _window_props(sdk, epoch["id"])["validFrom"] == 1735689600
+
+    hits = {r["id"]: r for r in _scan(sdk)}
+    assert hits[epoch["id"]]["valid_from"] == 1735689600
+    # the read completes and states the instant (it used to raise here)
+    text = render_context([hits[epoch["id"]]])
+    assert "[valid since 2025-01-01]" in text
+    # the ISO sibling renders the same marker — byte-identical evidence
+    assert render_context([hits[iso["id"]]]).replace("iso start", "epoch start") \
+        == text
+
+
+def test_an_unreadable_bound_is_skipped_with_an_observable_signal():
+    """#9741 second direction: a genuinely unreadable bound.
+
+    Chosen mechanism: SKIP the clause and COUNT it (``BOUND_RENDER_OUTCOMES``),
+    never raise and never coerce to ``None``/``0``. Coercing would make a
+    malformed timestamp indistinguishable from an absent one, and raising is
+    the poison pill itself. The ISO control below is the no-regression half:
+    a readable bound on the same hit still renders exactly as before.
+    """
+    from tortoise.retrieval import BOUND_RENDER_OUTCOMES, _validity_marker
+
+    control = _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                                "end_state": "open"})
+    for junk in ({"nested": 1}, ["x"], float("nan"), float("inf"), 10 ** 400):
+        before = BOUND_RENDER_OUTCOMES["unreadable_bound"]
+        assert _validity_marker({"id": "p", "valid_from": junk,
+                                 "end_state": "open"}) == "", junk
+        # the skip is OBSERVABLE — a silent skip is the silent-loss defect
+        assert BOUND_RENDER_OUTCOMES["unreadable_bound"] == before + 1, junk
+        # and the ISO control is untouched by the counter / the skip
+        assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                                 "end_state": "open"}) == control
+
+
+def test_one_unreadable_hit_does_not_deny_the_rendered_read(monkeypatch):
+    """#9741 — the poison pill, asserted as the observable it is.
+
+    Before the containment, ``render_context([good, bad])`` raised for the ONE
+    bad hit and returned NOTHING: every hit in the result set lost its evidence
+    to a row it is not part of. After it, the read returns for all hits, and
+    the hit whose annotation zone cannot be built at all (here a
+    ``superseded_by`` of the wrong TYPE, which raises inside the marker) still
+    renders its content — it loses the ANNOTATION, never the evidence — with
+    ``marker_failed`` counted so the caller can tell.
+    """
+    from tortoise.retrieval import (BOUND_RENDER_OUTCOMES, _render_block,
+                                    render_context)
+
+    good = {"id": "good", "content": "the answer", "valid_from": "2024-06-01"}
+    junk_bound = {"id": "junk-bound", "content": "poison",
+                  "valid_from": {"nested": 1}}
+    text = render_context([good, junk_bound])
+    # BOTH hits are rendered — the entity's evidence the read is whole
+    assert "the answer" in text and "poison" in text
+    assert "[valid since 2024-06-01]" in text
+
+    # a wrong-TYPE supersession field is read defensively by the marker itself
+    # (it is called unguarded from ``_has_claim_text`` on the ask lane), so the
+    # hit keeps its OWN marker and the read completes
+    from tortoise.retrieval import _validity_marker
+    assert _validity_marker({"id": "x", "valid_from": "2024-06-01",
+                             "superseded_by": "not-a-dict"}) == \
+        "[valid since 2024-06-01]"
+    assert _validity_marker({"id": "x", "valid_from": "2024-06-01",
+                             "supersedes": ["not-a-dict", 7]}) == \
+        "[valid since 2024-06-01]"
+    assert _validity_marker({"id": "x", "valid_from": "2024-06-01",
+                             "end_state": 1}) == "[valid since 2024-06-01]"
+
+    # the BACKSTOP: a marker shape nobody has seen yet still cannot deny the
+    # read — it costs that hit its marker only, and it is counted
+    before = BOUND_RENDER_OUTCOMES["marker_failed"]
+    broken_annotation = {"id": "broken", "content": "still readable",
+                         "session_id": "s1", "session_date": "2026-01-01"}
+    block = _render_block(broken_annotation)
+    # the marker's OWN contract is now "never raises" for stored shapes, so the
+    # backstop is exercised by a marker that does raise: the hit must keep its
+    # session identity and content, and the skip must be counted
+    import tortoise.retrieval as _r
+
+    def _boom(_h):
+        raise RuntimeError("marker shape nobody has seen yet")
+
+    monkeypatch.setattr(_r, "_validity_marker", _boom)
+    block = _render_block(broken_annotation)
+    assert "still readable" in block
+    assert "[session s1]" in block and "(session date 2026-01-01)" in block
+    assert BOUND_RENDER_OUTCOMES["marker_failed"] == before + 1
+    # the read as a whole still completes over a mixed set
+    assert "still readable" in render_context([broken_annotation, good])
 
 
 def test_search_annotation_distinguishes_open_from_unknown(lane):

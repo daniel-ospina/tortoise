@@ -40,10 +40,12 @@ documented follow-up.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from tortoise.coverage_loop import (
@@ -58,6 +60,36 @@ from tortoise.coverage_loop import (
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
 from .validity import END_UNKNOWN, PRECISION_UNKNOWN  # #2350: the 3-state end
+
+_log = logging.getLogger(__name__)
+
+#: #9741: the MEASUREMENT of the render path's two skipped classes — a stored
+#: window bound of a shape the marker cannot read, and a hit whose annotation
+#: zone could not be built at all. Both are SKIPPED rather than raised (one bad
+#: point must not deny the read) and both are COUNTED, because a silent skip is
+#: the same silent-loss defect as a silent drop: the caller must be able to tell
+#: that a hit's annotation is missing and why. Process-local; the ``warning``
+#: line beside each increment carries the offending value for anything durable.
+BOUND_RENDER_OUTCOMES: dict[str, int] = {
+    "unreadable_bound": 0,      # a bound present but of no readable shape
+    "marker_failed": 0,         # the marker raised for one hit (backstop)
+    "epoch_read_as_millis": 0,  # a NUMBER at millis magnitude (see the floor)
+}
+
+#: #9741: the magnitude at which a stored NUMBER stops being an epoch SECONDS
+#: and is read as an epoch MILLIS (the classic 1000× bug). The split is chosen
+#: so the low side can only be seconds and the high side can only be millis:
+#: BELOW it, a millis reading would predate 1973 (see the floor's own value) and
+#: a seconds reading spans 1970..5138 — the whole authored range; ABOVE it, a
+#: seconds reading names year 5138+ (no authored window;
+#: ``validity._EPOCH_SECONDS_SANE_MAX`` puts the authored ceiling at 2100-01-01)
+#: while a millis reading names 1973+. Every reinterpretation is COUNTED
+#: (``BOUND_RENDER_OUTCOMES['epoch_read_as_millis']``), because this reading is
+#: the marker's alone — the ordering measure (``search_engine._created_sort_key``)
+#: and ``time_aware._as_date`` still read a NUMBER as seconds, the unit
+#: ``validity``'s write vocabulary names — and an uncounted divergence is how
+#: one surface silently becomes authoritative over another.
+_EPOCH_MILLIS_FLOOR = 100_000_000_000  # ms: 1973-03-03T09:46:40Z; s: year 5138
 
 #: token-count estimator (matches the reader-context alignment invariant):
 #: rough LLM token ≈ whitespace tokens, plus a 10% markup allowance for
@@ -902,6 +934,84 @@ _ROLE_PREFIX = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s+",
                              re.IGNORECASE)
 
 
+def _epoch_utc_day(value: float) -> str | None:
+    """The UTC calendar day of a numeric epoch (seconds or millis), or ``None``.
+
+    #9741's display half. A stored NUMBER is the classic 1000× hazard: epoch
+    seconds and epoch millis are both plausible stored shapes in this graph
+    (``search_engine._created_sort_key`` records the numeric-epoch form;
+    ``capture_spool`` writes epoch MILLISECONDS for exactly this class of
+    field, and warns that a seconds value read by the millis side lands in
+    "the year 57000"), and reading one as the other silently states a date off
+    by three orders of magnitude. The unit is therefore decided by MAGNITUDE at
+    ``_EPOCH_MILLIS_FLOOR`` — see its note for why that split cannot misread a
+    plausible bound.
+
+    The day is a UTC day on purpose: the same rule ``assembly._norm_date`` and
+    every product day-stamp follow (a machine-local day would make the reader's
+    stated date depend on the host). ``None`` (never a fabricated date) when the
+    value does not fit a calendar at all — including an integer too large for
+    ``float()`` (``10**400``, the same shape ``validity._names_an_instant``
+    short-circuits to avoid an ``OverflowError`` out of a read path) and
+    ``nan``/``inf`` — the caller counts that.
+    """
+    try:
+        seconds = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if abs(seconds) >= _EPOCH_MILLIS_FLOOR:
+        BOUND_RENDER_OUTCOMES["epoch_read_as_millis"] += 1
+        seconds /= 1000.0
+    try:
+        return datetime.fromtimestamp(seconds, tz=UTC).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _display_bound(value: object, field: str, hit: dict) -> str:
+    """ONE stored window bound → the calendar day the reader states, or ``""``.
+
+    #9741: the boundary normaliser for every bound ``_validity_marker``
+    interpolates (``valid_from`` / ``valid_to`` / ``expired_at``), so a fix for
+    one call site cannot leave the others raising on the same shape. It accepts
+    the shapes the WRITE boundary legitimately stores:
+
+      * ``None`` / blank → ``""`` (an absent bound; the marker's own arms decide
+        what an open window renders as);
+      * ISO text → trimmed, and a full timestamp truncated to ``YYYY-MM-DD``
+        (the reader-context rule: no full timestamps in reader text);
+      * a NUMBER → the UTC calendar day of that epoch, seconds or millis.
+
+    Anything else (a mapping, a list, a number outside the calendar) is a value
+    the marker cannot honestly date. It is SKIPPED — the hit loses that clause
+    and the read completes — with ``BOUND_RENDER_OUTCOMES`` counted and a
+    ``warning`` naming the point id, the field and the value, because a skip the
+    caller cannot observe is the silent-loss defect this file's annotation
+    history is made of. It is deliberately NOT coerced to ``""`` and forgotten:
+    "unreadable" and "absent" must stay distinguishable (they do — absent never
+    increments the counter).
+
+    It never raises: a render path that raises on stored data is the poison pill
+    this issue is about.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        return text[:10] if len(text) > 10 else text
+    if isinstance(value, (int, float)):
+        day = _epoch_utc_day(value)
+        if day is not None:
+            return day
+    BOUND_RENDER_OUTCOMES["unreadable_bound"] += 1
+    _log.warning(
+        "validity marker skipped an unreadable %s on point %r: %r (%s) — "
+        "rendered without that clause",
+        field, hit.get("id"), value, type(value).__name__,
+    )
+    return ""
+
+
 def _validity_marker(h: dict) -> str:
     """Validity-window marker text for one hit (E6 #1538, D7).
 
@@ -933,16 +1043,30 @@ def _validity_marker(h: dict) -> str:
         denies.
     ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
     full timestamps in the reader context; timestamps stay on the graph
-    properties. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
+    properties. A stored NUMBER is a legal bound too (#9741) — it is read as an
+    epoch (seconds or millis, decided by magnitude) and rendered as its UTC
+    calendar day, through the same :func:`_display_bound` normaliser every bound
+    here goes through. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
     unchanged and render first."""
     marks: list[str] = []
-    sb = h.get("superseded_by") or {}
-    snippet = (sb.get("content_snippet") or "").strip()
+    # #9741 review P2: the marker is ALSO called from ``_has_claim_text`` on the
+    # ask path (``assemble_context``) with NO per-hit guard, so a wrong-TYPE
+    # field here denied the whole read through a second door. A bound reached
+    # ``_display_bound``; the SUPERSESSION fields are the same class of stored,
+    # unvalidated data, so they are read defensively too and the marker's own
+    # contract becomes "never raises" rather than "callers catch it".
+    sb = h.get("superseded_by")
+    sb = sb if isinstance(sb, dict) else {}
+    snippet = (sb.get("content_snippet") or "").strip() \
+        if isinstance(sb.get("content_snippet") or "", str) else ""
     if snippet:
         marks.append(f"[SUPERSEDED BY: {snippet}]")
-    supersedes = h.get("supersedes") or []
-    snips = [(s.get("content_snippet") or "").strip()
-             for s in supersedes if (s.get("content_snippet") or "").strip()]
+    supersedes = h.get("supersedes")
+    supersedes = supersedes if isinstance(supersedes, list) else []
+    snips = [s["content_snippet"].strip() for s in supersedes
+             if isinstance(s, dict)
+             and isinstance(s.get("content_snippet"), str)
+             and s["content_snippet"].strip()]
     if snips:
         marks.append("[SUPERSEDES: " + " ; ".join(snips) + "]")
     # ``vf`` is the DISPLAY form (trimmed); the ORDERABILITY gate below runs on
@@ -951,10 +1075,21 @@ def _validity_marker(h: dict) -> str:
     # copy made the two disagree for a padded date (``"2024-06-01 "`` read as a
     # start here, "no start recorded" beside it), which is the cross-surface
     # drift ``window_read_fields`` passes the bounds RAW to prevent.
+    # #9741: the three bounds are read through ONE boundary normaliser. An
+    # unconditional ``.strip()`` on the stored value assumed the TYPE the data
+    # is allowed not to have: ``valid_from`` is legally a NUMBER (epoch —
+    # ``validity.effective_precision`` short-circuits numerics to ``"day"``
+    # for exactly that reason, and ``create_point`` accepts it), and
+    # ``'int' object has no attribute 'strip'`` aborted rendering for EVERY hit
+    # in the result set. ``_display_bound`` accepts ISO text and a numeric
+    # epoch (seconds or millis) and returns the calendar day the reader states;
+    # anything it cannot read is SKIPPED with ``BOUND_RENDER_OUTCOMES`` counted
+    # and the value named in a ``warning`` — never raised, never rendered as an
+    # absent bound's silence.
     raw_vf = h.get("valid_from")
-    vf = (raw_vf or "").strip()
-    vt = (h.get("valid_to") or "").strip()
-    ex = (h.get("expired_at") or "").strip()
+    vf = _display_bound(raw_vf, "valid_from", h)
+    vt = _display_bound(h.get("valid_to"), "valid_to", h)
+    ex = _display_bound(h.get("expired_at"), "expired_at", h)
     if vf:
         # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
         # #9730: a START that names no instant renders NO start clause. The
@@ -962,12 +1097,11 @@ def _validity_marker(h: dict) -> str:
         # ``search_engine._created_sort_key(raw_vf)[0] == 0``, the one
         # ``validity.effective_precision`` resolves precision behind), not a
         # second notion of "parseable" — so a start clause this renders cannot
-        # disagree with the precision beside it. A FALSEY bound never reaches
-        # here (``""``, and a numeric ``0``/``False`` — see
-        # ``_bounds_an_instant``'s residual note); only truthy-but-unorderable
-        # values ever leaked.
-        vfd = (vf[:10] if len(vf) > 10 else vf) if _bounds_an_instant(raw_vf) \
-            else ""
+        # disagree with the precision beside it. A numeric bound reaches here
+        # as its own calendar day (``0`` → ``1970-01-01``: epoch 0 IS an
+        # instant, and #9741 removed the truthiness trap that used to drop it);
+        # only a present-but-unorderable STRING renders no start clause.
+        vfd = vf if _bounds_an_instant(raw_vf) else ""
         since = f" since {vfd}" if vfd else ""
         if _end_state_is_unknown(h):
             # #2350/#9202/#9741: ENDED but un-datable. Both spellings of that
@@ -977,20 +1111,17 @@ def _validity_marker(h: dict) -> str:
             # BEFORE the ``vt`` arm: a stored un-datable end is TRUTHY, so it
             # used to take the bounded-window arm and print itself verbatim.
             if ex:
-                exd = ex[:10] if len(ex) > 10 else ex
-                marks.append(f"[valid{since}; expired {exd}; end unknown]")
+                marks.append(f"[valid{since}; expired {ex}; end unknown]")
             else:
                 marks.append(f"[valid{since}; end unknown]")
         elif vt:
-            vtd = vt[:10] if len(vt) > 10 else vt
             # the both-ends form never carried "since" — a start it cannot
             # name leaves only the arrow and the end.
             lead = f"{vfd} " if vfd else ""
             if ex:
-                exd = ex[:10] if len(ex) > 10 else ex
-                marks.append(f"[valid {lead}→ {vtd}; expired {exd}]")
+                marks.append(f"[valid {lead}→ {vt}; expired {ex}]")
             else:
-                marks.append(f"[valid {lead}→ {vtd}]")
+                marks.append(f"[valid {lead}→ {vt}]")
         else:
             # No start recorded and an OPEN end: ``[valid]`` still states the
             # open-end reading (still-true) without asserting a start, which
@@ -1021,10 +1152,12 @@ def _end_state_is_unknown(h: dict) -> bool:
     token is the state's input, so preferring it could only contradict the
     verdict already computed.
     """
-    state = (h.get("end_state") or "").strip()
+    state = h.get("end_state")
+    state = state.strip() if isinstance(state, str) else ""
     if state:
         return state == END_UNKNOWN
-    return (h.get("valid_to_precision") or "") == PRECISION_UNKNOWN
+    declared = h.get("valid_to_precision")
+    return (declared if isinstance(declared, str) else "") == PRECISION_UNKNOWN
 
 
 def _bounds_an_instant(value: object) -> bool:
@@ -1034,11 +1167,9 @@ def _bounds_an_instant(value: object) -> bool:
     one the #6140/#9201/#9244 read gate resolves precision behind and
     ``commit_schema.validate_validity_window`` orders with — so for every bound
     the marker CONSULTS, the reader-facing marker and the precision beside it
-    cannot disagree about whether that bound names an instant. (The one bound it
-    does not consult is a FALSEY numeric — see the last paragraph.) That is why
+    cannot disagree about whether that bound names an instant. That is why
     ``_validity_marker`` hands this function the RAW stored bound, never its own
-    trimmed display copy (a padded date orders as nothing on every other
-    surface). Imported lazily inside the call for the same reason
+    display copy (a padded date orders as nothing on every other surface). Imported lazily inside the call for the same reason
     ``validity.effective_precision`` does: ``retrieval`` sits in the import
     graph ``search_engine`` is assembled from, and the eager edge is the cycle.
 
@@ -1049,20 +1180,17 @@ def _bounds_an_instant(value: object) -> bool:
     acquire a failure mode it never had). A numeric epoch ``0`` therefore IS an
     instant here too (1970-01-01T00:00:00Z).
 
-    ⚠️ This branch is unreachable from ``_validity_marker`` twice over, and the
-    second way is a KNOWN residual, not a guarantee (#9741): a TRUTHY numeric
-    raises ``AttributeError`` at ``(raw_vf or "").strip()``, while a FALSEY one
-    (``0`` / ``0.0`` / ``False``) short-circuits on that ``or ""`` — so an epoch-``0``
-    start renders NO marker at all while ``valid_from_precision`` reads ``"day"``
-    (epoch 0 IS an instant). That truthiness trap is the same one
-    ``sdk._supersede_window_start`` records fixing; how a numeric bound is
-    WRITTEN and RENDERED is #9741's contract question, not this gate's. The
-    branch exists so that #9741 handing the raw bound through cannot turn the
-    parity above into an ``OverflowError`` on the read path — when it lands, the
-    marker starts consulting numerics and this docstring's scope widens back.
-    ``tests/test_2350_validity_precision.py``
-    ::test_an_epoch_zero_start_renders_no_window_is_recorded pins the residual
-    so that change cannot pass silently.
+    ✅ Reachable from ``_validity_marker`` since #9741, and the numeric branch is
+    the reason it must exist: the marker no longer gates its start clause on a
+    truthiness test over a display STRING (which raised ``AttributeError`` for a
+    truthy numeric and dropped a falsey ``0``), it hands every bound to
+    ``_display_bound`` and gates on THIS predicate over the RAW value. So an
+    epoch-``0`` start renders ``[valid since 1970-01-01]`` — matching the
+    ``"day"`` precision ``validity.effective_precision`` reports beside it —
+    and a numeric too large for ``float()`` cannot turn the parity above into an
+    ``OverflowError`` on the read path. ``tests/test_2350_validity_precision.py``
+    ::test_an_epoch_zero_start_renders_no_window_is_recorded pins the epoch-0
+    reading (it pinned the ABSENCE before #9741).
     """
     if isinstance(value, (int, float)):
         return True
@@ -1165,12 +1293,8 @@ def _distinct_session_ids(hits: list[dict]) -> list[str]:
     return out
 
 
-def _render_block(h: dict) -> str:
-    """One hit's rendered context block — the SINGLE implementation shared
-    by ``render_context`` and the token budget (factored out of
-    ``render_context``, R1 #1540). ``question_date`` never appears here: it
-    only prepends the ``Current Date:`` header once in ``render_context``.
-    Per-hit dates come from the hit's own ``session_date``.
+def _hit_prefix(h: dict) -> str:
+    """One hit's annotation prefix (the block text before the fenced body).
 
     Session tag precedence (D3 identity): a hit that HAS the
     ``lme_session_index`` key keeps its historical rendering — ``>= 0`` is
@@ -1181,10 +1305,8 @@ def _render_block(h: dict) -> str:
     (:func:`hit_session_id`), falling back to ``[session ?]`` when the
     identity is unknown.
 
-    The BODY is fenced as well as the prefix: ``content`` is stored verbatim
-    and can carry newlines, so it is passed through :func:`_fence_body` — a
-    continuation line of the body can never start a line at block scope
-    (#6252, the body-side sibling of the #3844 prefix fix).
+    The BODY is fenced by the caller (:func:`_render_block`), never here.
+
     """
     if "lme_session_index" in h:
         idx = h["lme_session_index"]
@@ -1207,7 +1329,7 @@ def _render_block(h: dict) -> str:
     # only the deterministic leg's own role-bracket shape suppresses the
     # decoration — a non-role bracket prefix ([context], [IMPORTANT])
     # must not suppress speaker attribution
-    if spk and not _ROLE_PREFIX.match(h.get("content", "")):
+    if spk and not _ROLE_PREFIX.match(h.get("content") or ""):
         prefix = f"{prefix} [{spk}]"
     # The marker carries the SAME free-text class as the two values above: the
     # superseded/supersedes snippets are stored Point content, and the
@@ -1216,13 +1338,68 @@ def _render_block(h: dict) -> str:
     # Collapsed here rather than field by field inside _validity_marker — one
     # choke point covers every present and future free-text field the marker
     # interpolates.
-    marker = _one_line(_validity_marker(h))
+    marker = _safe_marker(h)
     if marker:
         # _validity_marker returns self-bracketed groups
         # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
         # extra wrap.
         prefix = f"{prefix} {marker}"
-    return f"{prefix} {_fence_body(h.get('content', ''))}"
+    return prefix
+
+
+def _safe_marker(h: dict) -> str:
+    """``_one_line(_validity_marker(h))`` — contained, and COUNTED (#9741).
+
+    The marker's own contract is "never raises" for the shapes the graph can
+    store (see its notes); this is the backstop for a shape nobody has seen
+    yet. It exists because the marker is called from a path with no per-hit
+    guard (``_has_claim_text`` on the ask lane), where one malformed row would
+    otherwise deny EVERY hit's evidence. Losing the marker is the smallest
+    degradation available: the hit keeps its content, its session tag and its
+    session date, and ``BOUND_RENDER_OUTCOMES['marker_failed']`` plus the
+    logged point id make the loss observable rather than silent.
+    """
+    try:
+        return _one_line(_validity_marker(h))
+    except Exception:  # noqa: BLE001 — containment, see the docstring
+        BOUND_RENDER_OUTCOMES["marker_failed"] += 1
+        _log.warning(
+            "validity marker skipped for point %r — it could not be built; "
+            "the hit renders without it",
+            h.get("id"), exc_info=True,
+        )
+        return ""
+
+
+def _render_block(h: dict) -> str:
+    """One hit's rendered context block — the SINGLE implementation shared
+    by ``render_context`` and the token budget (factored out of
+    ``render_context``, R1 #1540). ``question_date`` never appears here: it
+    only prepends the ``Current Date:`` header once in ``render_context``.
+    Per-hit dates come from the hit's own ``session_date``.
+
+    The BODY is fenced as well as the prefix: ``content`` is stored verbatim
+    and can carry newlines, so it is passed through :func:`_fence_body` — a
+    continuation line of the body can never start a line at block scope
+    (#6252, the body-side sibling of the #3844 prefix fix).
+
+    #9741 — CONTAINMENT, and why it is scoped to the MARKER.
+    The annotation zone is built from stored Point data, and stored data is the
+    class that carries shapes nobody enumerated. When ONE hit's marker cannot be
+    built, the failure used to propagate out of ``render_context`` and the
+    caller lost EVERY hit's evidence — a malformed row denying a read it is not
+    part of (the poison-pill half of #9741, and the same family as
+    #10119/#9819). So a failure costs that hit its MARKER ONLY: the count in
+    ``BOUND_RENDER_OUTCOMES['marker_failed']`` and the logged point id make the
+    loss observable, and the fence-plus-body below still renders the evidence.
+
+    Scoped to the marker, not the whole prefix (review P2): the session tag and
+    session date are load-bearing for temporal reads (#1144), so an unrelated
+    optional field's wrong TYPE must not cost them. ``_validity_marker`` is
+    written not to raise for the shapes the graph can store (see its own notes);
+    this catch is the backstop for the shapes nobody has seen yet.
+    """
+    return f"{_hit_prefix(h)} {_fence_body(h.get('content', ''))}"
 
 
 def _one_line(value: object) -> str:
