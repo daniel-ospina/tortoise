@@ -4604,7 +4604,7 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # tests added above at the same head pushed it 1596 → 1673, then 1682 when the disagreement
         # case was widened from the two log-invisible bars to all seven — the pin landing rather
         # than drifting, because a plausible offset is what it exists to refuse)
-        ("tests/test_capstone_preregistration_9075.py", 1682):
+        ("tests/test_capstone_preregistration_9075.py", 1693):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces

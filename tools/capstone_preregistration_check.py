@@ -34,8 +34,8 @@ It verifies five things, and it fails on each of them for a specific reason:
    registration was not **edited** by the same contribution that carries the log: only *add*
    commits are read (`--diff-filter=A`), so a change that rewrites a threshold and lands a scored
    log together is accepted by this check. That gap is pre-existing (the exemption arm has the
-   `_touch_epochs` content bound; the ordinary arm never had one), it is a NEW RULE to close and
-   therefore needs an owner decision — it is filed rather than invented here.
+   `_touch_epochs` content bound; the ordinary arm never had one), closing it is a NEW RULE that
+   needs an owner decision, and it is tracked as **#10555** rather than invented here.
 
    **The refusal this buys, at PR time rather than after the merge.** A change that adds a
    registration *and* a log has nothing on the base to appeal to, so it is **REFUSED**: the
@@ -696,12 +696,36 @@ BASE_REF_CANDIDATES = ("origin/main", "main")
 
 NO_BASE_REF = (
     "no base ref: this checkout has a remote but "
-    f"{'/'.join(BASE_REF_CANDIDATES)} does not resolve (and no --base-ref / ${BASE_REF_ENV} was "
-    "given), so the ordering cannot be measured against the published base. This is a usage / "
-    "environment error (exit 2), NOT the shallow-clone third outcome: a full-history checkout that "
-    "cannot name its base must not report success, and folding it into the skip path would let an "
-    "environment change silently downgrade the gate to the PR-internal rule it exists to remove"
+    f"{'/'.join(BASE_REF_CANDIDATES)} does not resolve and no --base-ref / ${BASE_REF_ENV} was "
+    "given, so the ordering cannot be measured against the published base"
 )
+
+#: The remedy differs by CAUSE, so the message does too (review cycle 3, finding 2). Naming the
+#: candidate set when the caller PINNED a ref that failed sends the operator to debug flag wiring —
+#: or to wonder whether the unconditional CI step is wired — when the real answer is "that ref is not
+#: fetched here". That is the same send-them-to-a-remedy-that-cannot-work defect this change closed
+#: for shallow-vs-base, so it is not repeated here.
+NO_BASE_REF_EXPLICIT = (
+    "the base ref {explicit!r} (from --base-ref / ${env}) does not resolve in this checkout. The "
+    "ordering claim is measured against the ref the contribution merges into, and an unresolvable "
+    "base is NOT substituted with a different ref — that would answer a question the caller did not "
+    "ask. Fetch it (`git fetch origin <branch>`) and re-run"
+)
+
+#: Appended to both base-ref failures: the exit code is the part a runner keys on.
+_NO_BASE_REF_TAIL = (
+    ". This is a usage / environment error (exit 2), NOT the shallow-clone third outcome: a "
+    "full-history checkout that cannot name its base must not report success, and folding it into "
+    "the skip path would let an environment change silently downgrade the gate to the PR-internal "
+    "rule it exists to remove"
+)
+
+
+def no_base_ref_message(explicit: str | None) -> str:
+    """The base-ref refusal for the cause that actually fired — never the other one's text."""
+    if explicit:
+        return NO_BASE_REF_EXPLICIT.format(explicit=explicit, env=BASE_REF_ENV) + _NO_BASE_REF_TAIL
+    return NO_BASE_REF + _NO_BASE_REF_TAIL
 
 SAME_PR_REFUSAL = (
     "{prereg} is not on the merge base ({base}): this change adds {n} evidence log(s) against a "
@@ -1077,7 +1101,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         # shallow case keeps the third outcome (CI test jobs are shallow by design, and refusing
         # there would red a correctly ordered tree); "a full-history checkout that cannot name its
         # base" is an environment/usage fault, which is exit 2.
-        raise CheckError(NO_BASE_REF)
+        raise CheckError(no_base_ref_message(base_ref))
 
     # The registration's appearance ON THE BASE — the only side a squash merge cannot rewrite.
     prereg_epochs = _added_epochs_on(base, prereg)
