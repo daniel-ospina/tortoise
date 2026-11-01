@@ -435,11 +435,13 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
             ``run(include_draft=True)`` escape hatch) — terminal nodes are
             NEVER re-included (#2422).
 
-    Legacy nodes without a stored status are LIVE (the entity write path
-    defaults ``coalesce($st, n.status, 'live')``), hence the NULL checks. This
-    is also why an EPISTEMIC-LABEL widening (#7927) needs no per-label status
+    An ABSENT status is LIVE — the legacy-node rule, and since #9974 R1 also the
+    ordinary birth state of an Object/Subject: that fold seeds ``status=$st``
+    (derived-or-absent, never a fabricated ``'live'``), while the Point fold still
+    writes ``coalesce($st, n.status, 'live')``. Hence the NULL checks. This is
+    also why an EPISTEMIC-LABEL widening (#7927) needs no per-label status
     branch: ``:Event`` stores ``eventStatus`` and no ``status`` at all, so it
-    reads LIVE here exactly as a legacy Point does.
+    reads LIVE here exactly as a status-less Point does.
     """
     terminal = _terminal_excluded(clause)
     if include_draft:
@@ -504,6 +506,44 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
 #: Point-first: the Point query is the hot path and stays the first, indexed
 #: lookup in every id-anchored sweep.
 EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
+
+#: The epistemic labels whose layer CARRIES a ``status`` family — every one but
+#: ``:Event``, whose lifecycle is ``eventStatus`` (a different vocabulary a
+#: ``status``-rendering read deliberately does not mix in).
+#:
+#: This is the declaration behind the ``related_status`` / ``provenance``
+#: contract: an ABSENT status READS live (``_terminal_excluded``'s NULL arm, and
+#: since #9974 R1 also the ordinary birth state of an Object/Subject) on these
+#: three, while ``:Event`` reports ``""`` — "this layer exposes no ``status``",
+#: the conflation #6976's widening was added to end. ⛔ Do NOT flatten the two
+#: into one ``value or 'live'`` at a call site: that reports ``live`` for an
+#: ``:Event`` peer, i.e. it invents a lifecycle state on the one label that has
+#: none. Use :func:`status_as_reported`.
+STATUS_CARRYING_EPISTEMIC_LABELS = frozenset({"Point", "Subject", "Object"})
+
+
+def status_as_reported(value: str | None, *, label: str | None = None) -> str:
+    """Render a STORED status as the string a read surface REPORTS.
+
+    ``value`` is the graph's ``status`` property (``None`` when absent).
+
+    An ABSENT status READS live — the legacy rule, and since #9974 R1 the
+    ordinary birth state of a status-less Object/Subject — so a surface that
+    renders the value as a STRING must render ``live`` too. Rendering ``""``
+    instead would reuse the value ``expand_relationships`` reserves for "this
+    peer's layer has no ``status`` family at all", which is a different claim.
+
+    ``label`` — the node's epistemic label, when the caller knows it. Omit it
+    only where the label is fixed by construction (e.g. a ``:Subject``-anchored
+    lookup). An UNNAMED label is treated as status-carrying: that is right for
+    ``:Point``/``:Subject``/``:Object``, and can only be wrong for an
+    ``:Event`` the caller failed to name.
+    """
+    if value is not None:
+        return value
+    if label is not None and label not in STATUS_CARRYING_EPISTEMIC_LABELS:
+        return ""
+    return "live"
 
 #: The keys an epistemic node's identity may live under, in resolution order
 #: (#7927). ONE declaration for a question three widened surfaces ask —

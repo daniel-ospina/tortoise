@@ -2516,6 +2516,12 @@ class _EntityHandlers:
             "n.is_operator=$isop",
             "n.op_type=$opt",
             "n.pointKind=coalesce($pk, n.pointKind)",
+            # #9974 R1 changed the ENTITY folds (`_upsert_object`/`_upsert_subject`)
+            # to `status=$st`, derived-or-absent; the POINT fold keeps this
+            # default DELIBERATELY — `create_point`'s born-live contract (#7856)
+            # is the Point's own, and a status-less Point storing `live` is what
+            # every `_live_only` reader already assumes. Do not "align" the two
+            # without moving that contract.
             "n.status=coalesce($st, n.status, 'live')",
             "n.authoredBy=coalesce($ab, n.authoredBy)",
             "n.embedding=CASE WHEN $embedding_clear THEN NULL "

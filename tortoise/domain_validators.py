@@ -348,11 +348,20 @@ def run_domain_graph_validators(
 _PORTFOLIO_DOMAIN = "portfolio"
 
 #: Statuses that mean "no lifecycle state was written", not "a state outside the
-#: kind's vocabulary". ``projection/entities.py`` MERGEs an Object with
-#: ``o.status=coalesce($st, 'live')``, so a node created without an explicit
-#: status carries ``live`` — flagging it would redden every freshly-minted
-#: mandate until someone set a status, which is not a graph defect. Named here
-#: (not inlined) because the exemption is a decision, not a test.
+#: kind's vocabulary" — so a freshly-minted mandate is not reddened until someone
+#: sets a status, which is not a graph defect. Named here (not inlined) because
+#: the exemption is a decision, not a test.
+#:
+#: ⛔ TWO different reasons carry `live` in this exemption, and they are no longer
+#: the same one (#9974 R1 review P3). The node scan below filters
+#: `o.status IS NOT NULL` (:560), so a node born without an explicit status
+#: — which since R1 is the ORDINARY shape, the fold seeds `status=$st` rather
+#: than the deleted `coalesce($st, 'live')` — is SKIPPED, not exempted. This set
+#: therefore covers only the LEGACY / caller-supplied shape: a node that already
+#: CARRIES the literal `live` (a pre-R1 mandate, or `create_object(…,
+#: status='live')`). The older text here claimed the fold filled `live` in; it
+#: does not, and a reader trusting it would think this set is what keeps new
+#: nodes out of the warning.
 _OBJECT_UNSET_STATUSES = frozenset({"live"})
 
 #: The mark's kind, and the FALLBACK contract used only when the pack registry
