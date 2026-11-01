@@ -1154,6 +1154,14 @@ def test_the_state_value_carve_out_row_records_what_is_enforced_and_what_is_not(
     # stay readable in the artifact a lane acts on.
     assert "THAT KEY IS COARSE" in row["note"], row["note"]
     assert "sharing an anchor word and" in row["note"], row["note"]
+    # And the SHARED tokenizer arm's over-read is stated too (#10513 review
+    # cycle-11 advisory): the dash-as-sign fix is not local to this rule — it
+    # feeds `_value_bindings`, which the against-store fold path also consumes —
+    # and it reads an em dash written flush against the numeral as a minus. A
+    # lane that narrows the arm, or widens it, has to move this row.
+    assert "ATTACHED" in row["note"], row["note"]
+    assert "OVER-READS A BULLET GLYPH" in row["note"], row["note"]
+    assert "test_never_across_fold_5080" in row["note"], row["note"]
 
 
 #: Number words the registry prose may spell, keyed by the count they name. A

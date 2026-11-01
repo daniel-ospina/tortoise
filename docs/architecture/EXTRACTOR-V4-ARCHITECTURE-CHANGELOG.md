@@ -1329,7 +1329,9 @@ header, so the compact branch is PROVEN taken rather than assumed — exactly
 once per prompt, so a second copy of one instruction cannot ride along. The registry row
 `state_value_carve_out` records the rule rather than an omission, and keeps `not-implemented` because
 of what it records next: nothing in the write path *enforces* retention. Prompt text is not the
-guarantee, and the enforcement half is `#10360`.
+guarantee, and the enforcement half is `#10360`. ⛔ **SUPERSEDED 2026-11-01 by `#10360` — the row now
+reads `implemented`; see the entry below.** (This paragraph is the history of *why* the row's residual
+list is read before its state word, and it is kept for that reason, not as a live statement.)
 
 ## 2026-10-30 — the S2/S4 prompts frame session text as DATA, not only the seam (`#10311`)
 
@@ -1467,3 +1469,71 @@ with the model's wrong index losing its advisory vote. Non-vacuity is in-test: f
 plus a **position** mutant that leaves every property in the prompt and appends the clause to the body
 — the wording check cannot see it and only the position check reds, which is what makes that assertion
 the one that bites.
+
+## 2026-11-01 — the carve-out's enforcement half exists in the write path, so `state_value_carve_out` moves to `implemented` (`#10360`)
+
+**The claim this entry corrects.** The 2026-10-30 `#9775` entry above ends by saying the registry row
+"keeps `not-implemented` because of what it records next: nothing in the write path *enforces*
+retention … the enforcement half is `#10360`." `#10360` landed, so that sentence is now false in both
+of its load-bearing halves and is marked SUPERSEDED in place rather than rewritten: the paragraph is
+still the reason a reader must read the row's residual list before its state word, and deleting the
+history is how a later lane loses that reason. `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §7 and
+`STORAGE-ARCHITECTURE.md` §7 — the two `declared_in` anchors the row carries — are unchanged; their
+rule ("any mechanical filter MUST carry this carve-out") is what the enforcement now serves.
+
+**What enforces it, and where.** `_refuse_rewritten_value` runs inside `execute_embed`, on the S1/S2
+model path — the one Point write path (`sdk.py`, `commit_ops.py`, `near_dup_merge.py` all reach it) and
+the only site where the MODEL authors the `quote`. A point whose own verbatim `quote` holds a
+DIFFERENT value in the SAME slot is not written. Three properties are load-bearing and each was a
+review finding before it was code: the refusal is on the POINT, never on the offsets (withholding the
+span leaves the rounded value in the graph one `find` away); it runs BEFORE `classify_consolidation`
+and before any supersede record is collected (a later refusal left `supersessions` naming a pid never
+written); and it judges the UNCLAMPED texts (a value straddling `_MAX_QUOTE` reads as a different
+value once cut — the false-accusation direction). The refused point's `supersedes` ref leaves through
+the shared drop report (`_carry_fold_supersede` with no survivor), so it is named, not lost — `#9906`'s
+no-silent-drop rule. `_mint_endpoint` (`#2552`'s mint-before-wire path) reads the recorded refusals and
+will not re-mint one, because building the endpoint Point from the model's text undid the refusal one
+step later.
+
+**What it does NOT enforce — and the row, not this page, is the list.** The engine is the production
+one (`_value_slots` reads `_value_bindings`, the E5/E7 contradiction engine; no second value
+classifier). Still outside it, each stated in the row with its trade: a value the model never EMITS
+(the capstone E2a class, upstream of selection); 50 of the 112 value-bearing points in the committed
+census receipts failing open on slot layout, so the rule judges 62 and refuses 0 today; strict verbatim
+survival short of target (`UNMEASURED(<an E2 LLM arm run>)`); clock/ISO form excluded by design; the
+engine's unit VOCABULARY limit; the S5 minted-endpoint site deliberately not wired (there `quote` is
+`content[:200]`, the point's own text, so a rewrite is impossible by construction); REFUSE rather than
+REPAIR; a leading currency symbol read as FORM; an over-long side failing open; the `k` prefix-vs-unit
+collision; a version's trailing zero as FORM; and the mint guard's coarse slot key, which suppresses a
+DISTINCT endpoint that shares an anchor word and a value with a refused point.
+
+**The recorded decision this departs from.** `tortoise/value_normalizer.py`'s `#2817` ruling ships no
+magnitude table (`k`/`M`/`MM`/`mil`/`milhão` dropped as a class). This seam reads `k` as ×1000, and the
+departure is recorded where the rule says it must be — an `OVERRIDES:` line on the issue, comment
+`6563672665` on `#10360` — because `#2817` governs money DERIVATION while `k` is already a unit
+identity in `_UNIT_EQUIV` here, and without the factor the rule refuses `5k QPS` against `5,000 QPS`.
+`value_normalizer`'s money path is untouched. No recorded decision reaches the refuse-don't-repair
+trade-off; it is stated in the row and named as the follow-up.
+
+**A change that is NOT local to this rule, stated because the row did not say so.**
+`_keeps_numeric_edge` now keeps a leading `Pd` (an en/em dash is a MINUS in every spelling), and
+`_keeps_numeric_edge` feeds `_leading_symbol_run` → `_strip_edges` → `_guard_token_seq` →
+`_value_bindings`, whose other consumers are the against-store fold path —
+`distinguishing_difference` / `fold_allowed` / `supersede_allowed`, pinned by
+`tests/test_never_across_fold_5080.py`. Direction is the safe one (`-5`/`–5`/`—5` now agree, and a dash
+no longer hides a real sign change), with one named over-read: an em dash written flush against the
+numeral (`—5 minutes`, punctuation as a bullet glyph) reads as minus. The row states it as residual (k).
+
+**Tests, and what reds if the mechanism is deleted.** `tests/test_state_value_verbatim_10360.py`
+carries the battery, the census residual pin and the mutation-checked write-path pins — deleting the
+`execute_embed` call re-writes the point and reds
+`test_the_write_path_refuses_a_point_that_rewrites_its_own_quote`, the two cap tests (which assert
+against the clamped text) and the operator/variant re-entry pins; deleting the `_mint_endpoint` guard
+puts the refused value back in `payload["points"]`. The registry contract is pinned by
+`tests/test_v4_declared_mechanisms.py::test_the_state_value_carve_out_row_records_what_is_enforced_and_what_is_not`,
+which asserts the `implemented` fields AND the residual literals, so a future lane that keeps the state
+word while deleting the residual section reds instead of shipping a blanket claim.
+`test_the_changelog_records_the_flip_and_marks_the_old_claim_superseded` pins THIS entry against the
+row, so the page cannot drift back to the pre-`#10360` story. Case COUNTS are deliberately not quoted:
+a hand-written total re-staled twice against a growing file (#10513 review P3), so the evidence is the
+named reds, which is what a mutation run can be checked against.

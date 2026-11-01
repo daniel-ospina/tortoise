@@ -821,3 +821,97 @@ def test_a_version_trailing_zero_is_FORM_today_and_that_is_stated():
                                      "the release is 2.11")
     assert v2._value_slot_divergence("the SDK version is 2026.10",
                                      "the SDK version is 2025.10")
+
+
+def test_a_dash_attached_to_the_numeral_is_a_sign_and_the_bullet_glyph_shape_is_stated():
+    """Residual (k), PINNED: the dash arm is shared and over-reads one glyph.
+
+    An en/em dash is a MINUS in every spelling (`_keeps_numeric_edge` keeps a
+    leading `Pd`), which is what stops a truthful `-5` point being dropped over
+    a typographic minus — the over-refusal direction that is worse than no guard.
+
+    ⚠️ The arm is NOT local to this rule: it feeds `_value_bindings`, which the
+    against-store fold path also consumes (`test_never_across_fold_5080.py`).
+    And it over-reads exactly one shape, measured here: an em dash written FLUSH
+    against the numeral (`—5 minutes`, punctuation used as a bullet glyph) reads
+    as minus, so a bulleted content line against an unbulleted quote diverges as
+    a dropped sign and is refused. A SPACED dash and `•` stay decoration. The
+    row states the cost as residual (k) instead of narrowing it, because telling
+    a bullet from a minus means judging the glyph's context — the same
+    form-vs-value guess that re-opened the `800millis`/`800ms` false refusal.
+    If a future lane narrows it, this test reds and the row has to move with it.
+    """
+    # ATTACHED em dash: read as a sign, so the unmarked side diverges.
+    assert v2._value_core("\u20145 minutes") == ("-", "5", "min")
+    assert v2._value_slot_divergence("\u20145 minutes of downtime",
+                                     "5 minutes of downtime")
+    # SPACED dash and a bullet marker: decoration, so the two sides agree. Both
+    # are the positive controls — the arm must not turn punctuation into a
+    # quantity in the shapes where the glyph is unambiguously markup.
+    assert not v2._value_slot_divergence("\u2014 5 minutes of downtime",
+                                         "5 minutes of downtime")
+    assert not v2._value_slot_divergence("\u2022 5 minutes of downtime",
+                                         "5 minutes of downtime")
+    # …and the sign the arm exists for is still kept: a dash does not hide a
+    # real sign change, in every spelling.
+    assert v2._value_slot_divergence("\u20145 minutes of downtime",
+                                     "-5 minutes of downtime") == (), (
+        "one minus, two spellings, must be ONE value — otherwise a truthful "
+        "point is dropped over typography")
+    assert v2._value_slot_divergence("-5 minutes of downtime",
+                                     "5 minutes of downtime")
+
+
+def test_the_changelog_records_the_flip_and_marks_the_old_claim_superseded():
+    """The durable record a later lane reads INSTEAD of the row (#10513 P3).
+
+    The 2026-10-30 `#9775` entry ends by asserting the row "keeps
+    `not-implemented` because … nothing in the write path *enforces* retention".
+    `#10360` put the enforcement in the write path, so that present-tense claim
+    went false and NOTHING in the tree marked it superseded — the defect this
+    test exists to keep closed. Two directions, both required:
+
+    * the old claim is still WORDS in the history (deleting it is how a later
+      lane loses the reason the residual list is read first), and it carries a
+      supersession marker naming `#10360`;
+    * a dated entry AFTER it records the flip with the row state the registry
+      actually carries, so the page and `config/v4-mechanisms.yml` cannot drift
+      apart in either direction.
+
+    Non-vacuous: on the pre-fix tree there is no marker and no such entry, so
+    both halves red.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    page = (root / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md"
+            ).read_text(encoding="utf-8")
+    claim = ("keeps `not-implemented` because")
+    assert claim in page, (
+        "the #9775 history paragraph was DELETED — it is the record of why the "
+        "residual list outranks the state word; mark it superseded instead")
+    claim_at = page.index(claim)
+    # the marker has to be bound to the claim it supersedes, not floating
+    # somewhere else in a 1,500-line page.
+    marker = "SUPERSEDED 2026-11-01 by `#10360`"
+    assert marker in page, (
+        f"the pre-#10360 claim is not marked superseded ({marker!r} absent) — a "
+        "reader arriving at state_value_carve_out still gets the old story")
+    assert claim_at < page.index(marker) < claim_at + 700, (
+        "the supersession marker is not adjacent to the claim it supersedes")
+    # …and the dated entry records the flip AFTER it, with the state the row
+    # actually carries. Asserting only "implemented appears somewhere" would
+    # pass against the row prose alone, so the entry's own heading is required.
+    entry = "## 2026-11-01 — the carve-out's enforcement half exists in the write path"
+    assert entry in page, (
+        "no dated entry records that #10360 landed and the row moved to "
+        "`implemented`")
+    assert page.index(entry) > claim_at, (
+        "the entry must come AFTER the history it supersedes (newest last)")
+    tail = page[page.index(entry):]
+    assert "`implemented`" in tail, tail[:400]
+    assert "execute_embed" in tail, tail[:400]
+    # the departure is pointed at where the decision lives, not asserted here
+    assert "6563672665" in tail, (
+        "the entry names the OVERRIDES departure but not the comment id on "
+        "#10360 that records it")
+    # and the residuals that are NOT enforced stay readable in the same entry
+    assert "REFUSE" in tail and "REPAIR" in tail, tail[:400]

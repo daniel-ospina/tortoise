@@ -676,6 +676,26 @@ mechanisms:
       rather than implied; a version's NON-zero groups are still judged
       (`2.10`/`2.11` refuses). Pinned by
       `test_a_version_trailing_zero_is_FORM_today_and_that_is_stated`.
+      (k) A DASH **ATTACHED** TO THE NUMERAL IS A SIGN IN EVERY SPELLING, WHICH
+      OVER-READS A BULLET GLYPH (#10513 review cycle-11 advisory, measured).
+      ⚠️ This arm is NOT local to this rule: `_keeps_numeric_edge` feeds
+      `_leading_symbol_run` -> `_strip_edges` -> `_guard_token_seq` ->
+      `_value_bindings`, whose OTHER consumers are the against-store fold path
+      (`distinguishing_difference` / `fold_allowed` / `supersede_allowed`,
+      pinned by `tests/test_never_across_fold_5080.py`), so the dash family is
+      now one minus there too. Direction is the safe one — `-5`/`–5`/`-5` agree,
+      so a truthful point is no longer dropped over a typographic minus — with
+      one measured over-read: an em dash written FLUSH against the numeral
+      (`—5 minutes`, punctuation used as a bullet glyph) reads as minus, so a
+      bulleted content line against an unbulleted quote diverges as a dropped
+      sign and is REFUSED. A SPACED dash (`— 5 minutes`) and `• 5 minutes` are
+      still decoration and agree. Named rather than fixed: telling a bullet from
+      a minus means judging the glyph's context, the same form-vs-value guess
+      that re-opened the `800millis`/`800ms` false refusal (cycle 3), and the
+      direction here is safe (an over-read WITHHOLDS a point and reports it; it
+      never writes a rewritten value). Pinned by
+      `test_a_dash_attached_to_the_numeral_is_a_sign_and_the_bullet_glyph_shape_is_stated`,
+      so a future lane that narrows it has to move this row.
       THE RENDER HALF is unchanged and stays pinned where #9775 left it.
       `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered into S1
       (`_granularity_text`), S2/S4 (`_render_master_core_only`,
