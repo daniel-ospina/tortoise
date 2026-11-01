@@ -27,6 +27,7 @@ Two things must stay true together, and they pull in opposite directions:
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -304,8 +305,42 @@ def test_the_allowlist_is_keyed_by_client_id_not_by_the_claimed_name(
         f"the allowlist admits an identity, not a string: {line!r}")
 
 
+# ════════════════════════════════════════════════════════════════════════
+# 4. The served PARAMS flag a stale page reads
+# ════════════════════════════════════════════════════════════════════════
+
+def test_the_page_carries_the_verification_flag_for_stale_consumers(
+        api_client, tmp_path, monkeypatch):
+    """`consent_page_html` sets `PARAMS.client_verified` beside `client_line`
+    and NOTHING in the current inline script reads it — a dead field unless its
+    contract is pinned, so it is pinned here rather than deleted (review P3
+    note): it is what a page served by a PREVIOUS deploy reads once
+    `client_line` is unknown to it, and it must never claim verification the
+    resolver did not grant.
+
+    Asserts BOTH arms in one test on purpose: a flag hard-wired to "1" would
+    pass a one-sided assertion while flattening every client into "verified".
+    """
+    tc, _ = api_client
+    monkeypatch.delenv(ATTESTED_CLIENTS_ENV, raising=False)
+    unbacked_html, _ = _page_and_line(api_client, tmp_path,
+                                      client={"client_name": "Claude"})
+    client_id = _register_client(tc, client_name="Claude")["client_id"]
+    monkeypatch.setenv(ATTESTED_CLIENTS_ENV, f'{{"{client_id}": "Claude"}}')
+    backed_html, _ = _page_and_line(api_client, tmp_path, client_id=client_id)
+
+    def _params(html: str) -> dict:
+        payload = html.split("const PARAMS = ", 1)[1].split(";\n", 1)[0]
+        return json.loads(payload.encode().decode("unicode_escape"))
+
+    assert _params(unbacked_html)["client_verified"] == "", (
+        "an unbacked client carried a truthy verification flag to the page")
+    assert _params(backed_html)["client_verified"] == "1", (
+        "an allowlisted client must carry the flag a stale page reads")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
-# 4. The CIMD half — metadata from an origin the client controls
+# 5. The CIMD half — metadata from an origin the client controls
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_a_CIMD_client_renders_its_HOST_and_never_its_document_name():
@@ -359,7 +394,7 @@ def test_a_cimd_looking_client_id_registered_by_DCR_is_not_backed():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. Fail-closed: a broken allowlist attests NOBODY
+# 6. Fail-closed: a broken allowlist attests NOBODY
 # ═══════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.parametrize("raw", [
@@ -387,7 +422,7 @@ def test_the_unbacked_sentence_withholds_the_name_and_keeps_the_handle():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 6. The allowlist is read per call (an operator change needs no restart)
+# 7. The allowlist is read per call (an operator change needs no restart)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_the_allowlist_is_read_at_call_time(monkeypatch):

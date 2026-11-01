@@ -2734,9 +2734,12 @@ def consent_page_html(*, client_name: str, client_id: str, params: dict,
 
     Returns ``(html, csp_nonce)``. The nonce gates the single inline <script>,
     so the caller can serve a script-src CSP that still permits the consent
-    logic. Attacker-controlled values (state / scope / resource / client_name)
-    are JSON-escaped for the <script> context, so a ``</script>`` payload cannot
-    break out of the block (PR #1264 review P1). Placeholder substitution is a
+    logic. Request-controlled values (state / scope / resource) are JSON-escaped
+    for the <script> context, so a ``</script>`` payload in any of them cannot
+    break out of the block (PR #1264 review P1); ``client_name`` is no longer a
+    raw attacker value — it is passed through `resolve_client_identity` below and
+    only an allowlist/CIMD-backed display name reaches the page (#8218), escaped
+    by the same single path. Placeholder substitution is a
     SINGLE pass, so a param value that *contains* a placeholder token is
     inserted verbatim rather than re-expanded (#6001 — see the comment at the
     substitution site for the failure it prevents).

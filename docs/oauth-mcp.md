@@ -413,6 +413,7 @@ inspection against the migration rather than by a test.
 |---|---|---|
 | `TORTOISE_OAUTH_CIMD` | `1` | `0`/`false`/`no`/`off` disables both the metadata flag and the fetch path |
 | `TORTOISE_OAUTH_CIMD_SAME_ORIGIN` | `1` | `0` relaxes "non-loopback `redirect_uris` must be same-origin with the client_id URL" — the single lever if a future client's document legitimately spans hosts |
+| `TORTOISE_OAUTH_ATTESTED_CLIENTS` | `{}` | **The consent screen's client-identity allowlist (#8218)** — JSON object `{"<client_id>": "<display name>"}`, read per call (no restart) by `tortoise/client_identity.py`. Keyed by `client_id`, NOT by the name a client claims, so a different client registering the same name stays unverified. It is the ONLY path by which a human-authored name reaches the page: without it every client renders as *"An unverified app (`<client_id>`)"* with the supplied `client_name` withheld, because DCR metadata is self-asserted (RFC 7591) and a name nothing backs is the phishing payload the screen exists to stop. Absence and malformed values are both fail-closed (attest nobody), so this is a labelling knob, not a safety one. An entry is a **code change** — review it like one. Declared `recommended` in `config/required-bindings.yml`. |
 
 Both knobs resolve through the shared env-truthiness contract (`tortoise/env_truthy.py`, #4097),
 so any truthy spelling (`1`/`true`/`yes`/`on`, any case) enables and any falsy spelling

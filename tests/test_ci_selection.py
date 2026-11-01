@@ -2126,6 +2126,40 @@ def test_a_consent_token_only_diff_runs_the_bridge_guard():
     )
 
 
+def test_a_client_identity_only_diff_runs_the_consent_identity_guards():
+    """#8218 review (finding 3): the identity RULE's own diff must select the
+    guards that pin it.
+
+    `tortoise/client_identity.py` owns the decision (which name, if any, the
+    consent screen may print). Before it was a `SOURCE_PATTERNS["api"]` entry it
+    matched no pattern and fell to `core`, where neither consent suite is
+    registered — so a diff that touched ONLY the rule ran no test that pins it,
+    while a diff to the render site that merely CALLS it (`tortoise/oauth.py`)
+    ran two. That is the #2938/#3154/#4367 silent-drop class, on exactly the file
+    a follow-up (the CIMD brand-prefix residual) would change.
+
+    Asserts the SELECTION, not the registration, so it reds on the pre-fix
+    patterns.
+    """
+    r = _sel(["tortoise/client_identity.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"], (
+        f"a client_identity.py-only diff selects {r['surfaces']} — both consent "
+        "guards are registered on `api`, and `core` does not run either"
+    )
+    assert "test_oauth_consent_client_identity_8218.py" in r["test_files"], (
+        "a client_identity.py-only diff does not run the count-based invariant "
+        "that owns this module (#8218)"
+    )
+    assert "test_oauth_mcp.py" in (set(r["test_files"])
+                                    | set(r.get("slow_selected") or ())), (
+        "a client_identity.py-only diff does not run tests/test_oauth_mcp.py, "
+        "whose renderer-contract assertions pin what the page prints (#8218). "
+        "It is a `slow_files` member, so it arrives through `slow_selected` — "
+        "checking `test_files` alone would call this covered when it is not"
+    )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 
