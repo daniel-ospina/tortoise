@@ -126,9 +126,12 @@ def belief_read_for(ranker, rows: list[dict]) -> tuple[bool | None, frozenset]:
       * ``None``  — the ranker is not one whose read we can observe (a
         duck-typed or caller-supplied object), or no rerank has run yet: make
         NO claim.
-      * ``False`` — the read failed or was never attempted (``signals_read``
-        is set only by a rerank whose fetch ANSWERED), so every score came
-        from a neutral fallback.
+      * ``False`` — the read failed, was never attempted, OR succeeded but
+        answered none of the rows on this page (an empty page intersection
+        collapses to ``(False, ∅)``, which is why an all-neutral page reads
+        ``not_consulted``), so every score came from a neutral fallback.
+        ``StateRanker``'s embedded branch sets ``signals_read`` unconditionally
+        (it reads the rows, not a graph) and relies on exactly that collapse.
       * ``True``  — the read answered, and ``answered_ids`` names WHICH rows it
         answered for. The verdict is NOT spread over the whole page: a row
         whose own id the read did not answer was scored from a default, and
