@@ -20287,6 +20287,25 @@ class FalkorProjection(
                     journal_first_materialized, journal_seq, label, rid):
                 return 0
             prop = _ENTITY_ID_PROP[label]
+            # #10389 review P2 — the #3860 ONE-TABLE rule, applied to the
+            # server-managed sets. ONE table names them per label and BOTH arms
+            # consume it: this replay fold and the live tenant route
+            # (`sdk._update_entity`). The asymmetry the review measured at the
+            # pre-fix head was exactly a two-arm set read by one arm — `:Source`
+            # defended on live AND replay, `:Event` on live only — so a
+            # journalled `EntityMutated {label: "Event", state: {story_arc: …}}`
+            # (produced by every pre-fix head's `update_entity`, ACCEPTED and
+            # persisted live) was re-materialised on the next `rebuild_all` onto
+            # the anchor §9.1(b) calls prose-free. The same argument the #3998
+            # `:Source` arm gives applies verbatim: "the bytes are already in
+            # the journal on any deployment that ran one", and a live-writer fix
+            # cannot retire them.
+            from .entities import (  # local: #2662 cycle
+                _SERVER_MANAGED_PROPS_BY_LABEL,
+                filter_source_props,
+            )
+
+            _denied: list = []
             if label == "Source":
                 # #3998: this arm replays a caller-supplied property map onto a
                 # `:Source` — so it is a WRITE PATH, and the declaration has to
@@ -20297,65 +20316,68 @@ class FalkorProjection(
                 # a copy" guarantee cannot be retired by fixing the live writer:
                 # the bytes are already in the journal on any deployment that
                 # ran one. Denied keys are DROPPED and WARNED, never silently.
-                from .entities import (
-                    _SOURCE_SERVER_MANAGED_PROPS,  # local: #2662 cycle
-                    filter_source_props,
-                )
-
                 state, _denied = filter_source_props(state)
-                # The SERVER-MANAGED keys are dropped too (#3998 review round 5).
-                # A `SourceCreated` record is the sole owner of the absent-raw
-                # state; there is no legitimate `EntityMutated` producer of it
-                # (the live route refuses it). Replaying one let a journal line
-                # written by an earlier head — e.g. the `rawState=None` CLEAR that
-                # round 3's open guard journalled — resurrect a permanently
-                # deleted raw on every rebuild. That is the silent loss this
-                # issue exists to prevent, on the one path whose comment already
-                # says a live-writer fix cannot retire the bytes.
-                # NOTE: `_SOURCE_IDENTITY_PROPS` is NOT dropped here. (This NOTE
-                # used to continue "although `entities._SOURCE_IDENTITY_PROPS`'
-                # docstring says it is" — #5196 removed that claim from the
-                # docstring, so the NOTE was citing text that no longer exists. It
-                # is corrected rather than left pointing at a vanished claim.)
-                # Making
-                # the code match that comment would change what an
-                # `EntityMutated` replay does with `url`/`canonicalUrl`/
-                # `urlAliases`, and `test_5026_b1_aboutdocument_replay_key_is_url_
-                # never_title` (a main-side pin) is exactly about the url replay
-                # key — so the change is deferred until it can be run against the
-                # docker lane rather than guessed at.
-                _sm = sorted(k for k in state if k in _SOURCE_SERVER_MANAGED_PROPS)
+            # The SERVER-MANAGED keys are dropped on EVERY label the table names
+            # (#3998 review round 5 for `:Source`; #10389 review P2 for the
+            # `:Event` half, whose deny set is `_EVENT_SERVER_MANAGED_PROPS`).
+            # A `SourceCreated` record is the sole owner of the absent-raw
+            # state; there is no legitimate `EntityMutated` producer of it
+            # (the live route refuses it). Replaying one let a journal line
+            # written by an earlier head — e.g. the `rawState=None` CLEAR that
+            # round 3's open guard journalled — resurrect a permanently
+            # deleted raw on every rebuild. That is the silent loss this
+            # issue exists to prevent, on the one path whose comment already
+            # says a live-writer fix cannot retire the bytes.
+            # NOTE: `_SOURCE_IDENTITY_PROPS` is NOT dropped here. (This NOTE
+            # used to continue "although `entities._SOURCE_IDENTITY_PROPS`'
+            # docstring says it is" — #5196 removed that claim from the
+            # docstring, so the NOTE was citing text that no longer exists. It
+            # is corrected rather than left pointing at a vanished claim.)
+            # Making
+            # the code match that comment would change what an
+            # `EntityMutated` replay does with `url`/`canonicalUrl`/
+            # `urlAliases`, and `test_5026_b1_aboutdocument_replay_key_is_url_
+            # never_title` (a main-side pin) is exactly about the url replay
+            # key — so the change is deferred until it can be run against the
+            # docker lane rather than guessed at.
+            _managed = _SERVER_MANAGED_PROPS_BY_LABEL.get(label)
+            if _managed:
+                _sm = sorted(k for k in state if k in _managed)
                 if _sm:
                     for k in _sm:
                         state.pop(k)
                     _denied = sorted(_denied + _sm)
-                if _denied:
-                    logger.warning(
-                        "rebuild: EntityMutated for :Source %r carried %d "
-                        "undeclared property name(s) %s — DROPPED, not replayed "
-                        "(#3998: the graph indexes the raw, it is not the raw "
-                        "store; event_id=%s)",
-                        rid, len(_denied), _denied, ev.get("event_id"))
-                if not state:
-                    # Nothing declared to apply. Still a MATCH, so the survivor
-                    # count reflects the record — but do not run an empty SET.
-                    # #4649: the identity is an OR-SET here too. A url-only
-                    # :Source carries no `id`, so an `id`-only probe would
-                    # report a false fold-miss for a record that DID match —
-                    # and #3998's filter arm is reachable by exactly that shape.
-                    matched = 0
-                    for match_prop in (prop, *secondary_entity_id_props(label)):
-                        r = self.g.query(
-                            f"MATCH (n:{label} {{{match_prop}:$id}}) "
-                            "RETURN count(n)",
-                            params={"id": rid},
-                        )
-                        matched = (r.result_set[0][0] or 0) if r.result_set else 0
-                        if matched:
-                            break
-                    if not matched:
-                        _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
-                    return matched or 0
+            if _denied:
+                logger.warning(
+                    "rebuild: EntityMutated for :%s %r carried %d "
+                    "undeclared property name(s) %s — DROPPED, not replayed "
+                    "(%s; event_id=%s)",
+                    label, rid, len(_denied), _denied,
+                    "#3998: the graph indexes the raw, it is not the raw "
+                    "store" if label == "Source" else
+                    "#10389/D1 (§9.1): the S1 narrative is text in Postgres, "
+                    "never a node property",
+                    ev.get("event_id"))
+            if _managed and not state:
+                # Nothing declared left to apply. Still a MATCH, so the
+                # survivor count reflects the record — but do not run an empty
+                # SET. #4649: the identity is an OR-SET here too. A url-only
+                # :Source carries no `id`, so an `id`-only probe would
+                # report a false fold-miss for a record that DID match —
+                # and #3998's filter arm is reachable by exactly that shape.
+                matched = 0
+                for match_prop in (prop, *secondary_entity_id_props(label)):
+                    r = self.g.query(
+                        f"MATCH (n:{label} {{{match_prop}:$id}}) "
+                        "RETURN count(n)",
+                        params={"id": rid},
+                    )
+                    matched = (r.result_set[0][0] or 0) if r.result_set else 0
+                    if matched:
+                        break
+                if not matched:
+                    _warn_entity_mutation_fold_miss(op, rid, label, ev.get("event_id"))
+                return matched or 0
             # #4649: OR-SET — primary key first, the label's secondary key on a
             # miss (a url-only :Source has no `id`). Without the fallback the
             # record folds to a MISS and `rebuild_all` reverts the write the

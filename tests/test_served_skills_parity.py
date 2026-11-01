@@ -57,6 +57,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -221,6 +222,32 @@ def test_4643_the_pin_is_exactly_what_the_generator_writes():
     assert MANIFEST.read_text(encoding="utf-8") == sp.dump_manifest(manifest), (
         "config/served-skills-upstream.yml is not what `--sync` generates — "
         "re-cut it with `uv run python tools/served_skills_parity.py --sync`")
+
+
+def test_4643_the_pin_header_names_every_artifact_the_same_command_writes():
+    """The header is the operator's COMMIT instruction — it must name the archive too.
+
+    Review finding F3 (P2) was that the write surface was stated more narrowly
+    than the code in three places; the generated pin header is the fourth and the
+    one an operator reads first. `sync()` re-cuts `website/skills/<name>.skill` as
+    part of the same derivation (`_rebuild_archives`), but the header said
+    "commit the mirrored skills together with this file". An operator who follows
+    that literally commits the served copy + pin and leaves the re-cut archive
+    UNCOMMITTED — which is byte-for-byte the stale-derived-artifact red this PR
+    exists to clear (`f045ac953`, and `cd7410b80` a day earlier), one gate later.
+
+    Asserted on the GENERATOR's output so the pin on disk cannot drift from it,
+    and on the pin on disk so a hand-edit cannot narrow the instruction either.
+    """
+    generated = sp.dump_manifest(sp.load_manifest(MANIFEST))
+    header = generated.split("\nupstream:")[0]
+    assert "--sync" in header, header
+    assert "archive" in header and ".skill" in header, (
+        "the pin's commit instruction does not name the derived .skill archives "
+        f"that `--sync` re-cuts, so following it commits a stale archive:\n{header}")
+    on_disk = MANIFEST.read_text(encoding="utf-8").split("\nupstream:")[0]
+    assert "archive" in on_disk and ".skill" in on_disk, (
+        "the committed pin's header is narrower than the derivation it documents")
 
 
 # ── the fail-closed directions (watched failing, not asserted in prose) ────
@@ -416,6 +443,14 @@ def test_4643_an_upstream_push_past_the_pin_is_the_stale_mirror(monkeypatch, tmp
     assert len(problems) == 1, problems
     assert "MIRROR IS STALE" in problems[0] and "tortoise-decide" in problems[0]
     assert "--sync" in problems[0]
+    # The printed remedy is what the operator actually acts on, so it must name
+    # every artifact the command it names rewrites: this PR made `--sync` re-cut
+    # the derived archives too, and a remedy that says "mirror + pin" leaves the
+    # re-cut archive uncommitted — the same red one gate later (review finding,
+    # F3 class: prose narrower than the write surface).
+    assert "archive" in problems[0] and ".skill" in problems[0], (
+        "the remedy prints a command whose derived output it does not tell the "
+        f"operator to commit: {problems[0]}")
 
 
 def test_4643_an_upstream_commit_that_cannot_change_what_we_serve_is_not_drift(
@@ -582,6 +617,16 @@ def test_4643_sync_dry_run_writes_nothing(monkeypatch, tmp_path):
 
 # ── #10437: `--sync` must also re-derive the `.skill` DOWNLOAD archives ────
 
+def _archived_names(rows) -> list[str]:
+    """The `<relpath>` half of a `SyncResult.archives` row.
+
+    Rows are `<relpath> (<bytes> bytes)` (see `_rebuild_archives`): the byte
+    count is operator detail, the relpath is the identity every assertion here
+    compares. One helper so the format is spelled once.
+    """
+    return [row.split(" (", 1)[0] for row in rows]
+
+
 def test_10437_the_archive_dir_has_exactly_one_home():
     """The archive directory must be the one the BUILDER owns (#10437 review).
 
@@ -664,7 +709,7 @@ def test_10437_sync_rebuilds_the_skill_archives_from_the_bytes_it_wrote(
 
     assert len(result.changed) == len(manifest["skills"]), result.changed
     # `changed` keeps meaning "served copies" — the archive is reported apart.
-    rebuilt = {line.split(" (", 1)[0] for line in result.archives}
+    rebuilt = set(_archived_names(result.archives))
     assert rebuilt == {str(sp.ARCHIVES_REL / f"{name}.skill")
                        for name in manifest["skills"]}, result.archives
     for name, entry in manifest["skills"].items():
@@ -815,7 +860,7 @@ def test_10437_dry_run_names_the_archives_the_real_run_rewrites(
     preview = sp.sync(root, pin, attempts=1, backoff=0, dry_run=True)
 
     assert len(preview.changed) == len(manifest["skills"]), preview.changed
-    assert {line.split(" (", 1)[0] for line in preview.archives} == expected, (
+    assert {*_archived_names(preview.archives)} == expected, (
         "the dry run must name every archive the real run would rebuild",
         preview.archives)
     for name, payload in stale.items():
@@ -824,7 +869,7 @@ def test_10437_dry_run_names_the_archives_the_real_run_rewrites(
 
     real = sp.sync(root, pin, attempts=1, backoff=0)
 
-    assert {line.split(" (", 1)[0] for line in real.archives} == expected, (
+    assert {*_archived_names(real.archives)} == expected, (
         real.archives)
     for name, entry in manifest["skills"].items():
         _, payload = _archive_payload(root, name)
@@ -902,6 +947,261 @@ def _sync_fixture(tmp_path, monkeypatch, head: str, upstream_bytes: dict[str, by
     root = tmp_path / "root"
     _pin_upstream(monkeypatch, manifest, head, upstream_bytes)
     return pin, manifest, root
+
+
+def _make_archive_stale(root, name: str,
+                        older: bytes = b"---\nname: older\n---\n# the OLDER served copy\n"):
+    """Leave `name`'s archive holding bytes cut from `older`, served copy intact.
+
+    The archive is a byte function of the served copy, so an archive that differs
+    from it can only come from a PREVIOUS source revision — the stale-derived-
+    artifact state `--sync` exists to repair (`f045ac953`, `cd7410b80`). It is
+    also the only state in which a re-cut is OBSERVABLE: writing from an
+    already-matching source writes nothing
+    (`build_skill_archives.write_stale_archives`).
+    """
+    sys.path.insert(0, str(REPO))
+    from tools import build_skill_archives as bsa
+
+    served = bsa.source_path(name, root)
+    current = served.read_bytes()
+    served.write_bytes(older)
+    try:
+        stale = bsa.build(name, root=root)
+    finally:
+        served.write_bytes(current)
+    archive = bsa.archive_path(name, root)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(stale)
+
+
+def test_4643_sync_re_cuts_the_derived_skill_archives_it_invalidates(monkeypatch, tmp_path):
+    """`--sync` must leave a tree that passes EVERY gate its own bytes feed.
+
+    The served copy is the `.skill` archive's only source, so a re-derivation
+    that does not re-cut the archive leaves a stale derived artifact behind —
+    and the operator followed the documented remedy, so nothing in the output
+    said so. Measured twice in two days, same test each time: cd7410b80 (#9750
+    round 3) and f045ac953 (#10423).
+
+    Vacuity: pre-fix `sync()` never touched `website/skills/*.skill`, so the
+    archive below keeps the bytes of the OLD served copy and both assertions
+    fail. The archive is created from the stale copy BEFORE the sync, which is
+    what makes this a real drift rather than a missing file.
+    """
+    sys.path.insert(0, str(REPO))
+    from tools import build_skill_archives as bsa
+
+    src = REPO / sp.MANIFEST_REL
+    pin = tmp_path / "pin.yml"
+    shutil.copyfile(src, pin)
+    manifest = sp.load_manifest(pin)
+    root = tmp_path / "root"
+    for entry in manifest["skills"].values():
+        dest = root / entry["served_path"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"---\nname: stale\n---\n# the OLD served copy\n")
+    # The archives exist and are CURRENT for the old copy — the state a previous
+    # sync (or a previous commit) leaves behind.
+    assert sorted(bsa.write_stale_archives(root)) == sorted(bsa.SKILL_NAMES), "fixture archives"
+
+    upstream_bytes = {e["upstream_path"]: b"---\nname: shipped\n---\n# NEW upstream\n"
+                      for e in manifest["skills"].values()}
+    _pin_upstream(monkeypatch, manifest, "c" * 40, upstream_bytes)
+
+    result = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert sorted(_archived_names(result.archives)) == sorted(
+        f"{sp.ARCHIVES_REL}/{n}.skill" for n in bsa.SKILL_NAMES), (
+        "sync re-derived every served copy, so every archive is stale: "
+        f"rebuilt {result.archives!r}")
+    for name in bsa.SKILL_NAMES:
+        served = bsa.source_path(name, root).read_bytes()
+        with zipfile.ZipFile(bsa.archive_path(name, root)) as zf:
+            payload = zf.read(f"{name}/SKILL.md")
+        assert payload == served, f"{name}.skill still holds the pre-sync bytes"
+    # Both gates the tree ships with now agree — the actual defect was that
+    # `--check` (parity) was green while the archive arm was red.
+    assert sp.check_local(sp.load_manifest(pin), root) == [], "sync output must pass parity"
+    assert bsa.write_stale_archives(root) == [], "sync output must leave no stale archive"
+
+
+def test_4643_sync_re_cuts_a_stale_archive_whose_served_copy_it_did_not_write(
+        monkeypatch, tmp_path):
+    """The write surface is "every stale archive under `root`", not "what I wrote".
+
+    Review finding F3: the code hands `_rebuild_archives` every skill in the
+    manifest, while the docstring/field/usage prose said "the skills it wrote".
+    The wider behaviour is the one this PR wants (`--sync` leaves a tree that
+    passes every gate, including an archive left stale by an earlier commit), so
+    the prose was corrected and the behaviour is pinned here.
+
+    The discriminating half: this sync writes NOTHING (`result.changed` is
+    empty, the served copies already equal upstream), so a narrowing to the
+    `changed` names — the other way to reconcile code and prose, explicitly
+    considered — would leave `result.archives` empty and red this test.
+    """
+    sys.path.insert(0, str(REPO))
+    from tools import build_skill_archives as bsa
+
+    current = b"---\nname: mid\n---\n# upstream\n"
+    pin, manifest, root = _sync_fixture(
+        tmp_path, monkeypatch, "e" * 40,
+        {e["upstream_path"]: current
+         for e in sp.load_manifest(REPO / sp.MANIFEST_REL)["skills"].values()})
+    for entry in manifest["skills"].values():
+        served = root / entry["served_path"]
+        served.parent.mkdir(parents=True, exist_ok=True)
+        served.write_bytes(current)
+    for name in bsa.SKILL_NAMES:
+        _make_archive_stale(root, name)
+
+    result = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert result.changed == [], (
+        f"fixture: the served copies are current, so this sync writes nothing: {result.changed!r}")
+    assert sorted(_archived_names(result.archives)) == sorted(
+        f"{sp.ARCHIVES_REL}/{n}.skill" for n in bsa.SKILL_NAMES), (
+        "a stale archive is re-cut even when its own served copy was not written; "
+        f"rebuilt {result.archives!r}")
+    assert bsa.write_stale_archives(root) == [], "sync left a stale archive behind"
+
+
+def test_4643_sync_dry_run_rebuilds_no_archive(monkeypatch, tmp_path):
+    """`--dry-run` wrote nothing, so it re-cuts nothing — but it NAMES the re-cuts.
+
+    ⛔ NON-VACUITY (review finding, P1). This test must RED on the mutant that
+    deletes the guard it exists to pin — `sync()`'s `dry_run=` argument to
+    `_rebuild_archives` (`tools/served_skills_parity.py`). The previous version
+    could not: it drove `_sync_fixture`, which creates neither `root` nor any
+    served copy, so the archive step hit `if not source_path(name, root).is_file():
+    continue` for every name, returned `[]`, never reached
+    `target.parent.mkdir(...)`, and satisfied both assertions with the guard
+    REMOVED.
+
+    Two things make a write observable here, and both are required:
+
+    1. the served copies EXIST and differ from upstream, so the sync has work;
+    2. the archives on disk are STALE **relative to those served copies** (cut
+       from an older copy), which is the one state a guard-less dry run would
+       repair — the archive step is byte-idempotent, so served copies that
+       already agree with their archive would leave the mutant invisible even
+       with (1).
+
+    State (2) is not contrived: it is the stale-derived-artifact state this PR
+    exists to repair (`f045ac953`, and `cd7410b80` a day earlier) — the served
+    copy re-derived while `website/skills/<name>.skill` was left behind.
+
+    ⛔ #10437/#10423 merge: the REPORT half is the reverse of what this case used
+    to assert (`result.archives == ()`). Silence is `--dry-run` UNDER-reporting
+    the derived artifacts, which is the documented remedy's own failure mode —
+    an operator told "nothing to do" about a stale archive. The two halves are
+    separable and both are pinned: the write half below (bytes on disk cannot
+    move) and the report half (the set a real run then re-cuts).
+    """
+    sys.path.insert(0, str(REPO))
+    from tools import build_skill_archives as bsa
+
+    pin, manifest, root = _sync_fixture(
+        tmp_path, monkeypatch, "d" * 40,
+        {e["upstream_path"]: b"# fresh upstream\n"
+         for e in sp.load_manifest(REPO / sp.MANIFEST_REL)["skills"].values()})
+    # (1) served copies present, one revision behind upstream.
+    for entry in manifest["skills"].values():
+        served = root / entry["served_path"]
+        served.parent.mkdir(parents=True, exist_ok=True)
+        served.write_bytes(b"---\nname: served\n---\n# the CURRENT served copy\n")
+    # (2) every archive is stale against its served copy: cut from OLDER bytes.
+    for name in bsa.SKILL_NAMES:
+        _make_archive_stale(root, name)
+    before = {n: bsa.archive_path(n, root).read_bytes() for n in bsa.SKILL_NAMES}
+
+    result = sp.sync(root, pin, attempts=1, backoff=0, dry_run=True)
+
+    assert result.changed, "fixture: upstream bytes must differ from the served copies"
+    assert sorted(_archived_names(result.archives)) == sorted(
+        f"{sp.ARCHIVES_REL}/{n}.skill" for n in bsa.SKILL_NAMES), (
+        "--dry-run must NAME the archives a real run re-cuts — from the bytes it "
+        f"fetched, not from the pre-sync mirror: {result.archives!r}")
+    for name in bsa.SKILL_NAMES:
+        assert bsa.archive_path(name, root).read_bytes() == before[name], (
+            f"--dry-run rewrote {name}.skill from the served copy")
+        assert bsa.source_path(name, root).read_bytes() == (
+            b"---\nname: served\n---\n# the CURRENT served copy\n"), (
+            f"--dry-run rewrote the served copy of {name}")
+
+
+def test_4643_a_failing_archive_write_does_not_abort_a_half_done_sync(
+        monkeypatch, tmp_path, capsys):
+    """`--sync` is best-effort on the archives — and the guard must be REACHABLE.
+
+    ⛔ NON-VACUITY (review finding, P2). The docstring promises that a checkout
+    that cannot re-cut the archives "must not make `--sync` fail AFTER it has
+    already written the served copies and the pin", and an earlier revision did
+    not implement it: the builder was resolved outside the `try` and the write
+    ran outside any guard, so `ENOSPC`/`EACCES` propagated straight out of
+    `sync()` after the pin was written. Delete the guard and this test errors
+    with the injected `OSError`.
+
+    The swallow is only acceptable because it is LOUD: the warning has to reach
+    stderr, or an operator following the documented remedy commits a stale
+    archive behind a silent exit 0.
+
+    ⛔ #10437/#10423 merge: the stub fails at `build_from_bytes`, which is where
+    the merged archive step BUILDS (from the payload the sync fetched). It used
+    to fail at `write_stale_archives`; a stub still armed on that name would
+    raise `AttributeError` from the wrong seam and pass this test for a reason
+    its own docstring does not claim.
+    """
+    pin, _manifest, root = _sync_fixture(
+        tmp_path, monkeypatch, "a" * 40,
+        {e["upstream_path"]: b"# fresh upstream\n"
+         for e in sp.load_manifest(REPO / sp.MANIFEST_REL)["skills"].values()})
+
+    names = ("how-to-use-tortoise", "tortoise-decide", "tortoise-file-finding")
+
+    class _FailingWriter:
+        SKILL_NAMES = names
+
+        @staticmethod
+        def build_from_bytes(name, payload):
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sp, "_archive_builder", lambda: _FailingWriter)
+
+    result = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert result.changed, "fixture: upstream must differ from the served copies"
+    assert result.archives == ()
+    assert sp.load_manifest(pin)["upstream"]["commit"] == "a" * 40, (
+        "the pin is written BEFORE the archives, so a failed re-cut must not undo "
+        "or roll back a completed sync")
+    err = capsys.readouterr().err
+    assert "FAILED" in err and "build_skill_archives.py" in err, (
+        f"a skipped archive re-cut must say so on stderr: {err!r}")
+
+
+def test_4643_an_unavailable_archive_builder_warns_instead_of_silently_skipping(
+        monkeypatch, tmp_path, capsys):
+    """A builder that cannot be loaded skips the step AND says so (#10423 review).
+
+    ⛔ NON-VACUITY: pre-fix the filter resolved the builder first, so `None`
+    produced an empty `wanted` and an early `return ()` with no diagnostic at
+    all — the operator saw `re-derived N served skill(s)`, exit 0, and a stale
+    archive. Deleting the warning reds this test.
+    """
+    pin, _manifest, root = _sync_fixture(
+        tmp_path, monkeypatch, "b" * 40,
+        {e["upstream_path"]: b"# fresh upstream\n"
+         for e in sp.load_manifest(REPO / sp.MANIFEST_REL)["skills"].values()})
+    monkeypatch.setattr(sp, "_archive_builder", lambda: None)
+
+    result = sp.sync(root, pin, attempts=1, backoff=0)
+
+    assert result.archives == ()
+    err = capsys.readouterr().err
+    assert "NOT re-cut" in err and "build_skill_archives.py" in err, (
+        f"an unavailable builder must not skip the archives silently: {err!r}")
 
 
 def test_4643_sync_to_a_non_head_commit_is_not_a_pin_its_own_check_rejects(
