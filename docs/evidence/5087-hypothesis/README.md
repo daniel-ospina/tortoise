@@ -157,6 +157,12 @@ one *observed* fact **machine-enforced**:
    holds to the same metric code.
 7. **The log did not say which probe revision produced it** — the log's `head=a1075dfc` names the
    commit the bars were read from, not the tool revision; this README now states it (`325f2a1a5`).
+8. **The log was written ONCE, at the end** — every line was buffered in memory and the file was
+   written only on a clean exit, so an aborted run left no file at all. That is precisely why replay
+   A's output does not exist. Each line is now written and flushed as it is logged, so a run that
+   dies mid-way still leaves the sessions it already measured on disk. The one-measured-log refusal
+   is unaffected (the file is still created once; it just no longer needs the process to co-operate).
+   **No number moves** — the measured log is unchanged and was already complete.
 
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
 repeated to get a friendlier number (the probe now refuses to overwrite the log at all).
@@ -173,6 +179,24 @@ registered wording asks for. The measured run predates that defect, so its `14 o
 
 ## Reproduce
 
+⛔ **The command below is admitted only at `a1075dfc2` — the head the measured run was taken at**
+(the commit `--prereg` names, and the `head=` the committed log prints). The pin refuses a head
+whose diff from `source_sha` (`718ee3b49`) touches any file outside `docs/`, `tools/` and `tests/`,
+and `config/` moves on nearly every merge — this PR itself touches two of those files — **so at a
+later head the first command REFUSES at `exit 3`, by design**, naming the offending files. That
+refusal is the pin working, not a broken checkout: it is what stops *"reproduce it at whatever head
+is handy"* from becoming *"reproduce it with code the measurement never ran"*. Reproducing at a
+later head therefore needs a **new pre-registration** (that is the cost of the frozen §6 pin, and
+it is the property that makes the recorded bars untunable).
+
+Check the admission first — **empty output means the pin admits this head**:
+
+```bash
+git diff --name-only 718ee3b497539540ea10269e7ccfe9b0867d010f HEAD   # must print nothing
+```
+
+Then, at an admitted head, with a private FalkorDB lane:
+
 ```bash
 uv run python tools/test_lane.py run -- true          # a private FalkorDB lane
 export TORTOISE_DB_URI=... TORTOISE_TEST_DOCKER_PORT=... TORTOISE_TEST_DOCKER_PASSWORD=...
@@ -182,6 +206,9 @@ uv run python tools/s3_prior_ablation.py \
     --out "docs/evidence/5087-hypothesis/s3-ablation-$(git rev-parse --short HEAD).log"
 uv run python tools/capstone_preregistration_check.py --dir docs/evidence/5087-hypothesis
 ```
+
+The log is written **incrementally** (every line flushed as it is logged), so a run that aborts
+mid-way still leaves the sessions it already measured on disk — the gap that lost replay A's output.
 
 `tools/s3_prior_ablation.py` reads its bars out of the **pre-registration commit**
 (`git show <sha>:docs/evidence/5087-hypothesis/PRE-REGISTRATION.md`), re-derives the corpus

@@ -34,6 +34,11 @@ was too wide: the three artifacts that compute every reported number live under 
 The node census is ``docs/evidence/7949-capstone/probes/capstone_measure.py::census``, imported
 READ-ONLY and reused; this module does not implement a second census (#10463 forbids one).
 
+THE LOG IS WRITTEN INCREMENTALLY (``open_log``): each line is flushed as it is logged, so a run
+that aborts mid-way still leaves the sessions it already measured on disk. The pre-fix probe
+buffered every line and wrote the file once at the end, which is why replay A's output does not
+exist at all (README, "Disclosure — replay A").
+
 Exit codes: 0 = both arms measured and a verdict was written; 3 = REFUSED / ARM-INVALID (no
 verdict, never a 0); 2 = the invocation itself is wrong (e.g. an ``--out`` escaping the evidence
 bundle).
@@ -48,7 +53,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import NoReturn
+from typing import Callable, NoReturn, TextIO
 
 ROOT = Path(__file__).resolve().parent.parent
 # The corpus package is imported from the repo root, so the root must be on sys.path when this
@@ -608,6 +613,32 @@ def inside_evidence(path: Path) -> bool:
     return True
 
 
+def open_log(path: Path) -> tuple[TextIO, Callable[[str], None]]:
+    """Open the log and return ``(handle, write_line)`` — the log is written INCREMENTALLY.
+
+    The measured run's output has to be storable **without the process's cooperation**. This bundle
+    is the receipt of what the alternative costs: replay A aborted mid-run on a probe defect, and
+    because the pre-fix probe accumulated every line in memory and wrote the file ONCE at the end
+    (`out_path.write_text`), that abort left *nothing* — no file at all — so its per-session noise
+    distribution is unreproducible and claimed nowhere (README, "Disclosure — replay A").
+
+    So each line is written and FLUSHED as it is logged: a killed process loses at most the line it
+    was in the middle of, and the sessions already measured survive on disk. The durable write is
+    the log's own definition of done, exactly as ``METRIC_ARTIFACT_PREFIXES`` is the code's.
+
+    The one-measured-log refusal is unaffected: the caller creates the file once (it has already
+    refused an existing ``--out``), it just no longer depends on a clean exit to have a body.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w", encoding="utf-8")
+
+    def write_line(message: str) -> None:
+        handle.write(message + "\n")
+        handle.flush()
+
+    return handle, write_line
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Two-arm S3 prior-injection ablation (#10463).")
     ap.add_argument("--prereg", required=True,
@@ -662,10 +693,12 @@ def main(argv: list[str] | None = None) -> int:
     sessions, corpus_hash = corpus_state(pins)
 
     lines: list[str] = []
+    handle, write_line = open_log(out_path)
 
     def log(message: str) -> None:
         lines.append(message)
         print(message, flush=True)
+        write_line(message)
 
     log("=== s3-ablation (#10463) — does telling extraction what exists reduce what it creates? ===\n")
     log(f"prereg={args.prereg} (bars read from the COMMIT, not the worktree)")
@@ -785,8 +818,7 @@ def main(argv: list[str] | None = None) -> int:
         verdict_line = f"{verdict_line} ({result['qualifier']})"
     log(f"VERDICT: {verdict_line}")
     log(f"WHY: {result.get('why')}")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines) + "\n")
+    handle.close()
     print(f"s3-ablation: wrote {out_path.relative_to(ROOT)}")
     if args.json:
         print(json.dumps({"arms": arms, "result": result}, indent=2, default=str))

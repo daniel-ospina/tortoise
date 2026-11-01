@@ -545,7 +545,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 **✅ `DECIDED (narrowed)` — the owner ruled:** the lookup sits **after** extraction, and it is consumed by the salience judgment and by S3 only. **Extraction does not consume it.** This follows from D4's own stated reason — the extraction consumer was never covered by it.
 
 >
-> ✅ **Note — the lookup bug `#4511` does not gate this design.** It bit *when the lookup sat before extraction* (`_fts_rows` read `r.get("kind")` while the callee emits `point_kind`, so every prior's type returned **blank**). **The lookup sits in S3 (§4.2), so the bug is not a dependency of this design.** ⚠️ **Still unmeasured (§14):** whether giving extraction the neighbourhood ever reduced what it created.
+> ✅ **Note — the lookup bug `#4511` does not gate this design.** It bit *when the lookup sat before extraction* (`_fts_rows` read `r.get("kind")` while the callee emits `point_kind`, so every prior's type returned **blank**). **The lookup sits in S3 (§4.2), so the bug is not a dependency of this design.** ✅ **MEASURED 2026-11-01 (§10, `#10463`) — and the answer is NO by the margin the design assumed:** giving extraction the neighbourhood cut created nodes **284 → 247 (−13 %)** against a pre-registered **≥ 25 %** bar, while recovering **fewer** real facts (47 → 40) and **fewer** operator edges (171 → 139) — a smaller extraction, not a leaner one. Bundle: `docs/evidence/5087-hypothesis/`.
 
 ### S2.1 — EXTRACT
 
@@ -1755,7 +1755,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 ## 14. Not established — do not treat as known
 
-- **Whether the neighbourhood lookup changes extraction's output is UNMEASURED — and it is moot by design.** The lookup is not load-bearing: S3 resolves the entity authoritatively instead (§4.2), so extraction does not need to emit *"attach to A"*. **What IS still unmeasured: whether S3's disambiguation is accurate**, and the cheap test is to replay a handful of real sessions **by hand** and show the candidates matched vs created (small-sample-first).
+- **Whether the neighbourhood lookup changes extraction's output is MEASURED — it does not, by the margin the design assumed (§10, `#10463`).** Created nodes fell **284 → 247 (−13 %)** against the pre-registered **≥ 25 %** bar, with both guards — recovered real facts (47 → 40) and operator edges (171 → 139) — falling in the same direction, so *"extraction no longer consumes the lookup"* is now backed by a number rather than by an argument. The lookup is not load-bearing either: S3 resolves the entity authoritatively instead (§4.2), so extraction does not need to emit *"attach to A"*. **What IS still unmeasured: whether S3's disambiguation is accurate**, and the cheap test is to replay a handful of real sessions **by hand** and show the candidates matched vs created (small-sample-first).
 - The `~8.6 Objects/session` figure is **inferred**, not directly measured — `extractedFrom` points at `:Source`, which carries no `id`, so Objects could not be grouped per session.
 - **Nothing measures how much of the surviving 2,963 non-`the` Objects is still junk** — `PR #465` proves a non-`the` Object can also be a bare reference.
 - The `^the <X>` **pattern** is a **floor**, not the whole fix.

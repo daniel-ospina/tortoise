@@ -361,3 +361,133 @@ def test_a_changed_metric_artifact_refuses_the_run(probe, monkeypatch, tmp_path)
     other_repo, source_sha, head = build("other", "tools/another_probe.py")
     monkeypatch.setattr(probe, "ROOT", other_repo)
     assert probe.assert_source_sha(source_sha, head) == ["tools/another_probe.py"]
+
+
+# ── the log has to survive the run (review r4 P2-3) ────────────────────────
+#
+# The measured run's OUTPUT — not only its definition — has to be storable without the process's
+# cooperation. The pre-fix probe buffered every line and wrote the file once, at the end, so an
+# abort mid-run left no file at all. That is exactly what happened to replay A: its per-session
+# noise distribution exists nowhere, which is why the bundle's ±31 % band rests on two quoted pairs.
+
+
+def test_an_aborted_run_leaves_the_sessions_it_already_measured(probe, tmp_path):
+    """Behavioural: lines are on DISK before the run finishes, without closing the handle.
+
+    The `try/except` below stands in for the abort (replay A died on `arm["arm"]` indexing a string
+    mid-run). Nothing closes the handle, so a file that only gets its body at exit reads empty here.
+    """
+    path = tmp_path / "nested" / "s3-ablation.log"
+    handle, write_line = probe.open_log(path)
+    try:
+        write_line("--- ARM OFF — fresh graph s3ablate_test_off ---")
+        write_line("  [OFF] created extraction nodes: 45")
+        raise RuntimeError("the run aborted mid-arm")
+    except RuntimeError:
+        pass
+    assert path.read_text().splitlines() == [
+        "--- ARM OFF — fresh graph s3ablate_test_off ---",
+        "  [OFF] created extraction nodes: 45",
+    ], "an abort must leave the completed sessions behind, not an empty or missing log"
+    handle.close()
+
+
+def test_the_log_is_not_written_once_at_the_end():
+    """The wiring, pinned on the source: `main`'s log() must go through the incremental writer.
+
+    The writer lives in `main`'s closure and needs a live graph and a model key to exercise, so the
+    end-of-run-only write is pinned here — that single one-shot write IS the defect (r4 P2-3): it is
+    the reason an aborted run leaves nothing at all.
+    """
+    import re
+
+    source = PROBE.read_text()
+    assert not re.search(r"out_path\.write_text\(", source), (
+        "a one-shot write at the end loses every measured session")
+    assert "open_log(out_path)" in source, "the log must be opened before the arms run"
+
+
+# ── the documented reproduce path must be executable where it is documented (r4 P2-2) ──
+#
+# `is_evidence_or_tool` refuses anything outside `docs/`, `tools/`, `tests/`, so the `## Reproduce`
+# command is admitted only at a head whose diff from the pinned `source_sha` touches nothing else.
+# `config/` moves on nearly every merge — this PR touches two of those files itself — so at the head
+# the bundle lands on, the FIRST command a reader types refused at exit 3 and read as a broken
+# checkout. The docs and the pin have to agree about that, and the agreement has to be pinned.
+
+#: The head the measured run was taken at: the commit `--prereg` names, which is also the `head=`
+#: the committed log prints. `718ee3b` (the pins' `source_sha`) is its parent-side pin.
+MEASURED_HEAD = "a1075dfc2"
+
+
+def test_the_reproduce_section_states_the_head_its_pin_admits(probe):
+    readme = (probe.EVIDENCE_DIR / "README.md").read_text()
+    assert "## Reproduce" in readme, "the bundle must document how to reproduce it"
+    section = readme.split("## Reproduce", 1)[1]
+    assert MEASURED_HEAD in section, (
+        "the reproduce command is admitted only at the head its `source_sha` pins — the section "
+        "must name it (r4 P2-2)")
+    assert "config/" in section and "exit 3" in section, (
+        "the section must say that a later head where non-evidence files (e.g. `config/`) moved is "
+        "REFUSED at exit 3 BY DESIGN — otherwise the refusal reads as a broken checkout")
+
+
+def test_a_later_head_that_moved_a_config_file_refuses_the_pin(probe, monkeypatch, tmp_path):
+    """The rule the docs now state is the rule the code enforces (temp repos, one variable).
+
+    `config/` is not production extraction code, but it is outside the allowlist, so the pin refuses
+    it: the run must be reproduced at the pinned head. Pinning the behaviour keeps the docs honest.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "probe-test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "probe-test@example.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "probe-test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "probe-test@example.invalid")
+
+    def build(name: str, touched: str) -> tuple[Path, str, str]:
+        repo = tmp_path / name
+        (repo / "tools").mkdir(parents=True, exist_ok=True)
+        (repo / "config").mkdir(parents=True, exist_ok=True)
+        (repo / "tools/s3_prior_ablation.py").write_text("# probe\n")
+        (repo / "config/ci-surfaces.yml").write_text("core: []\n")
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "baseline")
+        source_sha = _git(repo, "rev-parse", "HEAD")
+        target = repo / touched
+        target.parent.mkdir(parents=True, exist_ok=True)
+        prior = target.read_text() if target.exists() else ""
+        target.write_text(prior + "# moved after the pin\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "move one file")
+        return repo, source_sha, _git(repo, "rev-parse", "HEAD")
+
+    config_repo, source_sha, head = build("config", "config/ci-surfaces.yml")
+    monkeypatch.setattr(probe, "ROOT", config_repo)
+    with pytest.raises(SystemExit) as refusal:
+        probe.assert_source_sha(source_sha, head)
+    assert refusal.value.code == 3
+
+    docs_repo, source_sha, head = build("docs", "tools/another_probe.py")
+    monkeypatch.setattr(probe, "ROOT", docs_repo)
+    assert probe.assert_source_sha(source_sha, head) == ["tools/another_probe.py"]
+
+
+# ── the write-back must not leave the doc contradicting its own measurement (r4 P2-1) ──
+
+
+def test_the_architecture_doc_no_longer_calls_the_question_unmeasured(probe):
+    """§10 reported the falsification, but §4.1's note still pointed at §14 as "still unmeasured".
+
+    `#10463`'s contract says a falsified hypothesis is never re-run until it agrees, so the design
+    doc is what has to settle it: :548 routed the next reader to :1758's "UNMEASURED", i.e. to the
+    state that produced this lane. Both must carry the figure now, and §14 must keep the half that
+    really is still open (S3's disambiguation accuracy).
+    """
+    doc = (ROOT / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md").read_text()
+    assert "**Still unmeasured (§14):** whether giving extraction the neighbourhood" not in doc, (
+        "§4.1's note still sends the reader to §14 for an open question this PR measured")
+    assert "Whether the neighbourhood lookup changes extraction's output is UNMEASURED" not in doc, (
+        "§14 still declares UNMEASURED what §10 reports as measured")
+    assert "284" in doc and "247" in doc, "the measured figures must live where the claim was"
+    assert "whether S3's disambiguation is accurate" in doc, (
+        "the half that really IS still unmeasured must survive the edit")
