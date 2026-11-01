@@ -449,10 +449,15 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None, **_ignored):
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+                                   _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = "empty"
                     read_status_out[RESIDENCY_FIELD] = RESIDENCY_NOT_HOT
+                # #8447: a faithful fake records the truncation verdict too —
+                # the real read path sets it on EVERY return path.
+                if _truncation_out is not None:
+                    _truncation_out["truncated"] = False
                 return [{"id": "p1", "content": "alpha", "pointKind": "statement"}]
 
             def close(self):
@@ -475,8 +480,15 @@ class TestHostedSearchRoute:
         hosted_api = self._patch_route(monkeypatch)
         self._flags(monkeypatch, status=False, residency=False)
         body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
+        # #8447: `truncated` is NOT flag-gated (it costs two len() calls and a
+        # default-off marker preserves the silent subset), so it is the one key
+        # present here. The property this test guards — `status` and `residency`
+        # absent by default — is unchanged.
         assert body == {"results": [{"id": "p1", "content": "alpha",
-                                     "kind": "statement"}], "count": 1}
+                                     "kind": "statement"}], "count": 1,
+                        "truncated": False}
+        assert "status" not in body
+        assert RESIDENCY_FIELD not in body
 
     def test_the_residency_field_rides_the_response_when_enabled(
             self, monkeypatch):
@@ -507,11 +519,15 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _DownSDK:
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None, **_ignored):
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+                                   _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     # the store is down: the SDK sets `degraded` and the
                     # declaration is never read, so no residency key.
                     read_status_out["status"] = "degraded"
+                # #8447: an UNREAD store is not a complete empty answer.
+                if _truncation_out is not None:
+                    _truncation_out["truncated"] = True
                 return []
 
             def close(self):
@@ -531,9 +547,13 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _DownSDK:
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None, **_ignored):
+            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+                                   _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = "degraded"
+                # #8447: see above — unread, never "complete".
+                if _truncation_out is not None:
+                    _truncation_out["truncated"] = True
                 return []
 
             def close(self):
@@ -544,7 +564,11 @@ class TestHostedSearchRoute:
                             lambda org, scope, name: None)
         self._flags(monkeypatch, status=False, residency=False)
         body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
-        assert body == {"results": [], "count": 0}
+        # #8447: an UNREAD store is not a complete empty answer, so `truncated`
+        # is True even with both status flags off — the marker is the only thing
+        # that says so on this deployment.
+        assert body == {"results": [], "count": 0, "truncated": True}
+        assert "status" not in body
 
     def test_both_fields_ride_when_both_flags_are_on(self, monkeypatch):
         hosted_api = self._patch_route(monkeypatch)

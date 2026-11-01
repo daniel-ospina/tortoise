@@ -34541,6 +34541,13 @@ class TortoiseSDK:
                 # (off by policy, a set-up gap the engine does not have).
                 # Never an empty result, and never a raise.
                 read_status_out["status"] = _STATUS_DEGRADED
+                # #8447 (review round 2, P2): a store that never answered cannot
+                # be reported COMPLETE. The marker's own three states forbid it —
+                # 0 rows over an UNREAD store is the third state, not the first.
+                # Only ``status`` disagrees today, and only when its flag is on.
+                if _truncation_out is not None:
+                    _truncation_out["truncated"] = True
+                    _truncation_out.pop("total_available", None)
                 return []
             raise
         graph = proj.g
@@ -34560,6 +34567,11 @@ class TortoiseSDK:
                     "read path cannot reach the configured store (%s) — "
                     "degraded", e)
                 read_status_out["status"] = _STATUS_DEGRADED
+                # #8447 (review round 2, P2): configured but silent is still an
+                # unread store — never a complete empty answer.
+                if _truncation_out is not None:
+                    _truncation_out["truncated"] = True
+                    _truncation_out.pop("total_available", None)
                 return []
         # #7952: the store is reachable, so the known-hot set can be READ.
         if read_status_out is not None and _residency_enabled():
@@ -34890,12 +34902,14 @@ class TortoiseSDK:
                     # #8447 (review P1): this arm DROPS rows — ``search_snapshot``
                     # caps at ``limit`` — and it skipped the marker entirely, so a
                     # 20-match store answered 5 rows marked COMPLETE. The pre-cap
-                    # population is not knowable here (the snapshot ranks in
-                    # place), so a FULL page is treated as what it is: proof that
-                    # more MAY exist, never proof that it does not. Conservative
-                    # in the safe direction, and this arm already reports
-                    # ``status: degraded`` (a leg did not run), so over-marking
-                    # incompleteness cannot turn a HEALTHY read into a partial.
+                    # MATCH count is not exposed by the scorer, so a FULL page is
+                    # read as what it is: proof that more MAY exist, never proof
+                    # that it does not. The total is therefore WITHHELD (round 2
+                    # caught a fabricated one here). Conservative in the safe
+                    # direction: this arm already reports ``status: degraded``, so
+                    # over-marking cannot turn a HEALTHY read into a partial. The
+                    # residual imprecision is a degraded read whose match count is
+                    # EXACTLY ``limit`` — marked incomplete when it is complete.
                     _trunc["candidates"] = len(snap_hits) + (
                         1 if len(snap_hits) >= limit else 0)
                     _trunc["exact"] = False
@@ -34936,12 +34950,17 @@ class TortoiseSDK:
                         points = [p for p in points
                                   if p.get("id") in allowed_ids]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
-                # #8447 (review P1): same hole as the snapshot arm, but here the
-                # pre-cap population IS known — ``points`` is an unbounded
-                # ``self.query()`` scan and every filter above ran on it before
-                # ``fallback_tfidf`` capped at ``limit``. So the count is exact.
-                _trunc["candidates"] = len(points)
-                _trunc["exact"] = True
+                # #8447 (review rounds 1+2): this arm DROPS rows at ``limit``, so
+                # it must mark. The pre-cap MATCH count is not exposed by the
+                # scorer (``search_points`` ranks the whole corpus and slices), so
+                # a FULL page is read as what it is — proof that more MAY exist,
+                # never proof that it does not — and the total is WITHHELD rather
+                # than published as ``len(points)``, which is the whole kind-scoped
+                # CORPUS, not the matches (round 2's finding: 5,000 Points with 20
+                # matches answered ``total_available: 5000``).
+                _trunc["candidates"] = len(legacy_hits) + (
+                    1 if len(legacy_hits) >= limit else 0)
+                _trunc["exact"] = False
                 if allowed_ids is not None:
                     # The ANNOTATION has to be re-applied: ``fallback_tfidf``
                     # rebuilds every row through ``SearchResult.to_dict()``,
@@ -35453,7 +35472,16 @@ class TortoiseSDK:
         # a floor wearing a total's clothes.
         _filters_shrank = bool(
             exclude_status or claim_class is not None
-            or exclude_turn_echo_session)
+            or exclude_turn_echo_session
+            # #8447 (review round 2, P1): the POST-window kinds. ``kind``,
+            # ``relationship_filter`` and ``traversal_path`` all narrow
+            # ``result_ids`` AFTER the legs filled ``str_limit`` — the legs are
+            # ``entity_type``-scoped only, and the structural kind expansion is
+            # post-retrieval — so each of them breaks the same proof the filters
+            # above break.
+            or (kind is not None and query is not None)
+            or relationship_filter is not None
+            or traversal_path is not None)
         _trunc["candidates"] = len(result_ids)
         _trunc["exact"] = (len(result_ids) < str_limit) and not _filters_shrank
         result_ids = result_ids[:limit]
