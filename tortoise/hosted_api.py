@@ -60,6 +60,14 @@ from tortoise import (
 from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
+# #8447 row #6: the ONE page bound `event_store.read_after` REFUSES outside of.
+# Imported here (module level, not lazily like this file's other event_store
+# reaches) because `Query(..., le=…)` is evaluated once at import: deriving the
+# route's declared maximum from the enforcing seam is what keeps the two from
+# drifting into "the validator accepts 1000, the seam raises" (#1178 — one
+# instrument, not two literals). `event_store` imports stdlib only, so this
+# adds no cycle and no DSN cost.
+from tortoise.event_store import MAX_PAGE as _MAX_EVENT_PAGE
 
 # #10000: the record's turn read (lazy-imported at the call site so every
 # deployment without a record DSN pays nothing)
@@ -10086,7 +10094,7 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
 async def events_poll(
     after: str | None = None,
     types: str | None = None,
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE),
     org: dict = Depends(get_current_org_gated),  # noqa: B008
 ):
     """Poll graph/claim events after an opaque cursor (at-least-once contract).

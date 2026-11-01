@@ -884,15 +884,42 @@ def _event_row_exists(proj, event_id: str) -> bool | None:
     return bool(rows and rows[0][0] > 0)
 
 
+#: The page bound `read_after` enforces. It is the SAME domain `GET /v1/events`
+#: already declares — `Query(100, ge=1, le=MAX_PAGE)` (`hosted_api.events_poll`)
+#: — and the bound is stated in `poll_events`' own docstring. Three declarations,
+#: one seam: the clamp that used to be the enforcement here (#8447 row #6).
+MAX_PAGE = 1000
+
+
 def read_after(proj, after_seq: int, types: list[str] | None = None,
                limit: int = 100) -> list[dict]:
     """Return events with seq > after_seq, ordered seq ASC, deduped by event_id.
 
-    `types` filters by event type if provided. `limit` caps the page
-    (default 100, max 1000). Dedup: a duplicate event_id (defense in depth —
-    the unique constraint normally prevents them) keeps the FIRST occurrence.
+    `types` filters by event type if provided. `limit` caps the page and must
+    lie in ``1 .. MAX_PAGE`` (default 100, max ``MAX_PAGE`` — 1000).
+
+    #8447 row #6: an ask OUTSIDE that domain is REFUSED (``ValueError``) rather
+    than clamped. It used to be ``max(1, min(int(limit), 1000))`` — so a caller
+    asking for 5000 got 1000 rows and was told nothing, and because
+    ``len(page) < limit`` the short page read as *the stream is drained* while
+    4000 events were still undelivered (the contract #8447 pins: a bounded
+    operation returns complete results or says it is incomplete, never a
+    silently truncated page indistinguishable from a complete one). Refusing
+    at the reference point — rather than capping the caller's ask — is the same
+    instrument ``next_seq`` uses for an out-of-domain ``seq`` (#5379).
+
+    Dedup: a duplicate event_id (defense in depth — the unique constraint
+    normally prevents them) keeps the FIRST occurrence.
     """
-    limit = max(1, min(int(limit), 1000))
+    limit = int(limit)
+    if not 1 <= limit <= MAX_PAGE:
+        raise ValueError(
+            f"limit must be between 1 and {MAX_PAGE}, got {limit}. "
+            "An out-of-domain page size is REFUSED rather than clamped: a "
+            "silently clamped page is indistinguishable from a complete one, "
+            f"so the caller cannot tell {MAX_PAGE} rows from \"the stream ends "
+            "here\". Ask for a page within the bound and continue from the "
+            "last seq you received (#8447).")
     params: dict = {"after": int(after_seq), "limit": limit}
     if types:
         params["types"] = list(types)
