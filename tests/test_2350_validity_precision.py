@@ -1289,16 +1289,41 @@ def test_the_ranking_surface_agrees_only_where_the_state_is_END_UNKNOWN():
             assert state == END_KNOWN and ended is False, (raw, state, ended)
 
     # The residual the arm deliberately does NOT reach (recorded on #9741,
-    # pre-existing on ``main``): a stored STRING is interpolated as text by
-    # ``_display_bound``, so an un-datable string expiry alone still renders
-    # the open form. Pinned so "the arm covers every un-datable end" — a claim
-    # this PR's earlier prose made — cannot be re-asserted without a red test.
+    # pre-existing on ``main``): ``_display_bound`` returns a stored STRING
+    # VERBATIM, so a string expiry DOES produce text, ``not ex`` never fires,
+    # and the ``else`` arm states the open form with the expiry clause DROPPED.
+    # It is not interpolated anywhere — the earlier prose here said it was,
+    # which named the wrong mechanism. The arm reaches only the expiry that
+    # produced NO text at all. Pinned for BOTH spellings, because "the arm
+    # covers every un-datable end" is not the boundary: a DATABLE expiry on
+    # the same shape is dropped too, and that is the sharper loss (the column
+    # a reader would most trust is the one stated least). Neither claim can be
+    # re-asserted here without a red test.
     assert end_state("TBD", None) == END_UNKNOWN
     assert is_stale_entry({"expired_at": "TBD"}, question_date=qd) is True
     assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
                               "expired_at": "TBD",
                               "end_state": "known"}) == \
         "[valid since 2024-06-01]"
+    # ... and the DATABLE spelling, which the contract must not omit.
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                              "expired_at": "2026-01-02",
+                              "end_state": "known"}) == \
+        "[valid since 2024-06-01]"
+    # ... including under an UNREADABLE start — the shape the ``_bound_present``
+    # gate repaired for ``valid_to``: both spellings of the start agree
+    # (``[valid]``), and neither one states the datable expiry.
+    assert _validity_marker({"id": "p", "valid_from": float("nan"),
+                              "expired_at": "2026-01-02",
+                              "end_state": "known"}) == "[valid]"
+    # NON-VACUITY for the pair: the SAME expiry IS stated once a ``valid_to``
+    # owns the end, so the drop belongs to the absent-``valid_to`` arm and is
+    # not a normaliser failure on the value.
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                              "valid_to": "2024-09-01",
+                              "expired_at": "2026-01-02",
+                              "end_state": "known"}) == \
+        "[valid 2024-06-01 → 2024-09-01; expired 2026-01-02]"
 
 
 def test_an_unreadable_expiry_on_the_search_wire_states_the_end(lane):

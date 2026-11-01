@@ -1093,28 +1093,42 @@ def _validity_marker(h: dict) -> str:
         (``[valid 2024-01-01 → TBD]``, the #9741 residual). The state is
         CONSUMED, never re-decided here — see :func:`_end_state_is_unknown`.
         The THIRD end-bearing field joins them (#9741 review P2-1): a stored
-        ``expired_at`` this renderer cannot DATE — a mapping, a list, a number
+        ``expired_at`` this renderer cannot STATE — a mapping, a list, a number
         outside the authored span, i.e. the shapes ``_display_bound`` SKIPS
         (``not ex``) — with no ``valid_to`` stating the end, renders the same
         ``… ; end unknown`` form. The expiry stamp is an ASSERTED end, and the
         authority for that reading is the #9202 owner ruling
         (``validity.py:35-42``) plus ``END_UNKNOWN``'s own definition — "the
         window ENDED, but at a time we cannot pin" (``validity.py:23``) — so
-        an expiry this renderer cannot date can never render as "still true".
+        an expiry this renderer cannot STATE can never render as "still true".
+        ⚠️ "STATE" is narrower than "date" here, and the difference IS the
+        residual below: ``_display_bound`` returns a stored STRING verbatim
+        (trimmed, cut to 10 chars), so a STRING always produces display text
+        and never reaches this arm — however un-datable the text it produces.
+        The shapes above are the ones that produced NO text at all.
         ⚠️ ``time_aware.is_stale_entry`` answers a DIFFERENT question (which
         version ranks first) and is corroboration ONLY for the spellings
         ``validity.end_state`` calls ``END_UNKNOWN``; for an un-pinnable
         NUMBER it disagrees, because ``_names_an_instant`` short-circuits
         every number to ``END_KNOWN`` (``validity.py:203-207``) and the
-        numeric keys then fail to order, so ``nan``/``inf`` still rank as
-        current (measured; root **#10478**). It cannot be cited as the reason
-        this arm is right — the ruling is.
+        numeric keys order them PAST the question date instead of failing to
+        order — ``nan`` is the only genuinely unordered one (``inf`` and an
+        out-of-span number both order, to roughly year 55 000) — so
+        ``nan``/``inf`` still rank as current (measured; root **#10478**). It
+        cannot be cited as the reason this arm is right — the ruling is.
         It is gated on ``not valid_to``: a STATABLE end owns the window's end
         and is never relabelled by an unstatable expiry beside it. And it
-        reaches only what ``_display_bound`` SKIPS: a stored STRING is
-        interpolated as text, so ``expired_at="TBD"`` beside no ``valid_to``
-        still renders the open form — the recorded #9741 residual,
-        pre-existing on ``main`` and out of scope here.
+        reaches only what ``_display_bound`` SKIPS — the expiry that produced
+        NO text, so ``not ex`` fires. ⛔ It does NOT cover a present
+        ``expired_at`` that DID produce text: because a stored STRING comes
+        back verbatim, ``expired_at="TBD"`` and ``expired_at="2026-01-02"``
+        behave ALIKE — both reach the ``else`` arm below, which states
+        ``[valid…]`` (the open reading) with the expiry clause DROPPED and NOT
+        counted. That is the recorded #9741 residual: pre-existing on
+        ``main``, unchanged here and out of scope. It is stated for BOTH
+        spellings on purpose, because the un-datable one is not the boundary
+        of it, and the DATABLE spelling is the sharper loss — the column the
+        reader would most trust is the one stated least.
       - undated hits → NO validity marker (byte-identical rendering)
       - a PRESENT but UNORDERABLE start (``valid_from="TBD"`` /
         ``"not-a-date"``) → the start clause is OMITTED, never interpolated
@@ -1123,10 +1137,13 @@ def _validity_marker(h: dict) -> str:
         ``nan``, a number outside the authored span) renders the SAME forms,
         because it is the same fact — a bound was stored and it names no
         instant. It used to fall through the no-start arm and take a READABLE
-        ``valid_to``/``expired_at`` with it; the arm is now gated on
-        :func:`_bound_present` (was a bound stored?) rather than on the display
-        string (did it produce text?), so the two spellings of one stored fact
-        cannot state two different windows.
+        ``valid_to`` with it; the arm is now gated on :func:`_bound_present`
+        (was a bound stored?) rather than on the display string (did it
+        produce text?), so the two spellings of one stored fact cannot state
+        two different windows. That gate delivers the ``valid_to`` reading and
+        the END_UNKNOWN reading; it does NOT deliver a readable ``expired_at``
+        arriving with no statable ``valid_to`` — that shape is the residual
+        above, stated once and not claimed away here.
         Under the #6140 owner ruling such a bound names no instant, i.e. no
         start was recorded — which is exactly why
         ``validity.effective_precision`` reports no precision for it
