@@ -445,8 +445,17 @@ def digest_set(eligible: list[dict]) -> set[str]:
 def build_plan(report: dict, *, target: dict, health: dict | None,
                restore_proof: dict | None, target_note: str,
                recovery_missing: list[str],
-               journal_path: str | None = None) -> dict:
-    """The approvable artefact: pairs, counts, exclusions, digest, recovery."""
+               journal_path: str | None = None,
+               census_source: dict | None = None) -> dict:
+    """The approvable artefact: pairs, counts, exclusions, digest, recovery.
+
+    `census_source` says WHERE the population came from — the live stores, or a
+    `--census-json` file. `--execute` always re-derives live (a cached census
+    is refused outright), so this is not a deletion path; it is honesty about
+    the artefact a human approves. Without it a plan built from a cached census
+    could name `target: prod-A` while its population was read from dev-B, and
+    nothing in the file said so (#10483 review, P3-4).
+    """
     classified = classify_sessions(report)
     eligible = classified["eligible"]
     pop = report.get("population") or {}
@@ -466,6 +475,10 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
         # removals the target's rebuild never reads (#10483 review, P1).
         "journal": {"path": journal_path},
         "census": {
+            # ⛔ WHERE THIS POPULATION WAS READ FROM. A plan summarising a
+            # `--census-json` file is not a plan about the live deployment, and
+            # the artefact a human approves has to say so (#10483 review, P3-4).
+            "source": census_source or {"kind": "unspecified"},
             "episodic_graph_nodes": pop.get("episodic_graph_nodes"),
             "turn_shaped_nodes": pop.get("turn_shaped_nodes"),
             "sessions_with_graph_turns": pop.get("sessions_with_graph_turns"),
@@ -1586,7 +1599,22 @@ def main(argv: list[str] | None = None) -> int:
                           target_note=args.target_note,
                           recovery_missing=_recovery_missing(
                               args, restore_proof, health, report, target),
-                          journal_path=args.event_log_path)
+                          journal_path=args.event_log_path,
+                          # Provenance, never a gate: `--execute` re-derives the
+                          # census from the live stores and refuses a cached
+                          # one, so what this records is where the approval's
+                          # OWN numbers came from (#10483 review, P3-4).
+                          census_source=(
+                              {"kind": "census-json",
+                               "path": str(args.census_json),
+                               "note": ("the population was read from a FILE, "
+                                        "not the live stores — --execute "
+                                        "re-derives it live")}
+                              if args.census_json else
+                              {"kind": "live-read",
+                               "uri_host": _uri_host(args.uri),
+                               "db_path": args.db_path,
+                               "graph_name": args.graph_name}))
     except (ValueError, KeyError) as exc:
         # A census report whose counts and id lists disagree cannot describe a
         # purge set. Named refusal, never an uncaught traceback (`main`'s own
@@ -1610,6 +1638,10 @@ def main(argv: list[str] | None = None) -> int:
           f"graph node(s), {plan['census']['turn_shaped_nodes']} turn-shaped, "
           f"across {plan['census']['sessions_with_graph_turns']} session(s)")
     print(f"record     : {plan['census']['record_turn_rows_total']} turn row(s)")
+    source = plan["census"].get("source") or {}
+    print(f"source     : {source.get('kind')}"
+          + (f" ({source.get('path')})" if source.get("path") else "")
+          + (f" — {source['note']}" if source.get("note") else ""))
     print(f"census     : PARITY({counts[CLASS_PARITY]}, of which "
           f"{counts[CLASS_RECORD_AHEAD]} RECORD-AHEAD) · "
           f"RECORD-BEHIND({counts[CLASS_RECORD_BEHIND]}) · "
@@ -2003,20 +2035,28 @@ def _execute(plan: dict, args, target: dict) -> int:
             absent = [tid for tid in ids if tid not in survivors]
             if absent:
                 outcomes = sdk._journal_turn_removal(absent)
-                failed = [tid for tid, ok in outcomes.items()
-                          if ok is not True]
+                # ⛔ COVERAGE, NOT ONLY SUCCESS. `outcomes.items()` iterates
+                # what the journal REPORTED, so an id it simply omitted was
+                # never looked at: a partially-filled result balanced the
+                # totals below and exited 0 "purged" with an unjournaled
+                # removal on the books — the #3316 resurrection class
+                # (#10483 review, P3-2). The question is asked per ABSENT id,
+                # so an omission is as visible as a `False`.
+                failed = [tid for tid in absent
+                          if outcomes.get(tid) is not True]
                 if failed:
                     sys.stderr.write(
                         f"purge_legacy_turns: REFUSED "
                         f"{REFUSE_JOURNAL_UNCONFIRMED}: {len(failed)} "
                         f"removal(s) in session {sid} were deleted from the "
                         f"graph but NOT journaled (a rebuild would resurrect "
-                        f"them). {deleted_total} node(s) were deleted and "
+                        f"them — an omitted id is an unrecorded removal, not "
+                        f"a success). {deleted_total} node(s) were deleted and "
                         f"journaled BEFORE this failure, and this run stops "
                         f"here: {', '.join(failed[:10])}\n")
                     return 2
                 deleted_total += len(absent)
-                journaled_total += len(outcomes)
+                journaled_total += len(absent)
             if survivors:
                 survivors_left.extend(sorted(survivors))
                 sys.stderr.write(

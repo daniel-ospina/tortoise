@@ -583,7 +583,7 @@ class _FakeGraph:
 
 def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
                  journal_configured=True, journal_result=True,
-                 graph_fields=None, graph_missing=()):
+                 graph_fields=None, graph_missing=(), journal_omit=()):
     """Replace the SDK / projection seams `_execute` imports, and record what
     they were asked to do.
 
@@ -605,6 +605,7 @@ def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
     handed_graph_names: list = []
     overrides = dict(graph_fields or {})
     absent = {str(t) for t in graph_missing}
+    omit = {str(t) for t in journal_omit}
 
     def fake_read_graph(uri=None, db_path=None, graph_name=None, *,
                         node_ids=None, g=None):
@@ -651,7 +652,10 @@ def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
 
         def _journal_turn_removal(self, ids):
             journaled.extend(ids)
-            return {tid: journal_result for tid in ids}
+            # `journal_omit` models a result that SILENTLY drops an id — the
+            # shape a `set(outcomes) == set(absent)` assertion exists for.
+            return {tid: journal_result for tid in ids
+                    if tid not in omit}
 
     monkeypatch.setattr("tortoise.projection.FalkorProjection", _Proj)
     monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _SDK)
@@ -709,7 +713,7 @@ def _exec_setup(tmp_path, monkeypatch, *, ids=("s1_t0",), session="s1",
                 journal_lines=1, plan_journal="same", argv_journal="same",
                 survivors_after=(), sdk_graph="g", journal_configured=True,
                 journal_result=True, record_keys=None, graph_name="g",
-                graph_fields=None, graph_missing=()):
+                graph_fields=None, graph_missing=(), journal_omit=()):
     """A hermetic `_execute` call: real args, real plan, fake stores.
 
     `graph_name=None` OMITS `--graph-name`, which is the case the SDK/census
@@ -740,7 +744,8 @@ def _exec_setup(tmp_path, monkeypatch, *, ids=("s1_t0",), session="s1",
                                     journal_configured=journal_configured,
                                     journal_result=journal_result,
                                     graph_fields=graph_fields,
-                                    graph_missing=graph_missing)
+                                    graph_missing=graph_missing,
+                                    journal_omit=journal_omit)
     if record_keys is None:
         record_keys = {tid: _record_row(tid) for tid in ids}
     record_calls = _patch_record(monkeypatch, record_keys)
@@ -1053,6 +1058,26 @@ def test_execute_refuses_when_the_journal_cannot_carry_a_removal(
     assert purge.REFUSE_JOURNAL_UNCONFIRMED in capsys.readouterr().err
 
 
+def test_execute_refuses_a_journal_result_that_OMITS_a_deleted_id(
+        tmp_path, monkeypatch, capsys):
+    """P3-2: the check iterated `outcomes.items()` — what the journal REPORTED
+    — so an id it never mentioned was invisible, the totals still balanced, and
+    the run exited 0 "purged" with an unjournaled removal on the books (a
+    rebuild would resurrect it, the #3316 class).
+
+    The delete lands (both ids go), so `purged` must NOT be printed.
+    """
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        journal_omit=("s1_t1",))
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert purge.REFUSE_JOURNAL_UNCONFIRMED in captured.err
+    assert "s1_t1" in captured.err          # the OMITTED id is named
+    assert "purged     :" not in captured.out
+    assert setup.journaled == ["s1_t0", "s1_t1"]
+
+
 # ── a partial sweep is its OWN diagnosis, and "purged" is not printed ────
 
 def test_execute_reports_a_partial_sweep_with_its_own_code(
@@ -1203,6 +1228,40 @@ def test_cli_refuses_a_missing_census_file_with_a_named_refusal(
     assert purge.REFUSE_CENSUS_UNREADABLE in capsys.readouterr().err
 
 
+def test_the_plan_records_where_its_population_came_from(tmp_path, capsys):
+    """P3-4: the plan summarised a census without saying which census.
+
+    With `--census-json` a plan can name `target: prod-A` while its population
+    was read from dev-B. Not a deletion path (`--execute` re-derives live and
+    refuses a cached census outright), but the artefact a HUMAN approves has to
+    be honest about its source.
+    """
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    census = _write(tmp_path, "census.json", report)
+    plan_path = tmp_path / "plan.json"
+    assert purge.main([*_TARGET_ARGV, "--target-note", "t", "--census-json",
+                       census, "--plan-out", str(plan_path)]) == 0
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["census"]["source"]["kind"] == "census-json"
+    assert plan["census"]["source"]["path"] == census
+    assert "FILE" in capsys.readouterr().out          # and the PREVIEW says so
+
+
+def test_the_plan_records_a_LIVE_read_as_its_source(tmp_path, monkeypatch,
+                                                    capsys):
+    """The mirror: a plan whose population came from the stores says that, so
+    the field is a measurement and not a constant."""
+    _patch_live_census(monkeypatch,
+                       _report(clean=[_clean_with_ids("s1", ["s1_t0"])]))
+    plan_path = tmp_path / "plan.json"
+    assert purge.main([*_TARGET_ARGV, "--target-note", "t", "--record-dsn",
+                       _DSN, "--plan-out", str(plan_path)]) == 0
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["census"]["source"]["kind"] == "live-read"
+    assert plan["census"]["source"]["uri_host"] == "127.0.0.1:1"
+    assert "FILE" not in capsys.readouterr().out
+
+
 # ── a malformed-but-parseable plan is a refusal, not a traceback ─────────
 
 def test_execute_refuses_a_plan_entry_without_ids(
@@ -1307,6 +1366,27 @@ def test_a_live_census_whose_counts_disagree_is_a_named_refusal():
     code, message = _gate(plan, live=diverging)
     assert code == purge.REFUSE_CENSUS_UNREADABLE, message
     assert "purge set" in message
+
+
+def test_the_destructive_gate_refuses_a_missing_live_census():
+    """P3-3: this branch is the hinge of "execute re-verifies nothing" — with
+    no live report, the approved set cannot be re-derived at all — and it had
+    no test. An unverifiable set is not an approved set."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    code, message = _gate(plan, live=None)
+    assert code == purge.REFUSE_EXACT_SET_MISMATCH, message
+    assert "no report" in message
+
+
+def test_the_destructive_gate_refuses_a_live_census_it_cannot_read():
+    """P3-3: `REFUSE_CENSUS_UNREADABLE` was asserted only on PREVIEW paths.
+    An empty `{}` live report reaching `--execute` must refuse as a census it
+    cannot read — not as an empty set it can."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    code, message = _gate(plan, live={})
+    assert code == purge.REFUSE_CENSUS_UNREADABLE, message
+    assert "population" in message
+
 
 
 # ── the approval is OUT OF BAND: a plan cannot approve itself ────────────
