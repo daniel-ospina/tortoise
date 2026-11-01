@@ -6532,7 +6532,7 @@ surfaces:
   - test_temporal_constraint.py
   - test_terminal_dedup_nullhash.py  # #2971: _find_terminal_dedup_hit A10 hash-less fallback (rebuild-durable terminal guard)
   - test_temporal_leg_2976.py  # #2976: temporal retrieval leg — detector shapes, anchor co-presence + date spread, additive-fusion no-op (hermetic, no DB)
-  - test_temporal_leg_date_window_10538.py  # #10538: a DATE-RANGE question widens the candidate set by session — window-as-target gating, screen/ceiling exclusion, fused tail placement (hermetic, no DB)
+  - test_temporal_leg_date_window_10538.py  # #10538: a DATE-RANGE question widens the candidate set by session — window-as-target gating (session clustering), head-slice exclusion of the sessions the reader already holds, fused tail placement (hermetic, no DB)
   - test_2976_session_admission.py  # #2976: TR session-level admission — token budget binds + session is the admission unit (gold at rank 45 admitted); render stays dated/contiguous (hermetic, pure functions)
   - test_sdk_ep.py
   - test_sdk_group3.py
