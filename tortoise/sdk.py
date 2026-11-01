@@ -5261,8 +5261,12 @@ class _WriteNotLanded(Exception):
     **Scope: the graph-abort family only.** ``retryable_aborted_write`` also
     admits the write-slot arm (ordinary multi-writer contention) and MISCONF,
     and NEITHER says anything about whether the target existed — so arming this
-    sentinel on those would turn a benign ``update_point(<missing id>)`` into a
-    stale ``ResponseError`` after four attempts. The gate in
+    sentinel on those would turn a benign ``update_point`` on a target that
+    VANISHED between the guard read and the write (or on any door whose write
+    legitimately matches zero rows) into a stale ``ResponseError`` after four
+    attempts. (Pre-#10119 the same sentence named a ``<missing id>``; that shape
+    is now refused at the guard read before any write, so it reaches no abort
+    at all — see ``_graph_write_with_retry``'s note.) The gate in
     ``_graph_write_with_retry`` therefore LATCHES the first
     graph-deleted-or-replaced abort of the call (a later write-slot abort must
     neither arm it nor disarm it — a rebuild is itself a concurrent writer) and

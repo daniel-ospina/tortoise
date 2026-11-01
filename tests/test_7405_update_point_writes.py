@@ -985,13 +985,21 @@ _WRITE_SLOT = "another write is in progress, retry the query"
 class _TargetVanishesBeforeTheWrite:
     """The target is PRESENT at the guard read and gone by the write.
 
-    This is the ONE shape in which a zero-row statement is a legitimate,
-    NON-RAISING outcome for ``update_point`` (#8854 review round 10, I1):
-    #10119 refuses an id absent AT the guard read before any WRITE statement is
-    issued, so the reachable benign-zero-row case is a point that existed at
-    that read and was removed (rebuild / replay) before the write ran. (A
-    promote on an absent id also matches zero rows, but it RAISES `No point`
-    through `_raise_update_point_status_error`, so it is not benign.)
+    This is the ONE shape on the NON-PROMOTE arm in which a zero-row statement
+    is a legitimate, NON-RAISING outcome for ``update_point`` (#8854 review
+    round 10, I1): #10119 refuses an id absent AT the guard read before any
+    WRITE statement is issued, so the reachable benign-zero-row case here is a
+    point that existed at that read and was removed (rebuild / replay) before
+    the write ran.
+
+    Two other zero-row shapes are NOT this one, and the difference is the
+    outcome: a promote on an ABSENT id matches nothing and RAISES `No point`
+    (``_raise_update_point_status_error``), so it is not benign; and a promote
+    whose node goes LIVE between the #1088 probe and the guarded ``SET``
+    matches nothing and returns the POINT as the #1088 idempotent success
+    (``_promote_witness`` returns True for a status-only promote, and the
+    post-check completes it) — benign, but on the promote arm, and its reply is
+    the point rather than ``{}``.
 
     Two polarities, and the difference is the whole point:
 
