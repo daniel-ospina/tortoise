@@ -698,8 +698,9 @@ def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
 
     Only `:Subject`'s writer validates its `status` vocabulary. The `:Object`
     and `:Event` writers do NOT: a NON-PERSISTABLE value (a dict, bytes, a set)
-    is **dropped** by the writer — measured on this head, the node keeps
-    `status = 'live'` — so refusing it would reject a bundle the writer
+    is **dropped** by the writer — measured on this head, the node keeps NO
+    `status` at all (absent READS live since #9974 R1) — so refusing it would
+    reject a bundle the writer
     accepts. That is the over-rejection class round 4 of this PR already fixed
     once, and it is why the array refusal (a PERSISTABLE unhashable value,
     which IS stored and then breaks the direct-edge terminal check) is scoped by
@@ -728,8 +729,10 @@ def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 1
     # The dict is DROPPED, not stored verbatim — the mechanism the scoping
     # above depends on, so it is asserted rather than described.
+    # #9974 R1: dropped means ABSENT, not replaced by a fabricated 'live'
+    # (an absent status READS live via `live._terminal_excluded`).
     assert sdk._get_proj().g.query(
-        "MATCH (n:Object {name:'Alpha'}) RETURN n.status").result_set == [["live"]]
+        "MATCH (n:Object {name:'Alpha'}) RETURN n.status").result_set == [[None]]
     assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 1
 
 
@@ -1902,8 +1905,9 @@ def test_object_item_status_is_accepted_when_a_holder_owns_the_name(sdk):
     assert sdk._validate_bundle(bundle) == []
     created = sdk.ingest(bundle)
     assert created["created"]["connections"] == 1
+    # #9974 R1: a status-less holder stores NO status (absent READS live).
     assert sdk._get_proj().g.query(
-        "MATCH (n:Object {name:'Held'}) RETURN n.status").result_set == [["live"]]
+        "MATCH (n:Object {name:'Held'}) RETURN n.status").result_set == [[None]]
 
 
 def test_operator_shaped_holder_with_array_status_is_refused_in_phase1(sdk):
@@ -2344,7 +2348,9 @@ def test_second_same_name_item_declaring_array_is_dropped(sdk):
     rows = sdk._get_proj().g.query(
         "MATCH (o:Object {name:'Acme'}) RETURN o.id, o.status").result_set
     assert len(rows) == 1, rows
-    assert rows[0][1] == "live", rows
+    # #9974 R1: the array was DROPPED, so the node keeps NO status (absent
+    # READS live) — a stored 'live' would be a fabrication.
+    assert rows[0][1] is None, rows
 
 
 def test_two_bundle_refs_to_one_shared_name_are_a_self_edge(sdk):

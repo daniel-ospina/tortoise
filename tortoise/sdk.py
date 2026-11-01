@@ -6578,11 +6578,13 @@ def _item_declared_status(item: dict, depth: int = 1) -> tuple[bool, object]:
 
     ``_item_effective_status`` above returns the same VALUE the writer sees,
     but collapses "absent" and "explicitly ``None``" onto ``None``. Those are
-    different to the entity writers: an absent ``status`` takes the mint
-    default (``"live"``), while an explicit ``None`` is VALIDATED and
-    refused (``create_entity(type='subject', status=None)`` raises
-    ``Invalid status None``). Phase 1 cannot claim writer agreement without
-    the distinction, so it is kept here (#7925 review P3).
+    different to the entity writers: an absent ``status`` stores NOTHING — the
+    fold seeds ``status=$st`` so the property stays absent, which reads live
+    (``live._terminal_excluded``; #9974 R1) — while an explicit ``None`` is
+    VALIDATED and refused on the Subject door
+    (``create_entity(type='subject', status=None)`` raises ``Invalid status
+    None``). Phase 1 cannot claim writer agreement without the distinction, so
+    it is kept here (#7925 review P3).
     """
     return _item_prop_at_depth(item, "status", depth)
 
@@ -36328,9 +36330,14 @@ class TortoiseSDK:
         carry their own `status` families (which include `deprecated`), and an
         `:Event` carries NO `status` at all — its lifecycle is `eventStatus`,
         a different vocabulary this field deliberately does not mix in, so an
-        `:Event` peer reports `""`. `""` therefore means "this peer's layer
-        exposes no `status`", and it is now reached by LOOKING at the peer's
-        label rather than by never asking.
+        `:Event` peer reports `""`. A `:Point`/`:Object`/`:Subject` peer that
+        STORES no status also reports `""`: since #9974 R1 a status-less birth
+        leaves the property absent (derived-or-absent, never a fabricated
+        `'live'`), and that peer READS live (`live._terminal_excluded`), so `""`
+        over-reports "exposes no `status`" in exactly the way this widening
+        exists to reduce — stated rather than left to be rediscovered. `""`
+        therefore also means "this peer stores no `status`", and it is now
+        reached by LOOKING at the peer's label rather than by never asking.
 
         A THIRD meaning is `""`: the sweep leg for that peer's label FAILED
         (a raise is logged and skipped, so the other labels' statuses survive —
