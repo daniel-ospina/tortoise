@@ -3034,6 +3034,10 @@ def _write_capture_turns(
         durable=_journal_configured and getattr(_log, "durable", True),
         tenant=getattr(sdk, "_record_tenant", None))
     stored: dict[str, tuple] = {}
+    #: turn ids whose RECORD row holds an enriched text that THIS capture does
+    #: not write (`enrich_on` is False). Filled once the prior rows are read,
+    #: below; only the record lane can use it (see the emit loop).
+    _et_to_clear: set[str] = set()
     if not _record_first:
         # The record cannot hold this capture's turns: the graph is the store,
         # exactly as before #10000 (byte-identical, read-back included).
@@ -3094,6 +3098,40 @@ def _write_capture_turns(
                 sdk, session_id, [row["id"] for row in turn_rows])
             _prior_unknown = _read is None
             _prior = _read or {}
+        # ── THE RECORD LANE MUST BE ABLE TO REMOVE `embeddingText` (#10523
+        # review round 4, P1) ──
+        # The graph lane is ABSOLUTE: `t.embeddingText = turn.et` with `et` NULL
+        # REMOVES the property, so an ON→OFF re-capture (or the fail-soft arm
+        # where the extractor model cannot be built and `enrich_on` is False)
+        # reverts the node to the raw-only shape. The record's upsert is a MERGE
+        # (`props = point.props || EXCLUDED.props`, `record_projection.py:1879`)
+        # and an ABSENT key in the right operand leaves the left value intact
+        # (PostgreSQL: "the union of their keys, taking the second object's value
+        # when there are duplicate keys"), so simply OMITTING the key — which is
+        # what the OFF snapshot does to stay byte-identical — cannot remove it.
+        # The row then keeps the PREVIOUS capture's enriched text beside a vector
+        # this capture computed from the raw `content`: the claim "the vector
+        # describes this text" becomes false, which is exactly the #4194 lie
+        # `_TURN_WRITE_CYPHER`'s absolute SET exists to prevent, on the store
+        # that IS the system of record for these turns.
+        #
+        # So the key is journalled EXPLICITLY as JSON null — present, and null, so
+        # `jsonb ||` DOES override — and `props->>'embeddingText'` is then SQL
+        # NULL, which the replay's `n.embeddingText=$et` treats as a removal.
+        # ⛔ ONLY for a row that actually HOLDS one: a turn whose row never
+        # carried an enriched text emits nothing, so the gate-OFF snapshot stays
+        # byte-identical to pre-#8488 in the shape `TURNS_SNAPSHOT_OPTIONAL_KEYS`
+        # describes (a key present only when the branch applies).
+        # ⚠️ RECORDED RESIDUAL: when the prior read could not attest
+        # (`_prior_unknown`) the row's `embeddingText` is unknown, so nothing is
+        # emitted and a stale value survives — the same fail-soft arm `_UNATTESTABLE`
+        # names for `created_at`/`status`. Clearing on an unknown prior would be a
+        # claim this capture cannot make, and it would also delete a perfectly
+        # faithful text on the transient-failure arm the preserve rule protects.
+        if not enrich_on:
+            _et_to_clear = {
+                _tid for _tid, _held in _prior.items()
+                if _held is not None and _held.embedding_text is not None}
         for _i, _row in enumerate(turn_rows):
             _held = _prior.get(_row["id"])
             _emb = turn_embs[_i]
@@ -3427,9 +3465,15 @@ def _write_capture_turns(
         # #8488 scope 1: the enriched text rides the SAME snapshot as the
         # vector it describes, so the #4194 identity survives a rebuild —
         # `stamp_journal_embedding` attests `embeddingText` when it is present.
-        # Absent (flag OFF) the record is byte-identical to pre-#8488.
+        # Absent (flag OFF, and the row never held one) the record is
+        # byte-identical to pre-#8488.
         if enrich_on:
             _turn_snapshot["embeddingText"] = embedding_texts[i]
+        elif turn_id in _et_to_clear:
+            # An EXPLICIT removal, not an omission — see `_et_to_clear`. The
+            # record's tail is MERGED, so only a present JSON null can clear the
+            # previous capture's enriched text (#10523 review round 4, P1).
+            _turn_snapshot["embeddingText"] = None
         # #5004 round-3: when THIS capture encoded nothing, what rides the
         # record is the vector the write PRESERVED — computed by whatever model
         # was active at the ORIGINAL capture. Attesting the active model here

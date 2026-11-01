@@ -1608,6 +1608,90 @@ def test_the_record_preserve_arm_still_holds_when_BOTH_halves_are_unchanged(
     assert snapshot[0].get("embedding_preserved") is True
 
 
+def test_a_record_ON_to_OFF_recapture_journals_the_enriched_texts_REMOVAL(
+        sdk, monkeypatch):
+    """#10523 review round 4 (P1): the record lane must be able to REMOVE it.
+
+    The graph lane is absolute — `t.embeddingText = turn.et` with `et` NULL
+    removes the property — so an ON→OFF re-capture reverts the node to the
+    raw-only shape. The record's upsert MERGES its `props` tail
+    (`point.props || EXCLUDED.props`), and an ABSENT key leaves the left value
+    intact, so OMITTING `embeddingText` (what this arm used to do) cannot
+    remove it: the row kept the previous capture's enriched text beside a
+    vector computed from the raw `content`, which is the #4194 lie the whole
+    schema A′ design exists to prevent — on the store that IS the system of
+    record for these turns.
+
+    So the writer journals the key EXPLICITLY as JSON null for a turn whose row
+    holds one: `jsonb ||` overrides a present key with null, and
+    `props->>'embeddingText'` then reads SQL NULL, which the replay's
+    `n.embeddingText=$et` treats as a removal — the same absolute shape the
+    graph lane's `SET …=NULL` has.
+
+    Pre-fix this is red with no such key in the snapshot at all, and the row
+    keeps text no vector describes.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text="[user] rewrite A")})
+    _bind_tenant(sdk)
+    # ON → OFF: the gate is off (or the extractor model could not be built and
+    # `_capture_enriched_texts` answered ``None``) while the row holds the
+    # previous capture's enriched text. The embedder is gone too, so the write's
+    # preserve arm is the one that decides the vector.
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None], enrich_fn=lambda texts: None)
+    snapshot = seam.snapshots()
+    assert snapshot, "the capture journalled no turn at all — not a test"
+    assert "embeddingText" in snapshot[0], (
+        "the OFF snapshot OMITTED embeddingText, and the record's tail is "
+        "MERGED — so the previous capture's enriched text survives beside a "
+        "vector computed from the raw content (the #4194 lie the graph lane "
+        "clears)")
+    assert snapshot[0]["embeddingText"] is None, snapshot[0]
+    # …and the vector half agrees: the stored vector described a text the row
+    # no longer claims, so it is CLEARED rather than preserved.
+    assert snapshot[0]["embedding"] is None, snapshot[0]
+    assert snapshot[0].get("embedding_preserved") is None, snapshot[0]
+
+
+def test_a_record_OFF_capture_emits_no_embeddingText_for_a_row_with_none(
+        sdk, monkeypatch):
+    """The other half of the same arm: OFF stays byte-identical when the row
+    never carried an enriched text.
+
+    Without this, the leg above is satisfied by journalling `embeddingText:
+    null` unconditionally — which would put a key on the OFF snapshot that
+    pre-#8488 never had, in the exact shape this writer's OFF path promises to
+    keep byte-identical (`TURNS_SNAPSHOT_OPTIONAL_KEYS`).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text=None)})
+    _bind_tenant(sdk)
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None], enrich_fn=lambda texts: None)
+    snapshot = seam.snapshots()
+    assert snapshot, "the capture journalled no turn at all — not a test"
+    assert "embeddingText" not in snapshot[0], (
+        "the OFF snapshot named embeddingText for a row that never held one — "
+        "the record lane's OFF shape is no longer the pre-#8488 key set")
+    # The vector is still preserved: nothing about it changed.
+    assert snapshot[0]["embedding"] == [0.1, 0.2, 0.3], snapshot[0]
+
+
 def _imported_from(target: str) -> dict[str, set[str]]:
     """``{name: {modules}}`` — what the PACKAGE imports out of ``target``.
 

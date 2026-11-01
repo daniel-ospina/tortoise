@@ -42,9 +42,19 @@ What this module deliberately does NOT decide:
   The render therefore leads with the WHOLE window as ONE numbered untrusted
   block (:func:`_render_window`) and keeps the only turn-varying bytes in a
   trailing ``TARGET TURN: [n]`` clause (:func:`_target_clause`), which is ours
-  and sits outside the block. Every call of a capture now sends system + clause
-  + block verbatim, so the prefix is warmed by the first turn and hit by the
-  rest.
+  and sits outside the block. Every call of a capture now sends the system
+  prompt and then the block BYTE-IDENTICALLY, with only the clause trailing
+  after it — so the prefix (system + block) is warmed by the first turn and hit
+  by the rest.
+  ⛔ THE ORDER IS ``system`` → ``block`` → ``clause``, and it is load-bearing:
+  a cached prefix has to BE a prefix, so the varying clause must come last. An
+  earlier version of this sentence said "system + clause + block", which reads
+  as the opposite order and is exactly the sentence a later lane would cite
+  while "tidying" the render back into an uncacheable shape (#10523 review
+  round 4, P3). Test:
+  `test_the_prefix_is_stable_across_the_windows_calls_so_it_can_be_cached`
+  pins the prefix — and the suffix clause — so a re-order reds rather than
+  quietly costing ~9× the approved ingest figure.
   ⚠️ Residual, stated rather than implied: caching is a PROVIDER property
   (DeepSeek's automatic context cache, Anthropic's explicit ``cache_control``
   breakpoints). This module guarantees the stable prefix; whether it is BILLED as
