@@ -1036,23 +1036,6 @@ def _atomic_add_failure(declared: object, prereg_epoch: int) -> str | None:
     return None
 
 
-def _atomic_detail_entry(block: dict) -> dict:
-    """The VALIDATED disclosure fields, shaped for the printed ATOMIC-ADD block.
-
-    ⛔ One construction for every arm that records a declared atomic add (#10531 review cycle 7,
-    P2). Three arms can reach the disclosure — the exempt arm, the unscored arm and the plain
-    atomic arm — and when they were written by hand the detail was missing from two of them: the
-    header then printed "the disclosure … is the record of it:" followed by ZERO commit lines,
-    i.e. it pointed at the one part a reader can check and showed nothing (the cycle-6 fix repaired
-    the exempt arm and left the sibling unscored arm in exactly that shape). A single construction
-    cannot drift apart from itself.
-    """
-    return {
-        "squash_merge": str(block.get("squash_merge") or ""),
-        "branch_commits": [str(c) for c in block.get("branch_commits") or []],
-    }
-
-
 def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                    exempted: list[str] | None = None,
                    atomic_added: list[str] | None = None,
@@ -1186,7 +1169,11 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     atomic_added.append(log.name)
                 if (atomic_detail is not None and log.name in atomic
                         and log.name not in disclosure_failed):
-                    atomic_detail[log.name] = _atomic_detail_entry(atomic[log.name])
+                    block = atomic[log.name]
+                    atomic_detail[log.name] = {
+                        "squash_merge": str(block.get("squash_merge") or ""),
+                        "branch_commits": [str(c) for c in block.get("branch_commits") or []],
+                    }
             continue
         # ⛔ ATOMIC IS IDENTICAL-SHA, NOT EQUAL-EPOCH (#10531 review cycle 4, P1). Two DISTINCT
         # commits can share a second, and git orders those by ancestry — so an `==` epoch test would
@@ -1237,24 +1224,17 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 # ⛔ The atomic state is recorded HERE too (#10531 review P1): a log that is both
                 # atomic AND provably unscored is honestly disclosable, and a disclosure was being
                 # punished as "not an atomic add" because this `continue` skipped the bookkeeping.
-                # It is also REPORTED (#10531 review cycle 4, P2): a disclosure nobody prints is
-                # the silent path this tool refuses.
+                #
+                # ⛔ BUT IT IS NOT REPORTED AS A DISCLOSURE (#10531 review cycle 7, P2). This arm
+                # decided the pass on the log's CONTENT — deleting the disclosure from the same tree
+                # yields the identical verdict — so claiming `the ordering HOLDS BY DISCLOSURE` here
+                # would name a ground that carried nothing, and the printed block would be followed
+                # by zero commit lines because `atomic_detail` was never filled. The waiver IS still
+                # visible: `exempted` carries it into `ordering_exempt` and the claim line prints
+                # "(exempt by CONTENT, measured nothing: <log>)". `atomic_seen` is set so the
+                # anti-rot rule still sees a genuinely atomic log.
                 if atomic_pair:
                     atomic_seen.add(log.name)
-                    # ⛔ Only a DECLARED atomic add is reported as declared (#10531 review cycle 5,
-                    # P2): appending unconditionally made `run_order_claim` assert a disclosure the
-                    # record does not contain, and the printed block point at an absent key.
-                    if (atomic_added is not None and log.name in atomic
-                            and log.name not in disclosure_failed):
-                        atomic_added.append(log.name)
-                    # ⛔ …and the COMMITS are reported with it (#10531 review cycle 7, P2). The
-                    # cycle-6 fix closed this in the exempt arm and left it open here, so a
-                    # declared add on an unscored log still printed the header with zero detail
-                    # lines — `run()` only sets `ordering_atomic_add_commits` when the dict is
-                    # non-empty, so the block pointed at a disclosure it never showed.
-                    if (atomic_detail is not None and log.name in atomic
-                            and log.name not in disclosure_failed):
-                        atomic_detail[log.name] = _atomic_detail_entry(atomic[log.name])
                 if exempted is not None:
                     exempted.append(log.name)
                 continue
@@ -1264,14 +1244,14 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             # object is identical, so the comparison answers nothing; the disclosure is required.
             if log.name in disclosure_failed:
                 continue  # the specific field failure is already reported above
-            # ⛔ The record being UNREADABLE is not the record DECLARING (#10531 review cycle 7,
-            # P1). `record_unreadable` only suppresses a second finding for a defect
-            # `check_machine_record` already owns; it must not manufacture a declaration. Reading
-            # `atomic[log.name]` after it raised a bare `KeyError` out of `check_ordering` — no
-            # verdict, no `--json`, exit 1 with a traceback — on precisely the input the flag was
-            # added for, so a corrupt `preregistration.json` was UNRUNNABLE rather than reported.
-            declared = log.name in atomic
-            if not declared and not record_unreadable:
+            if log.name not in atomic:
+                if record_unreadable:
+                    # ⛔ RETURN, do not fall through (#10531 review cycle 7, P1). The record itself
+                    # could not be read, so there is nothing declared and nothing to index —
+                    # `atomic[log.name]` below raised KeyError straight out of run()/main(),
+                    # printing a traceback and NO findings, on exactly the state this flag exists
+                    # for. `check_machine_record` owns the diagnosis.
+                    continue
                 failures.append(
                     f"{log.name}: added at {log_epoch} by the SAME commit that added "
                     f"{PREREG_NAME} ({log_sha[:9]}) — the ordering is atomic, so git cannot show "
@@ -1280,16 +1260,21 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY} or the ordering is unproven."
                 )
                 continue
+            # `log.name` is provably in `atomic` from here on.
             # ⛔ The STATE is derived HERE, never read back from the caller's out-param (#10531
             # review P1). Deciding the anti-rot rule from `atomic_added` made the verdict depend on
             # whether a caller happened to pass a list: the same tree and pins gave `[]` via
             # `run()` and "disclosed ... but it is not one" via the three-argument form every test
             # and any future caller uses. An out-param reports; it may not judge.
             atomic_seen.add(log.name)
-            if atomic_added is not None and declared:
+            if atomic_added is not None:
                 atomic_added.append(log.name)
-            if atomic_detail is not None and declared:
-                atomic_detail[log.name] = _atomic_detail_entry(atomic[log.name])
+            if atomic_detail is not None:
+                block = atomic[log.name]
+                atomic_detail[log.name] = {
+                    "squash_merge": str(block.get("squash_merge") or ""),
+                    "branch_commits": [str(c) for c in block.get("branch_commits") or []],
+                }
             continue
         if log_epoch <= prereg_epoch:
             # THE ATTACK, and the conservative catch-all. Untouched and undeclarable (#10531).
