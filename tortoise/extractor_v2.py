@@ -8224,7 +8224,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                                    str(p.get("quote") or ""),
                                    warnings=warnings):
             refused_value_contents.add(_norm(content))
-            refused_value_contents.add(_norm(str(p.get("content") or "")))
+            # ⚠️ The CLAMPED key only: `_mint_endpoint` compares
+            # `str(ref).strip()[:_MAX_CONTENT]`, so an unclamped key could never
+            # match (and an unclamped-only entry would be a silent no-op).
             # The point's own `supersedes` ref is dropped WITH the point, and
             # #9906's rule is that none of the drop doors is silent — so the
             # reversal is reported through the same carry helper the other
@@ -8482,6 +8484,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         content = str(ref or "").strip()[:_MAX_CONTENT]
         if not content:
             return ""
+        # The `point_ids` clause is a WARNING fix, not a resolution fix: an
+        # operator naming an already-emitted point resolves through `_resolve`
+        # before minting is ever reached, and this guard runs on the clamped
+        # text. Its only reachable shape is the >cap full-vs-clamped divergence,
+        # where suppressing it keeps a truthful ref from being reported as
+        # "refused" (review cycle 5 measured both branches: the edge drops the
+        # same way, one misleading warning fewer).
         if _norm(content) in refused_value_contents and _norm(content) not in point_ids:
             # #10360: mint-before-wire must not resurrect what the
             # value-fidelity rule refused. Minting here would build a

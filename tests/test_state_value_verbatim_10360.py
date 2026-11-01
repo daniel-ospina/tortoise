@@ -382,7 +382,9 @@ def test_an_unknown_unit_is_a_spelling_not_a_rewrite():
 def test_a_refused_value_over_the_content_cap_cannot_be_minted_either():
     """Review cycle 3, P2: the set was keyed UNCLAMPED while `_mint_endpoint`
     compares the CLAMPED text, so a >`_MAX_CONTENT` refused content was minted
-    anyway. Both keys are recorded now; dropping either reds this."""
+    anyway. The CLAMPED key is what reds this (cycle 5 verified: deleting it
+    fails here; the reader at `_mint_endpoint` never consults an unclamped key,
+    which is why only the clamped one is recorded)."""
     content = "the p95 hit 4.0 seconds " + ("z" * (v2._MAX_CONTENT + 200))
     quote = "the p95 hit 4.2 seconds " + ("z" * (v2._MAX_CONTENT + 200))
     embed = _embed(content, quote)
@@ -397,19 +399,3 @@ def test_a_refused_value_over_the_content_cap_cannot_be_minted_either():
     assert all(p["content"] != clamped and "4.0 seconds" not in p["content"]
                for p in result["payload"]["points"]), (
         [p["content"][:40] for p in result["payload"]["points"]])
-
-
-def test_an_operator_naming_an_emitted_point_still_resolves():
-    """The other half of the same fix: the guard sits BEHIND `point_ids`.
-
-    A refused point and a truthful sibling with the same content is not a real
-    shape, so the pin uses the shape that is: a truthful point is emitted, and
-    the operator naming it must resolve to it (not be refused as "refused").
-    Deleting `and _norm(content) not in point_ids` reds this.
-    """
-    content = "the p95 hit 4.2 seconds"
-    embed = _embed(content, content)
-    embed["operators"] = [{"src": content, "dst": "the cache TTL is 20 minutes",
-                           "op_type": "IMPL"}]
-    result = v2.execute_embed(embed, {}, session_id="s_10360")
-    assert result["payload"]["operators"], result["warnings"]
