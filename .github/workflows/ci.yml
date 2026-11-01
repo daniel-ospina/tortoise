@@ -1504,7 +1504,7 @@ jobs:
     # GitHub-hosted — measured job queue wait in run 41320964047: 15.3, 17.8,
     # 19.0, 25.5, 33.7, 34.5, 37.6 and 39.0 MINUTES — while 10 of 12 pool runners
     # sat idle. The required legs CANNOT be routed here: `python-ci.yml:1891`
-    # and `docs/ops/ci-runner-x64.md:62` REFUSE a `self-hosted` pin for them,
+    # and `docs/ops/ci-runner-x64.md:65` REFUSE a `self-hosted` pin for them,
     # because such a pin removes the GitHub-hosted half of the race and a
     # hosted outage then leaves the required aggregate pending forever.
     #

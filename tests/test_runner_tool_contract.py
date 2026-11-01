@@ -463,7 +463,7 @@ _SCRIPT_GLOBS = (
 #: the 2026-10-24 measurement shows the pool serving `ubuntu-24.04` as well.
 _POOLABLE_LABEL = re.compile(r"ubuntu-(latest|\d+\.\d+)")
 #: The pool's OWN labels — a POOL-ONLY pin, in the runbook's vocabulary
-#: (`docs/ops/ci-runner-x64.md:60`: "not a spelling but a CLASS — any POOL-ONLY label:
+#: (`docs/ops/ci-runner-x64.md:62`: "not a spelling but a CLASS — any POOL-ONLY label:
 #: `self-hosted`, and equally the bare custom `self-hosted-x64`").
 #:
 #: WHY THIS ARM EXISTS. Until it, the predicate answered only for a hosted label, so a job
@@ -778,7 +778,7 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
     # …and a block list that names ONLY the pool's own markers is pool-eligible, which the
     # pre-fix reader answered False for — the #9018 scan's blind spot, pinned here so the
     # next edit cannot restore it. `[self-hosted, linux]` is a POOL-ONLY pin in the
-    # runbook's sense (`docs/ops/ci-runner-x64.md:60`): no GitHub-hosted runner carries
+    # runbook's sense (`docs/ops/ci-runner-x64.md:62`): no GitHub-hosted runner carries
     # `self-hosted`, so every leg is a bare box.
     assert _poolable_label(block_pool_only)
     # An expression is UNRESOLVABLE from the text, so it must not be skipped: on the
