@@ -855,8 +855,11 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # un-datable END (``END_UNKNOWN`` — the owner ruling of
             # 2026-10-25, ONTOLOGY §4.7), and the search payload already
             # normalises absence to ``None``/an omitted key
-            # (``search_engine.fetch_point_epistemic_state`` uses ``or None``
-            # and emits ``end_state`` only for a real window). Coercing here
+            # (``search_engine.fetch_point_epistemic_state`` normalises an
+            # ABSENT bound to ``None`` — only absence and the blank "no bound"
+            # spelling collapse, a stored number is kept at any value (#9741
+            # review P3-2) — and emits ``end_state`` only for a real window).
+            # Coercing here
             # minted an end nobody wrote, which ``is_stale_entry`` then reads
             # as ENDED at every ``question_date`` — every undated eval hit
             # ranked stale and the C6 ``prefer_latest_order`` arm degraded to

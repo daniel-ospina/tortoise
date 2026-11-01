@@ -4709,8 +4709,11 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # ``None``, so the resolved precision can no longer double as "this
             # point has that bound" — the surface's emit gate would then drop
             # the key here only (the #2350 review-P2 drift, now on both ends).
-            # The raw column is the presence datum; ``row[2] or None`` below
-            # normalises a falsey bound for the promoted WINDOW field only.
+            # The raw column is the presence datum; the promoted WINDOW field
+            # collapses only ABSENCE and the blank "no bound" spelling to
+            # ``None`` (a stored NUMBER is kept at any value — ``0`` is the
+            # epoch instant, #9741 review P3-2), so presence and value can
+            # differ for a bound that is blank here.
             st.setdefault("valid_from_present", row[2] is not None)
             st.setdefault("valid_to_present", row[3] is not None)
             old_id, old_content, old_created = row[5], row[6], row[7]
