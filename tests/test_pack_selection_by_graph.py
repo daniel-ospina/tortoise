@@ -542,8 +542,9 @@ def _assert_seed_visible(db_path: str, org_id: str) -> None:
     explicit release instead of a GC-timed one) and turns a recurrence into a
     named `SeedVisibilityError` carrying the identity evidence — the diagnosis
     a bare 404 on an unrelated assertion cost a cycle to reach. Both are kept
-    for those two jobs; the table above is why neither may be dropped as
-    "redundant".
+    for those two different jobs, NOT as redundancy insurance: the table above
+    measures each half SUFFICIENT on its own, so neither is load-bearing alone
+    and what the file cannot tolerate is the pre-fix shape (neither).
     `patched_tortoise_sdk` closes the anchor at fixture exit, so no extra server
     lifetime escapes the fixture.
 
