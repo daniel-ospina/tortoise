@@ -1354,6 +1354,12 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
     is that a junk token must not abort a supersede. That is the over-refusal
     this test guards against — kept so a later lane reading that finding does
     not "fix" it twice.
+
+    ⛔ It also FAILS the moment the premise becomes true: with
+    ``create_direct_edge`` mutated to leave an absent direction ABSENT on disk
+    (measured), the edge below carries no token and this test fails on its
+    first assertion. So the finding is not "known false" by decree — the test
+    is bound to the fact that makes it false.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
