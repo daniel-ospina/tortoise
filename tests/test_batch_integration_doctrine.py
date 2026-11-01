@@ -789,18 +789,21 @@ now scoped by ROLE (a suite command that writes THAT report), which is the subje
 this module already closed for ``_COUNT_SUBJECT``/``_MERGE_SUBJECT``/``_LANDED_TREE_DIFF``; both
 still kill their own mutants (see the ledger below).
 
-**Non-vacuity, measured at THIS head (41 checks, 0 red), each red on ONE check unless stated.** The
-reviewer's own mutant — the five-member enumeration replaced by prose — reds **1 of 41**
-(``test_the_unreproduced_gate_legs_are_named``), and so does dropping one member, dropping the two
-TEST legs, and dropping ``DEFERRABLE_LEGS``. On the ledger: deleting the ``comm -13`` line, flipping
-it to ``comm -23``, deleting an absent-report halt, deleting the fail-closed block, deleting the
-stated rule, rewriting its ``::`` separator, replacing the XML extraction with a ``grep``, and
-deleting the ``baseline-junit.xml`` source each red **1 of 41**
-(``test_the_failure_id_ledger_is_built_by_a_stated_rule``). Letting the post-revert re-check stop
-rewriting ``$B/batch-trackb.xml`` reds **3 of 41** (that check, the ``track_b`` completion check and
-the skip check — one run's instrument removed, seen from three sides). A backtick re-introduced into
-a halt message reds **1 of 41** (the new message check); a backtick in a trailing annotation stays
-GREEN, as does a reflowed enumeration.
+**Non-vacuity, measured at THIS head (41 checks, 0 red).** **19 document mutants applied, 16 killed,
+1 survivor, 2 controls.** Killed — 15 on exactly ONE check: the reviewer's own mutant (the five-member
+enumeration replaced by prose) reds ``test_the_unreproduced_gate_legs_are_named``, and so does dropping
+one member, dropping the two TEST legs, and dropping ``DEFERRABLE_LEGS``; on the ledger, deleting the
+``comm -13`` line, flipping it to ``comm -23``, deleting an absent-report halt, deleting the
+fail-closed block, deleting the stated rule, rewriting its ``::`` separator, replacing the XML
+extraction with a ``grep``, and deleting the ``baseline-junit.xml`` source each red
+``test_the_failure_id_ledger_is_built_by_a_stated_rule``; a backtick re-introduced into a halt message
+reds the new message check; and the two regression mutants for the re-scoped populations (Phase 3's
+half-1 skip-REASON ``comm`` deleted, the baseline's junit clear deleted) still red their own checks.
+One reds THREE: letting the post-revert re-check stop rewriting ``$B/batch-trackb.xml`` (the ledger
+check, the ``track_b`` completion check and the skip check — one run's instrument, seen from three
+sides). **2 controls stayed GREEN as they must**: a backtick in a trailing ``#`` annotation (``_code``
+cut) and the enumeration REFLOWED onto one line (whitespace normalisation) — so the scoped checks
+grade the claim rather than the spelling.
 **One survivor, and it is the documented CLASS, not this round's**: ``[ … ] || : || { … exit 1; }``
 — defusing the fail-closed halt with an always-0 segment — leaves the text perfect and the halt
 bash-dead, exactly like the ``BASELINE_TOTAL=0`` witness above. That is #10434's class (execute the
