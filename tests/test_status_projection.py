@@ -509,13 +509,13 @@ class TestProjectionFold:
             # fabricated `live` the fold used to seed and the door used to write
             # into the creation record. This leg's claim is unchanged and is what
             # it must keep saying: an Object the journal never superseded is NOT
-            # `superseded` on replay. The replay record carries no status, so the
-            # value is ABSENT, and absent READS LIVE (`live._terminal_excluded`) —
-            # asserting `is None` keeps BOTH halves: a fold reads `'superseded'`,
-            # and a re-instated `coalesce($st, 'live')` seed reads `'live'`.
+            # `superseded` on replay. An absent status reads LIVE
+            # (`live._terminal_excluded`), so the assertion is on the CONTRACT
+            # (not terminal, no carrier) rather than on a literal the projection
+            # has no derivation for.
             assert rows[0][0] is None, (
-                "the replayed registration fabricated a birth status — the "
-                f"journal carries none: {rows!r}")
+                "an Object the journal never superseded came back "
+                f"`superseded` from replay: {rows!r}")
             assert rows[0][1] is None, rows
         finally:
             sdk.close()
@@ -911,7 +911,7 @@ class TestReadSide:
             hits = sdk.tortoise_fts_query("the strategy", kind="core:strategy",
                                           entity_type="object", limit=5)
             assert hits, "seeded object must be retrievable (kind-scoped)"
-            assert hits[0].get("status") in (None, "live"), hits[0]
+            assert hits[0].get("status") is None, hits[0]
 
             sdk.create_entity("object", "the tactic", objectKind="core:strategy",
                               status="draft")
@@ -1360,12 +1360,13 @@ class TestLifecycleCarrierCoherence:
             oid = _make_carrier_entity(sdk, "Object", "epsilon")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
                 sdk.update_entity(oid, supersededBy="v2")
-            assert _carrier_row(sdk, "Object", "epsilon")[1] in (None, "live"), (
+            assert _carrier_row(sdk, "Object", "epsilon")[1] is None, (
                 "the graph's reading of the refused node must stay LIVE "
-                "(#9974 R1: an absent status IS live)")
+                "(#9974 R1: an absent status IS live, and a stored 'live' "
+                "would mean something DID fabricate one)")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
                 sdk.update_entity(oid, superseded_by="v2")
-            assert _carrier_row(sdk, "Object", "epsilon")[1] in (None, "live"), (
+            assert _carrier_row(sdk, "Object", "epsilon")[1] is None, (
                 "a snake-spelled carrier was ACCEPTED on a live node — the "
                 "guard is inert against it (review P1)")
         finally:
@@ -1464,20 +1465,21 @@ class TestBirthStatusIsDerivedNotFabricated:
         finally:
             sdk.close()
 
-    def test_a_caller_supplied_birth_status_lands_on_the_write_and_jsonl_routes(
+    def test_a_caller_supplied_birth_status_survives_the_live_write_and_replay(
             self, tmp_path):
         """Anti-vacuity: DERIVED means the record's value is carried, not lost.
 
         Without this leg the test above would pass if the birth status were
         simply dropped — the same fabrication failure in the other direction.
 
-        SCOPE, stated so the name does not overstate it: the two routes pinned
-        here are (1) the LIVE write (door + fold) and (2) the JSONL replay of the
-        record that write journaled. It does NOT cover the record-sourced route
-        (``cache_projection.node_from_row``), where a caller-supplied birth
-        status is still dropped — the residual this PR names in its body
-        (#9974 R1); closing it needs the record to carry a carrier column, a
-        different change than this one.
+        ⛔ SCOPE, stated (#9974 review P2-4): this covers the LIVE WRITE and the
+        JSONL replay only. It is NOT "both routes" in the sense of live vs
+        RECORD-SOURCED: on the record-sourced route (`cache_projection`,
+        `node_from_row`) a caller-supplied birth status is still DROPPED, because
+        `ObjectRegistered`/`SubjectAdded` are not `EventRecorded` and the layer
+        tables never store `status`. That is the PR's named residual — see
+        `cache_projection`'s STATED BOUND — and this leg must not be read as
+        covering it.
         """
         events = tmp_path / "events"
         events.mkdir()

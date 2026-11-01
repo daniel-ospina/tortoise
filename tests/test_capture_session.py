@@ -22,6 +22,7 @@ from tests._provider_env import pin_provider_routing_env, provider_routing_env_n
 from tests._verdict import verdict_client
 from tortoise import hosted_api as _ha
 from tortoise.hosted_api import app, get_current_org
+from tortoise.live import _live_only
 from tortoise.sdk import TortoiseSDK
 
 # #2242 concurrency test docker-lane guard — mirrors
@@ -2630,12 +2631,9 @@ def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
     rows = sdk._get_proj().g.query(
         "MATCH (o:Object {name:$n}) RETURN o.status",
         params={"n": "approach-A"}).result_set
-    # #9974 R1: the birth status is DERIVED-OR-ABSENT — ``approach-A`` is a
-    # ``create_entity`` birth with no status, so the property is ABSENT (and an
-    # absent status READS live through ``live._terminal_excluded``). Pinned as
-    # ``is None`` rather than ``(v or "live") == "live"`` so this leg ALSO reds
-    # if the fabricated ``'live'`` seed is reinstated; a fold would read
-    # ``'superseded'``, so the anti-fold claim is unchanged.
+    # #9974 R1: no fold fired, so no status was written at all — an absent
+    # status READS live via `live._terminal_excluded`, and `is None` is the
+    # precise form (a fold would have stored `'superseded'`).
     assert rows and rows[0][0] is None, \
         (f"fold must never fire for a dangling successor: {rows!r}")
 
@@ -2893,7 +2891,7 @@ def test_extract_session_v2_pt_ref_meta_warnings(sdk, monkeypatch):
         params={"old": old}).result_set
     assert rows and rows[0][0] == "live", \
         ("old point must stay live — a CORRECTS edge to a nonexistent "
-         f"successor would be dangling: {rows!r}")
+         f"successor would be dangling: {rows!r}")  # :Point keeps its seed
 
 
 def test_apply_supersessions_legacy_idless_object_is_refused_not_folded(sdk):
@@ -2947,6 +2945,9 @@ def test_apply_supersessions_legacy_idless_object_is_refused_not_folded(sdk):
         session_id="sess_legacy", warn=warns.append)
     assert applied == 0, \
         "an id-less target has no id to address — the record is refused"
+    # NOTE (#9974 R1 review P2-2): this fixture raw-writes `status:'live'`, so the
+    # literal is the honest expectation here — a lenient `or "live"` would stop
+    # discriminating the value this leg asserts about.
     assert _entity_fold_state(proj, "legacy-X") == ("live", None), \
         ("the target must be left untouched: a fold with no journal line is "
          "not restorable by a rebuild")
@@ -3060,6 +3061,8 @@ def test_apply_supersessions_prefers_id_match_over_same_string_name(sdk):
     n = proj.g.query(
         "MATCH (o:Object {name:$n}) RETURN o.status",
         params={"n": oid}).result_set
+    # The fixture writes this carrier with an explicit `status:'live'`, so the
+    # literal is honest here (a fold would store `'superseded'`).
     assert n and n[0][0] == "live", \
         f"name-match Object wrongly folded instead of the id match: {n!r}"
 
@@ -3678,6 +3681,7 @@ def test_apply_supersessions_chain_idless_target_is_refused(sdk):
     assert len(warns) == 1 and "it-mid" in warns[0] and "#3590" in warns[0], \
         warns
     # the refusal is LOCAL: the id-less head is untouched...
+    # The fixture raw-writes `it-mid` with `status:'live'` — the literal holds.
     assert _entity_fold_state(proj, "it-mid") == ("live", None), \
         _entity_fold_state(proj, "it-mid")
     # ...and the addressable link in the same chain still lands.
@@ -3864,7 +3868,7 @@ def test_apply_supersessions_pt_self_supersession_skipped(sdk):
         "MATCH (p:Point {id:$id}) RETURN p.status",
         params={"id": pid}).result_set
     assert rows and rows[0][0] == "live", \
-        "the self-referencing point must stay live"
+        "the self-referencing point must stay live"  # :Point keeps its seed
 
 
 def test_apply_supersessions_mixed_id_name_self_alias_skipped(sdk):
@@ -3945,6 +3949,7 @@ def test_apply_supersessions_dup_name_successor_not_self(sdk):
     by_id = {r[0]: (r[1], r[2]) for r in rows}
     assert by_id[id_a] == ("superseded", "plan-X"), \
         f"A must fold to superseded by plan-X: {by_id}"
+    # `obj-planx-dup-b` is raw-written with `status:'live'` — the literal holds.
     assert by_id["obj-planx-dup-b"] == ("live", None), \
         f"B (the distinct successor) must stay live: {by_id}"
 
@@ -3981,10 +3986,8 @@ def test_apply_supersessions_dead_dup_candidate_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    # #9974 R1: ``id_a`` is a ``create_entity`` birth, so its status is ABSENT
-    # (absent READS live — ``live._terminal_excluded``). Asserting the absent
-    # value keeps the leg discriminating in BOTH directions: a fold reads
-    # ``'superseded'``, a reinstated fabrication reads ``'live'``.
+    # #9974 R1: `A` is born status-less (derived-or-absent) and an absent
+    # status READS live; a fold would store `'superseded'` and red here.
     assert by_id[id_a] is None, \
         f"A must stay live — its only successor carrier is dead: {by_id}"
     assert by_id["obj-planx-dead"] == "superseded", by_id
@@ -4019,7 +4022,7 @@ def test_apply_supersessions_deprecated_carrier_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    # #9974 R1: absent birth status — see the dead-duplicate leg above.
+    # #9974 R1: derived-or-absent — absent READS live; a fold still reds.
     assert by_id[id_a] is None, \
         f"A must stay live — its only other carrier is deprecated: {by_id}"
 
@@ -4053,7 +4056,7 @@ def test_apply_supersessions_idless_live_carrier_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    # #9974 R1: absent birth status — see the dead-duplicate leg above.
+    # #9974 R1: derived-or-absent — absent READS live; a fold still reds.
     assert by_id[id_a] is None, \
         f"A must stay live — its only other carrier is id-less: {by_id}"
 
@@ -7816,25 +7819,27 @@ def test_apply_supersessions_concurrent_divergent_fold_one_wins(
         # premise assert turns any aliasing into a deterministic pre-race
         # failure instead of a ~4% post-race flake. If the redirect ever
         # splits, every run fails HERE loudly.
+        #
+        # ⚠️ The liveness half goes through `live._live_only`, the product's OWN
+        # NULL-tolerant predicate — NOT the literal `{status:'live'}` this leg
+        # used to spell. Since #9974 R1 an Object is born with NO stored status
+        # (derived-or-absent) and an absent status READS live, so a literal
+        # equality matches ZERO rows for every newborn entity (`null` is never
+        # `= 'live'`; a WHERE that is not `true` is false). The literal form was
+        # a second, divergent copy of the liveness rule that silently stopped
+        # agreeing with the product's.
         for label, proj in (("proj1", proj1), ("proj2", proj2)):
             n = proj.g.query(
                 "MATCH (o:Object {name:'race-O'}) RETURN count(o)",
             ).result_set[0][0]
             assert n == 1, f"{label} must see exactly ONE race-O: {n}"
-        # The liveness premise must NOT filter the literal ``status:'live'``:
-        # since #9974 R1 a status-less birth stores NO status, so that literal
-        # matches ZERO newborn Objects where it used to match every live one.
-        # The supported filter is the terminal predicate's NULL-tolerant arm
-        # (``live._terminal_excluded``), spelled here so the premise stays
-        # discriminating — a terminal race-O still counts 0.
-        _live_or_absent = "(o.status IS NULL OR o.status <> 'superseded')"
         n1 = proj1.g.query(
-            "MATCH (o:Object {name:'race-O'}) WHERE " + _live_or_absent +
-            " RETURN count(o)",
+            "MATCH (o:Object {name:'race-O'}) "
+            f"WHERE {_live_only('o.status')} RETURN count(o)",
         ).result_set[0][0]
         n2 = proj2.g.query(
-            "MATCH (o:Object {name:'race-O'}) WHERE " + _live_or_absent +
-            " RETURN count(o)",
+            "MATCH (o:Object {name:'race-O'}) "
+            f"WHERE {_live_only('o.status')} RETURN count(o)",
         ).result_set[0][0]
         assert n1 == 1 and n2 == 1, (
             f"both projs must see the SAME live race-O: proj1={n1} "

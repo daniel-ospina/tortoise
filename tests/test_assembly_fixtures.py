@@ -176,10 +176,11 @@ def test_base_graph_v2_lane_faithful(sdk):
     assert rows and rows[0][0] == "superseded" and rows[0][1] == "sofa", rows
     assert rows[0][2] == "2026-09-01T00:00:00Z", \
         f"fold timestamp must be pinned (byte-golden state headers): {rows}"
+    # #9974 R1: a status-less birth stores NO status (absent READS live).
     assert _row(proj, "MATCH (o:Object {name:'sofa'}) RETURN o.status"
-               )[0][0] == "live"
+               )[0][0] is None
     assert _row(proj, "MATCH (o:Object {name:'dog bed'}) RETURN o.status"
-               )[0][0] == "live"
+               )[0][0] is None
     # sparse `when`: exactly the two dated points carry it
     n_when = _count(proj, "MATCH (p:Point) WHERE p.when IS NOT NULL "
                           "RETURN count(p)")
