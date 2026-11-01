@@ -332,7 +332,8 @@ def run_sweep(
             # it would drain and moves nothing.
             receipt["session_events"] = drain_session_events(
                 lambda _payload: None, dry_run=True,
-                store=cursor_dir if cursor_dir is not None else default_cursor_dir())
+                store=cursor_dir if cursor_dir is not None else default_cursor_dir(),
+                only_session_id=only_session_id)
         elif not capture_consent_enabled():
             receipt["session_events"] = {
                 "status": "declined",
@@ -361,6 +362,12 @@ def run_sweep(
                     store=cursor_dir if cursor_dir is not None
                     else default_cursor_dir(),
                     exclude_session_id=exclude_session_id,
+                    # BOTH filters, for the reason the comment above gives: a
+                    # `--file <session>` run that forwarded `exclude` only would
+                    # drain every session's records from this substrate — the
+                    # flag silently half-applied, which is the class that
+                    # comment was written for (#3515 review).
+                    only_session_id=only_session_id,
                 )
                 receipt["session_events"] = summary_events
                 if summary_events.get("cursor_error"):
@@ -625,6 +632,13 @@ def write_sweep_status(receipt: dict, cursor_dir: Path | str | None) -> None:
                 "filed": events_counts.get("filed", 0),
                 "dead_lettered": events_counts.get("dead_lettered", 0),
                 "deferred": events_counts.get("deferred", 0),
+                # `held` (a live session, left queued by design) and
+                # `unselected` (another session under `--file`) were computed
+                # every pass and persisted NOWHERE, so the health line could not
+                # distinguish "nothing left" from "everything withheld".
+                "held": events_counts.get("held", 0),
+                "unselected": events_counts.get("unselected", 0),
+                "degraded": events_counts.get("degraded", 0),
                 "queued": events_counts.get("queued", 0),
                 "stuck": events_counts.get("stuck", 0),
                 "stopped": events_counts.get("stopped"),

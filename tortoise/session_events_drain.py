@@ -154,6 +154,20 @@ def default_session_events_dir(env: Mapping[str, str] | None = None) -> Path:
        backlog through a stubbed transport, and five unrelated tests failed on
        the extra POSTs.
 
+       ⚠️ What the guard gives here is ONE SHARED root, not one per test:
+       ``spool_dir()`` is ``<tmp>/tortoise-capture-spool-tests/<test-digest>``
+       and this derivation takes ``.parent``, which STRIPS the digest — so every
+       test in a run shares ``<tmp>/tortoise-capture-spool-tests/session-events``,
+       and ``cursor_dir()`` likewise shares ``…/store-sync`` (which is also where
+       the capture-spool tests' health and dead-letter assertions look). An
+       earlier version of this docstring claimed per-test isolation, which the
+       derivation does not provide (P3, found in review). The conclusion that
+       still holds is the one that matters for #3721 — a test never touches the
+       REAL substrate — and the sharing is latent rather than an active flake
+       only because nothing writes day files there today. A test that needs its
+       own substrate must pin ``TORTOISE_SESSION_EVENTS_DIR`` (which is exactly
+       what this suite's own cases do).
+
     ``TORTOISE_SESSION_EVENTS_DIR`` overrides everything, for a box whose
     substrate is not beside its spool.
     """
@@ -257,10 +271,38 @@ def _read_lines(path: Path) -> list[str] | None:
         return None
 
 
-def _count_records(path: Path) -> int | None:
-    """How many records a day file holds. No JSON parse — this is QUEUE DEPTH."""
+def _count_records(path: Path, only_session_id: str | None = None) -> int | None:
+    """How many records a day file holds. No JSON parse — this is QUEUE DEPTH.
+
+    With ``only_session_id`` the count IS a parse, because the question changes
+    from "how many records are in this day" to "how many of them is this run
+    asked to file" — and a plan that answered the first while the pass answered
+    the second would be two answers to one question (the defect `--dry-run` had
+    for `cursor_dir`). Unparseable lines are counted as NOT matching a named
+    session: `--file X` must not promise to file a line it cannot attribute.
+    """
     lines = _read_lines(path)
-    return None if lines is None else len(lines)
+    if lines is None:
+        return None
+    if only_session_id is None:
+        return len(lines)
+    return sum(1 for line in lines if _sid_of(line) == only_session_id)
+
+
+def _sid_of(line: str) -> str | None:
+    """The usable ``session_id`` of one raw line, or ``None``.
+
+    One definition, used by the `--file` filter in BOTH the plan and the pass, so
+    the two cannot disagree about which records are in scope.
+    """
+    try:
+        record = json.loads(line)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    raw = record.get("session_id")
+    return raw if isinstance(raw, str) and raw.strip() else None
 
 
 def _window(conversation: Any) -> list[dict]:
@@ -555,6 +597,7 @@ def drain_session_events(
     store: Path | str | None = None,
     max_records: int = MAX_RECORDS_PER_RUN,
     exclude_session_id: str | None = None,
+    only_session_id: str | None = None,
     dry_run: bool = False,
     now: float | None = None,
 ) -> dict[str, Any]:
@@ -564,12 +607,23 @@ def drain_session_events(
     api_url)``): a ``payload -> PostOutcome`` callable, so this leg files through
     the same wire path as every other capture and never grows its own.
 
+    ``only_session_id`` scopes the pass to ONE session — the ``--file`` half of
+    the sweep CLI, derived from the single file it was given. It must be
+    honoured here or `store-sync --file <session>` drains the WHOLE
+    session-events backlog, which is the "flag half-applied" class `--file` was
+    already fixed for on the spool and log legs (#3515 review). An unselected
+    record is skipped WITHOUT a POST and stays queued (never crossed), so the
+    scoped run is non-destructive for every other session, and it is counted as
+    ``unselected`` — ``queued`` then answers only what THIS run still owes, so a
+    scoped run reports ``filed 1, unselected 2, queued 0`` rather than claiming
+    either that the backlog is empty or that it owes work it was never given.
+
     Returns the run's progress record — ``filed``, ``deferred``,
-    ``dead_lettered``, ``held``, ``consumed``, ``queued`` (records still
-    undelivered), ``unreadable`` (whole days this pass could not read at all) and
-    ``stopped`` (``"batch"`` = the bound, ``"refused"`` = a transient refusal
-    ended the pass). The absence of exactly this record is why tens of thousands
-    of records accumulated invisibly (#6388).
+    ``dead_lettered``, ``held``, ``unselected``, ``consumed``, ``queued``
+    (records still undelivered), ``unreadable`` (whole days this pass could not
+    read at all) and ``stopped`` (``"batch"`` = the bound, ``"refused"`` = a
+    transient refusal ended the pass). The absence of exactly this record is why
+    tens of thousands of records accumulated invisibly (#6388).
     """
     root_path = Path(root) if root is not None else default_session_events_dir()
     store_path = Path(store) if store is not None else cursor_dir()
@@ -584,6 +638,10 @@ def drain_session_events(
         "deferred": 0,
         "dead_lettered": 0,
         "held": 0,
+        "unselected": 0,
+        # 2xx responses that STORED the turns and extracted nothing (#4197's
+        # shape, observed here rather than only on the spool leg).
+        "degraded": 0,
         "consumed": 0,
         "queued": 0,
         "stuck": 0,
@@ -614,8 +672,20 @@ def drain_session_events(
             # The plan must answer the SAME question the real pass does, so it
             # applies the same index-space binding — in memory only, since a
             # dry run writes no cursor.
-            cursor.note_shape(_day_key(path), _shape_of(path))
-            queued += cursor.queued(_day_key(path), total)
+            key = _day_key(path)
+            cursor.note_shape(key, _shape_of(path))
+            if only_session_id is None:
+                queued += cursor.queued(key, total)
+            else:
+                # `cursor.queued` subtracts a DAY's consumed prefix from a DAY's
+                # total; under a `--file` filter both of those are the unfiltered
+                # quantities, so the plan has to ask per record instead — the
+                # same predicate the pass uses, or the two answers to
+                # "how much is left" diverge.
+                lines = _read_lines(path) or []
+                queued += sum(1 for i, line in enumerate(lines)
+                              if not cursor.is_done(key, i)
+                              and _sid_of(line) == only_session_id)
         summary["queued"] = queued
         summary["detail"] = "plan only — nothing was posted and no cursor moved"
         summary["dead_letters_total"] = read_dead_letter_count(store_path)
@@ -696,9 +766,15 @@ def drain_session_events(
                 post, store_path, key, index, line, summary,
                 is_last=index == total - 1, settled=settled,
                 exclude_session_id=exclude_session_id,
+                only_session_id=only_session_id,
             )
             if verdict == "held":
                 summary["held"] += 1
+                continue
+            if verdict == "unselected":
+                # Another session's record under a `--file` scope: no POST, no
+                # strike, not crossed — it stays exactly as it was.
+                summary["unselected"] += 1
                 continue
             if verdict == "local_error":
                 # The DEAD-LETTER SUBSTRATE could not be written. That is a local
@@ -748,7 +824,16 @@ def drain_session_events(
                 continue
             total = counted
             cursor.set_total(key, total)
-        queued += cursor.queued(key, total)
+        if only_session_id is None:
+            queued += cursor.queued(key, total)
+        else:
+            # Same reason as the plan above: a `--file` run reports what it was
+            # asked to file, not the whole day's backlog — otherwise the run
+            # says `queued 40` after filing the one session it was scoped to.
+            lines = _read_lines(path) or []
+            queued += sum(1 for i, line in enumerate(lines)
+                          if not cursor.is_done(key, i)
+                          and _sid_of(line) == only_session_id)
     summary["queued"] = queued
     # The pass-ending reason is INDEPENDENT of the unreadable-day list: a pass
     # that stopped on the bound while some earlier day was unreadable used to
@@ -779,6 +864,7 @@ def _file_age(path: Path, now: float | None = None) -> float:
 def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
               summary: dict[str, Any], *, is_last: bool, settled: bool,
               exclude_session_id: str | None = None,
+              only_session_id: str | None = None,
               ) -> tuple[str, str | None]:
     """File ONE record. Returns ``(verdict, session_id)``.
 
@@ -833,6 +919,12 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
         # `_cmd_session_drain` documents the same rule for the spool). Left
         # un-consumed, so it is filed once it is no longer live.
         return "held", sid
+    if only_session_id is not None and sid != only_session_id:
+        # `--file <session>`: this pass was scoped to one session, so another
+        # session's record is not ours to file — and NOT ours to dead-letter
+        # either (a null sid included: it cannot be attributed to the scope).
+        # Left un-consumed, so an unscoped pass picks it up later.
+        return "unselected", sid
     turns = _window(record.get("conversation"))
     if sid is None:
         # No session id ⇒ the server cannot upsert it and the record names no
@@ -867,6 +959,22 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
     if outcome.ok:
         summary["filed"] += 1
         summary["verdicts"] += 1
+        # A 2xx is not one thing. The spool leg reads the body and records the
+        # store-only / degraded shapes as DEFERRALS (#4197), because the turns
+        # were stored and nothing was extracted. This leg counted every 2xx as
+        # `filed` and never looked — two answers to one wire event (found in
+        # review). The REASON comes from the single shared definition
+        # (`__main__._deferral_reason`), never a second copy of the rule.
+        #
+        # The FILING policy is deliberately unchanged: the record was accepted,
+        # re-POSTing it every pass would hammer the API for a condition this leg
+        # cannot fix, and the server upserts on `session_id` if it later
+        # extracts. What changes is that the condition is now COUNTED and
+        # printed, so `filed` no longer silently claims extraction happened.
+        reason = _deferral_reason_of(outcome)
+        if reason:
+            summary["degraded"] += 1
+            summary["detail"] = f"stored without extraction ({reason})"[:300]
         return "filed", sid
     verdict = classify_failure(outcome.status, outcome.detail)
     if verdict == "retry":
@@ -874,6 +982,29 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
         return "retry", sid
     return dead("http_rejected", str(outcome.detail or ""), session_id=sid,
                 status=outcome.status)
+
+
+def _deferral_reason_of(outcome: PostOutcome) -> str | None:
+    """Why a 2xx stored the turns without extracting — or ``None``.
+
+    Delegates to ``__main__._deferral_reason``, the ONE definition every other
+    capture writer uses, so this leg cannot drift from the spool's reading of
+    the same response body (#4197). Imported at call time: ``__main__`` is the
+    caller of this module, and it is a large import to pull in at module load.
+
+    Never raises: a body shape this cannot interpret is ``None`` ("nothing known
+    to be wrong"), because a probe that cannot look must not fabricate a
+    deferral — and must never cost the filing that already succeeded.
+    """
+    body = getattr(outcome, "body", None)
+    if not isinstance(body, dict):
+        return None
+    try:
+        from tortoise.__main__ import _deferral_reason
+
+        return _deferral_reason(body)
+    except Exception:
+        return None
 
 
 def format_progress(summary: dict[str, Any]) -> str:
@@ -895,6 +1026,11 @@ def format_progress(summary: dict[str, Any]) -> str:
         line += f", stuck {summary['stuck']} (over {MAX_STRIKES} strikes, skipped)"
     if summary.get("held"):
         line += f", held {summary['held']} (live session)"
+    if summary.get("unselected"):
+        line += f", unselected {summary['unselected']} (not this --file scope)"
+    if summary.get("degraded"):
+        line += (f", stored-not-extracted {summary['degraded']} "
+                 f"(filed; #4197 shape)")
     if summary.get("stopped"):
         line += f" (stopped {summary['stopped']})"
     if summary.get("posts"):

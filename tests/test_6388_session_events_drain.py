@@ -623,3 +623,88 @@ def test_a_deflate_corrupt_archive_day_is_reported_and_does_not_abort_the_pass(
     assert run["filed"] == 1                      # the later day still drains
     assert post.session_ids == ["s-later"]
     assert (store / "session-events-cursor.json").exists()
+
+
+def test_a_file_scoped_run_files_only_the_named_session(tmp_path: Path) -> None:
+    """P2 from review: `--file <session>` must not drain the WHOLE backlog.
+
+    `store_sync.run_sweep` derives `only_session_id` from `--file` and forwards it
+    to the spool and log legs; the session-events leg took `exclude_session_id`
+    but not this one, so a scoped run filed every other session's records too —
+    the same "flag half-applied" class the spool leg was already fixed for
+    (#3515 review). Anything not selected must stay QUEUED: a scoped run is
+    non-destructive for every other session.
+    """
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    _write_day(root, "2026-10-01.jsonl",
+               [_record("target"), _record("other-1"), _record("other-2")])
+
+    scoped = Recorder()
+    summary = _drain(root, store, scoped, only_session_id="target")
+
+    assert scoped.session_ids == ["target"]
+    assert summary["filed"] == 1
+    assert summary["unselected"] == 2
+    # `queued` counts what THIS run still owes: the two out-of-scope records are
+    # reported as `unselected` rather than folded into a queue depth the scoped
+    # run was never asked about.
+    assert summary["queued"] == 0
+
+    # A later UNSCOPED pass files them: "not selected" is not "dropped".
+    everything = Recorder()
+    rest = _drain(root, store, everything)
+    assert everything.session_ids == ["other-1", "other-2"]
+    assert rest["filed"] == 2
+    assert rest["queued"] == 0
+
+
+def test_the_plan_answers_the_scoped_question_the_pass_will_ask(
+        tmp_path: Path) -> None:
+    """The `--file` plan must not report the whole day's backlog.
+
+    A dry run that counted all three records while the real pass filed one would
+    be two answers to "how much is left" — the same divergence `--dry-run`
+    already had for `cursor_dir`.
+    """
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    _write_day(root, "2026-10-01.jsonl",
+               [_record("target"), _record("other-1"), _record("other-2")])
+
+    plan = _drain(root, store, Recorder(), dry_run=True, only_session_id="target")
+    assert plan["queued"] == 1
+
+    plan_all = _drain(root, store, Recorder(), dry_run=True)
+    assert plan_all["queued"] == 3
+
+
+def test_a_2xx_that_stored_without_extracting_is_counted_not_just_filed(
+        tmp_path: Path) -> None:
+    """P2 from review: one wire event, two accountings.
+
+    The spool leg reads a 2xx body and records the store-only / degraded shapes
+    as DEFERRALS (#4197) — the turns were stored and nothing was extracted. This
+    leg counted every 2xx as `filed` and never looked. The reason now comes from
+    the ONE shared definition (`__main__._deferral_reason`), so a stored-but-
+    not-extracted session is visible instead of reading as a clean filing.
+    """
+    from tortoise.session_events_drain import format_progress
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    _write_day(root, "2026-10-01.jsonl",
+               [_record("stored-only"), _record("extracted")])
+    post = Recorder({
+        "stored-only": PostOutcome(ok=True, status=201,
+                                   body={"extraction_mode": "empty"}),
+        "extracted": PostOutcome(ok=True, status=201,
+                                 body={"extraction_mode": "extracted"}),
+    })
+
+    run = _drain(root, store, post)
+
+    # Both records were ACCEPTED — the filing policy is unchanged — but only one
+    # of them produced memory points.
+    assert run["filed"] == 2
+    assert run["degraded"] == 1
+    assert run["queued"] == 0
+    assert post.session_ids == ["stored-only", "extracted"]
+    assert "stored-not-extracted 1" in format_progress(run)
