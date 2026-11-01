@@ -62,8 +62,8 @@ response_fields:
     (order_by=graph|confidence, or recall_state's StateRanker) AND that read answered
     for THIS row; "not_consulted" when the order measured no belief at all -- the
     relevance path never reads the posterior, and a read that FAILED, or that
-    answered no row on this page, collapses to this same state because every score on
-    it then came from a neutral default. The key is ABSENT in two cases -- the stage
+    answered none of the rows on this page, collapses to this same state because every
+    score on it then came from a neutral default. The key is ABSENT in two cases -- the stage
     that produced the order cannot say (a caller-supplied ranker whose read is not
     observable), and a MIXED page where the read answered other rows but not this one
     (no persisted belief was supplied for it) -- no claim is made rather than a
@@ -76,8 +76,8 @@ response_fields:
     same contract as tortoise_search -- a returned hit's `ep` block carries
     "consulted" when the StateRanker that produced the ORDER read the belief and the
     read answered for THAT row, "not_consulted" when the order measured no belief at
-    all (a read that failed, or one that answered no row on this page -- every score
-    then came from a neutral default), and is ABSENT when the ranker's read is
+    all (a read that failed, or one that answered none of the rows on this page --
+    every score then came from a neutral default), and is ABSENT when the ranker's read is
     unobservable or answered other rows but not this one. #10137.
   unchanged_when_off: yes — additive; ordering and every other field unchanged
 - response: tortoise_analyze
