@@ -1,11 +1,13 @@
 """#10137 — does the belief layer enter the ORDER a query returns?
 
-Measured on this tree before the fix: the EP posterior is read by
-``GraphRanker`` only when a caller passes ``order_by="graph"``. The DEFAULT
-path (``order_by="relevance"`` — what ``tortoise_search`` uses and what the
-answer lane's ``retrieve``/assembly calls use, since none of them pass an
-``order_by``) never reads ``posterior_alpha``/``ep_alpha`` at all, while it
-still SHIPS each hit's ``ep`` block (``confidence_mean``, ``has_ep``,
+Measured on this tree before the fix: the EP posterior is read **for ordering**
+by ``GraphRanker`` on ``order_by in ("graph", "confidence")`` and by
+``StateRanker`` inside ``recall_state``. The DEFAULT path
+(``order_by="relevance"`` — what ``tortoise_search`` uses and what the answer
+lane's ``retrieve``/assembly calls use, since none of them pass an
+``order_by``) never reads ``posterior_alpha``/``ep_alpha`` **for ordering**,
+while every ordering (the default included) still ANNOTATES each hit's ``ep``
+block from those same columns (``confidence_mean``, ``has_ep``,
 ``measured``, ``baseline``). A consumer reading a top-1 hit with
 ``confidence_mean: 0.9091`` therefore has no way to tell "belief ranked this"
 from "belief was never consulted" — the same shape that lets a published
