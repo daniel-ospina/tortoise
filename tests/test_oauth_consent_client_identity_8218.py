@@ -178,7 +178,15 @@ def _functions_touching(needle: str) -> dict[str, list[str]]:
     """
     found: dict[str, list[str]] = {}
     for path in sorted((REPO_ROOT / "tortoise").rglob("*.py")):
-        tree = ast.parse(path.read_text())
+        source = path.read_text()
+        # Text pre-filter, then parse. A function that mentions `needle` must
+        # live in a file that mentions it, so this cannot change the result -
+        # it only stops the pass parsing the ~260 modules that cannot match.
+        # It matters now that the file also runs on `core` (config/ci-surfaces:
+        # enumeration half), where this guard fires for every package edit.
+        if needle not in source:
+            continue
+        tree = ast.parse(source)
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
