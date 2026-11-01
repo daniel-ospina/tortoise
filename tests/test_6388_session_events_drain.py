@@ -202,6 +202,85 @@ def test_a_sealed_archive_day_is_still_drained(tmp_path: Path) -> None:
     assert post.session_ids == ["sealed-1"]
 
 
+def test_a_plain_file_that_replaces_a_drained_archive_is_not_skipped(
+        tmp_path: Path) -> None:
+    """P1 (reproduced): the DUAL-SHAPE day silently skipped every new record.
+
+    The cursor's ``consumed`` is an index into a DAY, but a day has two files.
+    Seal the day, drain the archive, then let a later session re-create the
+    plain file for the same day (``tools/seal_session_events.py`` seals on the
+    LOCAL clock while the producer names its file in UTC, so a UTC day already
+    behind local ``today`` stays sealable after its settle grace). PLAIN WINS
+    then reads the new file against the ARCHIVE's index space, so its first
+    ``consumed`` records are skipped — neither filed nor dead-lettered, and
+    ``queued`` reports 0, which is the state this module exists to forbid.
+
+    Pre-fix this file fails at the first assert: ``filed == 0``, the wire is
+    empty, and the LATE records are lost silently and stably across passes.
+    """
+    import gzip
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    (root / "archive").mkdir(parents=True)
+    archived = [f"archived-{i}" for i in range(4)]
+    with gzip.open(root / "archive" / "2026-10-01.jsonl.gz", "wt",
+                   encoding="utf-8") as fh:
+        for sid in archived:
+            fh.write(json.dumps(_record(sid)) + "\n")
+
+    first = Recorder()
+    assert _drain(root, store, first)["filed"] == 4
+    assert first.session_ids == archived
+
+    # A session ending later that UTC day re-creates the plain file.
+    late = [f"LATE-{i}" for i in range(4)]
+    _write_day(root, "2026-10-01.jsonl", [_record(sid) for sid in late])
+
+    second = Recorder()
+    summary = _drain(root, store, second)
+
+    assert summary["filed"] == 4
+    assert second.session_ids == late
+    assert summary["queued"] == 0
+
+    # …and the reset does not turn into a re-POST storm on the next pass: the
+    # re-filed day is now the plain file's index space and stays consumed.
+    third = Recorder()
+    again = _drain(root, store, third)
+    assert third.session_ids == []
+    assert again["filed"] == 0
+
+
+def test_the_seal_of_a_drained_plain_day_does_not_re_file_it(tmp_path: Path) -> None:
+    """The OTHER direction of the shape binding: plain → gz is the seal.
+
+    A fix for the dual-shape skip that reset on ANY shape change would turn the
+    seal into a re-POST of the whole day, so this is the guard against
+    over-correcting: the archive is a gzip of the plain file just drained, so
+    the same indices are already consumed.
+    """
+    import gzip
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    plain = _write_day(root, "2026-10-01.jsonl",
+                       [_record(f"s{i}") for i in range(3)])
+    first = Recorder()
+    assert _drain(root, store, first)["filed"] == 3
+
+    # tools/seal_session_events.py: gzip the settled day, then remove the plain.
+    (root / "archive").mkdir(parents=True, exist_ok=True)
+    with gzip.open(root / "archive" / "2026-10-01.jsonl.gz", "wt",
+                   encoding="utf-8") as fh:
+        fh.write(plain.read_text(encoding="utf-8"))
+    plain.unlink()
+
+    second = Recorder()
+    summary = _drain(root, store, second)
+    assert second.session_ids == []  # idempotent across the seal
+    assert summary["filed"] == 0
+    assert summary["queued"] == 0
+
+
 def test_the_pass_is_bounded_and_says_how_much_is_left(tmp_path: Path) -> None:
     """One pass can never be an unbounded hammer: cap, cadence, queue depth."""
     root, store = tmp_path / "session-events", tmp_path / "store-sync"
@@ -383,24 +462,63 @@ def test_a_stuck_record_is_not_crossed_by_the_record_behind_it(
     assert later["dead_lettered"] == 0
 
 
-def test_the_bound_caps_posts_even_when_every_record_proceeds_to_stuck(
+def test_the_bound_caps_posts_against_a_transport_that_never_recovers(
         tmp_path: Path) -> None:
-    """P1 from re-review: the bound must count POSTs, not terminal verdicts."""
-    from tortoise.session_events_drain import MAX_RECORDS_PER_RUN
+    """P1 from review: this case asserted nothing — 2 POSTs against a cap of 200.
 
+    Every record answering ``503`` ends the pass on the FIRST refusal, so the
+    counters never approached the cap: `assert run["posts"] <= 200` compared 2
+    with 200 and was green for any implementation. Proven vacuous at the review
+    head by two mutations — counting terminal verdicts instead of POSTs, and
+    deleting the bound entirely — both of which left it green.
+
+    So it now asserts the EXACT count of payloads the transport received, with a
+    transport that cannot end the pass early: every record is PERMANENTLY
+    rejected (422), which dead-letters and continues. `==` rather than `<=` is
+    what makes deleting the bound a failure (300 POSTs), and 300 POSTs is what
+    an outage would become without it.
+    """
     root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    total = MAX_RECORDS_PER_RUN + 100
+    _write_day(root, "2026-10-01.jsonl", [_record(f"s{i}") for i in range(total)])
+    post = Recorder(default=PostOutcome(ok=False, status=422, detail="bad lane"))
+
+    run = _drain(root, store, post)
+
+    # The count the transport actually saw — not the summary field a mutation
+    # would move along with it.
+    assert len(post.posted) == MAX_RECORDS_PER_RUN
+    assert run["posts"] == MAX_RECORDS_PER_RUN
+    assert run["stopped"] == "batch"
+    assert run["queued"] == total - MAX_RECORDS_PER_RUN  # the rest is still owed
+
+
+def test_the_bound_counts_verdicts_that_never_touch_the_wire(
+        tmp_path: Path) -> None:
+    """P2 from review: a dead letter is not always a POST, so `posts` is not enough.
+
+    ``no_session_id`` / ``no_conversation`` / ``unparseable_record`` reach a
+    TERMINAL verdict without a request, so a day made entirely of them did one
+    `fsync` per record into the shared `dead-letter.jsonl` in a single unbounded
+    pass while `posts` stayed 0. One pass must be bounded in RECORDS, not only
+    in requests.
+    """
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    total = MAX_RECORDS_PER_RUN + 100
+    # Every line is valid JSON with no usable session id: dead-lettered local.
     _write_day(root, "2026-10-01.jsonl",
-               [_record(f"s{i}") for i in range(MAX_RECORDS_PER_RUN + 100)])
-    down = Recorder(default=PostOutcome(ok=False, status=503, detail="unavailable"))
+               [json.dumps({"conversation": [{"role": "user", "content": "hi"}]})
+                for _ in range(total)])
+    post = Recorder()
 
-    for _ in range(4):
-        run = _drain(root, store, down)
+    run = _drain(root, store, post)
 
-    # Never more POSTs in one pass than the bound: an outage must not turn into
-    # an unbounded hammer.
-    assert run["posts"] <= MAX_RECORDS_PER_RUN
-    assert run["filed"] == 0
-    assert run["queued"] == MAX_RECORDS_PER_RUN + 100  # nothing crossed
+    assert post.posted == []  # nothing reachable to POST
+    assert run["dead_lettered"] == MAX_RECORDS_PER_RUN
+    assert run["stopped"] == "batch"
+    assert run["queued"] == total - MAX_RECORDS_PER_RUN
+    assert read_dead_letter_count(store) == MAX_RECORDS_PER_RUN
+
 
 def test_a_pass_of_stuck_records_never_spends_the_whole_budget_on_them(
         tmp_path: Path) -> None:
@@ -410,8 +528,6 @@ def test_a_pass_of_stuck_records_never_spends_the_whole_budget_on_them(
     passes — records 201..220 were never POSTed once, because every pass spent
     its whole budget re-attempting known-stuck records.
     """
-    from tortoise.session_events_drain import MAX_STRIKES
-
     root, store = tmp_path / "session-events", tmp_path / "store-sync"
     healthy = [f"s{i}" for i in range(5, 8)]
     _write_day(root, "2026-10-01.jsonl",

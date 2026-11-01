@@ -67,8 +67,9 @@ import json
 import os
 import time
 import zlib
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from tortoise.capture_spool import (
     PostOutcome,
@@ -86,8 +87,8 @@ __all__ = [
     "DEAD_LETTER_MAX_ROWS",
     "MAX_RECORDS_PER_RUN",
     "MAX_STRIKES",
-    "STUCK_RETRIES_PER_PASS",
     "SETTLE_GRACE_SECONDS",
+    "STUCK_RETRIES_PER_PASS",
     "cursor_dir",
     "default_session_events_dir",
     "drain_session_events",
@@ -188,6 +189,17 @@ def _day_key(path: Path) -> str:
         if name.endswith(suffix):
             return name[: -len(suffix)]
     return name
+
+
+def _shape_of(path: Path) -> str:
+    """Which of the day's two files this is — its index space, not its name.
+
+    ``archive/X.jsonl.gz`` (``"gz"``) and ``X.jsonl`` (``"plain"``) are the same
+    QUEUE entry across a seal, but two different FILES; see
+    :meth:`_Cursor.note_shape` for why the cursor has to know which one it is
+    looking at.
+    """
+    return "gz" if path.name.endswith(".gz") else "plain"
 
 
 def _candidate_files(root: Path) -> list[Path]:
@@ -294,7 +306,7 @@ class _Cursor:
         self.days = days
 
     @classmethod
-    def load(cls, store: Path, root: Path) -> "_Cursor":
+    def load(cls, store: Path, root: Path) -> _Cursor:
         try:
             parsed = json.loads((store / CURSOR_FILE).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -332,12 +344,63 @@ class _Cursor:
                         str(k): v for k, v in (strikes or {}).items()
                         if isinstance(v, int) and v > 0
                     } if isinstance(strikes, dict) else {},
+                    # WHICH SHAPE this index space belongs to (see
+                    # `note_shape`). Absent on a cursor written before the
+                    # dual-shape fix, which is treated as "unknown", not as a
+                    # transition.
+                    "shape": value.get("shape") if value.get("shape") in ("plain", "gz")
+                    else None,
                 }
         return cls(str(root), days)
 
     def day(self, key: str) -> dict:
         return self.days.setdefault(key, {"consumed": 0, "crossed": [], "strikes": {},
-                                          "total": -1, "probes": 0})
+                                          "total": -1, "probes": 0, "shape": None})
+
+    def note_shape(self, key: str, shape: str) -> str | None:
+        """Bind this day's cursor to the SHAPE the index space belongs to.
+
+        The cursor is keyed by DAY and ``consumed`` is an index into that day's
+        file — but a day has TWO possible files and they are not one index
+        space. ``archive/X.jsonl.gz`` and ``X.jsonl`` are the same queue entry
+        only while the SEAL is what separates them: the seal moves the file, so
+        the archive holds exactly the records the plain file held. A plain file
+        that appears AFTER an archive was drained is a DIFFERENT file — the
+        substrate's writer re-created the day for a session that ended after the
+        seal — and its records start at index 0 again. Applying the archive's
+        ``consumed`` to it skips them all, silently (reproduced: 4 records
+        neither filed nor dead-lettered, ``queued 0``, stable across passes).
+
+        So an ``gz → plain`` transition RESETS this day's index space. Every
+        other transition keeps it:
+
+        * ``plain → gz`` is the seal, the archive a gzip of the plain file we
+          just drained — same records, same indices, nothing re-filed (the
+          idempotency `_day_key` exists for).
+        * ``plain → plain`` is an append to the same file — a valid prefix.
+        * ``gz → gz`` is a re-seal of the same day — a valid prefix too.
+
+        The unsafe direction is the one comparable systems resolve the same way:
+        a consumer position is per FILE IDENTITY, and when identity cannot be
+        proven the read is repeated rather than skipped (Logstash's ``sincedb``
+        keys on inode + major + minor for exactly this, and documents that on
+        inode reuse "a previously seen file will be read again"). A re-read is
+        idempotent — the server upserts on ``session_id`` — whereas a skip is a
+        lost capture (#3870).
+
+        Returns a human-readable detail when it reset, else ``None``.
+        """
+        day = self.day(key)
+        previous = day.get("shape")
+        day["shape"] = shape
+        if previous != "gz" or shape != "plain":
+            return None
+        day["consumed"] = 0
+        day["crossed"] = []
+        day["strikes"] = {}
+        day["probes"] = 0
+        return (f"{key}: a plain file replaced the drained archive — "
+                f"re-filing the day (a new index space)")
 
     def consumed(self, key: str) -> int:
         return int(self.day(key).get("consumed") or 0)
@@ -526,6 +589,7 @@ def drain_session_events(
         "stuck": 0,
         "stuck_retries": 0,
         "posts": 0,
+        "verdicts": 0,
         "unreadable": [],
         "stopped": None,
         "dead_letters_total": 0,
@@ -547,6 +611,10 @@ def drain_session_events(
             if total is None:
                 summary["unreadable"].append(str(path))
                 continue
+            # The plan must answer the SAME question the real pass does, so it
+            # applies the same index-space binding — in memory only, since a
+            # dry run writes no cursor.
+            cursor.note_shape(_day_key(path), _shape_of(path))
             queued += cursor.queued(_day_key(path), total)
         summary["queued"] = queued
         summary["detail"] = "plan only — nothing was posted and no cursor moved"
@@ -569,7 +637,14 @@ def drain_session_events(
             summary["unreadable"].append(str(path))
             continue
         total = len(lines)
+        # BEFORE any index is read: bind this day's cursor to the shape it was
+        # built from. A plain file that replaced a drained archive is a NEW
+        # index space, and applying the old `consumed` to it skipped every new
+        # record (see `_Cursor.note_shape`).
+        rebound = cursor.note_shape(key, _shape_of(path))
         cursor.set_total(key, total)
+        if rebound:
+            summary["detail"] = rebound
         if cursor.consumed(key) > total:
             # The file is SHORTER than the cursor claims (a restored or rewritten
             # day). The safe reading is "nothing is known about these records":
@@ -591,7 +666,14 @@ def drain_session_events(
             index += 1
             if cursor.is_done(key, index):
                 continue
-            if summary["posts"] >= cap:
+            if summary["posts"] >= cap or summary["verdicts"] >= cap:
+                # TWO counters, because a dead letter is not always a POST.
+                # `no_session_id` / `no_conversation` / `unparseable_record` are
+                # dead-lettered WITHOUT touching the wire, so a day of 62,000
+                # malformed lines did 62,000 `fsync`s into the shared
+                # `dead-letter.jsonl` in ONE pass while `posts` stayed 0 — the
+                # bound was on the wrong quantity (found in review). `verdicts`
+                # counts records given a TERMINAL verdict, POSTed or not.
                 stopped = stopped or "batch"
                 break
             if cursor.strikes(key, index) >= MAX_STRIKES and index != probe_index:
@@ -610,7 +692,7 @@ def drain_session_events(
                 continue
             if cursor.strikes(key, index) >= MAX_STRIKES:
                 summary["stuck_retries"] += 1
-            verdict, session_id = _file_one(
+            verdict, _session_id = _file_one(
                 post, store_path, key, index, line, summary,
                 is_last=index == total - 1, settled=settled,
                 exclude_session_id=exclude_session_id,
@@ -726,6 +808,7 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
             summary["detail"] = "dead-letter substrate is not writable"
             return "local_error", session_id
         summary["dead_lettered"] += 1
+        summary["verdicts"] += 1
         return "dead", session_id
 
     try:
@@ -783,6 +866,7 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
         return "retry", sid
     if outcome.ok:
         summary["filed"] += 1
+        summary["verdicts"] += 1
         return "filed", sid
     verdict = classify_failure(outcome.status, outcome.detail)
     if verdict == "retry":

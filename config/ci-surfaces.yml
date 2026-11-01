@@ -1459,6 +1459,14 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
+  # #6388: the session-events DRAIN's CLI consumer (`tortoise session drain`) and
+  # its SessionStart hook live in `tortoise/__main__.py`, an EXACT `api`
+  # SOURCE_PATTERNS match. A match REPLACES the `core` fallback in `select()`, so
+  # a `__main__.py`-only diff selected `api` and NOT this guard — the #1349/#2938
+  # silent-drop class, in the direction where a PR reverting the hook wiring runs
+  # every surface except the one that drains. The `core` row is the other half
+  # (`session_events_drain.py` matches no named surface); BOTH are required.
+  - test_6388_session_events_drain.py
   # #4197: the saved-backlog CLI surface lives in `tortoise/__main__.py` — an
   # exact `api` SOURCE_PATTERN (it is NOT a SHARED_MODULE, so a `__main__.py`
   # change selects `api`, not the full matrix). The file's largest subject is
@@ -3686,6 +3694,13 @@ surfaces:
   # that edits it. Registered on `core` (the fallback surface), not a named
   # one, because nothing under `tools/` maps to a named surface.
   - test_session_events_seal.py
+  # #6388: the session-events DRAIN — the consumer half of the substrate the seal
+  # tool above manages. `tortoise/session_events_drain.py` matches no named
+  # SOURCE_PATTERNS entry, so it falls through to `core`; that is the arm that
+  # runs the guard when the drain module itself changes. Dual-registered under
+  # `api` for the `__main__.py` callsite (see the `api` entry) — the same shape
+  # `test_capture_spool.py` carries one block up.
+  - test_6388_session_events_drain.py
   # #3516 §B: the capture-lane marker. `tortoise/capture_spool.py` (the spool
   # carry-forward), `tortoise/pi-hooks/` (the producer stamp) and
   # `tortoise/projection/entities.py` (the journal fold) match no named surface
@@ -8889,6 +8904,7 @@ durations:
   test_session_attribution.py: 0.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 0.3
   test_session_import_codex.py: 23.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.0
   test_capture_spool.py: 4.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.9
+  test_6388_session_events_drain.py: 2.0  # new in #6388 (#3400/#4348 trap): a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row has to EXIST, not merely default: the `core` + `api` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: DB-free, graph-free, network-free and model-free — every case writes day files under `tmp_path` (`TORTOISE_SESSION_EVENTS_DIR`/`store=`) and drives `drain_session_events` with a recording `PostOutcome` transport; the only subprocess-free cost is gzip encode/decode on the sealed-day cases. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   # #3516 §B: the capture-lane marker. Measured as the CALL sum of an
   # embedded-lane run (23 tests, four of them HTTP round-trips); the docker
   # lane is expected to be faster, so this is a conservative over-weight. The
