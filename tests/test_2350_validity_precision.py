@@ -1269,6 +1269,56 @@ def test_one_unreadable_hit_does_not_deny_the_rendered_read(monkeypatch):
     assert "still readable" in render_context([broken_annotation, good])
 
 
+def test_the_pre_2978_predicate_shim_still_drives_assemble_context():
+    """#9741 review P2-1 — a ONE-positional patch of ``_has_claim_text`` must
+    still be able to drive ``assemble_context``.
+
+    ``tools/longmem_eval/slice_a_flood_bound.py`` is the ONE in-repo patcher of
+    that predicate — the #8043 Slice-A gate's pre-#2978 counterfactual arm —
+    and it swapped in ``lambda h: True`` at the module global. #9741 gave the
+    function a ``marker=`` keyword (one resolution per hit, shared between the
+    admission question and the render), so ``_SafeMarkerCache.claim_text``'s
+    ``_has_claim_text(h, marker=…)`` reached that single-positional lambda as
+    ``TypeError: <lambda>() got an unexpected keyword argument 'marker'``. The
+    exception escaped ``measure()``, so the instrument died and its committed
+    receipt could drift with nothing measuring it.
+
+    This reds on a GATING surface on purpose: the tool's own test file is a
+    member of ``config/ci-surfaces.yml::on_demand`` (#10194), which every PR
+    and push leg subtracts — so the break was real, deterministic, and
+    invisible. Pinned as the CONTRACT (a shim that accepts-and-ignores extra
+    keywords keeps working), exercised through the tool's real contextmanager
+    rather than a re-implementation of it.
+
+    Fails pre-fix: ``TypeError`` on the ``marker=`` keyword.
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    from tools.longmem_eval.slice_a_flood_bound import _pre_2978_predicate
+    from tortoise.retrieval import assemble_context
+
+    claimed = {"id": "claimed", "content": "the answer",
+               "valid_from": "2024-06-01"}
+    # no content and no marker text → the #2978 skip, so only the SHIM can let
+    # it into the window. Its presence proves the patch took effect, not just
+    # that the call happened not to raise.
+    contentless = {"id": "contentless"}
+
+    with _pre_2978_predicate():
+        assert [h["id"] for h in assemble_context(
+            [claimed, contentless], top_k=5, max_context_tokens=10_000,
+        )] == ["claimed", "contentless"]
+    # ... and the predicate is restored, so the shipped skip is back
+    assert [h["id"] for h in assemble_context(
+        [claimed, contentless], top_k=5, max_context_tokens=10_000,
+    )] == ["claimed"]
+
+
 def test_search_annotation_distinguishes_open_from_unknown(lane):
     sdk, _events = lane
     still = sdk.create_point("statement", "still", validFrom="2024-01-01")

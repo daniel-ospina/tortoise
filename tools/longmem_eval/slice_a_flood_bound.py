@@ -281,9 +281,23 @@ def _pre_2978_predicate() -> Iterator[None]:
     arm measures the pre-fix window on the shipped function rather than a
     re-implementation of it. Labelled ``reconstructed`` in the receipt: the
     original pre-#2978 window cannot be re-run (its baseline is what expired).
+
+    ⛔ The shim takes ``**_kw`` on purpose (#9741 review P2-1). The predicate
+    is patched at the MODULE GLOBAL and resolved there at call time
+    (``retrieval._SafeMarkerCache.claim_text`` → ``_has_claim_text(h,
+    marker=…)``), so a single-positional lambda raised ``TypeError: <lambda>()
+    got an unexpected keyword argument 'marker'`` the moment the real function
+    gained a keyword — and the exception escaped ``measure()``, i.e. the whole
+    instrument and ``render_receipt`` died and this receipt could drift
+    unobserved. Accepting-and-ignoring extra keywords keeps the shim's own
+    intent (force the predicate True) while surviving signature growth; a
+    shim that has to be widened on every call-site change is the fragility
+    ``tests/test_2350_validity_precision.py``
+    ::test_the_pre_2978_predicate_shim_still_drives_assemble_context now reds
+    on, on a GATING surface (this tool's own test is ``on_demand``).
     """
     original = retrieval._has_claim_text
-    retrieval._has_claim_text = lambda h: True  # type: ignore[assignment]
+    retrieval._has_claim_text = lambda h, **_kw: True  # type: ignore[assignment]
     try:
         yield
     finally:
