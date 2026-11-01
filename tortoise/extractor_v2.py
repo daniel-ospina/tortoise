@@ -152,6 +152,7 @@ import unicodedata
 import warnings
 import weakref
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
@@ -4114,7 +4115,7 @@ _KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
 #: unit prefix ... denoting multiplication by one thousand"), and `_UNIT_EQUIV`
 #: ALSO carries it as a unit identity because it is a unit `_value_bindings`
 #: fuses, so `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` needs the key. One symbol,
-#: two jobs: when the two sides DISAGREE about which job it did, the pair is
+#: two jobs: where the two sides use it for DIFFERENT jobs the pair is
 #: unjudgeable and fails OPEN — the direction every unjudgeable input here takes
 #: (#10513 review P1, measured: `20k`/`20km` and `5k QPS`/`5,000 QPS` both
 #: REFUSED before this arm existed, withholding a durable memory over a spelling
@@ -4124,6 +4125,11 @@ _KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
 #: from metres there. Stated as residual (i) in `config/v4-mechanisms.yml`
 #: rather than widened here on a guess.
 _MAGNITUDE_PREFIXES = frozenset({"k"})
+
+#: The factor each magnitude prefix denotes. Read ONLY by `_magnitude_agrees`,
+#: which is the whole of what the ambiguity arm is allowed to tolerate: the two
+#: sides must name the SAME number once the prefix is read as x1000.
+_MAGNITUDE_FACTORS = {"k": 1000}
 
 #: Every unit spelling this module can compare. A unit OUTSIDE this set is
 #: treated as "unit not stated" by `_value_identity_matches` (fail open), and
@@ -4187,6 +4193,35 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     return (sign, "/".join(out), _UNIT_EQUIV.get(suffix, suffix or None))
 
 
+def _magnitude_agrees(with_prefix: tuple[str, str, str | None],
+                      other: tuple[str, str, str | None]) -> bool:
+    """Do these two identities name the SAME number, reading the prefix as x1000?
+
+    The whole of what the ambiguity arm tolerates, and nothing beside it. A bare
+    magnitude prefix is only unjudgeable as a UNIT WORD; the NUMBER it belongs to
+    is never in dispute, so the arm may not waive a sign or a numeric core. That
+    narrowness is load-bearing and was earned by a review finding (#10513 P2,
+    measured): an arm that fired on the unit mismatch ALONE also wrote
+    `5k QPS` against `6,000 QPS`, `20k` against `21km` and `-20k` against
+    `20km` — a numeric rewrite and a dropped sign, the carve-out's own defects.
+
+    Two ways the numbers agree:
+      * the cores are EQUAL — `20k`/`20km`, where the suffix only names the unit
+        and no number was ever restated;
+      * the prefix reading closes the gap — `5k`/`5,000`, where `5 x 1000` IS
+        the other side's core.
+    """
+    factor = _MAGNITUDE_FACTORS.get(with_prefix[2])
+    if factor is None or with_prefix[0] != other[0]:
+        return False
+    if with_prefix[1] == other[1]:
+        return True
+    try:
+        return Decimal(with_prefix[1]) * factor == Decimal(other[1])
+    except (InvalidOperation, ValueError):  # pragma: no cover - belt and braces
+        return False
+
+
 def _value_identity_matches(a: tuple[str, str, str | None],
                             b: tuple[str, str, str | None]) -> bool:
     """Two value identities agree, allowing one side to omit the unit.
@@ -4196,14 +4231,16 @@ def _value_identity_matches(a: tuple[str, str, str | None],
     state, and that this module knows how to spell-normalise, must be the SAME
     unit — so a minutes→hours rewrite does not fold.
     """
-    # DELIBERATELY BEFORE the numeric-core comparison: `20k`/`20km` bind cores
-    # `20`/`20`, but `5k`/`5,000` bind `5`/`5000`, so a check placed after the
-    # core comparison would rescue only half the false refusals it exists for.
-    # And DELIBERATELY NARROW: it fires only when the two sides DISAGREE about
-    # the unit, so `5k` vs `6k` — two bare-magnitude values, a real rewrite —
-    # still reaches the core comparison and still refuses. A blanket waiver of
-    # anything carrying `k` would buy the tolerance by losing that detection.
-    if a[2] != b[2] and _MAGNITUDE_PREFIXES & {a[2], b[2]}:
+    # DELIBERATELY BEFORE the numeric-core comparison: `20k`/`20km` bind equal
+    # cores, but `5k`/`5,000` bind `5`/`5000`, so an arm placed after the core
+    # comparison would rescue only half the class it exists for.
+    # ⛔ AND IT ONLY EVER *ADDS* TOLERANCE — it cannot return False, so every
+    # pair it does not rescue falls through to the same checks it always faced.
+    # The gating is `_magnitude_agrees`: the unit mismatch alone is NOT enough
+    # (review P2 — that version wrote `5k`/`6,000`), so a numeric rewrite or a
+    # dropped sign still reaches the core comparison below and still refuses.
+    if a[2] != b[2] and _MAGNITUDE_PREFIXES & {a[2], b[2]} \
+            and (_magnitude_agrees(a, b) or _magnitude_agrees(b, a)):
         return True
     if a[0] != b[0] or a[1] != b[1]:
         return False

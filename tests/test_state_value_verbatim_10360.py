@@ -102,6 +102,14 @@ BATTERY = (
     # suffix is `k` and only the number moved. Delete the narrowness (widen the
     # arm to `a[2] in _MAGNITUDE_PREFIXES or b[2] in ...`) and THIS row reds.
     ("the load was 5k QPS", "the load was 6k QPS", True, "magnitude rewritten"),
+    # ⛔ THE TOLERANCE IS ABOUT THE UNIT WORD, NEVER ABOUT THE NUMBER OR THE SIGN
+    # (#10513 review P2, MEASURED: an arm that fired on the unit mismatch ALONE
+    # WROTE all three of these — `_value_slot_divergence` returned `()`).
+    # `_magnitude_agrees` is the gate that keeps them refused, and these rows are
+    # the only thing standing between that arm and a numeric waiver.
+    ("we saw 5k QPS", "we saw 6,000 QPS", True, "magnitude number moved"),
+    ("we ran 20k", "we ran 21km", True, "magnitude number moved 2"),
+    ("the delta is -20k", "the delta is 20km", True, "magnitude sign dropped"),
 )
 
 
@@ -119,24 +127,31 @@ def test_the_rule_fires_on_a_same_slot_rewrite_and_fails_open_on_form(
 
 
 def test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit():
-    """The `k` arm is a tolerance on AMBIGUITY, not a waiver on `k` (#10513 P1).
+    """The `k` arm is a tolerance on AMBIGUITY, not a waiver on `k` (#10513 P1/P2).
 
     `k` is SI's x1000 prefix AND a unit identity in `_UNIT_EQUIV` (it is a unit the
     engine fuses, so the table must carry the key). The two jobs are only
-    confusable when the two sides DISAGREE about which one it was, and that is
-    the only case the arm returns on — asserted here directly, so a future lane
-    that widens it to `a[2] in _MAGNITUDE_PREFIXES or b[2] in ...` reds this test
-    as well as the battery's `magnitude rewritten` row.
+    confusable when the two sides DISAGREE about which one it was, and even then
+    the arm may only tolerate the UNIT WORD — the number and the sign are never
+    in dispute.
+
+    ⛔ That second half is a review finding, not a nicety (#10513 P2, MEASURED):
+    an earlier revision of this arm fired on the unit mismatch ALONE and returned
+    before the sign/core check, so `5k QPS`/`6,000 QPS`, `20k`/`21km` and
+    `-20k`/`20km` were all WRITTEN. The assertions below are what reds that
+    revision; the unit-only arm cannot satisfy them.
     """
-    # The set may not name a symbol the module has no identity for: a magnitude
-    # prefix that is not also a unit identity would make this arm unreachable.
-    assert v2._MAGNITUDE_PREFIXES <= v2._KNOWN_UNITS
-    # Ambiguous unit: unjudgeable, so it fails OPEN (the refusal direction this
-    # rule must never take is the one that withholds a truthful memory).
+    # Ambiguous unit word: unjudgeable, so it fails OPEN (the refusal direction
+    # this rule must never take is the one that withholds a truthful memory).
     assert v2._value_slot_divergence("I ran 20k", "I ran 20km") == ()
     assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5,000 QPS") == ()
     # Same unit on both sides: still judged, and a moved number is a rewrite.
     assert v2._value_slot_divergence("the load was 5k QPS", "the load was 6k QPS")
+    # ⛔ The number and the sign are NOT the ambiguity, so they are still judged
+    # even where the unit words disagree (this is the P2 the arm first shipped).
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 6,000 QPS")
+    assert v2._value_slot_divergence("we ran 20k", "we ran 21km")
+    assert v2._value_slot_divergence("the delta is -20k", "the delta is 20km")
 
 
 def test_the_one_classifier_is_the_production_value_engine():
