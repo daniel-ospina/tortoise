@@ -20,6 +20,7 @@ unregistered test file).
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import re
 import subprocess
@@ -1196,10 +1197,8 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
 
     def _another_thread_reads() -> None:
         def _probe() -> None:
-            try:
+            with contextlib.suppress(OSError):
                 foreign.read_text(encoding="utf-8")
-            except OSError:
-                pass
 
         thread = threading.Thread(target=_probe, daemon=True)
         thread.start()
