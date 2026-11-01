@@ -1518,3 +1518,64 @@ class TestBirthStatusIsDerivedNotFabricated:
         assert _entity_door_props(
             "objectKind", "x", {"objectKind": "core:strategy"}
         )["objectKind"] == "core:strategy"
+
+
+# ── #9974 R1: a read surface RENDERS an absent status as live ───────────────
+
+class TestAbsentStatusRendering:
+    """``live.status_as_reported`` — the one spelling of "what a read REPORTS".
+
+    R1 removed the fabricated birth status, so a status-less Object/Subject now
+    stores NOTHING and an absent value has to be rendered. Two public read
+    surfaces render the value as a STRING — ``expand_relationships``'
+    ``related_status`` and ``provenance``'s subject ``status`` — and both
+    reported ``''`` for it, which silently changed what a LIVE entity read as
+    (#10524 review P2). ``''`` is a MEANINGFUL value on the first of them: it is
+    what ``expand_relationships`` reserves for a layer with no ``status`` family
+    at all (``:Event``), so reusing it for "absent" conflates the two.
+
+    The unit-level contract is pinned here; the two surfaces are pinned end to
+    end in ``test_expand_relationships_6976.py::
+    test_related_status_survives_the_widening`` (which exercises the ABSENT case
+    rather than writing a status first) and
+    ``test_subject_supersession_1423.py::
+    test_provenance_chain_surfaces_the_subject_status``.
+    """
+
+    def test_absent_reads_live(self):
+        from tortoise.live import status_as_reported
+
+        assert status_as_reported(None) == "live"
+        # every label whose layer carries a `status` family, explicitly
+        for label in ("Point", "Subject", "Object"):
+            assert status_as_reported(None, label=label) == "live", label
+
+    def test_the_event_carve_out_is_not_flattened_to_live(self):
+        """``:Event``'s lifecycle is ``eventStatus`` — ``''`` is the honest
+        answer there, and it is the value ``''`` must KEEP meaning."""
+        from tortoise.live import status_as_reported
+
+        assert status_as_reported(None, label="Event") == ""
+
+    def test_a_stored_status_is_never_defaulted(self):
+        """The helper fills an ABSENT value only: a terminal status must pass
+        through untouched, or every surface would report a dead claim live."""
+        from tortoise.live import status_as_reported
+
+        for value in ("superseded", "retracted", "outdated", "archived",
+                      "draft", "live", ""):
+            assert status_as_reported(value) == value, value
+            assert status_as_reported(value, label="Event") == value, value
+
+    def test_the_status_carrying_set_is_a_partition_of_the_epistemic_labels(self):
+        """A new epistemic label forces a decision here instead of silently
+        inheriting "absent reads live" (or the Event carve-out)."""
+        from tortoise.live import (
+            EPISTEMIC_LABELS,
+            STATUS_CARRYING_EPISTEMIC_LABELS,
+        )
+
+        assert set(EPISTEMIC_LABELS) == (
+            STATUS_CARRYING_EPISTEMIC_LABELS | {"Event"}), (
+            "a label was added to EPISTEMIC_LABELS without deciding whether its "
+            "layer carries a `status` family")

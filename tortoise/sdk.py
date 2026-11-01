@@ -98,6 +98,7 @@ from .live import is_terminal_status  # #2498 shared terminal predicate (Python 
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
+from .live import status_as_reported  # #9974 R1 absent-status rendering (shared with live.py)
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -27530,10 +27531,16 @@ class TortoiseSDK:
                              # #1423: the deciding subject's own lifecycle status
                              # rides the chain, so "who decided this?" can also
                              # report that the role/team has since been
-                             # superseded. Empty string when unset (a
-                             # pre-#1423 / raw-producer node), never absent —
-                             # additive for existing consumers.
-                             "status": sub.get("status", "") or ""}
+                             # superseded. Never absent — additive for existing
+                             # consumers — and DERIVED-OR-ABSENT since #9974 R1: a
+                             # status-less birth stores no `status`, which READS
+                             # live (`live._terminal_excluded`), so it renders as
+                             # `'live'` here rather than as `''`. This lookup is
+                             # `:Subject`-anchored, so the label is fixed by
+                             # construction and the `:Event`-shaped `""` of
+                             # `expand_relationships` does not apply (#9974 R1
+                             # review P2).
+                             "status": status_as_reported(sub.get("status"))}
         # ponytail: follow outgoing rels for Role → Org delegation
         rels = proj.g.query(
             "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], properties(n)",
@@ -36341,6 +36348,15 @@ class TortoiseSDK:
         because its label's status leg died, which is exactly the conflation the
         widening above was added to end — stated rather than left to be
         rediscovered.
+
+        An ABSENT `status` on a status-carrying label (`:Point`, `:Subject`,
+        `:Object`) reports `"live"`, not `""` (#9974 R1,
+        `live.status_as_reported`): absent has always READ live
+        (`live._terminal_excluded`'s NULL arm), and since R1 that is also the
+        ordinary birth state of a status-less Object/Subject — the entity fold
+        seeds `status=$st`, derived-or-absent, never a fabricated `'live'`.
+        `""` therefore stays reserved for the two meanings above, which is the
+        distinction this field exists to carry.
         """
         from .search_engine import get_relationships
         proj = self._get_proj()
@@ -36351,15 +36367,20 @@ class TortoiseSDK:
         statuses: dict[str, str] = {}
         if related_ids:
             rows: list = []
-            for _q in epistemic_label_queries(
-                    "MATCH (n:{label}) WHERE n.id IN $ids "
-                    "RETURN n.id, n.status"):
+            for _label, _q in zip(
+                    EPISTEMIC_LABELS,
+                    epistemic_label_queries(
+                        "MATCH (n:{label}) WHERE n.id IN $ids "
+                        "RETURN n.id, n.status"),
+                    strict=True):
                 try:
-                    rows.extend(proj.g.query(
-                        _q,
-                        params={"ids": related_ids},
-                        timeout=200,
-                    ).result_set)
+                    rows.extend(
+                        (_label, _row)
+                        for _row in proj.g.query(
+                            _q,
+                            params={"ids": related_ids},
+                            timeout=200,
+                        ).result_set)
                 except Exception:
                     # ONE label failing must not blank every peer's status: the
                     # sweep widens, so a leg that fails can only fail to add.
@@ -36368,9 +36389,14 @@ class TortoiseSDK:
                         "label — the other labels' statuses are kept",
                         exc_info=True)
                     continue
-            for row in rows:
+            for _label, row in rows:
                 try:
-                    statuses[row[0]] = row[1] or ""
+                    # `or "live"` would be wrong HERE: it would report `live`
+                    # for an `:Event` peer, the one label with no `status`
+                    # family. `status_as_reported` carries that carve-out (#9974
+                    # R1 review P2) — an ABSENT status on the other three labels
+                    # reads live, exactly as `_terminal_excluded` reads it.
+                    statuses[row[0]] = status_as_reported(row[1], label=_label)
                 except Exception:
                     # A malformed status row must not turn an ADVISORY
                     # annotation into a whole-read failure on this public method

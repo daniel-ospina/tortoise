@@ -557,11 +557,13 @@ def test_provenance_chain_surfaces_the_subject_status(env):
                           authoredBy=sid)
     chain = sdk.provenance(pt["id"])
     assert chain["subject"]["name"] == "Team Alpha", chain
-    # #9974 R1: a status-less birth leaves the property ABSENT, and this read
-    # renders an absent status as `''` (`coalesce(n.status, '')`) — LIVE, not
-    # terminal. The leg's claim (a since-superseded team is visible here) is
-    # unchanged: the second assertion below is the half that discriminates.
-    assert chain["subject"]["status"] in ("", None, "live"), chain
+    # #9974 R1: a status-less birth leaves the property ABSENT — and this read
+    # RENDERS an absent status as `'live'` (`live.status_as_reported`), the value
+    # absence has always READ as (`_terminal_excluded`'s NULL arm). Pinned
+    # EXACTLY: an allow-list of `("", None, "live")` would stop discriminating
+    # the value this leg asserts about, and `""` is reserved for a layer with no
+    # `status` family at all (#9974 R1 review P2).
+    assert chain["subject"]["status"] == "live", chain
     _apply(proj, sdk, [RECORD])
     assert sdk.provenance(pt["id"])["subject"]["status"] == "superseded"
 
