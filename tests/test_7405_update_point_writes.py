@@ -64,6 +64,7 @@ import uuid
 import pytest
 import redis.exceptions as redis_exc
 
+from tortoise import embeddings
 from tortoise.sdk import TortoiseSDK
 
 # The MEASURED v6 literal (see #7685): one sentence for two realities — a
@@ -1166,6 +1167,52 @@ def test_an_absent_id_issues_no_statement_for_the_write(tmp_path):
         assert proxy.matching == 0, (
             "an ABSENT id issued a write statement (#10119: the guard read "
             "must precede the append and every write)")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_absent_id_is_not_embedded_at_all(tmp_path, monkeypatch):
+    """#10495 review P3: the derived-embedding seam runs AFTER the guard read.
+
+    ``update_point(content=…)`` re-encodes the row through ``encode_for_row``,
+    which is a real inference — a model round-trip, or a timeout on a wedged
+    one. The seam used to sit ABOVE the lifecycle guard (#10119's read), so an
+    id that is ABSENT — the typo case that guard exists for — paid for a full
+    encode whose vector the early return then DISCARDED: work on a write that
+    cannot land. Measured on the pre-fix tree with this same spy:
+    ``update_point("typo-4", content=…)`` -> the embedder was called once.
+
+    Discriminating: on the pre-fix tree the first assertion fails with
+    ``['a revision that cannot land']``. The POSITIVE CONTROL keeps the spy
+    honest — if the content-edit arm stopped deriving a vector at all (a
+    regression of #4208), the second half fails instead of passing quietly.
+    """
+    sdk = _sdk(tmp_path, "absentembed")
+    try:
+        calls: list[str] = []
+        real = embeddings.encode_for_row
+
+        def _spy(content, expected_dim):
+            calls.append(content)
+            return real(content, expected_dim)
+
+        monkeypatch.setattr(embeddings, "encode_for_row", _spy)
+
+        missing = str(uuid.uuid4())
+        assert sdk.update_point(
+            missing, content="a revision that cannot land") == {}
+        assert calls == [], (
+            "an ABSENT id paid for an embedding the early return then threw "
+            f"away (#10495 review P3): {calls}")
+
+        # POSITIVE CONTROL: a real point's content edit must still derive.
+        pid = _pid(sdk)
+        calls.clear()
+        sdk.update_point(pid, content="a revision that lands")
+        assert calls == ["a revision that lands"], (
+            "the derived-embedding arm no longer re-encodes a content edit "
+            f"(#4208): {calls}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

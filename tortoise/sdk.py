@@ -16390,51 +16390,6 @@ class TortoiseSDK:
         elif "embedding" in props:
             props["embedding_verbatim"] = None
 
-        # #4208: a content edit must recompute the DERIVED vector in the SAME
-        # write, exactly as it already recomputes the derived `content_hash`
-        # (#1904). Before this, `update_point(content=B)` left the node holding
-        # content B with `vec(A)` — the dense leg then ranked it by text no
-        # longer on the node, and live != rebuild, because the replay's
-        # `_revise_point` DOES re-encode. Same rule as the hash, and the same
-        # rule #19 set for the revise fold: recompute from the new content, or
-        # WIPE it when the embedder is unavailable (`None`) — never preserve a
-        # vector the new content did not produce (a vector for different text
-        # is worse than none). #4194/#4280: route through `encode_for_store`
-        # (the store-width-declaring seam) so the stored width matches the
-        # Point HNSW index this store created; the seam is still
-        # `compute_embedding` (module global), so installed doubles intercept.
-        #
-        # A CALLER-supplied vector is deliberately NOT recomputed: the caller
-        # owns that write, the verbatim marker above already describes it, and
-        # the record/replay treatment of a caller vector on a revise is the
-        # separate declared gap #5046. Gated on the KEY, so this fires only
-        # when the caller supplied none.
-        _derived_embedding = False
-        _new_content = props.get("content")
-        if ("content" in props and "embedding" not in props
-                and _new_content is not None):
-            # `_new_content is not None` mirrors `_revise_point`'s own boundary
-            # — a `None` new_content is "no content edit" there, so it must not
-            # derive (or wipe) a vector either.
-            try:
-                from .embeddings import encode_for_row
-                props["embedding"] = (
-                    encode_for_row(_new_content, proj.required_embedding_dim)
-                    if _new_content else None)
-            except Exception:
-                props["embedding"] = None
-            _derived_embedding = True
-            # #5238 review P3: the vector just derived is NOT caller-owned, so
-            # a node that previously held a CALLER-supplied vector (and still
-            # carries `embedding_verbatim=true`) must have that marker cleared —
-            # exactly as the `embedding=None` path above does. Left set, the
-            # node advertises a SERVER-derived vector as caller-owned: the
-            # marker selects raw-vs-`vecf32` storage on every later re-emit and
-            # flips the consistency comparison to an exact-float compare, while
-            # a rebuild drops it (`_revise_point` re-encodes and never reads
-            # the marker) — live != rebuild, the round-6 false-verbatim class.
-            props["embedding_verbatim"] = None
-
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
             raise TypeError(
@@ -16631,6 +16586,60 @@ class TortoiseSDK:
             # contract already returns — no journal row, no epoch advance,
             # no dirty root, so a typo cannot strand the instance.
             return {}
+        # ⛔ ORDERING (#10495 review P3). This block runs AFTER the ABSENT
+        # early return above, not before it. `encode_for_row` is a real
+        # inference (a model round-trip, or a timeout on a wedged one), so
+        # running it above the guard made a write that CANNOT land pay for
+        # one and then throw the vector away — measured on the pre-fix tree
+        # with a spy on `tortoise.embeddings.encode_for_row`:
+        # `update_point("typo-4", content="…")` -> `embedder called for an
+        # ABSENT id: 1`. The status-carrying absent shape still reaches this
+        # block (it does not take the early return; the promote arm owns it),
+        # so nothing is skipped that used to run.
+        # #4208: a content edit must recompute the DERIVED vector in the SAME
+        # write, exactly as it already recomputes the derived `content_hash`
+        # (#1904). Before this, `update_point(content=B)` left the node holding
+        # content B with `vec(A)` — the dense leg then ranked it by text no
+        # longer on the node, and live != rebuild, because the replay's
+        # `_revise_point` DOES re-encode. Same rule as the hash, and the same
+        # rule #19 set for the revise fold: recompute from the new content, or
+        # WIPE it when the embedder is unavailable (`None`) — never preserve a
+        # vector the new content did not produce (a vector for different text
+        # is worse than none). #4194/#4280: route through `encode_for_store`
+        # (the store-width-declaring seam) so the stored width matches the
+        # Point HNSW index this store created; the seam is still
+        # `compute_embedding` (module global), so installed doubles intercept.
+        #
+        # A CALLER-supplied vector is deliberately NOT recomputed: the caller
+        # owns that write, the verbatim marker above already describes it, and
+        # the record/replay treatment of a caller vector on a revise is the
+        # separate declared gap #5046. Gated on the KEY, so this fires only
+        # when the caller supplied none.
+        _derived_embedding = False
+        _new_content = props.get("content")
+        if ("content" in props and "embedding" not in props
+                and _new_content is not None):
+            # `_new_content is not None` mirrors `_revise_point`'s own boundary
+            # — a `None` new_content is "no content edit" there, so it must not
+            # derive (or wipe) a vector either.
+            try:
+                from .embeddings import encode_for_row
+                props["embedding"] = (
+                    encode_for_row(_new_content, proj.required_embedding_dim)
+                    if _new_content else None)
+            except Exception:
+                props["embedding"] = None
+            _derived_embedding = True
+            # #5238 review P3: the vector just derived is NOT caller-owned, so
+            # a node that previously held a CALLER-supplied vector (and still
+            # carries `embedding_verbatim=true`) must have that marker cleared —
+            # exactly as the `embedding=None` path above does. Left set, the
+            # node advertises a SERVER-derived vector as caller-owned: the
+            # marker selects raw-vs-`vecf32` storage on every later re-emit and
+            # flips the consistency comparison to an exact-float compare, while
+            # a rebuild drops it (`_revise_point` re-encodes and never reads
+            # the marker) — live != rebuild, the round-6 false-verbatim class.
+            props["embedding_verbatim"] = None
 
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
