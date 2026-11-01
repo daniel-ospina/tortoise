@@ -165,9 +165,12 @@ than left for a reader to find:
    `capstone_run.py` / `tests/eval/write_path` are byte-identical to the pinned tree. Stated this way because the
    stronger claim — that this head *enforced* a metric-definition pin — would be false.
 3. **The E3 witness is the S3 function's return value, not the run receipt.** The log says this in its own
-   `S3 WITNESS:` line; it is a disclosed deviation from the pre-registration's wording *"asserted from the run
-   receipt"*, because the `capture_session` lane surfaces no `search` block at all. Repeated here because this
-   note is the document the ruling asked for.
+   `S3 WITNESS:` line. It is a disclosed deviation from what the registration requires — §2's *"**arm integrity** —
+   from the RUN RECEIPT, never from the flag being set: each session's receipt `search` block must show …"* —
+   because the `capture_session` lane surfaces no `search` block at all. (The exact phrase *"asserted from the run
+   receipt"* is `#5087` indicator 3's, not the registration's words; the probe's `S3 WITNESS:` log line quotes it,
+   and this note keeps the probe's phrasing only to stay findable beside the log.) Repeated here because this note
+   is the document the ruling asked for.
 4. **§3 rule 5's verdict text is not printed in full.** The registration fixes the form
    `HYPOTHESIS-FALSIFIED (ratio X)`; the log prints `RATIO: 0.9881` and `VERDICT: HYPOTHESIS-FALSIFIED` on
    separate lines rather than folding the ratio into the verdict token. The failure branch that sets the frozen
