@@ -48,10 +48,8 @@ leave every test below green while they measured whatever a caller's shell
 selected. `test_the_pool_bound_starves_the_prior_in_either_arm_state` EXECUTES
 the other state instead of only claiming it, which is why the pin may be ON
 here: the bound belongs to the WINDOW, not to the scorer, so pinning the arm a
-read actually uses costs no coverage. A peer PR (#10424) pins this same fixture
-the OTHER way (``TORTOISE_BM25_LEXICAL=0``); that hunk is SUPERSEDED — if you
-are resolving a conflict at the pin, keep it ON. ``=0`` would re-point every
-number this file documents at a scorer the product does not ship by default.
+read actually uses costs no coverage. ``=0`` would re-point every number this
+file documents at a scorer the product does not ship by default.
 """
 from __future__ import annotations
 
@@ -504,29 +502,35 @@ def test_the_pool_bound_starves_the_prior_in_either_arm_state(
     reason — which is what makes the bound a property of ``DEFAULT_POOL_SIZE``
     rather than an artefact of which scorer ran.
 
-    WHY this test exists (#10460 review, ISSUE 1). A peer PR (#10424) repairs the
-    pre-#10240 reds in this module by pinning the arm OFF in the same autouse
-    fixture — i.e. by measuring the tie instead of the shipped default. This test
-    is the evidence that the pin DIRECTION buys nothing: the bound holds either
-    way, so this module can pin the arm a read actually uses and still keep the
-    arm-OFF guarantee. It also ENFORCES a property the docstrings previously only
-    CLAIMED ("the ``=0`` state was also measured green") — a promise no test
-    executes is how such a claim goes stale.
+    WHY this test exists (#10460 review). The alternative repair is to pin the
+    arm OFF in the autouse fixture — i.e. to measure the tie instead of the
+    shipped default — and this test is the evidence that the pin DIRECTION buys
+    nothing: the bound holds either way, so this module can pin the arm a read
+    actually uses and still keep the arm-OFF guarantee. It also ENFORCES a
+    property the docstrings previously only CLAIMED ("the ``=0`` state was also
+    measured green") — a promise no test executes is how such a claim goes stale.
 
     It doubles as cover for the ``TORTOISE_BM25_LEXICAL=0`` OPT-OUT, which is a
     shipped, supported reading path — the ``=0`` half is exactly the order that
     documented opt-out produces.
 
-    ⚠️ It is NOT cover for a docker-URI / ``full: true`` lane, and an earlier
-    revision of this docstring wrongly claimed it was. The arm is gated on
-    ``is_embedded`` (``sdk.py``), and this module's ``sdk`` fixture constructs
-    ``TortoiseSDK(<tmpdir>/test.db)`` — an explicitly-provided ``db_path`` wins
-    over ``TORTOISE_DB_URI`` (``sdk.py``, #139) — so the store is EMBEDDED BY
-    CONSTRUCTION and ``is_embedded`` is True whatever the ambient URI is. MEASURED
-    with an ambient ``TORTOISE_DB_URI=docker://…``: ``s._db_uri is None`` and
-    ``proj._is_embedded is True``. The arm is therefore engaged here on every
-    lane shape, and no test in this module can reach the inert state; a run with
-    an ambient docker URI is a TRUE green, not a false one. ``TORTOISE_TEST_CARVE_OUT``
+    ⚠️ It is NOT cover for a docker-URI / ``full: true`` lane — there the arm is
+    INERT and the ``arm-off`` parameter is the ordering those lanes measure. The
+    arm is gated on ``is_embedded`` (``sdk.py``), and on a URI-set lane that flag
+    is FALSE: this module's ``sdk`` fixture does construct
+    ``TortoiseSDK(<tmpdir>/test.db)`` and the explicit ``db_path`` does win over
+    ``TORTOISE_DB_URI`` (``sdk.py``, #139) — ``s._db_uri is None`` — but the
+    construction is built through ``FalkorProjection``, whose epic #1647 (D-1=A)
+    class-level test redirect then rewrites a path-built store to the server URI
+    for ANY test session carrying a supported ``TORTOISE_DB_URI`` whose module
+    stem is not exempt. This module is in neither exemption registry (the
+    ``carve_out:`` list of ``config/ci-surfaces.yml`` / ``TEST_NO_REDIRECT_STEMS``
+    in ``tests/_embedded.py``), so it is not exempt. MEASURED inside a pytest
+    session OF THIS MODULE with an ambient ``TORTOISE_DB_URI=docker://…``:
+    ``s._db_uri is None`` and ``proj._is_embedded is False`` (the seam's own pin
+    is ``tests/test_redirect_seam.py::test_uri_set_redirects_to_server``). The
+    numbers above remain a TRUE green on such a lane only because the BOUND,
+    unlike the ordering, does not depend on the scorer. ``TORTOISE_TEST_CARVE_OUT``
     is what the URI-less session-start gate requires (epic #1647 P4), NOT what
     wakes the arm.
 
