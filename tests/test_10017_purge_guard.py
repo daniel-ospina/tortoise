@@ -494,3 +494,608 @@ def test_execute_refuses_a_plan_whose_counts_disagree_with_its_ids():
     code, message = _gate(plan, live=live)
     assert code == purge.REFUSE_NOT_IN_PLAN
     assert "turn_node_total" in message
+
+
+# ── review round 3: the refusals proven BY EFFECT ─────────────────────────
+#
+# A refusal asserted as a pure function's return value leaves the wiring free to
+# be inverted: `main` could drop its `if code: return 2`, or `_execute` could be
+# called before the gate, and every assertion above would still pass. The cases
+# below drive the real entry points with the store seams replaced, and assert on
+# the STATEMENTS that were — or were not — issued.
+
+import types  # noqa: E402 - kept next to the fakes that use it
+
+
+class _Result:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _FakeGraph:
+    """Records every statement `_execute` asks for.
+
+    `survivors_after` is what the post-delete read still finds standing, so a
+    partial sweep is expressible without a store.
+    """
+
+    def __init__(self, survivors_after=()):
+        self.queries: list[str] = []
+        self.survivors_after = list(survivors_after)
+
+    def statements(self, needle: str) -> list[str]:
+        return [q for q in self.queries if needle in q]
+
+    def query(self, cypher: str, params=None):
+        self.queries.append(cypher)
+        if "count(t)" in cypher:
+            return _Result([[len(self.survivors_after)]])
+        if "DETACH DELETE" in cypher:
+            return _Result([])
+        return _Result([(tid,) for tid in self.survivors_after])
+
+
+def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
+                 journal_configured=True, journal_result=True):
+    """Replace the SDK / projection seams `_execute` imports, and record what
+    they were asked to do."""
+    graph = _FakeGraph(survivors_after)
+    journaled: list[str] = []
+
+    class _Proj:
+        def __init__(self, *args, **kwargs):
+            self.g = graph
+
+        @classmethod
+        def from_uri(cls, uri, graph_name=None):
+            return cls()
+
+    class _SDK:
+        def __init__(self, db_path=None, event_log_path=None):
+            self.db_path = db_path
+            self.event_log_path = event_log_path
+
+        def _get_event_log(self):
+            return object() if journal_configured else None
+
+        def _get_proj(self):
+            return types.SimpleNamespace(graph_name=sdk_graph)
+
+        def _journal_turn_removal(self, ids):
+            journaled.extend(ids)
+            return {tid: journal_result for tid in ids}
+
+    monkeypatch.setattr("tortoise.projection.FalkorProjection", _Proj)
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _SDK)
+    return graph, journaled
+
+
+def _patch_record(monkeypatch, rows_by_key: dict):
+    """The record leg, scoped: returns only the keys asked for, like the real
+    `node_keys=` filter."""
+    calls: list[dict] = []
+
+    def fake(dsn, org_id, graph_id, node_keys=None):
+        wanted = list(node_keys or ())
+        calls.append({"org_id": org_id, "graph_id": graph_id,
+                      "node_keys": wanted})
+        if node_keys is None:
+            return {"rows_by_key": dict(rows_by_key), "non_turn_shaped": 0}
+        keep = set(wanted)
+        return {"rows_by_key": {k: v for k, v in rows_by_key.items()
+                                if k in keep}, "non_turn_shaped": 0}
+
+    monkeypatch.setattr(purge.census_mod, "read_record_turns", fake)
+    return calls
+
+
+class _Exec:
+    def __init__(self, args, plan, target, graph, journaled, record_calls):
+        self.args, self.plan, self.target = args, plan, target
+        self.graph, self.journaled = graph, journaled
+        self.record_calls = record_calls
+
+
+def _exec_setup(tmp_path, monkeypatch, *, ids=("s1_t0",), session="s1",
+                journal_lines=1, plan_journal="same", argv_journal="same",
+                survivors_after=(), sdk_graph="g", journal_configured=True,
+                journal_result=True, record_keys=None):
+    """A hermetic `_execute` call: real args, real plan, fake stores."""
+    journal = tmp_path / "journal.jsonl"
+    if journal_lines:
+        journal.write_text('{"type": "PointAdded"}\n', encoding="utf-8")
+    argv_journal_path = (journal if argv_journal == "same"
+                         else tmp_path / "missing-journal.jsonl")
+    args = purge._build_parser().parse_args([
+        "--db-path", str(tmp_path / "graph.db"), "--graph-name", "g",
+        "--org-id", "org", "--graph-id", "graph",
+        "--record-dsn", "postgresql://record",
+        "--event-log-path", str(argv_journal_path)])
+    target = purge._target_from_args(args)
+    plan_journal_path = (str(journal) if plan_journal == "same"
+                         else None if plan_journal is None
+                         else str(tmp_path / "other-journal.jsonl"))
+    plan = purge.build_plan(
+        _report(clean=[_clean_with_ids(session, list(ids))]),
+        target=target, health=_health(), restore_proof=_proof(session=session),
+        target_note="t", recovery_missing=[], journal_path=plan_journal_path)
+    graph, journaled = _patch_store(monkeypatch, survivors_after=survivors_after,
+                                    sdk_graph=sdk_graph,
+                                    journal_configured=journal_configured,
+                                    journal_result=journal_result)
+    if record_keys is None:
+        record_keys = {tid: {"node_key": tid} for tid in ids}
+    record_calls = _patch_record(monkeypatch, record_keys)
+    return _Exec(args, plan, target, graph, journaled, record_calls)
+
+
+# ── the wiring: a refusal must stop the delete at `main`, not only in a pure
+#    function (`_execute` is replaced with a sentinel) ────────────────────
+
+def _patch_live_census(monkeypatch, report):
+    # One node so the zero-node refusal (an absence is not established) does not
+    # pre-empt the gate this test is driving; the verdict itself comes from the
+    # patched `census`.
+    monkeypatch.setattr(purge.census_mod, "read_graph_turns",
+                        lambda *a, **k: {"nodes": {"s1_t0": {"pointKind": "event"}},
+                                         "unidentifiable": []})
+    monkeypatch.setattr(purge.census_mod, "read_record_turns",
+                        lambda *a, **k: {"rows_by_key": {}, "non_turn_shaped": 0})
+    monkeypatch.setattr(purge.census_mod, "census", lambda *a, **k: report)
+
+
+def _write(tmp_path, name: str, obj) -> str:
+    path = tmp_path / name
+    path.write_text(json.dumps(obj, default=str), encoding="utf-8")
+    return str(path)
+
+
+def _cli_execute(tmp_path, monkeypatch, *, report, plan=None, health=None,
+                 proof=None, approval=None, note="test target",
+                 digest=None, journal_lines=1):
+    _patch_live_census(monkeypatch, report)
+    called: list[dict] = []
+    monkeypatch.setattr(purge, "_execute",
+                        lambda p, a, t: (called.append(p), 0)[1])
+    journal = tmp_path / "journal.jsonl"
+    if journal_lines:
+        journal.write_text('{"type": "PointAdded"}\n', encoding="utf-8")
+    if plan is None:
+        plan = _plan([_clean_with_ids("s1", ["s1_t0"])],
+                     journal_path=str(journal))
+    argv = [*_TARGET_ARGV, "--target-note", note, "--execute",
+            "--record-dsn", "postgresql://record",
+            "--event-log-path", str(journal),
+            "--plan", _write(tmp_path, "plan.json", plan),
+            "--confirm-plan-digest", plan["plan_digest"] if digest is None
+            else digest,
+            "--health-json", _write(tmp_path, "health.json",
+                                    _health() if health is None else health),
+            "--restore-proof", _write(tmp_path, "proof.json",
+                                      _proof() if proof is None else proof)]
+    if approval is not False:
+        argv += ["--approval-record", _write(
+            tmp_path, "approval.json",
+            _approval(plan["plan_digest"]) if approval is None else approval)]
+    return purge.main(argv), called
+
+
+def test_execute_wiring_refuses_a_not_armed_record_before_any_delete(
+        tmp_path, monkeypatch, capsys):
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        health=_health(armed=False))
+    assert rc == 2
+    assert called == []                       # _execute was NEVER reached
+    assert purge.REFUSE_RECORD_NOT_ARMED in capsys.readouterr().err
+
+
+def test_execute_wiring_refuses_a_record_behind_target_before_any_delete(
+        tmp_path, monkeypatch, capsys):
+    ids = ["s1_t0", "s1_t1"]
+    live = _report(failed=[_failed("s1", ids, [
+        {"node": "s1_t1", "field": "key", "problem": "missing_in_record"}])])
+    _patch_live_census(monkeypatch, live)
+    called: list[dict] = []
+    monkeypatch.setattr(purge, "_execute", lambda p, a, t: (called.append(p), 0)[1])
+    journal = tmp_path / "journal.jsonl"
+    journal.write_text("{}\n", encoding="utf-8")
+    plan = _plan([_clean_with_ids("s1", ids)], journal_path=str(journal))
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "test target", "--execute",
+                     "--record-dsn", "postgresql://record",
+                     "--event-log-path", str(journal),
+                     "--plan", _write(tmp_path, "plan.json", plan),
+                     "--confirm-plan-digest", plan["plan_digest"],
+                     "--health-json", _write(tmp_path, "h.json", _health()),
+                     "--restore-proof", _write(tmp_path, "p.json", _proof()),
+                     "--approval-record", _write(
+                         tmp_path, "a.json", _approval(plan["plan_digest"]))])
+    assert rc == 2
+    assert called == []
+    assert purge.REFUSE_RECORD_BEHIND in capsys.readouterr().err
+
+
+def test_execute_wiring_refuses_a_live_census_off_by_one_before_any_delete(
+        tmp_path, monkeypatch, capsys):
+    plan = _plan([_clean_with_ids("s1", ["s1_t0", "s1_t1"])])
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0", "s1_t1", "s1_t2"])]),
+        plan=_plan([_clean_with_ids("s1", ["s1_t0", "s1_t1"])],
+                   journal_path=str(tmp_path / "journal.jsonl")))
+    assert rc == 2
+    assert called == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_EXACT_SET_MISMATCH in err and "s1_t2" in err
+
+
+def test_execute_wiring_refuses_target_drift_before_any_delete(
+        tmp_path, monkeypatch, capsys):
+    """The target-drift refusal was added by the previous commit with ZERO
+    coverage — a refusal nobody tests is the defect this review is about."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])],
+                 journal_path=str(tmp_path / "journal.jsonl"))
+    plan["target"] = dict(plan["target"], uri_host="prod.example:6379")
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]), plan=plan)
+    assert rc == 2
+    assert called == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_TARGET_DRIFT in err and "uri_host" in err
+
+
+def test_execute_wiring_reaches_the_delete_when_every_precondition_holds(
+        tmp_path, monkeypatch):
+    """The positive arm of the wiring, so the refusals above are not "a guard
+    that always refuses"."""
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]))
+    assert rc == 0
+    assert len(called) == 1
+
+
+# ── `_execute` itself: before the first DELETE ──────────────────────────
+
+def test_execute_refuses_a_journal_that_does_not_exist(
+        tmp_path, monkeypatch, capsys):
+    """`EventLog.append` CREATES a missing path, so a typo silently starts a
+    journal whose ordinals begin at 1 and whose removals the target's rebuild
+    never reads (#10483, P1)."""
+    setup = _exec_setup(tmp_path, monkeypatch, journal_lines=0)
+    assert not Path(setup.args.event_log_path).exists()
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert not Path(setup.args.event_log_path).exists()   # NOT created
+    assert setup.graph.statements("DETACH DELETE") == []
+    assert purge.REFUSE_JOURNAL_UNUSABLE in capsys.readouterr().err
+
+
+def test_execute_refuses_an_empty_journal(tmp_path, monkeypatch, capsys):
+    journal = tmp_path / "journal.jsonl"
+    journal.write_text("", encoding="utf-8")
+    setup = _exec_setup(tmp_path, monkeypatch, journal_lines=0)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    assert "EMPTY" in capsys.readouterr().err
+
+
+def test_execute_refuses_a_journal_the_plan_did_not_name(
+        tmp_path, monkeypatch, capsys):
+    setup = _exec_setup(tmp_path, monkeypatch, plan_journal=None)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_JOURNAL_UNUSABLE in err and "names no journal" in err
+
+
+def test_execute_refuses_a_different_journal_than_the_plan_names(
+        tmp_path, monkeypatch, capsys):
+    setup = _exec_setup(tmp_path, monkeypatch, plan_journal="other")
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    assert purge.REFUSE_JOURNAL_UNUSABLE in capsys.readouterr().err
+
+
+def test_execute_refuses_when_no_journal_is_configured(
+        tmp_path, monkeypatch, capsys):
+    setup = _exec_setup(tmp_path, monkeypatch, journal_configured=False)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    assert purge.REFUSE_NO_JOURNAL in capsys.readouterr().err
+
+
+def test_execute_refuses_when_the_sdk_addresses_another_graph(
+        tmp_path, monkeypatch, capsys):
+    setup = _exec_setup(tmp_path, monkeypatch, sdk_graph="some-other-graph")
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    assert purge.REFUSE_TARGET_DRIFT in capsys.readouterr().err
+
+
+# ── the TOCTOU gate: the record is re-read immediately before the delete ──
+
+def test_execute_refuses_when_the_record_lost_a_row_before_the_delete(
+        tmp_path, monkeypatch, capsys):
+    """P0: the record read in `main` can be minutes stale by the time session
+    k's DELETE runs. A row lost in that window makes RECORD-BEHIND invisible and
+    the graph copy the only copy — so no DELETE may be issued."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        record_keys={"s1_t0": {"node_key": "s1_t0"}})
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    assert setup.journaled == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_RECORD_BEHIND in err
+    assert "s1_t1" in err          # the id that is gone is NAMED
+    assert setup.record_calls == [{
+        "org_id": "org", "graph_id": "graph",
+        "node_keys": ["s1_t0", "s1_t1"]}]
+
+
+def test_execute_verifies_the_record_once_per_session_before_that_delete(
+        tmp_path, monkeypatch):
+    """Two sessions, two scoped record reads, each carrying only that session's
+    ids — the gate is per session, not one check for the whole run."""
+    journal = tmp_path / "journal.jsonl"
+    journal.write_text("{}\n", encoding="utf-8")
+    args = purge._build_parser().parse_args([
+        "--db-path", str(tmp_path / "graph.db"), "--graph-name", "g",
+        "--org-id", "org", "--graph-id", "graph",
+        "--record-dsn", "postgresql://record",
+        "--event-log-path", str(journal)])
+    target = purge._target_from_args(args)
+    plan = purge.build_plan(
+        _report(clean=[_clean_with_ids("s1", ["s1_t0"]),
+                       _clean_with_ids("s2", ["s2_t0"])]),
+        target=target, health=_health(), restore_proof=_proof(session="s1"),
+        target_note="t", recovery_missing=[], journal_path=str(journal))
+    graph, journaled = _patch_store(monkeypatch, sdk_graph="g")
+    calls = _patch_record(monkeypatch, {"s1_t0": {}, "s2_t0": {}})
+    rc = purge._execute(plan, args, target)
+    assert rc == 0
+    assert [c["node_keys"] for c in calls] == [["s1_t0"], ["s2_t0"]]
+    assert isinstance(graph, _FakeGraph) and journaled == ["s1_t0", "s2_t0"]
+
+
+def test_execute_stops_before_the_session_whose_record_row_is_gone(
+        tmp_path, monkeypatch, capsys):
+    """Session 1 is verified and deleted; session 2's row is gone, so the run
+    stops there and says that session 1's deletes already happened."""
+    journal = tmp_path / "journal.jsonl"
+    journal.write_text("{}\n", encoding="utf-8")
+    args = purge._build_parser().parse_args([
+        "--db-path", str(tmp_path / "graph.db"), "--graph-name", "g",
+        "--org-id", "org", "--graph-id", "graph",
+        "--record-dsn", "postgresql://record",
+        "--event-log-path", str(journal)])
+    target = purge._target_from_args(args)
+    plan = purge.build_plan(
+        _report(clean=[_clean_with_ids("s1", ["s1_t0"]),
+                       _clean_with_ids("s2", ["s2_t0"])]),
+        target=target, health=_health(), restore_proof=_proof(session="s1"),
+        target_note="t", recovery_missing=[], journal_path=str(journal))
+    _patch_store(monkeypatch, sdk_graph="g")
+    _patch_record(monkeypatch, {"s1_t0": {}})
+    rc = purge._execute(plan, args, target)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert purge.REFUSE_RECORD_BEHIND in err and "s2" in err
+    assert "1 node(s) were deleted and journaled BEFORE" in err
+
+
+def test_execute_refuses_when_the_journal_cannot_carry_a_removal(
+        tmp_path, monkeypatch, capsys):
+    setup = _exec_setup(tmp_path, monkeypatch, journal_result=False)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert purge.REFUSE_JOURNAL_UNCONFIRMED in capsys.readouterr().err
+
+
+# ── a partial sweep is its OWN diagnosis, and "purged" is not printed ────
+
+def test_execute_reports_a_partial_sweep_with_its_own_code(
+        tmp_path, monkeypatch, capsys):
+    """The shortfall shared `exact-set-mismatch` with the pre-delete drift, and
+    printed `purged : N` BEFORE the refusal — so the log read as success."""
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        survivors_after=("s1_t1",))
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert purge.REFUSE_PARTIAL_SWEEP in captured.err
+    assert "s1_t1" in captured.err                 # the survivor is NAMED
+    assert "ALREADY HAPPENED" in captured.err
+    assert "purged     :" not in captured.out      # no success line before it
+    # The surviving id is never journaled: it still stands in the graph.
+    assert setup.journaled == ["s1_t0"]
+
+
+def test_a_full_sweep_prints_purged_and_exits_zero(tmp_path, monkeypatch,
+                                                   capsys):
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
+                        survivors_after=())
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "purged     : 2 turn node(s)" in captured.out
+    assert purge.REFUSE_PARTIAL_SWEEP not in captured.err
+
+
+# ── #3175: a file that never held a census is not an empty census ────────
+
+@pytest.mark.parametrize("payload", [
+    {}, {"parity": {}}, {"parity": {"clean_sessions": [], "failed_sessions": []}},
+    {"population": {}, "parity": {"clean_sessions": [], "failed_sessions": []},
+     "dry_run": {"would_delete_ids": []}},            # no verdict
+])
+def test_cli_refuses_a_census_file_that_never_held_a_census(
+        tmp_path, capsys, payload):
+    census_path = _write(tmp_path, "census.json", payload)
+    plan_path = tmp_path / "plan.json"
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t", "--census-json",
+                     census_path, "--plan-out", str(plan_path)])
+    assert rc == 3
+    assert not plan_path.exists()          # no signable plan was written
+    err = capsys.readouterr().err
+    assert purge.REFUSE_CENSUS_UNREADABLE in err
+
+
+def test_cli_refuses_a_missing_census_file_with_a_named_refusal(
+        tmp_path, capsys):
+    """Documented as exit 3; it used to be an uncaught FileNotFoundError."""
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t", "--census-json",
+                     str(tmp_path / "nope.json")])
+    assert rc == 3
+    assert purge.REFUSE_CENSUS_UNREADABLE in capsys.readouterr().err
+
+
+# ── a malformed-but-parseable plan is a refusal, not a traceback ─────────
+
+def test_execute_refuses_a_plan_entry_without_ids(
+        tmp_path, monkeypatch, capsys):
+    """It used to reach `plan_digest` and escape `main` as a `KeyError`
+    traceback — indistinguishable from a crash, with the documented refusal
+    never printed (#10483 review, P1)."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    del plan["purge"]["sessions"][0]["ids"]
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]), plan=plan)
+    assert rc == 2
+    assert called == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_PLAN_UNREADABLE in err and "ids" in err
+    assert "Traceback" not in err
+
+
+# ── the approval is OUT OF BAND: a plan cannot approve itself ────────────
+
+def test_execute_refuses_without_an_out_of_band_approval(
+        tmp_path, monkeypatch, capsys):
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        approval=False)
+    assert rc == 2
+    assert called == []
+    assert purge.REFUSE_NO_APPROVAL in capsys.readouterr().err
+
+
+def test_execute_refuses_an_approval_for_another_digest(
+        tmp_path, monkeypatch, capsys):
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        approval=_approval("0" * 64))
+    assert rc == 2
+    assert called == []
+    assert purge.REFUSE_CONFIRMATION_MISMATCH in capsys.readouterr().err
+
+
+def test_an_edited_plan_cannot_borrow_the_approval_of_the_original():
+    """The two fields of one file are rewritten together: `purge.sessions` and
+    `plan_digest` both change, so `--confirm-plan-digest` still matches. Only an
+    approval recorded OUTSIDE the plan can tell the difference."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    edited = json.loads(json.dumps(plan))
+    edited["purge"]["sessions"] = [{"session": "s1", "ids": ["s1_t0", "s1_t9"],
+                                    "graph_turn_nodes": 2}]
+    edited["purge"]["turn_node_total"] = 2
+    edited["plan_digest"] = purge.plan_digest(edited["purge"]["sessions"])
+    live = _report(clean=[_clean_with_ids("s1", ["s1_t0", "s1_t9"])])
+    # The gate's own self-consistency check passes on the edited file…
+    code, _ = purge.evaluate_gate(
+        plan=edited, live_report=live, health=_health(),
+        restore_proof=_proof(), approval=_approval(plan["plan_digest"]),
+        confirm_digest=edited["plan_digest"], target_note="test target",
+        live_target=edited["target"])
+    assert code == purge.REFUSE_CONFIRMATION_MISMATCH      # …the approval does not
+
+
+# ── evidence has an AGE and an ADDRESS ──────────────────────────────────
+
+@pytest.mark.parametrize("age,code", [
+    (purge._HEALTH_MAX_AGE_SECONDS + 60, purge.REFUSE_ARMED_EVIDENCE_STALE),
+    (60, ""),
+])
+def test_armed_evidence_is_bounded_in_time(age, code):
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    got, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), health=_health(age=age))
+    assert got == code, message
+
+
+def test_armed_evidence_from_another_tenant_is_not_evidence_for_this_one():
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    foreign = {"record": {"armed": True, "org_id": "someone-else",
+                          "graph_id": "graph", "recorded_at": _ts(60)}}
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), health=foreign)
+    assert code == purge.REFUSE_TARGET_DRIFT
+    assert "someone-else" in message
+
+
+def test_armed_evidence_without_a_read_time_cannot_be_dated():
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    undated = {"record": {"armed": True, "org_id": "org", "graph_id": "graph"}}
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), health=undated)
+    assert code == purge.REFUSE_RECORD_NOT_ARMED
+    assert "recorded_at" in message
+
+
+def test_a_plan_without_armed_evidence_cannot_authorise_a_delete():
+    """A plan generated with no /health artefact was approved over an unarmed
+    record; a fresher /health today does not repair that."""
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    plan = purge.build_plan(report, target=_target(), health=None,
+                            restore_proof=_proof(), target_note="test target",
+                            recovery_missing=[])
+    code, message = _gate(plan, live=report)
+    assert code == purge.REFUSE_NOT_IN_PLAN
+    assert "armed evidence" in message
+
+
+@pytest.mark.parametrize("overrides,fragment", [
+    ({"age": purge._RESTORE_PROOF_MAX_AGE_SECONDS + 60}, "day(s) ago"),
+    ({"org": "other-org"}, "DIFFERENT deployment"),
+    ({"graph_id": "other-graph"}, "DIFFERENT deployment"),
+    ({"graph": "other-graph"}, "DIFFERENT deployment"),
+])
+def test_a_restore_proof_must_describe_this_deployment_and_be_recent(
+        overrides, fragment):
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    proof = _proof(**overrides)
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), proof=proof)
+    assert code == purge.REFUSE_RESTORE_PROOF_STALE
+    assert fragment in message
+
+
+# ── the docstring's flags are the parser's flags ───────────────────────
+
+#: Named in the docstring but NOT flags of THIS parser: `--dry-run` is named only
+#: to say it does not exist, and `--drill` belongs to
+#: `python -m tortoise record-backup`, quoted as the recovery recipe.
+_NON_FLAGS = {"--dry-run", "--drill"}
+
+
+def test_every_flag_the_docstring_names_exists_in_the_parser():
+    """The module documented `--dry-run` (no such flag) and "Required:
+    --event-log-path" against an optional argument, so a reader following the
+    docstring got an argparse usage error (#10483 review, P2)."""
+    parser = purge._build_parser()
+    known = {opt for action in parser._actions for opt in action.option_strings}
+    named = {f for f in re.findall(r"--[a-z][a-z-]+", purge.__doc__ or "")
+             if f not in _NON_FLAGS}
+    assert named <= known, named - known
+    assert "no `--dry-run` flag" in (purge.__doc__ or "")
