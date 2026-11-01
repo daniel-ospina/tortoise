@@ -299,13 +299,14 @@
             "t1",
             "t2"
           ],
+          "same_source_turn": false,
           "distinct_turns": true
         },
         {
           "a": "v3",
           "b": "v4",
           "values": "12/60",
-          "content_overlap": 0.6,
+          "content_overlap": 0.7778,
           "content_below_threshold": true,
           "content_leg_reachable": false,
           "quote_overlap": 0.6,
@@ -315,12 +316,13 @@
             "t3",
             "t4"
           ],
+          "same_source_turn": false,
           "distinct_turns": true
         }
       ],
       "collapse_threshold": 0.9,
       "same_turn_threshold": 0.75,
-      "why": "the 300/400 (content overlap 0.80 < the 0.90 near-verbatim threshold; quote overlap 0.80 >= the 0.75 same-turn threshold; turns t1/t2) and 12/60 (content overlap 0.60 < the 0.90 near-verbatim threshold; quote overlap 0.60 < the 0.75 same-turn threshold; turns t3/t4) pairs clear both collapse legs on their own terms: every content overlap is below the near-verbatim threshold, and the only quote overlap at or above the same-turn threshold belongs to a pair on DISTINCT turns, where that leg is unreachable, so no value pair is a collapse candidate on its own account, and every pair carries distinct turns. The guard is still consulted — 119 calls across the three packaging arms (post_2978_assembly=40, post_2978_assembly_value_marked=40, provenance_free_assembly=39), 2 of them refusals (post_2978_assembly=1, post_2978_assembly_value_marked=1, provenance_free_assembly=0) — and forcing it to accept everything leaves this arm's ids/order unchanged, so no refusal decides an outcome here. Its own regression is tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse"
+      "why": "the 300/400 (content overlap 0.80 < the 0.90 near-verbatim threshold; quote overlap 0.80 >= the 0.75 same-turn threshold; turns t1/t2) and 12/60 (content overlap 0.78 < the 0.90 near-verbatim threshold; quote overlap 0.60 < the 0.75 same-turn threshold; turns t3/t4) pairs clear both collapse legs on their own terms: every content overlap is below the near-verbatim threshold, and the only quote overlap at or above the same-turn threshold belongs to a pair on DISTINCT turns, where that leg is unreachable, so no value pair is a collapse candidate on its own account, and every pair carries distinct turns. The guard is still consulted — 119 calls across the three packaging arms (post_2978_assembly=40, post_2978_assembly_value_marked=40, provenance_free_assembly=39), 2 of them refusals (post_2978_assembly=1, post_2978_assembly_value_marked=1, provenance_free_assembly=0) — and forcing it to accept everything leaves this arm's ids/order unchanged, so no refusal decides an outcome here. Its own regression is tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse"
     },
     "provenance_leg_is_lane_scoped": {
       "measured": "with provenance 1 verbatim refs kept / 2 flood slots; without it 0 refs kept / 12 flood slots",

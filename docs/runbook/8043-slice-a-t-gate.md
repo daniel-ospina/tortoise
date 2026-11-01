@@ -141,14 +141,18 @@ number; both moved what the receipt may be quoted for.
 |---|---|---|
 | **#8945** — a comparison nothing ran | The `value_safety` verdict's leading clause was built **unconditionally**: it printed *"pairs sit below the 0.90 collapse threshold"* for any input, including a run whose overlap was 0.99. And the one number it named (`overlap`) was the **quote** overlap, while 0.90 (`DEFAULT_PACKAGE_VERBATIM_OVERLAP`) governs **content** — two quantities under one label. | The receipt now emits `content_overlap` and `quote_overlap` **separately**, each beside its own threshold (0.90 near-verbatim / 0.75 same-turn), each with a **computed** `*_below_threshold` and `*_leg_reachable`. The sentence is composed from those fields by `_value_pairs_sentence`, so it cannot outrun them; `test_value_pairs_sentence_is_composed_not_fixed` feeds a forced-above pair and fails if the wording does not flip. The `hasattr(retrieval, "_pkg_overlap")` guard was also removed — it degraded a rename to a plausible `null`. |
 | **#9114** — a control that could not fail | `controls.no_dupe_no_regression` was built from `_point` only, so every hit shared one D3 tier and `ids_identical` was **trivially true**: it measured "statement-only pools are untouched", never the tier boundary. | A second control, `no_dupe_tier_boundary`, ranks a raw **chunk above** the statements (0 duplicates). Under D3 that pool **is** regrouped, by design — so it asserts `tier_regroup_matches_key` (packaged order == the stable `_package_type_tier` projection) and `ids_identical_within_tier`, with `ids_identical` recorded as the **false-by-design** value it is. `test_tier_control_fails_when_the_tier_key_leaves_the_sort` removes the tier key from the sort and asserts the control reds. |
+| **#10508 review** — a split nothing could falsify, and a precondition re-derived | The repaired receipt emits two quantities, but the fixture gave every statement `content == quote`, so both calls at the `value_pairs` site received the **same** arguments: the two numbers were identical by construction and re-introducing #8945's swap (quote ratio under the content label) left the entire suite green. Separately, the same-turn reachability field used **raw equality** on the raw `source_turn_id`, where `_same_fact` gates on `_pkg_turn_key` **presence + equality** — so `None/None` read "same turn" (the leg is inert) and `0` vs `"0"` read "distinct" (it is reachable). | v3/v4 now carry a paraphrase **wrapper** the quote lacks (the production shape: *whole-quote similarity carries provenance text the values do not*), so their content overlaps (0.7778) differ from their quote overlaps (0.60) and `test_content_and_quote_overlaps_are_measured_from_different_strings` reds on the swap. Reachability is computed by `_shares_source_turn`, which calls the product's own `_pkg_turn_key` and is asserted against `_same_fact` itself in `test_same_turn_leg_precondition_is_the_products_predicate` — both pins were verified to red on the pre-fix code. |
 
 What the corrected figures showed on the existing fixture: the 300/400 pair's
 **quote** overlap is **0.80 — above the 0.75 same-turn threshold**, a fact the
 old single mis-labelled number concealed (it was reported as sitting below
 0.90). The pair is still not a collapse candidate, because that leg also
 requires a shared `source_turn_id` and the two hits sit on **distinct turns** —
-so the conclusion is unchanged, but it is now reached from a checked
-precondition rather than from a threshold the leg does not use.
+So the conclusion is unchanged, but it is now reached from a checked
+precondition rather than from a threshold the leg does not use. The two
+quantities are also now **separable on this fixture** (content 0.7778 vs quote
+0.60 on the 12/60 pair), which is what makes a silent re-merge of them red
+rather than green.
 
 ---
 

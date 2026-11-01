@@ -247,11 +247,34 @@ _OWN_SOURCE_TURNS = 3
 
 #: The value-critical pairs: same frame, DIFFERENT value. These must never
 #: collapse (`_pkg_differ_value_critical`) and must survive into the window.
+#:
+#: ⛔ The (content, quote) pair must NOT be byte-identical for every statement.
+#: #8945 emits TWO measured quantities because `_same_fact` has two ratio legs
+#: reading DIFFERENT strings — the near-verbatim leg reads normalized CONTENT,
+#: the same-source-turn leg reads the verbatim QUOTE. With `content == quote`
+#: everywhere, both calls at the `value_pairs` site receive the same arguments,
+#: the two numbers are numerically identical by construction, and reverting the
+#: content leg to the quote formula (#8945's defect: labelling a quote ratio as
+#: the content threshold) would leave every assertion — and the receipt —
+#: unchanged. So v3/v4 carry a paraphrase WRAPPER the quote lacks, which is the
+#: real production shape the runbook argues for ("whole-quote similarity carries
+#: provenance text the values do not") and the only thing that can discriminate
+#: the two fields.
 _VALUE_STATEMENTS = (
     ("v1", "the tea set cost 300 dollars", "the tea set cost 300 dollars", "t1"),
     ("v2", "the tea set cost 400 dollars", "the tea set cost 400 dollars", "t2"),
-    ("v3", "the mugs cost 12 dollars each", "the mugs cost 12 dollars each", "t3"),
-    ("v4", "the mugs cost 60 dollars total", "the mugs cost 60 dollars total", "t4"),
+    (
+        "v3",
+        "the mugs cost 12 dollars each, per the user, for the kitchen set",
+        "the mugs cost 12 dollars each",
+        "t3",
+    ),
+    (
+        "v4",
+        "the mugs cost 60 dollars total, per the user, for the kitchen set",
+        "the mugs cost 60 dollars total",
+        "t4",
+    ),
 )
 
 _OTHER_STATEMENTS = (
@@ -527,6 +550,35 @@ def _slot_census(admitted: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _shares_source_turn(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """The same-source-turn leg's PRECONDITION, computed the way the leg does.
+
+    ``_same_fact`` (``tortoise/retrieval.py``) gates that leg on
+    ``_pkg_turn_key`` **presence and equality**:
+
+        at = _pkg_turn_key(a); bt = _pkg_turn_key(b)
+        if not (at and at == bt):
+            return False
+
+    ⛔ Raw ``a.get("source_turn_id") == b.get("source_turn_id")`` is NOT that
+    predicate, and it diverges in two reachable ways (#10508 review, Finding 2):
+
+    * **both absent** — raw ``None == None`` reads "same turn" and, with a quote
+      overlap over the threshold, a receipt would claim the leg is what refuses
+      a merge the product never even consults. This is exactly the state the
+      ``provenance_free_assembly`` arm documents ("its same-turn leg is inert").
+    * **``0`` vs ``"0"``** — raw reads "distinct turns", while the product's
+      ``_pkg_turn_key`` maps the 0-based turn index to a string and the leg is
+      REACHABLE. A false "unreachable" is the #8945 shape one level down: prose
+      from a precondition the leg does not use.
+
+    Shared by the ``value_pairs`` reachability fields and the ``refused_pairs``
+    metadata so the two cannot drift apart.
+    """
+    ta, tb = retrieval._pkg_turn_key(a), retrieval._pkg_turn_key(b)
+    return bool(ta) and ta == tb
+
+
 @contextmanager
 def _probe_value_guard() -> Iterator[dict[str, Any]]:
     """Count `_pkg_differ_value_critical` calls/refusals for the duration.
@@ -589,7 +641,7 @@ def _value_pairs_sentence(value_pairs: list[dict[str, Any]]) -> str:
         return (
             "no value pair was measured, so this verdict states nothing about "
             "either collapse threshold — an empty measurement is not a safety "
-            "result"
+            "result."
         )
 
     def _comparator(below: bool) -> str:
@@ -604,7 +656,7 @@ def _value_pairs_sentence(value_pairs: list[dict[str, Any]]) -> str:
             f"{_comparator(p['quote_below_threshold'])} the "
             f"{DEFAULT_PACKAGE_SAME_TURN_OVERLAP:.2f} same-turn threshold; "
             f"turns {p['turns'][0]}/{p['turns'][1]}"
-            + ("" if p["distinct_turns"] else " — SAME TURN")
+            + (" — SAME TURN" if p["same_source_turn"] else "")
             + ")"
         )
 
@@ -616,6 +668,12 @@ def _value_pairs_sentence(value_pairs: list[dict[str, Any]]) -> str:
     # "a leg can bite" from the ratio alone would repeat #8945's error one
     # level down — a comparison that runs, against a precondition nothing
     # checked.
+    #
+    # The precondition is READ from ``same_source_turn``, which ``measure()``
+    # computes with the product's own ``_pkg_turn_key`` presence test (#10508
+    # Finding 2). It is not re-derived from ``turns`` here: absent-vs-absent is
+    # not a shared turn (the product leg is inert), and re-deriving it is how
+    # this file would grow a second, divergent definition of the leg.
     reached = [
         p
         for p in value_pairs
@@ -847,7 +905,13 @@ def measure() -> dict[str, Any]:
         qb = str(hb.get("quote") or "")
         ca = str(ha.get("content") or "")
         cb = str(hb.get("content") or "")
-        ta, tb = ha.get("source_turn_id"), hb.get("source_turn_id")
+        # The leg's OWN precondition, by the leg's own predicate (#10508
+        # Finding 2): `_pkg_turn_key` presence+equality, never raw equality on
+        # the raw field. Two hits with no `source_turn_id` at all share NO turn
+        # — the leg is inert — and `0` vs `"0"` is the SAME turn.
+        same_source_turn = _shares_source_turn(ha, hb)
+        ta = retrieval._pkg_turn_key(ha)
+        tb = retrieval._pkg_turn_key(hb)
         _num = lambda q: next((t for t in q.replace("/", " ").split() if t.isdigit()), "?")  # noqa: E731
         content_overlap = round(retrieval._pkg_overlap(ca, cb), 4)
         quote_overlap = round(retrieval._pkg_overlap(qa, qb), 4)
@@ -875,10 +939,14 @@ def measure() -> dict[str, Any]:
                 # the threshold on DISTINCT turns merges nothing.
                 "same_turn_leg_reachable": (
                     quote_overlap >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
-                    and ta == tb
+                    and same_source_turn
                 ),
                 "turns": [ta, tb],
-                "distinct_turns": ta != tb,
+                # The leg's precondition, stated rather than inferred from
+                # `turns`: absent-vs-absent is NOT "same turn" (the product leg
+                # is inert), so `distinct_turns` is its negation, not `ta != tb`.
+                "same_source_turn": same_source_turn,
+                "distinct_turns": not same_source_turn,
             }
         )
 
@@ -908,10 +976,10 @@ def measure() -> dict[str, Any]:
                     "arm": arm_name,
                     "a": rp["a"],
                     "b": rp["b"],
+                    # The same predicate the value-pairs block uses, and the one
+                    # `_same_fact` gates on (#10508 Finding 2) — not raw equality.
                     "same_source_turn": (
-                        ha.get("source_turn_id") == hb.get("source_turn_id")
-                        if ha and hb
-                        else None
+                        _shares_source_turn(ha, hb) if ha and hb else None
                     ),
                     # No `hasattr` guard: the attribute lives in the module
                     # this instrument just imported, so the guard could only
