@@ -36,11 +36,37 @@ from .ids import content_hash, ulid
 from .render import render
 
 # OpenAI-compatible providers (Ollama is handled separately via its native API).
+#
+# THE SESSION-EXTRACTION PROVIDER REGISTRY (#8133). A provider registered
+# here becomes visible to the consumers of the KEY SET, which read this mapping
+# rather than keeping a list of their own:
+#   * ``hosted_api._llm_provider_keys`` (the hosted ``no_provider`` gate),
+#   * ``test_session_extraction_modes.test_the_lane_gate_registry_covers_the_v2_extractor_registry``
+#     and the #1197 drift guard, which demand the two entries below.
+# ⚠️ THREE registration sites, not one — this mapping plus
+# ``sdk._SESSION_LLM_PROVIDER_PRIORITY`` (which provider serves a capture) and
+# ``sdk._SESSION_LLM_DEFAULT_MODELS`` (which model id is sent).  Adding a
+# provider HERE alone registers its KEY and leaves ``_build_session_llm_extractor``
+# raising ``KeyError`` on the missing default model: the #1197 guard catches the
+# first omission, the second is caught only by an end-to-end venice-only test
+# (tests/test_session_extraction_modes.py).
+# Before #8133 ``model_adapters.resolve_extractor_provider`` (the v2 extractor's
+# registry) carried ``venice`` and this mapping did not, so a venice-only
+# deployment reported ``('venice', ['venice'])`` there while every lane gate said
+# "no provider" and the capture stored its turns WITHOUT extracting — silently,
+# while the receipt blamed a key the operator had configured.
 _PROVIDERS = {
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
+    # venice.ai — the #1549 3-provider rotation lane, OpenAI-compatible at
+    # ``/v1`` (``models.OpenAICompatModel`` appends ``/chat/completions``).
+    # Registered on main by ``model_adapters.resolve_extractor_provider``, whose
+    # ``if vz_key:`` branch returns venice as a STANDALONE PRIMARY — so #8133
+    # was this entry missing, not a product decision to keep venice
+    # fallback-only.
+    "venice": ("https://api.venice.ai/api/v1", "VENICE_API_KEY"),
 }
 
 

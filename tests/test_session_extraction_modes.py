@@ -152,6 +152,97 @@ def test_sdk_priority_covers_all_registry_providers():
         )
 
 
+def test_a_venice_only_deployment_extracts(monkeypatch):
+    """#8133: venice-only is a SUPPORTED configuration and must EXTRACT.
+
+    Reproduced on main before the fix (venice-only env, every other provider
+    key unset):::
+
+        resolve_extractor_provider(): ('venice', ['venice'])   <- v2 says ready
+        _session_llm_provider():      None                     <- lane gate
+        _build_session_llm_extractor(): None
+the capture then stored its turns and reported ``extraction_mode:
+"no-provider"`` — silently, while the receipt blamed a key the operator HAD
+configured. The three readings must agree, and agree on venice.
+
+    ``resolve_extractor_provider()``'s standalone-venice branch is the recorded
+    decision (#1549, on main), so the fix is to make the lane gate see what the
+    v2 extractor can already serve — not to refuse venice-only deployments.
+    """
+    from tortoise import hosted_api
+    from tortoise.model_adapters import resolve_extractor_provider
+    from tortoise.sdk import (
+        _build_session_llm_extractor,
+        _session_llm_provider,
+    )
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MODEL", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
+    for k in hosted_api._LLM_PROVIDER_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("VENICE_API_KEY", "sk-test-8133")
+
+    # The v2 extractor's own registry: venice is a standalone primary.
+    assert resolve_extractor_provider() == ("venice", ["venice"])
+    # The lane gates must now agree with it (they reported None/False before).
+    assert hosted_api._llm_provider_available() is True
+    assert _session_llm_provider() == "venice"
+    extractor = _build_session_llm_extractor()
+    assert extractor is not None, (
+        "venice-only: the lane gate says a provider is configured but no "
+        "extractor can be built — the capture would skip extraction silently"
+    )
+    # ...and a venice-only capture is no longer a 'no-provider' capture.
+    assert hosted_api._llm_provider_available() == (
+        _build_session_llm_extractor() is not None)
+
+
+def test_a_venice_key_does_not_take_over_a_multi_key_deployment(monkeypatch):
+    """#8133 discriminator: the fix must NOT change which provider SERVES a
+    deployment that already had a legacy key.
+
+    A naive fix (prepending venice to ``_SESSION_LLM_PROVIDER_PRIORITY`` to
+    "make venice work") would silently re-route every multi-key deployment's
+    session extraction onto venice. venice is appended LAST so only a
+    venice-ONLY deployment changes behaviour.
+    """
+    from tortoise import hosted_api
+    from tortoise.sdk import _session_llm_provider
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in hosted_api._LLM_PROVIDER_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("VENICE_API_KEY", "sk-test-8133")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-8133")
+    assert _session_llm_provider() == "openrouter"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-8133")
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    assert _session_llm_provider() == "deepseek"
+
+
+def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
+    """#8133 Indicator 2: the lane-gate key set must be a SUPERSET of the v2
+    extractor's provider key set, so no future provider can land in one
+    registry only (the #1549 venice drift).
+
+    ``test_sdk_priority_covers_all_registry_providers`` guards the other
+    direction (ingest -> priority/hosted); this guards v2 -> lane gate.
+    """
+    from tortoise import hosted_api
+    from tortoise.model_adapters import _PROVIDER_KEY_ENV
+
+    lane_keys = set(hosted_api._LLM_PROVIDER_KEYS)
+    v2_keys = set(_PROVIDER_KEY_ENV.values())
+    missing = v2_keys - lane_keys
+    assert not missing, (
+        f"v2 extractor provider key(s) {sorted(missing)} are invisible to the "
+        f"capture lane gate — a deployment configured with only those would "
+        f"silently skip extraction (#8133); register the provider in "
+        f"tortoise.ingest._PROVIDERS"
+    )
+
+
 def test_analyze_keys_subset_of_session_keys():
     """#1197: every analyze._LLM_PROVIDERS key must be usable by the SESSION
     extractor — an analyze-only key (in analyze but not in ingest._PROVIDERS)
