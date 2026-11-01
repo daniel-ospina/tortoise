@@ -27,7 +27,7 @@ The system under test is the epistemic layer in three compositions, each with it
 |---|---|---|
 | **EP engine** (`TortoiseEP` + `quadrature.phi_*`) | Beta-message belief propagation over IMPL/NAND factors | Property tests (§2) |
 | **Graph as built by the pipeline** (extraction → operators → supersession → dream) | The *input* the engine reasons over | Graph-quality tests (§3) |
-| **Query/endpoint surface** (`get_confidence`, `traverse` *(deleted by #4282 — its recorded destination `explore_connections` has no `def` on `TortoiseSDK` yet, so the surviving SDK read is `expand_relationships` (one point, type-bound — NOT an all-type walk); the MCP walks are `tortoise_traverse` (all types) and the filtered `tortoise_analyze` / `tortoise_compute_confidence`, which take `rel_filter` and `direction`)*, `get_contested_claims`, ledger, bi-temporal) | What a user/agent actually experiences | Reasoning-endpoint scenarios (§4) |
+| **Query/endpoint surface** (`get_confidence`, `traverse` *(deleted by #4282, 2026-10-27 — its recorded destination `explore_connections` has no `def` on `TortoiseSDK` yet)*, `get_contested_claims`, ledger, bi-temporal) | What a user/agent actually experiences | Reasoning-endpoint scenarios (§4) |
 | **Whole system under hostile input** | Noise, loops, Sybil, flapping | Adversarial tests (§5) |
 
 **Method rules (non-negotiable):**
@@ -200,7 +200,7 @@ End-to-end, through the public surface. Each scenario = setup → action → que
 ### R2 — "What contradicts my decision?"
 
 - **Setup:** decision D(T1); two attackers C1, C2 `NAND→` D.
-- **Query:** `traverse(D, "NAND", direction="incoming")` — ⚠️ **`traverse` is DELETED by #4282** (recorded destination `explore_connections`, no `def` on `TortoiseSDK` yet). The filtered read itself is still reachable, but not from the SDK: the MCP tools `tortoise_analyze` and `tortoise_compute_confidence` take `rel_filter` and `direction`, and `tortoise/analyze.py`'s `counter_arguments` template already returns exactly this scenario's answer — NAND contradictors of a target as `(id, content, confidence)` ordered strongest-first. Its caveat is the addressing: the template matches `target.content CONTAINS $entity` rather than by id, so an id-addressed caller must go through `expand_relationships(D)` (one point, type-bound — not an all-type walk) and filter client-side.
+- **Query:** `traverse(D, "NAND", direction="incoming")` — ⚠️ **`traverse` is DELETED by #4282** (recorded destination `explore_connections`, no `def` on `TortoiseSDK` yet). The MCP `tortoise_analyze` question form routes through `tortoise/analyze.py`, where the `counter_arguments` template answers exactly this shape: it returns the contradictors as `(id, content, confidence)` ranked strongest-first, addressed by `target.content CONTAINS $entity` rather than by id. On the EP side, `compute_confidence(anchors=[D], rel_filter="NAND", direction="incoming")` takes the same two filters (it selects the subgraph for belief propagation) and returns confidences, not the list.
 - **Accept:** returns exactly {C1, C2} with each attacker's confidence and tier; sorted by message strength (the strongest attacker first); ledger shows both negative lines. Zero NAND edges found for an undecided claim is a graph-quality failure (G1).
 
 ### R3 — "Why does the graph believe X?" — ledger-vs-EP consistency
