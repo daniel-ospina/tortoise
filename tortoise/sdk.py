@@ -9237,7 +9237,8 @@ class TortoiseSDK:
         abort is re-raised. A first attempt is never consulted, so a benign
         zero-row result keeps that contract. ⛔ #10119 moved the reachable
         shape of that case for ``update_point``: an id ABSENT at its guard read
-        is refused before any statement, so the observed shape is a target
+        is refused before any WRITE statement (that read still issues its
+        own), so the observed shape is a target
         PRESENT at that read that vanishes before the write — an absent-at-entry
         id is no longer an example of a benign zero row here, and a write-slot
         abort on the vanished target must stay armed-free so the empty contract

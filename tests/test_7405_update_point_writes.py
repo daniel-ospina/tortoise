@@ -987,7 +987,7 @@ class _TargetVanishesBeforeTheWrite:
 
     This is the ONE shape in which ``update_point`` still issues a statement
     that matches nothing (#8854 review round 10, I1): #10119 refuses an id
-    absent AT the guard read before any statement is issued, so the reachable
+    absent AT the guard read before any WRITE statement is issued, so the reachable
     benign-zero-row case is a point that existed at that read and was removed
     (rebuild / replay) before the write ran.
 
@@ -1043,7 +1043,7 @@ def test_a_first_attempt_that_matches_nothing_keeps_the_empty_contract(
     first attempt never consults the witness, so this stays true.
 
     ⛔ #10119 moved WHERE that shape is reachable: an id absent at the guard
-    read now issues no statement at all (pinned by
+    read now issues no WRITE statement (pinned by
     ``test_an_absent_id_issues_no_statement_for_the_write``), so this test
     reaches it the only way left — the target is PRESENT at that read and
     vanishes before the write. Do NOT "restore" a write for an id that is
@@ -1086,9 +1086,9 @@ def test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract(
     yet", so only that family arms the witness.
 
     ⛔ #10119 RE-BASED THIS TEST, and it is not the same test it was: it used to
-    abort on an id absent at ENTRY, which is now refused before any statement
-    is issued (so its write-slot injection could never fire and its assertion
-    silently became "no statement at all"). The invariant it names is still
+    abort on an id absent at ENTRY, which is now refused before any WRITE
+    statement is issued (so its write-slot injection could never fire and its
+    assertion silently became "no write statement reached"). The invariant it names is still
     reachable, and this is the shape that reaches it — the target is PRESENT at
     the guard read, the FIRST statement aborts write-slot, the target vanishes
     so the RE-ISSUE matches zero rows. Nothing may report that as a landing,
