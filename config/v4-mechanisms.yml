@@ -559,7 +559,22 @@ mechanisms:
       construction and a rule there must compare against the resolved TURN text,
       a different rule with a weaker precision profile: a follow-up; (f) the rule
       REFUSES, it does not REPAIR — retaining by substituting the verbatim value
-      into the claim is the follow-up.
+      into the claim is the follow-up; (g) a LEADING CURRENCY SYMBOL is FORM, not
+      value — `_value_core` reads the numeric core and the unit written AFTER the
+      number, so `$12`/`€12` are one value while `$12`/`$60` is a rewrite;
+      named rather than fixed because `$` / `USD` / `US$` are one currency spelled
+      three ways, the `800millis`/`800ms` false-refusal class cycle 3 measured, so
+      a symbol-as-unit-identity rule would re-introduce it (the behaviour is
+      pinned by `test_a_leading_currency_symbol_is_FORM_today_and_that_is_stated`,
+      so tightening it has to move this row); (h) a side LONGER than
+      `_MAX_JUDGED_TEXT` (2 × `_MAX_CONTENT`) is not judged at all, deliberately:
+      the rule is fed the UNCLAMPED texts and the judge is LINEAR — measured 0.45
+      ms at 67 chars, 2.5 ms at 1 KB, 23 ms at 10 KB, 227 ms at 100 KB, 2.4 s at
+      1 MB — once per point in the single Point write path, so an over-long
+      model-authored side FAILS OPEN rather than spending minutes there. ⛔ Not
+      clamped: a cut value reads as a DIFFERENT value, the false-accusation
+      direction this rule must never take (pinned by
+      `test_an_over_long_side_is_not_tokenised_at_all`).
       THE RENDER HALF is unchanged and stays pinned where #9775 left it.
       `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered into S1
       (`_granularity_text`), S2/S4 (`_render_master_core_only`,

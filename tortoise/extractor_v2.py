@@ -4114,6 +4114,19 @@ _KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
 #: `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` is asserted by the test file so a unit
 #: the ENGINE can fuse can never be unknown here.
 
+#: The longest side the #10360 rule will JUDGE, in characters. The quote a point
+#: STORES is clamped to ``_MAX_QUOTE`` (200) and its content to ``_MAX_CONTENT``
+#: (1000), so a side past ``2 * _MAX_CONTENT`` cannot be the verbatim anchor the
+#: refusal exists to protect — it is a model-authored blob, and judging it is
+#: unbounded work inside the single Point write path, once per point. MEASURED
+#: (fixer, 2026-11-01) on this box: ``_value_slot_divergence`` costs 0.45 ms at
+#: 67 chars, 2.5 ms at 1 KB, 23 ms at 10 KB, 227 ms at 100 KB and 2.4 s at
+#: 1 MB — LINEAR. So an over-long side FAILS OPEN, the direction every
+#: unjudgeable input here takes (a refusal withholds a durable memory). ⛔ It is
+#: NOT clamped: a value straddling a cut reads as a DIFFERENT value, which is
+#: the false accusation the unclamped-judging fix above exists to prevent.
+_MAX_JUDGED_TEXT = 2 * _MAX_CONTENT
+
 
 def _value_core(token: str) -> tuple[str, str, str | None] | None:
     """``(sign, numeric core, unit)`` for a value token, or ``None``.
@@ -4233,6 +4246,13 @@ def _value_slot_divergence(content: object, quote: object,
     """
     # Cheap early-out first: a same-slot contradiction requires the QUOTE to
     # carry a value at all, and most points carry none (review P3).
+    # ⛔ And BOUNDED before anything is tokenised: an over-long side is not
+    # judged at all (see `_MAX_JUDGED_TEXT`) — the unbounded-cost half of the
+    # review's UNVERIFIED item, measured linear to 2.4 s for one 1 MB quote.
+    # Fail open, never clamp (a cut value reads as a different value).
+    if (len(str(quote or "")) > _MAX_JUDGED_TEXT
+            or len(str(content or "")) > _MAX_JUDGED_TEXT):
+        return ()
     if not _carries_value(quote):
         return ()
     content_slots = _value_slots(content)

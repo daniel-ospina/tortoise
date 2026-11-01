@@ -425,3 +425,75 @@ def test_a_whitespace_collapsed_over_cap_refusal_still_blocks_the_mint():
     result = v2.execute_embed(embed, {}, session_id="s_10360")
     assert result["payload"]["points"] == [], (
         [p["content"][:44] for p in result["payload"]["points"]])
+
+
+# ── 8. the rule's own BOUND, and the residual it still carries ─────────────
+
+def test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded():
+    """UNVERIFIED item 2, settled: the unclamped judge must be BOUNDED.
+
+    `_refuse_rewritten_value` is fed the UNCLAMPED texts (a value straddling the
+    clamp must not read as a rewrite), so a model-authored over-long side used to
+    be tokenised in full on EVERY point of the single Point write path. Measured
+    linear on this box: 0.45 ms at 67 chars, 2.5 ms at 1 KB, 23 ms at 10 KB,
+    227 ms at 100 KB, 2.4 s at 1 MB — one hallucinated mega-quote costs the
+    write path minutes. An over-long side now FAILS OPEN (never clamped: a cut
+    value reads as a different value, the false-accusation direction).
+
+    ⛔ Pinned by the WRITE, not by the return value: `()` is the answer both
+    before and after the fix — the defect was the WORK, not the verdict.
+    """
+    content = "the p95 hit 4.0 seconds"
+    quote = "the p95 hit 4.2 seconds " + ("padding z " * (v2._MAX_JUDGED_TEXT))
+    assert len(quote) > v2._MAX_JUDGED_TEXT
+    # within the bound the same pair IS a rewrite, so this fails open only on
+    # length — the bound cannot pass by the rule being broken (positive control)
+    assert v2._value_slot_divergence(content, "the p95 hit 4.2 seconds")
+    assert v2._value_slot_divergence(content, quote) == ()
+    result = _write(content, quote)
+    assert len(result["payload"]["points"]) == 1, result["warnings"]
+    assert not any("REWRITES its own verbatim" in w for w in result["warnings"])
+
+
+def test_an_over_long_side_is_not_tokenised_at_all(monkeypatch):
+    """The same bound, stated as COST: the engine is never called for it.
+
+    This is the half a return-value pin cannot see. It fails on the pre-fix code
+    (which tokenised the whole side first and answered `()` afterwards), so the
+    bound cannot be deleted without this going red.
+    """
+    calls = {"n": 0}
+    real = v2._value_bindings
+
+    def counting(text):
+        calls["n"] += 1
+        return real(text)
+
+    monkeypatch.setattr(v2, "_value_bindings", counting)
+    huge = "the p95 hit 4.2 seconds " + ("z " * v2._MAX_JUDGED_TEXT)
+    assert v2._value_slot_divergence("the p95 hit 4.0 seconds", huge) == ()
+    assert calls["n"] == 0, f"tokenised an over-long side: {calls['n']} calls"
+    # …and a side AT the bound is still judged (the bound is a bound, not an off
+    # switch): the engine is called again for a judgeable pair.
+    assert v2._value_slot_divergence("the p95 hit 4.0 seconds",
+                                     "the p95 hit 4.2 seconds")
+    assert calls["n"] > 0
+
+
+def test_a_leading_currency_symbol_is_FORM_today_and_that_is_stated():
+    """The residual the review called out, PINNED so it cannot move silently.
+
+    `_value_core` reads the numeric core and the unit AFTER it, so a LEADING
+    symbol is discarded: `$12` and `€12` are one value. That is fail-open (the
+    direction this rule always takes), and making a symbol a unit identity would
+    add a false-refusal class — `$` / `USD` / `US$` are one currency spelled
+    three ways, exactly the `800millis`/`800ms` trap cycle 3 measured. So the
+    behaviour STAYS and the registry row names it in "WHAT IS STILL NOT
+    ENFORCED" instead. If a future lane tightens it, this test reds and the row
+    has to move with it.
+    """
+    assert not v2._value_slot_divergence("the invoice was $12",
+                                         "the invoice was €12")
+    # the positive control: a symbol does not hide a numeric rewrite
+    assert v2._value_slot_divergence("the invoice was $12",
+                                     "the invoice was $60")
