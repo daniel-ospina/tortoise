@@ -6483,6 +6483,12 @@ surfaces:
   - test_models.py
   - test_namespace_uri_mode.py
   - test_reader.py
+  # #10539: the aggregation-aware reading seam — `system_prompt_for(question=...)`
+  # must give counting discipline to an aggregative question even when
+  # `detect_question_type`'s single-winner precedence picked a coarser fragment.
+  # Pins `tortoise/reader.py` (the same source that owns `test_reader.py`),
+  # so it is registered on this surface for the same reason.
+  - test_reader_aggregation_aware.py
   - test_reader_prerendered.py  # #3011: pre-rendered-evidence reader seam — byte-identical to the hit-list lane (hermetic)
   - test_reader_abstention_calibration.py
   - test_reader_4107_advice_shape.py  # #4107: hermetic characterisation drift pin (detector→None, advice-clause tension)
