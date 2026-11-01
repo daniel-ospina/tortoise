@@ -5011,3 +5011,47 @@ def test_embedded_start_refuses_a_db_directory_that_is_gone(tmp_path, capfd):
     assert "FATAL CONFIG FILE ERROR" not in captured, (
         "redis-server was spawned into a missing db dir — the unattributable "
         "FATAL this guard exists to prevent")
+
+
+def test_the_embedded_start_timeout_floor_reaches_the_client_tortoise_builds(
+        monkeypatch):
+    """#10437: the session floor must hold on the class the embedded client IS.
+
+    The 10 s default expires on a loaded shard and raises
+    ``RedisLiteServerStartError("The redis-server process failed to start")``
+    for a server that is merely slow — measured red on run 41253635128 leg
+    ``test-slow (a)`` in ``tests/test_mcp_http.py``, a file the PR under test did
+    not touch, and ``ci-introduced-failure`` then blocked the merge.
+
+    Two halves, because a floor applied to the WRONG class reads identical to
+    one applied to the right class: (a) the bound is in effect for this
+    process (reds without the `tests/_embedded.py` call), and (b) it is set on
+    ``redislite.client.Redis``, which ``redislite/falkordb_client.py`` imports
+    by name, so it is the class ``tortoise.FalkorDB``'s embedded client is
+    constructed from — not a sibling nothing uses.
+    """
+    import redislite.client as _rc
+    import redislite.falkordb_client as _fc
+
+    from tests._embedded import (
+        EMBEDDED_START_TIMEOUT_FLOOR,
+        raise_embedded_start_timeout_floor,
+    )
+
+    assert _fc.Redis is _rc.Redis, (
+        "falkordb_client stopped re-exporting client.Redis — the floor below "
+        "would then be set on a class no embedded client is built from")
+    assert _rc.Redis.start_timeout >= EMBEDDED_START_TIMEOUT_FLOOR, (
+        f"the session floor is not in effect: start_timeout="
+        f"{_rc.Redis.start_timeout} < {EMBEDDED_START_TIMEOUT_FLOOR}; an "
+        f"embedded start that outlives it raises RedisLiteServerStartError "
+        f"for a merely slow host")
+
+    # Raise-only: a caller that widened the bound further keeps its value, and
+    # the previous bound is REPORTED rather than assumed.
+    monkeypatch.setattr(_rc.Redis, "start_timeout",
+                        EMBEDDED_START_TIMEOUT_FLOOR + 30)
+    assert raise_embedded_start_timeout_floor() == EMBEDDED_START_TIMEOUT_FLOOR + 30
+    assert _rc.Redis.start_timeout == EMBEDDED_START_TIMEOUT_FLOOR + 30, (
+        "the floor must never LOWER a bound a caller raised deliberately")
+

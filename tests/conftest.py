@@ -503,6 +503,7 @@ def _session_will_connect(uri: str) -> bool:
 from tests._embedded import (  # noqa: E402
     _assert_configured_db_answers,
     _assert_p4_uri_required,
+    raise_embedded_start_timeout_floor,
     serialize_embedded_construction,
 )
 from tortoise.pricing import tier_limits  # noqa: E402  (late import: after TEST_MODE env wiring)
@@ -757,6 +758,28 @@ def _serialize_embedded_construction():
     serialize_embedded_construction(mp)
     yield
     mp.undo()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _embedded_start_timeout_floor():
+    """#10437: lift redislite's embedded start wait for this process, once.
+
+    A shard runs 4 xdist workers beside other CI jobs, and every embedded start
+    spends up to redislite's `start_timeout` (default 10 s) waiting for the
+    daemonized `redis-server` to create its unix socket. On a loaded host that
+    wait EXPIRES and the client raises `RedisLiteServerStartError("The
+    redis-server process failed to start")` for a server that is merely slow —
+    measured red on run 41253635128 leg `test-slow (a)`, in a file the PR under
+    test did not touch, where it then blocked the merge through
+    `ci-introduced-failure`.
+
+    Session-scoped and autouse so it is in place before the first construction,
+    and so it covers files that do not exist yet — the same reasoning (and the
+    same 60 s value) as the three per-file call sites #1988 established. The
+    mechanism and the measurements are in `tests/_embedded.py`.
+    """
+    raise_embedded_start_timeout_floor()
+    yield
 
 
 @pytest.fixture(scope="session", autouse=True)
