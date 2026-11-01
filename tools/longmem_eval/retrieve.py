@@ -847,17 +847,36 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             "status": h.get("status") or "",
             # E6 (#1538) D7: promoted validity-window fields — additive,
             # only when present (undated hits render no [valid …] marker).
-            "valid_from": h.get("valid_from") or "",
-            "valid_to": h.get("valid_to") or "",
-            "expired_at": h.get("expired_at") or "",
+            #
+            # ⛔ The window keys are forwarded VERBATIM (``None`` when the
+            # payload has no such key), never coerced with ``or ""``. ``""``
+            # is NOT this surface's spelling of "absent": since #9202
+            # ``validity.end_state`` reads a STORED ``""`` as an ASSERTED,
+            # un-datable END (``END_UNKNOWN`` — the owner ruling of
+            # 2026-10-25, ONTOLOGY §4.7), and the search payload already
+            # normalises absence to ``None``/an omitted key
+            # (``search_engine.fetch_point_epistemic_state`` uses ``or None``
+            # and emits ``end_state`` only for a real window). Coercing here
+            # minted an end nobody wrote, which ``is_stale_entry`` then reads
+            # as ENDED at every ``question_date`` — every undated eval hit
+            # ranked stale and the C6 ``prefer_latest_order`` arm degraded to
+            # ``all-stale-never-starve`` (a silent no-op). Absence travels as
+            # absence; the ``None`` key keeps the annotated key set fixed.
+            "valid_from": h.get("valid_from"),
+            "valid_to": h.get("valid_to"),
+            "expired_at": h.get("expired_at"),
             # #2350 (E-prec): the 3-state end rides the annotated surface too,
             # or the eval lane's reader cannot render an ended-unknown window
             # as distinct from a still-true one (``_validity_marker`` reads
             # these keys). Sourced from the search payload — the same place
-            # the window fields above come from.
-            "valid_from_precision": h.get("valid_from_precision") or "",
-            "valid_to_precision": h.get("valid_to_precision") or "",
-            "end_state": h.get("end_state") or "",
+            # the window fields above come from. Verbatim, for the reason
+            # above: a forged ``end_state`` would be consumed as GIVEN by
+            # ``is_stale_entry`` (it prefers a declared state over recomputing
+            # it), so an empty-string default here would be a fabricated
+            # verdict, not a benign placeholder.
+            "valid_from_precision": h.get("valid_from_precision"),
+            "valid_to_precision": h.get("valid_to_precision"),
+            "end_state": h.get("end_state"),
         }
         # #2684 (Slice B): the value-bearing verbatim SPAN — the offsets of
         # the point's own quote inside its source turn, surfaced WITH the

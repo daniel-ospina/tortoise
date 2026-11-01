@@ -87,6 +87,25 @@ would collide on the word `recency` (a window there, a freshness preference here
   markers use. A window that closed **on** `question_date` is therefore stale; a window still open
   after it is not.
 
+  > **AMENDED 2026-11-01 (#9202, owner ruling 2026-10-25 option B):** the parenthetical
+  > `unparseable → None = not stale` is **SUPERSEDED**, for ENDS only. A present end that names no
+  > instant is `END_UNKNOWN` — *the fact ended, at a time we cannot pin* — so `is_stale_entry` now
+  > resolves the state through `tortoise.validity.end_state` (the ONE home for "does this stored
+  > value point at an instant?") and demotes it at **every** `question_date`, instead of reading it
+  > as "no window information". Not demoting was the fabricated-coverage hazard `ONTOLOGY.md` §4.7
+  > names: no question date could ever close such a window, so it covered every later instant and
+  > always ranked as current. `_as_date` still returns `None` for an unparseable value; what changed
+  > is that a `None` no longer *means* "not stale" to this resolver (a START keeps the old reading —
+  > `is_not_yet_effective`, #6140). `_covers` (#9408) and the reply's `end_state` already read the
+  > value this way; the ranking was the surface that had not.
+  >
+  > One producer consequence, stated rather than absorbed: `sdk._supersede_window_end` stamps
+  > `str(valid_from)` for a NUMERIC kwarg (#5360's deliberate exemption), so a graph can hold
+  > `validTo="1780000000.0"`. The ordering measure reads an epoch from a NUMBER, never a string
+  > (`validity._EPOCH_AS_STRING_RE` names that shape as #9202's fault), so such an end is
+  > `END_UNKNOWN` — ENDED — and the ranking now agrees with `_covers` and the reply about it. The
+  > write route is the follow-up, not a reason for a fourth notion of "parseable" at read time.
+
 **D3 — Where each half of the mechanism lives (corrected after review cycle 1).**
 
 - **Query-side date anchor → product (`tortoise_fts_query`).** The method gains two optional
@@ -300,9 +319,20 @@ Runtime prerequisites: `TORTOISE_DB_URI` (docker FalkorDB) for the integration t
    under `date-pinned`/`None` the order is unchanged; all-stale and no-stale both return the input
    order with `applied=False`; a **future** `valid_to` (after `question_date`) is NOT stale; a
    window closed exactly ON `question_date` IS stale; a **numeric-epoch** `valid_to`/`expired_at`
-   (past and future) is classified correctly; an unparseable window value is NOT stale; a
-   **status-only** stale row (`status="retracted"`, no `superseded_by`, no window) IS demoted (the
-   clause that catches `retract_point`).
+   (past and future) is classified correctly; a **status-only** stale row (`status="retracted"`, no
+   `superseded_by`, no window) IS demoted (the clause that catches `retract_point`).
+
+   > **AMENDED 2026-11-01 (#9202, owner ruling 2026-10-25 option B):** this item's
+   > *"an unparseable window value is NOT stale"* criterion is **SUPERSEDED** — it is the defect the
+   > ruling reversed. The restated criterion is a four-way discriminator, so the ruling cannot be
+   > satisfied by a blanket "demote anything that does not parse": an unparseable/absent-valued END
+   > is ENDED at every `question_date` (`test_an_undatable_end_is_stale_but_an_absent_or_future_one_is_not`,
+   > `test_an_undatable_end_is_not_rescued_by_a_dated_question_date`), while an ABSENT end, a future
+   > dated end and a past dated end keep their ruled readings. The **numeric-epoch** clause above
+   > stands and is now pinned in both spellings: the NUMBER `1900000000` is the 2030-03-17 instant
+   > (open to a 2026 question), while the SAME instant spelled as a STRING names no instant to the
+   > ordering measure and is therefore ENDED
+   > (`test_an_epoch_spelled_as_a_STRING_names_no_instant_so_the_end_is_ENDED`).
 4. `tortoise_fts_query(..., time_aware=False)` is byte-identical to today; `detect_temporal_intent`
    may not be called at all on the off path.
 5. `tortoise_fts_query(q, time_aware=True, query_date=…, include_terminal=True)` embeds the
@@ -450,4 +480,4 @@ consumes the kwargs Task 2 adds). Final verification is last.
 - The recency-weight lever (`recency_fields`/`recency_boost`) for non-TR questions changes retrieval
   ordering; its harm/benefit is deliberately left to the sealed A/B (that is the point of the gate).
 
-<!-- plan-review: cycles=5, status=clean, version=2.3.0 -->
+<!-- plan-review: cycles=5, status=clean, version=2.3.1 -->

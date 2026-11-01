@@ -233,12 +233,123 @@ def test_numeric_epoch_windows_normalize():
                               question_date="2026-09-25")
 
 
-def test_unparseable_window_is_not_stale():
-    """FAIL VALUE: demoting on a value we cannot read (fail-closed is the
-    conservative direction here)."""
-    assert not is_stale_entry({"valid_to": "not-a-date"},
+def test_an_epoch_spelled_as_a_STRING_names_no_instant_so_the_end_is_ENDED():
+    """The STRING-epoch twin of the numeric case above — ruled, not accidental.
+
+    FAIL VALUE: ``False`` (the pre-#9202 reading — an un-datable end read as
+    "still true") for ``valid_to="1900000000"``.
+
+    ``1900000000.0`` as a NUMBER is the 2030-03-17 instant and is NOT stale to a
+    2026 question (asserted in ``test_numeric_epoch_windows_normalize``). The
+    SAME instant spelled as a STRING is not the same datum to this codebase's
+    ONE measure of *"does this stored value point at an instant?"*:
+    ``search_engine._created_sort_key`` reads an epoch from a NUMBER and never
+    from a string (it gates on ``len >= 10`` plus a ``-``/``T``, so a digit
+    string keys ``(1, text)``). ``validity._EPOCH_AS_STRING_RE`` names that
+    shape explicitly — *"this names no instant while its intent is
+    unmistakable — #9202's named fault, REFUSED with the number named as the
+    fix"* — so the write door does not accept it from a CALLER.
+
+    The ruling (owner, 2026-10-25, option B; ``ONTOLOGY.md`` §4.7) makes such an
+    end ``END_UNKNOWN``: the fact ENDED at an instant we cannot pin. The ranking
+    joining that reading is the whole point of this change — ``_covers``
+    already treats the same value as bounding no instant (#9408), and the reply
+    already reports ``end_state: "unknown"`` for it. Dating it here instead
+    would be a FOURTH notion of "parseable", i.e. the defect #9202 exists to
+    remove.
+
+    Reachable, and the reason this is pinned rather than left to prose:
+    ``sdk._supersede_window_end`` deliberately EXEMPTS a NUMERIC ``valid_from``
+    kwarg and stamps ``str(valid_from)`` into the predecessor's ``validTo``
+    (#5360's remaining exemption, pinned by
+    ``tests/test_validity_windows.py::test_window_end_numeric_kwarg_resolved_before_measure``).
+    Fixing THAT is the write route's job (follow-up), not a reason to re-open
+    the read side.
+
+    Date-independence is the discriminator: no ``question_date`` rescues it, so
+    a fix that only compared the junk spelling against the question string
+    cannot satisfy this.
+    """
+    from tortoise.validity import END_UNKNOWN, end_state
+
+    for spelled in ("1900000000", "1900000000.0"):
+        assert end_state(spelled, None) == END_UNKNOWN, (
+            f"{spelled!r} is an epoch spelled as a STRING — no instant to the "
+            f"ordering measure")
+        for qd in ("1990-01-01", "2026-09-25", "2050-01-01", None):
+            assert is_stale_entry({"valid_to": spelled}, question_date=qd), (
+                f"valid_to={spelled!r} must read ENDED at every question_date "
+                f"(qd={qd!r}); it is a present end that names no instant")
+    # The NUMBER for that same instant keeps its own, unchanged reading — the
+    # ruling is about the SPELLING, not about the horizon.
+    assert not is_stale_entry({"valid_to": 1900000000.0},
+                             question_date="2026-09-25")
+
+
+def test_an_undatable_end_is_stale_but_an_absent_or_future_one_is_not():
+    """A PRESENT-but-un-orderable end means ENDED — never "still true" (#9202).
+
+    FAIL VALUE: the pre-#9202 reading, which treated every unparseable window
+    value as NOT stale. That made such a window indistinguishable from an OPEN
+    one — no ``question_date`` could ever close it — so it covered every later
+    instant and always ranked as a current version of its fact. It is the same
+    fabricated-coverage hazard ``ONTOLOGY.md`` §4.7 names, and it contradicted
+    the owner ruling recorded there (*an end that is stored but names no instant
+    is an un-datable END: the fact ended, at a time we cannot pin*).
+
+    The four cases are kept together so the gate cannot be satisfied by a
+    blanket "demote anything that does not parse": absent, valid-and-future, and
+    valid-and-past must all keep their ruled readings.
+    """
+    # (a) PRESENT and un-orderable, in every spelling the ontology names, and
+    #     STALE AT EVERY question_date — including a far-future one, which is
+    #     what "covers every later instant" means operationally.
+    for junk in ("not-a-date", "someday", "TBD", ""):
+        for qd in ("2026-09-25", "2050-01-01", None):
+            assert is_stale_entry({"valid_to": junk}, question_date=qd), (
+                f"valid_to={junk!r} at question_date={qd!r} must read as ENDED")
+    # the canonical SHAPED form (#10079 stores a marker as no value + the
+    # declared marker) is the same END_UNKNOWN, and must read the same way
+    assert is_stale_entry({"valid_to_precision": "unknown"},
+                           question_date="2026-09-25")
+    assert is_stale_entry({"valid_to": None, "valid_to_precision": "unknown"},
+                           question_date="2026-09-25")
+
+    # (b) ABSENT — no end was recorded, so the window is still open.
+    assert not is_stale_entry({}, question_date="2050-01-01")
+    assert not is_stale_entry({"valid_to": None}, question_date="2050-01-01")
+    assert not is_stale_entry({"end_state": "open"}, question_date="2050-01-01")
+
+    # (c) PRESENT and VALID, in the future — scheduled end, still current.
+    assert not is_stale_entry({"valid_to": "2026-12-31T00:00:00+00:00"},
                               question_date="2026-09-25")
-    assert not is_stale_entry({"valid_to": "someday"})
+
+    # (d) PRESENT and VALID, in the past — closed at a known instant.
+    assert is_stale_entry({"valid_to": "2026-01-01T00:00:00+00:00"},
+                          question_date="2026-09-25")
+
+    # (e) A garbage/legacy precision token must not make this predicate RAISE:
+    #     it runs inside the retrieval ranking, where an exception degrades the
+    #     whole selection rather than answering one entry.
+    assert isinstance(is_stale_entry({"valid_to": "2026-01-01",
+                                      "valid_to_precision": "bogus"},
+                                     question_date="2026-09-25"), bool)
+    assert is_stale_entry({"valid_to": "2030-01-01",
+                           "valid_to_precision": True},
+                          question_date="2026-09-25") is False
+
+
+def test_an_undatable_end_is_not_rescued_by_a_dated_question_date():
+    """The discriminator for THIS bug: no ``question_date`` closes a junk end.
+
+    A fix that merely compared a junk end against the question string would pass
+    case (d) above and still leave the interval unbounded. This asserts the
+    behaviour is date-INDEPENDENT, which is what "covers every later instant"
+    actually asserts.
+    """
+    junk = {"valid_to": "not-a-date"}
+    assert all(is_stale_entry(junk, question_date=qd) for qd in (
+        "1990-01-01", "2026-09-25", "2050-01-01", None))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -288,6 +399,59 @@ def test_live_entry_is_not_stale():
     """FAIL VALUE: ``True`` for a plain live entry (would make the reorder a
     no-op or reorder noise)."""
     assert not is_stale_entry({"status": "draft", "superseded_by": None})
+
+
+def test_the_annotated_pool_never_invents_an_end_for_an_undated_hit():
+    """The eval lane's producer must not spell ABSENCE as a stored ``""`` (#9202).
+
+    FAIL VALUE: ``_annotate_hits`` forwarding an absent window as ``""``. Under
+    the #9202 owner ruling (``ONTOLOGY.md`` §4.7, option B) a *stored* value that
+    names no instant is an un-datable END — ``END_UNKNOWN``, stale — while an
+    ABSENT bound is ``END_OPEN``. A producer that converts absence into ``""``
+    therefore turns EVERY undated hit stale on this surface, and
+    ``prefer_latest_order`` sees an all-stale pool → ``all-stale-never-starve``
+    → the input order, ``applied: False``: the C6 arm silently degrades to a
+    no-op and the stats reason makes it look legitimate.
+
+    Reachable: the search payload the eval lane annotates OMITS a window key
+    when the point carries no bound (``SearchResult.to_dict`` /
+    ``sdk``'s embedded fallback), which is exactly what this fixture models —
+    a hit with no window keys at all, the shape a live undated claim arrives in.
+
+    Non-vacuity: the three shapes below differ ONLY in presence, so a producer
+    that collapses them onto one spelling cannot satisfy all three.
+    """
+    from tools.longmem_eval.retrieve import _annotate_hits
+
+    # (a) no window keys at all — the payload's ABSENT-end shape.
+    undated = _annotate_hits([{"id": "live", "content": "i live in lisbon"}],
+                             {}, [])[0]
+    # The key set is unchanged (a fixed 21-key surface), so absence must ride as
+    # ``None`` rather than being dropped or blanked.
+    assert "valid_to" in undated and undated["valid_to"] is None, (
+        f"an absent end must forward as None, got {undated['valid_to']!r}")
+    assert "expired_at" in undated and undated["expired_at"] is None
+    assert "end_state" in undated and undated["end_state"] is None
+    assert not is_stale_entry(undated, question_date="2050-01-01"), (
+        "an undated live entry must stay CURRENT at every question_date")
+
+    # (b) a STORED un-datable end — present, so the ruling makes it ENDED.
+    stored_junk = _annotate_hits(
+        [{"id": "junk", "content": "x", "valid_to": "TBD"}], {}, [])[0]
+    assert stored_junk["valid_to"] == "TBD", (
+        "a present end must be forwarded verbatim, never normalised away")
+    assert is_stale_entry(stored_junk, question_date="1990-01-01")
+
+    # (c) the canonical SHAPED form — no value + the declared marker. The
+    #     payload resolves it through the state map, so ``end_state`` arrives
+    #     and must be honoured rather than recomputed from a None bound.
+    shaped = _annotate_hits(
+        [{"id": "shaped", "content": "x",
+          "valid_to_precision": "unknown", "end_state": "unknown"}],
+        {}, [])[0]
+    assert shaped["end_state"] == "unknown"
+    assert is_stale_entry(shaped, question_date="2050-01-01"), (
+        "the declared un-datable marker is ENDED, not an open window")
 
 
 # ══════════════════════════════════════════════════════════════════════════

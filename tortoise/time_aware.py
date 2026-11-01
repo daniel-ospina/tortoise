@@ -275,8 +275,29 @@ def _as_date(value) -> str | None:
     ``validFrom`` is legal — see ``tests/test_validity_windows.py``). A
     naive ``str(v)[:10]`` misreads an epoch, so epochs are converted through
     ``datetime`` and everything is compared at the same DAY granularity the
-    reader's ``[valid …]`` markers use. Unparseable values return ``None``
-    (treated as "no window information", never as stale).
+    reader's ``[valid …]`` markers use. Unparseable values return ``None``.
+
+    ⛔ ``None`` does NOT mean "not stale" here, and this docstring used to say
+    it did ("treated as 'no window information', never as stale") — the very
+    sentence :func:`is_stale_entry` had to delete to stop an un-datable END
+    from covering every later instant (#9202). The two readers of this
+    primitive disagree deliberately, and neither is this function's verdict:
+
+    * an **END**: the caller resolves the STATE through
+      :func:`tortoise.validity.end_state`, the ONE home for "does this stored
+      value point at an instant?". A present end that names none is
+      ``END_UNKNOWN`` — ENDED, at a time we cannot pin — and never reaches the
+      comparison below; only a DATED end (``END_KNOWN``) does. So an
+      unparseable end IS read as stale.
+    * a **START**: :func:`is_not_yet_effective` keeps the old reading (#6140) —
+      a start that names no instant means *no start was recorded*, so it is
+      never demoted.
+
+    The measure that decides "names an instant" is
+    ``search_engine._created_sort_key`` (via ``validity._names_an_instant``),
+    never this function alone: it is why an epoch spelled as a STRING
+    (``"1900000000"``) is un-datable here and there, while the NUMBER
+    ``1900000000`` is the 2030-03-17 instant in both.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -313,26 +334,91 @@ def is_stale_entry(entry: dict, *, question_date: str | None = None) -> bool:
       which the clause below already catches). This is the clause that
       catches ``retract_point``, which writes ``status='retracted'`` and no
       window, or
-    * a validity window has closed: ``valid_to``/``expired_at`` casts to a
-      date ``<= question_date``. When ``question_date`` is missing or
-      unparseable, the presence of the window is the fallback signal. An
-      unparseable window value is NOT stale (conservative — never demote on
-      a value we cannot read).
+    * a validity window has closed: ``valid_to``/``expired_at`` CASTS to a
+      date ``<= question_date``, or is PRESENT but names no instant at all.
+      When ``question_date`` is missing or unparseable, the presence of the
+      window is the fallback signal.
+
+    ⛔ A PRESENT but un-datable end is STALE, not "not stale" (#9202). This used
+    to read *"an unparseable window value is NOT stale (conservative — never
+    demote on a value we cannot read)"*, which made such a window
+    indistinguishable from an OPEN one: no ``question_date`` could ever close
+    it, so it covered EVERY later instant and always ranked as current. That is
+    the fabricated-coverage hazard ``ONTOLOGY.md`` §4.7 names, and it
+    contradicted the owner ruling of 2026-10-25 (option B) recorded there — *an
+    end that is stored but names no instant is an un-datable END: the fact
+    ENDED, at a time we cannot pin* … *rather than that it is still true*.
+    The reply block already stopped saying "still true" (#10009); this
+    resolver, which decides PAGE SLOTS (``prefer_latest_ids``), had not.
+
+    The gate is ``validity.end_state`` — the ONE home for "is this an asserted
+    end, and is it datable?" — so the ranking can no longer disagree with the
+    reply about the same stored window. ``END_OPEN`` (an ABSENT end) is the
+    only state that means "no end was recorded"; everything else is an
+    asserted end, and an asserted end that cannot be ordered is ``END_UNKNOWN``,
+    which is ended. A numeric ``0``/``0.0`` epoch is a VALID instant (1970-01-01)
+    and keeps its old reading: absence, not falsiness, means "no window".
     """
+    from .validity import END_OPEN, END_UNKNOWN, end_state  # lazy — import light
+
     if entry.get("superseded_by"):
         return True
     if is_terminal_status(entry.get("status")):
         return True
     qd = _as_date(question_date) if question_date else None
+
+    def _end_state_of(key: str, raw) -> str:
+        """The window's END state, from the ONE resolver every read surface uses.
+
+        ``fetch_point_epistemic_state`` already resolves ``end_state`` through
+        ``window_read_fields`` for the search/recall stream, so it is read as
+        given; a caller that hands a bare dict (the eval lane, the hermetic
+        tests) gets the same answer recomputed from the raw bound and the
+        declared precision. Either way there is exactly one notion of "did this
+        window end": ``validity.end_state``.
+        """
+        if key == "valid_to":
+            declared = entry.get("end_state")
+            if declared:
+                return declared
+            try:
+                return end_state(raw, entry.get("valid_to_precision"))
+            except ValueError:
+                # A garbage/legacy precision token must not make a boolean
+                # predicate RAISE: ``is_stale_entry`` runs inside the retrieval
+                # ranking, where an exception degrades the whole selection
+                # (``selection_failed``) instead of answering one entry. The
+                # end's own datability is still resolved from the bound.
+                return end_state(raw, None)
+        return end_state(raw, None)
+
     for key in ("valid_to", "expired_at"):
         raw = entry.get(key)
-        # ``0``/``0.0`` is a VALID (falsy) epoch — absence, not falsiness,
-        # means "no window". A truthiness test would silently treat a
-        # 1970-01-01 window as no window at all.
-        if raw is None or raw == "":
+        state = _end_state_of(key, raw)
+        # ``END_OPEN`` is the ONLY "no end was recorded" reading (an ABSENT
+        # value); ``""`` and every un-orderable spelling are ASSERTED ends.
+        if state == END_OPEN:
             continue
+        if state == END_UNKNOWN:
+            # Present, asserted, and un-pinnable ⇒ the fact ended at an instant
+            # we cannot name. NOT current, whatever ``question_date`` is: this is
+            # the clause that used to make such a window cover every later
+            # instant. ``END_KNOWN`` means DATED (ONTOLOGY §4.7), so only that
+            # state falls through to the date comparison below.
+            return True
         d = _as_date(raw)
         if d is None:
+            # ``END_KNOWN`` (dated by the ordering measure) but not comparable
+            # as a date here — e.g. a bool, which IS the epoch measure's instant
+            # (1970) yet yields no date string. Compare through the SAME measure
+            # the read path orders with rather than silently continuing: a
+            # `continue` would leave the window open and reproduce this very
+            # bug one spelling over.
+            from .search_engine import _created_sort_key  # lazy — no cycle
+            k_raw = _created_sort_key(raw)
+            k_qd = _created_sort_key(qd) if qd else None
+            if k_qd is None or k_raw <= k_qd:
+                return True
             continue
         if qd is None or d <= qd:
             return True
