@@ -294,7 +294,14 @@ def test_the_index_relink_pass_binds_the_default_graph_tenant(
 # and it says so.
 
 #: The helpers that OPEN an SDK a hosted lane may write through.
-_SDK_OPENERS = frozenset({"_make_sdk", "_open_org_graph_sdk"})
+_SDK_OPENERS = frozenset({
+    "_make_sdk", "_open_org_graph_sdk",
+    # #10180: the ONE default-graph resolver every org-wide lane now opens
+    # through (and its I/O-free credential-shaped twin). A scan that did not
+    # learn these names would silently stop counting those lanes — exactly the
+    # drift this inventory exists to catch.
+    "_org_sdk", "_org_sdk_for_credential", "_org_sdk_from_name",
+})
 #: The openers that install a record tenant on the SDK they return.
 _INSTALLING_OPENERS = frozenset({"_data_sdk", "_data_sdk_offloaded"})
 #: The carriers that install a record tenant on an SDK that already exists.

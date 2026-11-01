@@ -1123,6 +1123,20 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # :func:`default_graph_id_for_credential`, the one home the session/JWT and
     # OAuth credential resolvers call too, so all three credential classes name
     # the default tenant the same way (or refuse it the same way).
+    #
+    # ⚠️ RECORDED RESIDUAL (accepted, not forgotten): `graph_namespace` above
+    # comes from the org row while this id comes from `public.graphs`, i.e. two
+    # reads inside one auth call — so a `promote_default_graph` committing
+    # between them can hand the credential a namespace from one default and an
+    # id from the other. It is the same class the org-id-only lanes closed by
+    # reading the pair once (`hosted_api._org_default_graph`, #10180 review); it
+    # is NOT closed here because both fields of the credential dict are already
+    # a single snapshot from the request's point of view (the data plane opens
+    # `graph_namespace` and the record files under `default_graph_id`, both from
+    # THIS dict), the promotion is an org-admin action rather than a per-write
+    # one, and re-reading here would add a control-plane round trip to every
+    # org-wide API-key auth. Closing it means resolving both from one row in
+    # this function — the same `default_graph_row_for` shape — not a third read.
     if graph_id:
         default_graph_id = None
     else:
@@ -1212,19 +1226,52 @@ def _graph_namespace_for(cp, org_id: str, graph_id: str | None,
     return rows[0]["namespace"] if rows else None
 
 
+def default_graph_row_for(cp, org_id: str) -> dict | None:
+    """The org's CURRENT default ``public.graphs`` row — ``id`` AND ``namespace``.
+
+    THE single read for "which graph is the org's default": the predicate of
+    :func:`default_graph_id_for` (``kind='default' AND status='active'``),
+    selecting both columns a caller can need, because the two questions — "which
+    graph do I OPEN" (the namespace) and "which graph do I FILE UNDER" (the id)
+    — are answers about one row. Two reads would be two instants, and a
+    ``promote_default_graph`` commit landing between them makes a lane open the
+    DEMOTED namespace while filing every record row under the PROMOTED graph:
+    the ``derived != measured`` split #10025 exists to remove, re-created by the
+    verb #10180 adds. Callers that need both take them from ONE row here.
+
+    ``None`` on no row, and ``None`` on a read failure — fail-closed, so a
+    caller that could not read the row names no tenant rather than guessing one.
+    """
+    try:
+        rows = cp.query(
+            "graphs", select=["id", "namespace"],
+            filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
+                     ("status", "eq", "active")],
+        )
+    except Exception as e:
+        _logger.warning(
+            "graphs default-row read failed — the record tenant stays unnamed "
+            "(fail-closed; migration 20261028000001 applied?): %s", e)
+        return None
+    return dict(rows[0]) if rows else None
+
+
 def default_graph_id_for(cp, org_id: str) -> str | None:
-    """The org's DEFAULT graph's stable id (#10025), or None (fail-closed).
+    """The org's CURRENT default graph's stable id (#10025), or None (fail-closed).
 
     "The default graph" is whichever ``public.graphs`` row carries
-    ``kind='default' AND status='active'`` for the org — today the row that
-    provisioning mints (:func:`ensure_default_graph_row`), because NO supported
-    path moves that marker afterwards (#10180). The measured reader inventory,
-    the two facts that answer "where is the default" differently, and the
-    options for a promotion verb are in
-    ``docs/ops/multi-graph-migration-runbook.md`` §6. Do not restate "the
-    organization's own graph" here (this docstring said exactly that until
-    #10180's measurement): it is true only while the control-plane row and the
-    org-ID derivation happen to agree.
+    ``kind='default' AND status='active'`` for the org. Until #10180 that was
+    always the row provisioning mints (:func:`ensure_default_graph_row`),
+    because no supported path could move the marker; since #10180
+    ``POST /v1/graphs/{graph_id}/promote`` (→ :func:`promote_default_graph`,
+    migration ``20261102000001``) moves it, together with the org's default
+    NAMESPACE (``organizations.graph_name``), in one transaction. So this reads
+    state, never a property of the organization: a caller that assumed the
+    default was the organization's own graph — true only while the
+    control-plane row and the org-ID derivation happen to agree — is reading a
+    pointer that has moved. The measured reader inventory, the two facts that
+    answer "where is the default" differently, and the reasoning for the move
+    are in ``docs/ops/multi-graph-migration-runbook.md`` §6.
 
     Until #10025 it had **no row** in ``public.graphs``: its identity was the
     literal string ``"default"`` (see :func:`graph_metadata`), which is not an
@@ -1238,21 +1285,12 @@ def default_graph_id_for(cp, org_id: str) -> str | None:
 
     The id is **READ** from the control plane, never derived from the name and
     never a constant: a rename cannot change it (owner ruling, 2026-10-26 — the
-    id is identity, the name is a user-editable label), and an absent row still
-    returns None so the record keeps refusing rather than guessing.
+    id is identity, the name is a user-editable label), a PROMOTION changes
+    WHICH row carries it, and an absent row still returns None so the record
+    keeps refusing rather than guessing.
     """
-    try:
-        rows = cp.query(
-            "graphs", select=["id"],
-            filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
-                     ("status", "eq", "active")],
-        )
-    except Exception as e:
-        _logger.warning(
-            "graphs default-row read failed — the record tenant stays unnamed "
-            "(fail-closed; migration 20261028000001 applied?): %s", e)
-        return None
-    return rows[0]["id"] if rows else None
+    row = default_graph_row_for(cp, org_id)
+    return row["id"] if row else None
 
 
 def default_graph_id_for_credential(cp, org_id: str,
@@ -4380,6 +4418,17 @@ def soft_delete_graph(cp, org_id: str, graph_id: str) -> bool:
     #2304: stamps ``deleted_at`` (the trash grace window's start — the
     purge enforces the _GRAPH_PURGE_GRACE_DAYS recovery period off it; legacy tombstones
     (deleted_at NULL) predate the column and are treated as past-grace).
+
+    #10180: the PATCH itself carries the ``kind != 'default'`` predicate and its
+    rowcount IS the answer, exactly as :func:`restore_graph` does (#2463). The
+    kind read above is only what lets a caller tell "default" from "unknown" for
+    its 403; on its own it is a CHECK-THEN-ACT, and a graph can be PROMOTED
+    between it and the write. Before this, the PATCH matched on id/org only, so
+    that interleaving tombstoned the org's brand-new DEFAULT row — leaving zero
+    live defaults, a state no surface can repair (`default_graph_id_for` filters
+    `status='active'` → the record refuses `no_tenant` for ever; `trash_graphs`
+    lists `kind='custom'` only, so the row is not in the trash; `restore_graph`
+    refuses `kind='default'`).
     """
     rows = cp.query(
         "graphs", select=["kind"],
@@ -4389,13 +4438,14 @@ def soft_delete_graph(cp, org_id: str, graph_id: str) -> bool:
         return False
     if rows[0].get("kind") == "default":
         return False
-    cp.query(
-        "graphs", method="PATCH",
-        filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)],
+    updated = cp.query(
+        "graphs", select=["id"], method="PATCH",
+        filters=[("id", "eq", graph_id), ("org_id", "eq", org_id),
+                 ("kind", "neq", "default")],
         json_body={"status": "deleted",
                    "deleted_at": _now_iso()},
     )
-    return True
+    return bool(updated)
 
 
 def restore_graph(cp, org_id: str, graph_id: str) -> bool:
@@ -4697,6 +4747,147 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
             return True
         raise
     return True
+
+
+#: #10180 — the atomic default-graph move is a plpgsql FUNCTION, not a table
+#: write, so the refusal codes RAISE inside it come back as an RPC error whose
+#: body carries the message (`rpc` keeps it, see its docstring). The endpoint
+#: maps them to its own statuses; every entry here names the remedy the caller
+#: must take, never a bare 500.
+_PROMOTE_DEFAULT_ERROR_CODES: dict[str, tuple[int, str]] = {
+    "promote_default_graph: graph not found": (404, "GRAPH_NOT_FOUND"),
+    "promote_default_graph: graph is in the trash": (409, "GRAPH_IN_TRASH"),
+    "promote_default_graph: graph is not active": (409, "GRAPH_NOT_ACTIVE"),
+    "promote_default_graph: unknown organization": (404, "UNKNOWN_ORG"),
+    # The function's own POST-CONDITION ("exactly one active default, and it is
+    # the target") firing: a concurrent writer won a race the row locks did not
+    # cover. Nothing was written — the whole transaction rolled back — so this
+    # is a RETRYABLE conflict, not a 500 and not a caller mistake.
+    "promote_default_graph: the default did not move": (409, "PROMOTE_CONFLICT"),
+}
+
+
+class PromoteDefaultGraphError(RuntimeError):
+    """A refused default-graph move (#10180), carrying the remedy.
+
+    Raised ONLY for the refusals the SQL function names — unknown/foreign
+    graph, a tombstoned graph, a non-active status, an unknown org. Anything
+    else (transport, an unexpected Postgres error) propagates as the plain
+    ``RuntimeError`` the ``rpc`` seam raises, so a genuine outage is never
+    dressed up as a caller mistake.
+    """
+
+    def __init__(self, message: str, *, status: int, code: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+def moved_default_namespace(org_id: str | None,
+                            namespace: str | None) -> str | None:
+    """The namespace an ORG-WIDE open must use when the default graph has MOVED
+    (#10180), or ``None`` for every organization whose default never moved.
+
+    ONE decision, shared by every resolver that opens "the org's default graph"
+    — REST (``hosted_api._data_sdk`` / ``_org_sdk``), MCP
+    (``mcp_auth._get_org_sdk``) and the quota counter. It is pure (no I/O) and
+    the ``None`` is the whole safety property: the caller then takes the
+    HISTORICAL open (``namespace=org_id`` → ``org_{org_id}``) exactly as before,
+    so this moves no existing organization's data access.
+
+    The test is a fact about the DATA, not a rule about the deployment:
+
+    * hosted only — the self-host registry lane has no ``public.graphs`` row to
+      move (the promote verb refuses there), so its ``graph_name`` is a name
+      about a different mapping and must never open its default graph;
+    * the value must have the SHAPE of a per-graph namespace of THIS org, i.e.
+      the ``org_{org_id}_`` prefix that ``insert_graph`` / ``_provision_graph``
+      mint (``org_{org_id}_{gid}``) and that a promotion moves
+      ``organizations.graph_name`` to. Only a promotion produces that value; the
+      untouched ``org_{org_id}``, the pre-#3543 ``team_{org_id}`` and the
+      registry's ``org_{name}`` (``sdk.org_create``, #2023) all fail the test and
+      keep the historical open — the exact regression #2023's pin in
+      ``_data_sdk`` exists to prevent.
+
+    ⚠️ **Precisely: a PREFIX test, and its one residual.** The suffix is not
+    checked against this org's ``public.graphs`` ids (that would cost a read on
+    the capture path for every request), so nothing here PROVES "only a
+    promotion can produce this value" — what makes it true is that
+    ``organizations.graph_name`` has no other writer that can land a per-graph
+    namespace: provisioning writes ``org_{org_id}``, and the only other UPDATE
+    path is ``provision_team``'s ``ON CONFLICT (id) DO UPDATE``
+    (``20260915000001``), which re-writes the value provisioning would write
+    anyway (so re-provisioning an org would REVERT a promotion — an operator
+    hazard, not a live path: the checkout replay short-circuits on
+    ``org_by_id``). The residual that remains conceivable is the pre-#1903
+    shape: a row whose stored ``graph_name`` is ``org_{name}`` and whose name
+    happens to begin ``{org_id}_`` would be indistinguishable from a promotion.
+    Org ids are 26-char hex, so that is a hypothetical, not a live shape — and
+    pinning the equality properly is #10361, filed from the same measurement.
+    """
+    if not org_id or not isinstance(namespace, str) or not namespace:
+        return None
+    if not is_supabase_enabled():
+        return None
+    if not namespace.startswith(f"org_{org_id}_"):
+        return None
+    return namespace
+
+
+def promote_default_graph(cp, org_id: str, graph_id: str) -> dict:
+    """Atomically move the org's `kind='default'` row to ``graph_id`` (#10180).
+
+    ONE call, ONE transaction: `public.promote_default_graph`
+    (``supabase/migrations/20261102000001_graphs_promote_default.sql``)
+    serializes on the organization row, then demotes the current live default
+    and promotes the target — so no other session can ever observe two
+    defaults or zero. The one-live-default INVARIANT is not re-implemented
+    here: it is the partial unique index ``uq_graphs_org_default_active``
+    (``20261028000001``), which this move is careful never to violate.
+
+    ⚠️ It also moves ``organizations.graph_name`` to the target row's
+    namespace. That is not incidental: the default graph's data-plane key IS
+    the org namespace, and every reader derives the default from that column
+    (``graph_metadata`` → GET /v1/graphs + the per-graph backup sweep, and the
+    ``graph_namespace`` carried on every resolved credential). Leaving it
+    behind would publish the default with the OLD namespace while naming the
+    NEW row — the graph and the record would disagree about where a capture
+    went. The demoted row keeps its own namespace, so no data moves and the
+    old graph stays addressable as a custom graph.
+
+    Returns the function's jsonb payload as a dict:
+    ``{ok, already_default, graph_id, name, namespace,
+    previous_default_graph_id, previous_namespace}``.
+
+    Refusals raise :class:`PromoteDefaultGraphError` (see
+    ``_PROMOTE_DEFAULT_ERROR_CODES``); an outage or an unmodelled SQL error
+    raises ``RuntimeError`` from the ``rpc`` seam.
+    """
+    try:
+        payload = cp.rpc(
+            "promote_default_graph",
+            {"p_org_id": org_id, "p_graph_id": graph_id},
+            representation=True,
+        )
+    except RuntimeError as e:
+        msg = str(e)
+        for code, (status, detail_code) in _PROMOTE_DEFAULT_ERROR_CODES.items():
+            if code in msg:
+                raise PromoteDefaultGraphError(
+                    msg, status=status, code=detail_code) from e
+        _logger.warning("promote_default_graph RPC failed (%s) — fail-closed", e)
+        raise
+    # PostgREST returns a scalar-returning function's value as the bare JSON
+    # body, but a client double (and some proxies) wrap it in a one-element
+    # list. Normalize BOTH rather than reading a shape and calling the other
+    # one an outage — a silent `{}` here would report a promotion that never
+    # happened.
+    if isinstance(payload, list) and len(payload) == 1:
+        payload = payload[0]
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise RuntimeError(
+            f"promote_default_graph returned an unusable payload: {payload!r}")
+    return payload
 
 
 def count_graph_keys(cp, org_id: str, graph_id: str) -> int:
