@@ -2224,6 +2224,25 @@ export function spoolSaturated(
   // (`listSpoolEntries` is the drain's repairing scanner — the same rule
   // `countPendingEntries` follows). The write path keeps the repairing scan.
   const { metas } = listSpoolEntries(dir, opts);
+  return saturatedForMetas(dir, metas, bounds, projection);
+}
+
+/** The ceiling arithmetic of `spoolSaturated`, over an ALREADY-READ scan.
+ *
+ *  Split out so a caller that has just listed the spool does not list it a
+ *  second time. `spoolHealthLine` is that caller: it needs the PENDING COUNT
+ *  (its own walk of `entries/`) and the SATURATED verdict (this walk), and
+ *  paying both parsed every meta twice at a population the cap raise took
+ *  1000 → 20 000 — the same double scan the Python leg removed
+ *  (`capture_spool._saturated_for_metas`). One scan, both answers; the
+ *  arithmetic lives HERE only, so the two legs and the two callers cannot drift.
+ */
+function saturatedForMetas(
+  dir: string,
+  metas: SpoolMeta[],
+  bounds: SpoolBounds = DEFAULT_BOUNDS,
+  projection: { projectedBytes?: number; replacesSessionId?: string } = {},
+): boolean {
   // Bytes `pruneSpool` may reclaim WITHOUT spending an undelivered entry: the
   // orphan class is byte-evictable only (see below).
   const reclaimableOrphanBytes = orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
@@ -2950,12 +2969,42 @@ export function captureHealthLine(
   return { ...base, line: `${base.line}, ${parts.join(", ")}` };
 }
 
+/** ONE read-only pass over `entries/`: the pending count AND the metas.
+ *
+ *  A health line needs two answers from the same directory — "how many captures
+ *  would a drain still try?" (`countPendingEntries`) and "is the spool at a
+ *  ceiling with nothing evictable?" (`spoolSaturated`) — and asking each with its
+ *  own walk parsed every meta twice at the population the cap raise took
+ *  1000 → 20 000. One scan, both answers. The Python leg's `_health_scan` is the
+ *  twin.
+ *
+ *  `undefined` means the spool could not be LISTED (the same contract as
+ *  `countPendingEntries`): an unreadable directory is not an empty one. A meta we
+ *  cannot read still counts as PENDING (it may be waiting) and is EXCLUDED from
+ *  the saturation metas — the same asymmetry the two separate walks had.
+ */
+function healthScan(dir: string): { pending: number; metas: SpoolMeta[] } | undefined {
+  const { metas, discards } = listSpoolEntries(dir, { repair: false });
+  if (discards.some((d) => d.reason === DISCARD_SPOOL_UNREADABLE)) return undefined;
+  let onDisk = 0;
+  try {
+    onDisk = readdirSync(entriesDir(dir)).filter((name) => name.endsWith(".meta.json")).length;
+  } catch (err) {
+    // ENOENT is an absent spool (0 files); anything else is unreadable.
+    if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") return undefined;
+  }
+  const pending =
+    Math.max(0, onDisk - metas.length) +
+    metas.filter((m) => terminalMarker(m) === undefined && !entryFiled(m)).length;
+  return { pending, metas };
+}
+
 function spoolHealthLine(
   dir: string,
   opts: { apiKey?: string; bounds?: SpoolBounds } = {},
 ): CaptureHealth {
-  const pending = countPendingEntries(dir);
-  if (pending === undefined) {
+  const scan = healthScan(dir);
+  if (scan === undefined) {
     // A spool we cannot list is UNKNOWN, not empty. Reporting `OK` here would be
     // a false pass on the acceptance's own surface, and it would also let the
     // self-heal below destroy a durable block marker that a later, readable
@@ -2966,7 +3015,7 @@ function spoolHealthLine(
       line: `capture: UNREADABLE (cannot list ${entriesDir(dir)})`,
     };
   }
-  const queued = pending;
+  const queued = scan.pending;
   let recorded = readCaptureStatus(dir);
   if (queued === 0 && recorded && recorded.state !== "ok") {
     // Self-healing: the block is over (or another leg filed everything). Never
@@ -2976,16 +3025,14 @@ function spoolHealthLine(
   }
   // A READ-ONLY question (`repair: false`): a health line must not quarantine,
   // record or unlink the spool it is describing.
-  // `bounds` are the ceilings the box actually runs with: SATURATED is a
-  // statement ABOUT them, so a caller (a test, a fleet surface) that knows the
-  // real pair passes it rather than inheriting the module default. Mirrors the
-  // Python leg's `capture_health_line(..., bounds=...)`.
-  const saturated = spoolSaturated(
-    dir,
-    opts.bounds ?? DEFAULT_BOUNDS,
-    {},
-    { repair: false },
-  );
+  // The verdict over the metas this call ALREADY read — no second scan, and the
+  // same arithmetic (`saturatedForMetas`) the write path runs. READ-ONLY by
+  // construction: a health line must not quarantine, record or unlink the spool
+  // it is describing. `bounds` are the ceilings the box actually runs with:
+  // SATURATED is a statement ABOUT them, so a caller (a test, a fleet surface)
+  // that knows the real pair passes it rather than inheriting the module
+  // default. Mirrors the Python leg's `capture_health_line(..., bounds=...)`.
+  const saturated = saturatedForMetas(dir, scan.metas, opts.bounds ?? DEFAULT_BOUNDS);
   // A marker we cannot UNDERSTAND is not a marker — the same rule this file
   // applies to `terminal_failure` and to a corrupt backoff window. A hand-edited
   // or foreign `status.json` carrying `{"state": "blocked"}` (or a status that

@@ -681,6 +681,71 @@ def test_the_health_line_is_not_OK_while_TERMINAL_entries_refuse_everything(tmp_
     assert line.line == "capture: SATURATED (0 queued, refusing new captures)"
 
 
+def test_the_ONE_health_scan_answers_both_questions_the_same_way(tmp_path):
+    """The health line used to answer "how many are pending?" and "is it
+    SATURATED?" with two separate full walks of `entries/` — parsing every meta
+    twice, measured at 2221 ms per line on a 20 000-entry spool where one walk is
+    ~800 ms. It is one walk now (`_health_scan`), and the arithmetic that decides
+    SATURATED lives in one place (`_saturated_for_metas`) so the write path and
+    the health line cannot drift.
+
+    This pin is the equivalence proof: for a spool holding one of EVERY shape the
+    two walks treat differently — a plain undelivered entry, a FILED entry, a
+    TERMINAL entry, and a corrupt meta (which counts as PENDING but is excluded
+    from the saturation metas) — the combined scan must reproduce
+    `count_pending_captures` and `spool_saturated(repair=False)` exactly.
+
+    MUTATION THAT REDS THIS: drop the `on_disk - len(metas)` term -> the corrupt
+    meta stops counting as pending (2 -> 1) and the box reads healthier than it
+    is; or call `spool_saturated` again instead of reusing the metas -> the count
+    term below still matches, so the red is the corrupt-meta one.
+    """
+    from tortoise.capture_spool import (
+        Bounds,
+        _health_scan,
+        _meta_path,
+        _saturated_for_metas,
+        _write_meta,
+        count_pending_captures,
+        spool_saturated,
+    )
+
+    roomy = Bounds(max_entries=1000, max_total_bytes=1 << 30, max_entry_bytes=1 << 20)
+    # FILED first, and flushed BEFORE anything else is spooled: a flush files
+    # every pending entry, so the other three shapes have to arrive after it.
+    write_spool_entry(tmp_path, _snapshot("delivered"), roomy)
+    assert flush_spool(tmp_path, _Server().post, now=time.time()).filed == 1
+    write_spool_entry(tmp_path, _snapshot("undelivered"), roomy)
+    write_spool_entry(tmp_path, _snapshot("terminal"), roomy)
+    meta = read_spool_meta(tmp_path, "terminal")
+    meta["terminal_failure"] = {"reason": "http_rejected", "detail": "422", "at": "now"}
+    _write_meta(tmp_path, meta)
+    _meta_path(tmp_path, "corrupt").write_text("{not json", encoding="utf-8")
+    (tmp_path / "entries" / "nometa.meta.json").write_text(
+        json.dumps({"version": 1}), encoding="utf-8")
+
+    scanned = _health_scan(tmp_path)
+    assert scanned is not None
+    pending, metas = scanned
+
+    assert pending == count_pending_captures(tmp_path) == 3, (
+        "pending must mean the same thing on both walks: `undelivered`, plus the "
+        "two metas neither walk can read (they may be waiting, so folding them "
+        "into 'nothing to do' is the false pass this health state exists to "
+        "remove) — and NOT `delivered` or `terminal`, which a drain skips")
+
+    for bounds in (roomy,
+                   # The count ceiling binds (two live metas, nothing filed).
+                   Bounds(max_entries=1, max_total_bytes=1 << 30,
+                          max_entry_bytes=1 << 20),
+                   # The byte ceiling binds.
+                   Bounds(max_entries=1000, max_total_bytes=1,
+                          max_entry_bytes=1 << 20)):
+        assert _saturated_for_metas(tmp_path, metas, bounds) is \
+            spool_saturated(tmp_path, bounds, repair=False), (
+                f"the reused metas must reach the SAME verdict: {bounds}")
+
+
 def test_a_HEALTH_read_never_repairs_the_spool_it_describes(tmp_path):
     """The health line now calls `spool_saturated`, which scans the metas — and
     `list_spool_metas` is the DRAIN's *repairing* scanner: it records a

@@ -1849,6 +1849,31 @@ def spool_saturated(
     and states the same rule.
     """
     metas, _ = list_spool_metas(root, repair=repair)
+    return _saturated_for_metas(
+        root, metas, bounds,
+        projected_bytes=projected_bytes,
+        replaces_session_id=replaces_session_id)
+
+
+def _saturated_for_metas(
+    root: Path,
+    metas: list[dict],
+    bounds: Bounds = DEFAULT_BOUNDS,
+    *,
+    projected_bytes: int | None = None,
+    replaces_session_id: str | None = None,
+) -> bool:
+    """The ceiling arithmetic of :func:`spool_saturated`, over an ALREADY-READ scan.
+
+    Split out so a caller that has just listed the spool does not list it a
+    second time. The health line is that caller: it needs the PENDING COUNT (its
+    own walk of `entries/`) and the SATURATION verdict (this walk), and paying
+    both turned one `capture: …` line into **two** full scans of every meta at a
+    population the cap raise took 1000 → 20 000 — measured 2221 ms per line at
+    20 000 entries, of which ~802 ms was the count and ~1539 ms the second scan
+    (review finding, #10479). One scan, both answers; the arithmetic lives HERE
+    only, so the two callers cannot drift apart.
+    """
     orphans = _orphan_paths(root)
     # Bytes prune may reclaim WITHOUT spending an undelivered entry: the orphan
     # class is byte-evictable only (see the docstring above).
@@ -2101,6 +2126,42 @@ def count_pending_captures(root: Path) -> int | None:
     return pending
 
 
+def _health_scan(root: Path) -> tuple[int, list[dict]] | None:
+    """ONE read-only pass over `entries/`: the pending count AND the metas.
+
+    A health line needs two answers from the same directory — "how many captures
+    would a drain still try?" (:func:`count_pending_captures`) and "is the spool
+    at a ceiling with nothing evictable?" (:func:`spool_saturated`) — and asking
+    each with its own walk meant parsing every meta TWICE, at the population the
+    cap raise took 1000 → 20 000 (measured: 2221 ms per line at the ceiling, of
+    which ~802 ms was the count and ~1539 ms the second scan). One scan, both
+    answers.
+
+    ``None`` means the spool could not be LISTED (the same contract as
+    :func:`count_pending_captures`): an unreadable directory is not an empty one.
+
+    A meta this leg cannot parse is still counted as PENDING — it may be waiting,
+    and folding it into "nothing to do" is how a box that could file nothing came
+    to report ``capture: OK``. It is EXCLUDED from the saturation metas because
+    `list_spool_metas(repair=False)` skips it; that is the same asymmetry the two
+    separate walks had, preserved on purpose.
+    """
+    metas, discards = list_spool_metas(root, repair=False)
+    if any(d.get("reason") == DISCARD_SPOOL_UNREADABLE for d in discards):
+        return None
+    try:
+        on_disk = sum(1 for name in os.listdir(_entries_dir(root))
+                      if name.endswith(".meta.json"))
+    except FileNotFoundError:
+        on_disk = 0
+    except OSError:
+        return None
+    pending = max(0, on_disk - len(metas)) + sum(
+        1 for m in metas
+        if _terminal_marker(m) is None and not _entry_is_filed(m))
+    return pending, metas
+
+
 class CaptureHealth(NamedTuple):
     """The per-box answer: the state, the count, the refusal, and the LINE."""
 
@@ -2238,12 +2299,14 @@ def _spool_health_line(
     keyless box is precisely the one that saturates, and the keyless fact is
     kept in the SATURATED line rather than replacing it.
     """
-    pending = count_pending_captures(root)
-    if pending is None:
+    # ONE scan for both answers (see `_health_scan`): the pending count and the
+    # metas the SATURATED verdict is computed from.
+    scan = _health_scan(root)
+    if scan is None:
         return CaptureHealth(
             "unreadable", 0, None,
             f"capture: UNREADABLE (cannot list {_entries_dir(root)})")
-    queued = pending
+    queued, scan_metas = scan
     recorded = read_capture_status(root)
     if queued == 0 and recorded is not None and recorded.get("state") != "ok":
         # Self-healing: the block is over (or the other leg filed everything).
@@ -2251,9 +2314,11 @@ def _spool_health_line(
         recorded = {"version": 1, "state": "ok", "queued": 0,
                     "updated_at": _now_iso()}
         write_capture_status(root, recorded)
-    # A READ-ONLY question (`repair=False`): a health line must not quarantine,
-    # record or unlink the spool it is describing.
-    saturated = spool_saturated(root, bounds, repair=False)
+    # The verdict over the metas this call ALREADY read — no second scan, and the
+    # same arithmetic (`_saturated_for_metas`) the write path runs. READ-ONLY by
+    # construction: a health line must not quarantine, record or unlink the spool
+    # it is describing.
+    saturated = _saturated_for_metas(root, scan_metas, bounds)
     status = recorded.get("status") if recorded is not None else None
     blocked_status = (
         status

@@ -82,6 +82,7 @@ import {
   resolveConfig,
   sourceName,
   spoolEntryBytes,
+  spoolSaturated,
   truncationMarker,
   warnIfCredentialStoreIsReadable,
   writeSpoolEntry,
@@ -2327,6 +2328,63 @@ test("a REFUSED session records once per spool state", () => {
   writeSpoolEntry(spool, { ...snapshot("held-2"), turns: [{ role: "user", content: "h" }] }, bounds);
   writeSpoolEntry(spool, { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] }, bounds);
   assert.equal(lines().length, 3);
+});
+
+test("the ONE health scan answers both questions the same way", async () => {
+  // The Pi leg's health line used to answer "how many are pending?" and "is it
+  // SATURATED?" with two separate full walks of `entries/`, parsing every meta
+  // twice at the population the cap raise took 1000 → 20 000. It is one walk now
+  // (`healthScan`), and the arithmetic that decides SATURATED lives in one place
+  // (`saturatedForMetas`) so the write path and the health line cannot drift.
+  //
+  // This pin is the equivalence proof, over a spool holding one of EVERY shape
+  // the two walks treat differently: a plain undelivered entry, a FILED entry, a
+  // TERMINAL entry, and a corrupt meta (which counts as PENDING but is excluded
+  // from the saturation metas).
+  //
+  // MUTATION THAT REDS THIS: drop the `onDisk - metas.length` term → the two
+  // unreadable metas stop counting as pending and the box reads healthier than
+  // it is. Mirrors the Python leg's
+  // `test_the_ONE_health_scan_answers_both_questions_the_same_way`.
+  const spool = tmpSpool();
+  const roomy = { maxEntries: 1000, maxTotalBytes: 1_000_000, maxEntryBytes: 100_000 };
+  writeSpoolEntry(spool, { ...snapshot("delivered"), turns: [{ role: "user", content: "d" }] }, roomy);
+  const filed = await flushSpool(TEST_CFG, {
+    dir: spool,
+    fetchImpl: recordingServer().fetchImpl,
+    now: 1000,
+  });
+  assert.equal(filed.filed, 1, "the premise: one entry is on the wire");
+  writeSpoolEntry(spool, { ...snapshot("undelivered"), turns: [{ role: "user", content: "u" }] }, roomy);
+  writeSpoolEntry(spool, { ...snapshot("terminal"), turns: [{ role: "user", content: "t" }] }, roomy);
+  const meta = readSpoolEntry(spool, "terminal");
+  assert.ok(meta);
+  meta.terminal_failure = { reason: "http_rejected", detail: "422", at: "now" };
+  writeFileSync(join(spool, "entries", `${entryKey("terminal")}.meta.json`), JSON.stringify(meta));
+  writeFileSync(join(spool, "entries", `${entryKey("corrupt")}.meta.json`), "{not json");
+  writeFileSync(join(spool, "entries", "nometa.meta.json"), JSON.stringify({ version: 1 }));
+
+  assert.equal(
+    countPendingEntries(spool),
+    3,
+    "the premise: `undelivered` plus the two metas neither walk can read — not " +
+      "`delivered` or `terminal`, which a drain skips",
+  );
+  // The health line reports exactly that pending count...
+  assert.equal(captureHealthLine(spool, { apiKey: "tt_x", bounds: roomy }).queued, 3);
+  // ...and its own verdict must equal the public predicate's, on every ceiling
+  // shape: count-bound, byte-bound, and roomy.
+  for (const bounds of [
+    roomy,
+    { maxEntries: 1, maxTotalBytes: 1_000_000, maxEntryBytes: 100_000 },
+    { maxEntries: 1000, maxTotalBytes: 1, maxEntryBytes: 100_000 },
+  ]) {
+    assert.equal(
+      captureHealthLine(spool, { apiKey: "tt_x", bounds }).state === "saturated",
+      spoolSaturated(spool, bounds),
+      `the health line and the public predicate must agree: ${JSON.stringify(bounds)}`,
+    );
+  }
 });
 
 test("the health line NAMES saturation", () => {

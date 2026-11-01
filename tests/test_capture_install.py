@@ -4293,7 +4293,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: Behaviour moved, so the generation moved with it: an installed generation-15
 #: copy keeps the old evicting prune and would otherwise read as a local edit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    16, "955e8bbda83178ce22029ad4961bb4d51f2919416e8f219eaa79227a377bbb60")
+    16, "419ca94587d2c2c160d14c93123836a0afacea51ff9ad22352eea39fbe28f52d")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4396,7 +4396,7 @@ _GENERATION_DIGESTS = {
     # refresh-to-green.
     15: "7fc5bad634e5d33388feab25c1a770403648212e07a648f5c99f23d5564b0a9f",
     # Generation 16: see the pinned pair above — the capture-loss rule change.
-    16: "955e8bbda83178ce22029ad4961bb4d51f2919416e8f219eaa79227a377bbb60",
+    16: "419ca94587d2c2c160d14c93123836a0afacea51ff9ad22352eea39fbe28f52d",
 }
 
 
