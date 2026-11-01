@@ -1048,3 +1048,36 @@ def test_the_tool_parses_under_the_floor():
         f"and the refusal is documentary (use different quote characters):\n"
         f"{run.stderr}"
     )
+
+
+def test_every_unresolved_writer_carries_a_census_class() -> None:
+    """#10541 — the unresolved writers are CLASSED, not merely listed.
+
+    The instrument is deliberately over-inclusive: a three-name callee
+    vocabulary cannot tell a legitimate exemption from a bypass, so bullet 2
+    used to be held at PARTIAL over every function it could not resolve. #10541
+    resolves each into one of three honest classes, so this falsifier goes RED
+    when a writer is unresolved and NOTHING says which class it is in — the
+    measurement defect the issue exists to clear.
+
+    Pre-fix this is RED: `WRITER_CENSUS` does not exist, every one of the
+    unresolved writers is unclassified, and `unclassified` is the whole set.
+    """
+    census = getattr(probe, "WRITER_CENSUS", {})
+    classes = getattr(probe, "CENSUS_CLASSES", ())
+    unresolved = sorted(
+        w for w, d in probe.embedding_writers().items()
+        if d["kind"] == "unresolved_write"
+    )
+    assert unresolved, (
+        "the instrument resolved every writer — this falsifier is no longer "
+        "exercising the case, so it proves nothing")
+    unclassified = [w for w in unresolved if w not in census]
+    assert not unclassified, (
+        f"unclassified by the #10541 census: {unclassified}")
+    bad = {w: census[w][0] for w in unresolved if census[w][0] not in classes}
+    assert not bad, f"census class outside {classes}: {bad}"
+    bypasses = [w for w in unresolved if census[w][0] == "bypass"]
+    assert not bypasses, (
+        "a REAL bypass must be fixed or filed, not parked in the census: "
+        f"{bypasses}")
