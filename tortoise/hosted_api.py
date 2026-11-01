@@ -638,10 +638,15 @@ def _moved_default_namespace(org_id: str | None,
     ``org_{org_id}_{gid}`` (what ``insert_graph``/``_provision_graph`` mint) or
     the pre-#3543 ``team_{org_id}_{gid}`` that is still stored for older graphs.
     Both are values only a promotion can put in ``organizations.graph_name``,
-    and the promotion REFUSES any other shape, so a promoted default is always
-    one this function can follow. The untouched ``org_{org_id}``, the pre-#3543
-    org-level ``team_{org_id}`` and the registry's ``org_{name}`` (#2023) all
-    keep the open they always had.
+    and the promotion's MOVE arm REFUSES any other shape, so a moved default is
+    followable. ⚠️ The IDEMPOTENT repair arm is deliberately exempt from that
+    refusal (it converges whatever namespace the default row already carries,
+    which is what §3 of ``20261028000001`` pins the pointer to), so a REPAIRED
+    pointer for a legacy org can still be the bare ``team_{org_id}``/``org_{name}``
+    that this function answers ``None`` for — which is exactly why the bare
+    ``team_{org_id}`` is not a promotable target (tortoise#10505). The untouched
+    ``org_{org_id}``, the pre-#3543 org-level ``team_{org_id}`` and the
+    registry's ``org_{name}`` (#2023) all keep the open they always had.
     """
     from tortoise.supabase_control import moved_default_namespace
 
