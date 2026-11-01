@@ -34967,6 +34967,17 @@ class TortoiseSDK:
                 # reason, not because order is guaranteed.
                 raw_results["fts"] = _bm25_hits
 
+        # #8447 (review round 5, P3): the PER-LEG window — how many rows the
+        # widest single leg returned — taken HERE, before any additive pass
+        # (``structural_hops``, PRF, entity-key expansion) widens a leg's list.
+        # A leg asked for ``str_limit`` rows that returns that many FILLED ITS
+        # OWN WINDOW, which proves matches beyond it were never read; saturation
+        # is therefore the proof on its own and needs no filter on top. Taken
+        # after the BM25 arm so a re-scored lexical slot counts as the leg it
+        # replaced. (Not the fused union: two legs of 60 under a window of 120
+        # reach ``str_limit`` together without either leg saturating.)
+        _leg_peak = max((len(_rows) for _rows in raw_results.values()), default=0)
+
         if not raw_results:
             # #4028: the vector leg RAN and the relevance floor removed every
             # near neighbour. That is an ANSWER (nothing relevant), not a leg
@@ -35189,13 +35200,6 @@ class TortoiseSDK:
         # 4. Fuse via RRF (skip if single strategy or full-scan)
         if is_full_scan or len(raw_results) == 1:
             strat_name, ranked = next(iter(raw_results.items()))
-            # #8447 (review round 5, P3): the PER-LEG window this leg filled,
-            # BEFORE the score floor below narrows it. Saturation of a leg's own
-            # window is proof that matches beyond it were never read, and it
-            # survives no matter what a filter then does to the visible set —
-            # the single-strategy branch has exactly one leg, so its own length
-            # IS the peak.
-            _leg_peak = len(ranked)
             # Apply threshold filter (score floor)
             fused = {pid: score for pid, score in ranked if score >= threshold}
             match_source = strat_name
@@ -35239,13 +35243,6 @@ class TortoiseSDK:
                 weights=fusion_weights,
                 k=fusion_k,
             )
-            # #8447 (review round 5, P3): the PER-LEG MAXIMUM, not the fused
-            # union. The union can reach ``str_limit`` with NO leg saturated
-            # (two legs of 60 under a window of 120), and it says nothing about
-            # whether a leg's own window filled — which is the fact that proves
-            # matches beyond it exist. Same reason as the branch above for
-            # taking it BEFORE the score floor.
-            _leg_peak = max((len(_rows) for _rows in ranked_lists), default=0)
             # Apply threshold filter to RRF scores
             if threshold > 0:
                 fused = {pid: score for pid, score in fused.items() if score >= threshold}
@@ -35253,16 +35250,6 @@ class TortoiseSDK:
 
         # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
         result_ids = list(fused.keys())
-        # #8447 (review round 3, P2): ``_pre_filter_ids`` — captured above, in
-        # each fusion branch, BEFORE the score floor — is the union the legs
-        # produced. A leg that filled its own window proves there is more than
-        # the window holds, and a filter that then drops the set BELOW ``limit``
-        # must not launder that into "complete". Measured on the review case:
-        # 500 eligible matches, window saturated at ``str_limit``, a filter
-        # removing 115 leaves 5, ``limit=10`` → the read reported COMPLETE while
-        # ~380 eligible matches were never read and are unreachable (no offset,
-        # no cursor). This is the size the completeness proof needs, not the
-        # post-filter one.
         # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source resolving by
         # `url` (#149's canonical key), not by `id` — the same three-way
         # id_field search_engine's legs use.
