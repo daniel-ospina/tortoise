@@ -19871,10 +19871,11 @@ def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
 
     ⛔ THE JOURNAL PATH IS RESOLVED THE WAY THE WRITE RESOLVES IT (#10000 review
     P1) — from `_data_sdk`'s OWN branch, never from the dict's
-    `graph_namespace`. The previous version read `org["graph_namespace"]`, which
-    only the KEY lanes stamp (`_get_current_org_supabase`); the SESSION-JWT org
-    dict (`_session_user_org`) carries neither `graph_id` nor `graph_namespace`,
-    so that read was `None` → `record_holds_turns(journal_configured=False)` →
+    `graph_namespace`. The previous version read `org["graph_namespace"]`
+    directly. WHEN #10000 WAS FIXED that field was stamped by the KEY lanes
+    only (`_get_current_org_supabase`), so the SESSION-JWT org dict
+    (`_session_user_org`) carried neither `graph_id` nor `graph_namespace` and
+    the read was `None` → `record_holds_turns(journal_configured=False)` →
     `None` → the record was never consulted on the one lane
     `get_session_detail`'s own docstring says it exists for (#2002/W6, the
     Settings Captured-sessions transcript DE2E-11), and the endpoint served
@@ -19884,6 +19885,21 @@ def _record_tenant_for_read(org: dict) -> tuple[str, str] | None:
     graph-bound key and `_make_sdk(namespace=org_id)` otherwise, and `_make_sdk`
     derives its journal from exactly those two arguments — so this mirrors the
     branch, and the read cannot resolve a journal the writer did not write to.
+
+    ⚠️ THE CARRIER HAS WIDENED SINCE, AND THAT IS WHY THE FIELD IS STILL NOT AN
+    ANSWER BY ITSELF (checked at this head, so the aside above is history rather
+    than a live claim): `_session_user_org` now stamps `graph_namespace`
+    (#10180's default-graph carrier) and `default_graph_id` (#10046;
+    `oauth.resolve_oauth_access_token` carries the same pair for `oat_`
+    tokens) — so the `None`-because-absent mechanism above no longer applies to
+    that lane. The rule it taught survives for a different and stronger reason:
+    `graph_namespace` present does NOT say WHICH branch wrote the turns. On a
+    GRAPH-BOUND credential it is the CUSTOM graph's namespace (a valid value,
+    `org_{org_id}_{gid}`), and the writer took the `graph_name=` branch — so a
+    reader that keyed the journal on the field would derive the OTHER
+    (`namespace=`) path and look for the transcript where nothing was written.
+    The branch is decided by `org["graph_id"]`, which is the same bit
+    `_data_sdk` asks; the field only ever supplies the VALUE inside a branch.
     """
     from tortoise.config import _resolve_event_log_path
     from tortoise.record_writer import record_holds_turns, record_tenant

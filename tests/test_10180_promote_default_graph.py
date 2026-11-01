@@ -1475,6 +1475,56 @@ def test_the_bind_takes_a_pre_resolved_tenant_without_reading(monkeypatch):
         "a None pre-resolved id must bind NOTHING (never a guess)")
 
 
+def test_the_default_graph_pair_comes_from_the_request_own_credential(monkeypatch):
+    """`_org_default_graph`'s HINT branch — the REQUEST path.
+
+    A lane reached from an authenticated request resolves the pair from the
+    credential that request was ADMITTED with (`_publish_default_namespace`), so
+    it pays no control-plane read and cannot disagree with the graph the data
+    plane opened for the same request. This is the branch the other pair tests
+    do NOT take: `test_the_default_graph_pair_is_read_at_one_instant` clears the
+    contextvar first, so it pins the READ shape only, and the hint branch (the
+    one every request-path lane traverses) had no direct test.
+
+    FAIL-ON: drop the hint branch and a request admitted against the PROMOTED
+    graph resolves the DEMOTED one — the graph/data split `_org_default_graph`
+    exists to remove — which the non-vacuity half below measures on this very
+    fixture (the read answers `(None, OLD_ID)` where the credential said
+    `(org_{TEAM}_{NEW_ID}, NEW_ID)`).
+    """
+    _hosted(monkeypatch)
+    fake = _fake_org_row(monkeypatch, f"org_{TEAM}")   # org row: NEVER promoted
+    reads: list[str] = []
+    orig_query = fake.query
+
+    def _query(table, **kw):
+        reads.append(table)
+        return orig_query(table, **kw)
+
+    monkeypatch.setattr(fake, "query", _query)
+    token = ha._resolved_default_namespace.set(None)
+    try:
+        ha._publish_default_namespace(_credential(default_graph_id=NEW_ID))
+        assert ha._org_default_graph(TEAM) == (f"org_{TEAM}_{NEW_ID}", NEW_ID)
+        assert reads == [], (
+            "a request-resolved credential must not cost a control-plane read — "
+            f"the pair came from the credential, yet {reads!r} was read")
+
+        # The hint is ORG-scoped: another org in the same context must read its
+        # own answer, never inherit this org's promoted graph.
+        reads.clear()
+        assert ha._org_default_graph(OTHER_TEAM) == (None, None)
+        assert reads, "a different org must not be served by this org's hint"
+    finally:
+        ha._resolved_default_namespace.reset(token)
+
+    # ── NON-VACUITY: with the hint cleared, this fixture's read path answers
+    # the DEMOTED pair — so the assertions above are discriminating rather than
+    # descriptive. (One instant per answer; two statements are two instants,
+    # which is why the pair comes from one row or from one credential.)
+    assert ha._org_default_graph(TEAM) == (None, OLD_ID)
+
+
 def test_every_default_graph_lane_resolves_both_answers_once():
     """Source pin for the CLASS, AST-based (not a grep of one lane).
 
