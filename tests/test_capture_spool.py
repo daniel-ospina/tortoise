@@ -888,7 +888,10 @@ def test_the_fast_admission_answer_honours_the_CEILINGS_it_was_measured_against(
     # camelCase spelling across two languages).
     stamps = json.loads(
         (tmp_path / sp.CAPTURE_REFUSAL_STAMP_FILE).read_text(encoding="utf-8"))["refusals"]
-    refused_stamp = [s for s in stamps if s["reason"] == "spool_saturated"][0]
+    refused_stamp = next(
+        (s for s in stamps if s["reason"] == "spool_saturated"), None)
+    assert refused_stamp is not None, (
+        f"the refusal stamp records no spool_saturated stamp at all; stamps={stamps}")
     assert refused_stamp["bounds"] == sp._bounds_stamp(tight) == "1:10000000", refused_stamp
     assert isinstance(refused_stamp["projected_bytes"], int), refused_stamp
     assert refused_stamp["replaces_session_id"] is None, refused_stamp
