@@ -146,12 +146,15 @@ refused anything is decoration.
 USAGE
 =====
     # 1. PREVIEW (the default — no flag needed, nothing is written to a store).
-    #    --event-log-path is REQUIRED FOR A PLAN `--execute` CAN ACT ON, and is
-    #    recorded in the plan: a preview run without it writes a plan whose
-    #    `journal.path` is null, and EVERY `--execute` of that plan then
-    #    refuses `journal-unusable`. It is not enforced at preview time (a
-    #    preview deletes nothing and its MISSING list names the gap); what the
-    #    plan records is what the human approves.
+    #    --event-log-path and --target-note are REQUIRED FOR A PLAN `--execute`
+    #    CAN ACT ON, and both are recorded in the plan: a preview run without
+    #    --event-log-path writes a plan whose `journal.path` is null (every
+    #    `--execute` of it refuses `journal-unusable`), and one without
+    #    --target-note writes `target_note: ""` (every `--execute` of it refuses
+    #    `no-target-note`). NEITHER is enforced at preview time — a preview
+    #    deletes nothing — but both are named in the plan's own MISSING list and
+    #    in the closing guidance, because what the plan records is what the human
+    #    approves, and an artefact that can never execute must say so.
     python tools/purge_legacy_turns.py \
         --uri '<target FalkorDB URI>' --graph-name <graph> \
         --record-dsn "$TORTOISE_RECORD_DSN" \
@@ -1213,14 +1216,42 @@ class _UsageParser(argparse.ArgumentParser):
 
 
 def _recovery_missing(args, restore_proof: dict | None,
-                      health: dict | None) -> list[str]:
-    """What is still absent on the recovery axis — named, never assumed."""
+                      health: dict | None, report: dict,
+                      live_target: dict) -> list[str]:
+    """What is still absent on the recovery axis — named, never assumed.
+
+    ⛔ ONE QUESTION, ASKED BY BOTH ARMS (again). `--restore-proof` was the LAST
+    evidence artefact judged here by bare TRUTHINESS while `--execute` applied
+    nine further requirements in `_restore_proof_problem` — so a preview over
+    `{"garbage": 1}` printed RECOVERY-PATH-STATED, dropped the
+    `no --restore-proof` line, and wrote an APPROVABLE plan that the
+    destructive arm then refused one precondition later. An operator read the
+    one list that speaks to precondition 3 and saw it satisfied (#10483 review
+    round 8, P2). Kubernetes states the rule this broke (KEP-576, dry-run): a
+    preview exists to "see if the request would have succeeded (admission
+    chain, validation, merge conflicts, …)" — the SAME validation, not a
+    cheaper one.
+
+    `report` and `live_target` have no defaults: a preview that cannot name the
+    plan's sessions or the deployment it is aimed at cannot judge the proof,
+    and a guard that is opt-out by omission is not a guard.
+    """
     missing: list[str] = []
     if not restore_proof:
         missing.append(
             "no --restore-proof artefact: #10017 precondition 3 (one sampled "
             "session deleted from a scratch graph and re-served from the "
             "record) has not been run for this target")
+    else:
+        planned_sessions = [e["session"]
+                            for e in classify_sessions(report)["eligible"]]
+        proof_problem = _restore_proof_problem(restore_proof, planned_sessions,
+                                               live_target)
+        if proof_problem:
+            missing.append(
+                "the --restore-proof artefact does not establish #10017 "
+                f"precondition 3 ({REFUSE_RESTORE_PROOF_STALE}): "
+                f"{proof_problem} — `--execute` will refuse it")
     # The SAME question the destructive arm asks: an artefact can be armed and
     # still prove nothing about the record (#10483 review round 5, P2).
     armed_gap = _armed_evidence_gap(health)
@@ -1232,6 +1263,17 @@ def _recovery_missing(args, restore_proof: dict | None,
         missing.append(
             "no --event-log-path: the journal the target's rebuild replays is "
             "not named in this plan, so `--execute` will refuse it")
+    # Same claim-vs-artefact shape as --event-log-path above, and the same
+    # direction of fix: the flag is REQUIRED FOR A PLAN `--execute` CAN ACT ON,
+    # not at preview time — but a plan written without it records
+    # `target_note: ""`, which `evaluate_gate` refuses outright, so the preview
+    # has to NAME it instead of exiting 0 in silence (#10483 review round 8,
+    # P3).
+    if not str(getattr(args, "target_note", "") or "").strip():
+        missing.append(
+            "no --target-note: the plan names no deployment, so `--execute` "
+            f"refuses it ({REFUSE_NO_TARGET_NOTE}) and the only remedy is "
+            "regenerating the plan")
     missing.append(
         "no recorded `python -m tortoise record-backup --drill` run against "
         "this target (the record's restore is implemented and documented, "
@@ -1268,8 +1310,15 @@ def _build_parser() -> _UsageParser:
     parser.add_argument("--graph-id", default=os.environ.get(
         "TORTOISE_RECORD_GRAPH_ID", ""), help="record tenant graph")
     parser.add_argument("--target-note", default="",
-                        help="REQUIRED: name the deployment this plan is for "
-                             "(recorded verbatim in the plan)")
+                        help="name the deployment this plan is for (recorded "
+                             "verbatim in the plan). Required for a plan "
+                             "`--execute` can act on: a plan written without "
+                             "it records an EMPTY target_note, and every "
+                             "`--execute` of it refuses no-target-note — the "
+                             "artefact a human approves must say which "
+                             "deployment it was approved for. Not enforced at "
+                             "preview time (a preview deletes nothing, and "
+                             "its MISSING list names the gap)")
     parser.add_argument("--health-json", default=None,
                         help="a CAPTURED /health body (record.armed evidence) — "
                              "it must state when it was read (fetched_at / "
@@ -1448,8 +1497,8 @@ def main(argv: list[str] | None = None) -> int:
         plan = build_plan(report, target=target, health=health,
                           restore_proof=restore_proof,
                           target_note=args.target_note,
-                          recovery_missing=_recovery_missing(args, restore_proof,
-                                                             health),
+                          recovery_missing=_recovery_missing(
+                              args, restore_proof, health, report, target),
                           journal_path=args.event_log_path)
     except (ValueError, KeyError) as exc:
         # A census report whose counts and id lists disagree cannot describe a
@@ -1492,8 +1541,9 @@ def main(argv: list[str] | None = None) -> int:
           f"{plan['journal']['path'] or '<NOT NAMED — --execute will refuse>'}")
     print("dry run    : NOTHING WAS DELETED. This is a preview; the purge "
           "requires --execute with the digest above, --restore-proof, an "
-          "armed-record artefact (--health-url) and an out-of-band approval "
-          "(--approval-record, kept outside the plan file).")
+          "armed-record artefact (--health-url), --target-note and an "
+          "out-of-band approval (--approval-record, kept outside the plan "
+          "file).")
     return 0
 
 
@@ -1523,11 +1573,20 @@ def _execute(plan: dict, args, target: dict) -> int:
             (#10483 review, P0). Kubernetes states the same rule on the delete
             itself: `DeleteOptions.preconditions` — "must be fulfilled before a
             deletion is carried out" (`k8s.io/apimachinery/pkg/apis/meta/v1`);
-        2. delete the exact planned ids per session and VERIFY absence;
+        2. delete the exact planned ids per session and VERIFY absence — inside
+           an `_apply_first_write_scope(...)` declaration (§17.1, #9124 /
+           #9206). At that moment the graph IS journal-backed (`sdk._get_proj()`
+           bound the journal), so an UNDECLARED mutating statement reaching
+           `proj.g` is counted as an undeclared writer today and REFUSED
+           (`DirectCacheWriteRefused`) once the handle guard arms. The
+           APPLY-FIRST lane, never `_live_write_scope`, is the honest one here:
+           the delete lands first and the record describing it is appended
+           after, which is `_journal_turn_removal`'s own contract;
         3. journal every VERIFIED-ABSENT id — including the ones a partially
             failing session did delete — through the SDK's own
             `_journal_turn_removal` (#10076), the ONE removal record, and
-            refuse if the journal cannot carry the removal;
+            refuse if the journal cannot carry the removal, all INSIDE the same
+            declaration;
         4. fail unless the deleted total equals the plan's stated total, with
             its OWN code (`partial-sweep`): "the set drifted before the delete"
             and "only part of the set is gone after it" are different
@@ -1538,7 +1597,8 @@ def _execute(plan: dict, args, target: dict) -> int:
     FIELDS. A row whose text changed after the live census would pass step 1,
     and the census's field comparison is the instrument that covers it.
     """
-    from tortoise.projection import FalkorProjection
+    from tortoise.projection import (FalkorProjection,
+                                    _apply_first_write_scope)
     from tortoise.sdk import TortoiseSDK
 
     # ⛔ 0a. THE JOURNAL IS NAMED BY THE APPROVED PLAN, AND MUST ALREADY EXIST.
@@ -1690,61 +1750,90 @@ def _execute(plan: dict, args, target: dict) -> int:
                 f"deleted and journaled BEFORE this check, and this run stops "
                 f"here.\n")
             return 2
-        # EXACT-SET DELETE: the id list is the approved one, and the statement
-        # is scoped both by the session wiring and by `t.id IN $ids`, so a turn
-        # that appeared after the census is not swept in.
-        proj.g.query(
-            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-            "WHERE t.is_episodic = true AND t.id IN $ids "
-            "DETACH DELETE t",
-            params={"sid": sid, "ids": ids},
-        )
-        remaining = proj.g.query(
-            "MATCH (t:Point) WHERE t.id IN $ids RETURN t.id",
-            params={"ids": ids},
-        ).result_set
-        # The same RESULTSET_SIZE guard the census uses: a SILENTLY truncated
-        # survivor list would report fewer survivors than exist, journal ids
-        # that still stand, and print a false "purged". One aggregate row is
-        # cap-immune, so the two must agree.
-        counted = int(proj.g.query(
-            "MATCH (t:Point) WHERE t.id IN $ids RETURN count(t)",
-            params={"ids": ids},
-        ).result_set[0][0])
-        survivors = {str(row[0]) for row in remaining or ()}
-        if len(survivors) != counted:
-            sys.stderr.write(
-                f"purge_legacy_turns: REFUSED {REFUSE_EXACT_SET_MISMATCH}: the "
-                f"survivor read for session {sid} returned {len(survivors)} "
-                f"row(s) but the store counts {counted} — the read was "
-                f"TRUNCATED, so which ids are gone is not established. No "
-                f"removal in this session was journaled.\n")
-            return 2
-        # A partially failing session still deleted SOME ids: those are journaled
-        # (they are gone from the graph, so a rebuild must not resurrect them),
-        # and the survivors are named and never journaled — journaling an id
-        # whose node still stands claims a removal that did not happen.
-        absent = [tid for tid in ids if tid not in survivors]
-        if absent:
-            outcomes = sdk._journal_turn_removal(absent)
-            failed = [tid for tid, ok in outcomes.items() if ok is not True]
-            if failed:
+        # ⛔ THE WRITE-LANE DECLARATION (§17.1, #9124 / #9206). At this moment
+        # the graph IS journal-backed: `sdk._get_proj()` above bound the
+        # journal, which registered this `(store, graph)` pair
+        # (`_register_journal_backed_graph`), and `proj.g` is the guarded write
+        # handle — so the `DETACH DELETE` below reaches
+        # `_journal_write_authority` as an UNPERMITTED mutating statement
+        # unless a lane is in flight. Two landed consequences, neither
+        # cosmetic: today (`_HANDLE_GUARD_ENFORCES = False`) a destructive tool
+        # silently joins the §17.1 census of undeclared writers — the very
+        # measurement part 2 is sized from; and once part 2 arms, the same
+        # statement RAISES `DirectCacheWriteRefused`, uncaught, killing the
+        # destructive arm on its FIRST delete in front of an operator holding
+        # an approved plan against a production graph (#10483 review round 8,
+        # P2).
+        #
+        # `_apply_first_write_scope` — not `_live_write_scope` — is the honest
+        # lane: this door deletes FIRST and appends the record that describes
+        # the landed outcome AFTER, which is exactly
+        # `_journal_turn_removal`'s contract ("After the delete has proven it
+        # landed, never before") and exactly the class #9206 created this lane
+        # for. It therefore states the WEAKER claim deliberately; the stronger
+        # journal-first claim would be false here.
+        with _apply_first_write_scope(
+                "10017 purge: DETACH DELETE then _journal_turn_removal"):
+            # EXACT-SET DELETE: the id list is the approved one, and the
+            # statement is scoped both by the session wiring and by
+            # `t.id IN $ids`, so a turn that appeared after the census is not
+            # swept in.
+            proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.is_episodic = true AND t.id IN $ids "
+                "DETACH DELETE t",
+                params={"sid": sid, "ids": ids},
+            )
+            remaining = proj.g.query(
+                "MATCH (t:Point) WHERE t.id IN $ids RETURN t.id",
+                params={"ids": ids},
+            ).result_set
+            # The same RESULTSET_SIZE guard the census uses: a SILENTLY
+            # truncated survivor list would report fewer survivors than exist,
+            # journal ids that still stand, and print a false "purged". One
+            # aggregate row is cap-immune, so the two must agree.
+            counted = int(proj.g.query(
+                "MATCH (t:Point) WHERE t.id IN $ids RETURN count(t)",
+                params={"ids": ids},
+            ).result_set[0][0])
+            survivors = {str(row[0]) for row in remaining or ()}
+            if len(survivors) != counted:
                 sys.stderr.write(
-                    f"purge_legacy_turns: REFUSED {REFUSE_JOURNAL_UNCONFIRMED}: "
-                    f"{len(failed)} removal(s) in session {sid} were deleted "
-                    f"from the graph but NOT journaled (a rebuild would "
-                    f"resurrect them). {deleted_total} node(s) were deleted "
-                    f"and journaled BEFORE this failure, and this run stops "
-                    f"here: {', '.join(failed[:10])}\n")
+                    f"purge_legacy_turns: REFUSED "
+                    f"{REFUSE_EXACT_SET_MISMATCH}: the survivor read for "
+                    f"session {sid} returned {len(survivors)} row(s) but the "
+                    f"store counts {counted} — the read was TRUNCATED, so "
+                    f"which ids are gone is not established. No removal in "
+                    f"this session was journaled.\n")
                 return 2
-            deleted_total += len(absent)
-            journaled_total += len(outcomes)
-        if survivors:
-            survivors_left.extend(sorted(survivors))
-            sys.stderr.write(
-                f"purge_legacy_turns: session {sid}: {len(survivors)} planned "
-                f"node(s) SURVIVED the delete (and were NOT journaled): "
-                f"{', '.join(sorted(survivors)[:10])}\n")
+            # A partially failing session still deleted SOME ids: those are
+            # journaled (they are gone from the graph, so a rebuild must not
+            # resurrect them), and the survivors are named and never journaled
+            # — journaling an id whose node still stands claims a removal that
+            # did not happen.
+            absent = [tid for tid in ids if tid not in survivors]
+            if absent:
+                outcomes = sdk._journal_turn_removal(absent)
+                failed = [tid for tid, ok in outcomes.items()
+                          if ok is not True]
+                if failed:
+                    sys.stderr.write(
+                        f"purge_legacy_turns: REFUSED "
+                        f"{REFUSE_JOURNAL_UNCONFIRMED}: {len(failed)} "
+                        f"removal(s) in session {sid} were deleted from the "
+                        f"graph but NOT journaled (a rebuild would resurrect "
+                        f"them). {deleted_total} node(s) were deleted and "
+                        f"journaled BEFORE this failure, and this run stops "
+                        f"here: {', '.join(failed[:10])}\n")
+                    return 2
+                deleted_total += len(absent)
+                journaled_total += len(outcomes)
+            if survivors:
+                survivors_left.extend(sorted(survivors))
+                sys.stderr.write(
+                    f"purge_legacy_turns: session {sid}: {len(survivors)} "
+                    f"planned node(s) SURVIVED the delete (and were NOT "
+                    f"journaled): {', '.join(sorted(survivors)[:10])}\n")
 
     if deleted_total != planned_total:
         # ⛔ ITS OWN CODE. "The set drifted before the delete" (the

@@ -252,9 +252,14 @@ def test_a_string_armed_is_not_armed():
 def test_execute_refuses_when_a_target_session_is_record_behind():
     ids = ["s1_t0", "s1_t1"]
     plan = _plan([_clean_with_ids("s1", ids)])
-    # The GRAPH still holds exactly the approved ids — so the exact-set digest
-    # is UNCHANGED. The record is what moved. If the gate checked only the
-    # digest, this run would delete a transcript the record cannot serve back.
+    # The GRAPH still holds exactly the approved ids. That does NOT make the
+    # digest byte-identical: `evaluate_gate` re-derives the live digest from
+    # `classify_sessions(live_report)["eligible"]`, and a RECORD-BEHIND session
+    # is classified EXCLUDED, so the live digest drops its pairs and cannot
+    # equal the approved one. A digest-only gate would therefore have refused
+    # too — what the class check buys is the BETTER DIAGNOSIS: `record-behind`
+    # names the backfill, instead of `exact-set-mismatch` sending the operator
+    # to re-approve a set that is still correct (#10483 review round 8, P3).
     live = _report(failed=[_failed("s1", ids, [
         {"node": "s1_t1", "field": "key",
          "problem": "missing_in_record"}])])
@@ -534,15 +539,29 @@ class _Result:
         self.result_set = rows
 
 
+def _lane_in_flight():
+    """The §17.1 write lane open at THIS instant, or `None`.
+
+    Read from the one ContextVar the guarded write handle consults
+    (`_journal_write_authority` → `_CACHE_WRITE_AUTHORIZED`), so a fake store
+    observes exactly what a real handle would decide on.
+    """
+    from tortoise.projection import _CACHE_WRITE_AUTHORIZED
+    return _CACHE_WRITE_AUTHORIZED.get()
+
+
 class _FakeGraph:
     """Records every statement `_execute` asks for.
 
     `survivors_after` is what the post-delete read still finds standing, so a
-    partial sweep is expressible without a store.
+    partial sweep is expressible without a store. `lanes` pairs each statement
+    with the §17.1 write lane in flight when it was issued, so a test can pin
+    that the DELETE was DECLARED rather than merely asserted about.
     """
 
     def __init__(self, survivors_after=()):
         self.queries: list[str] = []
+        self.lanes: list[tuple[str, object]] = []
         self.survivors_after = list(survivors_after)
 
     def statements(self, needle: str) -> list[str]:
@@ -550,6 +569,7 @@ class _FakeGraph:
 
     def query(self, cypher: str, params=None):
         self.queries.append(cypher)
+        self.lanes.append((cypher, _lane_in_flight()))
         if "count(t)" in cypher:
             return _Result([[len(self.survivors_after)]])
         if "DETACH DELETE" in cypher:
@@ -1011,6 +1031,45 @@ def test_a_full_sweep_prints_purged_and_exits_zero(tmp_path, monkeypatch,
     assert purge.REFUSE_PARTIAL_SWEEP not in captured.err
 
 
+def test_the_delete_declares_an_apply_first_write_lane(tmp_path, monkeypatch,
+                                                      capsys):
+    """§17.1 (#9124 / #9206): a journal-backed graph will not accept a mutating
+    statement with no declared lane. `_execute` declared none, and at that
+    moment the graph IS journal-backed (`sdk._get_proj()` bound the journal,
+    which registered the `(store, graph)` pair), so two things followed:
+
+      * today (`_HANDLE_GUARD_ENFORCES = False`) every session's `DETACH
+        DELETE` was counted as an UNDECLARED handle write — a destructive tool
+        silently joining the very §17.1 census that part 2 is sized from;
+      * once part 2 arms, the same statement raises
+        `DirectCacheWriteRefused`, uncaught, killing the destructive arm on its
+        FIRST delete in front of an operator holding an approved plan.
+
+    Pinned where a real handle decides: the ContextVar
+    `_journal_write_authority` itself reads, sampled at the instant each
+    statement is issued. `_apply_first_write_scope` — not
+    `_live_write_scope` — is the honest lane here: the delete lands FIRST and
+    the record describing it is appended AFTER, which is exactly
+    `_journal_turn_removal`'s contract (#10483 review round 8, P2).
+    """
+    setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"))
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    capsys.readouterr()
+    assert rc == 0
+    deletes = [lane for stmt, lane in setup.graph.lanes
+               if "DETACH DELETE" in stmt]
+    assert deletes, "the fake store saw no DELETE — this pin would be vacuous"
+    assert all(lane for lane in deletes), (
+        "the DETACH DELETE was issued with NO declared §17.1 write lane, so an "
+        f"armed handle would refuse it: lanes={deletes!r}")
+    assert all(lane.startswith("apply-first") for lane in deletes), deletes
+    # The record the lane covers really was appended, in the same lane.
+    assert setup.journaled == ["s1_t0", "s1_t1"]
+    # NON-VACUITY: the probe answers `None` when no lane is open, so "every
+    # delete saw a lane" is a measurement and not a constant.
+    assert _lane_in_flight() is None
+
+
 # ── #3175: a file that never held a census is not an empty census ────────
 
 @pytest.mark.parametrize("payload", [
@@ -1352,6 +1411,43 @@ def test_the_tool_does_not_claim_event_log_path_is_required_at_preview(
     assert "--event-log-path" in capsys.readouterr().out
 
 
+def test_the_tool_does_not_claim_target_note_is_required_at_preview(
+        tmp_path, capsys):
+    """P3 (#10483 review round 8): the parser help said `--target-note`
+    "REQUIRED", the preview enforced nothing, and a plan written without it
+    records `target_note: ""` — which `evaluate_gate`'s FIRST branch refuses
+    outright, so the artefact was dead on arrival from the moment it was
+    written, and nothing in the preview output said so. Same claim-vs-artefact
+    shape as the `--event-log-path` P3 round 7 fixed, and the same direction of
+    fix: state what is true, and NAME the gap in the plan's own MISSING list and
+    in the closing guidance."""
+    claims = " ".join([purge.__doc__ or "",
+                       next((a.help or "")
+                            for a in purge._build_parser()._actions
+                            if a.dest == "target_note")])
+    assert "REQUIRED: name the deployment" not in claims
+    assert "Required at PREVIEW time" not in claims
+    # …and the behaviour the reworded prose describes is the real one.
+    rc = purge.main([*_TARGET_ARGV,
+                     "--census-json", _write(tmp_path, "c.json", _report()),
+                     "--plan-out", str(tmp_path / "plan.json")])
+    assert rc == 0
+    plan = json.loads((tmp_path / "plan.json").read_text(encoding="utf-8"))
+    assert plan["target_note"] == ""
+    assert any("no --target-note" in m for m in plan["recovery"]["missing"])
+    out = capsys.readouterr().out
+    assert "MISSING   no --target-note" in out, out
+    closing = [line for line in out.splitlines() if line.startswith("dry run")]
+    assert closing and "--target-note" in closing[0], closing
+    # …and the refusal the preview predicts is the one `--execute` really gives.
+    code, _ = purge.evaluate_gate(
+        plan=plan, live_report=_report(), health=_health(),
+        restore_proof=_proof(), approval=_approval(plan["plan_digest"]),
+        confirm_digest=plan["plan_digest"], target_note="",
+        live_target=plan["target"], record_dsn=_DSN)
+    assert code == purge.REFUSE_NO_TARGET_NOTE
+
+
 # ── round 5: the ARMED evidence's own inputs ──────────────────────────────
 #
 # Three defects in the `_armed_evidence_problem` family, all of the "the guard
@@ -1439,8 +1535,21 @@ def _arming_missing(health) -> list[str]:
     missing = purge._recovery_missing(
         purge._build_parser().parse_args(
             [*_TARGET_ARGV, "--target-note", "t", "--event-log-path", "j.jsonl"]),
-        _proof(), health)
+        _proof(), health, _report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        _target())
     return [m for m in missing if "ARMED" in m]
+
+
+def _proof_missing(proof) -> list[str]:
+    """The preview's RESTORE-PROOF entries (precondition 3), isolated the same
+    way — the other entries are about arming, the journal and the recovery
+    drill, none of which this pin is about."""
+    missing = purge._recovery_missing(
+        purge._build_parser().parse_args(
+            [*_TARGET_ARGV, "--target-note", "t", "--event-log-path", "j.jsonl"]),
+        proof, _health(), _report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        _target())
+    return [m for m in missing if "precondition 3" in m]
 
 
 def test_the_preview_and_the_execute_gate_ask_the_same_arming_question():
@@ -1476,6 +1585,58 @@ def test_an_armed_body_without_a_record_fingerprint_is_named_by_the_preview():
 def test_a_real_health_body_is_not_named_by_the_preview():
     """The positive arm: the fix must not turn every preview red."""
     assert _arming_missing(_health()) == []
+
+
+# ── round 8: the SAME agreement question, for the SECOND evidence artefact ──
+#
+# Round 5 shared one function between the two arms for `/health` and left the
+# restore proof judged by bare truthiness, so the preview certified
+# precondition 3 for any non-empty JSON the destructive arm then refused.
+
+def test_the_preview_and_the_execute_gate_ask_the_same_restore_proof_question():
+    """Every proof body is judged by BOTH arms and the two must agree (#10483
+    review round 8, P2). `_execute`'s arm applies nine requirements
+    (`_restore_proof_problem`); the preview applied none beyond truthiness, so
+    `{"garbage": 1}` produced an APPROVABLE plan reading
+    `recovery : RECOVERY-PATH-STATED` with the `no --restore-proof` line gone —
+    and then `--execute` refused that exact artefact."""
+    clean = [_clean_with_ids("s1", ["s1_t0"])]
+    plan = _plan(clean)
+    bodies = [
+        ("real", _proof()),
+        ("absent", None),
+        ("garbage", {"garbage": 1}),
+        ("empty-object", {}),
+        ("not-served-from-record", {**_proof(), "served_from_record": False}),
+        ("session-not-in-plan", _proof(session="s9")),
+        ("eight-days-old", _proof(age=8 * 86400)),
+        ("unparseable-age", {**_proof(), "recorded_at": "yesterday"}),
+        ("wrong-tenant", _proof(org="other")),
+    ]
+    for name, body in bodies:
+        preview_gap = bool(_proof_missing(body))
+        code, _ = purge.evaluate_gate(
+            plan=plan, live_report=_report(clean=clean), health=_health(),
+            restore_proof=body, approval=_approval(plan["plan_digest"]),
+            confirm_digest=plan["plan_digest"], target_note="test target",
+            live_target=plan["target"], record_dsn=_DSN)
+        assert preview_gap == bool(code), (name, preview_gap, code)
+        # …and the agreement is not "both always refuse" / "both always pass".
+        assert preview_gap == (name != "real"), (name, preview_gap)
+
+
+def test_the_preview_names_a_restore_proof_the_execute_arm_would_refuse():
+    """The specific case round 8 named, asserted on its own so the message the
+    operator reads is pinned, not only the boolean."""
+    missing = _proof_missing({"garbage": 1})
+    assert missing, "the preview must not certify a proof `--execute` rejects"
+    assert purge.REFUSE_RESTORE_PROOF_STALE in missing[0]
+    assert "scratch_session" in missing[0]
+
+
+def test_a_real_restore_proof_is_not_named_by_the_preview():
+    """Positive arm: the fix must not turn every preview red."""
+    assert _proof_missing(_proof()) == []
 
 
 def test_an_unfingerprintable_record_dsn_is_refused_not_skipped(monkeypatch):

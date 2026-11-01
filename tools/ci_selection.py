@@ -2125,8 +2125,8 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # flat NON_PYTHON_PREFIXES entry and the tool matches no
              # SOURCE_PATTERNS row, so a purge-tool-only diff selected NO
              # surface at all — measured `select(["tools/purge_legacy_turns.py"])
-             # -> surfaces=[]`, the 75-case guard suite absent from
-             # `test_files` — and the change it does not guard is a delete (the
+             # -> surfaces=[]`, the guard suite absent from `test_files`
+             # — and the change it does not guard is a delete (the
              # #1349/#3332/#3616 silent-drop class). Pinned by
              # tests/test_ci_selection.py::
              # test_purge_legacy_turns_guard_runs_on_a_tools_only_change.
