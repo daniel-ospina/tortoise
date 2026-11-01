@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import re
 
+from .coverage_loop import _calendar_date
 from .search_engine import rrf_fusion
 
 # ── defaults (documented, knob-exposed by the caller) ────────────────────────
@@ -145,6 +146,56 @@ def content_tokens(text: str) -> frozenset[str]:
     )
 
 
+def _in_date_window(value: object, date_window: tuple[str, str]) -> bool:
+    """#10538: is this session date inside the question's derived range?
+
+    Both sides resolve through the ONE calendar-date resolver the product loop
+    already uses (:func:`tortoise.coverage_loop._calendar_date`), so an ingest
+    ``2023/04/10 (Mon) 17:50`` compares correctly against an ISO bound —
+    comparing RAW strings is what made ``_apply_time_window`` inert on the
+    frozen dataset (#9182). An undated candidate cannot be proven in-window.
+
+    An unparseable BOUND is not a licence to compare strings: it returns
+    False (nothing is provably in-window), which fails toward an inert leg
+    rather than toward a raw-string comparison that #9182 already measured as
+    silently wrong.
+    """
+    lo = _calendar_date(date_window[0])
+    hi = _calendar_date(date_window[1])
+    if lo is None or hi is None:
+        return False
+    day = _calendar_date(value)
+    if day is None:
+        return False
+    return lo <= day <= hi
+
+
+def _session_clustered(candidates: list[dict], head: int, limit: int) -> bool:
+    """#10538: does ONE session own half or more of the visible slots?
+
+    This is the defect's OWN condition, not a second gate: the issue defines
+    the failure as retrieval that "clusters on the single most-similar session
+    and starves the others". Without it, a window-targeted spread is
+    UNTARGETED — after ``_apply_time_window`` every remaining hit is in-window,
+    so the window selects the whole pool and the pick can displace a correct
+    rank-(k-1) gold on a question that was never clustered. That is the shape
+    #2976 measured at -3.3 pts (see the module docstring), so the spread must
+    fire only where the evidence really is starved.
+
+    The visible prefix is ``head`` (the reader-visible slice the caller
+    excludes from promotion); ``head == 0`` is the unguarded test mode, where
+    the first ``limit`` candidates stand in for it.
+    """
+    visible = candidates[:head] if head > 0 else candidates[:max(limit, 1)]
+    if len(visible) < 2:
+        return False
+    counts: dict[str, int] = {}
+    for c in visible:
+        key = str(c.get("session_id") or "")
+        counts[key] = counts.get(key, 0) + 1
+    return max(counts.values()) * 2 >= len(visible)
+
+
 def temporal_leg_order(
     candidates: list[dict],
     *,
@@ -152,6 +203,7 @@ def temporal_leg_order(
     limit: int = DEFAULT_TEMPORAL_LEG_LIMIT,
     bucket_cap: int = DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
     head: int = 0,
+    date_window: tuple[str, str] | None = None,
 ) -> list[str]:
     """Rank a temporal leg over already-ranked candidates → list of ids.
 
@@ -177,13 +229,17 @@ def temporal_leg_order(
        span instead of clustered on the semantically nearest date, while
        staying inside the question's own event vocabulary.
 
-**Anchors are required.** A question whose comparison phrases cannot be
-recovered (no anchor matched any candidate) yields ``[]`` — the leg is
-inert. This is deliberate, and measured: a spread-only leg promotes
+**Targets are required — an anchor, or (#10538) a date window.** A question
+whose comparison phrases cannot be recovered (no anchor matched any candidate)
+yields ``[]`` **unless** a ``date_window`` is supplied *and* the visible slots
+are session-clustered, in which case the window stands in as the target (see
+:func:`_session_clustered`). Both restrictions exist for the same measured
+reason: a spread-only leg promotes
 arbitrary deep pool items and, on a saturated-base proxy replay of the
 55-question temporal subset, cost 3.3 pts of evidence-turn recall@12 for
-+1 co-present question. Restricting the spread to anchor-relevant
-evidence keeps the promotion targeted; anchor-less ordering questions
++1 co-present question. Restricting the spread to anchor-relevant **or
+date-window-scoped, cluster-confirmed** evidence keeps the promotion targeted;
+anchor-less, window-less ordering questions
 ("how many days ago did I buy a smoker?") fall back to the pre-#2976
 behavior. The residual is documented on the arm (see the PR body).
 
@@ -311,11 +367,25 @@ no candidate is dated, which the caller treats as "leg inert".
             key = _bucket_key(best)
             bucket_counts[key] = bucket_counts.get(key, 0) + 1
 
-    # Anchors are required: without a single anchor-relevant candidate the
-    # leg has no deterministic targeting and must stay inert (never a
-    # spread-only promotion of arbitrary pool items).
+    # Targets are required: without a deterministic target the leg must stay
+    # inert (never a spread-only promotion of ARBITRARY pool items — the
+    # measured 3.3-pt cost of that on the 55-question temporal subset).
+    #
+    # #10538: a question may name its target as a DATE RANGE instead of
+    # comparison anchors ("what did I do between 2023-04-10 and 2023-04-20").
+    # The range is the question's own vocabulary — the same targeting property
+    # an anchor has — BUT it is only a target when the visible slots are
+    # session-CLUSTERED (the issue's own definition of the failure): after
+    # ``_apply_time_window`` every remaining hit is in-window, so without that
+    # condition the window selects the whole pool and the pick can displace a
+    # correct rank-(k-1) gold on a question that was never starved.
     if not relevant:
-        return []
+        if date_window and _session_clustered(candidates, head, limit):
+            relevant = {c["id"] for c in promotable
+                        if _in_date_window(c.get("session_date"),
+                                           date_window)}
+        if not relevant:
+            return []
 
     # ── phase 2: date/session spread over the ANCHOR-RELEVANT evidence ──
     # dict preserves insertion order → buckets are ordered by the semantic
@@ -360,8 +430,9 @@ def effective_promotion_budget(window: int, limit: int) -> int:
 
 
 def temporal_leg_empty_reason(*, dated: int, anchors: int, weight: float,
-                              budget: int = 1) -> str:
-    """The honest leg-trace reason for an EMPTY leg (the five causes).
+                              budget: int = 1,
+                              date_window: bool = False) -> str:
+    """The honest leg-trace reason for an EMPTY leg (the six causes).
 
     ``budget_disabled``        — the effective promotion budget is 0
     ``no_dated_candidates``    — the pool carries no dated hit at all
@@ -370,6 +441,12 @@ def temporal_leg_empty_reason(*, dated: int, anchors: int, weight: float,
     ``no_promotable_anchor_match`` — anchors exist but none matched an
         eligible candidate (no match at all, or every match already sits
         inside the excluded visible head and therefore needs no lift)
+    ``no_window_candidates``   — #10538: no anchors, a date window WAS
+        supplied, and it selected nothing (no in-window promotable hit, or
+        the visible slots were not session-clustered so the spread correctly
+        declined to fire). Distinct from ``no_anchors`` on purpose: the two
+        are different code paths and the ON/OFF reconstruction surface must
+        not launder a windowed miss as an anchor miss.
 
     ``budget`` defaults to 1 so a caller that does not track it keeps the
     pre-budget behavior.
@@ -378,6 +455,8 @@ def temporal_leg_empty_reason(*, dated: int, anchors: int, weight: float,
         return "budget_disabled"
     if dated <= 0:
         return "no_dated_candidates"
+    if anchors <= 0 and date_window:
+        return "no_window_candidates"
     if anchors <= 0:
         return "no_anchors"
     if weight <= 0:
@@ -394,6 +473,7 @@ def temporal_leg_fusion_order(
     bucket_cap: int = DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
     weight: float = DEFAULT_TEMPORAL_LEG_WEIGHT,
     placement: str = "tail",
+    date_window: tuple[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Fuse the temporal leg into the existing RRF — the window-tail wiring.
 
@@ -436,7 +516,7 @@ def temporal_leg_fusion_order(
     head_excl = 0 if placement == "head" else ceiling
     picks = temporal_leg_order(
         candidates, anchors=anchors, limit=limit, bucket_cap=bucket_cap,
-        head=head_excl)
+        head=head_excl, date_window=date_window)
     if not picks or weight <= 0:
         return order_ids, []
     if placement == "head":

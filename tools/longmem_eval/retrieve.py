@@ -403,8 +403,9 @@ class TimeConstraint:
     shape compares ("the dog bed for Max", "the training pads for Luna").
     Additive — the pre-#2976 consumers read only kind/start/end, so every
     existing shape is unchanged. An empty tuple means no comparison anchor
-    was recovered; the #2976 temporal leg REQUIRES a matched anchor and
-    stays inert in that case (it never promotes on date-spread alone).
+    was recovered; the #2976 temporal leg then promotes on session clustering
+    inside the resolved date window (#10538), and stays inert when there is
+    no window either — it never promotes on date-spread alone.
     """
     kind: str | None
     start: str | None = None
@@ -1978,11 +1979,23 @@ def retrieve_for_question(
         # stats block is the ON/OFF reconstruction surface — never report a
         # knob value that was silently clamped away).
         _tl_limit = effective_promotion_budget(effective_top_k, _tl_limit)
+        # #10538: a question that names a DATE RANGE instead of comparison
+        # anchors targets the pool by that range. Resolve the SAME inclusive
+        # ISO bounds the filter above resolved (one arithmetic, one
+        # resolver), then hand them to the leg so the spread runs inside the
+        # question's own window rather than not at all. ``ordering`` has no
+        # computable bound (`facet_window_bounds` returns ``None``) → ``None``
+        # → behaviour byte-identical to the pre-#10538 leg.
+        _tl_date_window = None
+        if tr_constraint.kind in ("interval", "recency"):
+            _tl_date_window = facet_window_bounds(
+                tr_constraint.kind, tr_constraint.start, tr_constraint.end,
+                None, anchor=question_date)
         _tl_order, _tl_picks = temporal_leg_fusion_order(
             annotated, anchors=tr_constraint.anchors,
             window=effective_top_k, limit=_tl_limit,
             bucket_cap=DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
-            weight=_tl_weight)
+            weight=_tl_weight, date_window=_tl_date_window)
         _tl_dated = sum(1 for h in annotated if h.get("session_date"))
         temporal_leg_stats = {
             "on": True,
@@ -2009,7 +2022,8 @@ def retrieve_for_question(
                              dated=_tl_dated,
                              anchors=len(tr_constraint.anchors),
                              weight=_tl_weight,
-                             budget=_tl_limit),
+                             budget=_tl_limit,
+                             date_window=bool(_tl_date_window)),
                          "count": 0})
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──
