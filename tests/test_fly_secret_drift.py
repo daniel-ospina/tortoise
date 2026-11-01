@@ -1885,9 +1885,8 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # ⛔ NOT `== attested_clients()` with the knob UNSET: that right-hand side is
     # always `{}`, which forbids the very activation `fly.toml [env]` documents
     # and cannot distinguish a reviewed attestation from a typo (#10472 review F1).
-    shipped_allowlist = _assert_allowlist_is_the_value_the_code_acts_on(
+    _assert_allowlist_is_the_value_the_code_acts_on(
         _fly_toml_env_value(attested), monkeypatch)
-    assert isinstance(shipped_allowlist, dict)  # shape pinned by the helper above
     for name in ("TORTOISE_AUDIT_DSN", "TORTOISE_LINK_INTENT_SECRET", "SENTRY_DSN"):
         assert declared[name] == f"gh-secret:{name}", declared[name]
         assert name in workflow_refs, f"deploy-hosted.yml never references secrets.{name}"
