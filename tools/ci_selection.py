@@ -1097,6 +1097,25 @@ SOURCE_PATTERNS = {
             # core-registered guard. Pinned by tests/test_ci_selection.py::
             # test_a_consent_token_only_diff_runs_the_bridge_guard.
             "tortoise/consent_token.py",
+            # #8218 review (finding 3): `tortoise/client_identity.py` OWNS the
+            # consent screen's identity decision (which name, if any, the page
+            # may print), and it matched no pattern — so a diff that touched
+            # ONLY the rule selected `core` and ran no consent test at all,
+            # while a diff to the render site that merely CALLS it
+            # (`tortoise/oauth.py`, above) ran two. That is the #2938/#3154/#4367
+            # silent-drop class on the module a follow-up like the CIMD
+            # brand-prefix residual would change. MEASURED before this entry:
+            # `--changed-files tortoise/client_identity.py --event pull_request`
+            # -> surfaces ['core'], full=false, with NEITHER
+            # `test_oauth_consent_client_identity_8218.py` NOR `test_oauth_mcp.py`
+            # selected. No CORE_ALSO entry: the count invariant is registered
+            # `api` + `core` (the `core` arm carries its AST-enumeration half),
+            # so the named-surface match still selects it through `api`, and
+            # `test_oauth_mcp.py` is an `api` registration (plus `slow_files`) —
+            # the `core` fallback adds nothing either suite needs. Pinned by
+            # tests/test_ci_selection.py::test_a_client_identity_only_diff_runs_
+            # the_consent_identity_guards.
+            "tortoise/client_identity.py",
             # #3496 put this entry here so a vendored-bundle bump would run the
             # consent page's CDN-version pin and the harness that executed the
             # bumped file. **#3524 §9 step 4 deleted both** (the page has no

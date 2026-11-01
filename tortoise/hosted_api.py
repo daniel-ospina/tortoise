@@ -42036,7 +42036,13 @@ async def oauth_authorize(request: Request):
             f"The consent bridge's signing key is unusable ({secret_problem}) — "
             "retry shortly."))
     html, nonce = consent_page_html(
-        client_name=client.get("client_name") or client["id"],
+        # #8218: `client_name` is the REGISTRY's stored name, and the identity
+        # decision is made inside `consent_page_html` (`client_identity`), so a
+        # DCR client that named itself "Claude" renders as an unverified app
+        # with its client_id as the handle. `client_id` is passed explicitly so
+        # the decision never depends on a request param.
+        client_id=client["id"],
+        client_name=client.get("client_name"),
         # #3443: `redirect_target` rides along with the raw params — the page
         # navigates THAT (deny included, which has no server round trip) and
         # posts `redirect_uri` back for validation as before.
