@@ -64,6 +64,42 @@ def _complete_configs(project: dict | str | None = None) -> dict:
     return configs
 
 
+#: Directories under `website/` that are build output, dependency trees or caches —
+#: never a place a deployment's source reads a binding from.
+_WEBSITE_SKIP_DIRS = frozenset({
+    "node_modules", "dist", "build", ".wrangler", ".cache", "coverage",
+    ".git", "__pycache__", ".turbo", ".next",
+})
+
+_WEBSITE_CORPUS: str | None = None
+
+
+def _website_corpus() -> str:
+    """Every text file under `website/` concatenated, for name-presence checks.
+
+    Whole-tree on purpose: both Pages projects are deployed from `website/`
+    (`premise-labs` from `website/functions/`, `tortoise-dashboard` from
+    `website/apps/dashboard/`), and a per-project root map would itself be an
+    unverified claim. ~300 files / ~6 MB measured, so this reads once per test
+    process.
+    """
+    global _WEBSITE_CORPUS
+    if _WEBSITE_CORPUS is None:
+        chunks: list[str] = []
+        for root, dirs, files in os.walk(REPO / "website"):
+            dirs[:] = [d for d in dirs if d not in _WEBSITE_SKIP_DIRS]
+            for fname in files:
+                path = Path(root) / fname
+                try:
+                    if path.stat().st_size > 2_000_000:
+                        continue
+                    chunks.append(path.read_text(encoding="utf-8", errors="ignore"))
+                except OSError:  # pragma: no cover - unreadable file
+                    continue
+        _WEBSITE_CORPUS = "\n".join(chunks)
+    return _WEBSITE_CORPUS
+
+
 def _without(configs: dict, env: str, btype: str, name: str) -> dict:
     """A copy of `configs` with one binding removed."""
     import copy
@@ -1030,6 +1066,52 @@ def test_the_classification_table_covers_every_binding() -> None:
     assert {p["project"] for p in manifest["projects"]} == set(EXPECTED_CLASSIFICATION), (
         "a project was added or removed without updating EXPECTED_CLASSIFICATION"
     )
+
+
+def test_every_Pages_env_var_is_read_by_Pages_code() -> None:
+    """An `env_vars` binding is a knob the DEPLOYMENT'S OWN CODE reads.
+
+    Declaring one for a Pages project whose code never mentions the name is not
+    a knob (#10472 review): a `recommended` absence then warns on every deploy of
+    that project FOREVER — "code has a default", when there is no such code
+    there — and an operator who follows the warning sets the value at the wrong
+    deployment, where nothing reads it. That is the exact inverse of the reason
+    the entry was added ("an undeclared knob is a capability the deployment
+    cannot exercise"): a MIS-declared knob is a capability an operator cannot
+    exercise, one layer up.
+
+    TORTOISE_OAUTH_ATTESTED_CLIENTS (#8218) was that entry. Its only reader is
+    `tortoise/client_identity.py`, which runs in the Fly-hosted authorization
+    server; `website/` never named it. Its home is `fly.toml [env]`, declared
+    `fly-toml-env` in `.github/scripts/fly-managed-secrets.txt` (pinned by
+    `tests/test_fly_secret_drift.py`).
+
+    Scoped to `env_vars`: D1/KV/R2 bindings are wired through `wrangler`/the
+    Pages API and some are consumed by the platform rather than by name.
+    """
+    corpus = _website_corpus()
+    # Non-vacuity: an empty/renamed `website/` tree must not pass by measuring
+    # nothing. The manifest's names are human-authored strings, so a corpus this
+    # small cannot contain them by accident either.
+    assert len(corpus) > 100_000, (
+        "the website/ source corpus came back nearly empty — the walker broke, "
+        "so this guard would pass vacuously")
+
+    checked = 0
+    unread: list[str] = []
+    for project in _manifest()["projects"]:
+        for spec in project["bindings"]:
+            if spec["type"] != "env_vars":
+                continue
+            checked += 1
+            if spec["name"] not in corpus:
+                unread.append(f"{project['project']}:{spec['name']}")
+    assert checked >= 10, f"only {checked} env_vars binding(s) examined — guard is not measuring"
+    assert not unread, (
+        "these env_vars bindings are declared for a Cloudflare Pages project whose "
+        "code never reads them — declare the knob on the deployment that runs the "
+        "reading code (fly.toml [env] + fly-managed-secrets.txt for the Fly-hosted "
+        "AS), or drop it: " + ", ".join(unread))
 
 
 def test_a_non_string_kind_is_a_ValueError_not_a_TypeError(tmp_path) -> None:

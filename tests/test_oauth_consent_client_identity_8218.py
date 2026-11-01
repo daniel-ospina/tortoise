@@ -309,14 +309,19 @@ def test_the_allowlist_is_keyed_by_client_id_not_by_the_claimed_name(
 # 4. The served PARAMS flag a stale page reads
 # ════════════════════════════════════════════════════════════════════════
 
-def test_the_page_carries_the_verification_flag_for_stale_consumers(
+def test_the_page_carries_the_verification_flag_for_a_future_consumer(
         api_client, tmp_path, monkeypatch):
     """`consent_page_html` sets `PARAMS.client_verified` beside `client_line`
     and NOTHING in the current inline script reads it — a dead field unless its
     contract is pinned, so it is pinned here rather than deleted (review P3
-    note): it is what a page served by a PREVIOUS deploy reads once
-    `client_line` is unknown to it, and it must never claim verification the
-    resolver did not grant.
+    note).
+
+    It is a FORWARD-compatibility field, and the earlier wording here claimed
+    backwards compatibility, which cannot hold: a page served by a PRE-#8218
+    deploy reads only `PARAMS.client_name` / `PARAMS.client_id`, so it can never
+    read this one. What it buys is a future page (or any consumer of the same
+    markup) taking the verdict directly instead of re-deriving it from the
+    sentence — and it must never claim verification the resolver did not grant.
 
     Asserts BOTH arms in one test on purpose: a flag hard-wired to "1" would
     pass a one-sided assertion while flattening every client into "verified".
@@ -336,7 +341,8 @@ def test_the_page_carries_the_verification_flag_for_stale_consumers(
     assert _params(unbacked_html)["client_verified"] == "", (
         "an unbacked client carried a truthy verification flag to the page")
     assert _params(backed_html)["client_verified"] == "1", (
-        "an allowlisted client must carry the flag a stale page reads")
+        "an allowlisted client must carry the verification flag a future consumer "
+        "takes instead of re-deriving the verdict")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

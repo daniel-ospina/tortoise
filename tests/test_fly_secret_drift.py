@@ -1677,7 +1677,41 @@ jobs:
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
+#: Reading `fly.toml [env]` needs a TOML parser; `module.fly_toml_env_keys`
+#: returns only NAMES (that is all the drift gate needs), so the VALUE of a
+#: declaration is read here.
+def _fly_toml_env_value(name: str) -> str:
+    import tomllib
+
+    env = tomllib.loads(REAL_FLY_TOML.read_text(encoding="utf-8"))["env"]
+    assert name in env, f"{name} is not assigned in fly.toml [env]"
+    value = env[name]
+    assert isinstance(value, str), f"{name} in fly.toml [env] is not a string"
+    return value
+
+
+def _client_identity_default(monkeypatch) -> dict[str, str]:
+    """What `tortoise/client_identity.py` resolves with the knob UNSET.
+
+    Loaded by path (not `import tortoise.client_identity`) so this infra suite
+    keeps its zero-tortoise-package import shape; the module itself is stdlib
+    only, so the direct load is sound.
+    """
+    import importlib.util
+
+    path = REPO_ROOT / "tortoise" / "client_identity.py"
+    spec = importlib.util.spec_from_file_location("client_identity_for_drift", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    # Registered BEFORE exec: `client_identity` declares a @dataclass, and
+    # dataclasses resolves `cls.__module__` through sys.modules during exec.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    monkeypatch.delenv(module.ATTESTED_CLIENTS_ENV, raising=False)
+    return module.attested_clients()
+
+
+def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatch):
     """End-to-end over the SHIPPED artifacts, not fixtures.
 
     Seeds the secret list from the real manifest's own names and runs the guard
@@ -1776,6 +1810,27 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt():
     for name in sorted(config_names):
         assert declared[name] == "fly-toml-env", declared[name]
         assert name in env_keys, f"{name} is not an assigned key in fly.toml [env]"
+    # ── #8218 / #10472 review: the consent screen's client-identity allowlist ──
+    # `TORTOISE_OAUTH_ATTESTED_CLIENTS` is an AUTHORIZATION-SERVER knob: its only
+    # reader is `tortoise/client_identity.py`, which runs inside THIS Fly app. It
+    # had been declared in `config/required-bindings.yml` — the CLOUDFLARE PAGES
+    # manifest, project `tortoise-dashboard` — where no Function imports it, so it
+    # was a `recommended` warning no deploy could ever satisfy, pointing an
+    # operator at a deployment that cannot read the value. Its home is here, and
+    # these assertions are what make the move load-bearing rather than cosmetic:
+    # declared `fly-toml-env`, the deploy applies the versioned value and
+    # `check-fly-machine-env.py` asserts the RUNNING machine carries it, while a
+    # Fly SECRET of that name (which would shadow `[env]`) fails this very gate.
+    attested = "TORTOISE_OAUTH_ATTESTED_CLIENTS"
+    assert declared[attested] == "fly-toml-env", declared[attested]
+    assert attested in env_keys, f"{attested} is not an assigned key in fly.toml [env]"
+    # ... and the DECLARED value is the code's own default, so the versioned
+    # config and `tortoise/client_identity.py` cannot silently diverge: attest
+    # nobody. A value added only here would attest a client the code never sees;
+    # a value added only in code would never reach the deployed machine.
+    assert json.loads(_fly_toml_env_value(attested)) == _client_identity_default(monkeypatch), (
+        "the versioned allowlist in fly.toml [env] diverges from the default "
+        "`tortoise/client_identity.py` resolves")
     for name in ("TORTOISE_AUDIT_DSN", "TORTOISE_LINK_INTENT_SECRET", "SENTRY_DSN"):
         assert declared[name] == f"gh-secret:{name}", declared[name]
         assert name in workflow_refs, f"deploy-hosted.yml never references secrets.{name}"
