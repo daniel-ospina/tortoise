@@ -3662,6 +3662,40 @@ def test_the_capstone_evidence_bundle_selects_core_not_tier1():
         assert r["full"] is False, (path, r)
 
 
+def test_the_8607_evidence_bundle_selects_core_not_tier1():
+    # PR #10495 review P2 (#10484): the W1b bundle is
+    # `docs/evidence/8607-w1b/{README.md,seed.py,measure.py,verify-revert.py}`,
+    # and `tests/test_8607_legacy_id_normaliser.py::
+    # test_each_evidence_script_puts_THE_REPO_ROOT_on_sys_path` reads each
+    # SCRIPT BY PATH and executes its own `sys.path.insert` line — the defect it
+    # pins (`parents[2]` -> `docs/`, an inert bootstrap) is a one-line edit to
+    # exactly these files.
+    #
+    # `docs/` is a flat NON_PYTHON_PREFIXES entry, so a bundle-only diff came
+    # back with `changed == []`, took the docs-only early return and selected
+    # tier-1 smoke — where the pin is NOT registered. A SOURCE_PATTERNS row
+    # cannot fix it (`_selection_relevant()` skips `core`); the remedy is a
+    # CORE_ALSO entry, as for the three sibling bundles above.
+    #
+    # Measured before the entry (2026-11-01, head `30f9b85ec`, `select()`
+    # in-process): `_sel(["docs/evidence/8607-w1b/seed.py"])` ->
+    # surfaces=[], full=False, test_8607_legacy_id_normaliser.py ABSENT.
+    # Mutation check: deleting the `"docs/evidence/8607-w1b/"` CORE_ALSO entry,
+    # or narrowing it to a subdirectory that matches nothing, fails assert 1 and
+    # assert 2 on every parametrisation — the defect the pin guards is a whole
+    # bundle, so all four files are covered, not only the scripts.
+    for path in (
+        "docs/evidence/8607-w1b/seed.py",
+        "docs/evidence/8607-w1b/measure.py",
+        "docs/evidence/8607-w1b/verify-revert.py",
+        "docs/evidence/8607-w1b/README.md",
+    ):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_8607_legacy_id_normaliser.py" in r["test_files"], (path, r)
+        assert r["full"] is False, (path, r)
+
+
 def test_the_capstone_census_pin_runs_on_a_main_py_change():
     # PR #9196 review P1: the OTHER direction of the same hole. The census pin
     # compares each hit's FILE and COUNT (the line ORDINAL is normalised away,
