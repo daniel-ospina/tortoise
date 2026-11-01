@@ -2722,6 +2722,63 @@ def test_the_real_e3_row_names_exactly_the_anchored_classes():
         assert named == anchored, (cell, sorted(named), sorted(anchored))
 
 
+def test_an_e3_row_spelling_the_document_class_as_source_is_accepted():
+    """#10525 review P1, MEASURED: the honest alternative was a CI FAILURE, not a choice.
+
+    The writer documents `_DERIVATION_REFERENCES_LABELS` as a set of RELATION SPELLINGS, not node
+    labels (`edges.py:716-744`: "the discriminator is the caller-supplied RELATION spelling … not
+    the target's node label"), and `edges.py:738-744` states that POST-D10 the `:Document` LABEL is
+    retired — the derivation is stored as `(Source)-[:references]->(Source)`. Holding E3's cells to
+    that flat set therefore REFUSED `Source` ("counts ['Source'] … an unanchored class in the
+    numerator") and DEMANDED `Document`, `0` nodes in the shipped census — settling the owner's
+    still-open #9736 ruling (*"the honest set may be `Point` + `Event` + `Source`-as-document … a
+    question for your ruling, not something a lane may settle by picking the one that parses"*) by
+    making one reading a red check.
+
+    Non-vacuity: on the pre-fix rule this row produced TWO failures — `counts ['Source'] among its
+    derived nodes` and `omits ['Document'] from its metric` — so `failures == []` reds on it.
+    """
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event` + `:Source`) carrying a "
+                  "version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` + `:Source` "
+                       "(the classes the model anchors: `Point` on the node, `Event` and the "
+                       "document derivation on their link; floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
+    )
+    assert failures == [], failures
+    # The accepted set is DERIVED, never typed: the pair is the writer's spelling plus the node
+    # label the writer's own comment names for the retired spelling.
+    groups = check.e3_required_class_groups()
+    assert frozenset({"Document", "Source"}) in groups, groups
+    assert frozenset({"Point"}) in groups and frozenset({"Event"}) in groups, groups
+    assert not any("Object" in group for group in groups), groups
+
+
+def test_an_e3_row_naming_neither_document_spelling_is_still_refused():
+    """The refusal that MATTERS survives: dropping the document class is #9736 one level down.
+
+    Accepting `Source` must not turn the omission arm into a pass. A cell naming `Point` + `Event`
+    and no document class at all still cannot reach a denominator that counts the document
+    derivation, and the message names BOTH spellings so a reader is not sent to the one the gate
+    happens to prefer.
+    """
+    row = {"line": "269", "metric": "", "denominator": ""}
+    cells = {"metric": check._classes_named("`Point` + `Event`"),
+             "denominator": check._classes_named("`Point` + `Event`")}
+    failures = check._e3_class_set_failures(row, cells, check.e3_required_class_groups())
+    assert len(failures) == 2, failures
+    for failure in failures:
+        assert "omits the document-derivation class" in failure, failure
+        assert "Document" in failure and "Source" in failure, failure
+
+
 def test_an_e3_numerator_narrower_than_its_denominator_is_refused():
     """THE MUTATION PROOF for #10525 P1, measured on the pre-fix code.
 

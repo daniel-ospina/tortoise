@@ -1203,8 +1203,14 @@ def point_composition_line(composition: dict | None) -> str:
         f"unanchored node in 'other' LOST a link or was minted by a writer that "
         f"never derives is the attribution #9736 still owns; the figure counts "
         f"it, the line does not excuse it. derivation figure (anchored / "
-        f"expected-to-derive): {figure}. The frozen 'all derived nodes' reading "
-        f"above is unchanged")
+        f"expected-to-derive): {figure}. The 'all derived nodes' figure above is "
+        f"the PRE-AMENDMENT reading and is retained for comparison: §10.1 "
+        f"re-registered E3's denominator to the classes the model anchors, so the "
+        f"REGISTERED reading no longer counts ':Object' and is narrower than the "
+        f"figure above (the E3 row note carries both). That amendment is a "
+        f"DISCLOSED revision of a frozen denominator — §10.1 states old and new, "
+        f"the authority and the reason — not a silent one, and whether it stands "
+        f"is #9736's ruling to give (owner-gated, still open)")
 
 
 def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
@@ -1258,10 +1264,13 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"run's own graph ({graph}, fixtures_hash {corpus_sha}). The "
         f"Source->Object identity link carries no sourceVersion BY "
         f"DESIGN (owner option A, #5199), so ':Object mention links' can "
-        f"never anchor — and the frozen denominator counts them anyway, "
-        f"so the = 1.000 bar is unreachable as registered (#9736: either "
-        f"the metric is re-registered or the model is reopened; a lane "
-        f"cannot pick). COMPOSITION of the {block.get('points', 0)} "
+        f"never anchor, and the UNAMENDED denominator counted them, which made "
+        f"the = 1.000 bar unreachable as registered. §10.1 re-registered E3's "
+        f"class set to the classes the model anchors, so the denominator a "
+        f"conforming row declares no longer counts ':Object' — a DISCLOSED reopen "
+        f"of a frozen denominator, whose ruling is #9736's to give (owner-gated, "
+        f"still open), which is why both readings are reported rather than one. "
+        f"COMPOSITION of the {block.get('points', 0)} "
         f"Point nodes the denominator also counts: "
         f"{block.get('turn_rows', 0)} mechanical turn rows + "
         f"{block.get('extraction_claims', 0)} extraction claims "
@@ -1295,10 +1304,10 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
         f"sitting outside it. "
         f"Whether an unanchored 'other' Point lost a link or "
         f"was minted by a writer that never derives is the attribution "
-        f"#9736 still owns. #9736 must choose between "
-        f"re-registering the metric and reopening the model, and this "
-        f"row reports BOTH readings so neither choice is made on a "
-        f"denominator whose composition was hidden")
+        f"#9736 still owns. #9736 holds BOTH the amendment §10.1 makes and "
+        f"the reopening of the model, and this row reports BOTH readings — the "
+        f"amended denominator and the pre-amendment one — so neither is read "
+        f"off a denominator whose composition was hidden")
 
 
 def _stage_calls(stats: dict, stage: str) -> int:

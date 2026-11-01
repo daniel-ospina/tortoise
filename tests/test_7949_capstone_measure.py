@@ -1504,6 +1504,52 @@ def test_the_e3_note_never_splices_this_runs_counts_into_a_historical_ratio():
     assert "3/11 = 0.272727" in custom, custom
 
 
+def test_the_e3_narration_never_claims_the_amended_denominator_counts_object():
+    """#10525 review P2, MEASURED: the instrument kept printing the claim this PR falsifies.
+
+    §10.1 re-registered E3's class set to `Point` + `Event` + `Document`, so the frozen denominator
+    NO LONGER counts `:Object`. The SET was moved (`DERIVED_LABELS` follows
+    `_DERIVATION_REFERENCES_LABELS`); the NARRATION of the set was not, and it is EMITTED —
+    `e3_row_note` into both copies of the log's E3 row, `point_composition_line` into the
+    `e3 point composition:` line. So every future scored run would have written, beside the amended
+    total, prose asserting the denominator counts `:Object` and that no choice had been made.
+
+    Three sentences carried it:
+
+    * ``the frozen denominator counts them anyway … a lane cannot pick`` (`e3_row_note`)
+    * ``#9736 must choose between re-registering the metric and reopening the model``
+      (`e3_row_note`) — the choice §10.1 makes, under #9736's own ruling
+    * ``The frozen 'all derived nodes' reading above is unchanged`` (`point_composition_line`) —
+      the reading MOVED, which is the whole point of the amendment
+
+    Non-vacuity: on the pre-fix probe every fragment in `falsified` is PRESENT in both rendered
+    strings, so each `not in` below reds; and ``grep`` over the two test files returned NOTHING for
+    any of them, which is why no pin caught it (the existing E3-note pins hold the SPLICE defect
+    and the two log copies, both orthogonal to these sentences).
+    """
+    graph, corpus_sha = "capstone_measure_test_1", "sha256:" + "e" * 64
+    note = measure.e3_row_note(composition=_shipped_composition(),
+                               e3_result=_e3_result(), graph=graph, corpus_sha=corpus_sha)
+    line = measure.point_composition_line(_shipped_composition())
+    falsified = ("counts them anyway", "a lane cannot pick", "must choose between",
+                 "frozen 'all derived nodes' reading")
+    for where, rendered in (("e3_row_note", note), ("point_composition_line", line)):
+        for fragment in falsified:
+            assert fragment not in rendered, (where, fragment, rendered)
+
+    # Both readings are still reported — that part of the narration was right and must survive —
+    # and the amendment is named where a reader can follow it, rather than asserted as a fact the
+    # owner has not ruled on.
+    assert "BOTH readings" in note, note
+    assert "§10.1" in note, note
+    assert "no longer count" in note, note
+    assert "PRE-AMENDMENT" in line, line
+    assert "§10.1" in line, line
+    assert "no longer counts" in line, line
+    # and the splice guard this note has always had stays green on the rewritten text
+    assert not re.search(r"\d+/\d+ = 1\.000000", note), note
+
+
 def test_the_shipped_log_states_the_e3_note_the_same_way_in_both_copies():
     """One note, two copies (the human `row E3 note:` line and the machine `note`).
 

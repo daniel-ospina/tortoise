@@ -223,9 +223,27 @@ DERIVATION_LABELS_NAME = "_DERIVATION_REFERENCES_LABELS"
 #: is not a *link* label — E3's numerator is ``Point`` plus every entry in the constant above.
 SELF_ANCHORED_CLASSES = ("Point",)
 
+#: The node LABEL each RETIRED relation spelling is actually stored on — the writer's own statement,
+#: not this gate's reading (#10525 review P1). ``edges.py:738-744``: *"POST-D10 the ``:Document``
+#: LABEL is retired (a document is a ``:Source``) … the stored edge is
+#: ``(Source)-[:references]->(Source)`` either way, while the alias is what still marks it a
+#: DERIVATION."* So a row may honestly spell the document-derivation class either way, and the
+#: shipped census proves the ambiguity costs a real count: ``Document`` is ``0`` nodes.
+#:
+#: ⛔ THIS TABLE EXISTS SO THE GATE DOES NOT SETTLE THE QUESTION (#9736 is OWNER-GATED). The ruling
+#: on #9736 is *"the honest set may be ``Point`` + ``Event`` + ``Source``-as-document … a question
+#: for your ruling, not something a lane may settle by picking the one that parses."* A rule that
+#: DEMANDED ``Document`` and REFUSED ``Source`` settled it — by turning the owner's open alternative
+#: into a CI failure. The gate now accepts either member, and decides only what is mechanically
+#: decidable: a cell that names NO document class at all still fails (that is #9736's own shape one
+#: level down), and a cell that names an unanchored class (``Object``) still fails.
+RETIRED_SPELLING_LABELS = {"Document": "Source"}
+
 #: Every node class E3's metric/denominator may NAME, keyed by the token that appears in prose. A
-#: class outside ``{Point} | labels`` is a class the model does not anchor for this criterion: naming
-#: it makes the row's own numerator unable to reach its denominator (#9736, #5199 option A).
+#: class outside ``{Point} | labels | the retired spellings' labels`` is a class the model does not
+#: anchor for this criterion: naming it makes the row's own numerator unable to reach its
+#: denominator (#9736, #5199 option A). ``Source`` is IN for the reason ``RETIRED_SPELLING_LABELS``
+#: states — it is the label the document derivation is stored on, not an extra class.
 NODE_CLASS_TOKENS = {
     "point": "Point",
     "event": "Event",
@@ -814,7 +832,12 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
        actually anchors; a denominator naming ``:Object`` counts a class the model leaves unanchored
        BY DESIGN (#5199 option A), which makes ``= 1.000`` unreachable as registered and reports a
        recorded decision as a defect (#9736). Omitting an anchored class fails symmetrically: the
-       numerator then cannot reach a denominator it must equal.
+       numerator then cannot reach a denominator it must equal. ⛔ WHICH SPELLING of the
+       document-derivation class is honest (``Document`` — the writer's retained relation alias,
+       ``0`` nodes in the shipped census — or ``Source``, the label it is stored on post-D10) is the
+       owner's #9736 ruling, NOT this gate's: both are accepted, see ``RETIRED_SPELLING_LABELS``.
+       The gate settles nothing here; it refuses a cell that names NEITHER, and a cell that names an
+       unanchored class.
 
     ```[]`` when the record cannot be read at all: ``check_machine_record`` owns that failure, and
     reporting it twice would make one defect look like two.
@@ -940,7 +963,7 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
     e3 = [r for r in rows if r["id"] == "E3"]
     if not e3:
         failures.append("no E3 row — its class set cannot be compared with the model")
-    anchored: frozenset[str] | None = None
+    groups: tuple[frozenset[str], ...] | None = None
     for row in e3:
         cells = {name: _classes_named(row[name]) for name in E3_CLASS_CELLS}
         named = cells["metric"] | cells["denominator"]
@@ -950,13 +973,13 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
                           "than written nodes (measured: docs/evidence/5087-hypothesis's E3 is a "
                           "session-arm receipt check) is not a class-set row")
             continue
-        if anchored is None:
-            anchored = frozenset(SELF_ANCHORED_CLASSES) | derivation_label_classes()
-        failures += _e3_class_set_failures(row, cells, anchored)
+        if groups is None:
+            groups = e3_required_class_groups()
+        failures += _e3_class_set_failures(row, cells, groups)
     return failures
 
 
-#: The two cells that must each name exactly the anchored class set (#9736). Both, not their union:
+#: The two cells that must each name every anchored class group (#9736). Both, not their union:
 #: a numerator narrower than its own denominator cannot reach it, which is the #9736 defect one
 #: level down, and a union test passes exactly that row.
 E3_CLASS_CELLS = ("metric", "denominator")
@@ -972,35 +995,73 @@ _E3_CELL_OMISSION_REASON = {
 }
 
 
+def e3_required_class_groups() -> tuple[frozenset[str], ...]:
+    """Each anchored class as the set of TOKENS a row may name it by (#10525 review P1).
+
+    One group per anchored class, and a cell must satisfy **every** group — which is what keeps the
+    per-cell (not union) discipline. A class whose relation spelling has a documented retired node
+    label (``Document`` → ``Source``) is ONE group with two members: the owner's #9736 ruling is
+    still open on which spelling is honest, so a row naming either satisfies it and the gate
+    settles nothing (see ``RETIRED_SPELLING_LABELS``). ``Point`` and ``Event`` are single-token
+    groups because both are real node labels in the census — there is no second way to spell them.
+    """
+    groups = [frozenset(SELF_ANCHORED_CLASSES)]
+    for spelling in sorted(derivation_label_classes()):
+        label = RETIRED_SPELLING_LABELS.get(spelling)
+        groups.append(frozenset({spelling, label}) if label else frozenset({spelling}))
+    return tuple(groups)
+
+
 def _e3_class_set_failures(row: dict[str, str], cells: dict[str, set[str]],
-                           anchored: frozenset[str]) -> list[str]:
+                           groups: tuple[frozenset[str], ...]) -> list[str]:
     """E3's class set, held to the model **cell by cell** (#10525 review P1).
 
-    The previous revision compared ``metric | denominator`` with ``anchored``. That made the
+    The previous revision compared ``metric | denominator`` with one flat set. That made the
     omission arm inert against the shape it was written for: each class only had to appear in ONE
     of the two cells, so a metric counting ``Point`` + ``Event`` against a denominator counting
     ``Point`` + ``Event`` + ``Document`` — #9736's own defect, one level down — produced no failure.
     Measured on the shipped row with only the metric cell mutated: baseline ``[]``, metric-only
     omission ``[]``. Every cell is now held to the anchored set on its own.
+
+    ⛔ THE CLASS IS THE UNIT, NOT THE SPELLING (#10525 review P1). The flat set was built from
+    ``_DERIVATION_REFERENCES_LABELS``, which the writer documents as a set of RELATION SPELLINGS
+    (``edges.py:716-744``), not node labels — and post-D10 ``Document`` is retired as a LABEL while
+    the derivation is stored as ``(Source)-[:references]->(Source)``. Holding cells to that flat set
+    therefore made ``Source`` (exactly the anchored ``references`` target) an UNANCHORED class to be
+    REFUSED, and made ``Document`` — ``0`` nodes in the shipped census — MANDATORY. Both are the
+    gate settling #9736's open question; with alias groups, whichever the owner rules is a row this
+    rule accepts.
     """
+    permitted = frozenset().union(*groups)
     failures: list[str] = []
-    counted = sorted((cells["metric"] | cells["denominator"]) - anchored)
+    counted = sorted((cells["metric"] | cells["denominator"]) - permitted)
     if counted:
         where = " and ".join(name for name in E3_CLASS_CELLS if cells[name] & set(counted))
         failures.append(
             f"E3 (line {row['line']}) counts {counted} among its derived nodes in its {where}, but "
-            f"the model anchors only {sorted(anchored)} ({DERIVATION_LABELS_NAME} + "
-            f"{list(SELF_ANCHORED_CLASSES)}) — an unanchored class in the numerator makes "
-            "`= 1.000` unreachable as registered, and reports a recorded decision (#5199 option A) "
-            "as a defect (#9736)"
+            f"the model anchors only {sorted(permitted)} ({DERIVATION_LABELS_NAME} + "
+            f"{list(SELF_ANCHORED_CLASSES)}; a retired spelling's node label counts as that class) "
+            "— an unanchored class in the numerator makes `= 1.000` unreachable as registered, and "
+            "reports a recorded decision (#5199 option A) as a defect (#9736)"
         )
     for name in E3_CLASS_CELLS:
-        missing = sorted(anchored - cells[name])
-        if missing:
-            failures.append(
-                f"E3 (line {row['line']}) omits {missing} from its {name}, but the model anchors "
-                f"{sorted(anchored)} — {_E3_CELL_OMISSION_REASON[name]}"
-            )
+        for group in groups:
+            if cells[name] & group:
+                continue
+            reason = _E3_CELL_OMISSION_REASON[name]
+            if len(group) == 1:
+                missing = sorted(group)
+                failures.append(
+                    f"E3 (line {row['line']}) omits {missing} from its {name}, but the model "
+                    f"anchors {sorted(permitted)} — {reason}"
+                )
+            else:
+                spellings = " nor ".join(f"`{member}`" for member in sorted(group))
+                failures.append(
+                    f"E3 (line {row['line']}) omits the document-derivation class from its "
+                    f"{name}, naming neither {spellings} — the model anchors that class, and "
+                    f"{reason}"
+                )
     return failures
 
 
