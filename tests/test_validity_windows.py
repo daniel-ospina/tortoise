@@ -2417,7 +2417,6 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
     # `tests/test_7951_update_point_outbox.py` uses). This test measures what
     # the DOOR commits to (its own ``_emit_event`` call), which is the surface
     # the defect lives on; it does not claim to cover the guard.
-    import json
     _journal_dir = tempfile.mkdtemp(prefix="tortoise_validity_journal_")
     _journal_path = os.path.join(_journal_dir, "events.jsonl")
     sdk._event_log_path = _journal_path
