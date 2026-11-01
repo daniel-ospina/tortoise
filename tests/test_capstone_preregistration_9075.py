@@ -2696,6 +2696,36 @@ def test_a_conditional_step_without_a_record_block_fails():
     assert any("carries no steps block" in f for f in failures), failures
 
 
+# The RECORD's producer is another lane, so its SHAPE is untrusted input — the module's own
+# contract (`_mapping`: "never a bare dict()/.get() crash"). A truthy wrong type on the RECORD
+# half used to raise `TypeError` out of `check_step_partition` ("'int' object is not iterable"),
+# past `run()` (which catches nothing) to `main()` (which catches only CheckError) — escaping as
+# a traceback with exit **1**, the code this tool reserves for FINDINGS. The pins half already
+# refused the same shape with CheckError (exit 2); these two arms hold the record half to it.
+# Both are `raise`-based, so they fail on the pre-fix code as TypeError, not as a mismatch.
+@pytest.mark.parametrize("field, value", [("unconditional", 5), ("conditional", 1)])
+def test_a_wrong_typed_record_steps_field_is_a_parse_error_not_a_crash(field, value):
+    rec = _record_with_steps()
+    rec["steps"][field] = value
+    with pytest.raises(check.CheckError) as excinfo:
+        check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert field in str(excinfo.value), excinfo.value
+    assert "expected a list" in str(excinfo.value), excinfo.value
+
+
+def test_the_wrong_typed_record_field_exits_2_and_says_why(tmp_path, capsys):
+    """End to end: the CLI must report a PARSE error (exit 2), not a traceback with exit 1.
+
+    This is the property the finding is about — the exit CODE is the tool's contract, and an
+    uncaught exception borrows the one reserved for "the table has findings".
+    """
+    directory = _materialise(tmp_path, _record_with_steps(unconditional=5))
+    code = check.main(["--dir", str(directory), "--no-git", "--no-corpus", "--json"])
+    out = capsys.readouterr()
+    assert code == 2, out.err
+    body = json.loads(out.out.strip().splitlines()[-1])
+    assert body["ok"] is False
+    assert "unconditional" in body["error"]
 
 
 # ── the steps pin's AUTHORING ORDER (#10215) ─────────────────────────────────

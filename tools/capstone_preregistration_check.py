@@ -705,7 +705,10 @@ def check_step_partition(pins: dict, record: dict) -> list[str]:
         neither dropped nor listed twice;
       * a conditional entry carries its condition, the idle evidence a run must show, and the issue
         that measured it — an entry without them is a waiver with no content;
-      * the document's pins fence and the machine record agree, so neither can rot alone.
+      * the document's pins fence and the machine record agree, so neither can rot alone;
+      * a wrong-typed field on EITHER side is a parse error (``CheckError`` → exit 2), never a
+        crash — an uncaught exception also exits 1, which is the code this tool reserves for
+        FINDINGS, so a malformed record would read as "the table has findings".
     """
     failures: list[str] = []
     record_steps = _mapping(record, "steps", MACHINE_RECORD)
@@ -784,10 +787,16 @@ def check_step_partition(pins: dict, record: dict) -> list[str]:
         )
         return failures
 
+    # The RECORD half is untrusted input exactly like the pins half (its producer is another
+    # lane), so it is read through the same readers rather than with a bare `.get()`. A
+    # truthy wrong type (`"unconditional": 5`, `"conditional": 1`) used to raise TypeError
+    # out of here — through `run()`, which catches nothing, to `main()`, which catches only
+    # CheckError — escaping as a traceback with exit 1, the code this tool reserves for
+    # FINDINGS. A wrong-typed field is a PARSE error (exit 2), which is what `_list` raises.
     _cmp_steps("steps.unconditional", declared,
-               [str(s) for s in (record_steps.get("unconditional") or [])])
+               [str(s) for s in _list(record_steps, "unconditional", MACHINE_RECORD)])
     record_conditional: dict[str, dict] = {}
-    for entry in record_steps.get("conditional") or []:
+    for entry in _list(record_steps, "conditional", MACHINE_RECORD):
         if isinstance(entry, dict) and str(entry.get("step") or ""):
             record_conditional[str(entry["step"])] = entry
     if sorted(record_conditional) != sorted(entries):
