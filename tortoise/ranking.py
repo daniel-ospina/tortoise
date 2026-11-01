@@ -72,6 +72,36 @@ def _w4_flag_on() -> bool:
         return False
 
 
+# #10137: whether the belief layer INFORMED the order a query returned.
+#
+# The read path ships each hit's ``ep`` block (``confidence_mean``, ``has_ep``,
+# ``measured``, ``baseline``) on EVERY ordering, but only ``order_by="graph"``
+# and ``order_by="confidence"`` ever READ the posterior. On the default
+# (``order_by="relevance"``) path the order is RRF-only, so a hit presenting
+# ``confidence_mean: 0.91`` says nothing about why it ranked where it did —
+# and a consumer (or a benchmark report) reading those numbers as evidence
+# that belief propagation participated is reading a layer that was never
+# consulted. These labels make that distinction machine-readable, which is the
+# only honest way to ship a belief block beside an order it did not produce.
+BELIEF_ORDER_CONSULTED = "consulted"
+BELIEF_ORDER_NOT_CONSULTED = "not_consulted"
+
+
+def annotate_belief_order(rows: list[dict], *, consulted: bool) -> list[dict]:
+    """Label each hit's ``ep`` block with whether the ORDER read the belief.
+
+    Additive and in-place (the read path builds these dicts per call): only a
+    row that already carries an ``ep`` block is labelled, so a surface that
+    ships no belief ships no claim about one. Idempotent.
+    """
+    value = BELIEF_ORDER_CONSULTED if consulted else BELIEF_ORDER_NOT_CONSULTED
+    for row in rows:
+        ep = row.get("ep")
+        if isinstance(ep, dict):
+            ep["informed_order"] = value
+    return rows
+
+
 # Default signal weights — must sum to 1.0.
 DEFAULT_SIMILARITY_WEIGHT = 0.5
 DEFAULT_GRAPH_BOOST_WEIGHT = 0.35

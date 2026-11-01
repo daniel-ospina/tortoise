@@ -5740,6 +5740,7 @@ surfaces:
   - test_fanout_cap.py  # #5010: the adopted per-entity fan-out cap (STORAGE-ARCHITECTURE §11.5) — the hub expansion is bounded per entity, the value has one home, a caller cannot raise it (tortoise/subgraph.py is the read-path expansion; tortoise/fanout.py is the shared declaration)
   - test_subgraph_render.py  # #3011: frozen serializer — block order, provenance, confidence, word budget (hermetic)
   - test_recall_state.py
+  - test_belief_order_10137.py  # #10137: the belief layer's contribution to a QUERY's order — ep.informed_order is consulted only where the order read the posterior
   - test_source_credibility.py
   - test_source_inheritance_own.py
   - test_supersede_edges.py
@@ -8395,6 +8396,7 @@ durations:
   test_capabilities_endpoint.py: 4.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.2
   test_longmem_reader_pinning.py: 6.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.1
   test_recall_state.py: 6.0  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.8
+  test_belief_order_10137.py: 11.0  # #10137: three live-graph cases (default/graph/confidence ordering) measured at 10.3-11.0 s on a private lane
   test_battery_corpus_v11.py: 11.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.3
   test_tenancy_spine.py: 3.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.0
   test_transport_wait_bound.py: 9.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.1

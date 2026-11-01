@@ -36214,7 +36214,13 @@ class TortoiseSDK:
                 ranked = w4_enrich_items(proj, ranked)
             if _claim_class_applies and _claim_classes_ok:
                 ranked = _with_claim_class(ranked, claim_classes)
-            return _with_read_status(ranked)
+            from .ranking import annotate_belief_order as _belief_label
+            # P2 (review): the label describes the READ, not the branch name — a
+            # caller-supplied projection-less ranker fetches no signals, so the
+            # order came from the rows' embedded fields and belief was not read.
+            return _with_read_status(_belief_label(
+                ranked, consulted=getattr(ranker, "projection", None) is not None))
+        belief_consulted = False
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
             # that ep.confidence_mean carries. GraphRanker reads the
@@ -36231,8 +36237,13 @@ class TortoiseSDK:
                 key=lambda r: signals.get(r.id, {}).get("confidence", 0.5),
                 reverse=True,
             )
+            belief_consulted = getattr(ranker, "projection", None) is not None
         # Default: RRF relevance order (already in fused order)
 
+        # #10137: `order_by="confidence"` above sorts on the belief mean, so it
+        # CONSULTED the layer; the relevance order below never reads it. The
+        # hits carry an `ep` block either way, so the distinction has to be
+        # stated — see `annotate_belief_order`.
         out = [r.to_dict() for r in results[:limit]]
         # W4 (#2101): additive why-layer enrichment (flag-gated) — see the
         # order_by=graph branch above for the contract.
@@ -36241,7 +36252,8 @@ class TortoiseSDK:
             out = w4_enrich_items(proj, out)
         if _claim_class_applies and _claim_classes_ok:
             out = _with_claim_class(out, claim_classes)
-        return _with_read_status(out)
+        from .ranking import annotate_belief_order as _belief_label
+        return _with_read_status(_belief_label(out, consulted=belief_consulted))
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
 
