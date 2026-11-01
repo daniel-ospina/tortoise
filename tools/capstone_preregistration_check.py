@@ -812,17 +812,45 @@ def _classes_named(cell: str) -> set[str]:
     NOUN satisfied the rule: E3's own wording — *"``Point`` + ``Event`` … that are the SOURCE of at
     least one ``extractedFrom`` relationship"* — yielded ``{'Point', 'Event', 'Source'}`` and PASSED,
     i.e. a cell naming NO document class at all was accepted by the very arm written to refuse it,
-    contradicting §7 item 6 ("a cell that names NO document class at all still fails"). A Cypher node
+    against §7 item 6's *"a denominator that omits a class the model does anchor fails too"* (quoted
+    here as that rule states it; the document-class requirement is this arm's own derivation from it,
+    not a sentence the registration contains). A Cypher node
     label is case-sensitive, so ``Point``/``Event``/``Document``/``Object``/``Source`` are the class
     spellings and ``SOURCE``/``source`` are prose. The canonical name is the TOKEN's value
     (``NODE_CLASS_TOKENS``), which is exactly the label spelling, so it is matched rather than the
     lower-case key; the plural stays tolerated (``Points`` names the class too).
+
+    ⛔ CASE ALONE MAY NOT BUY A SKIP (#10525 review round 3, P2 — MEASURED). Making the match
+    case-sensitive opened the inverse hole: a row whose cells are spelled ``point + object + event``
+    names no canonical class, so the caller's "names no graph class at all" arm SKIPPED it — and on
+    the previous matcher that same row was REFUSED for naming ``Object``. A lower-cased row is a
+    SPELLING error, never a criterion measured over something else, which is why
+    ``_class_words_mentioned`` exists: the caller asks it before treating an empty ``named`` set as
+    "not a class-set row".
     """
     plain = _plain(cell)
     return {
         canonical
         for token, canonical in NODE_CLASS_TOKENS.items()
         if re.search(rf"(?<![\w]){re.escape(canonical)}s?(?![\w])", plain)
+    }
+
+
+def _class_words_mentioned(cell: str) -> set[str]:
+    """Which class WORDS a cell mentions at all, IGNORING case — the spelling-error detector.
+
+    It answers one question only: is this cell talking about graph classes but spelling them in
+    prose case? A cell that mentions nothing (``docs/evidence/5087-hypothesis``'s E3 is a session-arm
+    receipt check) is a genuine non-class row and is declared skipped; a cell that mentions a class
+    word in prose case is a spelling error and FAILS, so lower-casing a row can never opt it out of
+    the arm. The returned values are the CANONICAL labels the prose tokens point at, so the failure
+    message can say what the row meant.
+    """
+    plain = _plain(cell).casefold()
+    return {
+        canonical
+        for token, canonical in NODE_CLASS_TOKENS.items()
+        if re.search(rf"(?<![\w]){token}s?(?![\w])", plain)
     }
 
 
@@ -973,23 +1001,44 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
 
     e3 = [r for r in rows if r["id"] == "E3"]
     if not e3:
-        # ⛔ SCOPED LIKE EVERY OTHER ARM IN THIS FUNCTION (#10525 review round 2, P3). It was
-        # unconditional, so a bundle that declares neither the visibility schema nor an E3
-        # criterion was RED-ed for a rule it never opted into — the sibling visibility arm below
-        # declares its skip instead. A skip that is not declared is the silent-green shape this
-        # tool refuses; a failure on a subject the bundle never raised is the mirror defect, and
-        # the "names no graph class at all" note further down is the declared-skip precedent.
-        if declares_visibility:
-            failures.append("no E3 row — its class set cannot be compared with the model")
+        # ⛔ SCOPED ON THE RIGHT SUBJECT (#10525 review round 2 P3, corrected round 3 P3 — MEASURED).
+        # The existence failure was unconditional, then gated on `declares_visibility` — a field of
+        # the RECORD's #9738 schema — while its subject is the DOCUMENT's E3 row. That reproduced the
+        # same false red one level down: a record that adopts the visibility schema but raises no E3
+        # criterion was refused for a criterion it never registered. The subject is a DISAGREEMENT
+        # between the two artifacts, so it fails only when the DOCUMENT registers E3 and the record
+        # does not; a bundle that registers neither is DECLARED skipped (an undeclared skip is the
+        # silent-green shape this tool refuses, and a failure on a subject the bundle never raised is
+        # its mirror).
+        document_registers_e3 = any(r["id"] == "E3" for r in rows)
+        if document_registers_e3:
+            failures.append(
+                "no E3 row — the DOCUMENT registers an E3 criterion but the machine record carries "
+                "none, so the class set it fixes cannot be compared with the model"
+            )
         else:
-            _note(scopes, "the record carries no E3 criterion, so its class set cannot be "
-                          "compared with the model — the #9736 arm is not asked of this bundle"
-                          " (the same scope rule as the #9738 arm above)")
+            _note(scopes, "no E3 criterion is registered by this bundle, so its class set cannot "
+                          "be compared with the model — the #9736 arm is not asked of it (the same "
+                          "declared-skip rule as the #9738 arm above)")
     groups: tuple[frozenset[str], ...] | None = None
     for row in e3:
         cells = {name: _classes_named(row[name]) for name in E3_CLASS_CELLS}
         named = cells["metric"] | cells["denominator"]
         if not named:
+            mentioned = (_class_words_mentioned(row["metric"])
+                         | _class_words_mentioned(row["denominator"]))
+            if mentioned:
+                # ⛔ A LOWER-CASED ROW IS A SPELLING ERROR, NOT A NON-CLASS ROW (#10525 review
+                # round 3 P2 — MEASURED). Treating it as "measured over something else" skipped the
+                # arm for a row that names `Object`, the one class the arm exists to refuse.
+                failures.append(
+                    f"E3 (line {row['line']}) mentions {', '.join(sorted(mentioned))} but names no "
+                    "graph class by its LABEL spelling — a Cypher node label is case-sensitive "
+                    "(`Point`/`Event`/`Document`/`Object`/`Source`), and prose case is a SPELLING "
+                    "error, not a criterion measured over something other than written nodes. "
+                    "Spell the label, or declare a criterion that is not a class-set row"
+                )
+                continue
             _note(scopes, f"E3 (line {row['line']}) names no graph class at all, so the anchor "
                           "model does not apply to it — a criterion measured over something other "
                           "than written nodes (measured: docs/evidence/5087-hypothesis's E3 is a "

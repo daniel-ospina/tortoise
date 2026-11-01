@@ -353,7 +353,7 @@ than a bar. **No threshold moved and the narrowing does not rescue the bar** —
 338 `Point`s are turn rows or operator Points and can never carry an `extractedFrom` link, §10.1)
 stays #9736's to attribute and is disclosed there, not absorbed. **#9736 remains OPEN and
 owner-gated**: this amendment is the reopen with the evidence in front of the owner, `Refs` and not
-`Closes`, and both readings are stated in §10.1's table (`148/433` as registered, `148/383` under
+`Closes`, and both readings are stated in §10.1 (and in §9's provenance table) (`148/433` as registered, `148/383` under
 the amended class set). The probe's own composition line reports the REGISTERED set it scores — it
 does not re-emit the pre-amendment figure as if it were this run's — and it says so.
 

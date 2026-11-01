@@ -1560,7 +1560,7 @@ def test_the_e3_narration_never_claims_the_amended_denominator_counts_object():
     assert "narrower than the figure above" not in line, line
     assert "PRE-AMENDMENT reading and is retained" not in line, line
     assert "this row reports BOTH readings" not in note, note
-    assert "which §10.1's table states" in line, line
+    assert "which §9's provenance table states" in line, line
     assert "§10.1 reports BOTH readings" in note, note
 
 

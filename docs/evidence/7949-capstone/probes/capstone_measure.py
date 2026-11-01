@@ -1207,7 +1207,7 @@ def point_composition_line(composition: dict | None) -> str:
         f"the REGISTERED reading, not the PRE-AMENDMENT one: §10.1 re-registered "
         f"E3's denominator to the classes the model anchors, so this figure no "
         f"longer counts ':Object' and is NARROWER than the pre-amendment reading, "
-        f"which §10.1's table states and this line does not recompute (the census "
+        f"which §9's provenance table states (and §10.1 restates) and this line does not recompute (the census "
         f"that produced the old figure is retained in HISTORY, so it is checkable "
         f"from the commit rather than re-emitted here as if it were this run's). "
         f"That amendment is a "

@@ -2779,14 +2779,51 @@ def test_an_e3_row_naming_neither_document_spelling_is_still_refused():
         assert "Document" in failure and "Source" in failure, failure
 
 
+def test_an_e3_row_spelled_in_prose_case_is_REFUSED_not_skipped():
+    """#10525 review ROUND 3, P2 — MEASURED: case sensitivity alone bought a SKIP.
+
+    Making the class matcher case-sensitive closed the prose-noun false accept and opened the inverse
+    hole: a row whose cells are spelled `point + object + event` names no canonical class, so the
+    caller's "names no graph class at all" arm skipped it — and the PRE-FIX matcher REFUSED that same
+    row for naming `Object`. A lower-cased row is a SPELLING error, never a criterion measured over
+    something else, so it must FAIL.
+
+    Non-vacuity: on the round-2 code (case-sensitive `_classes_named`, no
+    `_class_words_mentioned`) this row produced `failures == []` plus the "names no graph class"
+    scope note, so the `len(failures) >= 1` assertion below reds on it.
+    """
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (point + object + event) carrying a version "
+                  "anchor",
+        "denominator": "**all** derived nodes written by the run — point + object + event "
+                       "(floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "270",
+    })
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text()), scopes
+    )
+    assert len(failures) >= 1, (failures, scopes)
+    assert any("LABEL spelling" in f for f in failures), failures
+    assert all("names no graph class at all" not in s for s in scopes), scopes
+    # and the genuine non-class row is still a DECLARED skip, not a failure
+    assert check._class_words_mentioned(
+        "session-arms whose receipt proves the arm's S3 state") == set()
+
+
 def test_an_e3_row_naming_the_NOUN_source_instead_of_the_class_is_refused():
     """#10525 review ROUND 2, P2 — MEASURED: the ordinary English noun satisfied the arm.
 
     The class matcher casefolded the cell and matched the lower-case token, so E3's own wording —
     *"``Point`` + ``Event`` … that are the SOURCE of at least one ``extractedFrom`` relationship"*
     — named `{Point, Event, Source}` and PASSED, i.e. a cell naming NO document class at all was
-    accepted by the very arm written to refuse it, against §7 item 6 ("a cell that names NO
-    document class at all still fails"). A Cypher node label is case-sensitive: the class is
+    accepted by the very arm written to refuse it, against §7 item 6's *"a denominator that omits a
+    class the model does anchor fails too"* (quoted as that rule states it — the document-class
+    requirement is this arm's own derivation from it, not a sentence the registration contains).
+    A Cypher node label is case-sensitive: the class is
     spelled `Source`/`Document`, the prose noun is `source`/`SOURCE` and names nothing.
 
     Non-vacuity: on the pre-fix matcher both spellings yielded `Source` in the named set and
