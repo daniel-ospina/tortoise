@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise.ingest import _PROVIDERS
 from tools.longmem_eval.reader import (
     _ABSTRACTION_FRAGMENT,
     _AGGREGATION_FRAGMENT,
@@ -129,9 +130,14 @@ def test_named_provider_missing_key_still_raises(monkeypatch):
 
 
 def test_no_keys_still_fail_closed(monkeypatch):
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY",
-              "OPENAI_API_KEY", "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    # #10539 lane: derived from the REGISTRY, not a hardcoded four. `venice`
+    # (added by #10474) is a fifth provider, so the literal list left
+    # VENICE_API_KEY set on a venice-configured box and this test reddened
+    # locally while passing in keyless CI — a stale-list artifact, not a
+    # behaviour change. Sourcing the names from `_PROVIDERS` makes the test
+    # cannot-go-stale when a sixth provider lands.
+    for provider in _PROVIDERS:
+        monkeypatch.delenv(_PROVIDERS[provider][1], raising=False)
     with pytest.raises(RuntimeError):
         build_reader()
 
