@@ -413,7 +413,17 @@ class TestAuthorizePage:
             "scope": "mcp", "resource": "", "attempt_key": "ak-1"})
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
-        assert "test-connector" in r.text  # client name embedded
+        # #8218: `client_name` is DCR metadata — self-asserted, and RFC 7591
+        # warns a rogue client can borrow a legitimate name — so the page no
+        # longer prints it. The registered name must be ABSENT and the page
+        # presents the client_id (the only handle nothing can forge) instead.
+        # The renderer contract is `tortoise/client_identity.py`; the count-based
+        # invariant over every identity source lives in
+        # tests/test_oauth_consent_client_identity_8218.py.
+        assert "test-connector" not in r.text, (
+            "#8218: an unbacked client's self-asserted name reached the page")
+        assert reg["client_id"] in r.text
+        assert "An unverified app (" in r.text
         assert '"/oauth/consent"' in r.text
         # #1701 regression: the template was written with {{ }} (a .format()
         # escape) but is served via .replace() — double braces reached the
@@ -452,7 +462,18 @@ class TestAuthorizePage:
         payload = r.text.split("const PARAMS = ", 1)[1].split(";\n", 1)[0]
         parsed = _json.loads(payload.encode().decode("unicode_escape"))
         assert parsed["state"] == evil_state
-        assert parsed["client_name"] == reg["client_name"]
+        # #8218: `PARAMS.client_name` is now the REGISTRY-derived display name,
+        # empty for a client nothing attests — so the breakout payload cannot
+        # reach the page as a name at all, which is STRONGER than escaping it.
+        # The escaping/substitution half of this assertion set is still proved
+        # by `state` above (a client-supplied value that must ride verbatim
+        # through `_json_for_script`, #6001/#1264) — so this is an inversion of
+        # the carrier, not a deletion of the guard. Same treatment as
+        # tests/test_oauth_consent_page_step4.py:1730.
+        assert parsed["client_name"] == "", (
+            "#8218: an unbacked client's self-asserted name reached the page: "
+            f"{parsed['client_name']!r}")
+        assert reg["client_id"] in r.text
         # CSP is served with the nonce used on the inline script tag. There is
         # exactly ONE script tag now (the supabase-js CDN tag is gone with the
         # inline client), and no third-party script origin is permitted.

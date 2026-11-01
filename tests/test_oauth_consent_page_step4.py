@@ -445,7 +445,11 @@ def test_a_request_carrying_an_attempt_key_renders_the_page(api_client):
     r = tc.get("/oauth/authorize", params=params, follow_redirects=False)
     assert r.status_code == 200, r.text
     assert "text/html" in r.headers["content-type"]
-    assert "test-connector" in r.text
+    # #8218: the page is FOR this client, and the handle that proves it is the
+    # client_id — the registered NAME no longer appears, because a DCR client is
+    # unbacked until an operator attests it. Asserting the name here would be
+    # asserting the defect.
+    assert params["client_id"] in r.text
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -673,6 +677,10 @@ function snap() {
     orgOptions: sel.childNodes.map((o) => ({ value: o.value, text: o.textContent })),
     resourceLine: els['resource-line'].textContent,
     scopeLine: els['scope-line'].textContent,
+    // #8218: the client identity the page actually PRINTS — read from the DOM
+    // node a visitor reads, so an identity assertion cannot pass by asserting on
+    // an internal dict while the rendered sentence says something else.
+    clientLine: els['client-line'].textContent,
   };
 }
 
@@ -1515,7 +1523,7 @@ def _render_page(*, redirect_uri: str = _RAW_REDIRECT,
     }
     if redirect_target is not None:
         params["redirect_target"] = redirect_target
-    html = consent_page_html(client_name="c-3443", params=params,
+    html = consent_page_html(client_name="c-3443", client_id="c-3443", params=params,
                              raw_query="client_id=c-3443&attempt_key=ak-3443&state=st-1",
                              app_origin=APP_ORIGIN)
     return html[0] if isinstance(html, tuple) else html
@@ -1692,7 +1700,7 @@ def test_the_page_declares_exactly_the_placeholders_the_renderer_fills():
         f"template placeholders {sorted(declared)} != renderer's "
         f"{sorted(_PLACEHOLDERS)}")
     html, nonce = consent_page_html(
-        client_name="c", params={"state": "s"}, raw_query="state=s",
+        client_name="c", client_id="c", params={"state": "s"}, raw_query="state=s",
         app_origin=APP_ORIGIN)
     assert nonce in html
     leftover = set(re.findall(r"__[A-Z][A-Z0-9_]*__", html))
@@ -1703,7 +1711,15 @@ def test_the_page_declares_exactly_the_placeholders_the_renderer_fills():
 def test_a_param_carrying_a_placeholder_token_is_inserted_verbatim(token, api_client):
     """#6001's defect class, re-pinned for the new placeholder set: substitution
     is a SINGLE pass, so a value containing a token is inserted rather than
-    re-expanded (which broke the JSON literal and left an inert page)."""
+    re-expanded (which broke the JSON literal and left an inert page).
+
+    #8218 moved the SECOND carrier of this assertion. It used to be
+    ``client_name`` — a value the CLIENT supplied, which is exactly what must
+    not reach the page any more, so the assertion is not deleted but INVERTED:
+    the token the client put in its registered name appears nowhere, and the
+    attempt-key half of the #6001 defect (a client-supplied value that must ride
+    verbatim) is still proved by ``state`` via the page's own POST below.
+    """
     _r, html = _rendered_page(api_client, state=token, client={"client_name": token})
     assert html.count('nonce="') == 1
     payload = html.split("const PARAMS = ", 1)[1].split(";\n", 1)[0]
@@ -1711,7 +1727,9 @@ def test_a_param_carrying_a_placeholder_token_is_inserted_verbatim(token, api_cl
     assert parsed["state"] == token, (
         f"the token in `state` was re-expanded ({parsed['state']!r}) instead of "
         "being inserted verbatim")
-    assert parsed["client_name"] == token, parsed["client_name"]
+    assert parsed["client_name"] == "", (
+        "#8218: an unbacked client's self-asserted name must not reach the page "
+        f"at all, got {parsed['client_name']!r}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
