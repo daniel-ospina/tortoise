@@ -569,6 +569,43 @@ def test_a_backdated_edit_does_not_beat_the_touch_bound(tmp_path, monkeypatch):
     assert any("not an ancestor of" in f for f in failures), failures
 
 
+def test_a_backdated_readd_cannot_choose_the_pair(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-10 P1): `%ct` may not decide WHICH add-commit is the pair.
+
+    `_added_commits` is sorted by epoch, so `log_adds[0]` — the representative — was chosen by the
+    one field this module has ruled attacker-controlled. A delete-and-re-add BACKDATED to look newer
+    became the representative, made the pair look ATOMIC, and a disclosure waived a tree whose other
+    add-commit is a strict ANCESTOR of the registration — the condition the docstring calls a HARD
+    FAIL that no disclosure can waive. The verdict is now taken over EVERY add-commit, fail-closed.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_900)
+    log.unlink()
+    _git(repo, "rm", "-q", "--cached", str(log.relative_to(repo)))
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    prereg.write_text("x\n")
+    log.write_text("x\n")
+    _git(repo, "add", ".")
+    # BACKDATED so the re-add looks NEWER than the original add.
+    _git(repo, "commit", "-q", "-m", "re-add beside the registration", epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
+
+
+def test_a_late_edit_cannot_erase_the_disclosure_requirement(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-10 P2): the content arm must not certify "measured nothing" over a
+    LATER edit — a post-green edit flipping the verdict is the silent-green class one arm earlier."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    assert check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name)) == []
+    log.write_text("x\nstripped\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "strip the numbers", epoch=1_700_086_400)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("is not an ancestor of" in f for f in failures), failures
+
+
 def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
     """The ATOMIC shape: the registration and the log land in the SAME commit.
 

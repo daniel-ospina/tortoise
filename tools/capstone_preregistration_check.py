@@ -583,6 +583,15 @@ def _added_commits(path: Path) -> list[tuple[int, str]]:
         return []
     try:
         out = subprocess.run(
+            # ⚠️ KNOWN LIMITATION, DISCLOSED NOT SILENT (#10531 review cycle 10, P1): WITHOUT
+            # `--follow` a `git mv` reports the rename as an ADD of the new path, so a renamed
+            # log's pre-rename history — including a content that predates the thresholds — is
+            # invisible here. `--follow` was tried and REVERTED: measured on this tree it made
+            # `--diff-filter=A` report the MERGE-BASE commit as the add for ORDINARY files, which
+            # broke the base ordering verdict for logs added after the registration (8 tests). A
+            # guard that is wrong about the common case to cover the rare one is worse. Renames are
+            # therefore NOT a defended attack surface; the bound is disclosed here so the next lane
+            # inherits the fact rather than the illusion.
             ["git", "log", "--diff-filter=A", "--format=%H %ct", "--", str(rel)],
             cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
         )
@@ -719,6 +728,13 @@ def _touch_commits(path: Path) -> list[str]:
         return []
     try:
         out = subprocess.run(
+            # ⚠️ `--follow` is ABSENT here for the SAME reason as `_added_commits` above: it was
+            # tried and REVERTED (#10531 review cycle 10), because it made `--diff-filter=A` report
+            # the MERGE-BASE commit as the add for ordinary files and broke the base ordering verdict
+            # for logs added after the registration (8 tests). The consequence is the DISCLOSED
+            # limitation at `_added_commits`: a `git mv` hides the pre-rename history from this bound
+            # too, so renames are NOT a defended attack surface. Do not "fix" this by adding the flag
+            # without re-running that experiment.
             ["git", "log", "--full-history", "--format=%H", "--", str(rel)],
             cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
         )
@@ -1187,9 +1203,27 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     f"{log.name}: tracked but with no add-commit — ordering unprovable"
                 )
             continue  # untracked log: it cannot predate a commit that already exists
-        log_epoch, log_sha = log_adds[0]
+        # ⛔ `%ct` MAY NOT CHOOSE WHICH ADD-COMMIT IS THE PAIR (#10531 review cycle 10, P1).
+        # `_added_commits` is sorted by epoch, so `log_adds[0]` was decided by a field
+        # (`GIT_COMMITTER_DATE`) this module has already ruled attacker-controlled: a delete-and-
+        # re-add backdated to look NEWER became the representative, made the pair look ATOMIC, and a
+        # disclosure waived a tree whose other add-commit is a strict ANCESTOR of the registration —
+        # the condition the docstring calls a HARD FAIL that no disclosure can waive.
+        #
+        # The verdict is therefore taken over EVERY add-commit, FAIL-CLOSED:
+        #   * the log is ATOMIC only if an add-commit IS the registration's;
+        #   * it PREDATES the registration if ANY add-commit is a strict ancestor of it.
+        add_shas = {sha for _, sha in log_adds}
+        log_epoch = min(epoch for epoch, _ in log_adds)
+        atomic_pair = prereg_sha in add_shas
+        predating_sha = next(
+            (sha for sha in sorted(add_shas) if sha != prereg_sha and _is_ancestor(sha, prereg_sha)),
+            "",
+        )
+        # For MESSAGES only. The verdict never keys on this choice.
+        log_sha = predating_sha or (prereg_sha if atomic_pair else sorted(add_shas)[0])
         sha_known.add(log.name)
-        if prereg_sha in {sha for _, sha in log_adds}:
+        if atomic_pair:
             atomic_no_matter.add(log.name)
         if log.name in exempt:
             if log_epoch > prereg_epoch:
@@ -1226,7 +1260,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             # ⛔ Record the atomic state before this `continue` (#10531 review cycle 4, P2): an
             # exempt log that IS atomic and carries a disclosure reached the anti-rot loop and was
             # told "but it is not one" — the cycle-3 defect class resurfacing through this arm.
-            if log_sha == prereg_sha:
+            if atomic_pair:
                 atomic_seen.add(log.name)
                 if (atomic_added is not None and log.name in atomic
                         and log.name not in disclosure_failed):
@@ -1235,12 +1269,8 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                         and log.name not in disclosure_failed):
                     atomic_detail[log.name] = _atomic_detail_entry(atomic[log.name])
             continue
-        # ⛔ ATOMIC IS IDENTICAL-SHA, NOT EQUAL-EPOCH (#10531 review cycle 4, P1). Two DISTINCT
-        # commits can share a second, and git orders those by ancestry — so an `==` epoch test would
-        # both admit the attack shape (a log commit that IS an ancestor of the thresholds commit,
-        # hidden behind an equal second) and accuse the honest two-commit-same-second shape of being
-        # "the SAME commit", demanding a false record entry. `atomic_pair` is therefore identity.
-        atomic_pair = log_sha == prereg_sha
+        # ⛔ ATOMIC IS IDENTICAL-SHA, NOT EQUAL-EPOCH (#10531 review cycle 4, P1) — computed above,
+        # over EVERY add-commit, so `%ct` cannot choose the representative (#10531 cycle 10, P1).
 
         # ⛔ ANCESTRY IS CONSULTED FOR EVERY DISTINCT PAIR, NOT ONLY FOR `epoch <=` (#10531 review
         # cycle 5, P1). `%ct` is attacker-controlled (`GIT_COMMITTER_DATE`), so gating the reverse
@@ -1248,7 +1278,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         # pass green whenever its committer date was set to look LATER — the exact route this guard
         # exists to close, with no disclosure and no failure. The content arm is asked first, so an
         # unscored log is still exempt (#9089).
-        if not atomic_pair and _is_ancestor(log_sha, prereg_sha):
+        if predating_sha:
             ok, why = _log_declares_no_measurement(log)
             if not ok:
                 # ⛔ The ground is ANCESTRY, not the epoch (#10531 review cycle 6, P2): the committer
@@ -1257,7 +1287,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 # 1700000500" — a sentence that is simply false. The recorded date is shown as what
                 # it is, a recorded date, and the proof is the topology.
                 failures.append(
-                    f"{log.name}: its add-commit {log_sha[:9]} is an ANCESTOR of the "
+                    f"{log.name}: its add-commit {predating_sha[:9]} is an ANCESTOR of the "
                     f"pre-registration's add-commit {prereg_sha[:9]} — the log entered the tree "
                     f"before the thresholds (recorded dates {log_epoch} vs {prereg_epoch}, which "
                     f"git does not order), so it may have been scored against thresholds chosen "
@@ -1279,6 +1309,21 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         # number this gate reds it again (#9089). This arm is asked FIRST in both shapes: an
         # unscored log needs no disclosure to be ordered, whichever commit carried it.
         if log_epoch <= prereg_epoch:
+            # ⛔ THE TOPOLOGY BOUND COMES BEFORE THE CONTENT PASS (#10531 review cycle 10, P2). The
+            # content arm `continue`d before `_late_touches` was consulted, so an atomic log whose
+            # record was STRIPPED of its numbers in a LATER commit — leaving `run.status` not
+            # COMPLETED — was certified "measured nothing" and the disclosure requirement erased,
+            # while `_late_touches` did flag that commit. A post-green edit flipping the verdict is
+            # the cycle-8 silent-green class, one arm earlier.
+            late = _late_touches(log, prereg_sha)
+            if late:
+                failures.append(
+                    f"{log.name}: commit {late[0][:9]} changed it and is not an ancestor of "
+                    f"{PREREG_NAME}'s add-commit {prereg_sha[:9]} — so the content this check is "
+                    "about to read is not the content that entered with the registration, and an "
+                    "in-place edit can strip a number after the thresholds were written"
+                )
+                continue
             ok, why = _log_declares_no_measurement(log)
             if ok:
                 # ⛔ The atomic state is recorded HERE too (#10531 review P1): a log that is both
