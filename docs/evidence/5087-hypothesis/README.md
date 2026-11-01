@@ -116,8 +116,11 @@ nicety: the log prints a `S3 WITNESS` line that **does not exist** in the probe 
 (`git show a1075dfc2:tools/s3_prior_ablation.py | grep -c "S3 WITNESS"` → `0`, `325f2a1a5` → `1`),
 so its `head=` line names the commit the bars were read from, not the tool bytes that ran. The pin
 could not see the difference — it compared commits — which is why item 9 now refuses a dirty tree and
-the log carries the probe's own `sha256`. Review of this PR then found eight further hardening gaps
-in the probe. **All were fixed AFTER the run, and none of them changes a reported number** — the
+the log carries the probe's own `sha256`. Review of this PR then found further hardening gaps in the
+probe — **every one of them enumerated below, and no count is restated here**: a numeral written
+beside the list is a second copy of that list, and this section has already carried one that rotted
+(`eight` against ten items, before the eleventh was added). **All were fixed AFTER the run, and none
+of them changes a reported number** — the
 arithmetic (`created_counts`, `real_facts`,
 `concentration`, `decide`'s bar comparisons) is unchanged, and the run's own log already printed
 each session's S3 state at the moment of that session's capture. What the hardening does is make
@@ -196,6 +199,24 @@ one *observed* fact **machine-enforced**:
    switched the only check that the bars came from the document off** — no refusal, no line in the
    log saying it had not run. A missing record, a record with no `document_sha256`, and an
    unparseable record all **refuse** at `exit 3` now: absence is not an exemption.
+
+11. **The fresh-graph premise was ASSUMED, not checked.** The pre-registration's §0 requires each arm
+to run on a **FRESH disposable graph**, and nothing enforced it: `run_arm` read a baseline census
+and asserted nothing about it. Every printed delta is `after - before`, so it stays arithmetically
+correct over a graph that already held Points — while `real_facts` grades the arm's **whole** graph
+(`read_point_contents`), so the E2a guard would be scored over a previous run's Points with no line
+of the log looking wrong. Two ways to reach it without meaning to: `--graph-prefix` reuses a
+namespace on purpose, and the default name `s3ablate_<head8>_<epoch-second>` collides when two runs
+start inside the same second. A non-zero baseline is now **REFUSED** at `exit 3` before the first
+session is captured, and the baseline census is **printed**, so the log carries the evidence that
+the graph was fresh instead of an assurance that it was. ⚠️ **What the measured run does and does
+not establish:** its arm headers name fresh graphs (`s3ablate_a1075dfc_1793492224_off` / `…_on`, the
+same epoch-second suffix on both) and its `created=` counts are per-session deltas — that is
+*consistent with* a fresh baseline, and it is **not evidence of one**, because the pre-fix probe
+never printed the baseline and this log therefore contains no `graph baseline` line to check
+(`grep -c 'graph baseline' docs/evidence/5087-hypothesis/s3-ablation-a1075dfc.log` → `0`). The
+guard is enforced for future runs only. **No number moves** — the assertion can only REFUSE a run;
+it touches no count, no denominator and no bar.
 
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
 repeated to get a friendlier number. The one-log rule is enforced from the FILE, not from the flag

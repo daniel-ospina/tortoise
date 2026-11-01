@@ -447,11 +447,18 @@ _ZERO_CENSUS = {"points": 0, "point_composition": {}, "per_label": {}, "label_co
                 "operator_relationships": {}}
 
 
-def _run_one_off_arm(probe, monkeypatch, census):
-    """Drive `run_arm` with fakes: no graph, no key, no model call."""
+def _run_one_off_arm(probe, monkeypatch, census, counter: dict | None = None):
+    """Drive `run_arm` with fakes: no graph, no key, no model call.
+
+    ``counter`` (optional) is a caller-owned dict `{"sessions": n}` the fake SDK increments, so a
+    test that expects a REFUSAL can still prove the ordering it asserts — the helper raises before
+    returning its own copy, so a caller that could only read the returned dict could not check that
+    no session was captured.
+    """
     import tortoise.sdk as sdk_module
 
-    captured = {"sessions": 0}
+    captured = counter if counter is not None else {}
+    captured.setdefault("sessions", 0)
 
     class FakeSDK:
         def __init__(self, graph_name=None):
@@ -478,10 +485,14 @@ def test_a_reused_graph_is_refused_before_any_session_is_captured(probe, monkeyp
     session and score it; the fixed code refuses first, and no model call happens.
     """
     reused = dict(_ZERO_CENSUS, points=12)
+    captured: dict = {}
     with pytest.raises(SystemExit) as refusal:
-        _run_one_off_arm(probe, monkeypatch, lambda uri: reused)
+        _run_one_off_arm(probe, monkeypatch, lambda uri: reused, counter=captured)
     assert refusal.value.code == 3, "a reused graph is a REFUSAL (3), never a crash (1)"
     assert "is NOT fresh" in capsys.readouterr().err
+    assert captured["sessions"] == 0, (
+        "the baseline must be asserted BEFORE the first capture — a refusal that still ran a "
+        "session has already written into the reused graph")
 
 
 def test_a_fresh_graph_prints_the_zero_baseline_it_ran_on(probe, monkeypatch, capsys):
@@ -1202,3 +1213,69 @@ def test_the_bundle_states_the_two_orderings_the_probe_now_enforces(probe):
         "the hardening list must say the prerequisite refusals precede the log creation (F3)")
     assert "a bundle whose record is missing" in readme, (
         "the reproduce section must say a missing record is REFUSED, not skipped (F4)")
+
+
+# ── the hardening disclosure list (review r7 P3, and the count it restated) ─────────────────
+#
+# The section enumerates every instrument gap found AFTER the run. Two failure modes were live at
+# head `779f2c2c5`, and both are the same one: the list is the disclosure, so a wrong count or a
+# missing item is a hole in it. (a) The prose restated the list's length — "eight further hardening
+# gaps" — against TEN numbered items. (b) The freshest post-run refusal, `assert_fresh_graph`
+# (added in `2e1d5d730`), was not in the list at all: the probe refused a class of run the bundle
+# never mentioned. External discipline (Lakens, *Improving Your Statistical Inferences* ch. 13.5,
+# on deviating from a pre-registration): a deviation "should not just be reported, but the
+# consequences of the deviation should also be evaluated" — and a list missing an item reports it
+# nowhere at all.
+
+_HARDENING_HEADING = "## Post-run instrument hardening"
+
+
+def _hardening_list(readme: str) -> tuple[str, list[int]]:
+    """The disclosure section, and the numbers its items actually carry."""
+    import re
+
+    assert _HARDENING_HEADING in readme, "the bundle lost its post-run hardening disclosure"
+    section = readme.split(_HARDENING_HEADING, 1)[1].split("## Reproduce", 1)[0]
+    return section, [int(number) for number in re.findall(r"^(\d+)\. \*\*", section, re.M)]
+
+
+def test_the_hardening_list_is_contiguous_and_restates_no_count(probe):
+    """A numeral beside the list is a SECOND copy of the list, and it rots on the next addition."""
+    import re
+
+    readme = (probe.EVIDENCE_DIR / "README.md").read_text()
+    _section, numbers = _hardening_list(readme)
+    assert numbers, "the hardening list lost its numbering"
+    assert numbers == list(range(1, len(numbers) + 1)), (
+        f"the hardening items must be numbered 1..{len(numbers)} contiguously, got {numbers}")
+    stale = re.findall(r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b"
+                       r"\s+(?:further\s+)?hardening", readme, re.I)
+    assert not stale, (
+        f"the section restates a count ({stale}) beside a {len(numbers)}-item list: `eight` was "
+        "already stale against ten items, and the fresh-graph refusal makes it eleven")
+
+
+def test_the_bundle_discloses_the_fresh_graph_refusal_and_what_the_log_cannot_show(probe):
+    """The eleventh item, including the half the committed log CANNOT be asked for.
+
+    `assert_fresh_graph` refuses a reused graph only from `2e1d5d730` — after the run. The shipped
+    log therefore predates it and carries no baseline census, so a sentence claiming the log
+    evidences freshness would be false. Both halves are measured here rather than inspected.
+    """
+    readme = (probe.EVIDENCE_DIR / "README.md").read_text()
+    section, _numbers = _hardening_list(readme)
+    assert "FRESH disposable graph" in section, (
+        "the hardening list must carry the fresh-graph refusal (pre-registration §0's premise)")
+    assert "graph baseline" in section, (
+        "the item must name the line the guard now prints — the evidence the pre-fix probe could "
+        "not leave behind")
+    assert "consistent with" in section and "not evidence of one" in section, (
+        "and it must say what the measured run does NOT establish: its arm headers name fresh "
+        "graphs, which is consistency, not proof")
+
+    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    assert "graph baseline" not in log_text, (
+        "the committed log now carries a baseline census — the disclosure's 'not evidence' half "
+        "has to be re-measured, and the measured run is not this probe's output")
+    assert "fresh graph s3ablate_" in log_text, (
+        "the disclosure quotes the arm headers as the consistency evidence; they are not there")
