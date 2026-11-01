@@ -4103,6 +4103,169 @@ _GRAPH_EVENT_TYPES = frozenset({
 })
 
 
+def _rec_point_id(rec: dict):
+    """The POINT id a journal record carries, read from EITHER of its shapes.
+
+    ``PointAdded`` carries the whole snapshot under ``point`` (#548's replay
+    payload); ``PointRevised`` carries ``id`` at the top level (#548's id+extra
+    shape). A reader that knows only one of the two is wrong in a way that is
+    invisible: #10515's discriminator looks for an id the journal KNOWS, and a
+    created-then-unprojected point lives in the ``point`` shape, so reading
+    ``rec['id']`` alone would answer "a typo" for exactly the rebuild-window
+    revision the discriminator exists to report.
+    """
+    if not isinstance(rec, dict):
+        return None
+    pid = rec.get('id')
+    if pid is None:
+        point = rec.get('point')
+        if isinstance(point, dict):
+            pid = point.get('id')
+    return pid
+
+
+#: The chunk a journal presence scan reads at a time (#10515). Bounded so the
+#: scan's peak memory is the chunk, not the journal: a full-parsed
+#: ``EventLog.read_all()`` was measured at 631.7 ms and a 136 MB spike on 100k
+#: records, which is not a price a TYPO may pay.
+_JOURNAL_SCAN_CHUNK = 1 << 20
+
+
+_NON_POINT_ENTITY_LABELS_CACHE: frozenset[str] | None = None
+
+
+def _record_owns_point(label) -> bool:
+    """May an ``EntityMutated``-style ``label`` own a POINT node?
+
+    A MIRROR of the projection's own ``_owns_point`` (``projection/__init__.py``),
+    because the presence fold must answer the question the repo's other folds
+    answer: a delete naming a DIFFERENT canonical kind does not own a Point.
+    Without this, an ``EntityMutated {op: delete}`` for an ``Object`` whose id
+    collides with a point id folds that POINT to absent — i.e. a genuine lost
+    revision goes SILENT, the dangerous direction (review round 4, finding 1,
+    second half).
+
+    The labels are resolved LAZILY and once, so importing ``sdk`` does not pull
+    the projection in; an unresolvable set keeps the legacy ID-WIDE semantics
+    (unknown ⇒ possibly owns a Point), exactly as the fold falls back.
+    """
+    global _NON_POINT_ENTITY_LABELS_CACHE
+    if _NON_POINT_ENTITY_LABELS_CACHE is None:
+        try:
+            from .projection import _NON_POINT_ENTITY_LABELS
+            _NON_POINT_ENTITY_LABELS_CACHE = frozenset(_NON_POINT_ENTITY_LABELS)
+        except Exception:  # noqa: BLE001, RUF100 — fall back to legacy semantics
+            _NON_POINT_ENTITY_LABELS_CACHE = frozenset()
+    return not (isinstance(label, str)
+                and label in _NON_POINT_ENTITY_LABELS_CACHE)
+
+
+def _apply_journal_presence(line: bytes, point_id: str,
+                            state: dict[str, bool]) -> None:
+    """Fold ONE journal line into *state* for *point_id* (#10515 review B1).
+
+    Presence is LAST-RECORD-WINS per id, and only the record types that change
+    it are applied — see :meth:`TortoiseSDK._journal_knows_point` for why a bare
+    "does the journal mention this id" is the wrong question (a hard delete
+    journals the id too, and would make every write-after-delete look lost).
+    """
+    try:
+        rec = _json.loads(line.decode('utf-8', 'replace'))
+    except ValueError:
+        return
+    if not isinstance(rec, dict):
+        return
+    # ⛔ THE REPO'S ONE NORMALIZATION RULE (review round 4, finding 1). The
+    # projection folds `{**ev, **ev['point']}` on EVERY presence path (`_norm`,
+    # `projection/__init__.py`), because the same record has a FLAT (API) and a
+    # NESTED (script/`#325`) shape. Reading the raw record folded a nested
+    # `PointsMerged` / `EntityMutated op=delete` to PRESENT — so a deliberately
+    # merged-away or deleted point was reported as a lost revision, which is the
+    # false positive the earlier rounds removed for the flat shape.
+    point = rec.get('point')
+    if isinstance(point, dict):
+        rec = {**rec, **point}
+    kind = rec.get('type')
+    # `PointsMerged` names its ids in `keep_id` / `merge_ids`, NOT under `id` or
+    # `point` — so it never reaches `_rec_point_id` and a merged-away point folded
+    # back to presence through its `PointAdded` record (review round 3, finding 2;
+    # measured: a merged loser's `update_point` warned `journal still holds the
+    # id` on a healthy lane). The projection's own presence scan folds it the same
+    # way (`projection/__init__.py:8060`).
+    if kind == 'PointsMerged':
+        if rec.get('keep_id') == point_id:
+            state[point_id] = True
+        elif point_id in (rec.get('merge_ids') or ()):
+            state[point_id] = False
+        return
+    if _rec_point_id(rec) != point_id:
+        return
+    if kind == 'EntityMutated' and rec.get('op') == 'delete':
+        if not _record_owns_point(rec.get('label')):
+            return          # a delete of another KIND never owns a Point
+        state[point_id] = False
+    elif kind == 'PointRetracted' and rec.get('deleted'):
+        # The HARD delete (`_deleted_point_payload` writes `deleted`
+        # unconditionally). A `retract_point` TOMBSTONE keeps the node, so it is
+        # presence, not absence. RESIDUAL: a hard delete journalled BEFORE that
+        # marker existed (`{"id": …}` only) folds to presence — the marker's own
+        # docstring records that those rows read as tombstones, so this inherits
+        # that ambiguity rather than inventing one.
+        state[point_id] = False
+    else:
+        state[point_id] = True
+
+
+def _journal_presence_mentions(path, point_id: str) -> dict[str, bool]:
+    """Presence state for *point_id* from the journal at *path* (#10515).
+
+    One bounded-memory pass over the file, JSON-parsing ONLY the lines that
+    contain the id at all — a journal with 100k records about other points costs
+    a byte scan, not 100k object constructions. The id is the needle rather than
+    the ``"id": "…"`` form so a writer's separator choice cannot defeat it; a
+    false positive is filtered by the parse (:func:`_apply_journal_presence`
+    requires the record's OWN id to match).
+
+    Returns a ``{point_id: present}`` dict — ``{}`` when the journal never names
+    it (the typo shape). A record naming the id that no rule can classify leaves
+    it absent, which is the same answer as today.
+
+    RESIDUALS, named rather than claimed away (review round 2):
+
+    * the needle is the raw id bytes, so an id containing ``"``, ``\\`` or a
+      control character is JSON-ESCAPED in the record and never matches its own
+      line — that id reads as a typo. SDK-minted ids are hex-and-dash tokens, so
+      this needs a caller-supplied id; it is bounded and stated, not silent
+      reasoning;
+    * the splitter handles ``\\n``, ``\\r\\n`` and bare ``\\r`` (``EventLog``
+      documents all three), but a line SPLIT ACROSS TWO CHUNKS is carried by
+      ``tail`` and parsed only once complete. ⚠️ The memory bound follows the
+      separator: for a ``\\n``/``\\r\\n`` journal the peak is one chunk, but a
+      journal with NO ``\\n`` at all makes ``tail`` the whole file, so memory is
+      linear in journal size there (the ANSWER stays correct — the run of
+      ``\\r``-separated records is still folded).
+    """
+    needle = str(point_id).encode('utf-8')
+    state: dict[str, bool] = {}
+    tail = b''
+    with open(path, 'rb') as fh:
+        while True:
+            chunk = fh.read(_JOURNAL_SCAN_CHUNK)
+            if not chunk:
+                break
+            buf = tail + chunk
+            lines = buf.split(b'\n')
+            tail = lines.pop()          # a partial line — carried, never parsed
+            for line in lines:
+                for sub in line.split(b'\r'):
+                    if needle in sub:
+                        _apply_journal_presence(sub, point_id, state)
+    for sub in tail.split(b'\r'):
+        if needle in sub:
+            _apply_journal_presence(sub, point_id, state)
+    return state
+
+
 def _change_feed_enabled() -> bool:
     """Is the #2353 semantic change feed (and its PointRevised store half) on?
 
@@ -9538,6 +9701,201 @@ class TortoiseSDK:
         graph, while a false negative is only a loud miss.
         """
         return self._graph_presence(proj) is True
+
+    def _journal_knows_point(self, point_id: str) -> bool | None:
+        """Is *point_id* a point the JOURNAL still holds?
+
+        THREE answers, and the third is not the second (review round 3,
+        finding 1):
+
+        * ``True`` — the journal holds it (a real point whose projection is behind);
+        * ``False`` — the journal does not name it, OR **no journal is
+          configured**. The no-journal case is deliberately ``False``, not
+          ``None``: without a replay source nothing can be judged LOST, so the
+          caller must stay SILENT. The first cut returned ``None`` for it and the
+          caller read ``None`` as "unreadable", which alarmed EVERY TYPO on the
+          default configuration (`event_log_path=None`: `__main__`, the embedded
+          lane, every test SDK) with "the revision was NOT recorded" — indicator 2
+          reversed, and a counter that grows with typos can never be alerted on;
+        * ``None`` — a journal IS configured and its READ FAILED. That is
+          genuinely unjudged, and the caller reports it as `journal_unreadable`.
+
+        The second half of #10515's discriminator. ``update_point``'s ABSENT arm
+        reads the LIVE graph; an id the journal knows but the projection does not
+        hold is a rebuild in flight (#7405), not a typo, and the two are the same
+        read at that door.
+
+        ⛔ PRESENCE, NOT MENTION (review B1). The first cut answered "does any
+        record carry this id", which is WRONG on a healthy lane: a hard delete
+        journals ``EntityMutated {op: 'delete'}``, so ``delete_point(p)`` then
+        ``update_point(p, …)`` reported a lost revision for a point that is
+        intentionally gone — and a counter that fires on every write-after-delete
+        can never be alerted on. The state is therefore folded LAST-RECORD-WINS
+        per id, over the record types that change presence:
+
+        * ``EntityMutated {op: 'delete'}`` and a HARD-delete ``PointRetracted``
+          (its payload carries ``deleted`` unconditionally, ``_deleted_point_payload``)
+          → the point is gone;
+        * any record naming the id as a POINT id (``PointAdded`` under ``point``,
+          ``PointRevised`` at top level) → the point exists;
+        * a ``retract_point`` TOMBSTONE keeps the node (``status='retracted'``), so
+          it is not a delete.
+
+        ⛔ COST — the issue's own target (#10515 indicator 4), MEASURED before
+        landing (review B4). ``EventLog.read_all()`` parses every record; on a
+        synthetic 100k-record (23.7 MB) journal it measured **631.7 ms** and a
+        **136 MB** RSS spike. This scan measured **97.5 ms** for a miss (the typo
+        shape) and **115.5 ms** for a hit, with a **4.6 MB** peak — 6.5x faster
+        and 30x lighter, and linear in journal size (97.5 ms / 100k records =
+        ~1 ms per 1k records). The result is memoised on the journal file's
+        ``os.stat`` identity (inode + size + mtime_ns): repeats of the SAME id pay
+        nothing for the SCAN while the journal is unchanged, and a DIFFERENT id
+        pays one scan per journal state. (The scan is not the whole per-call cost:
+        `_report_absent_revision` also issues one `EXISTS` probe first, which is a
+        round trip — O(1), but counted here rather than left implicit.)
+
+        ⛔ NOT ``EventLog.position()`` (review B2). That read takes the
+        process-wide append lock AND the cross-process ``flock``, opens the
+        journal for WRITING, can recount the whole file, and on a lock timeout
+        stamps the path ``_FLOCK_UNHEALTHY`` for 30 s — whereupon every concurrent
+        ``append`` proceeds unserialised. Measured by the reviewer with a peer
+        holding the lock: a plain TYPO'd ``update_point`` went from 1.8 ms to
+        5006 ms and degraded every writer on that journal. ``os.stat`` is O(1),
+        takes no lock and needs no write permission.
+
+        ⛔ THE MEMO IS PER ID, AND A MISS EXTENDS IT (review round 2, finding 1).
+        The first cut cached a SINGLE id's answer under a journal-wide key, so the
+        next absent write for a DIFFERENT id read a fabricated ``False`` — and in
+        the #7405 window the journal does not change while the arm refuses, so the
+        key never moved: the FIRST loss was reported and every later one went
+        silent, which is the defect this fix exists to remove. The memo now holds
+        ``{id: present}`` and an id it has not seen forces its own scan, so the
+        cost is one scan per DISTINCT absent id per journal state (stated, not
+        hidden — repeats of the same id are free).
+
+        RESIDUAL, named rather than claimed closed (review round 2, finding 2): the
+        stat identity is ``dev+ino+size+mtime_ns``, so a same-inode, same-SIZE
+        rewrite whose ``mtime_ns`` lands in the SAME tick is indistinguishable and
+        the memo answers stale. ``EventLog``'s own position block names the same
+        residual for the same reason. It needs a same-size in-place journal swap
+        inside one clock tick; it is not covered by a record-count stamp either,
+        which is the hole it was chosen over.
+        """
+        log = self._get_event_log()
+        if log is None:
+            # NO JOURNAL CONFIGURED is `False`, not `None`: there is no replay
+            # source, so nothing can be judged LOST and the caller stays silent
+            # (round 3, finding 1 — `None` here alarmed every typo on the default
+            # `event_log_path=None` configuration).
+            return False
+        stat_key = self._journal_stat_key(log)
+        cache = getattr(self, '_journal_presence_memo', None)
+        known: dict[str, bool] = {}
+        if cache is not None and stat_key is not None and cache[0] == stat_key \
+                and cache[2] is log:
+            known = cache[1]
+            if point_id in known:
+                return known[point_id]
+        try:
+            seen = _journal_presence_mentions(log.path, point_id)
+        except FileNotFoundError:
+            # No journal FILE yet is the ordinary early-life typo path (a lane with
+            # a configured path and nothing written). Silent, by indicator 2.
+            seen = {}
+        except Exception:  # noqa: BLE001, RUF100 — reported by the caller
+            _logger.warning(
+                "journal could not be read to check whether %r is a known "
+                "point; an absent live read is reported as UNJUDGED rather "
+                "than asserted to be a typo (#10515)",
+                point_id, exc_info=True)
+            return None
+        known[point_id] = seen.get(point_id, False)
+        if stat_key is not None:
+            self._journal_presence_memo = (stat_key, known, log)
+        return known[point_id]
+
+    @staticmethod
+    def _journal_stat_key(log):
+        """O(1) identity of the journal FILE — the memo key (no locks, no read).
+
+        ``None`` when the path cannot be stat'd (an in-memory log, a scratch
+        lane): the answer is then simply not memoised, never guessed.
+
+        ``st_dev``/``st_ino`` catch a REPLACEMENT journal; ``st_size`` catches an
+        append; ``st_mtime_ns`` catches a same-size rewrite in a later tick. The
+        one shape it cannot see is a same-inode, same-size rewrite inside ONE
+        tick — named as a residual in :meth:`_journal_knows_point`.
+        """
+        path = getattr(log, 'path', None)
+        if not path:
+            return None
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+    def _report_absent_revision(self, point_id: str) -> None:
+        """Make a LEGITIMATE revision refused by the ABSENT arm VISIBLE (#10515).
+
+        The ABSENT early return in ``update_point`` is #10119's and stays exactly
+        as it is: it keeps a TYPO from appending a ``PointRevised`` row, advancing
+        ``:EpMeta.ep_version`` and stranding a ``_dirty_roots`` entry (#2422 /
+        #7505 / #9269). Its cost — stated in that door's own comment — is that a
+        target absent at this read gets no record and no retry, so a revision
+        that is legitimate DURING a rebuild (#7405) landed nowhere at all and said
+        nothing.
+
+        ⛔ THIS REPORTS THE LOSS; IT DOES NOT PREVENT IT. Nothing here retries the
+        write, restores a journal-first append, or changes the documented ``{}``
+        reply. The issue's target is that the loss stops being SILENT (indicator
+        1), and that a typo does not turn into an alarm (indicator 2):
+
+        * ``graph_unavailable`` — the graph's key could not be CONFIRMED, so the
+          absence cannot be judged at all (a rebuild replaced the graph, or the
+          probe could not run);
+        * ``journal_known`` — the journal carries the id and the LIVE graph does
+          not, i.e. a real point whose projection is behind;
+        * ``journal_unreadable`` — a journal IS configured and the read failed
+          (permissions, I/O, a path removed mid-flight). Unjudged is not "a typo":
+          nothing can tell what was lost, so it is reported as its own reason
+          rather than folded into silence (review round 2, finding 3). A missing
+          journal FILE is the ordinary early-life typo path and stays silent;
+        * neither — absent from BOTH, the typo shape, and it stays silent.
+
+        Rides the existing ``monitoring`` seam (``metrics()``
+        ``["silent_revision_losses"]``) exactly as ``record_write_failures`` does,
+        because a warning alone is a line nothing watches.
+        """
+        # `_proj` DIRECTLY, not `_get_proj()`: this runs on the absent path, where
+        # the guard above already read the graph, and `_get_proj` would CONNECT
+        # (pool + embedding warm-up) to answer a question about a call that is
+        # being refused.
+        proj = getattr(self, '_proj', None)
+        if self._graph_presence(proj) is not True:
+            reason = 'graph_unavailable'
+        else:
+            known = self._journal_knows_point(point_id)
+            if known is None:
+                reason = 'journal_unreadable'
+            elif known is True:
+                reason = 'journal_known'
+            else:
+                return
+        monitoring.record_silent_revision_loss(reason)
+        _logger.warning(
+            "update_point(%r): the LIVE graph does not hold this point, but %s "
+            "— the revision was NOT recorded and will not be replayed. If this "
+            "is a rebuild in flight (#7405) the write is lost; if the id is a "
+            "typo, ignore this line (#10515)",
+            point_id,
+            {
+                'graph_unavailable': "the graph key could not be confirmed",
+                'journal_known': "the journal still holds the id",
+                'journal_unreadable': "the journal could not be READ to rule "
+                                      "a typo out",
+            }[reason],
+        )
 
     def _graph_write_with_retry(self, fn, *, what: str, witness=None):
         """Issue a DIRECT graph write through the bounded-retry primitive (#7405).
@@ -16585,6 +16943,28 @@ class TortoiseSDK:
             # ABSENT. Zero side effects, and the same `{}` the documented
             # contract already returns — no journal row, no epoch advance,
             # no dirty root, so a typo cannot strand the instance.
+            # #10515: the trade above keeps the TYPO quiet, but it also made a
+            # LEGITIMATE revision refused during a rebuild leave no trace at all
+            # (no row, no epoch delta, no dirty root, no line, no counter). The
+            # reply stays `{}`; the loss is now REPORTED — a warning plus
+            # `metrics()["silent_revision_losses"]` — when the graph key cannot be
+            # confirmed or the journal still HOLDS the id, and stays silent for
+            # an id absent from both. It reports the loss; it does not prevent it.
+            # "Zero side effects" still holds for the GRAPH and the journal (no
+            # row, no epoch, no dirty root); the report READS the journal file,
+            # and it is deliberately a chunked read of `os.stat` + a byte scan,
+            # never `EventLog.position()` — that one takes the append flock and
+            # can cost a typo 5 s (review B2).
+            try:
+                self._report_absent_revision(id)
+            except Exception:  # noqa: BLE001, RUF100 — the report is DIAGNOSTIC
+                # A diagnostic must never turn the documented `{}` absent reply
+                # into a raise: the reply contract is the caller's, the report is
+                # ours. Recorded at debug so the swallow is findable (review
+                # round 4, non-blocking 1).
+                _logger.debug(
+                    "the #10515 absent-revision report failed for %r", id,
+                    exc_info=True)
             return {}
         # ⛔ ORDERING (#10495 review P3). This block runs AFTER the ABSENT
         # early return above, not before it. `encode_for_row` is a real

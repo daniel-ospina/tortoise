@@ -1173,6 +1173,250 @@ def test_an_absent_id_issues_no_statement_for_the_write(tmp_path):
             sdk.close()
 
 
+def _journal_carries(journal: str, pid: str) -> bool:
+    """Does the JSONL journal name *pid*, in either record shape (#10515)?
+
+    Deliberately INDEPENDENT of the SDK's own memoised scan: this is the test's
+    ground truth for "the journal knows this id", read straight from the file.
+    ``PointAdded`` carries the snapshot under ``point``; ``PointRevised`` carries
+    ``id`` at the top level.
+    """
+    try:
+        with open(journal, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                if ev.get("id") == pid:
+                    return True
+                point = ev.get("point")
+                if isinstance(point, dict) and point.get("id") == pid:
+                    return True
+    except FileNotFoundError:
+        return False
+    return False
+
+
+def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
+        tmp_path, caplog):
+    """#10515: a rebuild-window revision is no longer LOST IN SILENCE.
+
+    The ABSENT arm (#10119) refuses an id the LIVE graph does not hold — correct
+    for a TYPO, and it is deliberately kept. Its stated trade is that a target
+    absent at that read gets no ``PointRevised`` row, no epoch delta and no retry,
+    so during a rebuild (#7405) a LEGITIMATE revision landed nowhere and said
+    nothing: the caller got the documented ``{}`` and could not tell the two
+    states apart.
+
+    This test reaches BOTH shapes deliberately, as #10515's indicator 3 asks, and
+    asserts the OBSERVABILITY difference rather than the reply shape (the reply
+    stays ``{}`` in both):
+
+    * a point the JOURNAL knows, removed from the LIVE graph (the projection is
+      behind — the rebuild window) → a ``WARNING`` and one
+      ``metrics()["silent_revision_losses"]["journal_known"]``;
+    * an id absent from BOTH → still silent: no warning, no counter, because
+      turning a typo into an alarm is what the issue's indicator 2 forbids.
+
+    ⛔ The fix REPORTS the loss; it does not prevent it. Nothing here asserts a
+    journal row for the absent id — that row is exactly what #10119 removed, and
+    restoring it would re-open a stranded dirty root (#2422 / #7505 / #9269).
+    """
+    from tortoise import monitoring
+
+    sdk, journal = _sdk_journaled(tmp_path, "absentknown")
+    try:
+        pid = _pid(sdk)
+        assert _journal_carries(journal, pid), (
+            "the journal must carry the id — it is the discriminator")
+        # The rebuild window: the projection has not (re)applied the record yet.
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": pid})
+        assert not sdk.get_point(pid), (
+            "the live graph must NOT hold the point for this shape "
+            f"(get_point answered {sdk.get_point(pid)!r})")
+
+        before = monitoring.silent_revision_loss_counts().get("journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(pid, confidence=0.9) == {}
+        after = monitoring.silent_revision_loss_counts().get("journal_known", 0)
+
+        assert after == before + 1, (
+            "a journal-known id absent from the LIVE graph must be COUNTED — "
+            "this is the legitimate revision the ABSENT arm drops")
+        assert any("will not be replayed" in r.getMessage()
+                   for r in caplog.records), (
+            "the loss must also be LOUD in the log, not only in a counter")
+
+        # ── the other shape: a typo stays silent (indicator 2) ──
+        typo_before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == typo_before, (
+            "an id absent from BOTH the graph and the journal is a typo and "
+            "must add to no counter")
+        assert not any("will not be replayed" in r.getMessage()
+                       for r in caplog.records), (
+            "a typo must not produce the revision-loss warning")
+
+        # ── the third shape: a point the lane DELETED is gone, not lost ──
+        # (review B1) A hard delete journals `EntityMutated {op: delete}` with the
+        # SAME id, so a "does any record carry this id" test reported a lost
+        # revision on a healthy lane for every write-after-delete — and a counter
+        # that fires there can never be alerted on. Presence is folded
+        # last-record-wins, so a deleted point is NOT known.
+        gone = _pid(sdk)
+        sdk.delete_point(gone)
+        deleted_before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(gone, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == deleted_before, (
+            "a deliberately DELETED point must not be counted as a lost "
+            "revision — the counter has to stay alertable on a healthy lane")
+        assert not any("will not be replayed" in r.getMessage()
+                       for r in caplog.records), (
+            "a write after a hard delete must not warn about a lost revision")
+
+        # ── the memo is PER-ID, not per-journal-state (review round 2, find 1) ──
+        # The rebuild window is exactly the state in which the journal does NOT
+        # change while the arm refuses, so a memo that cached ONE id's answer
+        # under a journal-wide key answered a fabricated "typo" for the next id —
+        # the FIRST loss was reported and every later one went silent. Two
+        # distinct journal-known ids, in one journal state, both must count.
+        p1, p2 = _pid(sdk), _pid(sdk)
+        sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids DETACH DELETE n",
+            {"ids": [p1, p2]})
+        assert not sdk.get_point(p1) and not sdk.get_point(p2)
+        two_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(p1, confidence=0.9) == {}
+            assert sdk.update_point(p2, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == two_before + 2, (
+            "two journal-known points in ONE journal state must BOTH be "
+            "counted — a single-slot memo answers 'typo' for the second, "
+            "which is the silence #10515 removes")
+
+        # ── a MERGED-AWAY point is gone, not lost (review round 3, finding 2) ──
+        # `PointsMerged` names its ids in `keep_id`/`merge_ids`, not under `id` or
+        # `point`, so a fold that only reads `_rec_point_id` skipped it and the
+        # loser kept its earlier `PointAdded` presence — a routine dedup reported
+        # as a lost revision on a healthy lane. The record is appended in the
+        # PRODUCER's shape (`tortoise/api.py::merge_points`), and the loser is
+        # removed from the live graph the way the merge fold removes it.
+        keep = _pid(sdk)
+        loser = _pid(sdk)
+        sdk._get_event_log().append(
+            {"type": "PointsMerged", "keep_id": keep, "merge_ids": [loser]})
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": loser})
+        assert not sdk.get_point(loser)
+        merged_before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(loser, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == merged_before, (
+            "a point the lane deliberately MERGED AWAY must not be counted as "
+            "a lost revision")
+        assert not any("will not be replayed" in r.getMessage()
+                       for r in caplog.records), (
+            "a write after a merge must not warn about a lost revision")
+
+        # ── ... and the same in the NESTED record shape (review round 4, find 1) ──
+        # The same record has a FLAT (API) and a NESTED (script, #325) shape, and
+        # the projection normalizes both (`_norm`). A fold that read only the raw
+        # record reported a nested merge as "the journal still holds the id" — the
+        # false positive the earlier rounds removed for the flat shape.
+        keep2 = _pid(sdk)
+        loser2 = _pid(sdk)
+        sdk._get_event_log().append(
+            {"type": "PointsMerged",
+             "point": {"keep_id": keep2, "merge_ids": [loser2]}})
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": loser2})
+        assert not sdk.get_point(loser2)
+        nested_before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(loser2, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == nested_before, (
+            "a NESTED PointsMerged record must fold exactly as the flat one — a "
+            "bare top-level read reports a deliberate merge as a lost revision")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_typo_on_a_journal_less_sdk_stays_silent(tmp_path):
+    """#10515 indicator 2, on the DEFAULT configuration (review round 3, finding 1).
+
+    ``event_log_path=None`` is the documented default (``__main__``, the embedded
+    lane, every test SDK). With no journal there is no replay source, so nothing
+    can be judged LOST — the absent read is not a loss and must stay SILENT. The
+    first cut returned ``None`` from the journal question for this case and the
+    caller read ``None`` as "unreadable", which alarmed every typo with "the
+    revision was NOT recorded" and grew ``journal_unreadable`` with typo traffic.
+    """
+    from tortoise import monitoring
+
+    sdk = _sdk(tmp_path, "nojournal")
+    try:
+        before = monitoring.silent_revision_loss_counts()
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == before, (
+            "a journal-less SDK cannot judge a loss, so a typo must add nothing "
+            "to any reason")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_unconfirmable_graph_reports_the_loss_with_its_own_reason(tmp_path):
+    """#10515 `graph_unavailable`: a graph that cannot be CONFIRMED is not a typo.
+
+    The rebuild/replace window is the shape the issue is about, and it is reached
+    here the way the engine produces it: the target is absent from the live graph
+    AND the graph key probe answers 0 (`_AbortOnceGraph(present=False)`), so the
+    absence cannot be judged at all. The reply stays `{}`; the signal fires with
+    its own reason, because "unjudged" and "no such point" are different facts.
+    """
+    from tortoise import monitoring
+
+    sdk = _sdk(tmp_path, "absentunavailable")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": pid})
+        assert not sdk.get_point(pid)
+        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE, aborts=0,
+                                present=False)
+        proj.g = proxy
+
+        before = monitoring.silent_revision_loss_counts().get(
+            "graph_unavailable", 0)
+        assert sdk.update_point(pid, confidence=0.9) == {}
+        after = monitoring.silent_revision_loss_counts().get(
+            "graph_unavailable", 0)
+        assert after == before + 1, (
+            "an absent read on a graph whose key cannot be confirmed must be "
+            "reported as graph_unavailable — the caller cannot tell it from a "
+            "typo otherwise")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 def test_an_absent_id_is_not_embedded_at_all(tmp_path, monkeypatch):
     """#10495 review P3: the derived-embedding seam runs AFTER the guard read.
 
