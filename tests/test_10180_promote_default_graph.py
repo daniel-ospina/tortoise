@@ -89,6 +89,22 @@ def sb(monkeypatch):
     """
     from tests._http_fixtures import quiesce_testclient_background_work
 
+    # #10180: this file drives ONE store — the embedded temp DB that
+    # `patched_tortoise_sdk` binds — so it must not inherit the lane's URI.
+    # The fixture pins `TORTOISE_DB_PATH` and routes every SDK construction to
+    # `db_path`, but a `TORTOISE_DB_URI` in the ambient env WINS over that pin
+    # for the registry probe: `_registry_existing_graphs()` takes its URI
+    # branch and answers from the lane server's process-lifetime handle, i.e. a
+    # different backend than the one these seeds write to. The seeding path
+    # then names a graph (`graph_name=f"org_{TEAM}"`) that no listing on the
+    # lane server can contain — so the projection's existence verdict was False
+    # over a graph this test had just written, and `onboarding_complete` fell
+    # back to the legacy jsonb flag. Measured: green when the URI is absent
+    # (embedded), RED under every CI shard and under `tools/test_lane.py`,
+    # both of which export it.
+    # DELIBERATE_EMBEDDED_LANE (declared in test_uri_env_mutations_declared).
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
     quiesce_testclient_background_work(monkeypatch)
     fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": [],
