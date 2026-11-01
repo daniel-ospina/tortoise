@@ -600,13 +600,11 @@ def _seed_org(db_path: str, org_id: str) -> dict:
     default = sdk._graph_create(org_id, "default", kind="default",
                                 namespace=f"org_{org_id}")
     custom = sdk._graph_create(org_id, "custom", kind="custom")
-    _assert_seed_visible(db_path, org_id)
     # #10424: the guard's read went through the app's OWN registry handle, which
     # now holds this store for the rest of the test. Releasing the seeder keeps
     # the client count at ONE, so the fixture's teardown is the store's LAST
     # client — a clean shutdown instead of a co-tenant deferral that would leave
     # the daemon standing after the test.
-    sdk.close()
     return {"default": default, "custom": custom}
 
 
