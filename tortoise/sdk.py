@@ -9234,9 +9234,15 @@ class TortoiseSDK:
         "the caller's target never existed". The write-slot / MISCONF arms are
         retried without arming it, so their benign zero-row outcomes are
         unchanged, and a LATER one cannot disarm it. On exhaustion the abandoned
-        abort is re-raised. A first attempt is never consulted, so verbs that
-        return a benign empty result (``update_point`` on a missing id) keep
-        that contract.
+        abort is re-raised. A first attempt is never consulted, so a benign
+        zero-row result keeps that contract. ⛔ #10119 moved the reachable
+        shape of that case for ``update_point``: an id ABSENT at its guard read
+        is refused before any statement, so the observed shape is a target
+        PRESENT at that read that vanishes before the write — an absent-at-entry
+        id is no longer an example of a benign zero row here, and a write-slot
+        abort on the vanished target must stay armed-free so the empty contract
+        survives (``test_a_write_slot_abort_on_a_vanished_target_keeps_the_``
+        ``empty_contract``, #8854 review round 10).
 
         A witness for a multi-statement ``fn`` whose own return value is not a
         landing proof (the tag arm: ``_sync() -> None``), or a witness that
