@@ -1327,15 +1327,31 @@ def check_single_measured_log(directory: Path) -> list[str]:
     ]
 
 
-def _steps_block_epoch(directory: Path) -> int | None:
-    """The commit epoch that FIRST introduced the record's ``steps`` block.
+def _steps_block_epoch(directory: Path, current: dict | None = None) -> int | None:
+    """The commit epoch that FIRST carried the record's CURRENT ``steps`` block.
 
-    Walked oldest-first over the record's own history, comparing each revision's
-    parsed JSON, because ``--diff-filter=A`` names when the FILE appeared — not
-    when this block did. ``None`` when no revision carries one (or git cannot
-    answer), which the caller reads as "nothing to compare", never as "fine".
+    Two weaker predicates were rejected by review, and both are why this compares
+    CONTENT rather than the key's first appearance:
+
+    * ``"steps" in record`` returns at the revision that merely CONTAINS the key, so
+      an author who commits ``"steps": null`` with the record's initial (definitionally
+      pre-scored) commit and fills the real block after seeing the number stays green
+      forever — a key test is not a content test.
+    * an already-pinned block **edited after** a scored log never moves the key's
+      first appearance either, so changing the acceptance rule post-number would be
+      invisible — the exact shape this rule exists to catch.
+
+    So: the oldest revision whose ``steps`` value equals the block the record ships
+    NOW. That is when the operative rule was authored. ``None`` when no revision
+    carries it (or git cannot answer), which the caller reads as "nothing to
+    compare", never as "fine".
     """
     path = directory / MACHINE_RECORD
+    if current is None:
+        current = _record_for_steps(directory)
+    wanted = current.get("steps")
+    if not isinstance(wanted, dict) or not wanted:
+        return None                      # an empty/absent block is not a rule
     try:
         rel = path.resolve().relative_to(REPO_ROOT)
     except ValueError:
@@ -1359,18 +1375,36 @@ def _steps_block_epoch(directory: Path) -> int | None:
             record = json.loads(blob.stdout)
         except (OSError, json.JSONDecodeError, RecursionError):
             continue
-        if isinstance(record, dict) and "steps" in record:
+        if isinstance(record, dict) and record.get("steps") == wanted:
             return epoch
     return None
 
 
 def _document_has_deviations(directory: Path) -> bool:
-    """Whether the argument carries a real ``## Deviations`` heading (§8)."""
+    """Whether the argument carries a REAL ``## Deviations`` entry (§8).
+
+    ⛔ A bare heading is not a disclosure, and accepting one would restore the
+    "add one line to clear the finding" exit this rule was just repaired to close —
+    the same shape, moved from JSON into Markdown. So the section must carry at
+    least one ``### `` entry AND a non-blank body line under it. The §8 prose that
+    MENTIONS ``## Deviations`` cannot satisfy it either, because the match is on a
+    heading line, not a substring.
+    """
     try:
         text = (directory / PREREG_NAME).read_text()
     except (OSError, UnicodeDecodeError):
         return False
-    return any(line.strip().startswith("## Deviations") for line in text.splitlines())
+    lines = text.splitlines()
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.strip().startswith("## Deviations")), None)
+    if start is None:
+        return False
+    body = lines[start + 1:]
+    entry = next((i for i, ln in enumerate(body) if ln.startswith("### D")), None)
+    if entry is None:
+        return False
+    # at least one non-blank, non-heading line after the entry marker
+    return any(ln.strip() and not ln.startswith("#") for ln in body[entry + 1:])
 
 
 def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
@@ -1420,7 +1454,7 @@ def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
     if history_unavailable():
         return failures          # UNPROVABLE — never demand an attestation instead
 
-    steps_epoch = _steps_block_epoch(directory)
+    steps_epoch = _steps_block_epoch(directory, record)
     log_epochs = [epoch for log in scored for epoch in _added_epochs(log)]
     if steps_epoch is None or not log_epochs:
         return failures          # nothing to compare; not a finding either way

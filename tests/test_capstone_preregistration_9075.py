@@ -2697,70 +2697,145 @@ def test_a_conditional_step_without_a_record_block_fails():
 
 
 
-def _deviation_dir(tmp_path, *, steps=True, declared=None, scored=True):
-    """A throwaway bundle dir: a machine record (± a steps block) and ± a scored log."""
-    record = {"schema": check.PREREG_SCHEMA,
-              "written_before_any_scored_run": True,
-              "written_before_any_scored_run_basis": f"no SCORED run; {check.UNSCORED}",
-              "document": "PRE-REGISTRATION.md"}
-    if steps:
-        record["steps"] = {"conditional": [{"step": "S2.3"}]}
-    if declared:
-        record["steps_pinned_after_scored_log"] = declared
-    (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(record))
-    if scored:
-        (tmp_path / "capstone-measured-e0fc940b.log").write_text(
-            "# generated: 2026-10-23T23:16:55Z\n# result: COMPLETED\n")
-    return tmp_path
+
+# ── the steps pin's AUTHORING ORDER (#10215) ─────────────────────────────────
+#
+# ⛔ These build a REAL throwaway git repo (`_repo` rebinds `check.REPO_ROOT`),
+# because the predicate is history. A `tmp_path` bundle never executes the order
+# arm at all — measured at the round-6 review: deleting the whole order branch
+# left every test green, which is the vacuity this section exists to remove.
+
+DEV_DOC_WITHOUT = "# Pre-registration\n\nNo deviation section here.\n"
+DEV_DOC_WITH = ("# Pre-registration\n\n## Deviations\n\n"
+                "### D1 — 2026-11-01 — the step set\n\n"
+                "- **Original rule**: all eight observed.\n"
+                "- **New rule**: seven required + S2.3 conditional.\n"
+                "- **Reason**: the old rule was unsatisfiable.\n")
+
+
+def _dev_repo(tmp_path, monkeypatch, *, steps_first: bool, doc: str = DEV_DOC_WITHOUT):
+    """A throwaway repo holding a record, a scored log, and the argument."""
+    repo = _repo(tmp_path, monkeypatch)
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True)
+
+    def write_record(*, with_steps: bool) -> None:
+        record = {"schema": check.PREREG_SCHEMA,
+                  "written_before_any_scored_run": True,
+                  "written_before_any_scored_run_basis": f"no SCORED run; {check.UNSCORED}",
+                  "document": "PRE-REGISTRATION.md"}
+        if with_steps:
+            record["steps"] = {"unconditional": ["S0"],
+                               "conditional": [{"step": "S2.3", "condition": "c"}]}
+        (bundle / check.MACHINE_RECORD).write_text(json.dumps(record, indent=2) + "\n")
+
+    def commit(paths, message: str, epoch: int) -> None:
+        for p in paths:
+            _git(repo, "add", str(p.relative_to(repo)))
+        _git(repo, "commit", "-q", "-m", message, epoch=epoch)
+
+    (bundle / check.PREREG_NAME).write_text(doc)
+    record_path = bundle / check.MACHINE_RECORD
+    log_path = bundle / "capstone-measured-e0fc940b.log"
+    log_path.write_text("# generated: 2026-10-23T23:16:55Z\n# result: COMPLETED\n")
+
+    if steps_first:
+        write_record(with_steps=True)
+        commit([bundle / check.PREREG_NAME, record_path], "freeze the step set", 1_700_000_000)
+        commit([log_path], "the scored measurement", 1_700_000_100)
+    else:
+        write_record(with_steps=False)
+        commit([bundle / check.PREREG_NAME, record_path], "freeze the record", 1_700_000_000)
+        commit([log_path], "the scored measurement", 1_700_000_100)
+        write_record(with_steps=True)
+        commit([record_path], "pin the step set AFTER the number", 1_700_000_200)
+    return bundle
+
+
+def test_a_steps_pin_authored_AFTER_a_scored_log_without_a_deviation_reds(tmp_path, monkeypatch):
+    """The finding the rule exists for — and the one no earlier test could produce."""
+    bundle = _dev_repo(tmp_path, monkeypatch, steps_first=False)
+    failures = check.check_steps_block_is_pre_scored(bundle)
+    assert failures, "a rule pinned after the number must not pass silently"
+    assert "were added" in failures[0] and "## Deviations" in failures[0], failures
+
+
+def test_a_steps_pin_authored_BEFORE_a_scored_log_passes(tmp_path, monkeypatch):
+    """The honest lifecycle: freeze the rule, then measure. Must not be refused."""
+    assert check.check_steps_block_is_pre_scored(
+        _dev_repo(tmp_path, monkeypatch, steps_first=True)) == []
+
+
+def test_the_same_post_number_pin_passes_once_the_deviation_is_RECORDED(tmp_path, monkeypatch):
+    """§8's actual requirement: the fix for the finding is the ENTRY, not a quieter log."""
+    assert check.check_steps_block_is_pre_scored(
+        _dev_repo(tmp_path, monkeypatch, steps_first=False, doc=DEV_DOC_WITH)) == []
+
+
+def test_a_bare_deviations_HEADING_does_not_clear_the_finding(tmp_path, monkeypatch):
+    """A heading with nothing under it discloses nothing — the "add one line" exit."""
+    bare = "# Pre-registration\n\n## Deviations\n\n- **todo**\n"
+    failures = check.check_steps_block_is_pre_scored(
+        _dev_repo(tmp_path, monkeypatch, steps_first=False, doc=bare))
+    assert failures, "an empty Deviations section must not satisfy §8"
+
+
+def test_an_EDITED_pin_after_the_number_moves_the_epoch(tmp_path, monkeypatch):
+    """The second false negative a key-presence test has: the block EXISTED first and
+    was EDITED after the scored log, so a key test dates it to the first commit."""
+    bundle = _dev_repo(tmp_path, monkeypatch, steps_first=False)
+    repo = check.REPO_ROOT
+    record_path = bundle / check.MACHINE_RECORD
+    record = json.loads(record_path.read_text())
+    record["steps"]["unconditional"] = ["S0", "S1"]      # the rule changed, post-number
+    record_path.write_text(json.dumps(record, indent=2) + "\n")
+    _git(repo, "add", str(record_path.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "widen the rule after the number", epoch=1_700_000_300)
+    failures = check.check_steps_block_is_pre_scored(bundle)
+    assert failures, "the operative rule's own commit must be the one dated"
+    assert "were added" in failures[0], failures
 
 
 def test_a_record_asserting_BOTH_a_pre_scored_freeze_and_a_post_scored_pin_reds(tmp_path):
-    """#10215 review P2 — the two claims are incompatible, and that needs no history.
-
-    The step set IS the acceptance rule V5 applies, so a `steps` block authored
-    after a scored log is a PROTOCOL DEVIATION (§8), not a pre-registration edit.
-    An earlier cut of this rule instead REQUIRED the declaration, which made the
-    only passing record a self-contradicting one and let an author clear the
-    finding by writing one JSON line — a gate satisfied by asserting it.
-    """
-    d = _deviation_dir(tmp_path, declared="capstone-measured-e0fc940b.log")
-    failures = check.check_steps_block_is_pre_scored(d)
-    assert failures, "both claims cannot hold"
-    assert "cannot both hold" in failures[0], failures
+    """The contradiction needs no history, so it is checked first and always."""
+    record = {"schema": check.PREREG_SCHEMA,
+              "written_before_any_scored_run": True,
+              "written_before_any_scored_run_basis": f"no SCORED run; {check.UNSCORED}",
+              "steps": {"conditional": [{"step": "S2.3"}]},
+              check.STEPS_PINNED_AFTER: "capstone-measured-e0fc940b.log"}
+    (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(record))
+    (tmp_path / "capstone-measured-e0fc940b.log").write_text("# result: COMPLETED\n")
+    failures = check.check_steps_block_is_pre_scored(tmp_path)
+    assert failures and "cannot both hold" in failures[0], failures
 
 
 def test_no_steps_block_means_no_deviation(tmp_path):
-    assert check.check_steps_block_is_pre_scored(
-        _deviation_dir(tmp_path, steps=False, declared="x")) == []
+    record = {"schema": check.PREREG_SCHEMA, "written_before_any_scored_run": True}
+    (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(record))
+    (tmp_path / "capstone-measured-e0fc940b.log").write_text("x\n")
+    assert check.check_steps_block_is_pre_scored(tmp_path) == []
 
 
-def test_a_steps_pin_with_no_scored_log_needs_no_deviation(tmp_path):
-    """Pre-scored, §8's revision rule applies instead — nothing to record."""
-    assert check.check_steps_block_is_pre_scored(
-        _deviation_dir(tmp_path, declared="capstone-measured-e0fc940b.log",
-                       scored=False)) == []
-
-
-def test_the_deviation_section_is_detected_from_the_HEADING_not_a_mention():
-    """§8's requirement is a section. This file also MENTIONS the heading inside §8's
-    own prose, so a substring search would pass on the rule text alone."""
+def test_the_deviation_section_is_detected_from_a_REAL_ENTRY_not_a_mention():
+    """This file MENTIONS `## Deviations` inside §8's prose, so a substring search
+    would pass on the rule text alone; and a heading with no entry passes nothing."""
     assert check._document_has_deviations(PREREG.parent) is True
 
     import tempfile
+    from pathlib import Path
 
     with tempfile.TemporaryDirectory() as tmp:
-        from pathlib import Path
-
         d = Path(tmp)
         (d / check.PREREG_NAME).write_text(
             "## 8. Change control\n\nrecorded in a `## Deviations` section appended below\n")
-        assert check._document_has_deviations(d) is False, (
-            "a MENTION of the heading is not the section")
-        (d / check.PREREG_NAME).write_text("## Deviations\n\n### D1\n")
+        assert check._document_has_deviations(d) is False, "a mention is not the section"
+        (d / check.PREREG_NAME).write_text("## Deviations\n\n- nothing yet\n")
+        assert check._document_has_deviations(d) is False, "a bare heading discloses nothing"
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1 — 2026-11-01\n\n- **Original rule**: x\n")
         assert check._document_has_deviations(d) is True
 
 
 def test_the_shipped_bundle_satisfies_the_rule_it_is_judged_by():
-    """Reds if the record re-gains a post-scored declaration, or if the argument
-    loses its `## Deviations` section while the scored log stands."""
+    """Reds if the record re-gains a post-scored declaration (a contradiction)."""
     assert check.check_steps_block_is_pre_scored(PREREG.parent) == []

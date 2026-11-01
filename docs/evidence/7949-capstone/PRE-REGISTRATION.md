@@ -716,8 +716,7 @@ to answer.
 
 A protocol deviation is a change made **after** the first scored evidence log (§8). Each entry
 carries the date, the original value, the new value and the reason; the original rule is **quoted
-from the code it lived in** rather than silently edited, and a surviving statement of the old rule
-is struck through. This section was missing until `#10215`'s review caught it — which is
+from the code it lived in** rather than silently edited. This section was missing until `#10215`'s review caught it — which is
 itself the entry below.
 
 ### D1 — 2026-11-01 — the step set: "all eight observed" became "seven required + S2.3 conditional"
@@ -743,6 +742,11 @@ itself the entry below.
   ORIGINAL freeze, and it remains true of it — but the `steps` block is **not** original. It was
   authored while `capstone-measured-e0fc940b.log` (a COMPLETED run carrying E3/E4/E5 rows, added on
   `main` by `260903907`, 2026-10-23) already existed. A blanket pre-scored claim cannot cover content
-  added after the number was seen, so the record now names the log it postdates in
-  `steps_pinned_after_scored_log` and `tools/capstone_preregistration_check.py` **refuses** a `steps`
-  block that does not.
+  added after the number was seen — so the deviation is recorded **here**, and
+  `tools/capstone_preregistration_check.py` now closes it mechanically on AUTHORING ORDER rather than
+  on an attestation: it dates the commit that first carried the record's CURRENT `steps` block
+  (content-compared, because a key that is merely present tells you nothing about when the rule was
+  written, and an already-pinned block EDITED after a scored log never moves a key's first
+  appearance) and refuses when that commit postdates a scored log while this section is absent or
+  empty. Where the checkout is too shallow to establish the order it returns no verdict at all
+  rather than falling back to asking the record to assert it.
