@@ -711,6 +711,38 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
     legacy_seen: dict[tuple[str, str], int] = {}
     seen_dump_ids: dict[int, str] = {}
 
+    # ⛔ Invariant 3 must cover EVERY contract key in the post-pass key space, not
+    # only the key of the ONE label `_node_label` picked. A `:Point`+`:Session`
+    # node is skipped by the scope branch below (the picked label may be the
+    # out-of-scope `:Session`), yet its `id` IS a `:Point` key that a rename can
+    # land on — and a real `dump_graph` artifact carries multi-label nodes.
+    # Measured before this pass: a dump of `[Point{p-0000001}, Point+Session{
+    # poi-b3c35c6d…}]` was ACCEPTED and both nodes left carrying one `id`.
+    # A legacy old key registered here cannot produce a false collision: every
+    # rename target is canonical and no legacy key is.
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue          # counted by the malformed/skip branches below
+        dump_id = node.get("dump_id")
+        if not isinstance(dump_id, int) or isinstance(dump_id, bool):
+            continue
+        for node_label in _labels(node):
+            key_prop = KEY_PROPERTY.get(node_label)
+            if key_prop is None:
+                continue
+            value = _props(node).get(key_prop)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            held = final_keys.get((node_label, value))
+            if held is not None and held != dump_id:
+                problems.append(
+                    f"duplicate identity: :{node_label} {value!r} is carried by "
+                    f"both dump_id {held} and {dump_id} — two nodes already "
+                    "share one key, which no rename can fix"
+                )
+                continue
+            final_keys[(node_label, value)] = dump_id
+
     for node in nodes:
         if not isinstance(node, dict):
             problems.append(f"malformed node row: {node!r}")
@@ -768,16 +800,9 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
             continue
         value = raw
         if is_canonical(value):
-            # Invariant 4: a canonical id is never a candidate. A snapshot that
-            # carries the same canonical id twice is a duplicate identity, not
-            # a rename.
-            if (label, value) in final_keys:
-                problems.append(
-                    f"duplicate identity: :{label} {value!r} is carried by both "
-                    f"dump_id {final_keys[(label, value)]} and {dump_id} — two "
-                    "nodes already share one key, which no rename can fix"
-                )
-            final_keys[(label, value)] = dump_id
+            # Invariant 4: a canonical id is never a candidate. The key space
+            # above already registered this (label, key) and its duplicate
+            # check, so there is nothing left to add here.
             continue
         if (label, value) in legacy_seen:
             problems.append(

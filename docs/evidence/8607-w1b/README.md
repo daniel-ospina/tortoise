@@ -78,6 +78,13 @@ so a reader can recompute any row, and the digest includes the label so one lega
 labels cannot fold together. It is 104 bits, so collision resistance is a birthday bound, not a
 proof; the plan refuses on a target collision anyway (invariant 3), which is the real guard.
 
+**The collision universe covers multi-label nodes** — a `:Point`+`:Session` node is skipped by the
+scope branch (its picked label is the out-of-scope `:Session`), but its `id` is still a `:Point` key a
+rename can land on. Before that was fixed, `[Point{p-0000001}, Point+Session{poi-b3c35c6d…}]` was
+*accepted* and both nodes left carrying one `id`. `tests/test_8607_legacy_id_normaliser.py::
+test_a_multi_label_node_is_in_the_collision_universe` pins it. ⚠️ The **measured** population is
+single-label (§9.3), so this guard is unit-proven, not measured here.
+
 ## 5. Idempotence — a second run changes nothing
 
 ```
@@ -120,8 +127,9 @@ measured here* — the binding is a property of the code, not a result of this r
 ## 7. Identity resolves after the pass
 
 For **20** migrated nodes, resolving the NEW `(label, key)` returns exactly one node, and it is the
-same `dump_id` the plan renamed: **20/20**. Extended to the whole rename set: **1,000/1,000** resolve
-uniquely to the node they renamed, and **0** old ids remain addressable.
+same `dump_id` the plan renamed: **20/20**. Extended to the whole rename set, with the same
+`dump_id` equality test (not uniqueness alone): **1,000/1,000** resolve to the node they renamed, and
+**0** old ids remain addressable.
 
 ## 8. Recovery path — proven, not asserted
 
@@ -152,11 +160,11 @@ via `restore_graph`, so an intact pre-pass snapshot is a second, independent way
    `::test_an_edited_edge_list_is_refused_on_revert`), but a production-shaped dump — with real
    `IMPL`/`NAND` edges between legacy points — is the population they must fire on before the live
    pass.
-3. **Multi-label nodes.** Every seeded node carries exactly ONE label, so `_node_label`'s
-   label-set rules — scope decided over the label set rather than array order, and the refusal of a
-   node whose labels carry different contract keys — never fire on this population. A real
-   `dump_graph` artifact carries `:Point`+`:Session` nodes. Those branches are unit-covered; **no
-   number above depends on them**.
+3. **Multi-label nodes.** Every seeded node carries exactly ONE label, so neither `_node_label`'s
+   label-set rules (scope decided over the label set rather than array order; the refusal of a node
+   whose labels carry different contract keys) nor the multi-label arm of the collision universe
+   (§4) fires on this population. A real `dump_graph` artifact carries `:Point`+`:Session` nodes.
+   All three are unit-covered; **no number above depends on them**.
 4. **The live, journaled pass is not this tool.** §1.4 rule 2 requires the rewrite to be a journal
    event so `replay(journal)` reproduces it; #7951 owns that door. This is the offline half: the
    plan here *is* the payload that pass would journal.
@@ -164,5 +172,13 @@ via `restore_graph`, so an intact pre-pass snapshot is a second, independent way
 ## 10. Reproducing
 
 `seed.py`, `measure.py` and `verify-revert.py` in this directory are the scripts that produced every
-number above, run against a lane FalkorDB instance. They are evidence scripts, not tools: they seed
-a throwaway graph and never address a live one.
+number above. They are evidence scripts, not tools: they seed a throwaway graph and never address a
+live one. Run them **from the directory the artifacts live in**, with the port of your own lane
+instance (`uv run python tools/test_lane.py uri` prints it):
+
+```
+export T8607_PORT=<the lane instance's published port>
+uv run python docs/evidence/8607-w1b/seed.py            # seeds + dumps -> dump.json
+uv run python docs/evidence/8607-w1b/measure.py         # needs normalised.json: run §5's commands first
+uv run python docs/evidence/8607-w1b/verify-revert.py   # needs restored.json: run §8's command first
+```

@@ -71,7 +71,7 @@ for r in sample:
               f" (expected {r['dump_id']}) {'OK' if same else 'MISMATCH'}")
 print(f"  resolved uniquely to the same node: {ok}/{len(sample)}")
 print(f"  coverage of the whole rename set : "
-      f"{sum(1 for r in ren if len(by_key.get((r['label'], r['new']), [])) == 1)}/{len(ren)}")
+      f"{sum(1 for r in ren if (h := by_key.get((r['label'], r['new']), [])) and len(h) == 1 and h[0]['dump_id'] == r['dump_id'])}/{len(ren)}")
 
 # ── 5. leftover legacy shapes after the pass ──────────────────────────────
 print("\n=== legacy shapes remaining AFTER ===")
