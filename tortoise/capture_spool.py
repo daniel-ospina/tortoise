@@ -2254,13 +2254,6 @@ def _spool_health_line(
     # A READ-ONLY question (`repair=False`): a health line must not quarantine,
     # record or unlink the spool it is describing.
     saturated = spool_saturated(root, bounds, repair=False)
-    if api_key == "" and not saturated:
-        # The count is NOT dropped here: a keyless box is exactly the box whose
-        # spool grows forever (nothing can file it), so the backlog stays on the
-        # line that explains why.
-        return CaptureHealth(
-            "inactive", queued, None,
-            f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)")
     status = recorded.get("status") if recorded is not None else None
     blocked_status = (
         status
@@ -2269,6 +2262,12 @@ def _spool_health_line(
             and status > 0)
         else None
     )
+    # ⛔ THE ORDER OF THESE BRANCHES IS THE DOCSTRING'S PRECEDENCE:
+    # `UNREADABLE` > `BLOCKED` > `SATURATED` > `INACTIVE` > `DRAINING` > `OK`.
+    # A recorded refusal outranks INACTIVE because it names a CAUSE the operator
+    # can act on; the INACTIVE branch used to run first, so a keyless box with a
+    # recorded 402 printed INACTIVE and never BLOCKED — the docstring above
+    # stated an order the code did not implement (capture-loss review, #10479).
     if blocked_status is not None and queued > 0:
         return CaptureHealth(
             "blocked", queued, blocked_status,
@@ -2278,7 +2277,9 @@ def _spool_health_line(
         # `queued` is the PENDING count, so a ceiling filled by terminal entries
         # reads `SATURATED (0 queued, …)` — true on both counts: nothing will be
         # retried, and nothing new will be admitted. `session drain` names the
-        # terminal count and `--retry-terminal` re-arms them.
+        # terminal count and `--retry-terminal` re-arms them. The keyless fact
+        # is KEPT in the line rather than replacing it: a keyless box is exactly
+        # the one that saturates.
         if api_key == "":
             return CaptureHealth(
                 "saturated", queued, None,
@@ -2287,6 +2288,13 @@ def _spool_health_line(
         return CaptureHealth(
             "saturated", queued, None,
             f"capture: SATURATED ({queued} queued, refusing new captures)")
+    if api_key == "":
+        # The count is NOT dropped here: a keyless box is exactly the box whose
+        # spool grows forever (nothing can file it), so the backlog stays on the
+        # line that explains why.
+        return CaptureHealth(
+            "inactive", queued, None,
+            f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)")
     if queued > 0:
         return CaptureHealth("draining", queued, None,
                              f"capture: DRAINING ({queued} queued)")

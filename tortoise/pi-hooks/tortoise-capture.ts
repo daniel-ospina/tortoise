@@ -1,4 +1,4 @@
-// tortoise-hook-version: 15
+// tortoise-hook-version: 16
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -40,6 +40,23 @@
 // shipped bytes move. `session verify`'s "it captures with older logic"
 // wording is imprecise for this one generation; the classification and the
 // repair it prompts are right.
+//
+// Generation 16 (capture-loss, #10479): this seam no longer DISCARDS an
+// undelivered capture to make room, and it says so on the health line. Four
+// behavioural edits, all pinned by tests: (a) `pruneSpool`'s candidate set is
+// FILED entries only — an undelivered entry is the only copy of a conversation
+// that never reached the graph, so a full spool now REFUSES new work
+// (`spoolSaturated`, recorded as `spool_saturated`) instead of unlink-ing the
+// oldest; (b) the per-entry bound is asked about what is ALREADY on disk, and a
+// write that would push a legal entry past it is refused
+// (`entry_growth_refused`) rather than marking a fileable transcript terminal;
+// (c) `spoolSaturated` credits reclaimable ORPHAN bytes, so the refusal cannot
+// outlive a condition `pruneSpool` is entitled to clear; (d) a sixth health
+// state `capture: SATURATED` exists, because the other five could not say
+// "refusing every new capture" — a ceiling filled by terminal entries read
+// `OK (0 queued)`, byte-identical to a healthy box. Every one of these ships in
+// the same bytes as the rule they implement, so an installed generation-15 copy
+// must read as STALE rather than keep evicting undelivered captures.
 //
 // Generation 14 (#3515 review): the clock tolerance is ONE value shared by the
 // two arms that compare a persisted `at` with our spawn stamp. Generation 13
@@ -339,15 +356,6 @@ export const FLUSH_FOLLOW_UP_DELAY_MS = 250;
  *  one) must be able to say WHY the spool is not moving, without re-POSTing to
  *  find out. */
 export const SPOOL_STATUS_FILE = "status.json";
-/** The dedupe stamp for REFUSALS, in the spool ROOT beside `status.json`.
- *
- *  A refused session is refused on EVERY turn (the Pi hook snapshots at each
- *  `turn_end`) and has no spool entry to carry a marker, so without a stamp the
- *  ledger grows one line per turn for the session's whole life — inside the spool
- *  root, counted against no ceiling. Bookkeeping only: never a record of the
- *  capture state, never read as a verdict. Mirrors
- *  `capture_spool.CAPTURE_REFUSAL_STAMP_FILE`. */
-export const SPOOL_REFUSAL_STAMP_FILE = ".refusal-stamp.json";
 /** The server's machine-readable plan-allowance category (`hosted_api` 402 body). */
 export const QUOTA_EXCEEDED_CODE = "quota_exceeded";
 /**
@@ -935,8 +943,7 @@ export function postCapture(
 // A spool at a ceiling with nothing reclaimable is SATURATED: it REFUSES the
 // write, records the refusal, keeps the backlog, and reports
 // `capture: SATURATED`. The oldest undelivered entry is never reaped to make
-// room (capture-loss, 2026-11-01; supersedes #6388's "the oldest undelivered
-// entry is reaped and the record says so").
+// room (capture-loss, 2026-11-01; supersedes #6388).
 //
 // Idempotency: `session_id` remains the SERVER's upsert key. On top of it the
 // client derives a content-addressed capture key
@@ -986,19 +993,15 @@ export const MAX_ATTEMPTS = 64;
  *  (capture-loss residual 5). It used to be the ONE branch that deleted a
  *  PREVIOUSLY SPOOLED capture: a 1 KB conversation was destroyed by one
  *  oversized turn, below every other ceiling. A fresh snapshot that is oversized
- *  was never on disk, so there the record alone is the whole story — and
- *  NOTHING was retained, which is why retention is a property of the RECORD
- *  (`retained`) and not of this reason. */
+ *  was never on disk, so there the record alone is the whole story. */
 export const DISCARD_ENTRY_TOO_LARGE = "entry_too_large";
-/** A write that would take an EXISTING entry past `maxEntryBytes` while the
- *  content already on disk is UNDER that bound. The write is refused and the
- *  stored entry is left EXACTLY as it was — legal and fileable, not
- *  retried-less. Marking it terminal instead (`entry_too_large` when the on-disk
- *  content was fine) abandoned a conversation the server would have accepted:
- *  the drain skips a terminal entry forever and `countPendingEntries` excludes
- *  it, so a perfectly legal capture sat on disk uncounted and undelivered. A
- *  refused GROWTH is a delay, exactly like a refused new session. Mirrors
- *  `capture_spool.DISCARD_ENTRY_GROWTH_REFUSED`. */
+/** A WRITE that would take a LEGAL, fileable entry past `maxEntryBytes`.
+ *  Nothing is removed and nothing is abandoned: the stored entry (a PREFIX of
+ *  this snapshot, under the bound) is left untouched and filable, and the next
+ *  admitted write re-offers the refused turns. This is the arm that replaced a
+ *  silent abandonment — marking the entry `terminal_failure` here meant a legal
+ *  capture sat on disk that no drain would ever POST, no health line counted,
+ *  and no instrument reported (capture-loss, #10479 review). */
 export const DISCARD_ENTRY_GROWTH_REFUSED = "entry_growth_refused";
 export const DISCARD_COUNT_EXCEEDED = "spool_count_exceeded";
 export const DISCARD_BYTES_EXCEEDED = "spool_total_bytes_exceeded";
@@ -1024,6 +1027,10 @@ export const DISCARD_SPOOL_SATURATED = "spool_saturated";
  *  log is the only copy), and marked `terminal_failure` so the drain does not
  *  retry it — terminal, never destructive. */
 export const DISCARD_HTTP_REJECTED = "http_rejected";
+/** The refusal dedupe stamp, in the spool ROOT beside `status.json` (the
+ *  Python leg's `CAPTURE_REFUSAL_STAMP_FILE` — one spool, two legs, so the file
+ *  NAME is part of the contract). */
+export const CAPTURE_REFUSAL_STAMP_FILE = ".refusal-stamp.json";
 
 export interface SpoolMeta {
   version: 1;
@@ -1086,13 +1093,12 @@ export interface DiscardRecord {
   capture_key?: string;
   reason: string;
   detail?: string;
-  /** Whether anything was KEPT for this capture. RETENTION IS A PROPERTY OF THE
-   *  CASE, NOT OF THE REASON: `entry_too_large` has two arms with opposite
-   *  outcomes (a stored entry is kept and marked terminal; a fresh oversized
-   *  snapshot never reached the disk). The Python leg's `is_lost_discard` reads
-   *  this flag when it is present and falls back to the reason otherwise, and
-   *  both legs append to ONE `discarded.jsonl` — so a record written here must
-   *  carry the flag whenever the reason alone would misreport. */
+  /** Whether the capture SURVIVED the record (kept on disk, still filable).
+   *  Explicit because a reason can be shared by arms with opposite outcomes —
+   *  `entry_too_large` keeps a previously spooled entry and never existed for a
+   *  fresh oversized snapshot. A record that carries no flag is classified by
+   *  its reason (`RETAINED_DISCARD_REASONS`, Python leg), so a line written by
+   *  an older leg still classifies. */
   retained?: boolean;
 }
 
@@ -1172,7 +1178,15 @@ export interface QuotaRefusal {
 }
 
 /** The per-box capture state a health line reports (#2100). */
-export type CaptureState = "ok" | "draining" | "blocked" | "inactive" | "unreadable" | "saturated";
+export type CaptureState =
+  | "ok"
+  | "draining"
+  | "blocked"
+  | "inactive"
+  | "unreadable"
+  /** At a ceiling with nothing evictable: every NEW capture is refused. The
+   *  sixth state exists because the other five could not say it (capture-loss). */
+  | "saturated";
 
 /** What `status.json` holds. Advisory: it records the LAST refusal this leg saw;
  *  the health line always recomputes `queued` from the spool and treats an empty
@@ -1328,20 +1342,19 @@ export function readSpoolTurns(dir: string, sessionId: string): Turn[] {
   return turns;
 }
 
-/** All spool metas (unreadable metas are surfaced as `corrupt_entry` discards).
- *
- *  `repair: false` reads the same files and SKIPS the corrupt ones: no ledger
- *  line, no quarantine, no unlink. That is for a READER that must not mutate the
- *  spool it describes (`spoolSaturated` called from the health line) — the repair
- *  belongs to the drain's own scan, exactly as `countPendingEntries` states. An
- *  unreadable `entries/` is still a recorded discard even when `repair: false`: it
- *  is not a change to an entry, and a spool that cannot be listed must never read
- *  as an empty one. Mirrors the Python leg's `list_spool_metas(repair=False)`. */
+/** All spool metas (unreadable metas are surfaced as `corrupt_entry` discards). */
 export function listSpoolEntries(
   dir: string,
   opts: { repair?: boolean } = {},
 ): { metas: SpoolMeta[]; discards: DiscardRecord[] } {
-  const repair = opts.repair ?? true;
+  // `repair: false` reads the same files and SKIPS the corrupt ones: no ledger
+  // line, no quarantine, no unlink. For a READER that must not mutate the spool
+  // it describes — the health line (`spoolHealthLine` → `spoolSaturated`), the
+  // same contract `countPendingEntries` states. The repair belongs to the drain's
+  // own scan. An unreadable `entries/` is still RECORDED even when `repair` is
+  // false: that is not a change to an entry, and a spool that cannot be listed
+  // must never read as an empty one. Mirrors `capture_spool.list_spool_metas`.
+  const repair = opts.repair !== false;
   const metas: SpoolMeta[] = [];
   const discards: DiscardRecord[] = [];
   const root = entriesDir(dir);
@@ -1516,8 +1529,8 @@ export function recordDiscard(
     capture_key?: string;
     reason: string;
     detail?: string;
-    retained?: boolean;
     at?: string;
+    retained?: boolean;
   },
 ): DiscardRecord {
   const full: DiscardRecord = { at: rec.at ?? new Date().toISOString(), ...rec };
@@ -1526,6 +1539,89 @@ export function recordDiscard(
     appendFileSync(discardPath(dir), `${JSON.stringify(full)}\n`, { encoding: "utf8", mode: 0o600 });
   } catch {
     // a full disk must not throw out of a capture path
+  }
+  return full;
+}
+
+function refusalStampPath(dir: string): string {
+  return join(dir, CAPTURE_REFUSAL_STAMP_FILE);
+}
+
+/** The last stamped refusal, or `undefined` — a TOTAL read, never a throw. */
+function readRefusalStamp(dir: string):
+  { session_id?: string; reason?: string; entries_stamp?: number; record?: DiscardRecord } | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(refusalStampPath(dir), "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A cheap fingerprint of the spool state a refusal was measured against.
+ *
+ * `entries/`'s mtime moves on create, unlink and rename — exactly the
+ * transitions that can change "is anything evictable?" — and does NOT move when
+ * a refused session re-snapshots, because a refusal writes nothing at all. That
+ * is what makes the stamp hold across a refused session's turns while still
+ * letting the next refusal after a drain be recorded. */
+function entriesDirStamp(dir: string): number {
+  try {
+    return statSync(entriesDir(dir)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/** Record a REFUSAL once per (session, reason, spool state).
+ *
+ * A refusal is not a one-off event: a refused session re-snapshots on EVERY
+ * `turn_end`, it has no `prior` to hang a dedupe marker on (nothing was ever
+ * written for it), and an unconditional `recordDiscard` therefore appends one
+ * line per turn for as long as the box stays saturated. `discarded.jsonl` lives
+ * in the spool ROOT and is counted against no ceiling, so that is unbounded
+ * growth in the very directory the "bounded disk" claim is about — the same
+ * amplification class the `entry_too_large` branch already guards (#4714).
+ *
+ * The key is (session_id, reason, `entries/` stamp): the same session, refused
+ * for the same reason, while the spool itself has not changed, is the SAME
+ * event. One stamp stores the LAST refusal only, so it can suppress at most a
+ * repeat of itself: a different session, a different reason, or any change in
+ * the entry set is always recorded. The Python leg's `_record_refusal` is the
+ * twin and keys identically, because the two legs share this one ledger.
+ *
+ * Returns the ledger line either way — the prior one when this is a suppressed
+ * repeat — so a caller may report "the state" without inventing an event. */
+export function recordRefusal(
+  dir: string,
+  rec: {
+    session_id: string;
+    capture_key?: string;
+    reason: string;
+    detail?: string;
+    retained?: boolean;
+  },
+): DiscardRecord {
+  const fingerprint = {
+    session_id: rec.session_id,
+    reason: rec.reason,
+    entries_stamp: entriesDirStamp(dir),
+  };
+  const stamp = readRefusalStamp(dir);
+  if (
+    stamp &&
+    Object.entries(fingerprint).every(([key, value]) =>
+      stamp[key as keyof typeof fingerprint] === value,
+    )
+  ) {
+    if (stamp.record && typeof stamp.record === "object") return stamp.record;
+  }
+  const full = recordDiscard(dir, rec);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    atomicWrite(refusalStampPath(dir), `${JSON.stringify({ ...fingerprint, record: full })}\n`);
+  } catch {
+    // the stamp is an optimisation, never a precondition for recording
   }
   return full;
 }
@@ -1801,7 +1897,8 @@ export function writeSpoolEntry(
     // correct when the STORED content is itself over the bound and no attempt
     // could ever file it. When the stored content is under the bound — the
     // reviewer's 1032-byte conversation, destroyed by one oversized turn — the
-    // entry is legal and fileable, and all this write needs is to be refused.
+    // entry is legal and fileable, and all this write needs is to be REFUSED.
+    // Mirrors the Python writer's `capture_spool.write_spool_entry`.
     if (prior) {
       const onDisk = spoolEntryBytes(dir, snapshot.sessionId);
       if (onDisk > bounds.maxEntryBytes) {
@@ -1819,15 +1916,13 @@ export function writeSpoolEntry(
           // the bound must not append a ledger line per turn.
           return { written: false, bytes: onDisk, discards };
         }
-        discards.push(
-          quarantineEntry(dir, prior, DISCARD_ENTRY_TOO_LARGE, detail, Date.now()),
-        );
+        discards.push(quarantineEntry(dir, prior, DISCARD_ENTRY_TOO_LARGE, detail, Date.now()));
         return { written: false, bytes: onDisk, discards };
       }
       // The stored content is UNDER the bound and perfectly fileable; it is THIS
       // WRITE that would cross it. Refuse the growth and leave the entry exactly
-      // as it was — filable, counted, and delivered by the next drain. Marking it
-      // terminal here was a silent abandonment: a legal capture on disk, never
+      // as it was — filable, counted, and delivered by the next drain. Marking
+      // it terminal here was a silent abandonment: a legal capture on disk, never
       // filed, never counted, never reported.
       discards.push(
         recordRefusal(dir, {
@@ -1845,9 +1940,11 @@ export function writeSpoolEntry(
       );
       return { written: false, bytes: onDisk, discards };
     }
-    // A FRESH snapshot that is oversized was never on disk — nothing to retain.
-    // `retained: false` says so ON THE RECORD: this reason's other arm retains
-    // everything, and the reason alone cannot tell the two apart.
+    // A FRESH snapshot that is oversized was never on disk — there is nothing to
+    // retain, so the record alone is the whole story. `retained: false` says so ON
+    // THE RECORD: this reason's other arm retains everything, and the reason alone
+    // cannot tell the two apart. It is NOT de-duped: nothing was written for this
+    // session, so it has no entry to carry a marker (same as the Python leg).
     discards.push(
       recordDiscard(dir, {
         session_id: snapshot.sessionId,
@@ -2078,30 +2175,31 @@ export function pruneSpool(
 }
 
 /**
- * Is the spool at a ceiling with NOTHING EVICTABLE left to reclaim?
+ * Is the spool at a ceiling with NOTHING evictable?
  *
- * `pruneSpool` may only evict FILED entries and ORPHANS, so a spool whose live
+ * `pruneSpool` may only evict ORPHANS and FILED entries, so a spool whose live
  * entries are all undelivered cannot shrink: it is SATURATED. That state is
  * exactly where a cap silently destroys the product's own data (measured:
  * 80 `spool_count_exceeded` evictions of never-filed sessions on pi-cell-3),
  * so it is a first-class, reported state rather than an eviction trigger.
  *
- * ⛔ THE EVICTABLE SET IS `pruneSpool`'s, NOT "filed entries only". `pruneSpool`
- * reaps a quarantined `.orphan` under the byte ceiling, and this predicate folds
- * orphan bytes into `total` — so asking "is anything FILED?" answered a
- * DIFFERENT question than the one the total implies: a spool pushed over its
- * byte ceiling by evictable orphan bytes reported SATURATED, refused the write,
- * and therefore never reached the only call site that prunes (the write it just
- * refused), so the refusal OUTLIVED its own condition and every later capture
- * was refused for a reason prune was entitled to clear. Orphan bytes are
+ * Both ceilings are checked, because either one can bind.
+ *
+ * ⛔ THE EVICTABLE SET IS `pruneSpool`'s, NOT "filed entries only".
+ * `pruneSpool` reaps a quarantined `.orphan` under the byte ceiling, and this
+ * predicate folds orphan bytes into `total` — so asking "is anything FILED?"
+ * answered a DIFFERENT question than the one the total implies: a spool pushed
+ * over its byte ceiling by evictable orphan bytes reported SATURATED, refused the
+ * write, and therefore never reached the only call site that prunes (the write it
+ * just refused), so the refusal OUTLIVED its own condition and every later
+ * capture was refused for a reason prune was entitled to clear. Orphan bytes are
  * therefore CREDITED against the byte test — prune may delete them, so they are
  * room — while a COUNT overage is still only relievable by a filed entry,
  * because prune's orphan pass is byte-gated and never touches the count. A
  * quarantined orphan's delivered-ness is still unknowable (`quarantineLog`
  * removed the meta, the only copy of `filed_key`), which is why it is evicted
- * LAST; it is not a reason to call the spool unshrinkable.
- *
- * Both ceilings are checked, because either one can bind.
+ * LAST; it is not a reason to call the spool unshrinkable. Mirrors
+ * `capture_spool.spool_saturated`.
  *
  * PROJECTION (capture-loss residual 6): a write path does not ask about the spool
  * as it is, it asks whether the write ITSELF can land — pass its post-write size
@@ -2114,36 +2212,30 @@ export function pruneSpool(
  * write must not land OVER a ceiling); without one it stays `>=` (a spool exactly
  * AT a ceiling has no room for even a zero-byte entry). The Python twin
  * (`capture_spool.spool_saturated`) states the same rule.
- *
- * `repair: false` keeps the meta scan from MUTATING the spool (no ledger line, no
- * quarantine, no unlink): the health line must describe the spool it reads, and
- * `listSpoolEntries` is the drain's repairing scanner (`countPendingEntries`
- * states the same rule).
  */
 export function spoolSaturated(
   dir: string,
   bounds: SpoolBounds = DEFAULT_BOUNDS,
-  projection: {
-    projectedBytes?: number;
-    replacesSessionId?: string;
-    repair?: boolean;
-  } = {},
+  projection: { projectedBytes?: number; replacesSessionId?: string } = {},
+  opts: { repair?: boolean } = {},
 ): boolean {
-  const { metas } = listSpoolEntries(dir, { repair: projection.repair ?? true });
-  const orphans = orphanPaths(dir);
-  // Bytes prune may reclaim WITHOUT spending an undelivered entry: the orphan
-  // class is byte-evictable only (see the note below).
-  const reclaimableOrphanBytes = orphans.reduce((sum, path) => sum + fileSize(path), 0);
+  // `repair: false` keeps the meta scan from MUTATING the spool (no ledger line,
+  // no quarantine, no unlink): the health line must describe the spool it reads
+  // (`listSpoolEntries` is the drain's repairing scanner — the same rule
+  // `countPendingEntries` follows). The write path keeps the repairing scan.
+  const { metas } = listSpoolEntries(dir, opts);
+  // Bytes `pruneSpool` may reclaim WITHOUT spending an undelivered entry: the
+  // orphan class is byte-evictable only (see below).
+  const reclaimableOrphanBytes = orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
   let total =
-    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) + reclaimableOrphanBytes;
+    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
+    reclaimableOrphanBytes;
   const { projectedBytes, replacesSessionId } = projection;
-  let overCount: boolean;
-  let overBytes: boolean;
   if (projectedBytes === undefined && replacesSessionId === undefined) {
     // STRICT: the question is whether ADDING an entry would cross the ceiling, so
     // a spool exactly AT the count ceiling is already saturated.
-    overCount = metas.length >= bounds.maxEntries;
-    overBytes = total - reclaimableOrphanBytes >= bounds.maxTotalBytes;
+    if (metas.length < bounds.maxEntries && total - reclaimableOrphanBytes < bounds.maxTotalBytes)
+      return false;
   } else {
     const count = metas.length + (replacesSessionId === undefined ? 1 : 0);
     if (replacesSessionId !== undefined) {
@@ -2152,17 +2244,16 @@ export function spoolSaturated(
       total -= spoolEntryBytes(dir, replacesSessionId);
     }
     total += projectedBytes ?? 0;
-    overCount = count > bounds.maxEntries;
-    overBytes = total - reclaimableOrphanBytes > bounds.maxTotalBytes;
+    if (count <= bounds.maxEntries && total - reclaimableOrphanBytes <= bounds.maxTotalBytes)
+      return false;
   }
-  if (!overCount && !overBytes) return false;
-  // Over a ceiling that the ORPHAN credit could not absorb. Only a FILED entry
+  // Over a ceiling that the ORPHAN CREDIT could not absorb. Only a FILED entry
   // may make room now: its content is already on the wire, so dropping it costs
   // nothing a reader cannot re-fetch, while an UNDELIVERED entry is the only copy
   // of a conversation that never reached the graph and `discardEntry` UNLINKS it.
-  // The entry being written can never reclaim ITSELF: `pruneSpool` is told to
-  // keep it (`keepSessionId`), so counting it would admit a write nothing can
-  // make room for.
+  // The entry being written can never reclaim ITSELF: `pruneSpool` is told to keep
+  // it (`keepSessionId`), so counting it would admit a write nothing can make room
+  // for.
   return !metas.some((m) => entryFiled(m) && m.session_id !== replacesSessionId);
 }
 
@@ -2639,86 +2730,6 @@ function statusPathFor(dir: string): string {
   return join(dir, SPOOL_STATUS_FILE);
 }
 
-function refusalStampPath(dir: string): string {
-  return join(dir, SPOOL_REFUSAL_STAMP_FILE);
-}
-
-function readRefusalStamp(dir: string): Record<string, unknown> | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(refusalStampPath(dir), "utf8")) as unknown;
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** A cheap fingerprint of the spool state a refusal was measured against.
- *
- *  `entries/`'s mtime moves on create, unlink and rename — exactly the
- *  transitions that can change "is anything evictable?" — and does NOT move when
- *  a refused session re-snapshots, because a refusal writes nothing at all. That
- *  is what makes the stamp hold across a refused session's turns while still
- *  letting the next refusal after a drain be recorded. */
-function entriesDirStamp(dir: string): number {
-  try {
-    return statSync(entriesDir(dir)).mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-
-/** Record a REFUSAL once per (session, reason, spool state).
- *
- *  A refusal is not a one-off event: a refused session re-snapshots on EVERY
- *  turn (`writeSpoolEntry` is called from the Pi hook's `turn_end`), it has no
- *  `prior` to hang a dedupe marker on (nothing was ever written for it), and an
- *  unconditional `recordDiscard` therefore appends one line per turn for as long
- *  as the box stays saturated. `discarded.jsonl` lives in the spool ROOT and is
- *  counted against no ceiling, so that is unbounded growth in the very directory
- *  the "bounded disk" claim is about — the same amplification class the
- *  `entry_too_large` branch already guards (#4714).
- *
- *  The key is (session_id, reason, `entries/` stamp): the same session, refused
- *  for the same reason, while the spool itself has not changed, is the SAME
- *  event. One stamp stores the LAST refusal only, so it can suppress at most a
- *  repeat of itself: a different session, a different reason, or any change in
- *  the entry set is always recorded. Mirrors `capture_spool._record_refusal`.
- *
- *  Returns the ledger line either way — the prior one when this is a suppressed
- *  repeat — so a caller may report "the state" without inventing an event. */
-function recordRefusal(
-  dir: string,
-  rec: {
-    session_id: string;
-    capture_key?: string;
-    reason: string;
-    detail?: string;
-    retained?: boolean;
-  },
-): DiscardRecord {
-  const fingerprint = {
-    session_id: rec.session_id,
-    reason: rec.reason,
-    entries_stamp: entriesDirStamp(dir),
-  };
-  const stamp = readRefusalStamp(dir);
-  if (
-    stamp !== undefined &&
-    Object.entries(fingerprint).every(([key, value]) => stamp[key] === value)
-  ) {
-    const prior = stamp.record;
-    if (prior && typeof prior === "object") return prior as DiscardRecord;
-  }
-  const full = recordDiscard(dir, rec);
-  try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    atomicWrite(refusalStampPath(dir), `${JSON.stringify({ ...fingerprint, record: full })}\n`);
-  } catch {
-    // bookkeeping that cannot be persisted must never fail a capture path
-  }
-  return full;
-}
-
 /**
  * #2100: how many entries are PENDING — a READ-ONLY count for the health line.
  *
@@ -2803,21 +2814,6 @@ export function writeCaptureStatus(dir: string, status: CaptureStatus): void {
  * 259 B) must be able to tell a BLOCKED box from an idle one. The line is
  * printed once per `session_start` and again whenever a drain discovers a new
  * quota refusal.
- *
- * `SATURATED` is the sixth state and it exists because the other five could not
- * say it: a box at a ceiling with nothing evictable REFUSES every new capture,
- * while `DRAINING` describes a working backlog and — when the ceiling is filled
- * by TERMINAL entries, which are never retried and never counted — `OK (0 queued)`
- * describes a healthy box byte-for-byte. That is the silent-failure class this
- * spool's rules exist to remove, and the standard is explicit that a refusal must
- * reach the producer ("the publisher will be informed of the reject via a
- * `basic.nack`") and that queue depth is an observable, not an inference.
- *
- * Precedence: `UNREADABLE` > `BLOCKED` (a recorded refusal with a STATUS names a
- * cause the operator can act on) > `SATURATED` > `INACTIVE` > `DRAINING` > `OK`.
- * `SATURATED` outranks `INACTIVE` deliberately: a keyless box is precisely the
- * one that saturates, and the keyless fact is kept in the SATURATED line rather
- * than replacing it.
  *
  * `queued` is the number of PENDING entries (see `countPendingEntries`) —
  * recomputed from the spool on every call — and the recorded marker is only
@@ -2980,17 +2976,16 @@ function spoolHealthLine(
   }
   // A READ-ONLY question (`repair: false`): a health line must not quarantine,
   // record or unlink the spool it is describing.
-  const saturated = spoolSaturated(dir, opts.bounds ?? DEFAULT_BOUNDS, { repair: false });
-  if (opts.apiKey === "" && !saturated) {
-    // The count is NOT dropped here: a keyless box is exactly the box whose
-    // spool grows forever (nothing can file it), so the backlog must stay
-    // visible on the line that explains why.
-    return {
-      state: "inactive",
-      queued,
-      line: `capture: INACTIVE (no TORTOISE_API_KEY, ${queued} queued)`,
-    };
-  }
+  // `bounds` are the ceilings the box actually runs with: SATURATED is a
+  // statement ABOUT them, so a caller (a test, a fleet surface) that knows the
+  // real pair passes it rather than inheriting the module default. Mirrors the
+  // Python leg's `capture_health_line(..., bounds=...)`.
+  const saturated = spoolSaturated(
+    dir,
+    opts.bounds ?? DEFAULT_BOUNDS,
+    {},
+    { repair: false },
+  );
   // A marker we cannot UNDERSTAND is not a marker — the same rule this file
   // applies to `terminal_failure` and to a corrupt backoff window. A hand-edited
   // or foreign `status.json` carrying `{"state": "blocked"}` (or a status that
@@ -3005,6 +3000,15 @@ function spoolHealthLine(
     recorded.status > 0
       ? recorded.status
       : undefined;
+  // ⛔ PRECEDENCE — `UNREADABLE` > `BLOCKED` > `SATURATED` > `INACTIVE` >
+  // `DRAINING` > `OK`, and the order of these branches IS the precedence. A
+  // recorded refusal outranks INACTIVE because it names a CAUSE the operator can
+  // act on; SATURATED outranks INACTIVE deliberately, so a keyless box —
+  // precisely the one that saturates — keeps the keyless fact in the SATURATED
+  // line instead of replacing it. Before this branch existed the five states
+  // could not say "refusing every new capture": a working backlog read DRAINING,
+  // and a ceiling filled by TERMINAL entries (never retried, never counted) read
+  // `OK (0 queued)` — byte-identical to a healthy box.
   if (blockedStatus !== undefined && queued > 0) {
     return {
       state: "blocked",
@@ -3034,6 +3038,16 @@ function spoolHealthLine(
           queued,
           line: `capture: SATURATED (${queued} queued, refusing new captures)`,
         };
+  }
+  if (opts.apiKey === "") {
+    // The count is NOT dropped here: a keyless box is exactly the box whose
+    // spool grows forever (nothing can file it), so the backlog must stay
+    // visible on the line that explains why.
+    return {
+      state: "inactive",
+      queued,
+      line: `capture: INACTIVE (no TORTOISE_API_KEY, ${queued} queued)`,
+    };
   }
   if (queued > 0) {
     return { state: "draining", queued, line: `capture: DRAINING (${queued} queued)` };
