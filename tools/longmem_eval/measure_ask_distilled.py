@@ -79,10 +79,12 @@ stronger than they are:
    no clause to ``decision_rule``, changes no corpus, no scoring and no
    verdict: it refuses to *emit the report* when the report's own
    reproducibility sentence would be false. The precedent is in-tree —
-   ``tools/capstone_preregistration_check.py`` ("the commit that adds
-   PRE-REGISTRATION.md must be older than the commit that adds each *.log … an
-   ordering that cannot be shown is not an ordering") and
-   ``tools/finding_provenance.py`` (an ancestry test, never an equality test).
+   ``tools/capstone_preregistration_check.py`` ("the pre-registration's earliest
+   add-commit reachable from the BASE ref must be older than the evidence log's
+   add-commit … an ordering that cannot be shown is not an ordering"; #10463 moved
+   the comparison onto the base branch, because a squash merge rewrites the
+   contribution's own sibling commits) and ``tools/finding_provenance.py`` (an
+   ancestry test, never an equality test).
    Amending the pre-registration itself to name this check would be a lane
    editing a protocol that already has a run behind it — out of scope here.
 

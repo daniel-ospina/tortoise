@@ -29,6 +29,14 @@ It verifies five things, and it fails on each of them for a specific reason:
    the "before" relation holds between published artefacts — the base is the only side a squash
    cannot rewrite.
 
+   ⚠️ **What this arm does NOT prove, stated so it is not read as more than it is.** It establishes
+   *when* the registration became an artefact on the base. It does NOT establish that the
+   registration was not **edited** by the same contribution that carries the log: only *add*
+   commits are read (`--diff-filter=A`), so a change that rewrites a threshold and lands a scored
+   log together is accepted by this check. That gap is pre-existing (the exemption arm has the
+   `_touch_epochs` content bound; the ordinary arm never had one), it is a NEW RULE to close and
+   therefore needs an owner decision — it is filed rather than invented here.
+
    **The refusal this buys, at PR time rather than after the merge.** A change that adds a
    registration *and* a log has nothing on the base to appeal to, so it is **REFUSED**: the
    registration must land first, in its own PR. That is the arm that stops a contribution instead
@@ -681,20 +689,24 @@ BASE_REF_ENV = "PREREG_ORDERING_BASE_REF"
 BASE_REF_CANDIDATES = ("origin/main", "main")
 
 NO_BASE_REF = (
-    "UNPROVABLE — no base ref: this checkout has "
-    f"{'/'.join(BASE_REF_CANDIDATES)} to measure the ordering against, and it has a remote, so a "
-    "provisional base of HEAD would answer a question this checkout cannot answer (the ordering "
-    "claim is against the PUBLISHED base, not against this branch's own history)"
+    "no base ref: this checkout has a remote but "
+    f"{'/'.join(BASE_REF_CANDIDATES)} does not resolve (and no --base-ref / ${BASE_REF_ENV} was "
+    "given), so the ordering cannot be measured against the published base. This is a usage / "
+    "environment error (exit 2), NOT the shallow-clone third outcome: a full-history checkout that "
+    "cannot name its base must not report success, and folding it into the skip path would let an "
+    "environment change silently downgrade the gate to the PR-internal rule it exists to remove"
 )
 
 SAME_PR_REFUSAL = (
     "{prereg} is not on the merge base ({base}): this change adds {n} evidence log(s) against a "
-    "pre-registration that is NOT yet published there. A pre-registration must land FIRST, in its "
-    "own PR — the ordering claim is that the registration was already on the base before the "
-    "evidence log's add-commit, and a registration added by the SAME PR as its log has no such "
-    "claim to make: a squash merge collapses the two into one commit, so the ordering cannot be "
-    "shown from the merged history at all. Land the registration alone, then add the log in a "
-    "follow-up."
+    "pre-registration that is NOT published there. TWO causes, and the remedy differs — check "
+    "which one you are in: (a) THIS change adds the registration, in which case it must land "
+    "FIRST, in its own PR: the ordering claim is that the registration was already on the base "
+    "before the evidence log's add-commit, and a registration added by the SAME PR as its log has "
+    "no such claim to make, because a squash merge collapses the two into one commit and the "
+    "ordering cannot be shown from the merged history at all; or (b) your base ref is STALE — "
+    "the registration is already merged upstream and you have not fetched, so run "
+    "`git fetch origin` and re-run (the ordering then holds on the real base)."
 )
 
 
@@ -711,20 +723,44 @@ def _git_stdout(args: list[str]) -> tuple[int, str]:
 def resolve_base_ref(explicit: str | None = None) -> str | None:
     """The ref the ordering is measured against, or ``None`` when there is none to measure.
 
-    A checkout with NO remote is a local-only history (the shape the unit tests build in a temp
-    repo): there is no published base and no merge to be invariant against, so ``HEAD`` is the only
-    history there is and using it is not a weakening — it is the same predicate over the whole
-    available history. A checkout WITH a remote but without a resolvable base is a different state:
-    the answer would silently degrade to the PR-internal rule this change exists to remove, so it
-    fails closed with :data:`NO_BASE_REF` instead.
+    Precedence, and each step is deliberate:
+
+    1. An **explicit** ref (``--base-ref`` / ``$PREREG_ORDERING_BASE_REF``) is authoritative. It is
+       NOT a hint: ``resolve_base_ref`` returns ``None`` when it does not resolve, and the caller
+       fails closed. Silently substituting a different ref would answer a different question than
+       the one the caller pinned — the exact substitution this gate exists to refuse.
+    2. ``origin/main`` — the published base a contribution is merged into. Tried even when no remote
+       is configured, because a remote-TRACKING ref is the published side regardless.
+    3. A checkout with **no remote** is a local-only history (the shape the unit tests build in a
+       temp repo). It is resolved to ``HEAD`` BEFORE the local ``main`` candidate: there is no
+       published base and no merge to be invariant against, so ``HEAD`` is all the history there is.
+       Resolving it to a local ``main`` branch instead would gate a local-only repo against a
+       branch nobody publishes to — a different predicate than the one documented here (review
+       cycle 1, finding 7). A local ``main`` is still used when a remote exists.
+
+    A checkout WITH a remote but without a resolvable base returns ``None``, and the caller raises
+    ``CheckError`` (exit 2): the alternative is degrading to the PR-internal rule this change
+    removes, and a check that cannot read its subject must never report success.
     """
-    for candidate in ((explicit,) if explicit else ()) + BASE_REF_CANDIDATES:
+    code, out = _git_stdout(["remote"])
+    no_remote = code == 0 and not out.strip()
+    if explicit:
+        code, out = _git_stdout(["rev-parse", "--verify", "--quiet", explicit])
+        return explicit if code == 0 and out.strip() else None
+    # `origin/main` is tried first even with no configured remote: a remote-TRACKING ref is the
+    # published side, and a checkout can carry one without the remote being configured here.
+    code, out = _git_stdout(["rev-parse", "--verify", "--quiet", BASE_REF_CANDIDATES[0]])
+    if code == 0 and out.strip():
+        return BASE_REF_CANDIDATES[0]
+    if no_remote:
+        # A local-only history: `HEAD` is all of it. Deliberately BEFORE the local `main`
+        # candidate — a local branch named `main` is not a published base, and gating a local-only
+        # repo against it would silently measure a different predicate (review cycle 1, finding 7).
+        return "HEAD"
+    for candidate in BASE_REF_CANDIDATES[1:]:
         code, out = _git_stdout(["rev-parse", "--verify", "--quiet", candidate])
         if code == 0 and out.strip():
             return candidate
-    code, out = _git_stdout(["remote"])
-    if code == 0 and not out.strip():
-        return "HEAD"
     return None
 
 
@@ -1014,25 +1050,35 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     if history_unavailable():
         raise HistoryUnavailable(HISTORY_UNAVAILABLE, failures)
 
+    # ⛔ The git-FREE arm runs BEFORE the base guard, on purpose. "You never committed the
+    # registration" is the true, specific diagnosis for a checkout with no history at all (a
+    # tarball, a vendored copy, `git archive`), and it must not be replaced by the more general
+    # base-ref error — the remedy is completely different (review cycle 1, finding 1).
+    if logs and not _is_tracked(prereg):
+        failures.append(
+            f"{PREREG_NAME} is not committed, but {len(logs)} evidence log(s) exist — "
+            "the ordering cannot be proved, and an unprovable ordering is not an ordering"
+        )
+        return failures
+
     base = resolve_base_ref(base_ref)
     if base is None:
-        raise HistoryUnavailable(NO_BASE_REF, failures)
+        # ⛔ CheckError, NOT HistoryUnavailable (review cycle 1, finding 1). `run()` folds EVERY
+        # HistoryUnavailable into the non-failing third outcome, so raising that here would make an
+        # unresolvable base exit 0 — a fail-open in the one direction this gate must never fail. The
+        # shallow case keeps the third outcome (CI test jobs are shallow by design, and refusing
+        # there would red a correctly ordered tree); "a full-history checkout that cannot name its
+        # base" is an environment/usage fault, which is exit 2.
+        raise CheckError(NO_BASE_REF)
 
     # The registration's appearance ON THE BASE — the only side a squash merge cannot rewrite.
     prereg_epochs = _added_epochs_on(base, prereg)
     if not prereg_epochs:
         if not logs:
             return failures  # no registration on base, and nothing to be ordered against
-        # ⛔ Three DISTINCT refusals, deliberately not one: "you never committed it", "it has no
-        # add-commit to compare", and "it is in THIS change but not on the base" are three
-        # different remedies, and a single message would send a contributor to whichever the
-        # message happened to name. The last one is the arm #10463 asks for.
-        if not _is_tracked(prereg):
-            failures.append(
-                f"{PREREG_NAME} is not committed, but {len(logs)} evidence log(s) exist — "
-                "the ordering cannot be proved, and an unprovable ordering is not an ordering"
-            )
-            return failures
+        # ⛔ Two DISTINCT refusals, deliberately not one: "it has no add-commit to compare at all"
+        # and "it is in THIS history but not on the base" have different remedies, and the second
+        # carries both of ITS causes (same-PR, or a stale base) in one message rather than guessing.
         if not _added_epochs(prereg):
             failures.append(
                 f"{PREREG_NAME} has no add-commit (git log --diff-filter=A found nothing) — "
@@ -1515,9 +1561,16 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             # findings it carries are kept — an unprovable history must not clear a laundering
             # finding that needed no history to prove.
             failures += exc.failures
-            ordering = HISTORY_UNAVAILABLE
+            # ⛔ The CAUSE is carried through, not flattened to the shared constant (review cycle 1,
+            # finding 2): reporting "shallow clone … run git fetch --unshallow" on a FULL clone whose
+            # base ref does not resolve sends the operator to a remedy that cannot work. If a new
+            # HistoryUnavailable arm is added, its own text reaches the report automatically.
+            ordering = HISTORY_UNAVAILABLE if str(exc) == HISTORY_UNAVAILABLE else str(exc)
     else:
         ordering = "UNVERIFIED (--no-git)"
+    # Present on EVERY path: a consumer that reads `ordering_exempt` must be able to tell "nothing
+    # was exempted" from "the arm that fills it never ran" (review cycle 1, finding 2).
+    report.setdefault("ordering_exempt", [])
     report["ordering"] = ordering
     failures += check_machine_record(directory, pins)
 

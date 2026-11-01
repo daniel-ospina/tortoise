@@ -1551,8 +1551,13 @@ ORDERING_HALF_INVOCATION = (
     # slice) is exactly the change that can move a threshold after the numbers landed. `--dir` is
     # repeatable, so this stays ONE command on ONE line with no shell operator between two runs
     # (an `&&` chain would be a second command, and the pin refuses to describe two).
+    # Re-cut 2026-11 (#10463): `--base-ref` names the branch the PR merges INTO. The ordering claim
+    # is now "the registration was PUBLISHED on the base before the log's add-commit", so the base is
+    # an INPUT the step must pass — inferring `origin/main` would answer the wrong question on a PR
+    # that targets another branch, and a stale/absent base must reach the tool as such.
     "python3 tools/capstone_preregistration_check.py "
-    "--dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis"
+    "--dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis "
+    '--base-ref "origin/${{ github.base_ref }}"'
 )
 
 #: The only `if:` forms that do not drop enforcement. Judged on its own (`_SAFE_STEP_KEYS`
@@ -2603,11 +2608,16 @@ def test_a_multi_bundle_json_error_names_the_bundle_it_came_from(tmp_path, capsy
 # which is not squash-invariant: a squash merge rewrites those commits into one, so the same tree
 # passed its PR checks and redded `main` minutes later (#10468). The property the epic wants —
 # "no number is scored against a threshold whose author could already see it" — survives the
-# change, because a registration on the base is published, hash-pinned and cannot be retro-edited
-# inside the merge that carries the log. What must be tested is therefore (a) a registration that
-# WAS published first passes, (b) one added by the SAME change is REFUSED — that refusal is the
-# whole point, since it is the arm that fires at PR time instead of after the merge — and (c) the
-# strictness survived: equal epochs are still not "before".
+# change, because a registration on the base is a published artefact that a later squash cannot
+# rewrite. What must be tested is therefore (a) a registration that WAS published first passes,
+# (b) one added by the SAME change is REFUSED — that refusal is the whole point, since it is the
+# arm that fires at PR time instead of after the merge — and (c) the strictness survived: equal
+# epochs are still not "before".
+#
+# ⚠️ NOT covered, and not claimed: these arms read ADD commits only (`--diff-filter=A`), so a
+# contribution that rewrites a threshold in the registration AND lands a scored log in one commit is
+# accepted. Closing that needs a modification bound on the ordinary arm (the exemption arm already
+# has one, `_touch_epochs`) and is a new rule, filed rather than invented here.
 
 
 def _repo_with_published_base(tmp_path: Path, monkeypatch) -> Path:
@@ -2689,9 +2699,16 @@ def test_the_refusal_is_not_a_no_op_when_the_base_is_missing(tmp_path, monkeypat
     _git(repo, "commit", "-q", "-m", "base", epoch=1_700_000_000)
     prereg = _commit_prereg(repo, epoch=1_700_000_100)
     log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_200)
-    with pytest.raises(check.HistoryUnavailable) as exc:
+    # ⛔ Asserted through the ENTRY POINT, not just the raise (review cycle 1, finding 6): a previous
+    # version of this test asserted only `pytest.raises`, and the exception was one `run()` folded
+    # into the NON-FAILING third outcome — so the tool exited 0 while the test passed. The property
+    # is "the run does not report success", and only exit 2 can express it.
+    with pytest.raises(check.CheckError) as exc:
         check.check_ordering(prereg, [log])
     assert "no base ref" in str(exc.value), str(exc.value)
+    # …and the ENTRY POINT must not report success either: 2 ("cannot read my subject"), never 0.
+    assert check.main(["--dir", str(repo / "docs" / "evidence" / "7949-capstone"),
+                       "--no-corpus"]) == 2
 
 
 def test_equal_epochs_on_the_base_are_still_not_before(tmp_path, monkeypatch):
