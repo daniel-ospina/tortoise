@@ -74,7 +74,10 @@ It verifies five things, and it fails on each of them for a specific reason:
    block** on every number it restates. Two copies of a threshold that can disagree is how a gate
    reads one while a reviewer reads the other. It must also pin ``document_sha256``: the record is
    the artefact the run probe freezes, so an argument re-edited without the record moving with it is
-   a document the record no longer describes (#9075 review r3 P3).
+   a document the record no longer describes (#9075 review r3 P3). `hypothesis_bars` is compared by
+   the same rule, in both directions: the measured log names only five of the seven frozen bars, so
+   the record's restatement is what holds the other two — `corroboration_min_sessions`, which decides
+   the published `not-majority-of-sessions` qualifier, and the emitted-only `sessions_total`.
 
 What it deliberately does NOT do: it does not judge whether the thresholds are *right*. That is the
 argument in the document, and an argument is reviewed, not grepped.
@@ -140,6 +143,12 @@ SCORED_LOG_GLOB = "capstone-measured-*.log"
 #: its ``prereg=`` line, so the name is not this check's invention.
 MACHINE_RECORD = "preregistration.json"
 PREREG_SCHEMA = "capstone-preregistration/v1"
+
+#: The bundle CI has always checked. A second pre-registered bundle (#10463's ablation) is added by
+#: repeating ``--dir``: before that, no CI job read it at all, so its ordering rule and its
+#: record↔pins cross-check never executed — and a docs-only diff (which runs only the ``tier1``
+#: slice) is exactly the change that can move a threshold after the numbers landed (#10468 r6 F1).
+DEFAULT_PREREG_DIR = "docs/evidence/7949-capstone"
 
 #: The document's own sha256, restated in the record and REQUIRED there. ``git log`` bounds the
 #: document only where history is available (a shallow checkout has none) and ``--diff-filter=A``
@@ -1035,6 +1044,30 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
             "REFUSED boundary the document does not state"
         )
 
+    # The hypothesis bars, same shape as `denominator_floors` (#10468 review `f0b6842eb`, P2).
+    # THE SHARP CASE IS NOT A DISAGREEMENT: the measured log names only five of the seven bars, so
+    # the two it cannot be held to — `corroboration_min_sessions` (which decides the published
+    # `not-majority-of-sessions` qualifier) and the emitted-only `sessions_total` — are held to
+    # nothing at all unless this comparison exists. `hypothesis_bars` is optional at the PINS side
+    # because it is a block this bundle introduced (`docs/evidence/7949-capstone` has no such map);
+    # where the document does state it, the record may neither disagree, drop a bar, nor invent one.
+    pins_bars = _pins_mapping(pins, "hypothesis_bars")
+    rec_bars = _mapping(record, "hypothesis_bars", MACHINE_RECORD)
+    if not pins_bars:
+        if rec_bars:
+            failures.append(
+                f"{MACHINE_RECORD} hypothesis_bars has no pins block — the record may not invent a "
+                "bar the document does not state"
+            )
+    else:
+        for key, want in pins_bars.items():
+            cmp(f"hypothesis_bars.{key}", want, rec_bars.get(key))
+        for key in sorted(set(rec_bars) - set(pins_bars)):
+            failures.append(
+                f"{MACHINE_RECORD} hypothesis_bars.{key} has no pin — the record may not invent a "
+                "bar the document does not state"
+            )
+
     pins_split = _pins_mapping(pins, "split")
     rec_split = _mapping(record, "split", MACHINE_RECORD)
     for half in ("tune", "held_out"):
@@ -1389,8 +1422,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Verify the extractor-v4 capstone pre-registration (#9075)."
     )
-    ap.add_argument("--dir", default="docs/evidence/7949-capstone",
-                    help="directory holding PRE-REGISTRATION.md and its evidence logs")
+    ap.add_argument("--dir", action="append", default=None,
+                    help="directory holding PRE-REGISTRATION.md and its evidence logs; REPEAT to "
+                         f"check several bundles in one run (default: {DEFAULT_PREREG_DIR})")
     ap.add_argument("--no-git", action="store_true",
                     help="skip the commit-ordering check (pre-commit authoring)")
     ap.add_argument("--no-corpus", action="store_true",
@@ -1398,21 +1432,43 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit the report as JSON")
     args = ap.parse_args(argv)
 
-    directory = Path(args.dir)
-    if not directory.is_absolute():
-        directory = REPO_ROOT / directory
-    try:
-        report = run(directory, use_git=not args.no_git, use_corpus=not args.no_corpus)
-    except CheckError as exc:
-        if args.json:
-            print(json.dumps({"ok": False, "error": str(exc)}))
-        else:
-            print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
+    directories = []
+    for entry in args.dir or [DEFAULT_PREREG_DIR]:
+        directory = Path(entry)
+        directories.append(directory if directory.is_absolute() else REPO_ROOT / directory)
+
+    reports: list[dict] = []
+    errors: list[tuple[Path, str]] = []
+    for directory in directories:
+        try:
+            reports.append(run(directory, use_git=not args.no_git,
+                               use_corpus=not args.no_corpus))
+        except CheckError as exc:
+            errors.append((directory, str(exc)))
+    # 2 outranks 1 on purpose: "I could not check this subject" is a different answer from "I
+    # checked it and found problems", and a run that cannot read ONE of the bundles it was given
+    # must never report the other bundles' green as the verdict.
+    exit_code = 2 if errors else (0 if all(r["ok"] for r in reports) else 1)
 
     if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
-    else:
+        if len(directories) == 1:
+            print(json.dumps({"ok": False, "error": errors[0][1]} if errors else reports[0],
+                             indent=2, sort_keys=True))
+        else:
+            # Each error carries its OWN directory (#10468 review: the human path prints
+            # `ERROR: {directory}: {message}`, but the JSON emitted only the message — so a
+            # consumer of a two-bundle `--json` run could see THAT one failed and not WHICH).
+            print(json.dumps({"ok": exit_code == 0, "reports": reports,
+                              "errors": [{"directory": str(directory), "error": message}
+                                         for directory, message in errors]},
+                             indent=2, sort_keys=True))
+        return exit_code
+
+    for directory, message in errors:
+        print(f"ERROR: {directory}: {message}", file=sys.stderr)
+    for report in reports:
+        if len(directories) > 1:
+            print(f"=== {report['document']} ===")
         print(f"pre-registration: {report['document']}")
         print(f"criteria rows: {', '.join(r['id'] for r in report['rows']) or '(none)'}")
         print(f"evidence logs: {len(report['evidence_logs'])}"
@@ -1447,7 +1503,7 @@ def main(argv: list[str] | None = None) -> int:
             exempt_note = (f" (exempt by CONTENT, measured nothing: "
                            f"{', '.join(report['ordering_exempt'])})")
         print(f"machine record run-order claim: {report['run_order_claim']}{exempt_note}")
-    return 0 if report["ok"] else 1
+    return exit_code
 
 
 if __name__ == "__main__":
