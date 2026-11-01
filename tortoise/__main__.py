@@ -6326,6 +6326,27 @@ def _cmd_session_drain(api_key: str, api_url: str,
             f"discarded {len(summary.discarded)}",
             file=_sys.stderr,
         )
+    # #6388: the OTHER substrate `SessionStart` is the natural cadence for —
+    # `~/.tortoise/session-events/`, which had a WRITER and no drain (the spool
+    # above holds `entries/`; this holds the day files nothing ever read back).
+    # A LEG of the same drain, through the SAME transport (#1178: no second
+    # drainer), and bounded (`MAX_RECORDS_PER_RUN`) so a 61,997-record backlog is
+    # worked down over passes instead of fired at the API in one go. Never fatal
+    # to this command's exit-0 contract.
+    try:
+        from tortoise.session_events_drain import (
+            drain_session_events,
+            format_progress,
+        )
+
+        events = drain_session_events(
+            _session_post(api_key, api_url),
+            exclude_session_id=exclude_session_id,
+        )
+        if events.get("consumed") or events.get("queued") or events.get("dead_lettered"):
+            print(format_progress(events), file=_sys.stderr)
+    except Exception as exc:  # a broken substrate must not fail a background drain
+        print(f"session-events drain: nothing filed — {exc}", file=_sys.stderr)
     return 0
 
 

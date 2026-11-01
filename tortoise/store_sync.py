@@ -238,7 +238,8 @@ def run_sweep(
     markers into the spool — an irreversible mutation of the very substrate the
     plan was asked to REPORT on, which made the plan unreproducible.
     """
-    receipt: dict[str, Any] = {"spool": None, "log": None, "ok": True}
+    receipt: dict[str, Any] = {"spool": None, "session_events": None,
+                              "log": None, "ok": True}
     # `--file` names ONE session file for the LOG half; for the spool half the
     # equivalent is that session's spool entry. Both filters are forwarded so
     # neither flag is silently half-applied (#3515 review: `--exclude-session-id`
@@ -308,6 +309,73 @@ def run_sweep(
         except Exception as exc:  # a broken spool must not kill the log half
             receipt["spool"] = {"error": f"{type(exc).__name__}: {exc}"}
             receipt["ok"] = False
+    # ── #6388: the THIRD substrate ───────────────────────────────────────────
+    # `~/.tortoise/session-events/` — the day-addressed JSONL `reflect-hook`
+    # appends on shutdown. This module's own docstring has named it as item 1
+    # since #3515 while the spool leg only ever walked `<spool>/entries/`, so the
+    # substrate had a writer and NO drain (#6388: 61,997 records / 516 MB, and
+    # `~/.tortoise/store-sync/` never existed as proof that nothing consumed it).
+    #
+    # It is a LEG of this sweep, not a second drainer (#1178): the same consent
+    # gate, the same credential, and the same transport callable the spool leg
+    # files through. A dry run reports without moving its cursor, exactly like
+    # the spool leg above.
+    try:
+        from tortoise.capture_consent import (
+            capture_consent_enabled,
+            capture_declined_reason,
+        )
+        from tortoise.session_events_drain import drain_session_events
+
+        if dry_run:
+            receipt["session_events"] = {
+                "status": "dry_run",
+                "detail": ("plan only — the session-events leg was not drained; "
+                           "nothing was posted and no cursor moved"),
+            }
+        elif not capture_consent_enabled():
+            receipt["session_events"] = {
+                "status": "declined",
+                "detail": capture_declined_reason()
+                or "capture is off — the session-events leg was not drained",
+            }
+        else:
+            transport = post
+            if transport is None:
+                if not api_key:
+                    receipt["session_events"] = {
+                        "status": "no_credential",
+                        "detail": ("no API key — the session-events leg was not "
+                                   "drained"),
+                    }
+                    # A substrate that was NOT drained is not a success — the
+                    # same verdict the spool leg above records.
+                    receipt["ok"] = False
+                else:
+                    from tortoise.__main__ import _session_post
+
+                    transport = _session_post(api_key, api_url or "")
+            if transport is not None:
+                summary_events = drain_session_events(
+                    transport,
+                    store=cursor_dir if cursor_dir is not None
+                    else default_cursor_dir(),
+                    exclude_session_id=exclude_session_id,
+                )
+                receipt["session_events"] = summary_events
+                if summary_events.get("cursor_error"):
+                    # The backlog moved but its position could not be saved: the
+                    # next sweep re-POSTs it. Reported, never swallowed.
+                    receipt["ok"] = False
+                # A record that can never be filed is dead-lettered, not a lost
+                # capture and not a failure of the sweep; a TRANSIENT refusal
+                # that stopped the leg is the same class as the log half's
+                # `withheld` and does not fail the sweep either (the cursor did
+                # not move, so nothing was lost).
+    except Exception as exc:  # a broken substrate must not kill the other legs
+        receipt["session_events"] = {"error": f"{type(exc).__name__}: {exc}"}
+        receipt["ok"] = False
+
     receipt["log"] = run_worker(
         session_dir=session_dir if session_dir is not None else default_session_dir(),
         cursor_dir=cursor_dir if cursor_dir is not None else default_cursor_dir(),
@@ -546,8 +614,22 @@ def write_sweep_status(receipt: dict, cursor_dir: Path | str | None) -> None:
         # how a comma and an em-dash reached the line in generation 13).
         if reason:
             reason = _sanitise_reason(str(reason))
+        # #6388: how far the session-events backlog moved in this sweep. The
+        # absence of a per-run count is why tens of thousands of records
+        # accumulated invisibly; `queued` is the number an operator watches.
+        events = receipt.get("session_events")
+        events_counts = events if isinstance(events, dict) else {}
         payload = {
             "version": 1,
+            "session_events": {
+                "filed": events_counts.get("filed", 0),
+                "dead_lettered": events_counts.get("dead_lettered", 0),
+                "deferred": events_counts.get("deferred", 0),
+                "queued": events_counts.get("queued", 0),
+                "stuck": events_counts.get("stuck", 0),
+                "stopped": events_counts.get("stopped"),
+                "cursor_error": events_counts.get("cursor_error"),
+            },
             # `at` is consumed for PRECEDENCE, not for freshness: the extension
             # reads it to decide whether a record is the CLI's own name for THIS
             # sweep (and must not be replaced by its exit code). What it does
