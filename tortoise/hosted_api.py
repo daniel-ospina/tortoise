@@ -22373,10 +22373,20 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
         # For an org that has not promoted, `_org_sdk_from_name` is byte-
         # identical to the `namespace=` open this used to pass through
         # `_open_org_graph_sdk` to, so nothing changes for them.
-        # (`namespace=` is also the read-path WRITE pin 4 hazard: it re-derives
-        # `org_{prior}` and MINTs a graph the listing never had. That argument
-        # is why the name is resolved first and the historical arm is not a
-        # `namespace=` guess.)
+        # ⚠️ RESIDUAL, recorded because the comment this replaced claimed the
+        # opposite: the historical arm really IS the `namespace=` derivation —
+        # `_org_sdk_from_name(prior, None)` is `_make_sdk(namespace=prior)`. For
+        # an org whose graph is the pre-#3543 `team_{prior}`, that derives (and
+        # so MINTs) `org_{prior}`, which is the read-path WRITE pin 4 hazard
+        # `_open_org_graph_sdk`'s listing gate used to catch. It is accepted
+        # here rather than fixed because the ONLY way to tell the two spellings
+        # apart is that server-global `list_graphs()` probe — the on-loop cost
+        # this change exists to remove — and `moved_default_namespace` answers
+        # None for a legacy org-level `team_{prior}` as well, so a resolved name
+        # cannot carry the legacy spelling. The consequence is bounded: the
+        # inheritance is best-effort (`fork='self'` is the documented fallback)
+        # and the pre-#10180 code derived this same name, so no org regresses;
+        # what #10180 gives up on this one read is the no-mint guarantee.
         moved = prior_moved
         if isinstance(moved, _NamespaceNotResolved):
             # The legacy (checkout-replay) lane: it is sync and already calls
