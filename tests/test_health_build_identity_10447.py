@@ -185,13 +185,66 @@ def test_migrations_head_is_the_highest_migration_the_image_carries(sha_env):
     assert _health()["build"]["migrations_head"] == max(numbered)[1]
 
 
-def test_a_non_migration_sql_file_is_not_the_head():
-    """The ordering pin, at the resolver: a stray `.sql` whose stem does not
-    start with a numeric migration prefix is not a migration and cannot become
-    the published head."""
-    from tortoise import hosted_api as api  # noqa: PLC0415 - the subject under test
+def test_a_non_migration_sql_file_is_not_the_head(monkeypatch, tmp_path):
+    """THE DISCRIMINATOR for the numeric-ordering fix, on a CONTROLLED directory.
+
+    A pin that re-derives the implementation's own algorithm from the real
+    `supabase/migrations` cannot fail when the ordering is reverted — every real
+    name matches `\d+_`. This one supplies the file that breaks a lexicographic
+    sort (`seed.sql`, `_seed.sql` sort after every digit start) and asserts the
+    head anyway.
+    """
+    from tortoise import record_projection  # noqa: PLC0415 - the resolver under test
+    from tortoise import hosted_api as api  # noqa: PLC0415
+    d = tmp_path / "migrations"
+    d.mkdir()
+    for name in ("0001_a.sql", "9999_b.sql", "seed.sql", "_seed.sql"):
+        (d / name).write_text("-- x\n")
+    monkeypatch.setattr(record_projection, "_migrations_dir", lambda: d)
+    monkeypatch.setattr(record_projection, "PACKAGED_MIGRATIONS", tmp_path / "nowhere")
+    head, source = api._migrations_head()
+    assert head == "9999_b", head
+    lexicographic = max(p.stem for p in d.glob("*.sql"))
+    assert lexicographic != head, "the pinned fixture must defeat a lexicographic sort"
+    assert source == "checkout", source
+
+
+def test_migrations_source_names_the_population_it_read(monkeypatch, tmp_path):
+    """A wheel ships only the record lineage, so its `max` is plausible and
+    wrong for "has the schema migration landed". The payload must SAY which
+    population it read (review P2)."""
+    from tortoise import record_projection  # noqa: PLC0415
+    from tortoise import hosted_api as api  # noqa: PLC0415
+    packaged = tmp_path / "record_migrations"
+    packaged.mkdir()
+    (packaged / "20261029000001_record_point_cache_tier.sql").write_text("-- x\n")
+    monkeypatch.setattr(record_projection, "PACKAGED_MIGRATIONS", packaged)
+    monkeypatch.setattr(record_projection, "_migrations_dir", lambda: packaged)
+    head, source = api._migrations_head()
+    assert head == "20261029000001_record_point_cache_tier", head
+    assert source == "package", source
+
+
+def test_the_migrations_head_is_resolved_once_not_per_request(sha_env):
+    """`/health` must do no I/O per request (#2850's contract, restated in
+    `.github/scripts/deploy-health-gate.sh`): the resolver is memoised at import,
+    so a burst of checks cannot stat 13 paths and glob 77 files each time."""
+    sha_env("f" * 40)
+    calls = {"n": 0}
+    from tortoise import hosted_api as api  # noqa: PLC0415
+
+    original = api._migrations_head
+
+    def counting():
+        calls["n"] += 1
+        return original()
+
+    # The payload reads the CONSTANTS; the resolver is not consulted again.
+    before = calls["n"]
+    _health()
+    _health()
+    assert calls["n"] == before
     assert api._MIGRATIONS_HEAD is not None
-    assert api._MIGRATIONS_HEAD.split("_")[0].isdigit(), api._MIGRATIONS_HEAD
 
 
 # ── a stale deploy is UP: currency must not be folded into `status` ──────────

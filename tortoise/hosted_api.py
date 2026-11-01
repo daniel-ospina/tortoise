@@ -6022,14 +6022,13 @@ async def health_security():
 _PROCESS_STARTED_AT: str = datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _migrations_head() -> str | None:
-    """Highest schema migration THIS IMAGE carries (#10447).
+def _migrations_head() -> tuple[str | None, str | None]:
+    """`(highest schema migration this image carries, WHERE it was read from)`.
 
     Answers "has migration 7 landed in prod" from OUTSIDE the process, which
-    previously required reading the database. It is the highest-numbered `.sql`
-    filename in the migrations directory the image ships — resolved through
-    ``record_projection._migrations_dir()``, the ONE existing resolver (checkout
-    first, wheel second), so there is no second opinion about where the schema
+    previously required reading the database. Resolved through
+    ``record_projection._migrations_dir()`` — the ONE existing resolver (checkout
+    first, wheel second) — so there is no second opinion about where the schema
     lives. No database query: the issue's anti-goal is explicit that ``/health``
     must not grow database work.
 
@@ -6040,11 +6039,16 @@ def _migrations_head() -> str | None:
     head. Only a ``<digits>_`` prefix counts as a migration, and the maximum is
     taken over the parsed integer.
 
-    ``None`` when no migration-shaped file is present (a stripped install) — the
-    same "absent, and it says so" contract as ``commit_sha``, never a plausible
-    fake. A WHEEL install ships only the record migrations, so it reports the
-    highest of THOSE; that is the honest answer to "what does this image carry",
-    and comparing it against the checkout's head is what says the difference.
+    THE SECOND ELEMENT IS NOT DECORATION (review P2). A WHEEL ships only the
+    record migrations, so it reports the highest of THOSE — a number that is
+    plausible, wrong for the question "has the schema migration landed", and
+    indistinguishable from the checkout's answer unless the reader is told which
+    population it came from. Publishing the source makes the difference visible
+    where the datum is, instead of only in a docstring.
+
+    ``(None, None)`` when no migration-shaped file is present (a stripped
+    install) — the same "absent, and it says so" contract as ``commit_sha``,
+    never a plausible fake.
     """
     try:
         from tortoise import record_projection  # noqa: PLC0415 - local: keeps import cost off /health
@@ -6054,9 +6058,24 @@ def _migrations_head() -> str | None:
             for p in base.glob("*.sql")
             if (m := re.match(r"(\d+)_", p.name)) is not None
         ]
+        packaged = str(getattr(record_projection, "PACKAGED_MIGRATIONS", ""))
     except Exception:  # noqa: BLE001 - a build identity is never worth a 500
-        return None
-    return max(heads)[1] if heads else None
+        # ⛔ THIS SWALLOW HIDES A REAL BUG IF IT IS TOO BROAD, and it did once:
+        # `Path` is not imported at module scope in this file, so `Path(base)`
+        # raised NameError and this branch answered "no migrations" for a
+        # checkout that carries 77 — a plausible absence, which is the exact
+        # failure class #10447 is about. The pins forbid it passing:
+        # `test_migrations_head_is_the_highest_migration_the_image_carries`
+        # asserts the REAL tree's head is not None, so an over-broad swallow reds
+        # the suite instead of reading as "absent".
+        return None, None
+    if not heads:
+        return None, None
+    try:
+        source = "package" if os.path.realpath(base) == os.path.realpath(packaged) else "checkout"
+    except (OSError, ValueError):
+        source = None
+    return max(heads)[1], source
 
 
 #: #10447: resolved ONCE per process, at import — never per request. The value
@@ -6066,7 +6085,7 @@ def _migrations_head() -> str | None:
 #: /health — an in-memory snapshot, no I/O"). `_migrations_dir()` alone does 13
 #: `Path.exists()` stats before the glob, which is exactly the kind of work the
 #: #2850 fix removed from the request path (review P2).
-_MIGRATIONS_HEAD: str | None = _migrations_head()
+_MIGRATIONS_HEAD, _MIGRATIONS_SOURCE = _migrations_head()
 
 
 def _build_identity() -> dict:
@@ -6114,6 +6133,11 @@ def _build_identity() -> dict:
         "build_identified": sha is not None,
         "started_at": _PROCESS_STARTED_AT,
         "migrations_head": _MIGRATIONS_HEAD,
+        # WHICH population `migrations_head` was read from (review P2): the
+        # checkout tree (the schema, all 77 migrations) or the packaged wheel
+        # (only the record lineage). Without this the two answers are
+        # indistinguishable, and the packaged one is plausible and wrong.
+        "migrations_source": _MIGRATIONS_SOURCE,
     }
 
 
