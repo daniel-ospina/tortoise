@@ -158,7 +158,7 @@ def parser(tmp_path, monkeypatch):
     """
     sys.path.insert(0, str(REPO / "tools"))
     try:
-        import ci_selection  # noqa: PLC0415 - the subject under test
+        import ci_selection
     finally:
         sys.path.pop(0)
     monkeypatch.setattr(ci_selection, "REPO", tmp_path)
@@ -220,6 +220,18 @@ def test_a_comma_inside_a_space_separated_list_is_still_a_separator(tmp_path):
     ]
 
 
+def test_a_path_containing_a_comma_in_a_whitespace_entry_is_kept_whole(parser, tmp_path):
+    """The comma twin of the spaced-path case, at the TOKEN level: a token that
+    names an existing path keeps its comma, and the solo form of the same value
+    agrees with the in-list form (they disagreed while the token was stripped
+    before the existence check)."""
+    (tmp_path / "release, notes.md").write_text("x\n")
+    assert parser("release, notes.md") == ["release, notes.md"]
+    assert parser("release, notes.md tortoise/sdk.py") == [
+        "release, notes.md", "tortoise/sdk.py",
+    ]
+
+
 # ── the forms that already worked must not move ──────────────────────────────
 
 def test_the_documented_single_path_inline_form_is_unchanged(tmp_path):
@@ -247,7 +259,7 @@ def test_the_pre_fix_parse_would_fail_these_pins():
     above refuse."""
     sys.path.insert(0, str(REPO / "tools"))
     try:
-        import ci_selection  # noqa: PLC0415 - the subject under test
+        import ci_selection
     finally:
         sys.path.pop(0)
     value = "tortoise/hosted_api.py tortoise/sdk.py"

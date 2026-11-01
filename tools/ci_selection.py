@@ -5892,10 +5892,14 @@ def _split_changed_files(raw: str) -> list[str]:
     THE CONTRACT, stated for `--help` readers:
       * one value, entries separated by newline, comma, or space — all three
         are accepted and are indistinguishable in effect;
-      * a path containing a space OR a comma is passed as-is and is NOT split
-        (it must exist in the tree for that to be recognised);
+      * a path containing a space or a comma is kept whole when it is the WHOLE
+        value or a whitespace-separated entry (it must exist in the tree for
+        that to be recognised). INSIDE a comma-separated list a comma is always
+        a separator — the pieces of such a path are named as unknown paths on
+        stderr, so the reading is visible rather than silent;
       * `-` reads the list from stdin, one entry per line — unambiguous for any
-        path, including one with a space that no longer exists on disk.
+        path, including one with a space or a comma that no longer exists on
+        disk.
     """
     if raw == "-":
         return [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]  # noqa: E741
@@ -5949,25 +5953,32 @@ def _split_whitespace_keeping_spaced_paths(line: str) -> list[str]:
     so `tortoise/a.py tortoise/b.py` (no such joined path) splits, while
     `release notes.md` (a real file) does not.
     """
-    tokens: list[str] = []
-    for raw in line.split():
-        tok = raw.strip(",")
-        if not tok:
-            continue
-        if "," in tok and not _names_existing_path(tok):
-            tokens.extend(p for p in (x.strip() for x in tok.split(",")) if p)
-        else:
-            tokens.append(tok)
-    out: list[str] = []
+    tokens = line.split()
+    groups: list[str] = []
     i = 0
     while i < len(tokens):
         group = [tokens[i]]
         j = i + 1
+        # JOIN ON THE RAW TOKENS, commas included: `release,` + `notes.md` is a
+        # single path (`release, notes.md`), and splitting or stripping the comma
+        # before this pass loses the only evidence that it was one entry.
         while j < len(tokens) and _names_existing_path(" ".join([*group, tokens[j]])):
             group.append(tokens[j])
             j += 1
-        out.append(" ".join(group))
+        groups.append(" ".join(group))
         i = j
+    out: list[str] = []
+    for group in groups:
+        if _names_existing_path(group):
+            out.append(group)
+            continue
+        tok = group.strip(",")
+        if not tok:
+            continue
+        if "," in tok:
+            out.extend(p for p in (x.strip() for x in tok.split(",")) if p)
+        else:
+            out.append(tok)
     return out
 
 
