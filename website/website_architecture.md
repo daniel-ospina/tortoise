@@ -70,7 +70,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - the middleware's `APP_ONLY` **branch** (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`) — but `/auth` and
     `/auth.html` also have their own **unconditional** 301 below, so for those two the branch is not
-    what preserves the redirect on `tortoise.*`/previews (`:59-62`);
+    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:344-349`);
   - `/auth` and `/auth.html` 301 **unconditionally** — the redirect #4054 shipped, left alone because
     it is already in browsers' caches and changing it is its own decision — while `/auth/*` answers
     **302** (`#4346`) and `/admin` **302**s (`#4409`), all **unconditionally** (those cover

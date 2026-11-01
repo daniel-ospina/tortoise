@@ -490,21 +490,38 @@ def test_ordinary_marketing_requests_are_not_refused(path: str) -> None:
 # sentence describes. These guards are the cheap substitute for that reading: a
 # citation must land on real, non-blank source, and the one the prose quotes *as*
 # a construct must land on that construct — so a re-numbered branch reds here
-# instead of sending the next reader to an unrelated comment.
+# instead of sending the next reader to an unrelated comment. The routing record
+# (`website_architecture.md`) had drifted the same way with nothing to red on, so
+# it is scanned too.
 
 _MIDDLEWARE_CITATION = re.compile(r"_middleware\.ts:(\d+)(?:-(\d+))?")
 
+#: The routing record a lane reads for host routing — `_middleware.ts`'s own header
+#: sends a reader there, and so does the doc. It is in the SAME drift class as the
+#: citations above and was **unpinned**, which is how it stayed wrong: the
+#: `/auth`/`/auth.html` unconditional 301 was cited as `:59-62`, which at this head
+#: is the stray-code header block, so a lane auditing the OPEN #8680 allow-list
+#: entry followed the pointer onto a comment about the `/auth/*` 302, learned
+#: nothing about the 301, and — because a resolving pointer reads as a checked one
+#: — recorded the claim as verified when it was not.
+ARCH_DOC = REPO_ROOT / "website" / "website_architecture.md"
 
-def _doc_paragraph(needle: str) -> str:
-    """The blank-line-delimited paragraph of THIS module that contains `needle`."""
-    text = Path(__file__).read_text(encoding="utf-8")
+
+def _paragraph_of(path: Path, needle: str) -> str:
+    """The blank-line-delimited paragraph of `path` that contains `needle`."""
+    text = path.read_text(encoding="utf-8")
     for block in re.split(r"\n[ \t]*\n", text):
         if needle in block:
             return block
     raise AssertionError(
-        f"no paragraph of {Path(__file__).name} contains {needle!r} — the claim these "
+        f"no paragraph of {path.name} contains {needle!r} — the claim these "
         "citations support is gone, so the guard over it has no subject"
     )
+
+
+def _doc_paragraph(needle: str) -> str:
+    """The blank-line-delimited paragraph of THIS module that contains `needle`."""
+    return _paragraph_of(Path(__file__), needle)
 
 
 def _cited_middleware_text(paragraph: str) -> str:
@@ -548,6 +565,81 @@ def test_the_4328_citation_names_the_4328_rationale() -> None:
         "the docstring cites `_middleware.ts` as #4328's rationale but the cited lines "
         f"do not mention #4328; they are:\n{cited}"
     )
+
+
+def test_the_routing_record_cites_the_auth_301_branch_it_names() -> None:
+    """`website_architecture.md` must point AT the unconditional `/auth` 301.
+
+    The routing record says `/auth` and `/auth.html` "have their own
+    **unconditional** 301 below, so for those two the branch is not what
+    preserves the redirect on `tortoise.*`/previews" — the sentence is read by
+    the OPEN #8680 audit, which has to decide whether that 301 really is
+    unconditional. It cited `:59-62`, the stray-code header block, so the audit
+    landed on prose about the `/auth/*` 302: the pointer resolved, nothing about
+    the 301 was there, and a resolving pointer reads as a checked one.
+    """
+    doc = ARCH_DOC.read_text(encoding="utf-8").splitlines()
+    claim = next(
+        (
+            i
+            for i, line in enumerate(doc)
+            if "unconditional** 301 below" in line
+        ),
+        None,
+    )
+    assert claim is not None, (
+        "the routing record no longer carries the `/auth`-301 claim this citation "
+        f"supports — {ARCH_DOC.name} has been reworded, so the guard has no subject"
+    )
+    # The claim wraps across lines; take it and its continuation lines up to the
+    # next bullet or blank line, so the citation that ANSWERS the claim is the one
+    # joined to it (the neighbouring bullet cites the backstop at `:442`).
+    window = [doc[claim]]
+    for line in doc[claim + 1:]:
+        if not line.strip() or line.lstrip().startswith("-") or line.lstrip().startswith("_"):
+            break
+        window.append(line)
+    cited = _cited_middleware_text("\n".join(window))
+    assert 'url.pathname === "/auth"' in cited, (
+        "the routing record cites `_middleware.ts` for the `/auth`/`/auth.html` "
+        "unconditional 301, but the cited lines do not contain that branch; they are:\n"
+        f"{cited}"
+    )
+    assert "status: 301" in cited, (
+        "the cited lines name the `/auth` branch but not the 301 it is invoked to "
+        f"establish; they are:\n{cited}"
+    )
+
+
+def test_no_middleware_citation_in_the_routing_record_lands_off_its_construct() -> None:
+    """Every `_middleware.ts` citation in the routing record resolves and is non-blank.
+
+    The sibling guard below pins THIS file; the routing record needed its own,
+    because it is the artifact that sends a reader to `_middleware.ts` in the
+    first place and its citations had drifted twice (`:432`, a blank line, and
+    the `:59-62` above) with nothing to red on.
+    """
+    lines = MIDDLEWARE.read_text(encoding="utf-8").splitlines()
+    citations = list(_MIDDLEWARE_CITATION.finditer(ARCH_DOC.read_text(encoding="utf-8")))
+    assert len(citations) >= 3, (
+        f"{ARCH_DOC.name} cites `_middleware.ts` by line in at least three places "
+        "(the backstop, twice, and the `/auth` 301) — found "
+        f"{len(citations)}; the citations were deleted rather than corrected, which "
+        "loses the pointer instead of fixing it"
+    )
+    for match in citations:
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        assert 1 <= start <= end <= len(lines), (
+            f"{match.group(0)} (in {ARCH_DOC.name}) is out of bounds — "
+            f"{MIDDLEWARE.name} has {len(lines)} lines"
+        )
+        for n in (start, end):
+            assert lines[n - 1].strip(), (
+                f"{match.group(0)} (in {ARCH_DOC.name}) anchors on line {n} of "
+                f"{MIDDLEWARE.name}, which is blank — a blank anchor sends the reader "
+                "nowhere and reads as a checked pointer"
+            )
 
 
 def test_no_middleware_citation_in_this_file_lands_on_a_blank_line() -> None:
