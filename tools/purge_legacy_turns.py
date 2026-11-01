@@ -1142,28 +1142,29 @@ def _report_problem(report) -> str:
     for key in ("clean_sessions", "failed_sessions"):
         for index, entry in enumerate(report["parity"][key]):
             if not isinstance(entry, dict):
-                return (f"parity.{key}[{index}] is a "
-                        f"{type(entry).__name__}, not a census entry object")
+                return (f"parity.{key}[{index}]: {type(entry).__name__} is not "
+                        f"a census entry object")
             session = entry.get("session")
             if not isinstance(session, str) or not session:
-                return (f"parity.{key}[{index}].session is "
-                        f"{type(session).__name__}, not a session id")
+                return (f"parity.{key}[{index}].session: "
+                        f"{type(session).__name__} is not a session id")
             problems = entry.get("problems")
             if problems is None:
                 continue
             if not isinstance(problems, list):
-                return (f"parity.{key}[{index}].problems is a "
-                        f"{type(problems).__name__}, not a list of problems")
+                return (f"parity.{key}[{index}].problems: "
+                        f"{type(problems).__name__} is not a list of problems")
             for pindex, problem in enumerate(problems):
                 if not isinstance(problem, dict):
-                    return (f"parity.{key}[{index}].problems[{pindex}] is a "
-                            f"{type(problem).__name__}, not a problem object")
+                    return (f"parity.{key}[{index}].problems[{pindex}]: "
+                            f"{type(problem).__name__} is not a problem "
+                            f"object")
     # `build_plan` calls `.items()` on this one; a list there was an
     # `AttributeError` traceback AND, at the destructive arm, a report that
     # walked through the whole gate to "every precondition asserted".
     anomalies = report.get("anomalies")
     if anomalies is not None and not isinstance(anomalies, dict):
-        return (f"its `anomalies` block is a {type(anomalies).__name__}, not "
+        return (f"its `anomalies` block is {type(anomalies).__name__}, not "
                 f"an object of anomaly classes")
     if not isinstance(report["dry_run"].get("would_delete_ids"), list):
         return ("dry_run.would_delete_ids is missing — the purge set has ONE "
