@@ -161,7 +161,8 @@ def keyword_lane(monkeypatch):
     which is a claim that can only re-stale). The seams this docstring rests
     on are therefore named by SOURCE SNIPPET in ``_SDK_ANCHORS`` below —
     ``stand_down_flag`` and ``embedded_gate`` quoted by name above,
-    ``stand_down_warning`` quoted verbatim in the reproduction block, and
+    ``stand_down_warning`` as pytest renders it in the reproduction block
+    (the `%s` filled in — the anchor is the format string), and
     ``arm_gate_flag`` as the read the stand-down keys on — and
     ``test_the_sdk_anchors_this_docstring_cites_still_resolve`` proves each of
     those four still exists — a rename reds it, a re-ordering does not.
