@@ -1531,6 +1531,38 @@ def test_the_persisted_reason_NAMES_the_session_events_leg(tmp_path):
     assert json.loads((store / "sweep-status.json").read_text())["reason"] == "PermissionError: denied"
 
 
+def test_write_sweep_status_PERSISTS_the_events_counts(tmp_path):
+    """The body calls this leg "observable": the counts must reach the file.
+
+    `sweep-status.json` is the only surface a caller that discarded our output can
+    read, so a count that exists only in the receipt is a count nobody sees —
+    including `held` and `unselected`, the two states that mean "nothing can move
+    yet" rather than "nothing is left".
+
+    MUTATION THAT REDS THIS: drop the `session_events` block from
+    `write_sweep_status` (or any single key in it) → the health line can no longer
+    distinguish an empty backlog from a withheld one.
+    """
+    from tortoise import store_sync
+
+    store = tmp_path / "store"
+    store_sync.write_sweep_status({
+        "ok": True, "log": {},
+        "session_events": {
+            "filed": 3, "dead_lettered": 1, "deferred": 2, "held": 4,
+            "unselected": 5, "degraded": 1, "queued": 6, "stuck": 7,
+            "stopped": "batch", "cursor_error": "EACCES denied",
+            "unreadable": ["a.jsonl.gz", "b.jsonl"],
+        },
+    }, store)
+
+    assert json.loads((store / "sweep-status.json").read_text())["session_events"] == {
+        "filed": 3, "dead_lettered": 1, "deferred": 2, "held": 4, "unselected": 5,
+        "degraded": 1, "queued": 6, "stuck": 7, "stopped": "batch",
+        "cursor_error": "EACCES denied", "unreadable": 2,
+    }
+
+
 def test_MAIN_prints_the_session_events_leg(monkeypatch, tmp_path, capsys):
     """The body claims every pass is "printed as one line".
 
