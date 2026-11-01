@@ -3833,6 +3833,12 @@ def _norm_kind(k: str) -> str:
 #: own, unrelated caps (a point's ``_MAX_QUOTE``-char ``quote``, a summary's 2000).
 #: ``vet_gate._MAX_CONTENT`` mirrors this value (that module must not import
 #: this one — see its header), and a parity test pins the two together.
+#: ⛔ The word IDENTITY is load-bearing (#10513 review cycle-18, measured): the
+#: stored text and the key must be ONE string, so a pair the S2.2b arbiter
+#: ruled identical cannot key apart into a duplicate Point. Both storing sites
+#: therefore cut with ``_write_span`` — which returns ``x[:1000]`` UNCHANGED
+#: except when that cut would truncate a NUMERAL (see its docstring), the one
+#: case where value fidelity outranks byte identity.
 _MAX_CONTENT = 1000
 
 #: The point-QUOTE cap — distinct from ``_MAX_CONTENT`` (the identity cap) and
@@ -4575,17 +4581,39 @@ def _write_span(text: object, cap: int, *,
     graph. This cuts at a token boundary instead, and the SAME span is what the
     write stores, so the judged pair and the written pair are one string.
 
-    ⛔ A value can only be read SHORT by losing ALPHANUMERIC characters (review
-    cycle-14 P2, measured): a numeral cut to ``12`` out of ``1200`` is the
-    false-accusation shape. So when the cut splits a token, the token is dropped
-    WHOLE only if the discarded remainder carries an alphanumeric character.
+    ⛔ A value can only be read SHORT by losing DIGITS (review cycle-14 P2,
+    measured): a numeral cut to ``12`` out of ``1200`` is the false-accusation
+    shape. So when the cut splits a token, the token is dropped WHOLE only when
+    BOTH hold:
+
+    * the discarded remainder carries an alphanumeric character (a real split,
+      not a full stop), and
+    * the part of the split token that would be KEPT carries a DIGIT.
+
+    ⛔ **That second condition is what keeps this helper on the IDENTITY cap**
+    (#10513 review cycle-18, both P1s, measured). ``_MAX_CONTENT`` is not only a
+    storage bound: ``_norm(x.strip()[:_MAX_CONTENT])`` is the key the write's
+    dedup, ``classify_consolidation``, ``_merge_verdict_keys`` and
+    ``_endpoint_keys`` all compute, and every point already in the graph was
+    stored under it. Dropping a split token whose kept part is pure LETTERS
+    (``weekly`` cut to ``w``, ``bbbb…`` cut to ``bbbb…``) moved the stored text
+    off that key for no value reason at all: measured, a 1639-char content
+    stored 999 chars instead of the key's 1000, so a pair the S2.2b arbiter had
+    ruled identical fell through to ADD and minted a duplicate Point (``merges
+    == 0``), and a minted endpoint stopped being the ref's own key, breaking the
+    #5069 closed loop. The span may only move where the RULE is at stake — a
+    numeral whose digits the cut would truncate.
+
     When the remainder is PUNCTUATION only (``p95.`` cut to ``p95``) the token is
     kept: the value is intact, and dropping it would take a judgeable point out
     of the covered set over a full stop (measured: the committed census loses
     one — ``wp04_aurora_perf/raw``, a 201-char quote ending ``blew up the p95.``).
+    And when the kept digits are the whole value (``12.5 s`` cut after ``5``) the
+    token is kept too — nothing was truncated.
 
-    When the cut lands on a token boundary the span is ``text[:cap]`` unchanged,
-    so ordinary (under-cap) pairs are byte-identical to before this helper.
+    So the span equals ``text[:cap]`` for every text whose cut does not truncate
+    a numeral: on the ``_MAX_CONTENT`` sites the stored text IS the identity key
+    again, and on ``_MAX_QUOTE`` it is the pre-existing cut.
 
     ⛔ **This is the module's ONE truncation helper** — `_mint_endpoint` cuts with
     it too (review cycle 15, measured): leaving the mint on the HARD `[:cap]` cut
@@ -4600,16 +4628,23 @@ def _write_span(text: object, cap: int, *,
         return s
     cut = s[:cap]
     if cut and not cut[-1].isspace() and not s[cap].isspace():
-        # the cap landed INSIDE a token: keep it only if what we would lose is
-        # punctuation, i.e. carries nothing a value could be made of
+        # the cap landed INSIDE a token — the span moves only when a VALUE spans
+        # the cut, so ask the two questions separately (#10513 cycle-18 P1):
+        # what is DISCARDED, and what the kept prefix of the split token HOLDS.
+        kept = cut
+        while kept and not kept[-1].isspace():
+            kept = kept[:-1]
+        split_kept = cut[len(kept):]
+        discarded_alnum = False
         rest = s[cap:]
         while rest and not rest[0].isspace():
             if rest[0].isalnum():
-                # a real truncation: drop the split token whole
-                while cut and not cut[-1].isspace():
-                    cut = cut[:-1]
+                discarded_alnum = True
                 break
             rest = rest[1:]
+        if discarded_alnum and any(ch.isdigit() for ch in split_kept):
+            # a numeral is cut in two: drop the split token whole
+            cut = kept
     if not cut:
         # ⛔ The text is ONE token longer than the cap (a 250-char run with no
         # whitespace). Dropping it whole would leave the point with NO quote at
@@ -8537,14 +8572,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # below DROP the item silently — which reverses that contract and reds
         # the #5060 battery. `_raw_content` exists for the verdict key only.
         _raw_content = str(p.get("content", "")).strip()
-        # ⛔ `_write_span`, not `[:_MAX_CONTENT]` (review cycle-14 P2, measured):
-        # a HARD cut stores the truncated prefix of a split token (`… hit 4.`),
-        # which is a value the model never wrote — and it made the judged pair a
-        # DIFFERENT string from the written one, so a split value was stored
-        # unjudged (`content` ending `4.` against a `5.5` quote carries a real
-        # divergence with no warning). Cutting at the token boundary keeps the
-        # stored text free of module-fabricated values and makes the judged pair
-        # and the written pair the same string.
+        # ⛔ `_write_span`, not a bare `[:_MAX_CONTENT]` (review cycle-14 P2,
+        # measured): a HARD cut stores the truncated prefix of a split token
+        # (`… hit 4.`), which is a value the model never wrote — and it made the
+        # judged pair a DIFFERENT string from the written one, so a split value
+        # was stored unjudged (`content` ending `4.` against a `5.5` quote
+        # carries a real divergence with no warning).
+        # ⛔ AND `_MAX_CONTENT` IS THE IDENTITY CAP, so the span must stay the
+        # hard cut everywhere a value is not at stake (#10513 cycle-18 P1):
+        # `_endpoint_keys`, `_merge_verdict_keys` and the priors this classifier
+        # matches all key on `x[:1000]`, and this line storing a shorter
+        # word-boundary span made the write's probe text differ from the key —
+        # measured, a VET-authorised MERGE was dropped (`merges == 0`) and a
+        # duplicate Point minted. `_write_span` now returns `x[:1000]` verbatim
+        # unless the cut would truncate a NUMERAL, so the stored text IS the key.
         # ⚠️ From `_raw_content` (which is `str(...)`, NOT `str(... or "")`):
         # #5060 made a falsy content WRITABLE as its coerced text (a `None`
         # content is the claim "None"), and collapsing a falsy value to "" here
@@ -8924,16 +8965,23 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     minted_endpoints: list[str] = []
 
     def _mint_endpoint(ref: str, where: str) -> str:
-        # ⛔ `_write_span`, never `[:cap]` (review cycle 15, measured): a HARD cut
-        # stores the truncated prefix of a split token, so `_mint_endpoint`
-        # fabricated the value `… p95 hit 4` out of `… p95 hit 4.0 seconds` and
-        # minted it as a quote-less Point the model never wrote — the same class
-        # of module-fabricated value cycle 14 removed from the WRITE, left on the
-        # mint. It also broke dedup: the stored content is the token-safe span, so
-        # `n in point_ids` below missed a byte-identical ref and minted a
-        # DUPLICATE point beside it (measured: 3 points where the pre-cycle-14
-        # tree produced 1). One truncation helper for both halves, so the two
-        # strings cannot disagree.
+        # ⛔ `_write_span`, never a bare `[:cap]` (review cycle 15, measured): a
+        # HARD cut stores the truncated prefix of a split token, so
+        # `_mint_endpoint` fabricated the value `… p95 hit 4` out of
+        # `… p95 hit 4.0 seconds` and minted it as a quote-less Point the model
+        # never wrote — the same class of module-fabricated value cycle 14
+        # removed from the WRITE, left on the mint. It also broke dedup: the
+        # stored content is what `n in point_ids` below keys on, so a
+        # byte-identical ref missed it and minted a DUPLICATE point beside it
+        # (measured: 3 points where the pre-cycle-14 tree produced 1). One
+        # truncation helper for both halves, so the two strings cannot disagree.
+        # ⛔ AND THE MINT MUST STORE THE REF'S OWN IDENTITY PREFIX (#10513
+        # cycle-18 P1, measured): `_endpoint_keys` keys the entity guard on
+        # `_norm(ref[:1000])` and the closure/removal arms re-read the stored
+        # text back, so a mint that stored a SHORTER word-boundary span lost most
+        # of a long ref (measured: 550 of 1000 chars) and put the two keys out of
+        # step. `_write_span` keeps `ref[:1000]` verbatim except where the cut
+        # would truncate a numeral — the only case where the mint may move.
         content = _write_span(str(ref or "").strip(), _MAX_CONTENT)
         if not content:
             return ""

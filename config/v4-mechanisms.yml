@@ -501,16 +501,22 @@ mechanisms:
       recoverable from the run. It also runs BEFORE `classify_consolidation`
       and before any supersede record is collected (a later refusal left
       supersessions naming a pid never written), on the pair the WRITE KEEPS —
-      each side cut at a TOKEN boundary by `_write_span` (an incomplete trailing
-      token is dropped whole, so a value straddling `_MAX_QUOTE`/`_MAX_CONTENT`
-      is never read short), and it carries the refused point's `supersedes` ref
+      each side cut by `_write_span` to the text the write stores, and that text
+      is the IDENTITY window `x[:_MAX_CONTENT]` itself EXCEPT where the cut would
+      truncate a NUMERAL, in which case the split token is dropped whole so a
+      value straddling the cap is never read short (the one direction in which
+      value fidelity OUTRANKS byte identity — residual (n)), and it carries the
+      refused point's `supersedes` ref
       into the same drop report the other doors use (#9906: no silent drop door).
       ⚠️ Judging the UNCLAMPED pair instead — the previous reading — also refused
       a point over a divergence in text the write DISCARDS: measured, a 1219-char
       content whose stored `content[:_MAX_CONTENT]` binds no value at all was
       REFUSED, withholding a durable memory over a tail that never reaches the
       graph (#10513 review cycle-13 P2). What is judged is now exactly what is
-      written, and the token cut is what keeps the straddle direction closed.
+      written, and the NUMERAL-ONLY cut is what keeps the straddle direction
+      closed — an unconditional word-boundary cut ALSO moved the stored text off
+      the identity key, which cost a VET-authorised MERGE (review cycle-18 P1,
+      measured: `merges == 0` and a duplicate Point).
       (1b) THE OPERATOR PATH IS GUARDED, AND ITS TWO RESIDUALS ARE STATED RATHER
       THAN IMPLIED. `_mint_endpoint`
       (mint-before-wire, #2552) builds a Point from the MODEL's text, so it reads
@@ -562,11 +568,19 @@ mechanisms:
       measured), so the module cannot fabricate a value on this path either. A
       HARD `[:cap]` here stored `… p95 hit 4` out of `… p95 hit 4.0 seconds` — a
       value the model never wrote, minted as a quote-less endpoint Point, from a
-      text whose token-safe span carries no value at all — and, because the
-      stored content is now that token-safe span, a byte-identical operator ref
-      missed the `n in point_ids` dedup and minted a DUPLICATE point beside the
-      one it named (measured: 3 points where the pre-cycle-14 tree produced 1).
+      text whose kept span carries no complete value — and, because the stored
+      content is what `n in point_ids` keys on, a byte-identical operator ref
+      missed that dedup and minted a DUPLICATE point beside the one it named
+      (measured: 3 points where the pre-cycle-14 tree produced 1).
       One truncation helper for both halves, so the two strings cannot disagree.
+      ⛔ AND THE MINT STORES THE REF'S OWN IDENTITY WINDOW `ref[:_MAX_CONTENT]`
+      (#10513 review cycle-18 P1, measured): `_endpoint_keys` keys the entity
+      guard on `_norm(ref[:_MAX_CONTENT])`, and the closure/removal arms re-read a
+      minted point's STORED text back, so a mint that stored a shorter
+      word-boundary span lost most of a long ref (measured: 550 of 1000 chars for
+      `"a"*500 + " "*50 + "b"*500 + "tail"`) and put those two keys out of step.
+      `_write_span` now moves the span only for a truncated NUMERAL — residual
+      (n) — so what the mint stores IS the key the guard compares.
       Pinned by `test_the_MINT_cuts_at_a_TOKEN_boundary_so_it_cannot_FABRICATE_a_value`
       and `test_a_ref_that_matches_the_stored_content_RESOLVES_instead_of_minting_a_DUPLICATE`.
       ⚠️ That is not RETENTION: a refused point loses its value entirely, so what
@@ -818,6 +832,24 @@ mechanisms:
       `_value_bindings` and would be its own change; a second scale reading inside
       this seam is the parallel-classifier shape the review P2 rejected. Stated
       rather than absorbed, and pinned so closing it has to move this row.
+      (n) A NUMERAL SPLIT AT THE CAP MOVES THE STORED TEXT OFF THE LEGACY KEY
+      (#10513 review cycle-18 P1, measured). The `_MAX_CONTENT` sites store
+      `x[:1000]` — the identity key `_endpoint_keys`, `_merge_verdict_keys` and
+      `classify_consolidation` all compute, and the spelling every point already
+      in the graph carries — EXCEPT when that cut would truncate a NUMERAL, where
+      the split token is dropped whole (`… p95 hit ` instead of `… p95 hit 4`)
+      because a stored `4` where the source wrote `4.0` is a value the graph never
+      stated. The cost, STATED rather than absorbed: a point stored BEFORE this
+      change carries the hard-clipped spelling, so a re-extraction of that same
+      over-cap claim whose cut splits a numeral keys apart from the legacy row and
+      ADDs a near-duplicate instead of folding (the same trade `_endpoint_keys`
+      states for prefix matching, tracked on #5069). Non-vacuous both ways:
+      `test_the_stored_content_IS_the_identity_key_a_verdict_and_a_prior_key_on`
+      pins the identity for every non-numeral cut AND the numeral exception, and
+      the two `core` end-to-end pins that redded on the unconditional
+      word-boundary cut
+      (`test_a_verdict_on_a_candidate_over_the_cap_still_merges`,
+      `test_content_only_closure_collision_does_not_over_prune`) are green.
       THE RENDER HALF is unchanged and stays pinned where #9775 left it.
       `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered into S1
       (`_granularity_text`), S2/S4 (`_render_master_core_only`,
