@@ -36,11 +36,50 @@ from .ids import content_hash, ulid
 from .render import render
 
 # OpenAI-compatible providers (Ollama is handled separately via its native API).
+#
+# THE SESSION-EXTRACTION PROVIDER REGISTRY (#8133). A provider registered
+# here becomes visible to the consumers of the KEY SET, which read this mapping
+# rather than keeping a list of their own:
+#   * ``hosted_api._llm_provider_keys`` (the hosted ``no_provider`` gate),
+#   * ``test_session_extraction_modes.test_the_lane_gate_registry_covers_the_v2_extractor_registry``
+#     and the #1197 drift guard, which demand the two entries below.
+# ⚠️ FOUR registration sites, not one — this mapping, plus
+# ``sdk._SESSION_LLM_PROVIDER_PRIORITY`` (which provider serves a capture), plus
+# ``sdk._SESSION_LLM_DEFAULT_MODELS`` (which model id is sent), plus
+# ``.github/workflows/deploy-hosted.yml`` (the secret GATE and the ``fly secrets``
+# argv — pinned to ``hosted_api._LLM_PROVIDER_KEYS`` by
+# tests/test_deploy_workflow.py).  Adding a provider HERE alone registers its KEY
+# and then (a) leaves ``_build_session_llm_extractor`` raising ``KeyError`` on the
+# missing default model once the provider is also in the priority tuple, and
+# (b) leaves a HOSTED deployment without the secret, so it still reports
+# no-provider and skips extraction — the #8133 defect again, in the deploy lane.
+# The #1197 guard catches (a)'s first half and (b); the DEFAULT-MODEL half of
+# (a) is caught by ``test_every_priority_provider_has_a_default_model`` and the
+# venice-only behaviour by ``test_a_venice_only_deployment_extracts`` (both in
+# tests/test_session_extraction_modes.py — the first because
+# ``_build_session_llm_extractor`` indexes ``_SESSION_LLM_DEFAULT_MODELS``
+# directly, so a missing entry is an uncaught KeyError, not a fallback).
+# Before #8133 ``model_adapters.resolve_extractor_provider`` (the v2 extractor's
+# registry) carried ``venice`` and this mapping did not, so a venice-only
+# deployment reported ``('venice', ['venice'])`` there while every lane gate said
+# "no provider" and the capture stored its turns WITHOUT extracting — silently,
+# while the receipt blamed a key the operator had configured.
 _PROVIDERS = {
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
     "deepseek": ("https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
+    # venice.ai — the #1549 3-provider rotation lane, OpenAI-compatible at
+    # ``/v1`` (``models.OpenAICompatModel`` appends ``/chat/completions``).
+    # Registered on main by ``model_adapters.resolve_extractor_provider``, whose
+    # ``if vz_key:`` branch returns venice as a STANDALONE PRIMARY. ⚠️ That is
+    # PRECEDENT, not a recorded decision: #8133 records the product question
+    # (is venice a supported standalone primary, or intentionally fallback-only?)
+    # as OPEN and no owner ruling answers it. This entry is justified by #8133's
+    # OBJECTIVE — the lane gate and the v2 resolver must agree on what "a
+    # provider is configured" means — not by a decision that venice is primary.
+    # A fallback-only ruling would reopen this, and would say so on #8133.
+    "venice": ("https://api.venice.ai/api/v1", "VENICE_API_KEY"),
 }
 
 

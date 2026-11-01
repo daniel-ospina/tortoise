@@ -799,27 +799,27 @@ INGEST_PROMOTION_POLICIES = ("gated", "auto")
 
 # Provider priority when MULTIPLE keys are set (first configured wins — the
 # deploy-time decision is which key is present; a key is only ever sent to the
-# provider that issued it, #329). Order mirrors tortoise.ingest._PROVIDERS.
-_SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini")
+# provider that issued it, #329). Mirrors ingest._PROVIDERS; venice is LAST (#8133).
+_SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini", "venice")
 
-# Default model per provider when TORTOISE_SESSION_LLM_MODEL is unset. The
-# provider/model choice is a product decision (deploy-time) — these are
-# cheap-tier defaults matching the analyzer's model choices (analyze.py
-# _LLM_PROVIDERS) and session_indexer's whitelist family.
+# Default model per provider when TORTOISE_SESSION_LLM_MODEL is unset — a
+# deploy-time product decision; cheap-tier defaults matching analyze.py
+# _LLM_PROVIDERS and session_indexer's whitelist family. ``venice`` serves
+# deepseek-v4-flash (the id its adapter's docstring documents, sent verbatim).
 #
 # #4129: every id here must be one the provider actually SERVES, because a
 # provider answers 200 to a retired id and silently serves a different model.
 # api.deepseek.com still accepts "deepseek-chat" and serves "deepseek-flash",
 # so naming the retired id did not fail — it silently ran a model nobody
-# configured. Verified against GET /models on 2026-10-05, which serves exactly
-# ["deepseek-flash", "deepseek-v4-pro"]. Re-check with that endpoint before
-# changing an id; models.OpenAICompatModel also warns at call time when the
-# served id diverges from the requested one.
+# configured. Verified against GET /models on 2026-10-05: ["deepseek-flash",
+# "deepseek-v4-pro"]. Re-check there before changing an id; OpenAICompatModel
+# also warns at call time when the served id diverges from the one requested.
 _SESSION_LLM_DEFAULT_MODELS = {
     "openrouter": "deepseek/deepseek-chat",
     "deepseek": "deepseek-flash",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
+    "venice": "deepseek-v4-flash",
 }
 
 #: #3892 (owner ruling 2026-09-18): the additive warning a KEYLESS capture
