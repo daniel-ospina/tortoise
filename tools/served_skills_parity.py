@@ -94,9 +94,27 @@ USAGE
   uv run python tools/served_skills_parity.py --sync --commit <sha>
 
 ``--sync`` is the DERIVATION: it fetches upstream (HEAD, or ``--commit``),
-writes each served copy byte-for-byte and re-cuts
-`config/served-skills-upstream.yml`. Run it after editing a skill upstream,
-then commit the changed skills + the pin together.
+writes each served copy byte-for-byte, re-cuts
+`config/served-skills-upstream.yml`, and **re-cuts the derived
+`website/skills/<name>.skill` archives** for every skill whose archive is stale
+under the root — not only the ones it wrote (the archive is built from the
+served copy, so re-deriving the source invalidates it, and a stale archive left
+by an earlier commit is the same defect — see `tools/build_skill_archives.py`).
+Run it after editing a skill upstream, then commit the changed skills + the pin
++ the archives together.
+
+⛔ THE ARCHIVES ARE PART OF THE DERIVATION, NOT A SEPARATE CHORE, and `--dry-run`
+REPORTS them. The served copy is the source `tools/build_skill_archives.py` zips
+into `website/skills/<name>.skill` (the file the ChatGPT card hands over), so a
+sync that moved a served copy left that archive stale — and the prescribed fix
+then delivered a tree that fails
+`tests/test_onboarding_variants.py::test_9660_skill_archive_holds_exactly_its_
+own_skill`. That is the exact defect this tool's own remedy produced on #10088:
+exit 0 from both `--check` arms, a red repo. `sync()` re-derives them from the
+bytes it fetched, through the builder that owns the archive format (one source
+of bytes, not two) — which is also the only way a dry run can NAME them: a dry
+run that built from disk would zip the PRE-sync mirror, find it equal to the
+stale archive, and report "no archive changes" over exactly the #10088 shape.
 
 ``--sync --commit <sha>`` is for pinning a specific upstream commit. It is not
 silently equivalent to HEAD: the currency arm compares the pinned bytes against
@@ -133,6 +151,10 @@ from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_REL = Path("config") / "served-skills-upstream.yml"
+#: Where the `.skill` downloads live, RELATIVE TO THE ROOT BEING SYNCED (`root`,
+#: so a throwaway root in a test never touches this checkout). Derived from the
+#: served copies by `tools/build_skill_archives.py`; see `_rebuild_archives`.
+ARCHIVES_REL = Path("website") / "skills"
 RAW_HOST = "https://raw.githubusercontent.com"
 # A directory listing has no raw form, so the one API call in this tool lives
 # here. Unauthenticated it is 60 requests/hour per IP — enough for a daily run
@@ -169,9 +191,14 @@ def _err(msg: str) -> None:
           file=sys.stderr)
 
 
-def _note(msg: str) -> None:
-    """A non-fatal observation. stderr only — never stdout (the --json contract)."""
-    print(f"::notice::{msg}" if os.environ.get("GITHUB_ACTIONS") else msg,
+def _note(msg: str, level: str = "notice") -> None:
+    """A non-fatal observation. stderr only — never stdout (the --json contract).
+
+    `level` is the GitHub Actions annotation class (`notice` or `warning`) and is
+    inert outside CI; it is here so a step that FAILED but must not abort the run
+    surfaces as a warning rather than as an informational line (#10423).
+    """
+    print(f"::{level}::{msg}" if os.environ.get("GITHUB_ACTIONS") else msg,
           file=sys.stderr)
 
 
@@ -261,7 +288,8 @@ def dump_manifest(manifest: dict) -> str:
         "# MIT repo named below; this tree holds the derived MIRROR. Do not edit",
         "# a served skill or this pin by hand — edit the skill upstream, then run",
         "#   uv run python tools/served_skills_parity.py --sync",
-        "# and commit the mirrored skills together with this file.",
+        "# and commit the mirrored skills, the re-cut `website/skills/*.skill`",
+        "# archives that same command derives, and this file — all three together.",
         "#",
         "# `commit` is a real upstream commit and every sha256 is the CONTENT of",
         "# that commit — `--check-upstream` re-fetches by commit and re-hashes, so",
@@ -663,8 +691,11 @@ def check_upstream(manifest: dict, root: Path, attempts: int = DEFAULT_ATTEMPTS,
             f"      The MIT repo is the AUTHOR: this skill changed there and the "
             f"served copy here was never re-derived.\n"
             f"      Fix: `uv run python tools/served_skills_parity.py --sync` "
-            f"and commit the mirrored skills + the pin. (#4643 target 2 — this "
-            f"is the drift that must not ship behind a green deploy.)")
+            f"and commit the mirrored skills, the re-cut `website/skills/*.skill` "
+            f"archives it derives, and the pin. Committing only the mirror + pin "
+            f"leaves the archive stale, which is the SAME red one gate later. "
+            f"(#4643 target 2 — this is the drift that must not ship behind a "
+            f"green deploy.)")
     if not drifted and not unread:
         # Green, but say WHY it is green — otherwise a reader sees the pin's
         # commit differ from HEAD and has to re-derive that it is harmless.
@@ -732,12 +763,173 @@ class SyncResult(NamedTuple):
     ``target`` is returned rather than left in the manifest: ``sync`` re-loads
     the pin into its own dict, so a caller printing the outer manifest reports
     the PREVIOUS commit — the one fact `--sync` exists to report.
+
+    ``archives`` is the SEPARATE derived artifact (#10437): the `.skill`
+    downloads rebuilt from the served copies. Kept out of ``changed`` (which
+    keeps meaning "served copies rewritten") so one list never mixes a served
+    mirror with a zip built FROM it — an operator reading ``changed`` can still
+    tell which byte the pin moved.
     """
 
     changed: list[str]
     target: str
     previous: str
     at_head: bool | None  # None = could not be read (the note is still printed)
+    #: Derived `.skill` archives re-cut because this sync left them stale.
+    #:
+    #: A TUPLE, deliberately: a `NamedTuple` field with a mutable default
+    #: (`list`) is one list object shared by every `SyncResult` built without the
+    #: field (RUF012 — and `RUF` is in the lint select, so a `list` default reds
+    #: `ruff check .`). Immutability is also what a NamedTuple promises.
+    #:
+    #: Entries are `<relpath> (<bytes> bytes)`, not bare names: an operator
+    #: reading a sync report needs to know WHICH file moved and how big it is.
+    #: Kept out of `changed` (which keeps meaning "served copies rewritten") so
+    #: one list never mixes a served mirror with a zip built FROM it.
+    archives: tuple[str, ...] = ()
+
+
+def _archive_builder():
+    """`tools/build_skill_archives.py` as a module, or None if unavailable.
+
+    Two import contexts to satisfy: a test does `from tools import
+    served_skills_parity`, where `tools` is a package; the CLI runs the file as
+    a SCRIPT, where `tools/` itself is `sys.path[0]`. Try both, never guess.
+
+    Resolved ONCE and cached, because the answer cannot change inside a run —
+    and because a caller that cannot load the builder must be told so LOUDLY
+    rather than made to fail: see `_rebuild_archives`, which is where the
+    "unavailable, not fatal" decision is implemented (#10423 review, P2).
+    """
+    if _ARCHIVE_BUILDER:
+        return _ARCHIVE_BUILDER[0]
+    module = None
+    try:
+        import build_skill_archives as module  # script context
+    except ImportError:
+        try:
+            from tools import build_skill_archives as module  # package context
+        except ImportError:
+            module = None
+    _ARCHIVE_BUILDER.append(module)
+    return module
+
+
+def _build_skill_archives():
+    """The builder module, by name used at the call sites that OWN the format.
+
+    Same object `_archive_builder` resolves (kept as a second name because the
+    parity tests reach for it, and because "the module that owns the zip" reads
+    better than "a cached import" at the point where its `build_from_bytes` is
+    the ONE definition of what a `.skill` byte stream is).
+    """
+    return _archive_builder()
+
+
+def _rebuild_archives(root: Path, manifest: dict, payloads: dict[str, bytes],
+                      dry_run: bool = False) -> tuple[str, ...]:
+    """Re-derive `website/skills/<name>.skill` under ``root``; return what moved.
+
+    The archive is BUILT from the served copy, so any sync that moves a served
+    copy makes it stale — and nothing in either `--check` arm looks at it. The
+    consumer that DOES (`tests/test_onboarding_variants.py::test_9660…`) is a
+    pytest test, so the sanctioned remedy produced a red tree (#10088: both parity
+    arms green, CI `1 failed, 2869 passed`). Measured twice in two days, same
+    test, same one-line remedy: cd7410b80 (#9750 round 3) and f045ac953 (#10423).
+
+    ⛔ NOT "for the served copies just written". The names come from the PIN, so
+    an archive left stale under ``root`` by an earlier commit — whose served copy
+    this sync did not move — is re-cut too. That is the state this PR exists to
+    repair, and narrowing the call to the `changed` list would silently delete it
+    (`tests/test_served_skills_parity.py::test_4643_sync_re_cuts_a_stale_archive_
+    whose_served_copy_it_did_not_write`).
+
+    Skills are the INTERSECTION of the pin's entries and this repo's
+    `build_skill_archives.SKILL_NAMES` — enumerated from `SKILL_NAMES` (the
+    builder owns what an archive exists for) and filtered by the pin (a pin that
+    serves a subset never gains an archive here). A pinned skill with no
+    `SKILL_NAMES` entry is therefore not archived, and that is NOT silent: it is
+    reported as a note, because a new pinned skill needs its archive name added
+    in the same change rather than being dropped by a bare `continue`.
+
+    ``payloads`` is the bytes ``sync`` fetched, keyed by skill name — NOT the
+    file under ``root``. In a writing run those are the same bytes (``sync``
+    wrote them a few lines above, or they already matched), and in a ``--dry-run``
+    run the disk still holds the PRE-sync mirror. Reading the disk there zipped
+    the old mirror, found it equal to the stale archive the root was seeded with,
+    and reported that no archive would move — while the real run rewrote all
+    three. `--dry-run` is documented as "report the changes without writing", so
+    it has to report these from the only bytes that describe the change.
+
+    Best-effort on the WRITE, fail-closed on the INPUTS — and the distinction is
+    the whole contract (#10423 review, P2):
+
+    * an unloadable builder, or a write that raises (`ENOSPC`, `EACCES`), must
+      not fail `--sync` AFTER it has already written the served copies and the
+      pin — that leaves a half-done sync behind a non-zero exit. It is swallowed
+      only because it is LOUD: both arms print a warning naming the recovery
+      command, so an operator following the documented remedy never commits a
+      stale archive behind a silent exit 0.
+    * a pinned, archivable skill with no fetched payload is a BUG in the caller,
+      not a case to skip: it raises. `sync` fetches every pinned skill, so this
+      is unreachable today — which is exactly why a `continue` is wrong. It
+      would resurrect the #10088 shape (an archive nobody re-derives, every arm
+      green) the day a caller builds `payloads` from something narrower.
+    """
+    bsa = _archive_builder()
+    if bsa is None:
+        _note("the derived `website/skills/*.skill` archives were NOT re-cut: "
+              "`tools/build_skill_archives.py` could not be loaded. Run "
+              "`uv run python tools/build_skill_archives.py` and commit the "
+              "archives together with the mirror and the pin, or the tree is "
+              "red on `test_9660_skill_archive_holds_exactly_its_own_skill`.",
+              level="warning")
+        return ()
+    archivable = tuple(getattr(bsa, "SKILL_NAMES", ()))
+    for name in sorted(set(manifest["skills"]) - set(archivable)):
+        _note(f"{name}: pinned but NOT archivable — no entry in "
+              "build_skill_archives.SKILL_NAMES, so no website/skills/"
+              f"{name}.skill is derived for it. Add the name there if it should "
+              "ship as a download; a pinned skill with no archive is exactly "
+              "the stale-derived-artifact shape this tool exists to close.")
+    wanted = [name for name in archivable if name in manifest["skills"]]
+    for name in wanted:
+        if name not in payloads:
+            # ⛔ RAISE, never `continue` — see the docstring. Raised as
+            # `ParityError` rather than `PinDefect` because no pin byte is wrong
+            # here; `main()` reports it under its "could not verify" heading and
+            # exits 1 fail-closed rather than tracebacking.
+            raise ParityError(
+                f"{name}: no fetched payload to build website/skills/{name}.skill "
+                "from, although the pin lists it and build_skill_archives owns "
+                "an archive name for it. `_rebuild_archives` is fed the bytes "
+                "`sync` fetched for EVERY pinned skill; a missing one is a bug "
+                "in this caller, not a case to skip — skipping is how a "
+                "derived artifact goes stale with the gate green (#10088).")
+    moved: list[str] = []
+    try:
+        for name in wanted:
+            payload = payloads[name]
+            wanted_bytes = bsa.build_from_bytes(name, payload)
+            target = root / ARCHIVES_REL / f"{name}.skill"
+            if target.is_file() and target.read_bytes() == wanted_bytes:
+                continue
+            moved.append(
+                f"{ARCHIVES_REL / f'{name}.skill'} ({len(wanted_bytes)} bytes)")
+            if not dry_run:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(wanted_bytes)
+    except Exception as exc:  # best-effort by design — see the docstring
+        _note(f"re-cutting the derived `website/skills/*.skill` archives FAILED "
+              f"({type(exc).__name__}: {exc}). The served copies and the pin were "
+              f"already written, so this tree is HALF-derived: run "
+              f"`uv run python tools/build_skill_archives.py` and commit the "
+              f"archives with them.", level="warning")
+        return ()
+    return tuple(moved)
+
+
+_ARCHIVE_BUILDER: list[object] = []
 
 
 def sync(root: Path, manifest_path: Path, commit: str | None = None,
@@ -767,10 +959,15 @@ def sync(root: Path, manifest_path: Path, commit: str | None = None,
             # the pin is written either way, and the note below still applies.
             at_head = None
     changed: list[str] = []
+    #: name -> the bytes this sync fetched for it (== what a writing run puts on
+    #: disk). ``_rebuild_archives`` builds from THIS, so a `--dry-run` can name
+    #: the archives it would rewrite without a written file to read.
+    payloads: dict[str, bytes] = {}
 
     for name in sorted(manifest["skills"]):
         entry = manifest["skills"][name]
         payload = fetch_raw(repo, target, entry["upstream_path"], attempts, backoff)
+        payloads[name] = payload
         digest = sha256_bytes(payload)
         served = root / entry["served_path"]
         if not served.is_file() or served.read_bytes() != payload:
@@ -784,8 +981,18 @@ def sync(root: Path, manifest_path: Path, commit: str | None = None,
     manifest["upstream"]["commit"] = target
     if not dry_run:
         manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
+    # AFTER the served copies are on disk (and only from those bytes): the
+    # archives are derived FROM the mirror, so building them before the write
+    # would zip the previous mirror — the stale-archive defect, one level down.
+    # Built from `payloads`, which IS what the write above put on disk (and, in a
+    # dry run, what it WOULD have put there — the disk still holds the old bytes),
+    # so a dry run NAMES the archives a real run re-cuts instead of reporting
+    # "no archive changes" over a stale one (`changed` cannot answer this: an
+    # archive left stale by an earlier commit moves nothing in `changed`, which
+    # is why the names come from the PIN).
+    archives = _rebuild_archives(root, manifest, payloads, dry_run=dry_run)
     return SyncResult(changed=changed, target=target, previous=previous,
-                      at_head=at_head)
+                      at_head=at_head, archives=archives)
 
 
 # ── report + CLI ───────────────────────────────────────────────────────────
@@ -861,6 +1068,30 @@ def main(argv: list[str] | None = None) -> int:
                 "branch returns BEFORE the document/report is written, so the "
                 "flag would be accepted, print nothing machine-readable, and "
                 "exit 0. Run --sync, then the check that writes the report.")
+    else:
+        # The mirror-image defect. `--commit` and `--dry-run` are read ONLY
+        # inside the `--sync` branch above, so WITHOUT it both were accepted and
+        # dropped: `--check-upstream --commit <sha>` graded the PIN that is
+        # already written, printed no mention of `<sha>`, and exited 0 — a
+        # caller who named a commit was answered about a different commit, the
+        # shape AGENTS.md calls "a tool that cannot answer its own question".
+        # A bare `--dry-run` likewise ran BOTH network arms: an operator asking
+        # for a preview got a live check. Same rule as the block above — a flag
+        # accepted and silently ignored is worse than a refusal (review finding,
+        # P2).
+        strays = [flag for flag, on in (("--commit", args.commit is not None),
+                                        ("--dry-run", args.dry_run))
+                  if on]
+        if strays:
+            parser.error(
+                f"{' / '.join(strays)} only mean something with --sync, and "
+                "without it they would be accepted and silently ignored: "
+                "--commit names the upstream commit to DERIVE from, while "
+                "--check grades the pin already recorded, so `--check-upstream "
+                "--commit <sha>` would report on the pin and never mention "
+                "<sha>; --dry-run only suppresses --sync's writes, so on its own "
+                "it leaves both network arms running live. Run `--sync "
+                f"{' '.join(strays)}` or drop {' it' if len(strays) == 1 else ' them'}.")
 
     root = Path(args.root).resolve()
     manifest_path = Path(args.manifest) if args.manifest else root / MANIFEST_REL
@@ -899,6 +1130,14 @@ def main(argv: list[str] | None = None) -> int:
             if result.previous != result.target:
                 print(f"  pin moved {result.previous[:12]} -> {result.target[:12]}")
             for line in result.changed:
+                print(f"  ~ {line}")
+            # Unconditional, INCLUDING zero: a run that rewrites no archive must
+            # still say the archives were derived and are current. Suppressing
+            # the line at zero leaves an operator unable to tell "checked, all
+            # current" from "this pin has no archives" — the unreported derived
+            # artifact is the shape this PR exists to close.
+            print(f"  {verb} {len(result.archives)} .skill archive(s)")
+            for line in result.archives:
                 print(f"  ~ {line}")
             if result.at_head is False:
                 _note(
