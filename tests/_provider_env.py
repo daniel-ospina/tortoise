@@ -22,10 +22,20 @@ so it cannot drift the way a literal list does:
   analyze provider the hosted availability check reports (the broad gate).
 - ``tortoise.model_adapters._PROVIDER_KEY_ENV`` — the key envs of the v2
   adapter routing pool (``deepseek-direct`` / ``openrouter`` / ``venice``) used
-  by ``resolve_extractor_provider()`` (the inner gate). VENICE is here and NOT
-  in the hosted set, which is exactly how the hand-lists drifted.
+  by ``resolve_extractor_provider()`` (the inner gate).
 - the provider/lane SELECTOR envs, which are literals in ``sdk`` /
   ``model_adapters`` and have no registry to derive from.
+
+⚠️ State of the two sets, so this docstring cannot be read as a claim about
+``VENICE`` that the tree has outgrown: when #3695 was filed, ``VENICE_API_KEY``
+was in ``_PROVIDER_KEY_ENV`` and NOT in the hosted set — that asymmetry IS how
+the hand-lists drifted, and it is why the union below (not either set alone) is
+the thing a test must scrub. Since #8133 registered ``venice`` in
+``tortoise.ingest._PROVIDERS``, the hosted set carries ``VENICE_API_KEY`` too,
+so the two derivations agree today; the union stays because a future
+single-registry registration must not be able to hide behind the agreement.
+``provider_key_envs()`` here is the ONE copy of that union: ``conftest`` and the
+keyless-capture guard both call it rather than re-deriving it.
 
 ``TORTOISE_SESSION_LLM_MOCK`` is deliberately NOT pinned: it is the offline
 extraction seam, not a routing input, and a module that pins the mock seam
@@ -58,19 +68,30 @@ _PROVIDER_SELECTOR_ENVS: tuple[str, ...] = (
 )
 
 
+def provider_key_envs() -> tuple[str, ...]:
+    """Every provider API-KEY env var, derived from the two registries.
+
+    The keys-only half of ``provider_routing_env_names()``, exported because a
+    caller that pins the whole routing env set would also clear the four
+    *selector* envs — and a keyless-capture guard that clears
+    ``TORTOISE_SESSION_LLM_MOCK`` fails for the wrong reason. One copy: both
+    ``tests/conftest.py::provider_key_envs`` and the keyless-capture guard in
+    ``tests/test_session_extraction_modes.py`` call THIS function.
+    """
+    from tortoise.hosted_api import _llm_provider_keys
+    from tortoise.model_adapters import _PROVIDER_KEY_ENV
+
+    return tuple(sorted(
+        set(_llm_provider_keys()) | set(_PROVIDER_KEY_ENV.values())))
+
+
 def provider_routing_env_names() -> tuple[str, ...]:
     """Every env name that decides WHICH provider/lane an extraction routes to.
 
     Derived from the registries the gates read — never a hand-list. Sorted and
     de-duplicated so a test can iterate it deterministically.
     """
-    from tortoise.hosted_api import _LLM_PROVIDER_KEYS
-    from tortoise.model_adapters import _PROVIDER_KEY_ENV
-
-    names = set(_LLM_PROVIDER_KEYS)
-    names.update(_PROVIDER_KEY_ENV.values())
-    names.update(_PROVIDER_SELECTOR_ENVS)
-    return tuple(sorted(names))
+    return tuple(sorted(set(provider_key_envs()) | set(_PROVIDER_SELECTOR_ENVS)))
 
 
 def pin_provider_routing_env(monkeypatch) -> tuple[str, ...]:
