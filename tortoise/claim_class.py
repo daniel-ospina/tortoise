@@ -32,7 +32,9 @@ DERIVED claim may not override an ASSERTED one:
   supersession moves the predecessor's whole edge set, so the successor
   inherits its edges at the SAME slot positions — the rebuilt factor is judged
   with the predicate below rather than a second copy of the rule. The
-  method's direct-edge re-point arm is the same defect class, tracked as #9727.
+  method's direct-edge re-point arm (the operator-LESS 2a-DIRECT transfer) is
+  guarded the same way and with the same predicate, judged on the wiring each
+  re-pointed ``IMPL|NAND`` edge will hold (#9727).
 * ``sdk.ingest``'s partial-absorb branch refuses to complete an operator's
   input set into a derived-over-asserted wiring.
 * ``ep.TortoiseEP._affected_factors`` is the BACKSTOP for edges that already
