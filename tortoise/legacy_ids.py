@@ -730,7 +730,12 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
         dump_id = node.get("dump_id")
         if not isinstance(dump_id, int) or isinstance(dump_id, bool):
             continue
-        for node_label in _labels(node):
+        # `dict.fromkeys` DEDUPES: a hand-built dump may repeat a label
+        # (`["Point", "Point"]`), and registering the same node twice under one
+        # key made the survivor test see two holders and refuse the node as its
+        # own merge. `hosted_backup` dedupes `labels(n)` on the real export path,
+        # so this is a foreign-artifact guard, not a live one.
+        for node_label in dict.fromkeys(_labels(node)):
             key_prop = KEY_PROPERTY.get(node_label)
             if key_prop is None:
                 continue

@@ -486,6 +486,23 @@ def test_a_duplicate_the_rename_resolves_is_not_a_refusal():
     assert shared == {}, f"the pass left a shared key: {shared}"
 
 
+def test_a_repeated_label_is_not_the_node_merging_with_itself():
+    """``labels: ["Point", "Point"]`` is ONE node, not two holders of one key.
+
+    Registering a holder per label OCCURRENCE made the survivor test see two
+    holders and refuse the node as its own merge, with a message asserting two
+    nodes that do not exist. `hosted_backup` dedupes `labels(n)` on the real
+    export path, so this is a foreign-artifact guard.
+    """
+    dump = _dump()
+    dump["nodes"] = [_node(1, ["Point", "Point"], id=_minted_id(0))]
+    dump["edges"] = []
+    dump["node_count"] = 1
+    dump["edge_count"] = 0
+    plan = build_plan(dump)  # must not raise
+    assert len(plan.renames) == 0, "a canonical id is never a rename candidate"
+
+
 def test_a_duplicate_dump_id_is_refused():
     dump = _dump()
     dump["nodes"].append(_node(1, ["Point"], id="p-0000999", content="positional clash"))
@@ -542,9 +559,9 @@ def test_a_shared_key_property_is_out_of_scope_in_both_label_orders(labels):
     caller-supplied `session_*` key in one order and skip it in the other.
     """
     dump = _dump()
-    # A DISTINCT session id: reusing the base fixture's `:Session` key here would
-    # make two nodes share one Session identity, which the collision universe
-    # (correctly) refuses — and that is not what this test is about.
+    # A DISTINCT session id, for readability only: no refusal applies either way,
+    # because a duplicate on an out-of-scope label is tolerated by design — see
+    # `test_a_preexisting_duplicate_on_an_out_of_scope_label_does_not_block_the_pass`.
     dump["nodes"].append(_node(10_006, labels, id="session_7d6e5f4a3b2c"))
     dump["node_count"] = len(dump["nodes"])
     plan = build_plan(dump)  # must not raise

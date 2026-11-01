@@ -1,21 +1,29 @@
 """All remaining #8607 measurements from the committed artifacts."""
-import json, sys, hashlib
-from pathlib import Path
+import json
+import sys
 from collections import Counter
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from tortoise.legacy_ids import LEGACY, census, is_canonical, shape
-from tortoise.cache_projection import KEY_PROPERTY
+from pathlib import Path
 
-before = json.load(open("dump.json"))
-after  = json.load(open("normalised.json"))
-plan   = json.load(open("plan.json"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tortoise.cache_projection import KEY_PROPERTY
+from tortoise.legacy_ids import LEGACY, census, is_canonical, shape
+
+
+def _load(name):
+    with open(name) as fh:
+        return json.load(fh)
+
+
+before = _load("dump.json")
+after = _load("normalised.json")
+plan = _load("plan.json")
 
 # ── 1. per-label node counts, before/after ────────────────────────────────
 def per_label(d):
     c = Counter()
     for n in d["nodes"]:
-        for l in n["labels"]:
-            c[l] += 1
+        for label in n["labels"]:
+            c[label] += 1
     return c
 lb, la = per_label(before), per_label(after)
 print("=== per-label node counts (before → after) ===")
