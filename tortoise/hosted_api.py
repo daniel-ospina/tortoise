@@ -881,6 +881,54 @@ def _org_sdk_from_name(org_id: str, moved: str | None) -> TortoiseSDK:
     return _make_sdk(graph_name=moved) if moved else _make_sdk(namespace=org_id)
 
 
+def _awaits_default_namespace(org: dict) -> bool:
+    """True when this caller dict is ORG-WIDE and carries no default namespace.
+
+    ONE predicate for the two consumers that must never disagree — the
+    ADMISSION KEY (`_capture_session_key`) and the WRITE
+    (`_hydrate_default_namespace`). A GRAPH-BOUND dict is False by construction:
+    its ``graph_namespace`` is a CUSTOM graph's and "the default graph" is not
+    the question it asks (the same reason `_default_graph_name` refuses it,
+    #2023).
+    """
+    return bool(org.get("org_id")) and not org.get("graph_id") \
+        and not org.get("graph_namespace")
+
+
+def _admitted_default_namespace(org: dict) -> str | None:
+    """The default namespace THIS request was ADMITTED with, when the dict lacks it.
+
+    The REST auth seams stamp ``graph_namespace`` on the credential; the MCP
+    `tortoise_session_capture` tool builds its OWN dict and stamps it only for a
+    graph-BOUND key — and its SERVED implementation is frozen by
+    `tools/surface-guard.py`, so it cannot be changed to carry it (#3863/#4282).
+    The middleware did stamp the admitted credential's namespace on
+    ``mcp_auth._current_graph_namespace``, so that is where an org-wide dict's
+    answer comes from.
+
+    ⛔ READ BY BOTH HALVES, and that is the whole point (#10452 review, P2).
+    Before this existed, only the WRITE resolved it: the capture key was
+    computed from the bare dict, so on a PROMOTED org an org-wide MCP capture
+    keyed the DEMOTED graph (``org_{org_id}``) while `_capture_session_impl`
+    hydrated and wrote the PROMOTED one. That broke the invariant
+    `_capture_session_key` states — its graph component is "the graph the
+    capture will ACTUALLY write to" — and produced both halves of the #3365
+    class: a FALSE 409 (an org-wide MCP key colliding with a graph-bound key
+    bound to the demoted graph, whose namespace IS ``org_{org_id}``), and a
+    reopened #3129 SILENT-LOSS window (two captures of the same session on the
+    same physical graph landing in different buckets, so both pass admission
+    and the second is served a 0-extract replay). One function, two readers:
+    they cannot drift again.
+
+    ``None`` when the request is not org-wide, or when its transport resolved no
+    credential at all (self-host static/none) — the caller then falls back
+    exactly as before.
+    """
+    if _awaits_default_namespace(org):
+        return _mcp_auth._current_graph_namespace.get() or None
+    return None
+
+
 async def _hydrate_default_namespace(org: dict) -> dict:
     """Give an ORG-WIDE caller dict the default-graph namespace it lacks.
 
@@ -928,9 +976,8 @@ async def _hydrate_default_namespace(org: dict) -> dict:
     read is the only source that can answer there. One primary-key read at most,
     only on that branch, and OFF the loop.
     """
-    if org.get("org_id") and not org.get("graph_id") \
-            and not org.get("graph_namespace"):
-        carried = _mcp_auth._current_graph_namespace.get()
+    if _awaits_default_namespace(org):
+        carried = _admitted_default_namespace(org)
         if carried:
             return {**org, "graph_namespace": carried}
         resolved = await _cp_offload(
@@ -1032,6 +1079,16 @@ def _capture_session_key(org: dict, session_id: str | None) -> str | None:
     """
     if not session_id:
         return None
+    # #10452 review (P2): the WRITE resolves an org-wide dict's missing
+    # namespace (`_hydrate_default_namespace`) BEFORE `_capture_session_impl`
+    # opens anything, so the KEY must resolve it from the same source — else it
+    # names the DEMOTED graph on a promoted org and this bucket is not the one
+    # the capture writes. Both read `_admitted_default_namespace`; the fallback
+    # below is the same `_data_graph_name` the write's dict yields, so the two
+    # agree by construction on every branch.
+    carried = _admitted_default_namespace(org)
+    if carried:
+        org = {**org, "graph_namespace": carried}
     graph = _data_graph_name(org)
     if graph is None:
         # Fail closed: a bound key whose namespace did not resolve opens NO
