@@ -542,6 +542,10 @@ class GraphRanker:
         # #1348: use_degree=False isolates the CONFIDENCE contribution (ablation
         # arm — degree term neutralized so the graph_boost is confidence-only).
         self.use_degree = use_degree
+        # #10137: set by every `rerank` call — whether the graph signal read
+        # actually ANSWERED (see `_fetch_signals`). Read by the caller to label
+        # the order honestly; ``False`` until a rerank has run.
+        self.signals_read = False
         # #2952: recency decay is INTENTIONAL product behaviour (γ·e^(-λ·age),
         # 30-day half-life), so the fix is not to delete it but to make the
         # reference time it measures against EXPLICIT and injectable. A caller
@@ -578,7 +582,16 @@ class GraphRanker:
             return results
 
         ids = [r.get("id") for r in results if r.get("id")]
+        # #10137 review P1: `signals_read` is the READ's outcome, not the
+        # ranker's configuration. `_fetch_signals` swallows a failed read and
+        # answers None; deriving "belief was consulted" from
+        # `projection is not None` would then stamp `consulted` on an order
+        # produced from the neutral fallbacks (every confidence 0.5, every
+        # graph_boost 0.0) — a false claim minted by the very field that exists
+        # to prevent false claims.
         signals = self._fetch_signals(ids, entity_type) if self.projection is not None else {}
+        self.signals_read = bool(signals)
+        signals = signals or {}
         contested_boosts: dict[str, float] = {}
         if query and self.projection is not None and _w4_flag_on():
             contested_boosts = resolve_contested_relevance(
@@ -681,8 +694,15 @@ class GraphRanker:
 
     # ── Graph queries ─────────────────────────────────────────────────────
 
-    def _fetch_signals(self, ids: list[str], entity_type: str) -> dict[str, dict]:
-        """Batch-fetch graph signals for the given ids. Returns {id: {…}}."""
+    def _fetch_signals(self, ids: list[str], entity_type: str) -> dict[str, dict] | None:
+        """Batch-fetch graph signals for the given ids. Returns {id: {…}}.
+
+        Returns ``None`` (never ``{}``) when the read FAILED — the caller must
+        be able to telling "the read answered, and it answered empty" from
+        "the read did not answer", because #10137's ``ep.informed_order``
+        label is derived from exactly that difference. An empty batch (no ids)
+        is a successful read of nothing and still answers ``{}``.
+        """
         if not ids:
             return {}
         try:
@@ -691,7 +711,7 @@ class GraphRanker:
             return self._fetch_point_signals(ids)
         except Exception as e:  # pragma: no cover — defensive
             logger.warning("GraphRanker signal fetch failed: %s", e)
-            return {}
+            return None
 
     def _fetch_point_signals(self, ids: list[str]) -> dict[str, dict]:
         # Post-#2206/#2286 parity: a point's confidence is the belief MEAN

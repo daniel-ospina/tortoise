@@ -175,3 +175,43 @@ def test_the_confidence_order_also_says_it_was_consulted(sdk):
     assert means == sorted(means, reverse=True), means
     for r in conf_rows:
         assert r["ep"].get("informed_order") == "consulted"
+
+
+def test_a_failed_signal_read_is_not_labelled_consulted(sdk, monkeypatch):
+    """#10137 review P1 — the label follows the READ, not the ranker's config.
+
+    ``GraphRanker._fetch_signals`` deliberately swallows a failed read. When it
+    does, every confidence key stays at the neutral 0.5 (confidence path) and
+    every ``graph_boost`` is 0.0 (graph path) — belief contributed nothing, so
+    labelling those rows ``consulted`` would mint the exact false claim this
+    change exists to remove.
+    """
+    from tortoise.ranking import GraphRanker
+
+    _seed(sdk)
+    monkeypatch.setattr(GraphRanker, "_fetch_point_signals",
+                        lambda self, ids: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    graph_rows = sdk.tortoise_fts_query(_QUERY, order_by="graph", limit=10)
+    assert graph_rows
+    for r in graph_rows:
+        assert r["ep"].get("informed_order") == "not_consulted"
+        assert r["graph_ranking"]["graph_boost"] == 0.0
+
+    conf_rows = sdk.tortoise_fts_query(_QUERY, order_by="confidence", limit=10)
+    assert conf_rows
+    for r in conf_rows:
+        assert r["ep"].get("informed_order") == "not_consulted"
+
+
+def test_a_projectionless_ranker_is_not_labelled_consulted(sdk):
+    """A caller-supplied ranker with no graph reads nothing — and says so."""
+    from tortoise.ranking import GraphRanker
+
+    _seed(sdk)
+    rows = sdk.tortoise_fts_query(_QUERY, order_by="graph", limit=10,
+                                  graph_ranker=GraphRanker(None))
+    assert rows
+    for r in rows:
+        assert r["ep"].get("informed_order") == "not_consulted"
+        assert r["graph_ranking"]["graph_boost"] == 0.0

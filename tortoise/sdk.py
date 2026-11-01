@@ -36215,11 +36215,12 @@ class TortoiseSDK:
             if _claim_class_applies and _claim_classes_ok:
                 ranked = _with_claim_class(ranked, claim_classes)
             from .ranking import annotate_belief_order as _belief_label
-            # P2 (review): the label describes the READ, not the branch name — a
-            # caller-supplied projection-less ranker fetches no signals, so the
-            # order came from the rows' embedded fields and belief was not read.
+            # P2 (review): the label describes the READ, not the branch name —
+            # `signals_read` is set by the rerank that just ran, so a
+            # projection-less ranker (or a swallowed fetch failure) is not
+            # labelled as having consulted a layer it never read.
             return _with_read_status(_belief_label(
-                ranked, consulted=getattr(ranker, "projection", None) is not None))
+                ranked, consulted=getattr(ranker, "signals_read", False)))
         belief_consulted = False
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
@@ -36232,12 +36233,16 @@ class TortoiseSDK:
             # 0.75 prior — the pre-fix read ranked it as unmeasured 0.5).
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
-            signals = ranker._fetch_signals([r.id for r in results], entity_type)
+            read = ranker._fetch_signals([r.id for r in results], entity_type)
+            signals = read or {}
             results.sort(
                 key=lambda r: signals.get(r.id, {}).get("confidence", 0.5),
                 reverse=True,
             )
-            belief_consulted = getattr(ranker, "projection", None) is not None
+            # #10137 review P1: the label describes the READ, not the config —
+            # a failed fetch answers None and every key stays at the neutral
+            # 0.5, leaving the list in RRF order. That is NOT a consulted order.
+            belief_consulted = bool(read)
         # Default: RRF relevance order (already in fused order)
 
         # #10137: `order_by="confidence"` above sorts on the belief mean, so it
