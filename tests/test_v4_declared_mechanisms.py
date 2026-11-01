@@ -1162,6 +1162,16 @@ def test_the_state_value_carve_out_row_records_what_is_enforced_and_what_is_not(
     assert "ATTACHED" in row["note"], row["note"]
     assert "OVER-READS A BULLET GLYPH" in row["note"], row["note"]
     assert "test_never_across_fold_5080" in row["note"], row["note"]
+    # And the SEPARATOR exclusion's COST is stated as a residual (#10513 review
+    # cycle-12 P1): NO separator rung ships — `tortoise/value_normalizer.py`'s
+    # #2817 point 1, which this seam now COMPLIES with after shipping the
+    # unrecorded "commas are thousands" rung and WITHHOLDING truthful
+    # comma-decimal points — so the price is that a real thousands rewrite is
+    # unjudged too. The row is where that compliance and that cost are recorded
+    # together, so a future lane either moves the row or re-ships the guess.
+    assert "A SEPARATOR-BEARING NUMERAL IS NEVER JUDGED" in row["note"], row["note"]
+    assert ("test_a_separator_bearing_number_is_outside_the_judged_set"
+            in row["note"]), row["note"]
 
 
 #: Number words the registry prose may spell, keyed by the count they name. A

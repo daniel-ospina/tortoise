@@ -1500,7 +1500,8 @@ one (`_value_slots` reads `_value_bindings`, the E5/E7 contradiction engine; no 
 classifier). Still outside it, each stated in the row with its trade: a value the model never EMITS
 (the capstone E2a class, upstream of selection); 50 of the 112 value-bearing points in the committed
 census receipts failing open on slot layout, so the rule judges 62 and refuses 0 today; strict verbatim
-survival short of target (`UNMEASURED(<an E2 LLM arm run>)`); clock/ISO form excluded by design; the
+survival short of target (`UNMEASURED(<an E2 LLM arm run>)`); clock/ISO form excluded by design; a
+SEPARATOR-BEARING numeral excluded by design (below); the
 engine's unit VOCABULARY limit; the S5 minted-endpoint site deliberately not wired (there `quote` is
 `content[:200]`, the point's own text, so a rewrite is impossible by construction); REFUSE rather than
 REPAIR; a leading currency symbol read as FORM; an over-long side failing open; the `k` prefix-vs-unit
@@ -1511,9 +1512,24 @@ DISTINCT endpoint that shares an anchor word and a value with a refused point.
 magnitude table (`k`/`M`/`MM`/`mil`/`milhão` dropped as a class). This seam reads `k` as ×1000, and the
 departure is recorded where the rule says it must be — an `OVERRIDES:` line on the issue, comment
 `6563672665` on `#10360` — because `#2817` governs money DERIVATION while `k` is already a unit
-identity in `_UNIT_EQUIV` here, and without the factor the rule refuses `5k QPS` against `5,000 QPS`.
+identity in `_UNIT_EQUIV` here, and without the factor the rule refuses `5k QPS` against `5000 QPS`.
 `value_normalizer`'s money path is untouched. No recorded decision reaches the refuse-don't-repair
 trade-off; it is stated in the row and named as the follow-up.
+
+**The SAME ruling's point 1, COMPLIED with rather than departed from — and it corrected a shipped
+defect.** A first revision of this seam carried `str(token).replace(",", "")`, i.e. the "EN reads
+commas as thousands" rung `#2817` point 1 forbids outright ("No separator rule, at all … deciding that
+`R$ 1.234,56` is `1234.56` **is** the locale question the design excludes"), with no `OVERRIDES:`
+record — and it was wrong in the direction that WITHHOLDS a memory: `4,2` reduced to `42`, so a
+truthful point quoted in a comma-decimal locale diverged from its own quote and was refused (measured,
+as was `1.234` against `1234`). There is no locale on this path to decide it with — CLDR UTS #35
+carries `decimal`/`group` as per-locale symbols, and the reference implementation binds one string to
+two numbers (`format_decimal(1.2345, locale='en_US')` is `'1.234'`; `format_decimal(12345,
+locale='de_DE')` is `'12.345'`) — so a separator-bearing numeral is now OUTSIDE the judged set
+exactly like a clock (`_separator_reads_ambiguously`), and `_value_core` returns no identity for it
+rather than a guess. The cost is stated as residual (l): a REAL thousands rewrite (`5,000` against
+`6,000`) is unjudged too. Because this complies with `#2817`, it needs no second `OVERRIDES:` record;
+what it removes is the unrecorded departure.
 
 **A change that is NOT local to this rule, stated because the row did not say so.**
 `_keeps_numeric_edge` now keeps a leading `Pd` (an en/em dash is a MINUS in every spelling), and
