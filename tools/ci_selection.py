@@ -65,7 +65,13 @@ from pathlib import Path
 # 1.4.0 (#6135): the fast pool is split into N shards (config `fast_shards`)
 # instead of two hard-coded halves, and the push matrix is emitted as the whole
 # GHA matrix object (`fast_matrix`).
-SELECTION_FN_VERSION = "1.5.0"
+#: Bumped whenever a change can alter WHICH files the selection reports as
+#: changed, so a recorded `selection.json` can be replayed against the function
+#: that produced it. 1.6.0 (#10409): a space- or comma-separated
+#: `--changed-files` value is now split into entries instead of being read as
+#: one path — a recorded selection made before this bump may name a
+#: concatenated "path" and must be read as the pre-fix reading.
+SELECTION_FN_VERSION = "1.6.0"
 
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
@@ -5835,6 +5841,137 @@ def _warn_unknown_paths(explain: dict) -> None:
             file=sys.stderr)
 
 
+def _split_changed_files(raw: str) -> list[str]:
+    """Split a `--changed-files` value into entries — newlines, commas, spaces (#10409).
+
+    THE DEFECT THIS FIXES. The only accepted form used to be newline-separated
+    (`args.changed_files.splitlines()`), so a caller who formatted the list the
+    way a shell usually takes one — space-separated, the shape of `"a.py b.py"`
+    — got ONE entry whose text was the whole list. That entry was then matched
+    as a path, and the answer was a CONFIDENT SELECTION about a path that does
+    not exist. Measured on `718ee3b49`:
+
+        --changed-files "tortoise/hosted_api.py tortoise/sdk.py tests/test_ci_selection.py"
+          -> surfaces=['api','onboarding']  full=false  378 test files
+        the same three paths, newline-separated
+          -> full=true, test_files=ALL
+
+    So the wrong answer was not the issue's `full: true` in every case — it is
+    whatever the FIRST token happens to prefix-match, and when that token is a
+    registered path the concatenation UNDER-SELECTS: `tortoise/sdk.py` (a
+    SHARED_MODULE, which forces the FULL matrix) and `tests/test_ci_selection.py`
+    were both reported as NOT changed, and 378 tests ran instead of the matrix.
+    Under-selection is the dangerous direction; a silent over-selection to FULL
+    only wastes runners. Neither is acceptable, and neither errors.
+
+    WHY THE WHOLE-VALUE-AS-A-PATH FORM IS NOT REFUSED: it is a documented inline
+    invocation (`--changed-files tortoise/hosted_api.py` — see `_warn_unknown_paths`
+    for the full argument). Splitting makes both forms select IDENTICALLY, which
+    removes the trap instead of policing it.
+
+    THE SPACE AMBIGUITY, AND HOW IT IS SETTLED. A path may legitimately contain
+    a space (“docs/release notes.md”), so splitting every space is a fix that
+    silently breaks a real path — and a path that is broken into two unknown
+    tokens escalates to the FULL matrix, i.e. it looks like caution. The
+    discriminator is therefore PATH EXISTENCE, in the same spirit as
+    `_is_outside_repo_file`: whitespace tokens are re-joined GREEDILY while the
+    joined candidate names an existing path, so `release notes.md` survives as
+    one entry whether it is the whole value or one entry inside a longer list.
+    Greedy longest-match is deterministic (one pass, left to right), and it
+    fails in the visible direction: the pieces of a genuinely-split path are
+    named as unknown paths on stderr by `_warn_unknown_paths`, never silently —
+    except for the one residual stated below.
+
+    RESIDUAL (stated, not hidden): a path that contains a space AND has been
+    DELETED in the diff no longer exists on disk, so it is split — its pieces
+    then read as unknown paths, which forces the fail-closed FULL matrix and is
+    named on stderr. Never a silent under-selection. The remedy is the one this
+    tool already documents: pass the list on stdin (`--changed-files -`), where
+    no tokenisation happens at all.
+
+    THE CONTRACT, stated for `--help` readers:
+      * one value, entries separated by newline, comma, or space — all three
+        are accepted and are indistinguishable in effect;
+      * a path containing a space OR a comma is passed as-is and is NOT split
+        (it must exist in the tree for that to be recognised);
+      * `-` reads the list from stdin, one entry per line — unambiguous for any
+        path, including one with a space that no longer exists on disk.
+    """
+    if raw == "-":
+        return [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]  # noqa: E741
+    entries: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # A WHOLE LINE that names an existing path is one entry, before ANY
+        # separator question is asked — so a path carrying a comma or a space is
+        # protected by the same predicate, not by an assumption about which
+        # characters paths "never" contain (review P2).
+        if _names_existing_path(line):
+            entries.append(line)
+            continue
+        if not any(ch.isspace() for ch in line):
+            entries.extend(p for p in (x.strip() for x in line.split(",")) if p)
+            continue
+        entries.extend(_split_whitespace_keeping_spaced_paths(line))
+    return entries
+
+
+def _split_whitespace_keeping_spaced_paths(line: str) -> list[str]:
+    """Split *line* on whitespace, re-joining tokens that name ONE existing path.
+
+    GREEDY LONGEST MATCH, one left-to-right pass: from each token, extend while
+    the space-joined candidate still names an existing path. That is what keeps
+    `docs/release notes.md` whole — as the whole value, and as ONE entry inside a
+    longer list (`tortoise/sdk.py docs/release notes.md tests/x.py`), which a
+    whole-line existence check alone cannot see.
+
+    A COMMA IS ONLY A SEPARATOR BETWEEN TOKENS (review P2). `_split_changed_files`
+    folds commas for a line with no whitespace; inside a whitespace-bearing line a
+    comma stays INSIDE its token, so `docs/a,b.md` survives as one entry — the same
+    protection the space case gets, from the same predicate instead of a second
+    rule. Edge commas (`a.py, b.py`) are stripped per token.
+
+    Deterministic by construction: the only input to the join is the filesystem,
+    the pass is left to right, and an extension is taken only on a positive hit —
+    so `tortoise/a.py tortoise/b.py` (no such joined path) splits, while
+    `release notes.md` (a real file) does not.
+    """
+    tokens = [t for t in (tok.strip(",") for tok in line.split()) if t]
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        group = [tokens[i]]
+        j = i + 1
+        while j < len(tokens) and _names_existing_path(" ".join([*group, tokens[j]])):
+            group.append(tokens[j])
+            j += 1
+        out.append(" ".join(group))
+        i = j
+    return out
+
+
+def _names_existing_path(candidate: str) -> bool:
+    """True when *candidate* names a path that exists, read as a CHANGED path.
+
+    ONE base, deliberately: a `--changed-files` entry is a REPO-relative path —
+    that is what every `SOURCE_PATTERNS` row is written against — and an absolute
+    path already works through this base (`REPO / "/abs/p"` is `/abs/p`).
+
+    A CWD-relative fallback was tried and REMOVED (review P2): it made the parser
+    a function of the process working directory, so the same argument could yield
+    a different `changed_files` list — and therefore a different `selection.json`
+    — on two boxes, which is exactly what `SELECTION_FN_VERSION` exists to make
+    replayable. `_is_outside_repo_file` refuses CWD-relative resolution for this
+    same reason.
+    """
+    try:
+        return (REPO / candidate).exists()
+    except OSError:
+        return False
+
+
 def _is_outside_repo_file(c: str) -> bool:
     """True when *c* is an existing file OUTSIDE the checkout.
 
@@ -5875,7 +6012,11 @@ def _is_outside_repo_file(c: str) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--changed-files", default="", help="newline-separated changed files")
+    ap.add_argument("--changed-files", default="",
+                    help="changed files — newline-, comma-, or space-separated, "
+                         "all accepted and equivalent (#10409); a path containing "
+                         "a space is kept whole; `-` reads the list from stdin"
+                         " (one entry per line — unambiguous for any path)")
     ap.add_argument("--event", default="pull_request", choices=["push", "pull_request", "schedule"])
     ap.add_argument("--integrity", action="store_true", help="verify manifest coverage")
     ap.add_argument("--surface-audit", action="store_true",
@@ -6045,9 +6186,10 @@ def main() -> int:
         print(json.dumps(result))
         return 0
 
-    changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]  # noqa: E741
-    if args.changed_files == "-":
-        changed = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]  # noqa: E741
+    # #10409: ONE splitter for every accepted form (newlines, commas, spaces; a
+    # path containing a space stays whole), so a caller's separator can no longer
+    # change WHICH FILES were treated as changed. See `_split_changed_files`.
+    changed = _split_changed_files(args.changed_files)
     explain: dict = {}
     result = select(changed, args.event, manifest, explain=explain)
     _warn_unknown_paths(explain)

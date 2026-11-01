@@ -3508,6 +3508,18 @@ surfaces:
   # `SOURCE_PATTERNS` row matches, so a selector edit lands in the unknown-path
   # fail-closed branch -> FULL matrix, where this pin runs too.
   - test_ci_selection_changed_files_9109.py
+  # #10409: a space- or comma-separated `--changed-files` value used to be read as
+  # ONE path, and the selection silently mis-decided — under-selecting when the
+  # first token prefix-matched a registered path (measured: a three-path list
+  # answered `full=false` where the newline form answers `full=true`, so a
+  # SHARED_MODULE change ran 378 tests instead of the matrix). The pin feeds the
+  # tool the shape a shell actually produces (space-joined), compares it to the
+  # newline form, and holds the discriminator a naive `split()` loses: a path
+  # containing a space or a comma stays ONE entry. Registered in `core` beside the
+  # tool's own suite so it is CLASSIFIED at all (integrity refuses an unregistered
+  # test file); a `tools/ci_selection.py`-only diff still lands in the
+  # unknown-path fail-closed branch -> FULL matrix, where this pin runs too.
+  - test_ci_selection_space_separated_10409.py
   # #10130: the LOCAL affected-subset run (`tools/run_affected.sh`) — the wrapper
   # pipes the changed-name LIST into `--changed-files -` on stdin, prints the
   # selected `tests/…` set, refuses a `full: true` selection unless `--allow-full`,
