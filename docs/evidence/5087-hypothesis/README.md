@@ -109,8 +109,15 @@ nowhere.
 
 ## Post-run instrument hardening — disclosed, and **no number moved**
 
-The measurement above was produced by `tools/s3_prior_ablation.py` as committed in `325f2a1a5`.
-Review of this PR then found eight hardening gaps in the probe. **All eight were fixed AFTER the
+The measurement above was produced by `tools/s3_prior_ablation.py` **as an uncommitted working
+copy** whose content is what `325f2a1a5` commits — **not** by the probe as committed at the log's
+`head=a1075dfc2`. ⚠️ That distinction is checkable, and it was a real hole rather than a wording
+nicety: the log prints a `S3 WITNESS` line that **does not exist** in the probe at `a1075dfc2`
+(`git show a1075dfc2:tools/s3_prior_ablation.py | grep -c "S3 WITNESS"` → `0`, `325f2a1a5` → `1`),
+so its `head=` line names the commit the bars were read from, not the tool bytes that ran. The pin
+could not see the difference — it compared commits — which is why item 9 now refuses a dirty tree and
+the log carries the probe's own `sha256`. Review of this PR then found eight further hardening gaps
+in the probe. **All were fixed AFTER the
 run, and none of them changes a reported number** — the arithmetic (`created_counts`, `real_facts`,
 `concentration`, `decide`'s bar comparisons) is unchanged, and the run's own log already printed
 each session's S3 state at the moment of that session's capture. What the hardening does is make
@@ -156,16 +163,34 @@ one *observed* fact **machine-enforced**:
    would still be admitted by the new pin; it is a later re-run at a later head that the pin now
    holds to the same metric code.
 7. **The log did not say which probe revision produced it** — the log's `head=a1075dfc` names the
-   commit the bars were read from, not the tool revision; this README now states it (`325f2a1a5`).
+   commit the bars were read from, not the tool revision, and the producing working copy was
+   **uncommitted** (see the note above; this README previously claimed the run was "as committed in
+   `325f2a1a5`", which is not what the log can support). Two things now make that impossible to hide
+   again: the log carries `probe_sha256=<sha256 of the probe file>` — the bytes that ran, committed
+   or not, the way the bundle already records `fixtures_hash` — and `assert_clean_tree` refuses a run
+   whose working copy differs from its commit over the trees that can move a number (item 9).
 8. **The log was written ONCE, at the end** — every line was buffered in memory and the file was
    written only on a clean exit, so an aborted run left no file at all. That is precisely why replay
    A's output does not exist. Each line is now written and flushed as it is logged, so a run that
    dies mid-way still leaves the sessions it already measured on disk. The one-measured-log refusal
    is unaffected (the file is still created once; it just no longer needs the process to co-operate).
    **No number moves** — the measured log is unchanged and was already complete.
+9. **The pin could not see the WORKING TREE**, so "the pinned sha must be the tree that runs" was
+   unenforced for exactly the case that produced this bundle: `assert_source_sha` diffs two
+   **commits**, so an uncommitted edit to production extraction code, to a metric artifact, or to
+   this probe was admitted silently while the log still read as a clean-tree assertion (item 7's
+   `S3 WITNESS` line that its own `head=` commit does not contain is that hole, observed). The tree
+   is now asserted clean over `tortoise tests/eval/write_path docs/evidence/7949-capstone/probes
+   tools/s3_prior_ablation.py` (`git status --porcelain -- …` must be empty, refused at `exit 3`
+   before any model call), and the log prints `tree=<git describe --dirty>` beside the changed-file
+   line so it can never read as a clean-tree assertion it did not make. **No number moves** — the
+   measured run predates the guard and both arms ran in one process from one working copy.
 
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
-repeated to get a friendlier number (the probe now refuses to overwrite the log at all).
+repeated to get a friendlier number. The one-log rule is enforced from the FILE, not from the flag
+honour system: an existing `--out` is refused, and `--overwrite` — which exists for an aborted,
+unmeasured run such as replay A — is itself refused when the existing log carries a `RATIO:` or
+`VERDICT:` line, because only a run that reached a verdict can have written one.
 
 ⚠️ **Two emissions therefore post-date the measured log**, which the log cannot carry because it was
 written before they existed — both are computed from the numbers that ARE in it, and both are printed
@@ -195,6 +220,15 @@ Check the admission first — **empty output means the pin admits this head**:
 git diff --name-only 718ee3b497539540ea10269e7ccfe9b0867d010f HEAD   # must print nothing
 ```
 
+The working copy must be clean too — over `tortoise`, `tests/eval/write_path`,
+`docs/evidence/7949-capstone/probes` and `tools/s3_prior_ablation.py` — because a commit id cannot
+certify a dirty tree, and a probe edited in place is not the probe the bars were read for:
+
+```bash
+git status --porcelain -- tortoise tests/eval/write_path \
+    docs/evidence/7949-capstone/probes tools/s3_prior_ablation.py   # must print nothing
+```
+
 Then, at an admitted head, with a private FalkorDB lane:
 
 ```bash
@@ -212,8 +246,11 @@ mid-way still leaves the sessions it already measured on disk — the gap that l
 
 `tools/s3_prior_ablation.py` reads its bars out of the **pre-registration commit**
 (`git show <sha>:docs/evidence/5087-hypothesis/PRE-REGISTRATION.md`), re-derives the corpus
-`fixtures_hash`, refuses an `--out` that escapes this bundle, and refuses a `source_sha` whose
+`fixtures_hash`, refuses an `--out` that escapes this bundle (or one that already carries a
+`RATIO:`/`VERDICT:`, even under `--overwrite`), and refuses a `source_sha` whose
 non-production files differ from `HEAD` **or whose metric-definition code differs at all**
-(`METRIC_ARTIFACT_PREFIXES`). The node census is
+(`METRIC_ARTIFACT_PREFIXES`). It also refuses a **dirty working copy** over the trees that can move a
+number (`assert_clean_tree`), and logs `tree=` (`git describe --dirty`) and `probe_sha256=` so a run
+names both the commit and the bytes it executed. The node census is
 `docs/evidence/7949-capstone/probes/capstone_measure.py::census`, imported read-only — there is no
 second census.

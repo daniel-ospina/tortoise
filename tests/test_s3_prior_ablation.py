@@ -491,3 +491,141 @@ def test_the_architecture_doc_no_longer_calls_the_question_unmeasured(probe):
     assert "284" in doc and "247" in doc, "the measured figures must live where the claim was"
     assert "whether S3's disambiguation is accurate" in doc, (
         "the half that really IS still unmeasured must survive the edit")
+
+
+# ── the pin must see the WORKING TREE, and the log must name the bytes that ran (r5 P1) ──
+#
+# `assert_source_sha` compares two COMMITS, so an uncommitted edit to production code, to a metric
+# artifact or to the probe itself was admitted silently while the log still asserted that the pinned
+# sha was the tree that ran. The measured run is an instance of that hole: its `head=` line names
+# `a1075dfc2`, while the `S3 WITNESS` line it prints does not exist in the probe at that commit
+# (it was an uncommitted working copy whose content equals `325f2a1a5`). So the tree is now asserted
+# clean over exactly the paths that can move a number, and the log carries the probe's own sha256 —
+# which names the bytes that ran whether or not they were ever committed.
+
+
+def test_an_uncommitted_edit_refuses_the_run(probe, monkeypatch, tmp_path):
+    """Behavioural, temp repo, one variable: clean is admitted, a dirty guarded path is exit 3.
+
+    A dirty tree is refused because a commit id cannot certify it; a dirty path OUTSIDE the guarded
+    set (the evidence bundle, `config/`) is not refused, so the guard is not simply refusing
+    everything that is uncommitted.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "probe-test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "probe-test@example.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "probe-test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "probe-test@example.invalid")
+
+    repo = tmp_path / "dirty"
+    for rel in ("tortoise", "tests/eval/write_path", "docs/evidence/7949-capstone/probes", "tools",
+                "docs/evidence/5087-hypothesis", "config"):
+        (repo / rel).mkdir(parents=True, exist_ok=True)
+    (repo / "tools/s3_prior_ablation.py").write_text("# probe\n")
+    (repo / "tortoise/extractor_v2.py").write_text("SEARCH = 1\n")
+    (repo / "tests/eval/write_path/grading.py").write_text("REAL = 1\n")
+    (repo / "docs/evidence/7949-capstone/probes/capstone_measure.py").write_text("C = 1\n")
+    (repo / "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md").write_text("# prereg\n")
+    (repo / "config/ci-surfaces.yml").write_text("core: []\n")
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "baseline")
+    monkeypatch.setattr(probe, "ROOT", repo)
+
+    assert probe.dirty_paths() == [], "a committed tree must satisfy the guard"
+    assert probe.assert_clean_tree(), "a clean tree returns the `tree=` value the log prints"
+
+    # An uncommitted edit to the production extraction code — the case the commit diff cannot see.
+    (repo / "tortoise/extractor_v2.py").write_text("SEARCH = 2  # tuned after the pin\n")
+    with pytest.raises(SystemExit) as refusal:
+        probe.assert_clean_tree()
+    assert refusal.value.code == 3, "a dirty tree is an unmeasurable run, never a crash"
+
+    # The same edit to a metric artifact, and to the probe itself, are refused too.
+    for rel in ("tests/eval/write_path/grading.py", "tools/s3_prior_ablation.py"):
+        _git(repo, "checkout", "--", "tortoise/extractor_v2.py")
+        target = repo / rel
+        target.write_text(target.read_text() + "# tuned after the pin\n")
+        with pytest.raises(SystemExit) as refusal:
+            probe.assert_clean_tree()
+        assert refusal.value.code == 3, f"{rel}: a dirty metric artifact must refuse"
+        _git(repo, "checkout", "--", rel)
+
+    # …but an uncommitted change the run cannot measure through is NOT refused, so the guard stays
+    # a dirty-CODE guard rather than a blanket "commit before you run".
+    (repo / "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md").write_text("# prereg edited\n")
+    (repo / "config/ci-surfaces.yml").write_text("core: ['x']\n")
+    assert probe.dirty_paths() == [], (
+        "an uncommitted docs/config change cannot move a number and must not refuse the run")
+    status = _git(repo, "status", "--porcelain")
+    assert "config/ci-surfaces.yml" in status and "PRE-REGISTRATION.md" in status, (
+        "the repo really IS dirty there — so the empty guard above is the paths, not a clean tree")
+    assert probe.assert_clean_tree()
+
+
+def test_the_log_names_the_probe_bytes_not_only_a_commit(probe):
+    """`head=` names a commit and a commit cannot name a working copy; `probe_sha256` can."""
+    import hashlib
+
+    assert probe.probe_sha256() == "sha256:" + hashlib.sha256(PROBE.read_bytes()).hexdigest()
+    main_src = PROBE.read_text().split("def main(", 1)[1]
+    assert "probe_sha256()" in main_src, "main must compute the probe's own hash"
+    assert 'log(f"probe_sha256=' in main_src, (
+        "the log must carry the hash of the bytes that ran — the producing revision is otherwise "
+        "only reconstructible from a README note (r5 P1)")
+    assert 'log(f"tree={tree}' in main_src, (
+        "the log must print the working-tree state beside the changed-file line, so it can never "
+        "read as a clean-tree assertion")
+
+
+# ── `--overwrite` may replace an aborted run and nothing else (r5 P2) ──
+#
+# The flag existed for replay A (an aborted, unmeasured log). Nothing inspected the existing file,
+# so the same flag truncated a log carrying `RATIO:`/`VERDICT:` — the "re-run until it is
+# friendlier" path the one-log refusal exists to close, one flag away. An aborted run cannot print
+# either line, so the FILE decides.
+
+
+def test_overwrite_cannot_replace_a_measured_log(probe, monkeypatch, tmp_path):
+    monkeypatch.setattr(probe, "ROOT", tmp_path)
+    path = tmp_path / "docs/evidence/5087-hypothesis/s3-ablation-test.log"
+    path.parent.mkdir(parents=True)
+
+    assert probe.out_path_refusal(path, overwrite=False) is None, "an absent log is never refused"
+
+    path.write_text("--- ARM OFF — fresh graph x ---\n  [OFF] wp01_quarry_debug: created=45\n")
+    assert probe.out_path_refusal(path, overwrite=False) is not None, (
+        "an existing log is refused without --overwrite")
+    assert probe.out_path_refusal(path, overwrite=True) is None, (
+        "an aborted, unmeasured run must stay replaceable — that is what the flag is for")
+
+    path.write_text("--- ARM OFF ---\nRATIO: 0.8697\nVERDICT: HYPOTHESIS-FALSIFIED\n")
+    refusal = probe.out_path_refusal(path, overwrite=True)
+    assert refusal is not None and "MEASURED" in refusal, (
+        "the flag must not truncate a log that carries a verdict — that is the tuning path")
+
+    assert "out_path_refusal(" in PROBE.read_text().split("def main(", 1)[1], (
+        "the rule has to be wired into main, not merely available beside it")
+
+
+def test_the_bundle_states_the_overwrite_rule_the_probe_enforces(probe):
+    """README:168 claimed the probe "refuses to overwrite the log at all" — it refuses a MEASURED one."""
+    readme = (probe.EVIDENCE_DIR / "README.md").read_text()
+    assert "refuses to overwrite the log at all" not in readme, (
+        "the probe refuses a log that carries a verdict; --overwrite still replaces an aborted run")
+    assert "--overwrite" in readme and "RATIO" in readme, (
+        "the README must state the rule the code enforces, and name what marks a log as measured")
+
+
+def test_the_bundle_says_the_measured_run_came_from_an_uncommitted_probe(probe):
+    """r5 P1: the log's `head=` is the commit; the producing probe was an uncommitted working copy.
+
+    The bundle said the run was produced by `tools/s3_prior_ablation.py` "as committed in
+    `325f2a1a5`", which would mean a clean tree at a commit that does not contain the `S3 WITNESS`
+    line the log prints. It has to state the weaker, true thing — and with the new guards, why that
+    cannot happen again.
+    """
+    readme = (probe.EVIDENCE_DIR / "README.md").read_text()
+    assert "as committed in `325f2a1a5`" not in readme, (
+        "the measured run's log prints a line its `head=` commit does not contain: the producing "
+        "working copy was uncommitted")
+    assert "uncommitted" in readme, "the bundle must say plainly that the probe was uncommitted"

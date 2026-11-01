@@ -31,6 +31,15 @@ THE BARS ARE NOT TYPED HERE. They are parsed out of the pre-registration COMMIT
 METRIC-DEFINITION file differing at all (``METRIC_ARTIFACT_PREFIXES``). The prefix allowlist alone
 was too wide: the three artifacts that compute every reported number live under it.
 
+⚠️ A COMMIT DIFF CANNOT SEE THE WORKING TREE. ``assert_source_sha`` compares two commits, so an
+UNCOMMITTED edit to production code, to a metric artifact or to this file was admitted silently
+while the log still asserted that the tree it ran was the pinned one — and the bundle's own measured
+log is an instance of it: its ``head=`` line names the commit it ran under, while a line it prints
+does not exist in this probe at that commit (README item 7). ``assert_clean_tree`` therefore
+REFUSES a dirty tree over exactly those paths, the log prints ``tree=`` (``git describe --dirty``)
+beside the changed-file line so it can never read as a clean-tree assertion, and ``probe_sha256``
+names the bytes that ran whether or not they were ever committed.
+
 The node census is ``docs/evidence/7949-capstone/probes/capstone_measure.py::census``, imported
 READ-ONLY and reused; this module does not implement a second census (#10463 forbids one).
 
@@ -40,8 +49,9 @@ buffered every line and wrote the file once at the end, which is why replay A's 
 exist at all (README, "Disclosure — replay A").
 
 Exit codes: 0 = both arms measured and a verdict was written; 3 = REFUSED / ARM-INVALID (no
-verdict, never a 0); 2 = the invocation itself is wrong (e.g. an ``--out`` escaping the evidence
-bundle).
+verdict, never a 0); 2 = the invocation itself is wrong (an ``--out`` escaping the evidence bundle,
+or an existing ``--out`` — ``--overwrite`` replaces an aborted, unmeasured log and never one that
+carries a ``RATIO:``/``VERDICT:``).
 """
 from __future__ import annotations
 
@@ -79,7 +89,11 @@ def refuse(message: str) -> NoReturn:
 
     `raise SystemExit(str)` exits **1**, so a REFUSED run and an unhandled exception were
     indistinguishable to any caller — the module's own header promises 3 (review r1 P2).
-    `--prereg` mistakes are the exception: they are invocation errors and exit 2.
+
+    ⚠️ EVERY failure on the ``--prereg`` path is this code, not 2: the pins block, the pins keys and
+    the ``document_sha256`` cross-check all ``refuse()``. The only exit-2s in the module are the
+    ``--out`` checks (an escaping bundle, an existing measured log) — this docstring said otherwise
+    and was wrong (review r5 P3).
     """
     print(message if message.startswith("s3-ablation:") else f"s3-ablation: REFUSED — {message}",
           file=sys.stderr)
@@ -179,6 +193,9 @@ def assert_source_sha(source_sha: str, head: str) -> list[str]:
 
     Ancestor-checked, and every differing file must be evidence or tooling — so the numbers
     describe the pinned code, not some later production edit that slipped in beside the run.
+
+    ⚠️ This compares COMMITS only. An uncommitted edit is invisible to it — that half is
+    ``assert_clean_tree``, which ``main`` runs beside this one (review r5 P1).
     """
     proc = subprocess.run(["git", "merge-base", "--is-ancestor", source_sha, head],
                           cwd=str(ROOT), capture_output=True, text=True, check=False)
@@ -199,6 +216,68 @@ def assert_source_sha(source_sha: str, head: str) -> list[str]:
             "must be the code that COMPUTED the reported numbers, not only the code that ran"
         )
     return changed
+
+
+#: The trees whose UNCOMMITTED state can change a reported number — the half of "the pinned sha is
+#: the tree that runs" a COMMIT diff cannot see.
+#:
+#: Production extraction code, the metric artifacts (see ``METRIC_ARTIFACT_PREFIXES``), and this
+#: probe itself, which computes every reported number (the ``extraction_nodes`` numerator and
+#: denominator, ``real_facts``, the concentration share and the whole verdict mapping). A working
+#: copy carrying an edit to any of them is refused: a later commit id cannot certify a dirty tree.
+WORKTREE_GUARDED_PATHS = (
+    "tortoise",
+    "tests/eval/write_path",
+    "docs/evidence/7949-capstone/probes",
+    "tools/s3_prior_ablation.py",
+)
+
+
+def dirty_paths(paths: tuple[str, ...] = WORKTREE_GUARDED_PATHS) -> list[str]:
+    """Uncommitted changes under ``paths``, as ``git status --porcelain`` reports them."""
+    proc = subprocess.run(["git", "status", "--porcelain", "--", *paths], cwd=str(ROOT),
+                          capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        refuse(f"s3-ablation: REFUSED — cannot read the working tree state: "
+               f"{proc.stderr.strip()[:300]}")
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def tree_state() -> str:
+    """``git describe --dirty --always`` — the revision the log prints, marked when dirty."""
+    proc = subprocess.run(["git", "describe", "--dirty", "--always"], cwd=str(ROOT),
+                          capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        return "UNKNOWN"
+    return proc.stdout.strip() or "UNKNOWN"
+
+
+def probe_sha256() -> str:
+    """The sha256 of the bytes that RAN — the probe's own identity, committed or not.
+
+    ``head=`` names a commit, and a commit cannot name a working copy. This can: the log carries
+    the hash of the file that computed every number, so the producing revision is checkable even
+    when (as with the measured run) it was an uncommitted revision (README item 7).
+    """
+    import hashlib
+    return "sha256:" + hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def assert_clean_tree() -> str:
+    """The WORKING TREE must be the pinned tree too — not only the commit on top of it.
+
+    ``assert_source_sha`` compares commits, so before this guard an uncommitted edit to
+    ``tortoise/``, to a metric artifact or to this file was admitted silently and the log still read
+    as "the pinned sha is the tree that ran" (review r5 P1). Refused at exit 3, like every other
+    unmeasurable run. Returns ``tree_state()`` for the log to print.
+    """
+    dirty = dirty_paths()
+    if dirty:
+        refuse(f"s3-ablation: REFUSED — {len(dirty)} uncommitted change(s) under the guarded "
+               f"paths {list(WORKTREE_GUARDED_PATHS)}: {[line.strip() for line in dirty[:5]]} — "
+               "a commit id cannot certify a dirty tree, so the tree that runs would not be the "
+               "tree the pin names")
+    return tree_state()
 
 
 # ── the corpus ─────────────────────────────────────────────────────────────
@@ -614,6 +693,36 @@ def inside_evidence(path: Path) -> bool:
     return True
 
 
+#: The log lines only a run that reached a VERDICT can have written. An aborted run cannot print
+#: either, so their presence is what separates a MEASURED log from an unmeasured one.
+MEASURED_LOG_MARKERS = ("RATIO:", "VERDICT:")
+
+
+def out_path_refusal(out_path: Path, overwrite: bool) -> str | None:
+    """The one-measured-log rule, decided by the FILE and not only by the flag.
+
+    ``--overwrite`` exists for an aborted run that left an unmeasured log (replay A). Nothing
+    inspected the existing file, so the same flag also truncated a log carrying a ``RATIO:`` /
+    ``VERDICT:`` line — i.e. exactly the "re-run until it agrees" path the refusal exists to close,
+    one flag away (review r5 P2). An aborted run cannot write either line, so reading the file is
+    the test, and the README now states this rule instead of a stronger one the code never had.
+    """
+    if not out_path.exists():
+        return None
+    relative = out_path.relative_to(ROOT)
+    if not overwrite:
+        return (f"{relative} already exists. One bundle carries one measured log: a re-run writes "
+                "a NEW file (and the superseded one is deleted deliberately, with the supersede "
+                "chain disclosed), never an overwrite. Pass --overwrite only when you are "
+                "replacing an aborted, unmeasured run.")
+    prior = out_path.read_text(encoding="utf-8", errors="replace")
+    if any(line.startswith(MEASURED_LOG_MARKERS) for line in prior.splitlines()):
+        return (f"{relative} already carries a RATIO/VERDICT line, so it is a MEASURED log, not an "
+                "aborted one — --overwrite may replace an unmeasured run and nothing else. A "
+                "measured log is superseded by a NEW file with the supersede chain disclosed.")
+    return None
+
+
 def open_log(path: Path) -> tuple[TextIO, Callable[[str], None]]:
     """Open the log and return ``(handle, write_line)`` — the log is written INCREMENTALLY.
 
@@ -680,17 +789,20 @@ def main(argv: list[str] | None = None) -> int:
                    f"preregistration.json pins {want} — the record does not describe the "
                    "document this run is about to obey")
     # One bundle carries ONE measured log. Overwriting it silently is how a superseded run becomes
-    # invisible, and how a re-run could replace a falsifying number with a friendlier one.
-    if out_path.exists() and not args.overwrite:
-        print(f"s3-ablation: REFUSED — {out_path.relative_to(ROOT)} already exists. One bundle "
-              "carries one measured log: a re-run writes a NEW file (and the superseded one is"
-              " deleted deliberately, with the supersede chain disclosed), never an overwrite. "
-              "Pass --overwrite only when you are replacing an aborted, unmeasured run.",
-              file=sys.stderr)
+    # invisible, and how a re-run could replace a falsifying number with a friendlier one. The
+    # refusal reads the FILE: `--overwrite` may replace an aborted run, never a log with a verdict.
+    refusal = out_path_refusal(out_path, args.overwrite)
+    if refusal is not None:
+        print(f"s3-ablation: REFUSED — {refusal}", file=sys.stderr)
         return 2
     bars = pins["hypothesis_bars"]
     floors = pins["denominator_floors"]
     changed = assert_source_sha(str(pins["source_sha"]), head)
+    # The pin above compares COMMITS; this refuses a working copy that differs from the commit it
+    # claims to be. Both are needed: a dirty tree is how the measured run's log came to print a
+    # line its own `head=` did not contain (README item 7).
+    tree = assert_clean_tree()
+    probe_hash = probe_sha256()
     sessions, corpus_hash = corpus_state(pins)
 
     lines: list[str] = []
@@ -705,6 +817,11 @@ def main(argv: list[str] | None = None) -> int:
     log(f"prereg={args.prereg} (bars read from the COMMIT, not the worktree)")
     log(f"source_sha={pins['source_sha']} head={head}")
     log(f"source_sha..head changed files ({len(changed)}, all evidence/tooling): {changed or '(none)'}")
+    log(f"tree={tree} — the working copy the run executed, `git describe --dirty`; the guarded "
+        f"paths {list(WORKTREE_GUARDED_PATHS)} were ASSERTED clean before any model call, so this "
+        "run was not a dirty-tree run")
+    log(f"probe_sha256={probe_hash} — the bytes that computed every number below (a `head=` names "
+        "a commit; this names the file the run actually executed)")
     log(f"corpus=tests/eval/write_path sessions={len(sessions)} fixtures_hash={corpus_hash}")
     log(f"bars: primary_ratio_max={bars['primary_ratio_max']} "
         f"guard_ratio_min={bars['guard_ratio_min']} "
