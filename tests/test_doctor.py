@@ -1634,3 +1634,54 @@ class TestCaptureSpoolHealthRow:
         assert "ℹ️ Capture spool" in out, out
         assert "⚠️ Capture spool" not in out, out
         assert "❌ Capture spool" not in out, out
+
+    def test_a_SATURATED_spool_FAILS_the_report_by_name_not_by_fallthrough(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """A box that REFUSES every new capture is the box this row exists for,
+        and the sixth state must be a DECISION in the map, not the unknown-state
+        fallback.
+
+        The row's own rule is "`❌` only for a refusal retrying cannot fix": a
+        SATURATED spool is exactly that (nothing is evictable — only filing, a
+        key, or deleting entries clears it), so `⚠️` would make `doctor` exit 0
+        on a box capturing nothing. And when the state was added, this map was
+        the one enumeration of the set left behind (the `CaptureState` type and
+        `_print_capture_health`'s filter were both updated), so the comment's
+        own claim — "every state is named here so a new one cannot fall through"
+        — had already become false.
+
+        MUTATION THAT REDS THIS: delete the `"saturated"` row -> the icon comes
+        from the unknown-state fallback (⚠️) and the report exits 0.
+        """
+        from tortoise import capture_spool as sp
+
+        self._configured(monkeypatch, tmp_path)
+        root = sp.spool_dir()
+        # The box is saturated at the ceilings THIS test can afford; the verdict
+        # and the line are the real ones (`capture_health_line` with `tiny`), only
+        # the doctor's own call is bound to those ceilings.
+        tiny = sp.Bounds(max_entries=2, max_total_bytes=10_000_000,
+                         max_entry_bytes=10_000)
+        for i in range(2):
+            sp.write_spool_entry(root, sp.Snapshot(
+                session_id=f"sat-{i}",
+                turns=[{"role": "user", "content": "hi"}],
+                source="s.jsonl", machine_id="m" * 64, harness="claude"), tiny)
+        refused = sp.write_spool_entry(root, sp.Snapshot(
+            session_id="sat-refused",
+            turns=[{"role": "user", "content": "hi"}],
+            source="s.jsonl", machine_id="m" * 64, harness="claude"), tiny)
+        assert refused["written"] is False
+        assert refused["discards"][-1]["reason"] == "spool_saturated"
+
+        real = sp.capture_health_line
+        monkeypatch.setattr(
+            sp, "capture_health_line",
+            lambda r, *, api_key=None, bounds=None: real(r, api_key=api_key, bounds=tiny))
+
+        assert _run_doctor([]) == 1, "a refusing box is a FAILED report, not a warn"
+        out = capsys.readouterr().out
+        assert "capture: SATURATED (2 queued, refusing new captures)" in out, out
+        assert "❌ Capture spool" in out, out
+        assert "⚠️ Capture spool" not in out, out
+        assert "✅ Capture spool" not in out, out
