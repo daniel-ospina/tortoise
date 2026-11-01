@@ -1286,38 +1286,54 @@ def test_a_status_only_restatus_is_folded_from_the_records_own_stream():
     assert stmt.params["props"]["status"] == "archived"
 
 
-def test_a_restatus_is_unconditional_and_matches_the_live_set_state_op():
-    """A `restatus` moves a TERMINAL node; a connector fold never can.
+def test_a_restatus_is_applied_unguarded_within_the_replay():
+    """A `restatus` is NOT subject to the connector fold's terminal latch.
 
     The live fold applies a state op as `SET n += $state` with NO terminal guard
-    (`projection/__init__.py`, `_ENTITY_MUTATION_STATE_OPS`), which is how
-    `update_entity(status='live')` un-terminates an entity. The connector/pack
-    fold's every `SET` carries `AND (o.status IS NULL OR NOT (o.status IN
-    $excluded))`. If the replay applied the guard to a `restatus` too, a
-    rebuild would leave the node terminal where the live graph un-terminated it —
-    the same class of divergence, in the opposite direction.
+    (`projection/__init__.py`, `_ENTITY_MUTATION_STATE_OPS`), while the
+    connector/pack fold's every `SET` carries `AND (o.status IS NULL OR NOT
+    (o.status IN $excluded))`. Within the replay that difference is real and this
+    is the only test that reaches it: a PACK fold writes a TERMINAL word
+    (`archive` → `archived`, the shape `_terminal_index` exists for) and a later
+    `resume` is refused by the latch — but a `restatus` after it still moves the
+    node, because it is the caller's own write.
+
+    ⚠️ SCOPE, because the first draft of this test exercised neither half: the
+    earlier fixture chained `github.issue.closed` → `completed`, and `completed`
+    is NOT in `commit_ops.OBJECT_TERMINAL_STATUSES`, so a guarded `restatus` arm
+    passed it and the docstring's claim was untested. The preconditions here are
+    the pack fold's terminal latch and then the `restatus`. The CARRIER-derived
+    terminal case is different and deliberately guarded — see
+    `test_a_carried_supersession_beats_an_earlier_restatus`.
     """
-    row = {"id": "o-2", "name": "issue-2", "object_kind": "service"}
-    node = cp.node_from_row("Object", row)
-    # A connector fold writes first (`completed`, which is NOT terminal, so this
-    # fixture does NOT exercise the terminal latch — see the docstring's SCOPE)…
-    terminal = cp.apply_event_stream_folds(
-        (node,),
-        (cp.LifecycleEvent(seq=1, event_kind="github.issue.closed",
-                           object_name="issue-2"),),
-    )[0]
-    assert terminal.props.get("status") == "completed"
-    # …and a later `restatus` still moves it, as it does live.
-    revived = cp.apply_event_stream_folds(
-        (terminal,),
-        (cp.LifecycleEvent(seq=2, event_kind="",
-                           restatus_status="archived",
-                           target_id="o-2", target_label="Object"),),
-    )[0]
-    assert revived.props.get("status") == "archived", (
-        "a `restatus` was refused by the terminal guard — the live fold applies "
-        "a state op unconditionally (`SET n += $state`), so a rebuild would "
-        "leave this node terminal where the graph does not"
+    index = _terminal_index("archived")
+    row = {"id": "o-2", "name": "deal-2", "object_kind": "venture:tranche"}
+
+    def folded(events):
+        return cp.apply_event_stream_folds(
+            (cp.node_from_row("Object", row),), events, index=index)[0]
+
+    # The pack fold writes a TERMINAL word, then a later pack fold is latched
+    # out — the live fold's state machine.
+    latched = folded((
+        cp.LifecycleEvent(seq=1, event_kind="archive", object_name="deal-2"),
+        cp.LifecycleEvent(seq=2, event_kind="resume", object_name="deal-2"),
+    ))
+    assert latched.props.get("status") == "archived", (
+        "a pack fold's terminal word was resurrected — the replay lost the "
+        "live fold's per-event terminal guard"
+    )
+
+    # …and a `restatus` after it still moves the node, as it does live.
+    revived = folded((
+        cp.LifecycleEvent(seq=1, event_kind="archive", object_name="deal-2"),
+        cp.LifecycleEvent(seq=2, event_kind="", restatus_status="live",
+                          target_id="o-2", target_label="Object"),
+    ))
+    assert revived.props.get("status") == "live", (
+        "a `restatus` was refused by the terminal latch — the live fold applies "
+        "a state op unguarded (`SET n += $state`), so the rebuild would leave "
+        "this node terminal where the graph un-terminated it"
     )
 
 
@@ -1789,12 +1805,16 @@ def test_a_superseded_object_is_never_resurrected_by_a_connector_event():
 def test_the_event_stream_fold_can_never_write_a_terminal_status():
     """The bound, stated as an invariant instead of a promise.
 
-    The record carries no signal for a TERMINAL `restatus`
-    (`deprecated`/`archived`/`retracted` — see `DERIVED_FROM_RECORD`'s
-    NOT-DERIVED bullet), so a rebuild cannot honour one the GRAPH set, and the
-    fold may label an Object the graph kept terminal. That is survivable because
-    an ABSENT status already reads LIVE to `_terminal_excluded`, so the
-    pre-#10198 rebuild showed such an Object too.
+    ✅ THIS PARAGRAPH IS SUPERSEDED (#9974). It used to say the record carries
+    no signal for a TERMINAL `restatus` (`deprecated`/`archived`/`retracted`) and
+    that a rebuild therefore could not honour one the GRAPH set. That was true of
+    the LAYER tables only: the value's carrier is the record's layer-1 history
+    (`public.journal_event.payload -> 'state' -> 'status'`), which the cache now
+    folds — see `EVENT_STREAM_FOLDS`' «A TERMINAL `restatus` IS honoured now» and
+    `test_a_restatus_is_applied_unguarded_within_the_replay`. What SURVIVES here,
+    and is what this test actually pins, is narrower: no BUILT-IN connector fold
+    declares a terminal target, so the connector vocabulary alone can never write
+    one.
 
     ⚠️ This test alone is NOT the guard, and reading it as one was the review's
     finding: it asserts over `BUILTIN_CONNECTOR_FOLDS` (the half with no
@@ -2146,3 +2166,29 @@ def test_a_label_subset_view_still_folds_its_stream():
         "a Subject-only view skipped the record's stream — the rebuild over it "
         "materializes a LIVE Subject while the read door answers terminal"
     )
+
+
+def test_a_status_only_restatus_carries_no_supersession_column():
+    """The pin that keeps `restatus` and `supersede` apart on the RECORD side.
+
+    This assertion lived in the test this PR replaces; dropping it silently would
+    let a status-only `restatus` start writing `superseded_by`/`superseded_at`,
+    at which point a record row would derive `superseded` from a write that never
+    meant to supersede — and the rebuild would hide a name the graph resolves.
+    R2's whole argument rests on the carrier being written by a `supersede`
+    record, so the separation is pinned rather than assumed.
+    """
+    from tortoise.record_projection import mutations_for
+
+    for label, table in (("Object", "object"), ("Subject", "subject")):
+        stmts = mutations_for(
+            {"type": "EntityMutated", "label": label, "op": "restatus",
+             "state": {"status": "deprecated"}, "id": "x-1"},
+            org_id="o", graph_id="g",
+        )
+        sql = " ".join(st.sql for st in stmts)
+        assert "superseded_by" not in sql and "superseded_at" not in sql, (
+            f"a status-only restatus now carries a supersession column on "
+            f"{table} ({sql!r}) — `superseded` would leave the NOT-DERIVED "
+            "residue and a rebuild would hide a live name"
+        )

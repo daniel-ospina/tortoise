@@ -678,9 +678,11 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
 
     ⚠️ The map is the record's PRIMARY set **plus** the §2.6 cache names that
     ``node_from_row`` DERIVES from those columns (`status`, from a supersession
-    carrier) — #9974 — **plus** the same `status` derived from the record's EVENT
-    STREAM where a connector/pack lifecycle names the Object (#10198, an
-    `EVENT_STREAM_FOLDS` member). So the schema's refused names CAN appear here,
+    carrier) — #9974 — **plus** the same `status` derived from the record's own
+    HISTORY, through TWO legs of `EVENT_STREAM_FOLDS`, both applied here:
+    the connector/pack lifecycle where an event kind names the `:Object`
+    (#10198), and an explicit `EntityMutated` `state.status` — a caller's own
+    lifecycle write, for an `:Object` OR a `:Subject` (#9974). So the schema's refused names CAN appear here,
     synthesized rather than stored, and a consumer must not read their presence
     as "the record holds a column for this": ``_refused('object')`` still lists
     `status`. That is the projection's contract for a record-sourced node (the

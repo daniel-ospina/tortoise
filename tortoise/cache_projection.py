@@ -612,9 +612,15 @@ class LifecycleEvent:
       connector or pack fold maps onto ``Object.status`` (#10198). Joined to the
       row by NAME — which is this READER's join key, not the live fold's match:
       since #3590 `_fold_object_status` issues `MATCH (o:Object {id:$n})`.
-    * An explicit ``EntityMutated op=restatus`` (#9974) — a caller's own lifecycle
-      write, whose value the live fold applies as `MATCH (n:$label {id:$rid}) SET
-      n += $state`. Targeted by ID, and it is the ONLY carrier the value has:
+    * An explicit ``EntityMutated`` whose `state` carries a `status` (#9974) — a
+      caller's own lifecycle write, which the live fold applies as
+      `MATCH (n:$label {id:$rid}) SET n += $state`. ⛔ It is ANY state op, NOT
+      `op='restatus'`: `classify_entity_mutation_op` labels the record by
+      precedence (`supersededBy` > `name` > `status`), so
+      `update_entity(obj, name='acme-2', status='archived')` journals an
+      `op='rename'` CARRYING the status — and its own docstring says a consumer
+      wanting every transition "must NOT filter on `op`". Targeted by ID, and it
+      is the ONLY carrier the value has:
       `public.object` has no `status` column and the props tail refuses the name
       (`record_projection.OpDispatch.never_store`), so the layer-1 record
       (`public.journal_event.payload -> 'state' ->> 'status'`) is the whole
@@ -1201,7 +1207,14 @@ _LIFECYCLE_EVENTS_SQL = (
     # PAYLOAD, exactly as `projection/__init__.py::classify_entity_mutation_op`
     # says: a consumer wanting every status transition must read `state["status"]`
     # and must NOT filter on `op`.
-    "           AND jsonb_typeof(payload -> 'state' -> 'status') = 'string'))"
+    # `<> ''` is NOT decoration: `update_entity(obj, status='')` is accepted on
+    # `:Object`, the graph stores the empty string, and `_is_terminal_status('')`
+    # is false — so the graph reads LIVE. A reader that SELECTED it and then
+    # skipped it in Python would say "this is a status" and discard it, silently
+    # keeping an earlier terminal fold (the hide-a-live-name direction). One
+    # predicate, in one place.
+    "           AND jsonb_typeof(payload -> 'state' -> 'status') = 'string'"
+    "           AND payload -> 'state' ->> 'status' <> ''))"
 )
 
 #: The same statement narrowed to the events that could name ONE Object. The
