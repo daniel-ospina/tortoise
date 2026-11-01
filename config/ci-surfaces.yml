@@ -590,6 +590,19 @@ surfaces:
   # arm covers the `record_projection.py` migration resolver the same pin reads.
   - test_health_build_identity_10447.py
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
+  # build served `status: ok` and every other block happily. The pin holds the
+  # commit the DEPLOY was told to build (not a constant, not the checkout), that
+  # `/health` and `/v1/version` cannot disagree (one resolver), that a stale
+  # stamp is reported VERBATIM rather than coerced to HEAD, and that an unstamped
+  # or unrecognised stamp reads as such instead of as current. DB-free.
+  # DUAL registration (api+core), and the `api` arm is the one that matters: the
+  # file it guards is `tortoise/hosted_api.py`, an exact `api` SOURCE_PATTERN that
+  # REPLACES the `core` fallback (`tools/ci_selection.py::select`) — so a
+  # hosted_api.py-only diff would otherwise run no guard at all. The comment on
+  # the `core` row asserts this; `--integrity` cannot (it only asks "is the file
+  # classified?", and `core` alone satisfies that).
+  - test_health_build_identity_10447.py
+
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match
   # that REPLACES the `core` fallback — so a hosted_api.py-only change to its
@@ -3347,12 +3360,12 @@ surfaces:
   - test_9548_record_arming_health.py
   # #10447: `/health` published no build identity, so "is this deployed?" was
   # unanswerable from the endpoint every watchdog and census probes — a stale
-  # build served `status: ok` and every other block happily. The pin holds the
-  # commit the DEPLOY was told to build (not a constant, not the checkout), that
-  # `/health` and `/v1/version` cannot disagree (one resolver), that a stale
-  # stamp is reported VERBATIM rather than coerced to HEAD, and that an unstamped
-  # or unrecognised stamp reads as such instead of as current. DB-free. The `api`
-  # surface is the one `tortoise/hosted_api.py` selects, so it travels with it.
+  # build served `status: ok` and every other block happily. DB-free; the
+  # `record_projection`-only half (where the schema head is resolved) falls
+  # through to `core`. This row is the SECOND half of a dual registration:
+  # `tortoise/hosted_api.py` is an exact `api` SOURCE_PATTERN that REPLACES the
+  # `core` fallback, so the file also has an `api` row above — without it this
+  # guard is dropped on every hosted_api.py-only diff.
   - test_health_build_identity_10447.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)

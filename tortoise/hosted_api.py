@@ -6060,6 +6060,12 @@ def _migrations_head() -> tuple[str | None, str | None]:
     never a plausible fake.
     """
     try:
+        # Local on purpose, and NOT for import cost: `tortoise.record_projection`
+        # is already in `sys.modules` (this file imports a name from it at module
+        # scope), so the deferral saves nothing at import time. What the local
+        # binding buys is that `_migrations_dir` is looked up on the MODULE at
+        # call time — which is what lets a test substitute the resolver without
+        # reloading this 43k-line module.
         from tortoise import (
             record_projection,
         )
