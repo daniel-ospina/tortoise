@@ -7048,13 +7048,14 @@ def _content_hash(text: str) -> str:
 
 
 def _content_candidate_resolution(cands, content: str,
-                                  kind: str) -> tuple[str | None, bool]:
+                                  kind: str
+                                  ) -> tuple[str | None, bool, frozenset[str]]:
     """One bundle item's answer out of
     :meth:`TortoiseSDK._terminal_content_candidates`.
 
-    ``(terminal_hit_id_or_None, would_mint)`` — the same two questions the
-    per-item graph reads answered, and each one copies the order of the site it
-    must mirror rather than re-deriving it:
+    ``(terminal_hit_id_or_None, would_mint, fold_target_keys)`` — the first two
+    are the questions the per-item graph reads answered, and each one copies the
+    order of the site it must mirror rather than re-deriving it:
 
     * the TERMINAL HIT is :meth:`TortoiseSDK._find_terminal_dedup_hit`'s order:
       a terminal row under the CONTENT HASH, and only on that miss — and only
@@ -7072,16 +7073,50 @@ def _content_candidate_resolution(cands, content: str,
     a bug to "unify": the guard refuses only when the writer could not have
     resolved a hash-present sibling instead, while the writer takes any
     hash-less match it finds. Each arm mirrors its own site.
+
+    ``fold_target_keys`` is the third question, and it is **not** bookkeeping
+    (#9819 review P1): the non-empty ``key`` values stored on the node(s) this
+    item's CONTENT fold can land on — empty when the item mints, or when the
+    candidates carry no key at all. ``create_point`` applies the supplied key
+    through ``update_point`` on a content fold **only when the resolved point
+    holds no OTHER key**; a point that already holds a different one keeps it
+    and the supplied key is POPPED (`create_point`, #6110). So "the key was
+    free at Phase-1 time" does not mean "this item writes it", and a caller
+    predicting what LATER items will find must ask this set, not the absence of
+    a holder.
+
+    ⚠️ MULTIPLE candidates under one identity make the answer a SUPERSET, on
+    purpose: the writer resolves ``rows[0]`` of its own query, which carries no
+    ``ORDER BY``, so when one candidate holds a conflicting key and another
+    holds none, WHICH node the fold lands on is not decidable at Phase-1 time.
+    The caller's rule is therefore "the key lands only if EVERY candidate
+    accepts it", i.e. it treats an ambiguous pair as "does not land" — the
+    fail-closed direction (an item wrongly believed to hold its key can only
+    mask a later fold, while one wrongly believed not to hold it can only
+    over-reject a bundle that is already carrying duplicate content, which is
+    itself the broken pre-#6110 state).
     """
     (terminal_by_hash, present_by_hash,
-     terminal_hashless, present_hashless) = cands
+     terminal_hashless, present_hashless,
+     keys_by_hash, keys_hashless) = cands
     ch = _content_hash(content)
     hit = terminal_by_hash.get((ch, kind))
-    if hit is None and (ch, kind) not in present_by_hash:
+    _hash_present = (ch, kind) in present_by_hash
+    if hit is None and not _hash_present:
         hit = terminal_hashless.get((content, kind))
-    mints = ((ch, kind) not in present_by_hash
+    mints = (_hash_present is False
              and (content, kind) not in present_hashless)
-    return hit, mints
+    # The arm the writer would resolve from, in the writer's own order: the hash
+    # query first, and the A10 fallback only on a hash MISS (`_find_point_by_
+    # content`). Reading the other arm's keys would describe a node the write
+    # never addresses.
+    if _hash_present:
+        fold_keys = keys_by_hash.get((ch, kind), frozenset())
+    elif (content, kind) in present_hashless:
+        fold_keys = keys_hashless.get((content, kind), frozenset())
+    else:
+        fold_keys = frozenset()
+    return hit, mints, fold_keys
 
 
 # #2335 WI-2: the "file a report" hook target — the bug_report.yml template
@@ -22841,15 +22876,25 @@ class TortoiseSDK:
     def _terminal_content_candidates(
         self, wanted: list[tuple[str, str]],
     ) -> tuple[dict[tuple[str, str], str], set[tuple[str, str]],
-               dict[tuple[str, str], str], set[tuple[str, str]]]:
+               dict[tuple[str, str], str], set[tuple[str, str]],
+               dict[tuple[str, str], frozenset[str]],
+               dict[tuple[str, str], frozenset[str]]]:
         """Batched twin of :meth:`_find_terminal_dedup_hit` for a WHOLE bundle.
 
         ``wanted`` is one ``(content, pointKind)`` per candidate item. Returns
         ``(terminal_by_hash, present_by_hash, terminal_hashless,
-        present_hashless)``, every one keyed ``(identity, pointKind)`` — the
-        identity being the content HASH, or the CONTENT itself for the hash-less
-        A10 rows — so a caller resolves an item with NO graph read
-        (:func:`_content_candidate_resolution` is that resolver).
+        present_hashless, keys_by_hash, keys_hashless)``, every one keyed
+        ``(identity, pointKind)`` — the identity being the content HASH, or the
+        CONTENT itself for the hash-less A10 rows — so a caller resolves an
+        item with NO graph read (:func:`_content_candidate_resolution` is that
+        resolver). The two ``keys_*`` maps carry the non-empty ``key`` value
+        each candidate row STORES, as a SET per identity: a content fold applies
+        the supplied key only when the resolved point holds no other
+        (``create_point`` pops it, #6110), so the caller needs the stored keys,
+        not just the presence, of the node(s) the fold can land on. Two rows can
+        hold one identity, so the answer is a set and the caller must treat a
+        conflict in ANY member as "the key may be dropped" — see
+        :func:`_content_candidate_resolution`.
 
         ⛔ AT MOST TWO queries for the bundle, not one per item. The per-item
         helper costs THREE (terminal-hash, unfiltered-hash, hash-less fallback)
@@ -22905,7 +22950,7 @@ class TortoiseSDK:
         side already closes in :func:`_item_point_kind`.
         """
         if not wanted:
-            return {}, set(), {}, set()
+            return {}, set(), {}, set(), {}, {}
         # ONE hash per wanted content, computed once (it is sha256 over the
         # content, and both the parameter list and the legacy-arm gate read it).
         wanted_hashes = {content: _content_hash(content) for content, _ in wanted}
@@ -22915,6 +22960,11 @@ class TortoiseSDK:
         present_by_hash: set[tuple[str, str]] = set()
         terminal_hashless: dict[tuple[str, str], str] = {}
         present_hashless: set[tuple[str, str]] = set()
+        # The STORED keys of the rows, so a caller can predict whether a content
+        # fold would WRITE the item's key or pop it (#9819 review P1) — built
+        # from the same rows, so it costs no statement.
+        keys_by_hash: dict[tuple[str, str], set[str]] = {}
+        keys_hashless: dict[tuple[str, str], set[str]] = {}
         # ── arm 1: the HASH identity — INDEX-ANCHORED.
         # ⛔ `n.content_hash IN $hashes` seeks `Point.content_hash` (
         # `_POINT_RANGE_INDEX_PROPS`); measured on a 21-Point embedded graph
@@ -22933,11 +22983,11 @@ class TortoiseSDK:
             "MATCH (n:Point) WHERE "
             f"{' AND '.join(clauses)} "
             "AND n.content_hash IN $hashes "
-            "RETURN n.content_hash, n.pointKind, n.content, n.id, "
+            "RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "
             f"{_terminal_expression('n')} AS term",
             params={**params, "hashes": hashes},
         ).result_set
-        for raw_hash, kind, _content, node_id, terminal in rows:
+        for raw_hash, kind, _content, node_id, stored_key, terminal in rows:
             if not isinstance(kind, str):
                 # ✋ Unhashable (and unaddressable) — see the docstring. `raw_hash`
                 # need no such test for the mirror-image reason: the WHERE admits
@@ -22945,6 +22995,12 @@ class TortoiseSDK:
                 # (`content_hash IN $hashes`), so it cannot be a non-string here.
                 continue
             present_by_hash.add((raw_hash, kind))
+            if isinstance(stored_key, str) and stored_key:
+                # `create_point`'s own test on the resolved point's key is plain
+                # truthiness (`isinstance(...) and ... and != supplied`), so this
+                # one matches it exactly — a whitespace-only stored key DOES pop
+                # the incoming one, and a `strip()` here would disagree.
+                keys_by_hash.setdefault((raw_hash, kind), set()).add(stored_key)
             if terminal:
                 terminal_by_hash.setdefault((raw_hash, kind), node_id)
         # ── arm 2: the A10 hash-less fallback, and ONLY when some item's hash
@@ -22965,11 +23021,11 @@ class TortoiseSDK:
                 "MATCH (n:Point) WHERE "
                 f"{' AND '.join(clauses)} "
                 "AND n.content_hash IS NULL AND n.content IN $contents "
-                "RETURN n.content_hash, n.pointKind, n.content, n.id, "
+                "RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "
                 f"{_terminal_expression('n')} AS term",
                 params={**params, "contents": contents},
             ).result_set
-            for _raw_hash, kind, content, node_id, terminal in rows:
+            for _raw_hash, kind, content, node_id, stored_key, terminal in rows:
                 if not isinstance(kind, str):
                     # ✋ Unhashable (and unaddressable) — see the docstring. The
                     # WHERE admits only a value that EQUALS one of the bundle's
@@ -22977,10 +23033,15 @@ class TortoiseSDK:
                     # neither can be a non-string here.
                     continue
                 present_hashless.add((content, kind))
+                if isinstance(stored_key, str) and stored_key:
+                    keys_hashless.setdefault((content, kind), set()).add(
+                        stored_key)
                 if terminal:
                     terminal_hashless.setdefault((content, kind), node_id)
         return (terminal_by_hash, present_by_hash,
-                terminal_hashless, present_hashless)
+                terminal_hashless, present_hashless,
+                {k: frozenset(v) for k, v in keys_by_hash.items()},
+                {k: frozenset(v) for k, v in keys_hashless.items()})
 
     def _entity_name_holders(
         self, label: str, name: str,
@@ -24144,6 +24205,24 @@ class TortoiseSDK:
         # carries the stored one. One kind for both sides is the drift
         # `_item_stored_point_kind` and `_item_point_kind` exist to stop.
         minted_content: dict[tuple[str, str], int] = {}
+        # The `key` the node an in-bundle CREATION stores, per content identity
+        # (`None` = the mint wrote no key). It exists because the graph read
+        # (`_terminal_content_candidates`) cannot see a node minted earlier in
+        # THIS bundle, and whether a later item's supply of its own key is
+        # WRITTEN or POPPED on that fold turns on that node's key (#9819 review
+        # P1 — see `_key_writes_here`). Same conventional keys as
+        # `minted_content`: recorded under the STORED `pointKind`, looked up
+        # with the later item's POSITIONAL one.
+        minted_content_keys: dict[tuple[str, str], str | None] = {}
+        # The non-empty `key` values the fold target for a content identity is
+        # known to hold AFTER the items processed so far, per (POSITIONAL kind,
+        # content id). Seeded on first resolution from the writer's own arm (the
+        # batched graph read's `_fold_keys`, or the key an in-bundle mint
+        # stored) and extended by every FOLD that writes one — because the graph
+        # read is a Phase-1 snapshot taken before ANY item is written, so the
+        # first fold that lands a key on a keyless target changes the answer for
+        # every later fold under the same content (#9819 review P1).
+        content_target_keys: dict[tuple[str, str], set[str]] = {}
         # FIRST-WRITER-WINS on the KEY identity, recorded for EVERY minting item
         # (unlike `minted_terminal`, which records only a TERMINAL mint). The
         # writer resolves the key FIRST (`_resolve_dedup_hit`), so an item whose
@@ -24259,6 +24338,12 @@ class TortoiseSDK:
             content = pitem.get("content")
             _content_id: str | None = None
             _mints = False
+            # The stored `key` values of the node(s) this item's CONTENT fold can
+            # land on — empty when it mints, or when the candidates carry none
+            # (see `_content_candidate_resolution`). Read only when the item's
+            # key is a MISS, which is the same condition `create_point` falls
+            # through to content on.
+            _fold_keys: frozenset[str] = frozenset()
             # ⛔ NOT `and content`: the writer treats `""` as CONTENT, not as
             # absent. `_check_item_shape` admits it (only `None`/non-str is
             # refused) and `create_point`'s only content boundary is
@@ -24274,7 +24359,7 @@ class TortoiseSDK:
             # blank key as absent, and nothing treats blank content that way.
             if isinstance(content, str):
                 _content_id = _content_hash(content)
-                chit, _mints = _content_candidate_resolution(
+                chit, _mints, _fold_keys = _content_candidate_resolution(
                     _content_cands, content, pkind)
                 if chit:
                     violations.append({
@@ -24334,28 +24419,110 @@ class TortoiseSDK:
             # CONTENT axis (`_key_folds_here`). Recording it was a phantom mint
             # on BOTH axes — the fail-open above and its mirror over-reject.
             _key_folds_here = _has_pkey and (pkind, pkey) in minted_keys
-            _key_mints_here = (_has_pkey and not _key_folds_here
-                               and mkind is not None)
+            # ⛔ A key that is FREE among the records is NOT a key this item
+            # WRITES (#9819 review P1). Those come apart on exactly one shape,
+            # and the writer's own code names it: the key is free, the CONTENT
+            # resolves to an existing point, and that point already holds a
+            # DIFFERENT key — `create_point` then POPS the supplied key
+            # (`props.pop("key", None)`) rather than reassign it. So "this item
+            # holds the key from here on" needs POSITIVE evidence, on the two
+            # ways an item can end up holding it:
+            #   * it MINTS (`_mints`) — the CREATE stores the supplied key, no
+            #     question;
+            #   * it FOLDS by content onto a node that holds no OTHER key — the
+            #     fold applies the key through `update_point`, so the node
+            #     holds it afterwards (that is the #6110 "content hit adopts
+            #     the key" path, now predicted instead of assumed).
+            # Recording the key on the mere absence of a holder is what let a
+            # phantom record suppress EVERY later record for that key — no key
+            # mint, no content mint, no `minted_terminal` — so a later item's
+            # terminal mint went unrecorded and a third item key-folded onto it
+            # with Phase 1 certifying the bundle (measured: `[{key: K,
+            # content: C0}, {key: K, content: C1, status: retracted}, {key: K,
+            # content: C2, props: {confidence: 0.9}}]` COMMITTED over a live
+            # point holding a different key, and C1's retracted node came back
+            # with `batch_id` stamped).
+            # ⚠️ Both directions are settled TOGETHER, because dropping the
+            # record alone re-opens the mirror: a content-folding item under a
+            # key whose fold target holds NO key DOES write it, and treating
+            # that key as free makes the NEXT item's real fold look like a mint
+            # — recording a terminal mint for a node nobody creates, and
+            # over-rejecting the third item.
+            # ⛔ …and the fold target is a MOVING value, not a Phase-1 constant:
+            # the graph read is a snapshot taken before ANY item is written, so
+            # the first fold that lands a key on a keyless target changes what
+            # every LATER fold under that content sees. Tracking it is
+            # `content_target_keys` — seeded once per identity from the arm the
+            # writer would use (the batched graph read, or the key that an
+            # in-bundle mint stored) and extended by each fold that writes one.
+            _key_writes_here = False
+            if _has_pkey and not _key_folds_here and mkind is not None:
+                # `None` = this item CREATES the node (the CREATE stores the
+                # key); a set = the keys the fold target is known to hold.
+                _fold_target: set[str] | None = None
+                # …and `False` when the record the target's key lives in is
+                # MISSING — which cannot happen while the two maps are written in
+                # one block, so it can only mean they drifted. That case fails
+                # CLOSED ("the key may be dropped"), the direction that cannot
+                # mask a later fold.
+                _target_known = True
+                if (isinstance(content, str)
+                        and (pkind, _content_id) in minted_content):
+                    # An EARLIER item of this bundle minted that node, so the
+                    # graph read cannot see it — its stored key is the one that
+                    # item supplied (`minted_content_keys`).
+                    if (pkind, _content_id) in minted_content_keys:
+                        _mk = minted_content_keys[(pkind, _content_id)]
+                        _fold_target = set() if _mk is None else {_mk}
+                    else:
+                        _target_known = False
+                elif _mints or not isinstance(content, str):
+                    # …the CREATE leg (a non-str content item is refused on its
+                    # own, `_check_item_shape`, so it reaches no write at all).
+                    _fold_target = None
+                else:
+                    # …a content fold onto a node already in the GRAPH. "May be
+                    # dropped" wins over "may land" when duplicate candidates
+                    # disagree — the writer picks `rows[0]` with no ORDER BY.
+                    _fold_target = set(_fold_keys)
+                if _fold_target is None:
+                    _key_writes_here = _target_known
+                else:
+                    _live = content_target_keys.get((pkind, _content_id))
+                    if _live is None:
+                        _live = content_target_keys[(pkind, _content_id)] = (
+                            _fold_target)
+                    _key_writes_here = all(k == pkey for k in _live)
+                    if _key_writes_here:
+                        # …and a WRITTEN key is what every later fold under this
+                        # content sees from now on.
+                        _live.add(pkey)
             # ⛔ The TERMINAL record is still written by the FIRST minting item,
             # so a fold onto an intra-bundle TERMINAL point stays refused. Its
             # key is the STORED kind (`mkind`) — see the map declarations.
             _mints_here = (_mints and not _key_folds_here
                            and (pkind, _content_id) not in minted_content)
-            if _key_mints_here:
+            if _key_writes_here:
                 minted_keys[(mkind, pkey)] = j
             if _mints_here and mkind is not None:
                 minted_content[(mkind, _content_id)] = j
+                # The key the minted NODE stores, so a later item that
+                # content-folds onto it can answer the same question without a
+                # graph read (`_key_writes_here` above). `None` means "the mint
+                # wrote no key", which accepts any supplied one.
+                minted_content_keys[(mkind, _content_id)] = (
+                    pkey if _has_pkey else None)
             if (isinstance(mint_status, str)
                     and mint_status in TERMINAL_EXCLUDED_STATUSES):
-                # Conservative in the FAIL-CLOSED direction, stated so it is
-                # not read as precision: the KEY record does not predict a
-                # CONTENT fold onto an existing live point (which would pop the
-                # declaration and mint nothing terminal). Over-rejecting that
-                # pathological combination — a bundle that declares `retracted`
-                # on a key which content-folds onto a live point and then
-                # reuses the key — is preferred to letting a fold land on a
-                # terminal mint.
-                if _key_mints_here:
+                # ⛔ This record predicts a node BORN TERMINAL, so BOTH halves
+                # must hold: the item really CREATES the node (`_mints_here` —
+                # a content fold pops the declared status and stores nothing),
+                # and the key really rides that create (`_key_writes_here`).
+                # Reading only the key half over-rejected a bundle whose item
+                # content-folded under a key: it mints nothing, so the next item
+                # under that key was refused for a terminal mint that never
+                # happens (the mirror of the fail-open above, same root cause).
+                if _key_writes_here and _mints_here:
                     minted_terminal[(mkind, pkey)] = (j, mint_status)
                 # Content is an identity too, so the same simulation covers a
                 # later item with the SAME content under a DIFFERENT (or no)
