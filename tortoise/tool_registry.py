@@ -1589,9 +1589,36 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
     "tortoise_onboarding_github_index",
 })
 
+#: ⛔ The OPENING of this description is load-bearing, not prose (#10084). A model
+#: shapes the call payload FROM this text, and a host may refuse a WRITE payload
+#: that carries a routing argument: measured on the ChatGPT venue, a
+#: `tortoise_create_point` carrying `graph` was blocked client-side while the same
+#: call without it succeeded — and the blocked no-op form `graph="default"` is
+#: the one this text used to bless as an equivalent alternative. The block is
+#: value-independent (a non-existent graph id was refused the same way), so the
+#: text does NOT promise that a non-redundant argument is safe.
+#:
+#: ⛔ The OMIT rule is TARGET-based, never ask-based, and carries its anti-bypass
+#: clause on purpose: "omit unless the user asked" would let a target established
+#: by a system prompt or an earlier turn be omitted, and teaching that a host
+#: refuses routing arguments invites the obvious retry — drop `graph` after a
+#: block — which lands the write on the DEFAULT graph. That is the silent
+#: wrong-graph write #9340 names as this feature's most likely failure.
+#:
+#: What may change here is what the model is TOLD TO SEND, never what the surface
+#: ACCEPTS: `graph` is still advertised and honoured everywhere it was
+#: (`tests/test_10084_graph_argument_omit_first.py`).
 GRAPH_ARGUMENT_DESCRIPTION = (
-    "Optional graph to act on. Omitted = the workspace's default graph, and an "
-    "explicit `graph=\"default\"` is the same no-op. "
+    "Optional graph to act on. "
+    "OMIT IT when you are acting on this workspace's default graph: omission targets "
+    "the default, and that is the form to send. An explicit `graph=\"default\"` targets "
+    "the same graph as omitting it (a graph-bound credential is refused rather than "
+    "re-pointed), so it buys nothing here — and some hosts refuse a write call that "
+    "carries a routing argument at all, so do not send it. "
+    "If the graph you are acting on is NOT this workspace's default, SEND it — "
+    "including when a host has already refused an earlier call. Never drop `graph` to "
+    "get a write through: the write would land on the default graph instead of the one "
+    "asked for. "
     "Accepts, in order of preference: the graph's id, the namespace string "
     "`tortoise_list_graphs` returns for it (e.g. `org_<workspace>_<graph_id>` "
     "— that tool lists namespaces, not ids), "
