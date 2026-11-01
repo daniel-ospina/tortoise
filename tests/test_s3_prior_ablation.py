@@ -922,10 +922,16 @@ def test_an_uncommitted_edit_refuses_the_run(probe, monkeypatch, tmp_path):
 
     # …but an uncommitted change the run cannot measure through is NOT refused, so the guard stays
     # a dirty-CODE guard rather than a blanket "commit before you run".
+    # ⚠️ The DOCUMENT below is the admitted case on purpose and it is not the record: the bars come
+    # out of a COMMIT (`git show <sha>:…`), so a dirty copy of it cannot move one. Its neighbour
+    # `preregistration.json` is NOT in this case — that file is read from the working tree and
+    # decides which document the bars come from, so it IS guarded
+    # (`test_an_uncommitted_record_repoints_the_bars_and_is_refused`).
     (repo / "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md").write_text("# prereg edited\n")
     (repo / "config/ci-surfaces.yml").write_text("core: ['x']\n")
     assert probe.dirty_paths() == [], (
-        "an uncommitted docs/config change cannot move a number and must not refuse the run")
+        "an uncommitted copy of the pre-registration or of a config file cannot move a number — "
+        "the bars are parsed out of a commit — and must not refuse the run")
     status = _git(repo, "status", "--porcelain")
     assert "config/ci-surfaces.yml" in status and "PRE-REGISTRATION.md" in status, (
         "the repo really IS dirty there — so the empty guard above is the paths, not a clean tree")
