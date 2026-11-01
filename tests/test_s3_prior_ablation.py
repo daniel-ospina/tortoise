@@ -232,6 +232,21 @@ def test_the_session_floor_refuses(probe):
     assert result["ratio"] is None
 
 
+def test_unequal_arms_are_refused_rather_than_silently_truncated(probe):
+    """The per-session table pairs the arms row by row, so a short arm must REFUSE.
+
+    `zip` truncates to the shorter iterable, so a 7-session OFF arm against a 6-session ON arm
+    printed a table that looked complete while the seventh session was simply absent from it. The
+    refusal is exit 3 — an unmeasurable run, never 1, which is what a crash looks like.
+    """
+    off = _arm(14, [100] * 7, facts=60, operator_edges=10)
+    on_short = _arm(14, [50] * 6, facts=60, operator_edges=10)
+    assert len(probe.paired_sessions(off, off)) == 7
+    with pytest.raises(SystemExit) as refusal:
+        probe.paired_sessions(off, on_short)
+    assert refusal.value.code == 3
+
+
 def test_a_non_majority_result_is_qualified_not_silently_omitted(probe):
     """E2b is a registered QUALIFIER: 2 of 7 sessions falling must be said out loud."""
     off = _arm(14, [100, 100, 10, 10, 10, 10, 10], facts=60, operator_edges=10)

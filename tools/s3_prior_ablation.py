@@ -46,6 +46,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parent.parent
 # The corpus package is imported from the repo root, so the root must be on sys.path when this
@@ -65,7 +66,7 @@ VERDICT_ARM_INVALID = "ARM-INVALID"
 
 
 
-def refuse(message: str) -> "NoReturn":
+def refuse(message: str) -> NoReturn:
     """A refusal is exit 3, never 1: 1 is what a crash looks like.
 
     `raise SystemExit(str)` exits **1**, so a REFUSED run and an unhandled exception were
@@ -396,7 +397,7 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
                 "session_id": sid,
                 "ok": bool(receipt.get("ok")),
                 "created": created,
-                "llm_calls": int(((stats.get("llm") or {}).get("calls") or 0)),
+                "llm_calls": int((stats.get("llm") or {}).get("calls") or 0),
                 "s3": s3_state,
                 "errors": list(receipt.get("errors") or [])[:3],
                 "elapsed_s": round(time.time() - started, 1),
@@ -448,6 +449,24 @@ def concentration(pairs: list[tuple[int, int]]) -> dict:
     return {"share": max(reductions) / total,
             "largest_session_reduction": max(reductions),
             "total_reduction": total}
+
+
+def paired_sessions(off: dict, on: dict) -> list[tuple[dict, dict]]:
+    """The two arms' sessions paired row by row — REFUSED, never truncated, on a mismatch.
+
+    Every per-session statistic the probe prints (the table, the ratio range) reads these pairs,
+    so a `zip` over two arms of different lengths would silently drop the tail of the longer arm
+    and still print a table that looks complete. That is a reporting defect with a measurement's
+    shape, so a mismatch is a refusal (exit 3), not a shorter table.
+
+    `strict=True` is therefore unreachable — it is here so a future edit that relaxes the guard
+    above cannot reintroduce the silent truncation (ruff's B905 asks for the explicit choice).
+    """
+    off_rows, on_rows = off["sessions"], on["sessions"]
+    if len(off_rows) != len(on_rows):
+        refuse(f"the arms replay {len(off_rows)}/{len(on_rows)} sessions; a per-session "
+               "comparison needs both arms to replay the same set")
+    return list(zip(off_rows, on_rows, strict=True))
 
 
 def decide(bars: dict, floors: dict, off: dict, on: dict) -> dict:
@@ -663,6 +682,11 @@ def main(argv: list[str] | None = None) -> int:
     if "OFF" not in arms or "ON" not in arms:
         refuse("s3-ablation: REFUSED — both arms are required; a single-arm result is "
                          "never a verdict")
+    # The per-session table and the per-session ratio range pair the two arms ROW BY ROW, so an
+    # arm of a different length would be silently truncated to the shorter one by `zip` — a table
+    # that looks complete while a whole session of one arm is missing from it. `paired_sessions`
+    # refuses that outright (exit 3, never 1: an unmeasurable run is not a crash).
+    pairs = paired_sessions(arms["OFF"], arms["ON"])
 
     result = decide(bars, floors, arms["OFF"], arms["ON"])
     off_recover = sum(1 for row in arms["OFF"]["sessions"] if not row["ok"])
@@ -670,7 +694,7 @@ def main(argv: list[str] | None = None) -> int:
 
     log("--- per-session table (created extraction nodes) ---")
     log(f"{'session':28s} {'OFF':>6s} {'ON':>6s} {'delta':>7s} {'OFF s3':>10s} {'ON s3':>10s}")
-    for off_row, on_row in zip(arms["OFF"]["sessions"], arms["ON"]["sessions"]):
+    for off_row, on_row in pairs:
         log(f"{off_row['session_id']:28s} "
             f"{off_row['created']['extraction_nodes']:6d} "
             f"{on_row['created']['extraction_nodes']:6d} "
@@ -681,7 +705,7 @@ def main(argv: list[str] | None = None) -> int:
     # print a per-session ratio range derived from sessions whose S3 state was never proven, which
     # is exactly the number a reader would quote (review r3 P2).
     ratios = []
-    for off_row, on_row in zip(arms["OFF"]["sessions"], arms["ON"]["sessions"]):
+    for off_row, on_row in pairs:
         off_n = off_row["created"]["extraction_nodes"]
         ratios.append((on_row["created"]["extraction_nodes"] / off_n) if off_n else None)
     defined = [value for value in ratios if value is not None]
