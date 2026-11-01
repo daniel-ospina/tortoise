@@ -252,7 +252,7 @@ def test_the_target_is_the_existing_canonical_minter():
 def test_a_normalised_point_key_is_an_entity_handle_not_a_minted_ulid():
     """⚠️ The DECISION this pass makes, pinned where it can be seen.
 
-    The target is ``entity_name_id``'s handle — ``poi-<sha256[:26]>`` — which is
+    The target is ``legacy_ids._derived_legacy_handle``'s — ``poi-<sha256[:26]>`` — which is
     NOT the ``<ts-hex>-<uuid12>`` shape ``create_point`` mints (and warns about
     when it is handed anything else). A normalised ``:Point`` key space is
     therefore the entity-handle spelling, and the label carries BOTH canonical
@@ -410,6 +410,99 @@ def test_a_target_collision_is_refused():
     assert any("target collision" in p for p in exc.value.problems), exc.value.problems
 
 
+def test_a_multi_label_node_is_in_the_collision_universe():
+    """⛔ A ``:Point``+``:Session`` node is skipped by the SCOPE branch, but its
+    ``id`` is still a ``:Point`` key — a rename that lands on it merges two
+    nodes. Measured before the fix: this dump was ACCEPTED by ``build_plan`` and
+    ``apply_plan`` left both nodes carrying the same ``id``.
+
+    A real ``dump_graph`` artifact carries multi-label nodes, so this is the
+    population the live pass would meet, not a fabricated edge case.
+    """
+    dump = _dump()
+    collision = canonical_id("Point", "p-0000001")
+    # The picked label is the out-of-scope :Session, so the scope branch skips
+    # this node entirely — before the fix, so did the collision universe.
+    dump["nodes"].append(
+        _node(10_003, ["Point", "Session"], id=collision, sessionId="session_abc123def456")
+    )
+    dump["node_count"] = len(dump["nodes"])
+    with pytest.raises(LegacyIdError) as exc:
+        build_plan(dump)
+    assert any("target collision" in p for p in exc.value.problems), exc.value.problems
+
+
+def test_a_preexisting_duplicate_on_an_out_of_scope_label_does_not_block_the_pass():
+    """A duplicate `:Session` id cannot make a RENAME ambiguous, so it is not a refusal.
+
+    Only a REKEYED label can be a rename target, so refusing here would be a
+    false block: a real dump that happens to carry two nodes under one
+    `:Session` key would refuse the whole pass for a collision it cannot cause.
+    The duplicate is still registered in the collision universe.
+    """
+    dump = _dump()
+    session_id = "session_dup_4a3b2c1d0e9f"
+    dump["nodes"].append(_node(10_008, ["Session"], id=session_id, sessionId=session_id))
+    dump["nodes"].append(_node(10_009, ["Session"], id=session_id, sessionId=session_id))
+    dump["node_count"] = len(dump["nodes"])
+    plan = build_plan(dump)  # must not raise
+    assert len(plan.renames) == census(dump).legacy, "the in-scope renames still plan"
+
+
+def test_a_duplicate_the_rename_resolves_is_not_a_refusal():
+    """A shared key the plan RESOLVES must not be refused as if it were unfixable.
+
+    ``[Point+Session{id: p-0000005}, Point{id: p-0000005}]`` shares a ``:Point``
+    key — but the plain ``:Point`` is a rename candidate, so after the pass the
+    two nodes carry ``p-0000005`` and ``poi-<hash>`` and NO key is shared. The
+    refusal must be raised only when two holders SURVIVE the pass; raising it at
+    registration time blocked a fully normalisable dump, which is the same
+    over-block class as refusing on an out-of-scope label's duplicate.
+    """
+    # A MINIMAL dump: the base fixture already carries every `p-0000NNN` id, so
+    # appending one of those would test the fixture's own duplicate, not this.
+    dump = _dump()
+    dump["nodes"] = [
+        _node(10_010, ["Point", "Session"], id="p-0000005"),
+        _node(10_011, ["Point"], id="p-0000005"),
+    ]
+    dump["edges"] = []
+    dump["node_count"] = 2
+    dump["edge_count"] = 0
+    for field in ("source_node_count", "source_edge_count", "read_edge_count"):
+        if field in dump:
+            dump[field] = 2 if "node" in field else 0
+    plan = build_plan(dump)  # must not raise
+    out, _ = apply_plan(dump, plan)
+    seen: dict[tuple[str, str], list[int]] = {}
+    from tortoise.cache_projection import KEY_PROPERTY as _KP
+
+    for node in out["nodes"]:
+        for label in node["labels"]:
+            kp = _KP.get(label)
+            if kp and isinstance(node["props"].get(kp), str):
+                seen.setdefault((label, node["props"][kp]), []).append(node["dump_id"])
+    shared = {k: v for k, v in seen.items() if len(v) > 1}
+    assert shared == {}, f"the pass left a shared key: {shared}"
+
+
+def test_a_repeated_label_is_not_the_node_merging_with_itself():
+    """``labels: ["Point", "Point"]`` is ONE node, not two holders of one key.
+
+    Registering a holder per label OCCURRENCE made the survivor test see two
+    holders and refuse the node as its own merge, with a message asserting two
+    nodes that do not exist. `hosted_backup` dedupes `labels(n)` on the real
+    export path, so this is a foreign-artifact guard.
+    """
+    dump = _dump()
+    dump["nodes"] = [_node(1, ["Point", "Point"], id=_minted_id(0))]
+    dump["edges"] = []
+    dump["node_count"] = 1
+    dump["edge_count"] = 0
+    plan = build_plan(dump)  # must not raise
+    assert len(plan.renames) == 0, "a canonical id is never a rename candidate"
+
+
 def test_a_duplicate_dump_id_is_refused():
     dump = _dump()
     dump["nodes"].append(_node(1, ["Point"], id="p-0000999", content="positional clash"))
@@ -466,7 +559,10 @@ def test_a_shared_key_property_is_out_of_scope_in_both_label_orders(labels):
     caller-supplied `session_*` key in one order and skip it in the other.
     """
     dump = _dump()
-    dump["nodes"].append(_node(10_006, labels, id="session_9f8a7b6c5d4e"))
+    # A DISTINCT session id, for readability only: no refusal applies either way,
+    # because a duplicate on an out-of-scope label is tolerated by design — see
+    # `test_a_preexisting_duplicate_on_an_out_of_scope_label_does_not_block_the_pass`.
+    dump["nodes"].append(_node(10_006, labels, id="session_7d6e5f4a3b2c"))
     dump["node_count"] = len(dump["nodes"])
     plan = build_plan(dump)  # must not raise
     assert [r for r in plan.renames if r.dump_id == 10_006] == [], (
@@ -475,7 +571,7 @@ def test_a_shared_key_property_is_out_of_scope_in_both_label_orders(labels):
     assert census(dump).out_of_scope["Session"] == 2
     out, _ = apply_plan(dump, plan)
     node = next(n for n in out["nodes"] if n["dump_id"] == 10_006)
-    assert node["props"]["id"] == "session_9f8a7b6c5d4e", "the session key is untouched"
+    assert node["props"]["id"] == "session_7d6e5f4a3b2c", "the session key is untouched"
 
 
 def test_a_padded_key_is_refused_rather_than_silently_trimmed():
@@ -1122,7 +1218,7 @@ def test_a_report_with_no_renames_cannot_pose_as_an_undo(tmp_path):
 
     Run documented step 2 twice: the second pass renames nothing and rewrites
     the report with `renames: []`. Step 3 then "restores" the normalised dump,
-    exits 0, and the original ids survive in NO artifact — `entity_name_id` is a
+    exits 0, and the original ids survive in NO artifact — `_derived_legacy_handle` is a
     sha256, so they are not re-derivable.
     """
     from tools.legacy_id_normalise import main
@@ -1316,7 +1412,7 @@ def test_a_second_pass_over_a_different_dump_cannot_overwrite_the_first_plan(tmp
     Measured before the guard: pass 1 over dump A writes plan.json; `rm` the dump
     (the documented workflow — the plan IS the way back); pass 2 over dump B with
     the same `--report` overwrites it, exits 0, and A's original ids then survive
-    in no file. `entity_name_id` is a sha256, so they are not re-derivable.
+    in no file. `_derived_legacy_handle` hashes the OLD key, so they are not re-derivable.
     """
     from tools.legacy_id_normalise import main
 
