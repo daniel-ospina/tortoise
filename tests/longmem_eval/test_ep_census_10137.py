@@ -600,6 +600,37 @@ def test_census_probe_counts_an_overlapped_qid_once(tmp_path):
         out["questions_failed"]
 
 
+def test_census_probe_keeps_the_disclosure_invariant_on_a_duplicate_qid(tmp_path):
+    """``questions_in_run - questions == questions_failed`` holds for EVERY
+    input, including one whose outcome ids are not distinct (#10137 review, P3).
+
+    ``summary["questions"]`` is ``len(rows)`` (``measurement_posture.py:353``)
+    and the failure ids are distinct ids, so two independent counts made the
+    published total SMALLER than the ratio's own denominator (``-1``) for a
+    duplicate-qid input. The total is now DERIVED from the denominator plus the
+    ablation, so the invariant is structural rather than a coincidence of
+    well-formed input. Not reachable from a checkpoint written by current
+    ``run.py`` (both lists are built dict-by-qid) — this pins the shape that
+    arrives as foreign JSON, which is exactly what a probe reads.
+
+    Non-vacuous: with ``questions_in_run = len(distinct ids)`` this asserts
+    ``2 == 3``.
+    """
+    dup = [{"question_id": "q0", "question_type": "t",
+            "belief_activation": _manifest()},
+           {"question_id": "q0", "question_type": "t",
+            "belief_activation": _manifest()},
+           {"question_id": "q1", "question_type": "t",
+            "belief_activation": _manifest()}]
+    out = _probe().cells(_write(tmp_path, _report_doc(dup)))
+
+    assert out["questions"] == 3                # the runner's own denominator
+    assert out["questions_in_run"] == 3
+    assert out["questions_in_run"] - out["questions"] == \
+        out["questions_failed"]
+    assert out["questions_in_run"] >= out["questions"]
+
+
 def test_census_probe_treats_a_non_count_cell_as_unread(tmp_path):
     """``operators: true`` is UNREAD, not a measured 1 (#10137 review, P3).
 

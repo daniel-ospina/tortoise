@@ -182,11 +182,15 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   `questions_with_ep / questions = N/N = 1.00` over its survivors with the ablation invisible. The
   probe therefore reads the input's own failure list (`run.py:2797` writes `failures`; a report
   carries both the list and `n_failed`, `report.py:2792-2798`) and publishes `questions_failed`
-  beside `questions_in_run`, which counts every question the run covered — as **distinct question
-  ids over both lists**, never `len(outcomes) + len(failures)`: a qid completed by one worker and
-  failed by another lands in both (`report.py:1407-1410`), and summing the lengths published a
-  2-question population as a 3-question run. On a clean run the three agree; on a crash
-  `questions_in_run − questions == questions_failed`, and that gap is the disclosure. A question that
+  beside `questions_in_run` — **the ratio's own denominator plus the questions it excludes**, which
+  is what makes `questions_in_run − questions == questions_failed` hold by construction rather
+  than by luck. The failure ids are counted as **distinct ids over both lists**, never
+  `len(outcomes) + len(failures)`: a qid completed by one worker and failed by another lands in
+  both (`report.py:1407-1410`), and summing the lengths published a 2-question population as a
+  3-question run. And the total is never a *second* count of the population: the runner's own
+  denominator counts rows while the ids are distinct, so a duplicate-`question_id` input published a
+  total smaller than the denominator it described. On a clean run all three agree; on a crash the
+  gap is the disclosure. A question that
   failed and then produced an outcome counts once, as an outcome — it was recovered, and it is in
   the ratio's denominator. ⛔ The report arm does **not** take its total from `n_questions`: that is
   `len(outcomes)` (`report.py:1106`), so overriding with it silently dropped the failure population

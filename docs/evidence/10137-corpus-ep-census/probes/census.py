@@ -115,9 +115,10 @@ def cells(path: str) -> dict:
         # never short of the truth, so no separate count is carried.
         reported_failed = None
 
-    # EVERY question the run covered, counted as DISTINCT question ids over the
-    # two lists — never ``len(outcomes) + len(failures)`` (#10137 review, P2).
-    # The overlap is a documented real shape, not a hypothetical: a qid
+    # EVERY question the run covered: the ratio's own denominator PLUS the
+    # questions it excludes. The failure ids are counted as DISTINCT ids over
+    # the two lists — never ``len(outcomes) + len(failures)`` (#10137 review,
+    # P2). The overlap is a documented real shape, not a hypothetical: a qid
     # completed by one worker and failed by another lands in BOTH lists
     # (``report.py:1407-1410``), and ``_merge_checkpoint`` unions the two
     # independently, tombstones being present only when the writer knew it was
@@ -145,7 +146,20 @@ def cells(path: str) -> dict:
     if isinstance(reported_failed, int) and reported_failed > len(failed_ids):
         unlisted = reported_failed - len(failed_ids)
     questions_failed = len(failed_ids - outcome_ids) + unlisted
-    n = len(outcome_ids | failed_ids) + unlisted
+    # DERIVED from the two published figures — never a second, independent count
+    # of "how many questions". ``summary["questions"]`` is the runner's own
+    # ``len(rows)`` (``measurement_posture.py:353``), i.e. ROWS, while the id sets
+    # above are distinct non-empty ids; an input with a duplicate or absent
+    # ``question_id`` therefore made the two disagree and could publish a total
+    # SMALLER than the ratio's own denominator (#10137 review, P3 — reachable
+    # from hand-built/foreign JSON only: ``run.py``'s loader builds both lists
+    # dict-by-qid, and the vendored ``report.py`` grades per-qid precisely
+    # because duplicate outcome entries are a documented shape there, ``:1407-
+    # 1412``). Adding the ablation to the denominator instead makes the
+    # invariant ``questions_in_run - questions == questions_failed`` hold BY
+    # CONSTRUCTION for every input, which is what the disclosure claims.
+    n = (summary.get("questions") if isinstance(summary.get("questions"), int)
+         else len(outcome_ids)) + questions_failed
 
     # NOT ``or 0``: an ABSENT cell is UNKNOWN, and coercing it would publish a
     # fabricated "measured zero" — the rule ``measurement_posture`` states for
