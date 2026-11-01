@@ -89,19 +89,34 @@ def sb(monkeypatch):
     """
     from tests._http_fixtures import quiesce_testclient_background_work
 
-    # #10180: this file drives ONE store — the embedded temp DB that
-    # `patched_tortoise_sdk` binds — so it must not inherit the lane's URI.
-    # The fixture pins `TORTOISE_DB_PATH` and routes every SDK construction to
-    # `db_path`, but a `TORTOISE_DB_URI` in the ambient env WINS over that pin
-    # for the registry probe: `_registry_existing_graphs()` takes its URI
-    # branch and answers from the lane server's process-lifetime handle, i.e. a
-    # different backend than the one these seeds write to. The seeding path
-    # then names a graph (`graph_name=f"org_{TEAM}"`) that no listing on the
-    # lane server can contain — so the projection's existence verdict was False
-    # over a graph this test had just written, and `onboarding_complete` fell
-    # back to the legacy jsonb flag. Measured: green when the URI is absent
-    # (embedded), RED under every CI shard and under `tools/test_lane.py`,
-    # both of which export it.
+    # #10180: this file asserts NAMED-GRAPH semantics, so it must run on the
+    # embedded store the fixture binds and not on the lane server.
+    #
+    # Epic #1647's docker-lane redirect (`FalkorProjection.__init__`, the
+    # `explicit_path and _uri and TORTOISE_TEST_MODE` block) does not merely
+    # move a construction: with a `TORTOISE_DB_URI` in the ambient env it
+    # flips the fixture's explicit-`db_path` construction ONTO that server and
+    # REPLACES `graph_name` with a session+path hashed one. So the seeds below
+    # land on the lane server under a name like
+    # `test_promote_<hash(session+path+name)>` rather than at `org_{TEAM}`,
+    # while `_registry_existing_graphs()` lists that same server's hashed
+    # names. One backend, but the name this file reasons about — the org
+    # namespace and its per-graph `org_{org_id}_{gid}` sibling — is a fiction
+    # there: it is never in the listing, so the projection's existence verdict
+    # answers False over graph state the test had just written and
+    # `onboarding_complete` falls back to the legacy jsonb flag. Measured:
+    # green embedded, RED under every CI shard and under `tools/test_lane.py`,
+    # both of which export the URI (in the failing shards, `org_team-10180`
+    # was absent from the listing while the seed's node was readable from the
+    # hashed graph it actually landed in).
+    #
+    # `TORTOISE_TEST_NO_REDIRECT` (the seam `test_org_graph_open_tripwire.py`
+    # uses) would keep the URI set and exempt only the redirect. Not used here
+    # on purpose: nothing in this file asserts about the redirect, the
+    # probe's URI branch or its cache lifecycle — those are pinned where they
+    # live (`test_org_graph_open_tripwire.py`, and the #4661 probe-reuse tests
+    # in `test_hosted_api.py`) — so borrowing the exemption would add
+    # machinery without coverage, and leave this file's premise implicit.
     # DELIBERATE_EMBEDDED_LANE (declared in test_uri_env_mutations_declared).
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
 
