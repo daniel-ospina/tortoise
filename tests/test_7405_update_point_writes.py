@@ -1021,8 +1021,21 @@ def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
     hold: there is no first attempt to abort and retry. Do NOT "restore" a
     write attempt here to make the count non-zero — that would re-open
     #10119 (an absent id journalling a revision, advancing the EP epoch and
-    stranding a dirty root). The retry/witness family is still exercised by
-    the PRESENT-target abort test (``_AbortOnceGraph(..., present=True)``).
+    stranding a dirty root).
+
+    ⚠️ COVERAGE OF THE ARMING DIRECTION IS NOW UNREACHABLE THROUGH THIS DOOR,
+    and that is stated rather than papered over. The #8854 P1 property is that
+    a state-independent abort (the write-slot arm) must not ARM the witness.
+    The witness only changes an outcome where a write LEGITIMATELY matches zero
+    rows — and after #10119 this door has no such path: an absent target
+    returns before the write, and a present target matches. A PRESENT-target
+    test therefore passes on BOTH trees and proves nothing (measured: with the
+    arming gate mutated to `if keep:` it stays green), so none was added. The
+    gate itself is unchanged, and the direction it CAN show here — a slot abort
+    must not DISARM a graph-abort latch — is pinned by the mixed
+    graph-abort-then-slot-abort test below. A future regression arming the
+    witness would have to be caught through a door that can still issue a
+    zero-row write.
     """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
