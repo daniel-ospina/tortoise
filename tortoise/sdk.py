@@ -16097,16 +16097,27 @@ class TortoiseSDK:
         # shared guard for their lifecycle writes; this verb did not, and it
         # writes the same window the temporal read surfaces answer from.
         #
-        # THE GATE IS SCOPED to `_TEMPORAL_RESTAMP_PROPS` (see that constant for
-        # why a blanket refusal is wrong here: #3305's post-terminalization
-        # revisions are a recorded capability). A call with no temporal prop in
-        # it does not reach this guard at all, so:
-        #   * a status-carrying call keeps the promote path unchanged —
-        #     `update_point(terminal, status='live')` still raises the #432
-        #     "Illegal status transition", and an already-LIVE node is still the
-        #     #1088 idempotent no-op;
-        #   * `missing_ok=True` keeps the absent-id contract: this verb returns
-        #     `{}` for a missing id (measured on both trees);
+        # THE TERMINAL GATE IS SCOPED to `_TEMPORAL_RESTAMP_PROPS` (see that
+        # constant for why a blanket refusal is wrong here: #3305's
+        # post-terminalization revisions are a recorded capability). The GATE
+        # ITSELF now runs on EVERY call (#10119, below); what is scoped is its
+        # terminal RAISE, passed as `refuse_terminal`, so:
+        #   * a call carrying a temporal prop is refused on a terminal node
+        #     exactly as before — including a STATUS-carrying one, which keeps
+        #     #7819 whole: `update_point(terminal, status='live', validTo=…)`
+        #     still raises `already terminal`, it does NOT reach the #432
+        #     promote message (that message is for the status-only shape);
+        #   * a call with NO temporal prop asks the terminality question but is
+        #     not refused on it, so `update_point(terminal, status='live')`
+        #     still raises the #432 "Illegal status transition", and an
+        #     already-LIVE node is still the #1088 idempotent no-op;
+        #   * `missing_ok=True` makes the ABSENT verdict a `None` rather than a
+        #     raise, and the caller turns that into the documented `{}` reply
+        #     with NO side effects (#10119). A status-carrying call is the one
+        #     absent shape that keeps its pre-existing behaviour — it falls
+        #     through to the guarded promote write and raises `No point <id>`
+        #     (no side effects either way; the asymmetry is the promote
+        #     contract's, #432);
         #   * `allow_operator=True` keeps operator points writable: this verb is
         #     what `annotate_operator` delegates to, and a caller may pass a
         #     window for an operator. A TERMINAL operator is still refused, pinned
@@ -16123,9 +16134,64 @@ class TortoiseSDK:
         # can still be given `status='live'` (the flag keeps it terminal for
         # readers, and the status then contradicts it). That predates this
         # change; the promote contract and its message are #432's.
-        if _TEMPORAL_RESTAMP_PROPS & set(props):
-            self._assert_lifecycle_guard(id, method="update", missing_ok=True,
-                                         allow_operator=True)
+        # ── #10119: the ABSENT arm takes no receipt, and now no WORK ──────────
+        # Measured on the pre-fix tree: `update_point("no-such-point-9202",
+        # confidence=0.5)` returned `{}` — the documented absent-id contract —
+        # and yet appended a `PointRevised` journal row, advanced
+        # `:EpMeta.ep_version` (0 -> 1 from cold), and put the ABSENT id into
+        # `_dirty_roots`, where it SURVIVED `_sweep_dirty_roots(all real ids)`
+        # and held `_auto_dream_mode()` at `'local'` for the life of the
+        # instance — a typo'd id pinning the instance out of its dream cycle
+        # (#2422 / #7505 / #9269). The reply was honest; the side effects were
+        # not.
+        #
+        # THE GATE IS THE EXISTING INSTRUMENT, NOT A SECOND ONE. #8854 round 9
+        # closed this exact shape on the PROMOTE no-op arm by returning before
+        # `_mark_dirty`; the ABSENT arm had no such exit even though this door
+        # already performed existence reads it could gate on. The predicate
+        # lives in `_assert_lifecycle_guard` (the #2498/#7819 instrument: one
+        # statement, one classifier, over the whole fan-out — #7822), so this
+        # door now consults it on EVERY call instead of only when a temporal
+        # prop is present. It must run HERE — after the refusals above (so a
+        # refused call is reported as itself, not as absent) and BEFORE the
+        # journal append and every write (the append is the commit point,
+        # #7951 §17.1; an append for a node that is not there is a record of a
+        # revision that cannot exist).
+        #
+        # `refuse_terminal` is FALSE unless the call carries a temporal prop:
+        # #7819 scoped THIS door's terminal refusal deliberately (a generic
+        # re-assertion of a dead claim is the recorded capability pinned by
+        # `tests/test_lifecycle_guards.py::
+        # test_create_point_dedup_without_a_window_still_folds`).
+        #
+        # ⛔ THE STATUS-CARRYING CALL IS *NOT* SKIPPED. A first cut of this fix
+        # read `if 'status' not in props:` around the whole guard and thereby
+        # DELETED an existing refusal (#7819 review): measured on a flag-dead
+        # point (`status=null, outdated=true`), `update_point(p,
+        # status='live', validTo=…)` LANDED — status flipped to `live` and the
+        # window stored — where the pre-fix tree raised `already terminal
+        # (outdated)`. Only the ABSENT early return is status-gated (the
+        # promote arm owns the absent shape, raising `No point <id>`).
+        # ⚠️ THE TRADE THIS MAKES, STATED (#7405). During a rebuild the engine
+        # aborts writes while the target is legitimately absent from the LIVE
+        # graph but present in the journal. Pre-fix the non-promote arm appended
+        # `PointRevised` first (the §17.1 commit point), so such a revision was
+        # durable and a replay could pick it up, and the write rode the 7-14 s
+        # `_graph_write_with_retry` window. Post-fix, a target absent at THIS
+        # read gets no retry and no record: the typo and the mid-rebuild
+        # absence are the SAME read, and the typo harm (a stranded dirty root,
+        # #10119) is the one that persists, so this is the intended trade — but
+        # the #7405 window no longer covers that shape. Do not "restore"
+        # journal-first for absent ids to get the window back.
+        _temporal_restamp = bool(_TEMPORAL_RESTAMP_PROPS & set(props))
+        _verdict = self._assert_lifecycle_guard(
+            id, method="update", missing_ok=True, allow_operator=True,
+            refuse_terminal=_temporal_restamp)
+        if _verdict is None and 'status' not in props:
+            # ABSENT. Zero side effects, and the same `{}` the documented
+            # contract already returns — no journal row, no epoch advance,
+            # no dirty root, so a typo cannot strand the instance.
+            return {}
 
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
@@ -17130,7 +17196,8 @@ class TortoiseSDK:
     def _assert_lifecycle_guard(self, point_id: str, *, method: str,
                                 role: str = "point",
                                 missing_ok: bool = False,
-                                allow_operator: bool = False) -> dict | None:
+                                allow_operator: bool = False,
+                                refuse_terminal: bool = True) -> dict | None:
         """Single authoritative terminal/operator guard for point lifecycle
         transitions (#2498).
 
@@ -17172,6 +17239,19 @@ class TortoiseSDK:
         the shared ``live.classify_lifecycle_fanout`` (the hosted commit
         pre-check runs the same statement and the same classifier, so the two
         cannot disagree).
+
+        ``refuse_terminal`` (#10119) lets a door that has its OWN narrower
+        terminal policy ASK the terminality question without pre-empting it.
+        ``update_point`` is the one such door: #7819 scoped its terminal
+        refusal to `_TEMPORAL_RESTAMP_PROPS` because a generic re-assertion of
+        a dead claim is a recorded capability (see the scope note at the call
+        site), so on that door a terminal verdict must be RETURNED, not raised
+        — while the ABSENT verdict is the same for every caller and must be
+        answered here, once, from the same read (#7822: one statement, one
+        classifier). Passing ``False`` suppresses the terminal RAISE only; the
+        caller is then responsible for its own terminal policy —
+        ``update_point`` permits a generic revision and leaves the
+        status-carrying shape to the promote arm's own guarded write.
         """
         rows = self._get_proj().g.query(
             LIFECYCLE_FANOUT_QUERY, params={"id": point_id},
@@ -17191,7 +17271,7 @@ class TortoiseSDK:
         # once — the operator branch of the classifier outranks terminal, so
         # its `status`/`outdated` are not the terminality answer.
         marker = self._lifecycle_terminal_marker(point_id, rows)
-        if marker is not None:
+        if marker is not None and refuse_terminal:
             # Neither verb of the two families (#7819): ``update_point``
             # re-stamps a prop/window without terminalizing, while
             # ``retract_point`` / ``supersede_point`` / ``invalidate_point``

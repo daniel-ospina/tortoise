@@ -1011,6 +1011,18 @@ def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
     a stale ``ResponseError`` after four attempts, where the documented answer
     is ``{}``. Only the graph-deleted-or-replaced family can mean "not
     replayed yet", so only that family arms the witness.
+
+    ⛔ #10119 MAKES THAT PROPERTY STRUCTURAL FOR THE MISSING-TARGET CASE: the
+    door now reads the target's existence from the lifecycle guard BEFORE the
+    journal append and BEFORE any write, so an absent id issues NO statement —
+    ``proxy.matching == 0``. The witness can therefore never be armed on a
+    missing target, which is why this assertion is the POST-fix one and the
+    pre-fix ``>= 2`` ("the aborted statement was re-issued") can no longer
+    hold: there is no first attempt to abort and retry. Do NOT "restore" a
+    write attempt here to make the count non-zero — that would re-open
+    #10119 (an absent id journalling a revision, advancing the EP epoch and
+    stranding a dirty root). The retry/witness family is still exercised by
+    the PRESENT-target abort test (``_AbortOnceGraph(..., present=True)``).
     """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
@@ -1023,7 +1035,9 @@ def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
         proj.g = proxy
 
         assert sdk.update_point(missing, confidence=0.5) == {}
-        assert proxy.matching >= 2, "the aborted statement was never re-issued"
+        assert proxy.matching == 0, (
+            "an ABSENT id issued a write statement (#10119: the guard read "
+            "must precede the append and every write)")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
