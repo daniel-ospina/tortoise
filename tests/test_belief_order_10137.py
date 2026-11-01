@@ -3,9 +3,10 @@
 Measured on this tree before the fix: the EP posterior is read **for ordering**
 by ``GraphRanker`` on ``order_by in ("graph", "confidence")`` and by
 ``StateRanker`` inside ``recall_state``. The DEFAULT path
-(``order_by="relevance"`` — what ``tortoise_search`` uses and what the answer
-lane's ``retrieve``/assembly calls use, since none of them pass an
-``order_by``) never reads ``posterior_alpha``/``ep_alpha`` **for ordering**,
+(``order_by="relevance"`` — `tortoise_search`'s own default, which it and the
+SDK verb both accept a caller's ``order_by`` for, plus the answer lane's
+``retrieve``/assembly calls, which pass none) never reads
+``posterior_alpha``/``ep_alpha`` **for ordering**,
 while every ordering (the default included) still ANNOTATES each hit's ``ep``
 block from those same columns (``confidence_mean``, ``has_ep``,
 ``measured``, ``baseline``). A consumer reading a top-1 hit with

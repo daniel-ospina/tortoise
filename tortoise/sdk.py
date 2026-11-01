@@ -36247,8 +36247,11 @@ class TortoiseSDK:
             # #10137 review P1 / round 7 P1: the label describes the READ and
             # the read must have supplied a MEASUREMENT — a failed fetch answers
             # None (every key stays at the neutral 0.5, leaving the list in RRF
-            # order), and a row with no persisted α/β answered 0.5 too. Neither
-            # is a consulted order. Same predicate the rankers use.
+            # order), and a row with no persisted belief at all — no α/β AND no
+            # `n.confidence` mirror — answered 0.5 too. Neither is a consulted
+            # order. A mirror-only row IS a measurement on this read (it is the
+            # coalesce's FIRST choice) and is labelled `consulted`; see
+            # test_the_mirror_counts_only_where_the_read_consults_it.
             answered = frozenset(
                 pid for pid, sig in (read or {}).items() if sig.get("has_prior"))
             belief_consulted = bool(answered)

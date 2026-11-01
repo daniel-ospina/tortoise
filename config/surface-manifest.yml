@@ -54,6 +54,21 @@ allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
 response_fields:
+- response: tortoise_search
+  field: ep.informed_order
+  emitted_when: any Point hit that carries an `ep` block gains `informed_order` —
+    "consulted" when the ORDER read the belief layer (order_by=graph|confidence, or
+    recall_state's StateRanker) and the read answered for that row, "not_consulted"
+    when it did not, and ABSENT when the stage that produced the order cannot say
+    (a caller-supplied ranker whose read is not observable). #10137.
+  unchanged_when_off: yes — no flag; the key is additive and the order, scores and every
+    other field are byte-identical to the pre-#10137 response
+- response: tortoise_recall
+  field: ep.informed_order
+  emitted_when: same contract as tortoise_search — every returned hit's `ep` block says
+    whether the StateRanker that produced the ORDER read the belief ("consulted"), did
+    not ("not_consulted"), or cannot say (absent). #10137.
+  unchanged_when_off: yes — additive; ordering and every other field unchanged
 - response: tortoise_analyze
   field: why
   emitted_when: TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)

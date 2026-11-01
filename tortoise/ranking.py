@@ -802,10 +802,13 @@ class GraphRanker:
             # baseline prior alone is prior-only, NOT measured.
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false), "
-            # #10137 review round 6: a row is a MEASUREMENT only when the node
-            # carries a persisted α/β. `has_ep` is #3276's narrower "EP measured
-            # this" and a #2199 baseline prior is prior-only — but it IS a
-            # belief value the score multiplies in, so it counts here.
+            # #10137 review rounds 6-12: a row is a MEASUREMENT when the node
+            # carries a persisted belief — the α/β columns OR the
+            # `n.confidence` flush-mirror this read coalesces FIRST (the mirror
+            # is specific to THIS read; StateRanker's is α/β only). `has_ep` is
+            # #3276's narrower "EP measured this" and a #2199 baseline prior is
+            # prior-only — but it IS a belief value the score multiplies in, so
+            # it counts here.
             "  (n.confidence IS NOT NULL OR n.posterior_alpha IS NOT NULL "
             "   OR n.ep_alpha IS NOT NULL) AS has_prior"
         )
