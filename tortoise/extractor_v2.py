@@ -4261,9 +4261,17 @@ def _value_slot_divergence(content: object, quote: object,
         return ()
     if tuple(a for a, _ in content_slots) != tuple(a for a, _ in quote_slots):
         return ()  # a different slot layout is not a same-slot contradiction
+    # `strict=True` states the invariant the guard four lines above already
+    # enforces (the two slot layouts are equal), so a future edit that weakens
+    # the guard raises here instead of silently truncating to the shorter side
+    # — which would judge a PREFIX of the pair and fail open on the rest. Ruff
+    # B905 is part of the pinned `select` (`pyproject.toml` `[tool.ruff.lint]`,
+    # held by `tests/test_lint_config.py`), so leaving it implicit reds the
+    # required `agent-infra-ci / lint` leg (#10513 review P1).
     return tuple(
         (anchor, _value_core_str(cv), _value_core_str(qv))
-        for (anchor, cv), (_, qv) in zip(content_slots, quote_slots)
+        for (anchor, cv), (_, qv) in zip(content_slots, quote_slots,
+                                         strict=True)
         if not _value_identity_matches(cv, qv)
     )
 
