@@ -333,8 +333,8 @@ def test_eval_annotation_keeps_an_absent_end_absent(sdk):
     side (absence travels as ``None``); the predicate is untouched, so the
     ruling that a stored un-datable end is ENDED is not re-opened.
     """
-    from tortoise.time_aware import is_stale_entry
     from tools.longmem_eval.retrieve import _annotate_hits, _validity_marker
+    from tortoise.time_aware import is_stale_entry
 
     timeless = sdk.create_point("statement", "i live in lisbon")
     hits = _scan(sdk)
@@ -377,8 +377,8 @@ def test_eval_annotation_keeps_an_absent_end_absent(sdk):
 
 def test_eval_annotation_of_a_legacy_undatable_end_still_reads_ended(sdk):
     """The #9202 ruling survives the producer fix (end-to-end, not by dict)."""
-    from tortoise.time_aware import is_stale_entry
     from tools.longmem_eval.retrieve import _annotate_hits
+    from tortoise.time_aware import is_stale_entry
 
     ended = sdk.create_point("statement", "ended, un-datable",
                              validFrom="2026-06-14",
