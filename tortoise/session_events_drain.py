@@ -85,6 +85,7 @@ __all__ = [
     "DEAD_LETTER_MAX_ROWS",
     "MAX_RECORDS_PER_RUN",
     "MAX_STRIKES",
+    "STUCK_RETRIES_PER_PASS",
     "SETTLE_GRACE_SECONDS",
     "cursor_dir",
     "default_session_events_dir",
@@ -103,6 +104,10 @@ MAX_RECORDS_PER_RUN = 200
 #: ``stuck``: a 402 whose estimated cost never fits the tier, or a payload the
 #: transport always throws on, must not gate the queue behind it forever.
 MAX_STRIKES = 3
+#: How many known-stuck records one pass may still PROBE. Zero would never let a
+#: record recover when the refusal lifts (a quota top-up); more than one would
+#: spend the POST budget on records that are not draining.
+STUCK_RETRIES_PER_PASS = 1
 #: A day file whose mtime is older than this has no writer on it any more, so an
 #: unparseable LAST line is a torn record rather than one being appended RIGHT
 #: NOW. The same settle rule ``tools/seal_session_events.py`` uses before it
@@ -194,7 +199,7 @@ def _candidate_files(root: Path) -> list[Path]:
     landed between our listing and its unlink) is read from the plain file only:
     the same records twice would be two POSTs of one session.
     """
-    found: dict[str, Path] = {}
+    found: dict[str, list[Path]] = {}
     for directory in (root / "archive", root):
         try:
             names = sorted(p.name for p in directory.iterdir() if p.is_file())
@@ -204,11 +209,14 @@ def _candidate_files(root: Path) -> list[Path]:
             if not (name.endswith(".jsonl") or name.endswith(".jsonl.gz")):
                 continue
             path = directory / name
-            key = _day_key(path)
-            # PLAIN WINS: the root is scanned last, and it holds the live shape.
-            if key not in found or directory == root:
-                found[key] = path
-    return sorted(found.values(), key=_day_key)
+            found.setdefault(_day_key(path), []).append(path)
+    # PLAIN WINS when a day is present in both shapes (a seal that landed between
+    # our listing and its unlink, or an in-place gzip): the plain file is the one
+    # a writer is appending to, and reading the same records twice would be two
+    # POSTs of one session. Chosen explicitly rather than by scan order.
+    picked = [next((p for p in paths if not p.name.endswith(".gz")), paths[-1])
+              for paths in found.values()]
+    return sorted(picked, key=_day_key)
 
 
 def _read_lines(path: Path) -> list[str] | None:
@@ -336,6 +344,9 @@ class _Cursor:
         """
         return index < self.consumed(key) or index in self.crossed(key)
 
+    def strikes(self, key: str, index: int) -> int:
+        return int((self.day(key).get("strikes") or {}).get(str(index), 0))
+
     def strike(self, key: str, index: int) -> int:
         strikes = self.day(key)["strikes"]
         strikes[str(index)] = int(strikes.get(str(index), 0)) + 1
@@ -408,16 +419,26 @@ def _append_dead_letter(store: Path, row: dict) -> bool:
     READERS — this substrate is a status surface, not a second unbounded log, and
     a record's own row is written once (its path key is unique).
     """
+    # `ensure_ascii=True`: a lone surrogate is legal JSON (the TS writer's
+    # `JSON.stringify` emits exactly that form for an unpaired code unit) and
+    # `.encode("utf-8")` raises `UnicodeEncodeError` on it — a ValueError, not an
+    # OSError — which escaped this function and aborted the WHOLE drain before
+    # the cursor write, so that day never drained and every pass re-POSTed the
+    # prefix. ASCII escaping makes the row writable and keeps the failure list
+    # short of one more class.
+    data = (json.dumps(row, ensure_ascii=True) + "\n").encode("utf-8")
     try:
         store.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(store / DEAD_LETTER_FILE,
                      os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            os.write(fd, (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
+            written = 0
+            while written < len(data):
+                written += os.write(fd, data[written:])
             os.fsync(fd)
         finally:
             os.close(fd)
-    except OSError:
+    except (OSError, ValueError):
         return False
     return True
 
@@ -476,6 +497,7 @@ def drain_session_events(
         "consumed": 0,
         "queued": 0,
         "stuck": 0,
+        "stuck_retries": 0,
         "posts": 0,
         "unreadable": [],
         "stopped": None,
@@ -498,7 +520,7 @@ def drain_session_events(
             if total is None:
                 summary["unreadable"].append(str(path))
                 continue
-            queued += max(0, total - cursor.consumed(_day_key(path)))
+            queued += cursor.queued(_day_key(path), total)
         summary["queued"] = queued
         summary["detail"] = "plan only — nothing was posted and no cursor moved"
         summary["dead_letters_total"] = read_dead_letter_count(store_path)
@@ -518,7 +540,6 @@ def drain_session_events(
             # empty queue: its records are neither filed nor dead-lettered, and
             # an operator has to know which day that is.
             summary["unreadable"].append(str(path))
-            stopped = "unreadable"
             continue
         total = len(lines)
         cursor.set_total(key, total)
@@ -538,6 +559,18 @@ def drain_session_events(
             if summary["posts"] >= cap:
                 stopped = stopped or "batch"
                 break
+            if (cursor.strikes(key, index) >= MAX_STRIKES
+                    and summary["stuck_retries"] >= STUCK_RETRIES_PER_PASS):
+                # A known-stuck record would spend the whole POST budget on
+                # itself every pass, so the cap could never reach a not-yet-
+                # struck record — the escape hatch defeated exactly when it is
+                # needed (found in re-review). It is skipped WITHOUT a POST and
+                # stays queued; `STUCK_RETRIES_PER_PASS` keeps ONE probe per pass
+                # so it still recovers when the refusal lifts.
+                summary["stuck"] += 1
+                continue
+            if cursor.strikes(key, index) >= MAX_STRIKES:
+                summary["stuck_retries"] += 1
             verdict, session_id = _file_one(
                 post, store_path, key, index, line, summary,
                 is_last=index == total - 1, settled=settled,
@@ -596,7 +629,10 @@ def drain_session_events(
             cursor.set_total(key, total)
         queued += cursor.queued(key, total)
     summary["queued"] = queued
-    summary["stopped"] = stopped
+    # The pass-ending reason is INDEPENDENT of the unreadable-day list: a pass
+    # that stopped on the bound while some earlier day was unreadable used to
+    # report `stopped unreadable`, which names the wrong cause.
+    summary["stopped"] = stopped or ("unreadable" if summary["unreadable"] else None)
     try:
         _write_cursor(store_path, cursor)
     except OSError as exc:

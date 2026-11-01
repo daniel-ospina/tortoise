@@ -401,3 +401,45 @@ def test_the_bound_caps_posts_even_when_every_record_proceeds_to_stuck(
     assert run["posts"] <= MAX_RECORDS_PER_RUN
     assert run["filed"] == 0
     assert run["queued"] == MAX_RECORDS_PER_RUN + 100  # nothing crossed
+
+def test_a_pass_of_stuck_records_never_spends_the_whole_budget_on_them(
+        tmp_path: Path) -> None:
+    """P1 from re-review: the cap must still REACH a healthy record.
+
+    Probe that found this: 220 records, the first 200 permanently refused, 30
+    passes — records 201..220 were never POSTed once, because every pass spent
+    its whole budget re-attempting known-stuck records.
+    """
+    from tortoise.session_events_drain import MAX_STRIKES
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    healthy = [f"s{i}" for i in range(5, 8)]
+    _write_day(root, "2026-10-01.jsonl",
+               [_record(f"s{i}") for i in range(5)] + [_record(s) for s in healthy])
+    post = Recorder({f"s{i}": PostOutcome(ok=False, status=402, detail="quota")
+                     for i in range(5)})
+
+    # Enough passes for every poison record to reach MAX_STRIKES; the point is
+    # what happens AFTER that, when the budget would otherwise be consumed by
+    # re-attempting them.
+    for _ in range(40):
+        run = _drain(root, store, post, max_records=5)
+
+    # The healthy records behind the five poison ones WERE reached.
+    for sid in healthy:
+        assert sid in post.session_ids
+    assert run["queued"] == 5  # the poison ones are still queued, never dropped
+
+
+def test_an_unreadable_day_does_not_mislabel_a_bound_stop(tmp_path: Path) -> None:
+    """P2 from re-review: `stopped` names the PASS, the list names the day."""
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    archive = root / "archive"
+    archive.mkdir(parents=True)
+    (archive / "2026-09-30.jsonl.gz").write_bytes(b"not a gzip stream")
+    _write_day(root, "2026-10-01.jsonl", [_record(f"s{i}") for i in range(6)])
+
+    run = _drain(root, store, Recorder(), max_records=2)
+
+    assert run["unreadable"], "the broken day must be reported"
+    assert run["stopped"] == "batch"
