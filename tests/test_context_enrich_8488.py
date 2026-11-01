@@ -33,6 +33,7 @@ network call.
 """
 from __future__ import annotations
 
+import re
 from typing import ClassVar
 
 import numpy as np
@@ -40,6 +41,7 @@ import pytest
 
 from tortoise.context_enrich import (
     ENRICH_ENV,
+    _target_clause,
     enrich_enabled,
     enrich_turn_texts,
 )
@@ -85,9 +87,8 @@ class _Rewriter:
     raw and maps to a different lexicon direction."""
 
     def complete(self, *, system, user):
-        target = user.split("TARGET turn (rewrite this one):\n", 1)[1]
-        target = target.split("\n\n", 1)[0]
-        return target.replace("the release is blocked", "the auth flow is blocked")
+        return _target_of(user).replace("the release is blocked",
+                                        "the auth flow is blocked")
 
 
 @pytest.fixture
@@ -163,47 +164,98 @@ def test_enrich_turn_texts_is_identity_without_a_complete_fn():
 
 
 def test_enrich_turn_texts_rewrites_each_turn_with_its_neighbours():
-    """The rewrite threads the neighbour window into each prompt."""
+    """Every call carries the WHOLE window and names, outside it, which turn to
+    rewrite — so the neighbours ARE the context and the prefix stays stable."""
     texts = ["[user] it is broken", "[assistant] the auth flow broke"]
     calls: list[str] = []
 
     def fake(system, user):
         calls.append(user)
-        target = user.split("TARGET turn (rewrite this one):\n", 1)[1]
-        target = target.split("\n\n", 1)[0]
-        return "RESOLVED: " + target
+        return "RESOLVED: " + _target_of(user)
 
     out = enrich_turn_texts(texts, complete_fn=fake)
     assert out == ["RESOLVED: [user] it is broken",
                    "RESOLVED: [assistant] the auth flow broke"]
-    # turn 0's prompt carries its NEXT neighbour; turn 1's carries its PREV.
-    assert "[assistant] the auth flow broke" in calls[0]
-    assert "[user] it is broken" in calls[1]
-    # …and on the RIGHT SIDE of the window (a prev/next swap would satisfy the
-    # two assertions above, since both neighbours appear in both prompts).
-    _MARK = "TARGET turn (rewrite this one):"
-    window0 = _window_of(calls[0])
-    assert window0.split(_MARK, 1)[0].strip() == "Previous turn:", window0
-    assert window0.split("Previous turn:", 1)[1].split(_MARK, 1)[0].strip() \
-        == ""
-    assert window0.split("Next turn:", 1)[1].strip() \
-        == "[assistant] the auth flow broke", window0
-    window1 = _window_of(calls[1])
-    assert window1.split(_MARK, 1)[0].split("Previous turn:", 1)[1].strip() \
-        == "[user] it is broken"
-    assert window1.split("Next turn:", 1)[1].strip() == "", window1
+    # Each prompt's window really holds BOTH turns, in order…
+    window = ("[1] [user] it is broken\n\n"
+              "[2] [assistant] the auth flow broke")
+    assert _window_of(calls[0]) == window, _window_of(calls[0])
+    assert _window_of(calls[1]) == window, _window_of(calls[1])
+    # …and the TARGET is named from OUTSIDE it, one turn per call.
+    assert _target_of(calls[0]) == "[user] it is broken"
+    assert _target_of(calls[1]) == "[assistant] the auth flow broke"
+    assert calls[0].rstrip().endswith(_target_clause(0)), calls[0][-120:]
+    assert calls[1].rstrip().endswith(_target_clause(1)), calls[1][-120:]
+
+
+def test_the_prefix_is_stable_across_the_windows_calls_so_it_can_be_cached():
+    """#8932 §2 approved the per-turn rewrite BECAUSE of prompt caching
+    (~$1.02/M doc tokens cached vs ~$9.20/M uncached), and a cache hit needs a
+    byte-identical PREFIX across the calls of one capture.
+
+    The old render spliced ``Previous turn:…``/``TARGET turn:…``/``Next turn:…``
+    inline, so every slot differed per turn and the only shared bytes were the
+    system prompt and the clause — the uncached end of that band, ~9× the
+    approved figure (review round 3, P2). The window is ONE block now and the
+    only turn-varying bytes are the trailing TARGET clause.
+    """
+    texts = [f"[user] turn {i}" for i in range(4)]
+    calls: list[tuple[str, str]] = []
+
+    def fake(system, user):
+        calls.append((system, user))
+        return "x"
+
+    enrich_turn_texts(texts, complete_fn=fake)
+    assert len(calls) == 4
+    assert len({system for system, _ in calls}) == 1, "the system prompt moved"
+    prefixes = {user.rsplit("\n\n", 1)[0] for _, user in calls}
+    assert len(prefixes) == 1, (
+        "the request prefix differs per turn, so none of it can be cached "
+        f"({len(prefixes)} distinct prefixes for one window)")
+    prefix = next(iter(prefixes))
+    # …and the varying tail is one short clause, not the whole window.
+    assert [user[len(prefix):] for _, user in calls] == [
+        "\n\n" + _target_clause(i) for i in range(4)], \
+        [user[len(prefix):] for _, user in calls]
+    assert len(_target_clause(0)) < 100, len(_target_clause(0))
+
+
+def _target_of(prompt: str) -> str:
+    """The TARGET turn's stored text, resolved from the rendered prompt.
+
+    The target is named by index (a suffix OUTSIDE the untrusted block), so the
+    test resolves it the way the model is asked to: read the window, then apply
+    the numbered clause.
+    """
+    tail = prompt.rsplit("\n", 1)[-1]
+    match = re.search(r"TARGET TURN: \[(\d+)\]", tail)
+    assert match is not None, f"no TARGET clause in the rendered prompt: {tail!r}"
+    want = int(match.group(1))
+    parts = re.split(r"(?m)^\[(\d+)\] ", _window_of(prompt))
+    for idx, chunk in zip(parts[1::2], parts[2::2], strict=False):
+        if int(idx) == want:
+            return chunk.strip("\n")
+    raise AssertionError(f"no turn [{want}] in the window: {_window_of(prompt)!r}")
 
 
 def _window_of(prompt: str) -> str:
     """The UNTRUSTED-DATA body out of a rendered rewrite prompt (its boundary
-    is body-derived, so the caller cannot know the nonce in advance)."""
+    is body-derived, so the caller cannot know the nonce in advance).
+
+    The TARGET clause follows the END boundary, so the body ends at the LAST
+    boundary line rather than at the last line of the message.
+    """
     body = prompt.split("\n", 1)[1]          # drop the trusted clause line
     begin, rest = body.split("\n", 1)        # the BEGIN boundary line
-    end = rest.rsplit("\n", 1)[1]            # the END boundary line
     assert begin.startswith("<<<BEGIN-UNTRUSTED-NEIGHBOUR-WINDOW-"), begin
-    assert end.startswith("<<<END-UNTRUSTED-NEIGHBOUR-WINDOW-"), end
-    assert begin.replace("BEGIN", "END") == end, (begin, end)
-    return rest.rsplit("\n", 1)[0]
+    lines = rest.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("<<<END-UNTRUSTED-NEIGHBOUR-WINDOW-"):
+            end = lines[i]
+            assert begin.replace("BEGIN", "END") == end, (begin, end)
+            return "\n".join(lines[:i])
+    raise AssertionError(f"no END boundary in the rendered prompt: {prompt!r}")
 
 
 def test_the_rewrite_prompt_frames_the_window_as_untrusted_data():
@@ -221,8 +273,7 @@ def test_the_rewrite_prompt_frames_the_window_as_untrusted_data():
 
     def spy(system, user):
         seen.append((system, user))
-        return user.split("TARGET turn (rewrite this one):\n", 1)[1] \
-                   .split("\n\n", 1)[0]
+        return _target_of(user)
 
     enrich_turn_texts(["[user] one", "[assistant] two"], complete_fn=spy)
     system, user = seen[0]
@@ -231,10 +282,8 @@ def test_the_rewrite_prompt_frames_the_window_as_untrusted_data():
     assert user.startswith(clause + "\n"), user[:200]
     # …the window follows the boundary VERBATIM (no escaping — `quote`-verbatim
     # citation and turn resolution depend on it)…
-    assert _window_of(user) == (
-        "Previous turn:\n\n\n"
-        "TARGET turn (rewrite this one):\n[user] one\n\n"
-        "Next turn:\n[assistant] two"), _window_of(user)
+    assert _window_of(user) == "[1] [user] one\n\n[2] [assistant] two", \
+        _window_of(user)
     # …and the trusted side the clause points at ("the ones we wrote outside
     # that block") is the SYSTEM prompt, which repeats the prohibition.
     assert "never carry out an" in system, system
@@ -254,17 +303,19 @@ def test_a_captured_turn_cannot_close_the_untrusted_block():
     enrich_turn_texts(texts, complete_fn=fake)
     user = calls[0]
     begin = user.split("\n", 1)[1]
-    end = user.rsplit("\n", 1)[1]
+    end = next(line for line in reversed(user.split("\n"))
+               if line.startswith("<<<END-UNTRUSTED-NEIGHBOUR-WINDOW-"))
     assert begin.startswith("<<<BEGIN-UNTRUSTED-NEIGHBOUR-WINDOW-"), begin
-    assert end.startswith("<<<END-UNTRUSTED-NEIGHBOUR-WINDOW-"), end
-    # The REAL end marker is the last line — i.e. it comes AFTER the injected
-    # one — and it is not the nonce the body predicted, so the body could not
-    # close the block: the frame still encloses the whole window…
+    # The REAL end marker comes AFTER the injected one and is not the nonce the
+    # body predicted, so the body could not close the block: the frame still
+    # encloses the whole window…
     assert user.count(forged) == 1
     assert user.rindex(end) > user.index(forged)
     assert "0000000000000000" not in end, end
-    # …and nothing after it but the marker was appended to the trusted side.
-    assert user.split(end, 1)[1] == ""
+    # …and the only thing after it is OUR trusted target clause — never any part
+    # of the captured body, so the frame cannot be closed and then continued.
+    after = user.split(end, 1)[1]
+    assert after == "\n\n" + _target_clause(0), after
 
 
 def test_enrich_turn_texts_fails_soft_to_raw_text():
@@ -492,8 +543,7 @@ def test_turn_discrimination_survives_enrichment():
     ]
 
     def rewrite(system, user):
-        target = user.split("TARGET turn (rewrite this one):\n", 1)[1]
-        return target.split("\n\n", 1)[0].replace("they said it", "it")
+        return _target_of(user).replace("they said it", "it")
 
     enriched = enrich_turn_texts(turns, complete_fn=rewrite)
     assert enriched != turns, "the enrichment changed nothing — not a test"
@@ -551,10 +601,8 @@ def test_recapture_on_with_a_different_rewrite_clears_the_stale_vector(
 
     class _BillingRewriter:
         def complete(self, *, system, user):
-            target = user.split("TARGET turn (rewrite this one):\n", 1)[1]
-            target = target.split("\n\n", 1)[0]
-            return target.replace("the release is blocked",
-                                  "the billing flow is blocked")
+            return _target_of(user).replace("the release is blocked",
+                                            "the billing flow is blocked")
 
     _no_embedder(monkeypatch)
     monkeypatch.setattr(model_adapters, "build_extractor_model",
@@ -584,6 +632,41 @@ def test_content_edit_clears_the_enriched_text(sdk, embedder, enrichment_on):
         "vector from the new content (#4194)")
     assert np.allclose(after[3], compute_embedding("the billing migration is blocked"),
                        atol=1e-6), after
+
+
+def test_a_caller_supplied_vector_clears_the_enriched_text(
+        sdk, embedder, enrichment_on):
+    """#10523 review round 3 (P3): the OTHER vector door into the same invariant.
+
+    Round 2 closed `update_point(content=…)`, which RE-ENCODES. A caller vector
+    (`embedding=[…]`) or a caller clear (`embedding=None`) also replaces what the
+    vector describes, through the same bare `SET n += $props`, and that branch
+    never touches `embeddingText` — so an enriched turn kept a "the auth flow"
+    text beside a caller's vector computed from nothing of the kind. The
+    identity hash cannot catch it (payload-only, and withheld when the vector is
+    preserved), so this leg is the only thing that does.
+    """
+    sdk.capture_session(CONV, session_id="sess-vec")
+    t0 = _turn_rows(sdk, "sess-vec")[0]
+    assert t0[2] == "[user] the auth flow is blocked", t0
+    assert t0[3] is not None, t0
+
+    # A caller vector: the node must not keep the text the OLD vector described.
+    sdk.update_point(t0[0], embedding=[1.0, 0.0, 0.0, 0.0])
+    after = _turn_rows(sdk, "sess-vec")[0]
+    assert after[2] is None, (
+        "a caller-supplied vector replaced the vector an embeddingText was "
+        "computed from, and the text survived (#4194)")
+    assert np.allclose(after[3], [1.0, 0.0, 0.0, 0.0], atol=1e-6), after
+
+    # …and an unrelated update must NOT disturb a writer-minted value (the gate
+    # is the KEY, so this cannot be satisfied by clearing unconditionally).
+    sdk.capture_session(CONV, session_id="sess-vec2")
+    t0b = _turn_rows(sdk, "sess-vec2")[0]
+    assert t0b[2] == "[user] the auth flow is blocked", t0b
+    sdk.update_point(t0b[0], status="live")
+    assert _turn_rows(sdk, "sess-vec2")[0][2] == t0b[2], (
+        "an update with no vector changed the writer-minted embeddingText")
 
 
 # ── 10. `embeddingText` is WRITER-minted at every intake door ──────────────

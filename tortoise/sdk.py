@@ -16528,6 +16528,17 @@ class TortoiseSDK:
             props["embedding_verbatim"] = True
         elif "embedding" in props:
             props["embedding_verbatim"] = None
+        # #8488 scope 1 (review round 3, P3): BOTH of those arms REPLACE or CLEAR
+        # the vector, so neither may leave the writer-minted ``embeddingText``
+        # behind — it describes the vector this write just replaced, which is the
+        # #4194 lie under a different door. Round 2 closed the branch that
+        # RE-ENCODES from `content` (`_derived_embedding`, below); a caller vector
+        # (`embedding=[…]`) and a caller clear (`embedding=None`) reach the node by
+        # the same bare `SET n += $props` and never touch the text. `None` REMOVES
+        # the property. Gated on the KEY, so an unrelated update leaves a
+        # writer-minted value alone — which is what makes it survive one.
+        if "embedding" in props:
+            props["embeddingText"] = None
 
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
