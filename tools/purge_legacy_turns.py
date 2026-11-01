@@ -1353,6 +1353,18 @@ def _recovery_missing(args, restore_proof: dict | None,
         missing.append(
             "no usable /health ARMED evidence for this target (#9548 / PR "
             f"#9989): {armed_gap}")
+    # …and the same question about its SOURCE. `--execute` refuses a CAPTURED
+    # body outright (`main` cannot tell a file from a live read, so a
+    # hand-written body would satisfy the arming precondition — #10483 review,
+    # P2-3). This arm has to say so too, or the preview certifies the very
+    # artefact the destructive arm rejects, which is the divergence rounds 5
+    # and 8 closed for the body's CONTENT.
+    elif health is not None and not getattr(args, "health_url", None):
+        missing.append(
+            "the /health ARMED evidence came from a FILE (--health-json), not "
+            "from this deployment: `--execute` refuses a captured body "
+            f"({REFUSE_ARMED_EVIDENCE_STALE}) because its arming fact is "
+            "whatever its author wrote. Re-run with --health-url")
     if not getattr(args, "event_log_path", None):
         missing.append(
             "no --event-log-path: the journal the target's rebuild replays is "

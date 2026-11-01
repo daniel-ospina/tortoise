@@ -1846,12 +1846,19 @@ def test_a_flattened_body_that_names_no_record_is_refused_in_both_shapes():
         assert code == purge.REFUSE_RECORD_NOT_ARMED
 
 
-def _arming_missing(health) -> list[str]:
+def _arming_missing(health, *, health_url: bool = True) -> list[str]:
     """The preview's arming entries, isolated from the two unconditional notes
-    `_recovery_missing` always adds (record-backup drill, reverse graph path)."""
+    `_recovery_missing` always adds (record-backup drill, reverse graph path).
+
+    `health_url` says HOW the body reached the run — the live read
+    (`--health-url`, the only source `--execute` accepts) or a capture. The
+    source is part of the arming question now, so the argv has to state it.
+    """
+    argv = [*_TARGET_ARGV, "--target-note", "t", "--event-log-path", "j.jsonl"]
+    if health_url:
+        argv += ["--health-url", "https://tortoise.example/health"]
     missing = purge._recovery_missing(
-        purge._build_parser().parse_args(
-            [*_TARGET_ARGV, "--target-note", "t", "--event-log-path", "j.jsonl"]),
+        purge._build_parser().parse_args(argv),
         _proof(), health, _report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
         _target())
     return [m for m in missing if "ARMED" in m]
@@ -1902,6 +1909,19 @@ def test_an_armed_body_without_a_record_fingerprint_is_named_by_the_preview():
 def test_a_real_health_body_is_not_named_by_the_preview():
     """The positive arm: the fix must not turn every preview red."""
     assert _arming_missing(_health()) == []
+
+
+def test_the_preview_and_the_gate_agree_that_a_FILE_is_not_arming_evidence():
+    """The SOURCE half of the agreement (P2-3). `--execute` refuses a captured
+    body outright; a preview that printed RECOVERY-PATH-STATED over the same
+    body would certify the very artefact the destructive arm rejects — the
+    divergence rounds 5 and 8 closed for the body's CONTENT."""
+    named = _arming_missing(_health(), health_url=False)
+    assert named, "the preview must not certify a captured arming fact"
+    assert "--health-url" in named[0]
+    # …and the live source of the SAME body is clean, so this is a measurement
+    # of the source and not a constant.
+    assert _arming_missing(_health(), health_url=True) == []
 
 
 # ── round 8: the SAME agreement question, for the SECOND evidence artefact ──
