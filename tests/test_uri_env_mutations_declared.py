@@ -156,6 +156,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # fixture-param monkeypatch auto-restores (no lane leak).
     "test_9567_record_capstone.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #8447 truncation marker: the end-to-end half of the suite seeds a real
+    # store and applies a real `limit` to it, so it forces the EMBEDDED lane
+    # (delenv the URI, then pin TORTOISE_DB_PATH to a tmp_path db) — a URI
+    # redirect would fold the "20 matches, limit=5" measurement onto a shared
+    # server graph whose match count the test does not control, which is
+    # exactly what the marker is asserted against. The delenv IS the point;
+    # the fixture-param monkeypatch auto-restores (no lane leak).
+    "test_8447_truncation_marker.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #2724 churn-wave hygiene (2026-09-09): the two #2600 Phase 1 Task 1
     # apikey-verify unit tests (TestRegistryApikeyVerifyRawCreatedBy at
     # :163/:184) force the embedded lane (delenv the URI, then pin
@@ -737,6 +746,23 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # any query — so nothing rides the URI and no docker-half coverage is claimed.
     # The `monkeypatch` arg is function-scoped and auto-restores (no lane leak).
     "test_work_claim.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #10463/#10468: the S3 prior-ablation probe's `main()` refuses when either
+    # prerequisite is unset, and those two refusals are the ONLY behaviour these
+    # tests reach — every graph read below them (`run_arm`, `corpus_state`,
+    # `load_census`, `show`, `head_sha`, `assert_clean_tree`) is stubbed, and the
+    # one run that is allowed past them stubs `run_arm` outright. So the URI here
+    # is a PRESENCE input the refusal branch reads (`os.environ.get(
+    # "TORTOISE_DB_URI")` in the probe's `main()` guard), never a connection:
+    # DELIBERATE_URI for the `setenv` sites (a configured lane is the input that
+    # lets the run reach the refusals it is testing — nothing connects), and
+    # DELIBERATE_EMBEDDED_LANE for the `delenv`, which is the missing-URI refusal
+    # ITSELF (r6 F3: a keyless/URI-less run must exit 3 leaving no `--out` on
+    # disk, so the absent URI is exactly what the assertion is about).
+    # A docker-half green is not claimed for any site: no graph is queried.
+    # Function-scoped `monkeypatch`, auto-undone at teardown (no lane leak).
+    "test_s3_prior_ablation.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
 

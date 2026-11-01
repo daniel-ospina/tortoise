@@ -34317,6 +34317,15 @@ class TortoiseSDK:
         # (the wall-clock date for §5e) and is the byte-identical path.
         query_date: str | None = None,
         time_aware: bool = False,
+        # #8447: PRIVATE — the TRUNCATION marker's caller-owned sink, the same
+        # pattern ``read_status_out`` uses (and ``_record_reads`` /
+        # ``_residency_key`` for the other private read switches). The read
+        # path records whether it DROPPED rows at ``limit`` so the caller can
+        # tell a complete result from a subset; ``tortoise/truncation.py`` is
+        # the marker's ONE home and mints its own field rather than a fifth
+        # read-status term. Default None = not computed, so every existing
+        # caller is byte-identical (and pays nothing).
+        _truncation_out: dict | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -34625,6 +34634,16 @@ class TortoiseSDK:
         if claim_class is not None:
             claim_class = _claim_class.validate(claim_class)
 
+        # #8447: the TRUNCATION marker starts COMPLETE and is only ever flipped
+        # by a seam that actually drops rows. Seeding it here (rather than at
+        # the cut) is what makes every early return below a POSITIVE claim of
+        # completeness instead of an un-marked response the caller must guess
+        # about — the distinction the issue's contract turns on. A missing
+        # marker at the consumer is therefore a producer bug, not "complete"
+        # (``truncation.truncation_field`` refuses to guess).
+        if _truncation_out is not None:
+            _truncation_out["truncated"] = False
+
         # B6 (#3892): the status sink and the trace used to classify it. When
         # no status is requested this is exactly today's ``leg_trace`` (None
         # unless the caller passed one) — byte-identical behavior. When a
@@ -34638,6 +34657,15 @@ class TortoiseSDK:
             _caller_trace = leg_trace
         else:
             _caller_trace = None
+        # #8447 (review round 5, P2): the truncation marker's proof needs the
+        # SAME per-leg verdicts — a leg that never answered drops rows exactly
+        # as a cap does, and until this the marker could not see it. With a
+        # sink and no other trace, record one here: every consumer of
+        # `status_trace` only APPENDS audit entries (never changes the rows),
+        # and `degradation_chain` gates its per-leg lists on `trace_active`, so
+        # the cost is bounded and the answer is unchanged.
+        if status_trace is None and _truncation_out is not None:
+            status_trace = []
 
         # #7952 (§17.2): the COMPLETENESS MARKER. Declared only AFTER the
         # projection is obtained and the bounded probe has answered, so the
@@ -34665,6 +34693,18 @@ class TortoiseSDK:
                 _read_ledger = None
                 _read_ledger_enabled = False
 
+        # #8447: the TRUNCATION marker's state, written by the seam that DROPS
+        # rows and read by ``_with_read_status`` below — so the marker is
+        # recorded at the ONE place every return passes through, with the rows
+        # that actually SHIP. Before this, a cap applied downstream of the cut
+        # (``min_confidence``, a hit whose entity fetch came back empty) made
+        # the delivered count disagree with what the marker claimed: a 3-match
+        # pool whose 3 rows ``min_confidence`` filtered out answered 0 rows and
+        # ``truncated: False`` — a positive claim of completeness on an empty
+        # answer. Seeding ``candidates=0`` means every early return (nothing was
+        # cut) is positively marked COMPLETE rather than left un-marked.
+        _trunc: dict = {"candidates": 0, "exact": False, "incomplete": False}
+
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
 
@@ -34674,6 +34714,14 @@ class TortoiseSDK:
             store is known to be DECLARED and to have ANSWERED, and
             ``configured=True`` / ``reached=True`` are facts, not defaults.
             """
+            if _truncation_out is not None:
+                from .truncation import mark_truncation as _mark_truncation
+                # ``returned`` is the rows about to SHIP, not the rows that
+                # survived the cut — the difference is the downstream filters.
+                _mark_truncation(
+                    _truncation_out, returned=len(rows),
+                    candidates=_trunc["candidates"], exact=_trunc["exact"],
+                    incomplete=_trunc.get("incomplete", False))
             if read_status_out is not None:
                 status = _classify_leg_trace(
                     status_trace or (), hit_count=len(rows),
@@ -34791,6 +34839,13 @@ class TortoiseSDK:
                 # (off by policy, a set-up gap the engine does not have).
                 # Never an empty result, and never a raise.
                 read_status_out["status"] = _STATUS_DEGRADED
+                # #8447 (review round 2, P2): a store that never answered cannot
+                # be reported COMPLETE. The marker's own three states forbid it —
+                # 0 rows over an UNREAD store is the third state, not the first.
+                # Only ``status`` disagrees today, and only when its flag is on.
+                if _truncation_out is not None:
+                    _truncation_out["truncated"] = True
+                    _truncation_out.pop("total_available", None)
                 return []
             raise
         graph = proj.g
@@ -34810,6 +34865,11 @@ class TortoiseSDK:
                     "read path cannot reach the configured store (%s) — "
                     "degraded", e)
                 read_status_out["status"] = _STATUS_DEGRADED
+                # #8447 (review round 2, P2): configured but silent is still an
+                # unread store — never a complete empty answer.
+                if _truncation_out is not None:
+                    _truncation_out["truncated"] = True
+                    _truncation_out.pop("total_available", None)
                 return []
         # #7952: the store is reachable, so the known-hot set can be READ.
         if read_status_out is not None and _residency_enabled():
@@ -34943,10 +35003,10 @@ class TortoiseSDK:
         _vector_floor = _resolve_vector_min_similarity()
         _floored_legs: set[str] = set()
         # ── #8488: the in-process Okapi BM25 lexical arm ────────────────────
-        # Gated OFF by default (``TORTOISE_BM25_LEXICAL``, fail-safe — the same
-        # posture as every other lever here) because swapping the lexical
-        # SCORER is a retrieval-behaviour change and #8486 has produced no
-        # baseline to measure it against yet.
+        # ON by default, OPT-OUT via ``TORTOISE_BM25_LEXICAL=0`` (owner ruling
+        # 2026-10-28, ``tortoise/bm25.py::BM25_DEFAULT_ENABLED``) — the arm was
+        # fail-safe OFF only until it had its own mechanism-level evidence and
+        # the #10121 tie fix it depends on.
         #
         # What it swaps. The graph-side lexical leg is scored by the graph's
         # fulltext scorer, which on the embedded lane gives a rare term exactly
@@ -34994,6 +35054,10 @@ class TortoiseSDK:
         # Reopening it means feeding the expansion's alias tokens INTO the arm
         # so the arm is the last writer — not running it earlier.
         _bm25_lexical = False
+        # Where the ARM's own trace entries begin (``None`` = the arm did not
+        # run). The completeness proof attributes a leg-trace entry by
+        # PROVENANCE, never by the slot name both lexical scorers share.
+        _bm25_trace_start: int | None = None
         _prf_supersedes_the_arm = bool(
             search_keys_prf
             or (entity_key_expansion and entity_type == "point"))
@@ -35061,6 +35125,17 @@ class TortoiseSDK:
             # slot in the tally; this is the same slot scored differently, not
             # a second leg.
             from tortoise.search_engine import run_bm25_query
+            # #8447 (review round 6, P2): WHERE the arm's trace entries start.
+            # The arm records under the SAME ``leg="fts"`` slot (the trace's
+            # vocabulary has three leg names and the lexical one is that name),
+            # so the completeness proof below must attribute an entry by
+            # PROVENANCE, not by slot name — otherwise the arm's own
+            # ``breaker_open`` / ``query_failed`` verdicts are read as the
+            # SHIPPED leg failing, and every read on a store where the arm trips
+            # its breaker is marked ``truncated: true`` even though the shipped
+            # leg answered and every row shipped. A marker that fires on a
+            # healthy read is the false positive this module forbids.
+            _bm25_trace_start = len(status_trace) if status_trace is not None else None
             _bm25_hits = run_bm25_query(
                 graph, query, entity_type=entity_type, limit=str_limit,
                 timeout_ms=int(_elevated_timeout_ms or 500),
@@ -35082,6 +35157,50 @@ class TortoiseSDK:
                 # reason, not because order is guaranteed.
                 raw_results["fts"] = _bm25_hits
 
+        # #8447 (review round 5, P3): the PER-LEG window — how many rows the
+        # widest single leg returned — taken HERE, before any additive pass
+        # (``structural_hops``, PRF, entity-key expansion) widens a leg's list.
+        # A leg asked for ``str_limit`` rows that returns that many FILLED ITS
+        # OWN WINDOW, which proves matches beyond it were never read; saturation
+        # is therefore the proof on its own and needs no filter on top. Taken
+        # after the BM25 arm so a re-scored lexical slot counts as the leg it
+        # replaced. (Not the fused union: two legs of 60 under a window of 120
+        # reach ``str_limit`` together without either leg saturating.)
+        _leg_peak = max((len(_rows) for _rows in raw_results.values()), default=0)
+
+        # #8447 (review round 6): DID EVERY ASKED LEG ANSWER? The proof below only
+        # ever looked at the rows the SURVIVING legs returned, so a leg that
+        # raised, hit the 500 ms collective deadline or was refused by its own
+        # circuit breaker was invisible — its rows were never read and are
+        # unreachable, exactly like rows behind the cap. Ask the trace.
+        #
+        # ``_asked_legs`` mirrors ``degradation_chain``'s own submit predicate (a
+        # leg is only asked when the strategy is enabled AND it has a question:
+        # the sparse/structural legs need a query, the dense leg needs a query
+        # VECTOR). A leg that was never asked is a DECLARED capability gap — no
+        # embedder installed, say — not a drop from a set this read matched;
+        # ``status: degraded`` is the field that reports it, and marking every
+        # read on a keyword-only deployment truncated would be the false positive
+        # that trains readers to ignore this marker.
+        #
+        # ⛔ COMPUTED HERE, BEFORE the first early return below. The fold used to
+        # sit with the exactness proof, ~700 lines further down, so the two
+        # returns that leave this block (the #4028 floored vector leg, and
+        # ``no_fallback_applicable``) shipped ``truncated: false`` over a read
+        # whose sparse leg never answered — 0 rows marked COMPLETE over a store
+        # that was only half read. Every return after this point consults it.
+        #
+        # ``skip_from`` is the BM25 arm's provenance (see the call site): its
+        # entries are appended after the chain and describe the ARM.
+        _asked_legs = {
+            "fts": bool(strategies.get("fts") and query),
+            "vector": bool(strategies.get("vector") and query_vec),
+            "structural": bool(strategies.get("structural")),
+        }
+        from .truncation import lost_leg_owners as _lost_leg_owners
+        _lost_legs = _lost_leg_owners(
+            _asked_legs, status_trace, skip_from=_bm25_trace_start)
+
         if not raw_results:
             # #4028: the vector leg RAN and the relevance floor removed every
             # near neighbour. That is an ANSWER (nothing relevant), not a leg
@@ -35097,6 +35216,13 @@ class TortoiseSDK:
                 # data-returning path here. The hosted route indexes
                 # ``status_out["status"]`` unguarded, so a missing term is a
                 # 500, not a null.
+                #
+                # #8447 (review round 6, P3): an ASKED leg that never answered
+                # is the ONE reason this "nothing relevant" answer is not
+                # complete — the floor emptied the dense leg while the sparse one
+                # could have failed in the same read. The total is withheld
+                # (``exact`` stays False), so the caller gets the third state.
+                _trunc["incomplete"] = bool(_lost_legs)
                 return _with_read_status([])
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
@@ -35137,6 +35263,20 @@ class TortoiseSDK:
                         status_trace.append(_trace_entry(
                             "fallback", ran=True, degraded=True,
                             reason="tfidf_snapshot", count=len(snap_hits)))
+                    # #8447 (review P1): this arm DROPS rows — ``search_snapshot``
+                    # caps at ``limit`` — and it skipped the marker entirely, so a
+                    # 20-match store answered 5 rows marked COMPLETE. The pre-cap
+                    # MATCH count is not exposed by the scorer, so a FULL page is
+                    # read as what it is: proof that more MAY exist, never proof
+                    # that it does not. The total is therefore WITHHELD (round 2
+                    # caught a fabricated one here). Conservative in the safe
+                    # direction: this arm already reports ``status: degraded``, so
+                    # over-marking cannot turn a HEALTHY read into a partial. The
+                    # residual imprecision is a degraded read whose match count is
+                    # EXACTLY ``limit`` — marked incomplete when it is complete.
+                    _trunc["candidates"] = len(snap_hits) + (
+                        1 if len(snap_hits) >= limit else 0)
+                    _trunc["exact"] = False
                     return _with_read_status(
                         _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
@@ -35174,6 +35314,17 @@ class TortoiseSDK:
                         points = [p for p in points
                                   if p.get("id") in allowed_ids]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
+                # #8447 (review rounds 1+2): this arm DROPS rows at ``limit``, so
+                # it must mark. The pre-cap MATCH count is not exposed by the
+                # scorer (``search_points`` ranks the whole corpus and slices), so
+                # a FULL page is read as what it is — proof that more MAY exist,
+                # never proof that it does not — and the total is WITHHELD rather
+                # than published as ``len(points)``, which is the whole kind-scoped
+                # CORPUS, not the matches (round 2's finding: 5,000 Points with 20
+                # matches answered ``total_available: 5000``).
+                _trunc["candidates"] = len(legacy_hits) + (
+                    1 if len(legacy_hits) >= limit else 0)
+                _trunc["exact"] = False
                 if allowed_ids is not None:
                     # The ANNOTATION has to be re-applied: ``fallback_tfidf``
                     # rebuilds every row through ``SearchResult.to_dict()``,
@@ -35194,6 +35345,10 @@ class TortoiseSDK:
                 status_trace.append(_trace_entry(
                     "fallback", ran=True, degraded=True,
                     reason="no_fallback_applicable", count=0))
+            # #8447 (review round 6, P3): same fold as the floored return above —
+            # nothing was cut, but an asked leg that never answered means the
+            # empty answer is not a complete one.
+            _trunc["incomplete"] = bool(_lost_legs)
             return _with_read_status([])
 
         # R4 (#1543): 1-2 hop IMPL/NAND expansion on TEXT hits (graph as
@@ -35668,7 +35823,72 @@ class TortoiseSDK:
                                     else _vt_reason),
                             count=len(_vt_stats["demoted"])))
 
-        # Truncate AFTER filtering
+        # #8447: THIS is the seam where results are lost, and until now the read
+        # said nothing about it — ``limit`` above the candidate count returned a
+        # bare list, so "exactly 5 matches" and "20 matches, you got 5"
+        # serialized identically. Record the population the cap is applied to;
+        # ``_with_read_status`` publishes the verdict with the rows that ship.
+        #
+        # ``exact`` is a CLAIM, so it is only made on evidence: ``result_ids`` is
+        # the union of the retrieval legs, each asked for ``str_limit`` rows, so a
+        # set SHORTER than that window proves no leg filled its own limit. That
+        # proof does NOT survive a post-retrieval filter, though — the filters at
+        # the seams above (``exclude_status`` / ``claim_class`` /
+        # ``exclude_turn_echo_session``) SHRINK the union after the legs filled
+        # their windows, so a short set over a filtered read proves nothing. Nor
+        # does it survive a leg that never ANSWERED at all (``_lost_legs``
+        # below): its rows are absent from the union for a reason that has
+        # nothing to do with how many matches exist. Every one of those
+        # conditions must hold, or the count is withheld rather than published
+        # as a floor wearing a total's clothes.
+        _filters_shrank = bool(
+            exclude_status or claim_class is not None
+            or exclude_turn_echo_session
+            # #8447 (review round 2, P1): the POST-window kinds. ``kind``,
+            # ``relationship_filter`` and ``traversal_path`` all narrow
+            # ``result_ids`` AFTER the legs filled ``str_limit`` — the legs are
+            # ``entity_type``-scoped only, and the structural kind expansion is
+            # post-retrieval — so each of them breaks the same proof the filters
+            # above break.
+            or (kind is not None and query is not None)
+            or relationship_filter is not None
+            or traversal_path is not None
+            # #8447 (review P2): the SCORE FLOOR narrows the fused union after
+            # the legs filled their windows — the rows it drops scored below it,
+            # so the survivors are not provably the whole match population.
+            or threshold > 0)
+        # #8447 (review round 6, P2): WHY ``_lost_legs`` IS NOT COMPUTED HERE.
+        # It is folded above, before this block's first early return, and asks the
+        # trace with a ``(leg, reason)`` table instead of one flat reason list:
+        #
+        #   * ``fts`` + ``index_missing`` is a LOST leg, not an answer — the
+        #     lexical leg RAISED and returned nothing while the rows it would
+        #     have matched still exist, and that index is the only route to them
+        #     (``tortoise/truncation.py::LEG_ANSWERED_REASONS``).
+        #   * the #8488 BM25 arm writes into the SAME ``leg="fts"`` slot, so its
+        #     own ``breaker_open`` / ``query_failed`` entries are attributed to
+        #     the ARM by provenance (``skip_from``), never to the shipped leg
+        #     whose rows survive untouched.
+        #
+        # Key ABSENCE from ``raw_results`` could never make this distinction — a
+        # leg that ran and found nothing leaves no key either — which is why the
+        # trace, not the result dict, is the evidence. A leg emptied by the #4028
+        # relevance floor is likewise an answer (it recorded `degraded=False`),
+        # so it never enters here.
+        _trunc["candidates"] = len(result_ids)
+        _trunc["exact"] = (
+            (len(result_ids) < str_limit)
+            and not _filters_shrank
+            and not _lost_legs)
+        # A read is INCOMPLETE even when nothing was cut from the visible set, in
+        # two cases — both of them "matches this read never saw, reachable by no
+        # follow-up call":
+        #   * a leg filled its own window. Saturation IS the proof; it does not
+        #     need a filter on top, and requiring one let a `pool_size` below
+        #     `limit` (an EXACT override, `retrieve.resolve_pool_size`) launder a
+        #     saturated window into COMPLETE;
+        #   * an asked leg never answered (``_lost_legs``, folded above).
+        _trunc["incomplete"] = bool(_leg_peak >= str_limit or _lost_legs)
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)

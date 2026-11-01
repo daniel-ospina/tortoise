@@ -1618,6 +1618,67 @@ def assert_seam_target(harness: str,
     )
 
 
+def startup_seam_report(*, home: str | os.PathLike[str] | None = None,
+                        harnesses: tuple[str, ...] | None = None,
+                        ) -> list[str]:
+    """The READ side of :func:`assert_seam_target`: one sentence per seam
+    this machine would LOAD which is not the seam this repo SHIPS.
+
+    SCOPE: a READ-side surface — its callers are the drain's line and
+    `tortoise session health`. It is NOT the session-start surface §7/§9 of
+    ``docs/architecture/PI-CAPTURE-ARCHITECTURE.md`` record as unbuilt, and must
+    not be read as closing that criterion.
+
+    #6388 (part 2) / #10241 — the measured divergence: on the reference box the
+    installed seam was generation 14 (149,736 B) against a shipped generation 15
+    (152,752 B), because it was installed by an OLDER CLI and **no install ran on
+    that machine since**.  Install-time verification cannot observe that state by
+    construction — it grades a write THIS process just performed — so the
+    divergence was reported only by an EXPLICIT read-side check (`hooks status`,
+    `doctor`) and never at session start; a re-run of the installer before
+    #10241 did not even report it, it silently ERASED it.  A session that starts
+    on such a box captures with the old bytes and says nothing, which is
+    precisely the silence #6388 was filed for.
+
+    This is NOT a second predicate for the same rule (#1178).  It asks the one
+    question :func:`assert_seam_target` already answers — is the file the
+    harness LOADS (:func:`resolved <Path.resolve>` through symlinks, sha256)
+    the file we SHIP — and only changes WHO ASKS IT and WHEN: the read side
+    (``require_present=False``, so an absent seam stays ``missing-artifact``'s
+    answer) instead of the installer's write path.  The harness list defaults to
+    ``hook_install.ARTIFACT_CONTRACTS``, so a newly registered artifact seam is
+    asserted on the read side with no edit here — and one derivation of "where the
+    seam lives" (#4680), never a literal ``"pi"``.
+
+    REPORT-ONLY, by the same posture as the assert it delegates to: it never
+    raises and never blocks, and it returns sentences instead of a verdict so a
+    caller can attach them to whatever read-side surface it owns.  It therefore
+    does not take the fail-loud-vs-warn decision §7/§9 of
+    ``docs/architecture/PI-CAPTURE-ARCHITECTURE.md`` reserve for the owner: warn
+    is the branch this repo's capture seams already take on the READ side (a capture path that
+    refuses to start would lose every turn to report a stale copy); the
+    installer's own failure is unaffected, and only a session-start surface
+    would have to take the decision.
+    """
+    names = harnesses if harnesses is not None else tuple(
+        hook_install.ARTIFACT_CONTRACTS)
+    sentences: list[str] = []
+    for harness in names:
+        try:
+            divergence = assert_seam_target(harness, home=home,
+                                           require_present=False)
+        except Exception as e:  # pragma: no cover - assert_seam_target does
+            # not raise by design; a read-side report must not be the one place
+            # that turns a seam inspection into a failed session start.
+            sentences.append(
+                f"the {harness} capture seam could not be inspected: "
+                f"{e.__class__.__name__}: {e}")
+            continue
+        if divergence:
+            sentences.append(divergence)
+    return sentences
+
+
 def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     harness = "pi"
     ext_dir = pi_home(home)
@@ -2129,4 +2190,5 @@ __all__ = [
     "merge_cursor_capture_hooks",
     "openclaw_home",
     "pi_home",
+    "startup_seam_report",
 ]
