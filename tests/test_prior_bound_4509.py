@@ -147,8 +147,9 @@ def _hermetic_pool_and_legs(monkeypatch):
     reason the pool floor below gives. Pinned ON explicitly (#10446): the
     numbers below are the DEFAULT arm's, and a future flip of
     ``BM25_DEFAULT_ENABLED`` must not silently re-point them. The pin is
-    ASSERTED IN EFFECT by ``test_the_lexical_arm_pin_is_in_effect`` — a pin
-    nothing checks is a comment.
+    ASSERTED PRESENT AND IN EFFECT by
+    ``test_the_lexical_arm_pin_is_in_effect`` — a pin nothing checks is a
+    comment.
 
     The pool floor: ``resolve_pool_size`` honours ``TORTOISE_POOL_FLOOR``, so an
     ambient value in a developer's shell moves the very window the residual pin
@@ -165,16 +166,23 @@ def _hermetic_pool_and_legs(monkeypatch):
 
 
 def test_the_lexical_arm_pin_is_in_effect(_hermetic_pool_and_legs):
-    """The pin above must be IN EFFECT — through the constant
+    """The pin above must be PRESENT and IN EFFECT — through the constant
     ``tortoise.bm25.BM25_ENV``, never a literal, so a rename cannot quietly
     restore an ambient ordering (#10436's pattern).
 
-    Without this the pin is unfalsifiable and therefore untested: the arm is ON
-    by DEFAULT since #10240, so a ``setenv`` that stopped taking effect would
-    keep every test below green while they measured whatever the caller's shell
-    selected. The exposure is narrow (``from tortoise.bm25 import BM25_ENV``
-    fails loudly if the constant is removed), but a lever no test reads is a
-    comment — and this module's docstrings quote numbers as "the DEFAULT arm's".
+    TWO assertions, because the arm is ON by DEFAULT since #10240 and neither
+    half can see what the other does (#10460 review):
+
+    * ``os.environ.get(BM25_ENV) == "1"`` — the pin EXISTS. This is the half
+      that can fail where CI runs, because nothing exports the variable
+      (``tests/conftest.py``, ``config/`` and the workflows are silent on it):
+      delete the fixture's ``setenv`` and the resolved flag is STILL ``True``,
+      so an in-effect-only guard green-lights exactly the repair it exists to
+      forbid — a pin that stopped taking effect would leave every test below
+      green while they measured whatever the caller's shell selected.
+    * ``bm25_enabled() is True`` — the pin RESOLVES ON, i.e. an ambient ``=0``
+      does not defeat it and a future flip of ``BM25_DEFAULT_ENABLED`` cannot
+      leave it silently measuring the other ordering.
 
     Deliberately NOT an ``assert`` inside the fixture: a hard-failing fixture
     would turn a mutation of the LEVER into an ERROR for every test in the
@@ -182,6 +190,11 @@ def test_the_lexical_arm_pin_is_in_effect(_hermetic_pool_and_legs):
     """
     from tortoise.bm25 import bm25_enabled
 
+    assert os.environ.get(BM25_ENV) == "1", (
+        f"the autouse fixture no longer pins {BM25_ENV} (unset or "
+        f"{os.environ.get(BM25_ENV)!r}): the arm is ON by default, so every "
+        "test here would stay green while the ordering came from the caller's "
+        "shell")
     assert bm25_enabled() is True, (
         "the BM25-arm pin did not take — this module's numbers are documented "
         "as the DEFAULT arm's, so a pin that resolves OFF (or not at all) means "
