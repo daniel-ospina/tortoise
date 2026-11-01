@@ -318,6 +318,82 @@ def test_eval_annotation_forwards_the_end_state_for_the_marker(sdk):
         "[valid since 2026-06-14; end unknown]"
 
 
+def test_eval_annotation_keeps_an_absent_end_absent(sdk):
+    """#9202 review: the annotation surface forwards absence as absence.
+
+    FAIL VALUE: ``_annotate_hits`` spelled every missing window field as ``""``
+    (``h.get("valid_to") or ""``). ``""`` is NOT this codebase's spelling of
+    "no end" — since #9202 ``validity.end_state`` reads a STORED ``""`` as an
+    ASSERTED, un-datable end (``END_UNKNOWN``; owner ruling 2026-10-25,
+    ONTOLOGY §4.7), and ``time_aware.is_stale_entry`` now honours that state.
+    So the annotation minted an end the graph never wrote: every UNDATED eval
+    hit ranked STALE at every ``question_date``, and the C6 ``prefer_latest_-
+    order`` arm degraded to ``all-stale-never-starve`` — a silent no-op whose
+    stats reason reads as a legitimate never-starve. Fixed on the PRODUCER
+    side (absence travels as ``None``); the predicate is untouched, so the
+    ruling that a stored un-datable end is ENDED is not re-opened.
+    """
+    from tools.longmem_eval.retrieve import _annotate_hits, _validity_marker
+    from tortoise.time_aware import is_stale_entry
+
+    timeless = sdk.create_point("statement", "i live in lisbon")
+    hits = _scan(sdk)
+    # non-vacuous premise: the search payload carries NO window key for an
+    # undated point (pinned by test_undated_hits_have_no_window_keys).
+    raw = next(h for h in hits if h["id"] == timeless["id"])
+    for key in ("valid_from", "valid_to", "expired_at", "end_state"):
+        assert key not in raw, (key, raw)
+
+    entry = next(e for e in _annotate_hits(hits, {}, [])
+                 if e["id"] == timeless["id"])
+
+    # THE FIX: an absent end is not an end, at any question_date. (RED on the
+    # pre-fix producer: ``entry["valid_to"]`` was ``""`` ⇒ ``is_stale_entry``
+    # returned True for every ``qd`` below.)
+    for qd in ("1990-01-01", "2026-09-25", "2050-01-01", None):
+        assert is_stale_entry(entry, question_date=qd) is False, qd
+
+    # the MECHANISM: the annotated key set stays the documented 21 — absence is
+    # a ``None`` VALUE, never a dropped key (the C3-1/C4 driver golden pins the
+    # count) and never a minted ``""``.
+    assert len(entry) == 21
+    for key in ("valid_from", "valid_to", "expired_at",
+                "valid_from_precision", "valid_to_precision", "end_state"):
+        assert key in entry, key
+        assert entry[key] is None, (key, entry[key])
+
+    # The two halves that keep this honest — neither is re-opened by the fix:
+    # (i) the PRE-FIX spelling really was read as ENDED (so this pins the
+    #     producer, not a blanket "never demote");
+    # (ii) a legacy STORED un-datable end still reads ENDED, which is the
+    #     #9202 ruling itself.
+    assert is_stale_entry({**entry, "valid_to": ""},
+                          question_date="2050-01-01") is True
+    assert is_stale_entry({**entry, "end_state": "unknown"},
+                          question_date="2050-01-01") is True
+    # and the reader is byte-identical: no window ⇒ no [valid …] marker.
+    assert _validity_marker(entry) == ""
+
+
+def test_eval_annotation_of_a_legacy_undatable_end_still_reads_ended(sdk):
+    """The #9202 ruling survives the producer fix (end-to-end, not by dict)."""
+    from tools.longmem_eval.retrieve import _annotate_hits
+    from tortoise.time_aware import is_stale_entry
+
+    ended = sdk.create_point("statement", "ended, un-datable",
+                             validFrom="2026-06-14",
+                             validToPrecision="unknown")
+    entry = next(e for e in _annotate_hits(_scan(sdk), {}, [])
+                 if e["id"] == ended["id"])
+    # the payload normalises the stored end to ``None`` + ``end_state``
+    # ``unknown`` (search_engine uses ``or None``); the annotation forwards
+    # BOTH, so the state — not a minted ``""`` — is what carries the end.
+    assert entry["valid_to"] is None
+    assert entry["end_state"] == "unknown"
+    for qd in ("2026-09-25", "2050-01-01", None):
+        assert is_stale_entry(entry, question_date=qd) is True, qd
+
+
 def test_provenance_flag_is_absent_by_default_and_additive_when_on(sdk, monkeypatch):
     """Objectives 5/9 + owner decision #3837 (source + when learned + confidence).
 

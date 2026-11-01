@@ -154,6 +154,7 @@ import weakref
 from collections import Counter
 from typing import Any
 
+from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
 from . import value_gate as _value_gate  # #4899: the S2.2b identifier-only predicate
 from . import vet_gate as _vet_gate  # #5005: S2.2 VET (stdlib-only module)
 from ._gate_memo import GateMemo
@@ -2672,6 +2673,91 @@ def _story_topics(story: str, cap: int = 6) -> list[str]:
     return topics
 
 
+#: The character width a leg's derived query is cut to BEFORE sanitisation, per
+#: leg. ``object`` is uncut (an entity name is short and cutting it would merge
+#: two different entities into one query); the text legs are cut to 80 because
+#: the query is a search string, not the claim.
+_QUERY_TEXT_WIDTH: dict[str, int | None] = {
+    "object": None,
+    "event": 80,
+    "point": 80,
+}
+
+
+def _candidate_text(value: object) -> str:
+    """The text `execute_embed` will USE for a candidate — the writer's OWN
+    coercion, not a second opinion about it.
+
+    ⛔ `str(value)` and **never** `str(value or "")`: `#5060` made a falsy content
+    WRITABLE as its coerced text, so a `None` content is committed as `"None"`
+    while `""` and whitespace-only content are **dropped** (`if not content:
+    continue`). That asymmetry is what tells a candidate S5 writes from one it
+    never writes, and reading it wrong in either direction makes the identity
+    report lie:
+
+    * counting a DROPPED (empty) candidate made the report fire on a healthy run
+      and assert a record the run never emitted (#5095 review round 3);
+    * skipping a COERCED (`None`) candidate hid a committed Point whose identity
+      was never established (#5095 review round 2).
+
+    One home: the derivation, the coverage question, the report and the record all
+    read this.
+    """
+    return str(value).strip()
+
+
+def _candidate_query_text(entity_type: str, raw: str) -> str:
+    """The text a candidate's OWN derived query is built from — ONE home, in this
+    order: **strip, then cut to the leg's width**.
+
+    ⛔ The order is the whole point, and it was a live defect (#5095 review B2):
+    `_derive_queries` cut the RAW text to 80 and stripped afterwards (inside
+    `_sanitise_query_text`), while `execute_embed` stripped first and then took
+    `content[:80]`. For a 100-character point whose raw text begins with a space,
+    those two windows are different strings, so the query that RAN and the key
+    asked for at commit time were different — and the record then said *"the
+    lookup did not run for this candidate"* about a lookup that ran, which is the
+    opposite lie from the one this change exists to remove. Every producer of a
+    candidate query (the derivation, the coverage question, the record) goes
+    through this function.
+    """
+    text = _candidate_text(raw)
+    width = _QUERY_TEXT_WIDTH.get(entity_type)
+    return text[:width] if width else text
+
+
+def _sanitise_query_text(raw: str) -> str:
+    """The searchable form of one derived query — sanitised, truncated to 160.
+
+    #1350 D3: RediSearch treats 'word:' as a field-prefix and punctuation as
+    syntax — sanitize derived query text so an FTS failure never kills a search
+    leg. ⛔ ONE home: `_derive_queries` stores this form and `_query_key` keys on
+    it, so the query that RUNS and the key that reports coverage cannot drift.
+    """
+    q = (raw or "").strip()
+    if not q:
+        return ""
+    q = re.sub(r"\b\w+:", " ", q)
+    q = re.sub(r"[^\w\s-]", " ", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    return q[:160]
+
+
+def _query_key(entity_type: str, raw: str) -> str | None:
+    """The IDENTITY of one derived query — ``<leg>:<normalised text>``.
+
+    `_derive_queries` derives with it and `_candidate_covered` asks the same
+    question of a single candidate with it. A second copy of this normalisation
+    would let a candidate's key drift from the query that was actually run, and
+    the drift would be invisible — the record would simply say *"not run"* about
+    a query that ran. Returns ``None`` for a query with no searchable text.
+    """
+    q = _sanitise_query_text(raw)
+    if not q:
+        return None
+    return f"{entity_type}:{_norm_sent(q)}"
+
+
 def _derive_queries(embed_list: dict, story: str) -> dict:
     """Deterministic query derivation: entity names → object/subject,
     event contents → event, point contents → point, story topics → point.
@@ -2680,30 +2766,24 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     seen: set[str] = set()
 
     def _add(entity_type: str, q: str) -> None:
-        q = (q or "").strip()
-        if not q:
-            return
-        # #1350 D3: RediSearch treats 'word:' as a field-prefix and
-        # punctuation as syntax — sanitize derived query text so an FTS
-        # failure never kills a search leg.
-        q = re.sub(r"\b\w+:", " ", q)
-        q = re.sub(r"[^\w\s-]", " ", q)
-        q = re.sub(r"\s+", " ", q).strip()
-        key = f"{entity_type}:{_norm_sent(q)}"
-        if key in seen:
+        key = _query_key(entity_type, q)
+        if key is None or key in seen:
             return
         seen.add(key)
-        queries[entity_type].append(q[:160])
+        queries[entity_type].append(_sanitise_query_text(q))
 
     for e in embed_list.get("entities", []) or []:
         if isinstance(e, dict) and e.get("name"):
-            _add("object", str(e["name"]))
+            # through the ONE home, like the text legs: the object width is None
+            # today, so this is behaviour-identical — and the day one is set, the
+            # derivation and the record cannot silently disagree (#5095 review).
+            _add("object", _candidate_query_text("object", e.get("name")))
     for ev in embed_list.get("events", []) or []:
         if isinstance(ev, dict) and ev.get("content"):
-            _add("event", str(ev["content"])[:80])
+            _add("event", _candidate_query_text("event", ev.get("content")))
     for p in embed_list.get("points", []) or []:
         if isinstance(p, dict) and p.get("content"):
-            _add("point", str(p["content"])[:80])
+            _add("point", _candidate_query_text("point", p.get("content")))
     for t in _story_topics(story):
         _add("point", t)
     return queries
@@ -2878,11 +2958,27 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     Returns:
         {"mode": str, "degraded": bool, "reason": str|None,
          "entities": [{id, name, kind}], "points": [{id, content, kind}],
-         "events": [{id, content, kind}], "queries_run": int}
+         "events": [{id, content, kind}], "queries_run": int,
+         "query_coverage": {"derived"|"ran"|"failed": {leg: int}},
+         "query_results": {"ran": [key], "failed": [key]}}
+
+    ⛔ ``degraded`` is NOT the completeness signal (#5095). It means the search
+    never got through its FIRST query, so a degraded result carries ZERO priors;
+    a failure on query 2..N is swallowed and the run returns ``degraded: False``
+    with a genuinely PARTIAL prior set. ``query_coverage`` / ``query_results``
+    are what make that distinction readable — ``failure_policy.lookup_state``
+    reads them, and a consumer that reads only ``degraded`` is asking the
+    question this function could not previously answer.
     """
     mode = resolve_backend_mode()
+    # `query_coverage` / `query_results` are present on EVERY return path, zeroed
+    # here: the documented shape is what a caller indexes, and these two paths are
+    # exactly the unresolved ones — a KeyError on the unresolved shape would be the
+    # worst place to have one (#5095 review A5).
     empty = {"mode": mode, "degraded": True, "reason": None,
-             "entities": [], "points": [], "events": [], "queries_run": 0}
+             "entities": [], "points": [], "events": [], "queries_run": 0,
+             "query_coverage": {"derived": {}, "ran": {}, "failed": {}},
+             "query_results": {"ran": [], "failed": []}}
     if not _is_searchable_backend(mode, sdk):
         store = ("FalkorDBLite (embedded)"
                  if _sdk_backend_is_embedded(sdk) else repr(mode))
@@ -2900,6 +2996,19 @@ def search_graph(sdk, embed_list: dict, story: str, *,
     bucket = {"object": "entities", "subject": "entities",
               "event": "events", "point": "points"}
     results: dict[str, dict] = {"entities": {}, "points": {}, "events": {}}
+    # #5095 (§4.4 G3): the lookup's COMPLETENESS, reported rather than assumed.
+    # `degraded` alone cannot express it — a failure on query 2..N is swallowed
+    # below (correctly: one bad query is not a dead graph), and the run then
+    # returns `degraded: False` with a genuinely PARTIAL prior set. That is the
+    # reachable incomplete shape, and the reason `failure_policy.lookup_state`
+    # reads these counters rather than the single `degraded` bit.
+    coverage: dict[str, dict[str, int]] = {
+        "derived": {leg: len(qs) for leg, qs in queries.items()},
+        "ran": {leg: 0 for leg in queries},
+        "failed": {leg: 0 for leg in queries},
+    }
+    ran_keys: list[str] = []
+    failed_keys: list[str] = []
     q_run = 0
     try:
         first = True
@@ -2922,7 +3031,15 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                     # dead graph).
                     if first:
                         raise
+                    coverage["failed"][entity_type] += 1
+                    key = _query_key(entity_type, q)
+                    if key:
+                        failed_keys.append(key)
                     continue
+                coverage["ran"][entity_type] += 1
+                key = _query_key(entity_type, q)
+                if key:
+                    ran_keys.append(key)
                 first = False
     except Exception as e:  # backend unreachable — degrade, don't raise
         _enrich_point_priors(sdk, list(results["points"].values()))
@@ -2933,6 +3050,12 @@ def search_graph(sdk, embed_list: dict, story: str, *,
             "points": list(results["points"].values()),
             "events": list(results["events"].values()),
             "queries_run": q_run,
+            # A degraded lookup ran no query to completion (the handler is
+            # reachable only from the FIRST query), so its coverage is zeros —
+            # reported rather than omitted, so a reader can tell "reported as
+            # zero" from "not reported".
+            "query_coverage": coverage,
+            "query_results": {"ran": [], "failed": []},
         }
     _enrich_point_priors(sdk, list(results["points"].values()))
     return {
@@ -2941,15 +3064,119 @@ def search_graph(sdk, embed_list: dict, story: str, *,
         "points": list(results["points"].values()),
         "events": list(results["events"].values()),
         "queries_run": q_run,
+        "query_coverage": coverage,
+        "query_results": {"ran": ran_keys, "failed": failed_keys},
     }
 
 
+def _candidate_covered(search: dict, entity_type: str, raw: str) -> bool:
+    """Did the run's OWN identity query for THIS candidate actually run?
+
+    Per-candidate, not per-run: with a bounded lookup some candidates' queries
+    ran and others' did not, and folding them into one answer is the same defect
+    this whole change removes — a claim about a check that did not happen.
+
+    Fallbacks, both stated: a ``search`` built by something other than
+    `search_graph` carries no ``query_results``, so the run-level state is all
+    there is (``failure_policy`` falls back the same way and for the same
+    reason); and a candidate that derives no searchable text has no query at all,
+    so its identity was never tested.
+    """
+    results = (search or {}).get("query_results") if isinstance(search, dict) else None
+    key = _query_key(entity_type, raw)
+    if key is None:
+        # No searchable text means NO derived query existed, so this candidate was
+        # never tested — whatever the run-level state says. Checked BEFORE the
+        # fallback below: a resolved run with no `query_results` (a foreign search
+        # dict) would otherwise answer "covered" for a candidate nothing queried
+        # (#5095 review B1).
+        return False
+    if not isinstance(results, dict):
+        return _failure_policy.lookup_state(search) == _failure_policy.LOOKUP_RESOLVED
+    ran = results.get("ran")
+    return isinstance(ran, list) and key in ran
+
+
+def _identity_report(search: dict, candidates: dict) -> dict:
+    """§4.4 G3's run-level report — how much of this run's identity is unresolved.
+
+    Per CANDIDATE, not per run: a bounded lookup leaves some candidates' queries
+    run and others' unrun, and the difference is exactly what the next slice
+    (I1's create gate) has to act on. `operators` and `retractions` are counted
+    but not attributed: both name OTHER items, so their identity is the identity
+    of what they reference rather than of a query of their own — a stated limit,
+    not an oversight.
+
+    I2's *"never silently"* is the whole point: nothing here drops or suppresses
+    anything. It makes the run's own record say which part of what it committed
+    was never checked against the graph.
+    """
+    if not isinstance(candidates, dict):
+        candidates = {}
+    counts: dict[str, int] = {}
+    unresolved: dict[str, int] = {}
+    for section, leg in _failure_policy.LEG_BY_SECTION.items():
+        items = [item for item in (candidates.get(section) or [])
+                 if isinstance(item, dict)]
+        text_key = {"entities": "name", "events": "content", "points": "content"}[section]
+        missing = 0
+        counted = 0
+        for item in items:
+            # ⛔ S5's OWN admission test (`_candidate_text`): a candidate it will
+            # DROP (`""` / whitespace-only content — `if not content: continue`)
+            # is not a candidate. Counting one fired the warning on a healthy run
+            # and asserted a record the run never emitted (#5095 review round 3),
+            # while skipping the ones it COERCES and writes (`None` -> "None")
+            # hid a committed candidate whose identity was never established
+            # (#5095 review round 2). Both directions are the same mistake about
+            # the same asymmetry, and it lives in ONE place now.
+            raw = _candidate_query_text(leg, item.get(text_key, ""))
+            if not raw:
+                continue
+            counted += 1
+            if not _candidate_covered(search, leg, raw):
+                missing += 1
+        counts[section] = counted
+        unresolved[section] = missing
+    for section in ("operators", "retractions"):
+        counts[section] = len([item for item in (candidates.get(section) or [])
+                               if isinstance(item, dict)])
+    return _failure_policy.plan_identity(
+        search, candidates=counts, unresolved=unresolved)
+
+
+
 def _render_search_results(search: dict) -> str:
+    """The S4 prompt's view of the S3 lookup — and the TRUTH about what it checked.
+
+    #5095 (§4.4 G3): this used to answer a degraded lookup with *"no existing
+    items available"* and an instruction to treat everything as new — a claim
+    about a check that never happened, on the one pass (`run_s4`, the GAP
+    REVIEWER) whose output becomes the committed candidate list. Both halves are
+    the inverse of invariant I1, so the clause now comes from
+    `failure_policy.lookup_note`: what is true (*unresolved*, not absent), what
+    not to infer (nothing is *new*), and what not to claim (omit a
+    `link_before_create` entry for a search that did not happen) — while keeping
+    the EMISSION requirement, because forbidding the false claim must not read
+    as forbidding the work.
+
+    A `partial` lookup keeps its real hits: the results are shown, and the note
+    is prepended. A `resolved` lookup renders byte-identically to pre-#5095.
+    """
     if not search:
-        return "(no graph search results)"
+        # An empty/None search is `unresolved`, not "nothing exists" (#5095
+        # review B3): `run_s4` is reachable with `{}` (a tool caller, a test), and
+        # saying "no existing items" there is the same unmeasured absence claim
+        # this function no longer makes for a degraded lookup.
+        empty_note = _failure_policy.lookup_note(search)
+        return (f"{empty_note}\n\n(no graph search results)"
+                if empty_note else "(no graph search results)")
+    note = _failure_policy.lookup_note(search)
     if search.get("degraded"):
-        return (f"(graph search DEGRADED — {search.get('reason') or 'skipped'}; "
-                "no existing items available; assume everything is new)")
+        # A degraded lookup has no priors to render (the handler is reachable
+        # only from the FIRST query, so zero rows were collected) — the note is
+        # the whole render, and it substitutes for the old inverted sentence.
+        return note or "(graph search DEGRADED; the existing-item lookup did not run)"
     parts = []
     if search.get("entities"):
         parts.append("EXISTING ENTITIES (id | name | kind):\n" + "\n".join(
@@ -2964,8 +3191,13 @@ def _render_search_results(search: dict) -> str:
             f"- {e['id']} | {e.get('content', '')[:120]} | {e.get('kind', '')}"
             for e in search["events"][:40]))
     if not parts:
+        # No hits is a MEASURED absence only when the lookup completed; a
+        # partial lookup's empty leg is not evidence of anything.
+        if note:
+            return note + "\n\n(graph search returned no existing items)"
         return "(graph search returned no existing items)"
-    return "\n\n".join(parts)
+    body = "\n\n".join(parts)
+    return f"{note}\n\n{body}" if note else body
 
 
 # ── S4: REVIEW GAPS — the complete embed list ──────────────────────────────
@@ -5951,7 +6183,7 @@ def _scripts(content: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def _identity_differences(a: str, b: str) -> frozenset[str]:
+def _identity_differences(a: str, b: str, absorbed: list[str] | None = None) -> frozenset[str]:
     """Every identity dimension in which ``a`` and ``b`` differ.
 
     Deliberately independent of the value dimensions.  Asking only for the
@@ -5959,6 +6191,10 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     "the deploy succeeded at 3pm" and "the deploy failed at 5pm" differ in a
     number and in the predicate, and returning the number would license
     superseding the predicate — the harm this boundary exists to prevent.
+
+    ``absorbed`` (#5329 out-param, never read by this function's answer): the
+    pair's ONE-SIDED content tokens, which a fold therefore discards.  See the
+    vocabulary-gap census appended at the end of this module.
     """
     out: set[str] = set()
     neg_a, neg_b = _negation_markers(a), _negation_markers(b)
@@ -5973,6 +6209,8 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     content_a, content_b = _content_tokens(a), _content_tokens(b)
     only_a, only_b = content_a - content_b, content_b - content_a
     one_sided = only_a | only_b
+    if absorbed is not None:  # #5329: deterministic order; never a decision
+        absorbed.extend(sorted(one_sided))
     named = _proper_nouns(a) | _proper_nouns(b)
     if only_a and only_b:
         out.add("substituted_content")
@@ -6039,13 +6277,18 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
     Total and fail-closed — every input is coerced by ``_norm`` and every
     operation is a string, regex or set operation, so LLM-shaped input cannot
     raise here; if anything does, the sentinel reads as a difference.
+
+    #5329: a FOLD's absorbed one-sided tokens are counted (see the census at
+    the end of this module); the decision itself is unchanged.
     """
+    absorbed: list[str] = []
+    absorbed_fold = False
     try:
         ta, tb = _guard_tokens(a), _guard_tokens(b)
         if not ta or not tb:
             # Nothing to compare: refuse the fold rather than assume agreement.
             return "unreadable", _UNREADABLE
-        identity = _identity_differences(a, b)
+        identity = _identity_differences(a, b, absorbed=absorbed)
         dimension: str | None = None
         # The identity dimensions come first, because they are the ones that
         # constrain BOTH decisions; a value dimension is reported only when no
@@ -6066,9 +6309,14 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
                 dimension = "number"
             elif _date_tokens(a) != _date_tokens(b):
                 dimension = "date"
+            if dimension is None:
+                absorbed_fold = True  # #5329: a fold — count what it absorbed
         return dimension, identity
     except Exception:  # noqa: BLE001, RUF100
         return "unreadable", _UNREADABLE
+    finally:
+        if absorbed_fold:
+            _record_vocabulary_gap(absorbed)
 
 
 def distinguishing_difference(a: str, b: str) -> str | None:
@@ -7413,9 +7661,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                                 "across namespaces in the existing graph — "
                                 "created with the explicit kind (link-before-"
                                 "create cannot disambiguate)")
-            link_before_create.append({
-                "searched_for": f"entity '{name}'", "found": False,
-                "note": "no match — created"})
+            link_before_create.append(_failure_policy.created_record(
+                f"entity '{name}'",
+                query_ran=_candidate_covered(
+                    search, "object", _candidate_query_text("object", name))))
         lifecycle = str(e.get("lifecycle", "") or "").strip()
         supersedes_ref = str(e.get("supersedes") or "").strip()
         supersedes_collected = bool(supersedes_ref and supersedes_ref
@@ -7534,9 +7783,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     "note": f"existing {eid} — connect, do not re-create"})
                 break
         else:
-            link_before_create.append({
-                "searched_for": f"event '{content[:60]}'", "found": False,
-                "note": "no match — created"})
+            link_before_create.append(_failure_policy.created_record(
+                f"event '{content[:60]}'",
+                query_ran=_candidate_covered(
+                    search, "event", _candidate_query_text("event", content))))
         event_ids[n] = eid
         ev_entry = {
             "id": eid, "eventKind": ekind.rsplit(":", 1)[-1] if ":" in ekind else ekind,
@@ -7802,9 +8052,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                                 "value change)"})
         else:
             reason = "NEW"
-            link_before_create.append({
-                "searched_for": f"point '{content[:60]}'", "found": False,
-                "note": "no match — created"})
+            link_before_create.append(_failure_policy.created_record(
+                f"point '{content[:60]}'",
+                query_ran=_candidate_covered(
+                    search, "point", _candidate_query_text("point", content))))
         # #2552 (op_04): collect an explicit point-level ``supersedes`` ref
         # (the DECISION-REVERSAL channel — a NEW decision/claim replaces a
         # prior-session one). Resolution runs after the loop against the S3
@@ -8866,6 +9117,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                                    "restamp_overrides": 0,
                                    "slot_rekeys": 0},
                 "vet": {"enabled": vet_enabled, "s2": {}, "union": {}},
+                # #5095: the always-present rule applies to this hand-enumerated
+                # return too — and this branch's `search` is the most unresolved
+                # one there is (nothing ran), so an absent block here would be
+                # the one omission that matters.
+                "identity": _identity_report(
+                    {"mode": resolve_backend_mode(), "degraded": True,
+                     "reason": "no conversation content"}, {}),
                 "chain_enforcer": {"notes": [], "stats": {
                     "items_checked": 0, "violations": 0,
                     "rewired": 0, "warned": 0}}}
@@ -9262,6 +9520,42 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["embed_list"] = complete_list
     result["s2_embed"] = embed_list          # S2 raw (pre-S4) — owner loop
     result["search"] = search
+    # #5095 (§4.4 G3): the identity surface — always present, additive. It says
+    # which candidates the run committed WITHOUT ever checking them against the
+    # graph, so nothing about an unrun lookup is silent (I2). The held/averted
+    # count is the input the next slice (I1's create gate) reads.
+    result["identity"] = _identity_report(search, complete_list)
+    _id = result["identity"]
+    if _id["state"] != _failure_policy.LOOKUP_RESOLVED:
+        # The denominator is the ATTRIBUTED classes (entities / events / points) —
+        # the ones a query can establish or fail to. `operators` and `retractions`
+        # name OTHER items and are reported as counts only, so folding them in
+        # here would print a share over two different populations (#5095 review
+        # B4). And the set is the run's PROPOSED candidate list, before S5's own
+        # dedup drops any of it — the text says "candidate", never "committed".
+        _denominator = sum(_id["candidates"].get(section, 0)
+                           for section in _failure_policy.LEG_BY_SECTION)
+        _reason = f" ({_id['reason']})" if _id["reason"] else ""
+        if _id["unresolved_total"]:
+            # ⛔ Two sentences, never one generalised over both, and NEITHER
+            # asserts what a candidate's own `link_before_create` says: a
+            # candidate whose query was cut can still be folded onto a prior by
+            # S5 (`found: true`), so "their record says UNRESOLVED" was a false
+            # claim about that candidate's record (#5095 review round 3).
+            result.setdefault("warnings", []).append(
+                f"S3 identity {_id['state']}{_reason}: the existing-item lookup "
+                f"did not run for {_id['unresolved_total']} of {_denominator} "
+                f"candidate(s)")
+        else:
+            # The other shape, and it is ordinary rather than broken: the budget
+            # can cut only the trailing STORY-TOPIC queries, which follow every
+            # candidate query. Saying "the lookup did not run over the candidate
+            # set" here contradicted the block's own counters in the same result
+            # (#5095 review round 3).
+            result.setdefault("warnings", []).append(
+                f"S3 identity {_id['state']}{_reason}: part of the lookup did "
+                f"not run or did not complete, but every candidate's own query "
+                f"ran — no candidate was left unchecked")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface
@@ -10964,3 +11258,305 @@ def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
         lines += [f"- {cat}: {desc}" for cat, desc in ups.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
     return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# APPENDED AT THE END OF THIS MODULE ON PURPOSE — see the #7949 capstone note:
+# docs/evidence/7949-capstone/ types this module's live `file.py:line` cites, so
+# an insertion ANYWHERE ABOVE them re-stales all of them. New code goes here.
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Vocabulary gap census (#5329) — see the append note above ──────────────────────────────────────────────
+#
+# The boundary refuses a fold on differences read from CLOSED, hand-written
+# word lists: ``_NEGATION_MARKERS``, ``_CONDITION_MARKERS`` /
+# ``_CONDITION_PHRASES``, ``_DATE_WORDS``, ``_CLOCK_UNITS``, ``_SCRIPT_BLOCKS``.
+# Every one is finite, and a marker the lists do not name reaches NO identity
+# dimension — the pair then reads as a one-sided broadening and FOLDS (memory
+# loss: a wrong keep is noise, a wrong drop is a deleted claim).
+#
+# The lists are not the bug: closing the class needs a model, not a longer list
+# (#5329's own recommendation), and failing closed on any unknown token would
+# over-block every legitimate broadening. The bug was that the fold happened
+# SILENTLY — nothing anywhere said "this token reached no identity dimension".
+# This census is that statement: it counts, per token, the fold decisions that
+# absorbed it, so the tokens that fell off the end of the vocabularies are
+# nameable and countable instead of invisible. It never changes a decision.
+#
+# WHAT IT DOES NOT CLAIM (review F2): it does not classify. A token here is
+# "one-sided content that reached no identity dimension" — the population a
+# marker gap HIDES IN, not proof of one. Ordinary dropped details land here too
+# ("the team meets weekly in main office" ← "the team meets weekly" absorbs
+# `main`, `office`). Recurrence is the operator's signal: a genuine marker
+# recurs across many claims, a one-off detail does not.
+#
+# TWO POPULATIONS, reported separately (review cycle 2, ISSUE 2). A token the
+# PAIR-READ vocabularies NAMES (`_CONNECTIVE_MEMBERS`, `_POLARITY_MEMBERS`) is
+# not a missing list entry — but it is also not UNDERSTOOD by a fold that still
+# absorbed it: a one-sided `because` reaches no identity dimension (the swap
+# guard refuses only a SWAP) and a one-sided `off` outside a copula predicate
+# does not fire the state guard, so both are DROPPED, and `because` takes the
+# causal link with it. Subtracting them on token membership hid exactly the
+# load-bearing case; they are counted in their own buckets instead —
+# `one_sided_connective` / `one_sided_state` in ``vocabulary_gap_snapshot()`` —
+# so "named by a closed list" stays distinct from "handled by the guard".
+#
+# Read it with ``vocabulary_gap_report()`` (the UNNAMED tokens) and
+# ``vocabulary_gap_snapshot()`` (the unnamed tokens, the pair-read residual, and
+# the bounds actually hit — the only reading that says whether the sample is
+# complete); reset it with ``reset_vocabulary_gap_census()`` between measurement
+# windows.
+
+#: Distinct absorbed tokens retained (a report is a SAMPLE of the tail, and
+#: says so; the running total is exact regardless).  Bounded so a long-lived
+#: process cannot grow this without limit.
+_VOCABULARY_GAP_CAP = 512
+#: Distinct tokens logged at WARNING on first sight.  Bounded for the same
+#: reason — the census is the durable record, the log line is the alarm.
+_VOCABULARY_GAP_LOG_CAP = 32
+#: Longest token retained, in characters (review F4). A token comes from
+#: ``_content_tokens``, so an unlucky claim can carry a URL or a base64 blob;
+#: un-truncated it would pin claim-sized strings for the process's lifetime and
+#: emit claim-sized log records. Longer ones are counted, not retained.
+_VOCABULARY_GAP_MAX_TOKEN = 64
+#: Tokens a CLOSED pair-read vocabulary already NAMES, so their presence is no
+#: evidence of a *vocabulary* gap: `off`/`because` are in
+#: ``_POLARITY_MEMBERS`` / ``_CONNECTIVE_MEMBERS``, and reading them needs the
+#: PAIR (``_polarity_drop`` / ``_connective_swap``).
+#: ⚠️ NAMED is not UNDERSTOOD. Their presence IS evidence the GUARD did not fire
+#: on this pair — the fold dropped a connective or a state word — so they must
+#: not reach the flat report (that would call a named token unnamed) and must
+#: not vanish either (that would report the pair-read residual as zero). They go
+#: to ``one_sided_connective`` / ``one_sided_state`` in the snapshot.
+_VOCABULARY_GAP_UNDERSTOOD = _CONNECTIVE_MEMBERS | _POLARITY_MEMBERS
+
+
+#: The pair-read families, as the snapshot names them. Disjoint by construction
+#: (no token is in both, and the test suite asserts it), so a token has exactly
+#: one bucket and no precedence rule is needed.
+_PAIR_READ_BUCKETS = ("one_sided_connective", "one_sided_state")
+
+
+def _pair_read_bucket(token: str) -> str | None:
+    """The pair-read family that NAMES ``token``, else ``None`` (#5329).
+
+    A clause CONNECTIVE is what ``_connective_swap`` reads and a STATE word is
+    what ``_polarity_drop`` reads; both read the PAIR, not the token. A token in
+    either set that a FOLD absorbed is the guard not firing on THIS pair — a
+    real drop (`because` removes the causal link, `off` removes the state) that
+    the flat report must not call an unnamed gap and must not swallow.
+    """
+    if token not in _VOCABULARY_GAP_UNDERSTOOD:
+        return None
+    if token in _CONNECTIVE_MEMBERS:
+        return "one_sided_connective"
+    if token in _POLARITY_MEMBERS:
+        return "one_sided_state"
+    return None
+
+
+class _VocabularyGapCensus:
+    """Per-token count of the fold decisions that absorbed a token (#5329).
+
+    Thread-safe (the boundary runs on extractor worker threads), bounded, and
+    never read by any decision — ``_boundary`` calls ``record`` after it has
+    computed its answer, in a ``finally`` that cannot alter the returned value,
+    and ``record`` itself swallows everything (a raising logging handler must
+    not turn a fold into a refusal — review F1).
+    """
+
+    __slots__ = ("_counts", "_folds", "_lock", "_logged", "_oversize",
+                 "_paired", "_truncated")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: Counter[str] = Counter()
+        self._logged = 0
+        self._truncated = 0
+        self._oversize = 0
+        self._folds = 0
+        # The pair-read residual, one Counter per family. Bounded by the
+        # vocabularies themselves (17 + 20 members), so no cap and no
+        # truncation counter is needed here.
+        self._paired: dict[str, Counter[str]] = {
+            name: Counter() for name in _PAIR_READ_BUCKETS}
+
+    def record(self, tokens) -> None:
+        """Count one fold decision and the tokens it absorbed.
+
+        NEVER raises, and the suppress is LOAD-BEARING (review cycle 1): the
+        call sits in ``_boundary``'s ``finally``, OUTSIDE its ``try/except``, so
+        an escaping exception is not swallowed as an "unreadable" pair — it
+        would leave ``fold_allowed`` entirely and abort the capture.
+        ``_boundary`` reaches this through ``_record_vocabulary_gap`` (end of
+        module), which owns the local no-escape guarantee for that call site;
+        this suppress is defence in depth, so a second caller cannot
+        reintroduce the escape. A maintainer who moved the call INSIDE the
+        ``try`` would convert a raising handler into the silent false refusal
+        this suppress exists to prevent.
+        """
+        with contextlib.suppress(Exception):  # observability never decides
+            self._record(tokens)
+
+    def _record(self, tokens) -> None:
+        new: list[str] = []
+        with self._lock:
+            self._folds += 1
+            for t in tokens:
+                bucket = _pair_read_bucket(t)
+                if bucket is not None:
+                    # NAMED by a closed pair-read vocabulary, and still DROPPED
+                    # by this fold — so the guard did not fire on this pair
+                    # (#5134/#5139 residual), not a missing list entry. Counted
+                    # in its own bucket: neither an unnamed gap nor invisible
+                    # (review cycle 2, ISSUE 2), and never alarmed as one.
+                    self._paired[bucket][t] += 1
+                    continue
+                if len(t) > _VOCABULARY_GAP_MAX_TOKEN:
+                    self._oversize += 1
+                    continue
+                if t in self._counts or len(self._counts) < _VOCABULARY_GAP_CAP:
+                    if t not in self._counts and self._logged < _VOCABULARY_GAP_LOG_CAP:
+                        new.append(t)
+                        self._logged += 1
+                    self._counts[t] += 1
+                else:
+                    self._truncated += 1
+        if new:
+            # LOUD, once per newly-seen token: a token the boundary could not
+            # read as identity announces itself the first time it is absorbed.
+            # Guarded: a handler that raises (structured/JSON/Sentry handlers
+            # do) must not reach the boundary's fail-closed branch.
+            #
+            # ⚠️ THE TOKENS THEMSELVES GO TO THE LOG — a DELIBERATE trade, not
+            # an oversight (review cycle 2). They are claim-derived content, so
+            # every configured handler (structured, JSON, Sentry) sees up to
+            # `_VOCABULARY_GAP_LOG_CAP` of them per process; the in-memory
+            # census does not leave the box, this line does. Kept because the
+            # alarm is only actionable WITH the token: "a fold absorbed 3
+            # tokens" names nothing a reader can act on, and #5329's whole
+            # failure was a silent loss that no count alone can localise. The
+            # exposure is bounded by that cap and by
+            # `_VOCABULARY_GAP_MAX_TOKEN`; the durable record (and the full
+            # token set) stays in-process behind `vocabulary_gap_report()`, so
+            # a deployment that cannot ship tenant text off-box can drop this
+            # handler and keep the census.
+            with contextlib.suppress(Exception):  # a raising handler must not decide
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "boundary vocabulary gap (#5329): a fold absorbed "
+                    "one-sided token(s) %s that reached NO identity dimension "
+                    "(read as an added detail, then discarded). A marker among "
+                    "them lost its difference; a recurring token is the "
+                    "signal. Read the counts AND the bounds with "
+                    "extractor_v2.vocabulary_gap_snapshot()", new)
+
+    def report(self) -> dict[str, int]:
+        """``{token: fold decisions absorbing it}``, commonest first."""
+        with self._lock:
+            return dict(sorted(self._counts.items(),
+                               key=lambda kv: (-kv[1], kv[0])))
+
+    def snapshot(self) -> dict[str, Any]:
+        """The report plus the bounds hit and the pair-read residual."""
+        with self._lock:
+            return {
+                "tokens": dict(sorted(self._counts.items(),
+                                      key=lambda kv: (-kv[1], kv[0]))),
+                "distinct_tokens": len(self._counts),
+                # NOT "claims folded": this counts BOUNDARY CALLS that returned
+                # a fold decision. A consumer that asks both `fold_allowed` and
+                # `supersede_allowed` about one pair counts it twice, and a
+                # speculative call counts once (review F3).
+                "fold_decisions": self._folds,
+                # The PAIR-READ RESIDUAL (#5329 review cycle 2, ISSUE 2): tokens
+                # a closed vocabulary NAMES but whose guard did not fire on this
+                # pair, so the fold dropped them. Kept out of ``tokens`` (they
+                # are not unnamed vocabulary gaps) and counted here, because a
+                # dropped `because`/`off` is a real loss and reporting it as
+                # zero was the census being narrower than its own claim.
+                "one_sided_connective": self._sorted_paired(
+                    "one_sided_connective"),
+                "one_sided_state": self._sorted_paired("one_sided_state"),
+                "pair_read_residual": sum(
+                    sum(c.values()) for c in self._paired.values()),
+                "truncated_observations": self._truncated,
+                # OBSERVATIONS, not distinct tokens: the same oversize blob
+                # absorbed by five folds counts 5. Named for what it counts, so
+                # the sibling above reads as an observation count too rather
+                # than as a distinct-vs-occurrences pair.
+                "oversize_observations": self._oversize,
+                "cap": _VOCABULARY_GAP_CAP,
+                "max_token_chars": _VOCABULARY_GAP_MAX_TOKEN,
+            }
+
+    def _sorted_paired(self, bucket: str) -> dict[str, int]:
+        """One pair-read family, commonest first (caller holds the lock)."""
+        return dict(sorted(self._paired[bucket].items(),
+                           key=lambda kv: (-kv[1], kv[0])))
+
+    def reset(self) -> None:
+        with self._lock:
+            self._counts.clear()
+            for counter in self._paired.values():
+                counter.clear()
+            self._logged = 0
+            self._truncated = 0
+            self._oversize = 0
+            self._folds = 0
+
+
+_VOCABULARY_GAPS = _VocabularyGapCensus()
+
+
+def vocabulary_gap_report() -> dict[str, int]:
+    """The UNNAMED one-sided tokens fold decisions absorbed (#5329), counted.
+
+    ``{token: number of fold decisions that absorbed it}``, commonest first.
+    These are the tokens the boundary read as "a detail added to one side" and
+    dropped, minus the tokens a closed vocabulary NAMES
+    (``_VOCABULARY_GAP_UNDERSTOOD``) — the population in which an unlisted
+    negator, condition or date word hides. It also contains ordinary dropped
+    details; the census does not classify (see the section comment above).
+
+    ⚠️ This is the UNNAMED class only, and it is NOT the size of the residual:
+    a token a closed vocabulary names is still dropped by a fold the pair-read
+    guard did not fire on (one-sided `because`, one-sided `off`), and those are
+    counted in ``vocabulary_gap_snapshot()`` under ``one_sided_connective`` /
+    ``one_sided_state`` with the total in ``pair_read_residual``. Read BOTH —
+    this dict alone under-counts what fell off the end of a fold decision.
+
+    ⚠️ It is also NOT complete on its own: at ``_VOCABULARY_GAP_CAP`` distinct
+    tokens it stops GROWING, and oversize tokens are never retained, while this
+    return value carries neither fact. Read ``vocabulary_gap_snapshot()`` when
+    the completeness of the sample matters — it reports ``distinct_tokens``,
+    ``truncated_observations`` and ``oversize_observations`` alongside it.
+    """
+    return _VOCABULARY_GAPS.report()
+
+
+def vocabulary_gap_snapshot() -> dict[str, Any]:
+    """``vocabulary_gap_report()`` plus the census's bounds and call count."""
+    return _VOCABULARY_GAPS.snapshot()
+
+
+def reset_vocabulary_gap_census() -> None:
+    """Clear the census (a measurement window boundary; never a decision)."""
+    _VOCABULARY_GAPS.reset()
+
+
+def _record_vocabulary_gap(absorbed: list[str]) -> None:
+    """Count one FOLD's absorbed tokens, and NEVER raise out of the boundary.
+
+    The guarantee is LOCAL to this call on purpose.  ``_boundary`` invokes this
+    from its ``finally:``, so an escaping exception would leave ``fold_allowed``
+    entirely and abort the capture — strictly worse than the refusal that
+    function's fail-closed branch exists to produce.  ``record()`` swallows
+    everything today; this wrapper keeps the invariant even if a future sink
+    (a per-tenant census, a second destination) stops doing so, without spending
+    a line above `def extract_session_v2(` — the #7949 bundle's cites are typed
+    against those line numbers, and every line added there re-stales them.
+    """
+    with contextlib.suppress(Exception):  # observability never decides
+        _VOCABULARY_GAPS.record(absorbed)

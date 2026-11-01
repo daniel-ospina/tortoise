@@ -678,9 +678,11 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
 
     ⚠️ The map is the record's PRIMARY set **plus** the §2.6 cache names that
     ``node_from_row`` DERIVES from those columns (`status`, from a supersession
-    carrier) — #9974 — **plus** the same `status` derived from the record's EVENT
-    STREAM where a connector/pack lifecycle names the Object (#10198, an
-    `EVENT_STREAM_FOLDS` member). So the schema's refused names CAN appear here,
+    carrier) — #9974 — **plus** the same `status` derived from the record's own
+    HISTORY, through TWO legs of `EVENT_STREAM_FOLDS`, both applied here:
+    the connector/pack lifecycle where an event kind names the `:Object`
+    (#10198), and an explicit `EntityMutated` `state.status` — a caller's own
+    lifecycle write, for an `:Object` OR a `:Subject` (#9974). So the schema's refused names CAN appear here,
     synthesized rather than stored, and a consumer must not read their presence
     as "the record holds a column for this": ``_refused('object')`` still lists
     `status`. That is the projection's contract for a record-sourced node (the
@@ -715,21 +717,42 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     if row is None:
         return None
     node = node_from_row(label, row)
-    # #10198: the connector/pack lifecycle half of the same `status` cache is
-    # derived from the record's EVENT STREAM, which no row carries — so a read
-    # that stopped at `node_from_row` would answer a connector-tracked Object
-    # without the status a `rebuild_from_record` materializes, breaking this
-    # function's own "the same map" contract. Narrowed to the events that can
+    # #10198 / #9974: the event-stream half of the same `status` cache is
+    # derived from the record's HISTORY, which no layer row carries — so a read
+    # that stopped at `node_from_row` would answer without the status a
+    # `rebuild_from_record` materializes, breaking this function's own "the same
+    # map" contract. TWO legs reach that stream and both are applied here:
+    #   * the connector/pack lifecycle (#10198) — an `EventRecorded` whose
+    #     `eventKind` a fold maps onto `Object.status` (`:Object` only, as the
+    #     live fold is);
+    #   * an explicit `EntityMutated` `state.status` (#9974) — the caller's own
+    #     lifecycle write for an `:Object` OR a `:Subject`, whose only carrier is
+    #     `public.journal_event.payload`. Narrowed to the events that can
     # name THIS Object: a single-row read folds only the events that could
     # possibly name it. ⚠️ That narrows the FOLD, not the read — the table's
     # only index is keyed on the event's own subject, so the predicate filters
     # after the scope scan (see `read_lifecycle_events`).
     target = node.props.get("name")
-    if label in EVENT_STREAM_FOLDS and isinstance(target, str) and target:
+    # ⛔ The gate is the FOLD's membership, not a NAME. Since #9881 an Object's
+    # record key is the `id` (`chk_object_node_key_is_contract_key`: `node_key =
+    # id`), so `name` is not the coordinate the fold needs — and it can be the
+    # EMPTY STRING (`name IS NOT NULL` does not exclude `''`), which made the old
+    # truthiness gate skip the fold for a node `rebuild_from_record` folded by id.
+    # That is the two-answer split this half exists to remove. A row with NO name
+    # is not a legal shape (`name IS NOT NULL`), so this is not defence against a
+    # nameless row — only against the empty one. `key` is required non-empty
+    # above, so the fold always has a coordinate.
+    if label in EVENT_STREAM_FOLDS:
         node = apply_event_stream_folds(
             (node,),
             read_lifecycle_events(conn, org_id=org_id, graph_id=graph_id,
-                                  target=target),
+                                  # #9974: the second coordinate. A `restatus`
+                                  # names its target by the stable id, so a
+                                  # name-only narrowing would filter out the
+                                  # record that carries the value and this door
+                                  # would answer a status the rebuild does not.
+                                  target=target if isinstance(target, str) and target else None,
+                                  target_id=key),
         )[0]
     return dict(node.props)
 

@@ -490,7 +490,8 @@ def main(argv: list[str] | None = None) -> int:
     #   2. a second pass over a DIFFERENT dump with the same `--report`
     #      overwrites that report with its own renames — the first pass's
     #      original ids then survive in NO file.
-    # The ids are not re-derivable (`entity_name_id` is a sha256), and after
+    # The ids are not re-derivable (`legacy_ids._derived_legacy_handle` is a
+    # sha256 of the OLD key, so the old key is the input it consumes), and after
     # `rm snapshot` (the documented workflow) the report is the only way back.
     # So the check runs before EVERY report write and compares FINGERPRINTS: the
     # same dump's plan may be rewritten, a different dump's may not. ⚠️ A same-dump

@@ -38,6 +38,7 @@ from unittest import mock
 
 import pytest
 
+from tests._provider_env import pin_provider_routing_env
 from tortoise import __main__ as main
 from tortoise import capture_backlog as backlog
 
@@ -63,14 +64,20 @@ def places(monkeypatch, tmp_path):
     (home / ".tortoise" / "credentials.json").write_text(json.dumps(
         {"api_key": "tt_test", "api_url": "https://legit.example.com"}),
         encoding="utf-8")
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "TORTOISE_SESSION_LLM_MOCK",
+    for k in ("ANTHROPIC_API_KEY",
+              "TORTOISE_SESSION_LLM_MOCK",
               # The upload identity must come from the fixture's own
               # `credentials.json`, never from an ambient shell — otherwise the
               # hosted/self-hosted direction a test pins would be decided by
               # the developer's environment.
               "TORTOISE_API_KEY", "TORTOISE_API_URL"):
         monkeypatch.delenv(k, raising=False)
+    # ⚠️ The provider-key set is DERIVED, never the four-name literal this used
+    # to carry — the #3695 / #5477 class. #8133 registered ``venice`` in
+    # ``ingest._PROVIDERS``, so an ambient ``VENICE_API_KEY`` now makes the
+    # backlog report an extraction it CAN run, which silently changes the
+    # "missing key" note these tests pin.
+    pin_provider_routing_env(monkeypatch)
     return home, receipts
 
 

@@ -501,8 +501,10 @@ def _session_will_connect(uri: str) -> bool:
 # helper lives in tests/_embedded.py (pinned by test_markers.py — the
 # tests.conftest import would re-execute conftest's top-level code).
 from tests._embedded import (  # noqa: E402
+    EMBEDDED_FLOOR_FIXTURE_SOURCE,
     _assert_configured_db_answers,
     _assert_p4_uri_required,
+    raise_embedded_start_timeout_floor,
     serialize_embedded_construction,
 )
 from tortoise.pricing import tier_limits  # noqa: E402  (late import: after TEST_MODE env wiring)
@@ -757,6 +759,33 @@ def _serialize_embedded_construction():
     serialize_embedded_construction(mp)
     yield
     mp.undo()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _embedded_start_timeout_floor():
+    """#10437: lift redislite's embedded start wait for this process, once.
+
+    A shard runs 4 xdist workers beside other CI jobs, and every embedded start
+    spends up to redislite's `start_timeout` (default 10 s) waiting for the
+    daemonized `redis-server` to create its unix socket. On a loaded host that
+    wait EXPIRES and the client raises `RedisLiteServerStartError("The
+    redis-server process failed to start")` for a server that is merely slow —
+    measured red on run 41253635128 leg `test-slow (a)`, in a file the PR under
+    test did not touch, where it then blocked the merge through
+    `ci-introduced-failure`.
+
+    Session-scoped and autouse so it is in place before the first construction,
+    and so it covers files that do not exist yet — the same reasoning (and the
+    same 60 s value) as the three per-file call sites #1988 established. The
+    mechanism and the measurements are in `tests/_embedded.py`.
+
+    It names its own ``source`` so the floor is ATTRIBUTABLE to this fixture:
+    those three per-file call sites set the same class attribute to the same 60
+    and never restore it, so the live value cannot tell this fixture apart from
+    a file that merely ran earlier in the same worker.
+    """
+    raise_embedded_start_timeout_floor(source=EMBEDDED_FLOOR_FIXTURE_SOURCE)
+    yield
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -1839,12 +1868,19 @@ def _reset_hosted_registry_probe() -> None:
 # ``test_run_with_eval_keys.py::test_managed_keys_match_the_code_registries``,
 # pins the same union to tools/run-with-eval-keys.sh.)
 def provider_key_envs() -> tuple[str, ...]:
-    """Every provider API-key env var the routing/tests gates consult."""
-    from tortoise.hosted_api import _llm_provider_keys
-    from tortoise.model_adapters import _PROVIDER_KEY_ENV
+    """Every provider API-key env var the routing/tests gates consult.
 
-    return tuple(sorted(
-        set(_llm_provider_keys()) | set(_PROVIDER_KEY_ENV.values())))
+    Delegates to ``tests/_provider_env.py`` — the ONE copy of the
+    ``_llm_provider_keys() | _PROVIDER_KEY_ENV.values()`` derivation. Imported
+    lazily on purpose: a module-level ``from tests._provider_env import …`` in
+    this file would be a second conftest shared-module edge to register
+    (``test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared``),
+    and the helper is stdlib-only with its own lazy tortoise imports, so there
+    is nothing to gain by hoisting it.
+    """
+    from tests._provider_env import provider_key_envs as _derived
+
+    return _derived()
 
 
 #: Selector/override env vars that re-shape the resolved route WITHOUT a key:

@@ -56,6 +56,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pytest
 
+from tests._provider_env import pin_provider_routing_env
 from tortoise.embeddings import EmbeddingModel
 from tortoise.exceptions import HybridReadUnavailableError
 from tortoise.search_engine import (
@@ -91,11 +92,21 @@ class _FakeEmbedder:
 
 
 def _offline_llm(monkeypatch) -> None:
-    """Keyless capture — no LLM extraction runs (no network, no mock)."""
+    """Keyless capture — no LLM extraction runs (no network, no mock).
+
+    The provider set is DERIVED (``pin_provider_routing_env``), never a literal
+    list — the #3695 / #5477 class. The hand-list this replaces was complete
+    until #8133 registered ``venice`` in ``ingest._PROVIDERS``: after that, an
+    ambient ``VENICE_API_KEY`` built a real ``OpenAICompatModel`` against
+    ``https://api.venice.ai/api/v1`` and issued a BILLED request inside tests
+    that promise no egress. The assertion makes the docstring true — and it
+    fails LOUDLY on a provider-configured box instead of quietly billing.
+    """
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    pin_provider_routing_env(monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from tortoise.sdk import _build_session_llm_extractor
+    assert _build_session_llm_extractor() is None, "keys leaked into the test"
 
 
 def _embedder(monkeypatch, embedder):

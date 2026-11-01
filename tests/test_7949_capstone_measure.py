@@ -1847,6 +1847,99 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         f"only {checked} live cites were resolved — the sweep is not reading the bundle")
 
 
+def test_the_bare_continuation_cites_name_what_they_say():
+    """A BARE `:NNNN` continuation is invisible to the sweep above — pin it here.
+
+    `_BUNDLE_CITE` requires a cite to NAME ITS FILE, so the docs' house style —
+    `` `extractor_v2.py:9056` … `:9060` ``, where the file is named once for
+    several numbers — produces cites the sweep neither resolves NOR reports
+    `unmatched`. They are simply invisible, which is how SIX wrong numbers
+    survived three review rounds in a bundle whose thesis is "a claim nothing
+    re-checks can rot silently" (#5095 review round 3, finding 1: three in
+    `README.md`, three in `docs/00_index.md` + this probe, the last three a bare
+    `+50` bump over sites whose true shift was `+192`/`+199`).
+
+    Each row states the document, a phrase that must sit on ONE line of it, and,
+    per cited number, what `tortoise/extractor_v2.py` must read there. The phrase
+    is what makes this a claim about the SENTENCE rather than about a markdown
+    line number (which would rot exactly as fast as the cites do), and it must
+    occur exactly once in the document — an ambiguous phrase reds instead of
+    silently checking the easier of two matches.
+
+    Non-vacuity: measured on this head's parent, where `docs/00_index.md` said
+    `whose call is :9136` and this probe said `:9426-9430` for the vet block,
+    `:9044` for the early return and `:8781` for the `_edus_from_conversation`
+    call: every one of those rows FAILS the two checks below (the number is not
+    on the phrase's line, and the old number carries other code).
+    """
+    rows = (
+        # `each VET pass is gated on the LIST` — the gate AND its call, twice.
+        ("docs/00_index.md", "each VET pass is gated on the LIST", (
+            ("9194", "if vet_enabled and embed_list:"),
+            ("9195", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("9316", "if vet_enabled and complete_list:"),
+            ("9317", "vet_union_stats, _w, _ = _run_vet_pass("),
+        )),
+        # the VET block's start; its three lines of keys close on line 9446
+        ("docs/00_index.md", "emitted unconditionally at", (
+            ("9475", 'result["classify_later"] = {'),
+            ("9485", 'result["vet"] = {'),
+        )),
+        # `_IDLE_CITES["vet"]`: the early return and the surface it emits
+        ("probes/capstone_measure.py", "its vet surface", (
+            ("9103", "if not edus:"),
+            ("9119", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+        )),
+        # ...and the same claim in the rule's own docstring
+        ("probes/capstone_measure.py", "with the flag ON", (
+            ("9119", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+        )),
+        ("probes/capstone_measure.py", "follows at", (
+            ("9102", "edus = _edus_from_conversation(conversation)"),
+        )),
+        # the S2.2/S2.3 block this probe names as the #9116 seam's subject
+        ("probes/capstone_measure.py", 'result["vet"]`` at', (
+            ("9485", 'result["vet"] = {'),
+            ("9489", ("exact", "}")),
+        )),
+    )
+    docs = dict(_BUNDLE_DOCS)
+    sources = {name: path.read_text(encoding="utf-8").splitlines()
+               for name, path in _BUNDLE_SOURCES.items()}
+    failures: list[str] = []
+    for doc_label, phrase, cites in rows:
+        lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
+        hits = [ln for ln in lines if phrase in ln]
+        if len(hits) != 1:
+            failures.append(
+                f"{doc_label}: the scoping phrase {phrase!r} occurs {len(hits)} "
+                f"time(s) — this pin needs exactly one line to scope the cite "
+                f"to, so re-word the pin's phrase rather than letting it bind "
+                f"the easier of two matches")
+            continue
+        line = hits[0]
+        for number, anchor in cites:
+            if f":{number}" not in line and f"-{number}" not in line:
+                failures.append(
+                    f"{doc_label}: the sentence containing {phrase!r} does not "
+                    f"cite :{number} — a bare continuation is invisible to "
+                    f"_BUNDLE_CITE, so this pin is the only thing reading it")
+                continue
+            got = sources["extractor_v2"][int(number) - 1]
+            if isinstance(anchor, tuple):
+                if got.strip() != anchor[1]:
+                    failures.append(
+                        f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                        f"{got.strip()!r}, not exactly {anchor[1]!r}")
+            elif anchor not in got:
+                failures.append(
+                    f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                    f"{got.strip()!r}, which carries no {anchor!r}")
+    assert not failures, (
+        "a bare `:NNNN` continuation names code it does not name — re-derive the "
+        "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
+
+
 def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     """A cite on ANOTHER epic's index row is not this bundle's to verify.
 
@@ -1996,6 +2089,92 @@ def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
                     f"tree-derived table have drifted apart. Re-derive the "
                     f"document's cites; do not relax this leg. "
                     f"cited spans: {sorted(spans)}")
+
+
+#: A bare CONTINUATION cite in either backtick spelling: the probes are
+#: docstrings, so they write ``:13334`` (RST) where the markdown writes `:13334`.
+_BARE_CONTINUATION = re.compile(r"`{1,2}(:\d+(?:-\d+)?)`{1,2}")
+
+#: The two documents that print the entry-point pair — the `def` cite AND the
+#: `:N` continuation naming the CALL. `E1-E5-PROOFS.md`, `docs/00_index.md` and
+#: `EXTRACTOR-V4-ARCHITECTURE.md` never restate the pair, so they are not this
+#: leg's business (their own prefixed cites are swept above).
+_ENTRY_POINT_DOCS = (
+    ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
+    ("probes/capstone_run.py",
+     _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),
+)
+
+
+def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
+    """The `:N` continuation naming the `_extract_session_v2` CALL is checked.
+
+    `_BUNDLE_CITE` only matches a cite that NAMES a file, so `(sdk.py:14297;
+    called at :13334)` had exactly one checked number and one unverifiable one —
+    and the unchecked half went stale TWICE on this branch, once at the commit
+    that re-derived it (it was already `:13299` there). Re-staling it to a wrong
+    line reds NOTHING: measured, `:13334` → `:13399` in both documents leaves this
+    file at 51 passed. That is the blind spot this leg closes from the other side,
+    the same one `_BARE_CITE` names above for the per-surface numbers.
+
+    Both numbers are DERIVED from the tree (the bundle's own convention: the
+    symbol is authoritative, the line is a convenience), so this leg never carries
+    a typed number that an insertion above `_extract_session_v2` would silently
+    invalidate. The pair must sit on ONE line, and since #4282 the call half is
+    FILE-QUALIFIED (`hosted_api.py:N`) rather than a bare `:N`: the in-`sdk.py` call
+    was `capture_session`'s own body, so the surviving call site is in another file,
+    and a bare continuation cannot name the tree it counts. The bare-continuation
+    sweep stays in place so a re-introduced `:N` reds rather than passing unchecked.
+
+    Non-vacuity: the anchors must each match exactly one line (two calls would make
+    "the" call site a guess, and the message says so), and re-staling the doc's
+    continuation to any other number reds here.
+    """
+    sdk_lines = (_REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    # ⚠️ #4282 DELETED `TortoiseSDK.capture_session`, and with it the ONLY in-`sdk.py`
+    # call — `extracted, meta = self._extract_session_v2(` was that method's own body.
+    # Same re-pointing the bundle's `(def, call)` pair already carries in
+    # `test_7949_capstone_verdict_check.py`: the surviving production caller is the
+    # hosted capture lane, which passes the method as a CALLABLE, so the call site is
+    # derived from `hosted_api.py`. Both numbers stay derived from the tree; what
+    # changes is which tree a call site can be derived FROM at all.
+    call_anchor = "sdk._extract_session_v2,"
+    def_anchor = "def _extract_session_v2("
+    hosted_lines = (_REPO / "tortoise/hosted_api.py").read_text(encoding="utf-8").splitlines()
+    calls = [i + 1 for i, ln in enumerate(hosted_lines) if ln.strip() == f"slot, {call_anchor}"]
+    defs = [i + 1 for i, ln in enumerate(sdk_lines)
+            if ln.lstrip().startswith(def_anchor)]
+    assert len(calls) == 1, (
+        f"{len(calls)} lines in tortoise/hosted_api.py call {call_anchor!r} ({calls}) — "
+        "the call site this leg pins is no longer unique, so derive the one the "
+        "entry-point paragraph means before trusting a number here")
+    assert len(defs) == 1, (
+        f"{len(defs)} lines define `_extract_session_v2` ({defs}) — the bundle "
+        "trumpets ONE entry point; re-derive which def it means")
+    call_line, def_line = calls[0], defs[0]
+    assert call_line != def_line, (call_line, def_line)
+    for name, path in _ENTRY_POINT_DOCS:
+        text = path.read_text(encoding="utf-8")
+        doc_lines = text.splitlines()
+        citing = [ln for ln in doc_lines if f"sdk.py:{def_line}" in ln]
+        assert len(citing) == 1, (
+            f"{name} cites the entry point `sdk.py:{def_line}` on {len(citing)} "
+            f"lines — this leg attributes the bare continuation by its LINE, so "
+            "exactly one line may carry the pair")
+        assert f"hosted_api.py:{call_line}" in citing[0], (
+            f"{name} names the entry point at `sdk.py:{def_line}` but does not carry "
+            f"the surviving call site `hosted_api.py:{call_line}` (`{call_anchor}`; "
+            "the in-`sdk.py` call died with `capture_session`, #4282). Re-derive the "
+            "number from the tree; do not delete the cite.")
+        bare = [m.group(1) for m in _BARE_CONTINUATION.finditer(citing[0])]
+        bare = [b for b in bare if b != f":{def_line}"]
+        assert bare == [], (
+            f"{name} names the entry point at `sdk.py:{def_line}` and still carries a "
+            f"bare continuation {bare}; a bare `:N` names no file, so `_BUNDLE_CITE` — "
+            "and every rule in `_BUNDLE_RULES` — cannot check it, and a bare number "
+            "cannot say WHICH tree it counts once the survivor lives in another file. "
+            "The dead in-`sdk.py` call that this continuation used to name is gone "
+            "(#4282); cite `hosted_api.py:{call_line}` instead.")
 
 
 # ── E2's blocker names the LIVE half, not the closed render issue ─────────
