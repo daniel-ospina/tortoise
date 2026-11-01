@@ -74,7 +74,10 @@ It verifies five things, and it fails on each of them for a specific reason:
    block** on every number it restates. Two copies of a threshold that can disagree is how a gate
    reads one while a reviewer reads the other. It must also pin ``document_sha256``: the record is
    the artefact the run probe freezes, so an argument re-edited without the record moving with it is
-   a document the record no longer describes (#9075 review r3 P3).
+   a document the record no longer describes (#9075 review r3 P3). `hypothesis_bars` is compared by
+   the same rule, in both directions: the measured log names only five of the seven frozen bars, so
+   the record's restatement is what holds the other two — `corroboration_min_sessions`, which decides
+   the published `not-majority-of-sessions` qualifier, and the emitted-only `sessions_total`.
 
 What it deliberately does NOT do: it does not judge whether the thresholds are *right*. That is the
 argument in the document, and an argument is reviewed, not grepped.
@@ -1040,6 +1043,30 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
             f"{MACHINE_RECORD} denominator_floors.{key} has no pin — the record may not invent a "
             "REFUSED boundary the document does not state"
         )
+
+    # The hypothesis bars, same shape as `denominator_floors` (#10468 review `f0b6842eb`, P2).
+    # THE SHARP CASE IS NOT A DISAGREEMENT: the measured log names only five of the seven bars, so
+    # the two it cannot be held to — `corroboration_min_sessions` (which decides the published
+    # `not-majority-of-sessions` qualifier) and the emitted-only `sessions_total` — are held to
+    # nothing at all unless this comparison exists. `hypothesis_bars` is optional at the PINS side
+    # because it is a block this bundle introduced (`docs/evidence/7949-capstone` has no such map);
+    # where the document does state it, the record may neither disagree, drop a bar, nor invent one.
+    pins_bars = _pins_mapping(pins, "hypothesis_bars")
+    rec_bars = _mapping(record, "hypothesis_bars", MACHINE_RECORD)
+    if not pins_bars:
+        if rec_bars:
+            failures.append(
+                f"{MACHINE_RECORD} hypothesis_bars has no pins block — the record may not invent a "
+                "bar the document does not state"
+            )
+    else:
+        for key, want in pins_bars.items():
+            cmp(f"hypothesis_bars.{key}", want, rec_bars.get(key))
+        for key in sorted(set(rec_bars) - set(pins_bars)):
+            failures.append(
+                f"{MACHINE_RECORD} hypothesis_bars.{key} has no pin — the record may not invent a "
+                "bar the document does not state"
+            )
 
     pins_split = _pins_mapping(pins, "split")
     rec_split = _mapping(record, "split", MACHINE_RECORD)

@@ -1027,6 +1027,83 @@ def test_a_record_inventing_a_floor_the_pins_do_not_state_fails(tmp_path):
     assert any("has no pin" in f for f in failures), failures
 
 
+#: The pre-registered bundle whose measured log names only FIVE of its seven frozen
+#: `hypothesis_bars`. The other two — `corroboration_min_sessions` (which decides the published
+#: `not-majority-of-sessions` qualifier) and the emitted-only `sessions_total` — can only be held
+#: through `preregistration.json`, so this bundle's document is where the bars are read FROM (one
+#: copy: the document's, via the tool's own parser — never a literal here).
+HYPOTHESIS_BUNDLE = REPO_ROOT / "docs" / "evidence" / "5087-hypothesis"
+
+
+def _pins_with_bars() -> dict:
+    """The capstone pins plus THIS bundle's real `hypothesis_bars`, as a document would state them."""
+    pins = check.parse_pins(PREREG.read_text())
+    pins["hypothesis_bars"] = dict(
+        check.parse_pins((HYPOTHESIS_BUNDLE / check.PREREG_NAME).read_text())["hypothesis_bars"])
+    return pins
+
+
+@pytest.mark.parametrize("key,value", [
+    ("corroboration_min_sessions", 6),
+    ("sessions_total", 8),
+])
+def test_a_record_hypothesis_bar_that_disagrees_with_the_pins_fails(tmp_path, key, value):
+    """REGRESSION (#10468 review `f0b6842eb`, P2): the seven frozen bars were restated, unchecked.
+
+    `check_machine_record` compared the corpus keys, the floors, the split, `e4_denominator` and the
+    criteria rows — but never `hypothesis_bars`, so the record's own copy of the bars was a second
+    copy bound to nothing. It is the ONLY copy of two of them: the measured log names five, and the
+    two it does not are `corroboration_min_sessions` (which decides whether the verdict line carries
+    `not-majority-of-sessions`) and the emitted-only `sessions_total`. Rotating
+    `corroboration_min_sessions` 4 → 6 in the record alone left every check green while a consumer
+    of the record read a bar the pinned document does not state.
+    """
+    bars = dict(_pins_with_bars()["hypothesis_bars"])
+    bars[key] = value
+    d = _materialise(tmp_path, _record(hypothesis_bars=bars))
+    failures = check.check_machine_record(d, _pins_with_bars())
+    assert any(f"hypothesis_bars.{key}" in f for f in failures), failures
+
+
+def test_a_record_dropping_a_pinned_bar_fails(tmp_path):
+    """A record that silently drops a bar must red, not skip the comparison (`cmp` is not `if in`)."""
+    bars = dict(_pins_with_bars()["hypothesis_bars"])
+    bars.pop("corroboration_min_sessions")
+    d = _materialise(tmp_path, _record(hypothesis_bars=bars))
+    failures = check.check_machine_record(d, _pins_with_bars())
+    assert any("hypothesis_bars.corroboration_min_sessions" in f for f in failures), failures
+
+
+def test_a_record_inventing_a_hypothesis_bar_the_pins_do_not_state_fails(tmp_path):
+    """The record may not add a bar the argument never froze — the same direction as the floors."""
+    bars = dict(_pins_with_bars()["hypothesis_bars"])
+    bars["made_up_bar"] = 99
+    d = _materialise(tmp_path, _record(hypothesis_bars=bars))
+    failures = check.check_machine_record(d, _pins_with_bars())
+    assert any("hypothesis_bars.made_up_bar has no pin" in f for f in failures), failures
+
+
+def test_a_record_restating_bars_a_pins_block_does_not_state_fails(tmp_path):
+    """`hypothesis_bars` is optional at the PINS side (the capstone bundle has no such map), so the
+    record of a bundle whose document states no bars may not carry them either."""
+    d = _materialise(tmp_path, _record(hypothesis_bars={"primary_ratio_max": 0.75}))
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any("hypothesis_bars has no pins block" in f for f in failures), failures
+
+
+def test_the_real_5087_record_restates_every_frozen_bar():
+    """The bundle this guard exists for: its record agrees with its own frozen bars, bar for bar.
+
+    This is the half `tests/test_s3_prior_ablation.py::_threshold_mismatches` delegates — it holds
+    the log's five, and says these two are held by the record through this gate.
+    """
+    pins = check.parse_pins((HYPOTHESIS_BUNDLE / check.PREREG_NAME).read_text())
+    assert pins["hypothesis_bars"], "this bundle must state its bars in the pins block"
+    assert check.check_machine_record(HYPOTHESIS_BUNDLE, pins) == []
+    record = json.loads((HYPOTHESIS_BUNDLE / check.MACHINE_RECORD).read_text())
+    assert record["hypothesis_bars"] == pins["hypothesis_bars"]
+
+
 def test_a_record_sentence_total_that_disagrees_with_the_pins_fails(tmp_path):
     """`hedge_scope_sentences_total` (343) was restated by the record and never compared."""
     rec = _record()

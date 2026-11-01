@@ -272,16 +272,20 @@ git status --porcelain -- tortoise tests/eval/write_path \
     docs/evidence/7949-capstone/probes tools/s3_prior_ablation.py   # must print nothing
 ```
 
-Then, at an admitted head, with a private FalkorDB lane:
+Then, at an admitted head, with a private FalkorDB lane. `tools/test_lane.py run` is the entry point
+into **pytest** — it strips a leading `--` and invokes `python -m pytest <argv>` — so it cannot carry
+the probe, which is not a test module. The tool's documented two-step form is what puts the three
+seam variables into THIS shell:
 
 ```bash
-uv run python tools/test_lane.py run -- true          # a private FalkorDB lane
-export TORTOISE_DB_URI=... TORTOISE_TEST_DOCKER_PORT=... TORTOISE_TEST_DOCKER_PASSWORD=...
+uri="$(uv run python tools/test_lane.py uri)" || exit 1   # a private FalkorDB lane
+eval "$uri"   # exports TORTOISE_DB_URI, TORTOISE_TEST_DOCKER_PORT, TORTOISE_TEST_DOCKER_PASSWORD
 # A NEW filename: the committed log is NEVER overwritten (the probe refuses an existing --out).
 uv run python tools/s3_prior_ablation.py \
     --prereg a1075dfc2a964a6e9e1a49ec990ebadf8c9a180a \
     --out "docs/evidence/5087-hypothesis/s3-ablation-$(git rev-parse --short HEAD).log"
 uv run python tools/capstone_preregistration_check.py --dir docs/evidence/5087-hypothesis
+uv run python tools/test_lane.py down                     # remove the lane
 ```
 
 The log is written **incrementally** (every line flushed as it is logged), so a run that aborts

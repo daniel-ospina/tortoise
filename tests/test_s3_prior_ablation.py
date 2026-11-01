@@ -75,8 +75,13 @@ def _threshold_mismatches(pins_bars: dict, pins_floors: dict, log_text: str) -> 
 
     Only the thresholds the LOG names are compared, because a log can only be held to what it
     recorded — the committed log predates the full-bars emission below and names five of the seven.
-    The document's remaining bars are pinned against the record (`preregistration.json`) by
-    `tools/capstone_preregistration_check.py`, which CI now runs on this bundle.
+    The two it does not name are held through the RECORD, not through this function:
+    `preregistration.json` restates every bar, and `tools/capstone_preregistration_check.py` — which
+    CI now runs on this bundle — compares that map against the document's pins in both directions,
+    so a bar moved in either copy (or dropped from the record, or invented by it) reds the gate.
+    `corroboration_min_sessions` decides the published `not-majority-of-sessions` qualifier;
+    `sessions_total` is emitted-only. `test_the_machine_record_restates_every_frozen_bar` pins the
+    first half here, `tests/test_capstone_preregistration_9075.py` holds the second (#10468 P2).
     """
     seen = _log_thresholds(log_text)
     problems = []
@@ -324,6 +329,21 @@ def test_the_log_header_names_every_bar_and_floor(probe):
     main_src = PROBE.read_text().split("def main(", 1)[1]
     assert "log(bars_log_line(bars))" in main_src and "log(floors_log_line(floors))" in main_src, (
         "the helpers must be what main emits — a helper beside an unchanged f-string pins nothing")
+
+
+def test_the_machine_record_restates_every_frozen_bar(probe):
+    """The half `_threshold_mismatches` delegates: the record's bars ARE the document's.
+
+    Without this the two bars the log cannot hold — `corroboration_min_sessions` and
+    `sessions_total` — would be held to nothing but the document digest, which a re-cut
+    registration moves by design (#10468 review `f0b6842eb`, P2). The gate half (a record that
+    moves, drops or invents a bar reds) lives in `tests/test_capstone_preregistration_9075.py`.
+    """
+    import json
+
+    record = json.loads((probe.EVIDENCE_DIR / "preregistration.json").read_text())
+    assert record["hypothesis_bars"] == BARS, (
+        "the record the probe consumes must restate the document's bars character for character")
 
 
 def test_ci_checks_this_bundle_not_only_the_capstone_one(probe):
@@ -708,6 +728,58 @@ def test_the_admission_check_is_a_necessary_condition_not_the_whole_pin(probe):
         assert prefix.rstrip("/") in section, (
             f"the section must name the stricter rule's prefix {prefix!r}: it is the axis the "
             "documented pathspec cannot express, so a reader is sent to a refusal without it")
+
+
+# ── the documented lane command must be one that RUNS (r9 P3) ────────────────
+#
+# The section used to open with `uv run python tools/test_lane.py run -- true`, described as "a private
+# FalkorDB lane". `run` is the PYTEST entry point: it strips the leading `--`, finds no test target in
+# `["true"]`, PREPENDS `tests/` and invokes `python -m pytest tests/ true` — pytest then exits 4 with
+# `file or directory not found: true` while the lane container is up. It also applies the three seam
+# variables to the CHILD only, so it can never populate the shell that the following `export` line was
+# written for. The two tests below pin the section's shape and MEASURE the defect it would reintroduce.
+
+
+def _test_lane():
+    """The lane tool as a module — same loader shape as `_probe()`, no subprocess needed."""
+    spec = importlib.util.spec_from_file_location("_test_lane_repro", ROOT / "tools/test_lane.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_reproduce_section_starts_the_lane_and_exports_its_seam(probe):
+    """The documented path must start a lane AND put the seam in the caller's shell.
+
+    `run` does the first and not the second, so the section uses the tool's own documented two-step
+    form (`uri` then `eval`), which is the only spelling that does both. r9 P3.
+    """
+    readme = (probe.EVIDENCE_DIR / "README.md").read_text()
+    section = readme.split("## Reproduce", 1)[1]
+    assert "test_lane.py run --" not in section, (
+        "`run` executes PYTEST on the rest of the argv — it cannot start-and-export for a probe")
+    assert 'uri="$(uv run python tools/test_lane.py uri)"' in section, section
+    assert 'eval "$uri"' in section, "the seam variables must reach THIS shell, not a child"
+    assert "test_lane.py down" in section, "a lane left up is the residue the tool exists to bound"
+
+
+def test_a_lane_command_with_no_pytest_target_exits_4():
+    """MEASURED, not asserted from prose: `["true"]` is not a target and `tests/ true` is exit 4.
+
+    This is the failure the section used to open with, reproduced with the tool's own predicate and
+    the same argv `cmd_run` builds for it (`[sys.executable, "-m", "pytest", "tests/", "true"]`).
+    pytest rejects the bogus path at argument resolution — no collection, no Docker, 0.5 s.
+    """
+    lane = _test_lane()
+    assert not lane._argv_names_a_target(["true"]), (
+        "if `true` were a target the tool would not prepend `tests/` and the defect would not exist")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/", "true", "-q", "-p", "no:cacheprovider"],
+        cwd=str(ROOT), capture_output=True, text=True, check=False)
+    assert proc.returncode == 4, (proc.returncode, proc.stdout, proc.stderr)
+    assert "file or directory not found: true" in (proc.stdout + proc.stderr), proc.stdout
 
 
 def test_a_metric_artifact_move_is_invisible_to_the_documented_pathspec(probe):
