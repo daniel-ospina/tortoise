@@ -2364,6 +2364,53 @@ def test_every_verdict_artifact_lives_in_a_per_batch_directory() -> None:
             "goes to whatever `$B` happened to be"
         )
 
+    # 3. The MEASURED incident this whole section argues from is a LIVE-SOURCE fact, so it is READ
+    #    out of the workflow rather than restated. Round 40's reviewer reported the citation as
+    #    stale and prescribed run `40238275534`; measured at this head the doctrine's number is the
+    #    CORRECT one (`python-ci.yml:2013`, "MEASURED (run 40808264676, `test-slow (a)`)", with the
+    #    quoted sentence verbatim at `:2018`), so the defect was never the number — it was that
+    #    NOTHING bound the number to its source, which is what lets a re-measured rerun leave a
+    #    stale one behind. The rule this PR already applies to `needs: changes` and to the
+    #    required-contexts list applies here too: read the live source, never restate it.
+    workflow = (ROOT / ".github" / "workflows" / "python-ci.yml").read_text(encoding="utf-8")
+    cited = sorted(set(re.findall(r"\(run (\d{8,})\)", DOC.read_text(encoding="utf-8"))))
+    assert cited, (
+        "the per-batch-ledger argument quotes a measured incident but cites no run: a number with "
+        "no source is a claim an operator cannot check, and it is the sentence doing the "
+        "persuasive work for the whole section"
+    )
+    # …and the id must sit on the SENTENCE, not merely in the file. Two runs are both real and both
+    # measured in this workflow (`40808264676` here and `40238275534` a few hundred lines up), so a
+    # "does the id appear anywhere" needle accepts a substitution that swaps one true citation for
+    # another and leaves the argument standing on the wrong incident — measured: swapping the id for
+    # `40238275534` left that needle green with 41 checks passing. The claim is that ONE measured
+    # incident shows this class, so the unit is the workflow's own comment BLOCK: the id and the
+    # quoted sentence must be in the same one.
+    incident = "truncated the file between this leg's `tail` and its attribution read"
+    assert incident in workflow, (
+        "the doctrine quotes a workflow comment about a sibling leg truncating the shared "
+        "`/tmp/pytest.log` and `python-ci.yml` no longer records it — the quotation marks assert a "
+        "source the tree does not carry"
+    )
+    blocks: list[str] = []
+    block: list[str] = []
+    for line in workflow.splitlines():
+        if line.lstrip().startswith("#"):
+            block.append(line)
+        elif block:
+            blocks.append("\n".join(block))
+            block = []
+    if block:
+        blocks.append("\n".join(block))
+    anchors = [b for b in blocks if incident in b]
+    for run_id in cited:
+        assert any(f"run {run_id}" in b for b in anchors), (
+            f"the doctrine cites run {run_id} for the incident its own sentence quotes, but the "
+            "workflow block that records that sentence names a different run (or none) — the "
+            "citation is a typo, or a re-measured number left behind. Read the workflow's own "
+            "`MEASURED (run …)` block and cite what it records"
+        )
+
 
 def test_phase_1_checks_out_the_pinned_base_before_the_baseline_suite() -> None:
     """#10399 review ISSUE 2: ``git branch`` creates a ref and does NOT move HEAD.
@@ -4192,6 +4239,28 @@ _COMM_SETS = (
     ("-23", "cleared-failures"),
 )
 
+#: The Phase-4 fail-closed halt's own SUBJECT — the PAIR, not a token. The halt fires when the
+#: report's OWN count is non-zero while the ids extracted from it are EMPTY, so its predicate is
+#: `reported != 0` ORed with "the ledger file is non-empty". Either half ALONE certifies the wrong
+#: thing: `[ -s … ]` on its own never reads the report's count, so a `junit_family` / `classname`
+#: drift that breaks the extraction passes green (the exact fail-open the halt exists for), while
+#: `-gt 0` halts on every CLEAN report and never on a drifted one.
+#:
+#: Round 40: the check matched this halt by SUBSTRING (`'[ -s "$B/$side.failures" ]' in c or
+#: "$side.failures" in c`), so flipping `-eq` to `-gt` and reducing the predicate to `[ -s … ]`
+#: alone BOTH survived with 41 checks green. That is the subject-vs-mention class this module has
+#: already closed for ``_COUNT_SUBJECT`` / ``_MERGE_SUBJECT`` / ``_TREE_ASSERT_REF`` /
+#: ``_LANDED_TREE_DIFF``, applied to the fence the docstring calls the last detector before
+#: ``BATCH-GREEN``.
+#:
+#: Tolerance is the ``_MERGE_SUBJECT`` kind (`${reported}`, an optional quote pair, free spacing),
+#: because redding a respelled or reflowed honest line is the failure this module's own CONTROLS
+#: exist to prevent — the pairs, not the spelling, are what the claim is made of.
+_LEDGER_FAILCLOSED_SUBJECT = re.compile(
+    r'\[\s*"?\$\{?reported\}?"?\s+-eq\s+"?0"?\s*\]\s*\|\|\s*'
+    r'\[\s*-s\s+"?\$B/\$side\.failures"?\s*\]'
+)
+
 
 def _failure_ledger_fence() -> list[str] | None:
     """The Phase-4 fence that builds the failure-id ledger (all four sources + the NEW set)."""
@@ -4257,9 +4326,22 @@ def test_the_failure_id_ledger_is_built_by_a_stated_rule() -> None:
             "writes the whole document on ONE line (measured), so no grep/awk pairing of adjacent "
             "lines can work at all"
         )
-    assert any(c.startswith("uv run python - ") for c in codes), (
+    parsers = [i for i, c in enumerate(codes) if c.startswith("uv run python - ")]
+    assert parsers, (
         "the ids must be extracted by a parser, not by `grep`: the whole report is one line, so a "
         "line-oriented rule extracts nothing and the diff is empty in both directions"
+    )
+    # …and the parser's failure must STOP the fence. Round 40 measured that NOTHING matched this
+    # line's `|| exit 1`: turning it into `|| true` and deleting it entirely both left 41 checks
+    # green, while a parser that dies on a malformed report silently leaves an EMPTY ledger for one
+    # of the four sides — which the fail-closed halt below then reads as "that half had no
+    # failures". `_halts` is the discipline this module applies at every other halt site, and it is
+    # what refuses `|| true` and an always-0 segment parked in front of the `exit 1`.
+    assert all(_halts(_block(ledger, i)) for i in parsers), (
+        "the id extraction does not HALT on failure: a parser that dies leaves an EMPTY ledger for "
+        "that side, and an empty set diffs empty in both directions — `BATCH-GREEN` over a red "
+        "tree. `|| true` is the negation of the halt this line needs, so it is refused here as it "
+        "is at every other halt site in this document"
     )
 
     # 3. The four SOURCES, each with an absent-report HALT: an absent report means that half never
@@ -4294,13 +4376,28 @@ def test_the_failure_id_ledger_is_built_by_a_stated_rule() -> None:
         "an extraction that yields nothing from a report that says it failed would diff empty in "
         "both directions and print `BATCH-GREEN` over a red tree"
     )
-    assert any(
-        '[ -s "$B/$side.failures" ]' in c or "$side.failures" in c
-        for c in codes
-        if "exit 1" in c and "UNPROVEN-FULL-SUITE" in c
-    ), (
+    failclosed = [i for i, c in enumerate(codes) if "UNPROVEN-FULL-SUITE" in c]
+    assert failclosed, (
         "the empty-extraction case must HALT as `UNPROVEN-FULL-SUITE(<lane>)`: an id the rule cannot "
         "read is undefined, not absent"
+    )
+    # The halt must carry the MECHANISM, not the tokens. Round 40 measured four defusings of this
+    # one line that each left the text honest-looking and the guard green: `|| true`, a deleted
+    # halt, `-eq 0` flipped to `-gt 0`, and the predicate reduced to `[ -s … ]` alone. Subject-match
+    # the pair (`_COUNT_SUBJECT`'s shape), then require it to actually BE a halt — the two
+    # properties are orthogonal, and neither one covers the other.
+    assert all(_LEDGER_FAILCLOSED_SUBJECT.search(_block(ledger, i)) for i in failclosed), (
+        'the fail-closed halt does not test the mechanism `[ "$reported" -eq 0 ] || [ -s '
+        '"$B/$side.failures" ]`: it must fire when the report\'s OWN count is non-zero AND the '
+        "extracted id set is empty. Either half alone certifies the wrong thing — `[ -s … ]` alone "
+        "never reads the count, so a rule/producer drift passes green; `-gt 0` halts on every "
+        "CLEAN report and never on the drifted one"
+    )
+    assert all(_halts(_block(ledger, i)) for i in failclosed), (
+        "the fail-closed halt is DEFUSED: `_halts` refuses `|| true`, an always-0 segment "
+        "(`|| : ||`, the class the module header used to record as a survivor) and a halt parked in "
+        "a subshell. An id the rule cannot read is undefined, not absent — and an undefined id is "
+        "never green"
     )
 
     # 6. The sources are the reports the run fences WRITE, and the two batch ones are written TWICE
