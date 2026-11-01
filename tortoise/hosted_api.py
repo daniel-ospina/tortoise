@@ -33064,9 +33064,22 @@ class _ProbeNotSampled:
 _PROBE_NOT_SAMPLED = _ProbeNotSampled()
 
 
+class _NamespaceNotResolved:
+    """Sentinel type for the ``moved=`` argument (#10180).
+
+    ``None`` already MEANS something there — "this org's default graph was never
+    promoted, open the historical namespace" — so it cannot double as "the
+    caller did not resolve it". Without the distinction a caller could not hand
+    a resolved ``None`` down without making the callee resolve again, which is
+    the double read this argument exists to remove.
+    """
+_NAMESPACE_NOT_RESOLVED = _NamespaceNotResolved()
+
+
 def _graph_has_org_namespace(
         org_id: str, *,
         listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
+        moved: str | None | _NamespaceNotResolved = _NAMESPACE_NOT_RESOLVED,
 ) -> bool:
     """Existence check WITHOUT constructing the ORG projection (constructing
     org_{tid} would materialize an absent org graph — a read-path write,
@@ -33087,7 +33100,16 @@ def _graph_has_org_namespace(
     and both must come from ONE snapshot: a second probe was a second
     FalkorDB connection in URI mode, and it could also list a DIFFERENT name
     than the one the verdict was about. ``None`` cannot be the default — it is
-    the probe's own FAILURE signal (fail-open below)."""
+    the probe's own FAILURE signal (fail-open below).
+
+    ``moved`` carries the org's ALREADY-resolved default namespace on the same
+    principle (#10180): this verdict and the open that follows it are two
+    questions about one graph, so they must be one resolution. Resolving here
+    and again in `_open_org_graph_sdk` answered them at two instants, and on a
+    lane with no credential hint (the MCP onboarding gate, a background pass)
+    it paid TWO control-plane reads per projection instead of one. The default
+    sentinel keeps every other caller byte-identical: it resolves exactly where
+    this function always did."""
     # #3543: both tenant prefixes are probed — a graph minted before the
     # rename is `team_{org_id}`, and no data migration rewrites it. Probing
     # only `org_` reported "node absent" for every pre-rename org, which made
@@ -33107,7 +33129,8 @@ def _graph_has_org_namespace(
     # no-write FLOW-defaults path over a graph that is present. `None` from the
     # resolver (fail-soft: unreadable control plane) keeps the historical
     # probe below, i.e. the pre-#10180 answer.
-    moved = _org_default_namespace(org_id)
+    if isinstance(moved, _NamespaceNotResolved):
+        moved = _org_default_namespace(org_id)
     if moved is not None:
         return moved in listed
     return any(name in listed
@@ -33282,6 +33305,7 @@ def _registry_existing_graphs() -> set[str] | None:
 def _open_org_graph_sdk(
         org_id: str, *,
         listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
+        moved: str | None | _NamespaceNotResolved = _NAMESPACE_NOT_RESOLVED,
 ) -> TortoiseSDK | None:
     """SDK on the org's DEFAULT graph, or None when the server lists neither
     the canonical nor the pre-rename name.
@@ -33319,7 +33343,8 @@ def _open_org_graph_sdk(
         listed = _registry_existing_graphs()
     if not listed:
         return None
-    moved = _org_default_namespace(org_id)
+    if isinstance(moved, _NamespaceNotResolved):
+        moved = _org_default_namespace(org_id)
     if moved is not None:
         # #10180: this org's default graph was PROMOTED into its own namespace
         # (`org_{org_id}_{gid}`), so that name — not `org_{org_id}` — is the
@@ -33369,7 +33394,16 @@ def _get_onboarding_projection(org_id: str) -> dict:
     # share this single snapshot, which also closes the gap where the second
     # probe could list a DIFFERENT name than the one the verdict was about.
     listed = _registry_existing_graphs()
-    if not _graph_has_org_namespace(org_id, listed=listed):
+    # #10180: the existence VERDICT and the OPEN are two questions about ONE
+    # graph, so they are answered from ONE resolution of the org's default
+    # namespace — resolving inside both helpers was two answers at two instants
+    # (a promotion landing between them makes the verdict about one graph and
+    # the open about another), and two control-plane reads per projection on a
+    # lane with no credential hint. `listed` decides whether a resolution is
+    # owed at all: a failed probe (`None`) fails open without one and an empty
+    # listing reaches the same early return, so neither pays a new read.
+    moved = _org_default_namespace(org_id) if listed else _NAMESPACE_NOT_RESOLVED
+    if not _graph_has_org_namespace(org_id, listed=listed, moved=moved):
         state = dict(raw)
         state.update(_os.flow_defaults())
         state["onboarding_complete"] = _os.resolve_wire_completion(
@@ -33387,7 +33421,7 @@ def _get_onboarding_projection(org_id: str) -> dict:
         # name this line never opens. None comes back when the probe failed
         # (fail-open) or neither name is listed: fall back to the inline
         # construction so the read proceeds and raises → 'unavailable'.
-        proj = (_open_org_graph_sdk(org_id, listed=listed)
+        proj = (_open_org_graph_sdk(org_id, listed=listed, moved=moved)
                 or _org_sdk(org_id))._get_proj()
         node = _os.read_onboarding_node(proj, org_id)
         steps = _os.completed_steps(proj, org_id) if node is not None else []
