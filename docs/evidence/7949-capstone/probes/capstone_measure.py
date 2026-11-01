@@ -1004,7 +1004,11 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
                     f"({_summary(block)}). {_IDLE_CITES[key]} This is NOT the "
                     f"#9116 absent-surface cause: the surface is HERE and says "
                     f"the flag was set, and the step stays unobserved until it "
-                    f"carries a non-empty {'/'.join(_WITNESS_STATS)} AS WELL")
+                    f"carries a non-empty {'/'.join(_WITNESS_STATS)} AS WELL — "
+                    "which is not a refusal on its own since #10215: this same "
+                    "shape is what `step_accounting` accounts as a WITNESSED IDLE "
+                    "step when the four idle predicates hold (no failure marker, "
+                    "a positive candidate count)")
             elif ran is False:
                 refused = refused or (
                     where,
