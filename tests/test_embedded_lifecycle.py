@@ -5013,6 +5013,256 @@ def test_embedded_start_refuses_a_db_directory_that_is_gone(tmp_path, capfd):
         "FATAL this guard exists to prevent")
 
 
+# ── the BOOT WINDOW: a REFUSED connect while the server is starting ────────
+#
+# Measured red (run 41269839713, job 124746933422, `test-slow (a)`, PR #10467):
+#
+#     redis.exceptions.ConnectionError: Error 111 connecting to
+#     /tmp/tt_bb_3f48q/tmpp7l87lx_/redis.socket. Connection refused.
+#
+# tracked as #10492 (a CI run is not a tracker record: the next lane that hits
+# this cannot scope, cite or reopen one).
+#
+# raised from `client.py:471 -> _wait_for_server_start -> ping -> _connect` on a
+# test file that PR does not touch, after 676 tests had passed in the same leg,
+# on a host whose own orphan gate counted 476 redislite servers from 2 OTHER
+# concurrent suites. `_wait_for_server_start` tolerates exactly one
+# not-ready-yet arm (`BusyLoadingError`), so the first REFUSED connect — bind()
+# done, listen() not yet, or a momentarily full listen backlog — killed the
+# construction outright instead of being waited out inside the budget the wait
+# loop exists to spend.
+#
+# The pins below hold BOTH halves: a refusal inside the boot window is waited
+# out, and every other outcome still fails exactly as it did before.
+
+import redis.exceptions as _rex  # noqa: E402
+import redislite.client as _redislite_client  # noqa: E402
+
+from tortoise.embedded_lifecycle import (  # noqa: E402
+    _ORIGINAL_WAIT_FOR_SERVER_START,
+    _REFUSED_CONNECT_RETRY_S,
+)
+
+
+class _FakeBootClient:
+    """The attributes `_wait_for_server_start` actually reads.
+
+    `socket_file` is what the guard NAMES when it announces the wait; it is not
+    read by redislite's own wait, so the default keeps every pin below honest
+    about which attributes the seam really consults.
+    """
+
+    def __init__(self, refusals: int, start_timeout: float,
+                 socket_file: str = "/tmp/x/redis.socket"):
+        self.start_timeout = start_timeout
+        self.socket_file = socket_file
+        self.refusals = refusals
+        self.pings = 0
+
+    def ping(self):
+        self.pings += 1
+        if self.refusals < 0 or self.pings <= self.refusals:
+            raise _rex.ConnectionError(
+                "Error 111 connecting to /tmp/x/redis.socket. "
+                "Connection refused.")
+        return True
+
+
+def _refused_connect_error() -> _rex.ConnectionError:
+    return _rex.ConnectionError(
+        "Error 111 connecting to /tmp/x/redis.socket. Connection refused.")
+
+
+def test_a_refused_connect_during_the_boot_window_is_waited_out():
+    """The unpatched wait DIES on the first refusal; the guard waits it out.
+
+    Both halves run against the SAME fake client shape (two refusals, then the
+    server answers), so the first assertion is the pre-fix tree's behaviour — a
+    non-vacuity proof, not a restatement of the patch.
+    """
+    assert _ORIGINAL_WAIT_FOR_SERVER_START is not None, (
+        "the guard installer never captured the pre-patch seam, so the "
+        "non-vacuity half below would be the patch measured against itself")
+
+    pre_fix = _FakeBootClient(refusals=2, start_timeout=2)
+    with pytest.raises(_rex.ConnectionError) as excinfo:
+        _ORIGINAL_WAIT_FOR_SERVER_START(pre_fix)
+    assert "Connection refused" in str(excinfo.value), (
+        "the pre-fix seam must die on the refused connect this guard is about")
+    assert pre_fix.pings == 1, (
+        "the pre-fix wait retried a refusal — then there is no defect to fix")
+
+    patched = _FakeBootClient(refusals=2, start_timeout=2)
+    _redislite_client.RedisMixin._wait_for_server_start(patched)
+    assert patched.pings == 3, (
+        "the guard must re-enter the wait until the server answers")
+
+
+def test_the_boot_window_guard_still_fails_loudly_once_the_budget_is_spent():
+    """Fail CLOSED: a server that never answers still raises, bounded.
+
+    The budget is read from the server's OWN `start_timeout` (the guard adds no
+    knob), and the error the caller sees is the raw connection error — not a
+    swallow, not a re-wrap.
+
+    ⛔ THE BOUND IS PINNED BY ATTEMPT COUNT, NOT BY THE CLOCK (review P2). The
+    real ceiling is `start_timeout` + at most ONE in-flight attempt, and the
+    round-2 version of this test asserted only `elapsed < 5.0` against a 1 s
+    budget — 5x the claimed bound, so an implementation that spent double the
+    budget passed it. The attempt count is deterministic (a 1 s budget with a
+    0.1 s pause cannot admit more than ~11 attempts) and it reds both for an
+    unbounded loop and for a 2x-budget one; the wall clock stays only as a
+    flake-tolerant runaway guard.
+    """
+    budget = 1
+    stuck = _FakeBootClient(refusals=-1, start_timeout=budget)
+    started = time.monotonic()
+    with pytest.raises(_rex.ConnectionError) as excinfo:
+        _redislite_client.RedisMixin._wait_for_server_start(stuck)
+    elapsed = time.monotonic() - started
+
+    assert "Connection refused" in str(excinfo.value), (
+        "the exhausted budget must re-raise the refused connect unchanged")
+    assert elapsed >= 0.9, (
+        f"the guard gave up after {elapsed:.2f}s, before the declared "
+        f"start_timeout budget")
+    max_attempts = int(budget / _REFUSED_CONNECT_RETRY_S) + 2
+    assert stuck.pings <= max_attempts, (
+        f"{stuck.pings} attempts inside a {budget}s budget (ceiling "
+        f"{max_attempts}) — the guard is spending a fresh budget per retry "
+        f"or not checking the deadline at all")
+    assert elapsed < 5.0, (
+        f"the guard kept retrying for {elapsed:.2f}s — runaway, not bounded")
+
+
+def test_a_missing_socket_file_still_fails_immediately():
+    """ENOENT is NOT the boot window — it must not be waited out (#3653/#4961).
+
+    A missing socket file means the socket is GONE, which no amount of waiting
+    repairs; slowing it down would also blunt the loud signature #4879's
+    docstring relies on.
+    """
+
+    class _GoneSocketClient(_FakeBootClient):
+        def ping(self):
+            self.pings += 1
+            raise _rex.ConnectionError(
+                "Error 2 connecting to /tmp/x/redis.socket. "
+                "No such file or directory.")
+
+    gone = _GoneSocketClient(refusals=-1, start_timeout=5)
+    started = time.monotonic()
+    with pytest.raises(_rex.ConnectionError) as excinfo:
+        _redislite_client.RedisMixin._wait_for_server_start(gone)
+    elapsed = time.monotonic() - started
+
+    assert "No such file or directory" in str(excinfo.value)
+    assert gone.pings == 1, (
+        "a missing socket file was retried — the guard is catching more than "
+        "a refused connect")
+    assert elapsed < 1.0, (
+        f"a missing socket file waited {elapsed:.2f}s — ENOENT is not the "
+        f"boot window")
+
+
+def test_the_boot_window_guard_leaves_the_busy_loading_verdict_alone():
+    """The other not-ready-yet arm is untouched: redislite's own verdict.
+
+    A server that answers -LOADING for the whole budget is redislite's
+    `RedisLiteServerStartError`; the guard must not convert that into a
+    connection error, nor retry it beyond the original wait.
+    """
+    busy = _FakeBootClient(refusals=-1, start_timeout=1)
+    busy.ping = lambda: (_ for _ in ()).throw(
+        _rex.BusyLoadingError("LOADING Redis is loading the dataset"))
+    with pytest.raises(_redislite_client.RedisLiteServerStartError):
+        _redislite_client.RedisMixin._wait_for_server_start(busy)
+
+
+_BOOT_LOGGER_NAME = "tortoise.embedded_lifecycle"
+
+
+def _boot_window_lines(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records
+            if "#10447 boot window" in record.getMessage()]
+
+
+def test_a_boot_window_retry_is_announced_before_it_waits(caplog):
+    """An unannounced wait in a constructor is a wedged lane (review P2).
+
+    This module already states the rule three functions above, on the #4921
+    lock branch: *"Say so BEFORE waiting. An unannounced wait in a constructor
+    is indistinguishable from a wedged lane."* The guard spends up to the
+    server's own `start_timeout` — 60 s under the test floor
+    (`tests/_embedded.py:301`) — so a silent retry is exactly the "leg that
+    simply takes a minute longer, with no evidence in the output" the review
+    named, on the `test-slow` legs this guard was written for.
+
+    ⛔ "BEFORE" IS PINNED, NOT ASSUMED. The handler snapshots `pings` at emit
+    time, so an announcement written AFTER the first retry observes `[2]` and
+    reds; only a line emitted before the wait sees the single failed attempt.
+    """
+    pings = _FakeBootClient(refusals=3, start_timeout=2)
+    seen_at_emit: list[int] = []
+
+    class _PingAtEmit(logging.Handler):
+        def emit(self, record):
+            if "#10447 boot window" in record.getMessage():
+                seen_at_emit.append(pings.pings)
+
+    handler = _PingAtEmit()
+    boot_logger = logging.getLogger(_BOOT_LOGGER_NAME)
+    boot_logger.addHandler(handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger=_BOOT_LOGGER_NAME):
+            _redislite_client.RedisMixin._wait_for_server_start(pings)
+    finally:
+        boot_logger.removeHandler(handler)
+
+    assert pings.pings == 4, "the guard must still wait the refusal out"
+    lines = _boot_window_lines(caplog)
+    assert len(lines) == 1, (
+        f"the boot window must announce itself ONCE, not per attempt — got {lines}")
+    assert "/tmp/x/redis.socket" in lines[0], (
+        f"the announcement must name the socket it is waiting on — got {lines[0]!r}")
+    assert "2.0s" in lines[0], (
+        f"the announcement must name the budget — got {lines[0]!r}")
+    assert seen_at_emit == [1], (
+        f"the wait was announced at ping #{seen_at_emit} — it must be said BEFORE "
+        f"the first retry, when only the refused attempt has been made")
+
+
+def test_the_boot_window_budget_exhaustion_names_the_attempt_count(caplog):
+    """Giving up is announced too, with the count — the raw error cannot say it.
+
+    The connection error a caller sees is identical whether the server refused
+    once or for a whole budget, so without this line the retry leaves no trace
+    at all: `elapsed` is the only remaining signal and nothing logs it.
+    """
+    stuck = _FakeBootClient(refusals=-1, start_timeout=1)
+    with (
+        caplog.at_level(logging.WARNING, logger=_BOOT_LOGGER_NAME),
+        pytest.raises(_rex.ConnectionError) as excinfo,
+    ):
+        _redislite_client.RedisMixin._wait_for_server_start(stuck)
+
+    assert "Connection refused" in str(excinfo.value), (
+        "the exhausted budget must still re-raise the refused connect unchanged")
+    lines = _boot_window_lines(caplog)
+    gave_up = [line for line in lines if "gave up" in line]
+    assert len(gave_up) == 1, (
+        f"giving up on the boot window must be announced exactly once — got {lines}")
+    assert f"{stuck.pings} refused connect" in gave_up[0], (
+        f"the exhaustion line must state the attempt count ({stuck.pings}) — "
+        f"got {gave_up[0]!r}")
+    assert "/tmp/x/redis.socket" in gave_up[0], (
+        "the exhaustion line must name the socket that never answered")
+    assert len(lines) == 2, (
+        f"expected one announcement plus one give-up, got {lines}")
+
+
+# ── the START TIMEOUT FLOOR: a slow host is not a failed server (#10437) ───
+
 def test_the_embedded_start_timeout_floor_reaches_the_client_tortoise_builds(
         monkeypatch):
     """#10437: the session floor must hold on the class the embedded client IS.
@@ -5083,4 +5333,3 @@ def test_the_embedded_start_timeout_floor_reaches_the_client_tortoise_builds(
     assert raise_embedded_start_timeout_floor() == EMBEDDED_START_TIMEOUT_FLOOR + 30
     assert _rc.Redis.start_timeout == EMBEDDED_START_TIMEOUT_FLOOR + 30, (
         "the floor must never LOWER a bound a caller raised deliberately")
-

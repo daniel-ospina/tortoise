@@ -202,6 +202,42 @@ def test_editing_the_log_is_refused(wt: Path) -> None:
     assert "suite-log-hash-mismatch" in check.stdout
 
 
+def test_a_gap_in_the_numbering_does_not_clobber_an_earlier_suite_log(wt: Path) -> None:
+    """The next suite number comes from the MAXIMUM in use, not from the COUNT.
+
+    Measured on #10474's own lane: its state held suites 1,2,3,4,6,7 (a gap at 5, left
+    by an interrupted `run`), so `len(suites) + 1` re-minted **7** — the new command's
+    output overwrote suite 7's log, and `check` re-derived the earlier suite's hash
+    against that overwritten file and refused the whole report with
+    `suite-log-hash-mismatch`. Honest evidence was reported INVALID by the instrument,
+    and the merge path refuses on that verdict (agent-infra#2977).
+
+    Non-vacuity: on the pre-fix tool the fourth `run` takes n=3, both assertions below
+    fail, and so does the check — the shape is reproduced, not narrated.
+    """
+    assert tool(wt, "init").returncode == 0
+    for name in ("one", "two", "three"):
+        assert tool(wt, "run", "--cmd", GREEN, "--name", name).returncode == 0
+
+    # Drop the middle ENTRY but keep its log: exactly what a lost suite leaves behind.
+    state = state_of(wt)
+    dropped = state["suites"].pop(1)
+    put_state(wt, state)
+    assert (wt / dropped["log"]).exists()
+
+    assert tool(wt, "run", "--cmd", GREEN, "--name", "four").returncode == 0
+
+    suites = state_of(wt)["suites"]
+    numbers = [suite["n"] for suite in suites]
+    assert len(set(numbers)) == len(numbers), f"duplicate suite number(s): {numbers}"
+    logs = [suite["log"] for suite in suites]
+    assert len(set(logs)) == len(logs), f"two suites share one log file: {logs}"
+    assert suites[-1]["n"] > max(suite["n"] for suite in suites[:-1]), numbers
+
+    check = tool(wt, "check")
+    assert check.returncode == 0, check.stdout
+
+
 def test_counts_edited_in_the_state_are_refused_by_re_derivation(wt: Path) -> None:
     """'wrote 37' vs 'ran 37': the numbers are re-derived from the log, so an edit is caught.
 
