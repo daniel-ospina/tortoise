@@ -808,3 +808,68 @@ class TestAnEarlyReturnStillConsultsTheFold:
 
         assert rows == []
         assert truncation_field(sink)[TRUNCATED_FIELD] is True
+
+
+class TestAnArmThatServedTheSlotIsNotALostLeg:
+    """The arm's provenance has a SECOND half: delivering proves the slot served.
+
+    An absent fulltext index is the benign embedded state ``run_fts_query``
+    documents, and it makes the lexical leg record ``index_missing`` on every
+    read. When the #8488 arm — ON by default — re-reads the same slot from the
+    graph and delivers the rows, no match was lost, so the read is COMPLETE.
+    Judging the owner's ``index_missing`` alone marks every read on that store
+    ``truncated: true`` with all rows delivered: the same false positive as
+    judging the arm's own failure, one step further on.
+    """
+
+    @staticmethod
+    def _no_fulltext_index(monkeypatch):
+        """The shipped lexical leg raises on a missing index and returns []."""
+        import tortoise.search_engine as se
+        from tortoise.search_engine import _trace_entry
+
+        def _raise_no_index(graph, query, *, entity_type="point", limit=20,
+                            **kwargs):
+            trace = kwargs.get("leg_trace")
+            if trace is not None:
+                trace.append(_trace_entry(
+                    "fts", ran=True, degraded=True, reason="index_missing",
+                    count=0))
+            return []
+
+        monkeypatch.setattr(se, "run_fts_query", _raise_no_index)
+
+    def test_the_arm_delivering_the_slot_excuses_the_missing_index(
+            self, sdk, monkeypatch):
+        _seed(sdk, 3)
+        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)  # default ON
+        self._no_fulltext_index(monkeypatch)
+
+        trace: list[dict] = []
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
+                                      leg_trace=trace)
+
+        assert len(rows) == 3
+        # non-vacuous: the lexical leg really did fail on the absent index …
+        assert any(e.get("reason") == "index_missing" for e in trace), trace
+        # … and the ARM really did deliver the slot …
+        assert any(e.get("mechanism") == "bm25" for e in trace), trace
+        # … so every match this read could see was delivered.
+        assert truncation_field(sink) == {TRUNCATED_FIELD: False}, (
+            "the in-process arm re-read the whole lexical slot from the graph; "
+            "marking this read truncated is the false positive that makes the "
+            "field meaningless")
+
+    def test_the_same_read_without_the_arm_is_still_lost(self, sdk, monkeypatch):
+        """Control: no arm, no second route to the rows — the read IS incomplete."""
+        _seed(sdk, 3)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        self._no_fulltext_index(monkeypatch)
+
+        sink: dict = {}
+        sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+
+        assert truncation_field(sink)[TRUNCATED_FIELD] is True, (
+            "with the arm off, nothing read the lexical half — the rows are "
+            "unreachable and the read may not claim completeness")

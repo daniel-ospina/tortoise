@@ -198,22 +198,34 @@ def lost_leg_owners(asked_legs: dict[str, bool], status_trace, *,
                        arm's ``breaker_open`` branch writes no ``mechanism`` and
                        no ``declined`` key at all, so key-based attribution
                        would leave exactly that branch mis-read.
+
+    An ARM entry cannot make a leg LOST, and one of them can prove one was
+    SERVED: an arm that answered ``ok`` produced rows for the slot it shares, so
+    a missing index on the shipped leg cost this read nothing. Without that
+    half, a store whose fulltext index is absent — the benign embedded state
+    ``run_fts_query`` documents — and whose arm re-read the same slot from the
+    graph is marked ``truncated: true`` on EVERY read, all rows delivered: the
+    same false positive as judging the arm's own failure, one step further on.
     """
     lost: set[str] = set()
+    served_by_an_arm: set[str] = set()
     for index, entry in enumerate(status_trace or ()):
-        if skip_from is not None and index >= skip_from:
-            continue
         if not isinstance(entry, dict):
             continue
         leg = entry.get("leg")
         if not asked_legs.get(leg):
+            continue
+        if skip_from is not None and index >= skip_from:
+            # This entry is the ARM's own verdict about the slot it shares.
+            if entry.get("reason") == "ok":
+                served_by_an_arm.add(leg)
             continue
         if not entry.get("degraded"):
             continue
         answered = LEG_ANSWERED_REASONS.get(leg, DEFAULT_LEG_ANSWERED_REASONS)
         if entry.get("reason") not in answered:
             lost.add(leg)
-    return lost
+    return lost - served_by_an_arm
 
 
 def truncation_field(sink: dict | None) -> dict:
