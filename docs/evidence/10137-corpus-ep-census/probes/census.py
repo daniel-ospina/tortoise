@@ -53,13 +53,19 @@ def _census_unread(manifest: object) -> bool:
     """Is this manifest's graph census UNREAD (absent, fail-open, or ``None``)?
 
     One rule for all four cells, taken from ``measurement_posture`` rather than
-    re-derived here: an ABSENT cell is UNKNOWN exactly like a ``None`` one, so
-    the fail-open shape ``{"ep_ran": False, "error": ...}`` is unread. A
-    manifest that is not a dict at all (no manifest) is unread by definition.
+    re-derived here: a key in ``_UNKNOWN_PER_MANIFEST_KEYS`` is UNKNOWN when
+    absent or ``None`` — AND by the module's own coercion, which refuses a
+    ``bool`` and any non-numeric value (``_optional_int``: "a bool is not a
+    count"). ``value is None`` alone was not the same predicate (#10137
+    review, P3): a manifest carrying ``operators: true`` read as READ here and
+    UNREAD for ``cells.operators_unread``, which is the disagreement this
+    function exists to end. A manifest that is not a dict at all (no manifest)
+    is unread by definition.
     """
     if not isinstance(manifest, dict):
         return True
-    return any(manifest.get(k) is None for k in mp._UNKNOWN_PER_MANIFEST_KEYS)
+    return any(mp._optional_int(manifest.get(k)) is None
+               for k in mp._UNKNOWN_PER_MANIFEST_KEYS)
 
 
 def cells(path: str) -> dict:
@@ -75,8 +81,11 @@ def cells(path: str) -> dict:
         summary = posture["activation"]
         source = "report"
         # ``n_failed`` is ``len(failures)`` on a report (``report.py:1898``,
-        # ``:2793``), so the two arms carry the failure population the same way.
-        questions_failed = doc.get("n_failed")
+        # ``:2793``) and the list itself rides the report too
+        # (``report.py:2792``). Read BOTH: the list gives the ids the union
+        # below needs, the count is the authority when a list was pruned.
+        reported_failed = doc.get("n_failed")
+        failures = [f for f in (doc.get("failures") or []) if isinstance(f, dict)]
     else:                                                     # a checkpoint
         # ``requested`` is the caller's resolved ARM, never inferred from the
         # outcomes — but a checkpoint carries it in its fingerprint
@@ -101,15 +110,42 @@ def cells(path: str) -> dict:
         # ratio's denominator is still the outcomes (that is the runner's own
         # aggregate); ``questions_in_run`` below is what makes the difference
         # between the two READABLE.
-        questions_failed = len(doc.get("failures") or [])
+        failures = [f for f in (doc.get("failures") or []) if isinstance(f, dict)]
+        # The checkpoint's list IS the authority here (``run.py:2797``); it is
+        # never short of the truth, so no separate count is carried.
+        reported_failed = None
 
-    # Every question the input says the run covers — the outcomes it carries
-    # PLUS the ones that failed. ``questions`` in the published block is the
-    # ratio's denominator (the outcomes), so a crash makes these two disagree;
-    # that disagreement is the disclosure, never a silent N/N (#10137 review, P2).
-    n = len(outcomes) + (questions_failed or 0)
-    if source == "report" and isinstance(doc.get("n_questions"), int):
-        n = doc["n_questions"]
+    # EVERY question the run covered, counted as DISTINCT question ids over the
+    # two lists — never ``len(outcomes) + len(failures)`` (#10137 review, P2).
+    # The overlap is a documented real shape, not a hypothetical: a qid
+    # completed by one worker and failed by another lands in BOTH lists
+    # (``report.py:1407-1410``), and ``_merge_checkpoint`` unions the two
+    # independently, tombstones being present only when the writer knew it was
+    # a ``--retry-failed`` re-attempt (``run.py:2699-2729``). Summing the
+    # lengths published a 2-question population as a 3-question run, and the
+    # gap the README calls "the disclosure" hid it — the gap was
+    # ``questions_failed`` BY CONSTRUCTION.
+    #
+    # ``questions_failed`` is therefore the count of failures that actually
+    # ABLATE the ratio: a qid that failed and then produced an outcome counts
+    # once, as an outcome (it was recovered, and it is in the denominator).
+    #
+    # ⛔ The report arm's own ``n_questions`` is NOT used as the total: it is
+    # ``len(outcomes)`` (``report.py:1106`` -> ``:2376``), so overriding with it
+    # silently dropped the failure population in the arm that produces the
+    # published artifact — F3 fixed nothing there (#10137 review, P2).
+    outcome_ids = {o.get("question_id") for o in outcomes
+                   if isinstance(o, dict) and o.get("question_id")}
+    failed_ids = {f.get("question_id") for f in failures if f.get("question_id")}
+    # A reported count larger than the list is a failure population whose ENTRY
+    # list the input pruned. Those ids cannot be matched against an outcome, so
+    # they are added rather than dropped — undercounting the ablation is the one
+    # direction that resurrects ``N/N = 1.00``.
+    unlisted = 0
+    if isinstance(reported_failed, int) and reported_failed > len(failed_ids):
+        unlisted = reported_failed - len(failed_ids)
+    questions_failed = len(failed_ids - outcome_ids) + unlisted
+    n = len(outcome_ids | failed_ids) + unlisted
 
     # NOT ``or 0``: an ABSENT cell is UNKNOWN, and coercing it would publish a
     # fabricated "measured zero" — the rule ``measurement_posture`` states for
@@ -135,8 +171,9 @@ def cells(path: str) -> dict:
     # two disclosures of one fact, disagreeing. Count the rows whose census was
     # NOT READ, by the summed cells' own rule: a key in
     # ``_UNKNOWN_PER_MANIFEST_KEYS`` is UNKNOWN when absent or ``None``. The
-    # private constant is imported deliberately — it is the ONE definition, and
-    # a rename there must red this probe loudly rather than drift from it.
+    # private constant and ``_optional_int`` are imported deliberately — they
+    # are the ONE definition, and a change there must red this probe loudly
+    # rather than drift from it.
     per_question_unread = sum(
         1 for o in rows if _census_unread(o.get("belief_activation")))
     if not manifests:

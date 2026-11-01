@@ -167,10 +167,12 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   question — including the empty-population boundary, where an input with *no* outcomes must not
   claim a source it never read. A *partial* population still publishes its rows, and
   `per_question_unread` says how many questions inside them have an **unread** census — the same
-  rule, and the same predicate (`measurement_posture._UNKNOWN_PER_MANIFEST_KEYS`), the summed
-  cells use for `<key>_unread`, so the two disclosures can never disagree (#10137 review, P2: a
+  rule, and the same predicate (`measurement_posture._UNKNOWN_PER_MANIFEST_KEYS`, coerced through
+  the module's own `_optional_int`, which refuses a `bool` or any non-numeric cell), the summed
+  cells use for `<key>_unread`, so the two disclosures can never disagree (#10137 review, P2/P3: a
   manifest PRESENT is not a census READ — the producer's fail-open shape
-  `{"ep_ran": false, "error": …}` carries a manifest and no cells, and used to count as read).
+  `{"ep_ran": false, "error": …}` carries a manifest and no cells, and used to count as read; and
+  `operators: true` is not a count).
   Each row also carries that manifest's `error`, so the reason a census is missing is readable per
   question instead of inferred from nulls.
 
@@ -179,10 +181,17 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   the normal case, and the case this very bundle came from — would publish
   `questions_with_ep / questions = N/N = 1.00` over its survivors with the ablation invisible. The
   probe therefore reads the input's own failure list (`run.py:2797` writes `failures`; a report
-  carries `n_failed`, `report.py:1898`) and publishes `questions_failed` beside
-  `questions_in_run`, which counts every question the run covered — outcomes **plus** failures. On
-  a clean run the three agree; on a crash `questions_in_run − questions == questions_failed`, and
-  that gap is the disclosure. This artifact: `questions_in_run = 24`, `questions_failed = 0`. These branches are pinned by
+  carries both the list and `n_failed`, `report.py:2792-2798`) and publishes `questions_failed`
+  beside `questions_in_run`, which counts every question the run covered — as **distinct question
+  ids over both lists**, never `len(outcomes) + len(failures)`: a qid completed by one worker and
+  failed by another lands in both (`report.py:1407-1410`), and summing the lengths published a
+  2-question population as a 3-question run. On a clean run the three agree; on a crash
+  `questions_in_run − questions == questions_failed`, and that gap is the disclosure. A question that
+  failed and then produced an outcome counts once, as an outcome — it was recovered, and it is in
+  the ratio's denominator. ⛔ The report arm does **not** take its total from `n_questions`: that is
+  `len(outcomes)` (`report.py:1106`), so overriding with it silently dropped the failure population
+  in the arm that publishes the ordinary artifact. This artifact: `questions_in_run = 24`,
+  `questions_failed = 0`. These branches are pinned by
   `tests/longmem_eval/test_ep_census_10137.py::test_census_probe_*`.
 
 `census.json` below was written by the *checkpoint* path, so it carries `per_question_source:

@@ -557,8 +557,61 @@ def test_census_probe_discloses_failed_questions_behind_the_ratio(tmp_path):
     # by exactly the failures, so a reader cannot mistake one for the other.
     assert out["questions_in_run"] - out["questions"] == out["questions_failed"]
 
-    # The report arm reads the same population off ``n_failed``.
+    # The report arm reads the same population — and the SAME gap — off
+    # ``n_failed``. This half is the one that matters: a report is the ordinary
+    # path (``report.py:1106`` sets ``n_questions = len(outcomes)``, so an
+    # override with it would silently drop the failures here, #10137 review P2),
+    # and the report carries no per-entry list in this input, so the count is
+    # the only witness to the three missing questions.
     rep = _report_doc(_outcomes(2))
     rep["n_failed"] = 3
     out_rep = _probe().cells(_write(tmp_path / "rep", rep))
     assert out_rep["questions_failed"] == 3
+    assert out_rep["questions_in_run"] == 5     # 2 outcomes + 3 unlisted failures
+    assert out_rep["questions"] == 2
+    assert out_rep["questions_in_run"] - out_rep["questions"] == \
+        out_rep["questions_failed"]
+
+
+def test_census_probe_counts_an_overlapped_qid_once(tmp_path):
+    """A qid in BOTH lists is ONE question (#10137 review, P2).
+
+    The overlap is a documented real shape, not a hypothetical: a qid completed
+    by one worker and failed by another lands in both lists (``report.py:1407-
+    1410``), and ``_merge_checkpoint`` unions the two independently, the
+    ``remove_failures`` tombstone being present only when the writer knew it was
+    a ``--retry-failed`` re-attempt (``run.py:2699-2729``). ``len(outcomes) +
+    len(failures)`` published a 2-question population as a 3-question run — and
+    the gap the README calls "the disclosure" could not see it, because the gap
+    was ``questions_failed`` BY CONSTRUCTION.
+
+    A recovered question is not an ablation: it is in the ratio's denominator.
+    """
+    overlapped = {"fingerprint": {"activate_beliefs": True},
+                  "outcomes": _outcomes(2),
+                  "failures": [{"question_id": "q0",
+                                "error": "reader timeout"}]}
+    out = _probe().cells(_write(tmp_path, overlapped))
+
+    assert out["questions_in_run"] == 2          # not 3
+    assert out["questions"] == 2
+    assert out["questions_failed"] == 0          # q0 was recovered
+    assert out["questions_in_run"] - out["questions"] == \
+        out["questions_failed"]
+
+
+def test_census_probe_treats_a_non_count_cell_as_unread(tmp_path):
+    """``operators: true`` is UNREAD, not a measured 1 (#10137 review, P3).
+
+    ``measurement_posture._optional_int`` refuses a ``bool`` and any
+    non-numeric value ("a bool is not a count"), so the summed cells count such
+    a cell as unread. ``value is None`` alone does not, and that made the two
+    disclosures disagree again - the disagreement #10137 review F2 fixed.
+    """
+    outcomes = [{"question_id": "q-bool", "question_type": "t",
+                 "belief_activation": _manifest(operators=True)}]
+    out = _probe().cells(_write(tmp_path, _report_doc(outcomes)))
+
+    assert out["cells"]["operators_unread"] == 1
+    assert out["per_question_unread"] == 1
+    assert out["per_question"][0]["operators"] is True   # published as read
