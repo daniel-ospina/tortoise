@@ -34,6 +34,13 @@ Host routing lives in `website/functions/_middleware.ts`:
 - `tortoise.*` root → `product.html` (rewritten), everything else serves its own asset
 - `premiselabs.co` + preview hosts root → `index.html` (company page)
 - `/product` on non-tortoise hosts → 404 (product page never leaks onto the company host)
+- **a stray authorization response is refused, not rendered or forwarded** (`?code=…`, #10088 ask 3):
+  a 400 with a named error page, on BOTH hosts, and **ahead of the company-host consolidation 301s**
+  — the one refusal-shaped branch that supersedes the general "consolidate to the canonical host"
+  rule, because a `Location` would carry the credential to a second URL. The **exception** is the
+  surface that can actually redeem a code — `/auth`, `/auth/*` (the BFF's `/auth/callback`),
+  `/admin`, and the `APP_ONLY` pages the company host 301s to the app origin — which returns its
+  redirect above the guard
 - **auth surfaces redirect to the app origin — and WHICH layer does it depends on the host:**
   - the middleware's `APP_ONLY` branch (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`),
