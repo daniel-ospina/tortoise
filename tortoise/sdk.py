@@ -18693,10 +18693,12 @@ class TortoiseSDK:
             """
             if _direction == "out":
                 _dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
-                       "RETURN type(r), r, t.id, ID(r), labels(t)")
+                       "RETURN type(r), r, t.id, ID(r), labels(t), "
+                       "coalesce(t.claimClass, 'asserted')")
             else:
                 _dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
-                       "RETURN type(r), r, t.id, ID(r), labels(t)")
+                       "RETURN type(r), r, t.id, ID(r), labels(t), "
+                       "coalesce(t.claimClass, 'asserted')")
             _rows = proj.g.query(_dq, params={"old_id": old_id}).result_set
             if not _rows:
                 return []
@@ -18762,12 +18764,32 @@ class TortoiseSDK:
                     # The transfer below writes NO edge for this row (the
                     # #8622 endpoint-label condition) — it only deletes.
                     continue
-                if (new_id not in _direct_classes
-                        or _tid not in _direct_classes):
-                    # Not a CLAIM on this side (:Subject/:Object/:Event —
-                    # #7902), or no resolvable id: nothing can override it, and
-                    # it can override nothing.
+                if _tid is None or _tid == "":
+                    # NO id property at all: the transfer's
+                    # ``MATCH (t {id:$tid})`` cannot resolve it, so the MERGE
+                    # writes nothing and only the delete-leg runs — the same
+                    # outcome the pre-guard code had, and nothing to judge.
                     continue
+                if isinstance(_tid, str) and _tid not in _direct_classes:
+                    # A string id with no ``:Point`` row is not a CLAIM
+                    # (:Subject/:Object/:Event — #7902): nothing can override
+                    # it, and it can override nothing. (An ABSENT id never
+                    # reaches here — the label probe below skips it with the
+                    # rows the transfer writes no edge for.)
+                    continue
+                if isinstance(_tid, str):
+                    _tid_classes = _direct_classes.get(_tid)
+                else:
+                    # ⛔ A NON-STRING id the transfer's ``MATCH (t {id:$tid})``
+                    # still RESOLVES (measured: an integer ``id``): the fan-out
+                    # probe is id-ADDRESSABLE only, so it cannot describe this
+                    # endpoint — but the edge IS written, so it must be judged.
+                    # The row's own marker carries the only verdict there is,
+                    # and absence of one is ``asserted`` (the ``normalize``
+                    # rule). Skipping it here would be a fail-open on exactly
+                    # the axis the id filter above closes.
+                    _tid_classes = {_claim_class.normalize(
+                        _row[5] if len(_row) > 5 else None)}
                 _rdict = (dict(_rel.properties)
                           if hasattr(_rel, "properties") else {})
                 # ⛔ Only a STRING token reaches the predicate: a raw-written
@@ -18784,10 +18806,12 @@ class TortoiseSDK:
                     _src_id, _tgt_id = new_id, _tid
                 else:
                     _src_id, _tgt_id = _tid, new_id
+                _src_classes = (_direct_classes.get(new_id)
+                                if _src_id == new_id else _tid_classes)
+                _tgt_classes = (_direct_classes.get(new_id)
+                                if _tgt_id == new_id else _tid_classes)
                 if _claim_class.direction_blocks_create(
-                        _eff_dir,
-                        _direct_classes.get(_src_id),
-                        _direct_classes.get(_tgt_id)):
+                        _eff_dir, _src_classes, _tgt_classes):
                     # ⛔ It names the WIRING IT JUDGED, not ``old->new``: on the
                     # ``in`` arm the edge being re-pointed is ``tid -> old``
                     # becoming ``tid -> new``, so a hardcoded ``old->new``
