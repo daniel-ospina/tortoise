@@ -156,6 +156,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # fixture-param monkeypatch auto-restores (no lane leak).
     "test_9567_record_capstone.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #8447 truncation marker: the end-to-end half of the suite seeds a real
+    # store and applies a real `limit` to it, so it forces the EMBEDDED lane
+    # (delenv the URI, then pin TORTOISE_DB_PATH to a tmp_path db) — a URI
+    # redirect would fold the "20 matches, limit=5" measurement onto a shared
+    # server graph whose match count the test does not control, which is
+    # exactly what the marker is asserted against. The delenv IS the point;
+    # the fixture-param monkeypatch auto-restores (no lane leak).
+    "test_8447_truncation_marker.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # #2724 churn-wave hygiene (2026-09-09): the two #2600 Phase 1 Task 1
     # apikey-verify unit tests (TestRegistryApikeyVerifyRawCreatedBy at
     # :163/:184) force the embedded lane (delenv the URI, then pin
