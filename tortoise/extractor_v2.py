@@ -4106,6 +4106,14 @@ _UNIT_EQUIV = {
 #: must never take (review P2).
 _LEADING_DOT = re.compile(r"(?<![\d.])\.(\d)")
 
+#: The unit identities this module can compare — the VALUES of the table.
+_KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
+
+#: Every unit spelling this module can compare. A unit OUTSIDE this set is
+#: treated as "unit not stated" by `_value_identity_matches` (fail open), and
+#: `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` is asserted by the test file so a unit
+#: the ENGINE can fuse can never be unknown here.
+
 
 def _value_core(token: str) -> tuple[str, str, str | None] | None:
     """``(sign, numeric core, unit)`` for a value token, or ``None``.
@@ -4149,16 +4157,28 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
 
 def _value_identity_matches(a: tuple[str, str, str | None],
                             b: tuple[str, str, str | None]) -> bool:
-    """Two value identities agree, allowing ONE side to omit the unit.
+    """Two value identities agree, allowing one side to omit the unit.
 
     ``800`` and ``800ms`` agree (the unit is written or not), the way a point may
-    distil "800ms" from a source sentence that says "800". A unit that appears on
-    BOTH sides must be the SAME unit (spelling-normalised), so a minutes→hours
-    rewrite does not fold.
+    distil "800ms" from a source sentence that says "800". A unit BOTH sides
+    state, and that this module knows how to spell-normalise, must be the SAME
+    unit — so a minutes→hours rewrite does not fold.
     """
     if a[0] != b[0] or a[1] != b[1]:
         return False
-    return a[2] is None or b[2] is None or a[2] == b[2]
+    # A unit the SPELLING table does not know cannot be compared mechanically:
+    # `800millis`/`800ms`, `20kms`/`20km`, `1.5-inch`/`1.5in`, `32-byte`/`32-
+    # bytes` are one unit spelled two ways, and refusing them is the
+    # false-accusation direction the earlier string-identity attempt died on
+    # (review cycle 3, P2 — the `32-byte` shape already occurs 4 times in the
+    # committed census). So an unknown unit is treated as the "one side omits
+    # the unit" tolerance; knowing it is `_UNIT_EQUIV`'s job, and
+    # `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` is asserted by the test file so a
+    # fusable unit cannot silently be unknown again.
+    known = _KNOWN_UNITS
+    if a[2] not in known or b[2] not in known:
+        return True
+    return a[2] == b[2]
 
 
 def _value_slots(text: object) -> tuple[tuple[str, tuple], ...]:
@@ -8200,6 +8220,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if _refuse_rewritten_value(str(p.get("content") or ""),
                                    str(p.get("quote") or ""),
                                    warnings=warnings):
+            refused_value_contents.add(_norm(content))
             refused_value_contents.add(_norm(str(p.get("content") or "")))
             # The point's own `supersedes` ref is dropped WITH the point, and
             # #9906's rule is that none of the drop doors is silent — so the
@@ -8458,7 +8479,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         content = str(ref or "").strip()[:_MAX_CONTENT]
         if not content:
             return ""
-        if _norm(content) in refused_value_contents:
+        if _norm(content) in refused_value_contents and _norm(content) not in point_ids:
             # #10360: mint-before-wire must not resurrect what the
             # value-fidelity rule refused. Minting here would build a
             # `statement` Point out of the MODEL's text — the rewritten value —

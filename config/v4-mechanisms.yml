@@ -547,9 +547,13 @@ mechanisms:
       comment 2026-10-13, `#7949` E2) — the figure that would move is the E2
       arm's, and this lane ran no LLM arm. `UNMEASURED(<an E2 LLM arm run>)`.
       (c) a rewritten CLOCK or ISO date is not caught (form excluded by design);
-      (d) a unit the engine writes APART is not fused into the value token by
-      `_UNIT_WORDS`, so a minutes/seconds rewrite spelled with a space is not
-      judged (an engine limit, not a tolerance of this rule); (e) the S5
+      (d) a unit WORD the engine's own `_UNIT_WORDS` vocabulary does not carry
+      (`seconds`, `minute`, `hour`, `day`, `mile`, …) is never fused into the
+      value token — apart or not — so a minutes→seconds rewrite is not judged:
+      an ENGINE VOCABULARY limit, not a tolerance of this rule (the units it
+      does fuse are compared); a unit SPELLING outside `_UNIT_EQUIV` fails open
+      on purpose, because refusing `800millis`/`800ms` is the false-accusation
+      direction this rule must never take; (e) the S5
       minted-endpoint site is not judged against its own quote — there `quote` is
       `content[:200]`, the point's OWN text, so a rewrite is impossible by
       construction and a rule there must compare against the resolved TURN text,

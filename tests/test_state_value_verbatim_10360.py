@@ -347,3 +347,47 @@ def test_a_refused_value_cannot_re_enter_the_graph_through_an_operator():
     assert "the p95 hit 4.0 seconds" not in contents, contents
     assert any("refused for rewriting its own verbatim quote" in w
                for w in result["warnings"]), result["warnings"]
+
+
+# ── 7. pins for the cycle-3 findings ──────────────────────────────────────
+
+def test_the_unit_table_covers_every_unit_the_engine_can_fuse():
+    """A fused unit must never be UNKNOWN here.
+
+    Review cycle 2 closed the wildcard by returning an unmapped suffix as
+    itself; review cycle 3 measured that this created a false-refusal class
+    (`800millis`/`800ms`, `20kms`/`20km`, `32-byte`/`32-bytes` — the last shape
+    occurs 4 times in the committed census), so an unknown unit now fails OPEN
+    and this structural pin keeps a fusable unit from being unknown at all.
+    Mutating any of the six `k/km/mi/m/kg/lb` rows reds this.
+    """
+    assert set(v2._UNIT_WORDS) <= set(v2._UNIT_EQUIV)
+
+
+def test_the_suffix_comes_from_the_last_digit_run():
+    """Review cycle 3, finding 3: `raw.find(...)` read the FIRST occurrence of
+    the last run (`24h/7d/4w` → `hdw`). Reverting to it reds these two."""
+    assert v2._value_core("24h/7d/4w") == ("", "24/7/4", "w")
+    assert v2._value_core("12.3ms/1") == ("", "12.3/1", None)
+
+
+def test_an_unknown_unit_is_a_spelling_not_a_rewrite():
+    """The fail-open half of the same finding: same unit, different spelling."""
+    for content, quote in (("800millis", "800ms"), ("20kms", "20km"),
+                           ("1.5-inch", "1.5in"), ("32-byte", "32-bytes")):
+        assert v2._value_slot_divergence(f"the value is {content}",
+                                         f"the value is {quote}") == (), content
+
+
+def test_a_refused_value_over_the_content_cap_cannot_be_minted_either():
+    """Review cycle 3, P2: the set was keyed UNCLAMPED while `_mint_endpoint`
+    compares the CLAMPED text, so a >`_MAX_CONTENT` refused content was minted
+    anyway. Both keys are recorded now; dropping either reds this."""
+    content = "the p95 hit 4.0 seconds " + ("z" * (v2._MAX_CONTENT + 200))
+    quote = "the p95 hit 4.2 seconds " + ("z" * (v2._MAX_CONTENT + 200))
+    embed = _embed(content, quote)
+    embed["operators"] = [{"src": content, "dst": "the cache TTL is 20 minutes",
+                           "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    assert all(p["content"] != content for p in result["payload"]["points"]), (
+        [p["content"][:40] for p in result["payload"]["points"]])
