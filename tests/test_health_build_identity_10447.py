@@ -186,7 +186,7 @@ def test_migrations_head_is_the_highest_migration_the_image_carries(sha_env):
 
 
 def test_a_non_migration_sql_file_is_not_the_head(monkeypatch, tmp_path):
-    """THE DISCRIMINATOR for the numeric-ordering fix, on a CONTROLLED directory.
+    r"""THE DISCRIMINATOR for the numeric-ordering fix, on a CONTROLLED directory.
 
     A pin that re-derives the implementation's own algorithm from the real
     `supabase/migrations` cannot fail when the ordering is reverted — every real
@@ -194,8 +194,8 @@ def test_a_non_migration_sql_file_is_not_the_head(monkeypatch, tmp_path):
     sort (`seed.sql`, `_seed.sql` sort after every digit start) and asserts the
     head anyway.
     """
-    from tortoise import record_projection  # noqa: PLC0415 - the resolver under test
-    from tortoise import hosted_api as api  # noqa: PLC0415
+    from tortoise import hosted_api as api
+    from tortoise import record_projection
     d = tmp_path / "migrations"
     d.mkdir()
     for name in ("0001_a.sql", "9999_b.sql", "seed.sql", "_seed.sql"):
@@ -213,8 +213,8 @@ def test_migrations_source_names_the_population_it_read(monkeypatch, tmp_path):
     """A wheel ships only the record lineage, so its `max` is plausible and
     wrong for "has the schema migration landed". The payload must SAY which
     population it read (review P2)."""
-    from tortoise import record_projection  # noqa: PLC0415
-    from tortoise import hosted_api as api  # noqa: PLC0415
+    from tortoise import hosted_api as api
+    from tortoise import record_projection
     packaged = tmp_path / "record_migrations"
     packaged.mkdir()
     (packaged / "20261029000001_record_point_cache_tier.sql").write_text("-- x\n")
@@ -225,26 +225,28 @@ def test_migrations_source_names_the_population_it_read(monkeypatch, tmp_path):
     assert source == "package", source
 
 
-def test_the_migrations_head_is_resolved_once_not_per_request(sha_env):
+def test_the_migrations_head_is_resolved_once_not_per_request(sha_env, monkeypatch):
     """`/health` must do no I/O per request (#2850's contract, restated in
     `.github/scripts/deploy-health-gate.sh`): the resolver is memoised at import,
-    so a burst of checks cannot stat 13 paths and glob 77 files each time."""
+    so a burst of checks cannot stat 13 paths and glob 77 files each time.
+
+    THE PIN IS THE BOOBY TRAP (review P3). A counter that nothing installs asserts
+    `0 == 0` and would pass even if `_build_identity()` re-resolved per request.
+    Replacing the resolver with one that RAISES fails the moment the payload
+    calls it, and passes only while the payload reads the constants.
+    """
     sha_env("f" * 40)
-    calls = {"n": 0}
-    from tortoise import hosted_api as api  # noqa: PLC0415
+    from tortoise import hosted_api as api
 
-    original = api._migrations_head
-
-    def counting():
-        calls["n"] += 1
-        return original()
-
-    # The payload reads the CONSTANTS; the resolver is not consulted again.
-    before = calls["n"]
-    _health()
-    _health()
-    assert calls["n"] == before
     assert api._MIGRATIONS_HEAD is not None
+
+    def boom(*_a, **_k):
+        raise AssertionError("the migrations head was resolved per request")
+
+    monkeypatch.setattr(api, "_migrations_head", boom)
+    first = _health()["build"]
+    second = _health()["build"]
+    assert first["migrations_head"] == api._MIGRATIONS_HEAD == second["migrations_head"]
 
 
 # ── a stale deploy is UP: currency must not be folded into `status` ──────────

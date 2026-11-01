@@ -6051,7 +6051,9 @@ def _migrations_head() -> tuple[str | None, str | None]:
     never a plausible fake.
     """
     try:
-        from tortoise import record_projection  # noqa: PLC0415 - local: keeps import cost off /health
+        from tortoise import (
+            record_projection,
+        )
         base = record_projection._migrations_dir()
         heads = [
             (int(m.group(1)), p.stem)
@@ -6059,7 +6061,7 @@ def _migrations_head() -> tuple[str | None, str | None]:
             if (m := re.match(r"(\d+)_", p.name)) is not None
         ]
         packaged = str(getattr(record_projection, "PACKAGED_MIGRATIONS", ""))
-    except Exception:  # noqa: BLE001 - a build identity is never worth a 500
+    except Exception:
         # ⛔ THIS SWALLOW HIDES A REAL BUG IF IT IS TOO BROAD, and it did once:
         # `Path` is not imported at module scope in this file, so `Path(base)`
         # raised NameError and this branch answered "no migrations" for a
