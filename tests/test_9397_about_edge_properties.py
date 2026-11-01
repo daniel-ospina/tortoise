@@ -3422,12 +3422,20 @@ def test_the_default_ingestion_path_reaches_the_binder():
     # flipping the default would falsify the corrected sentence while the call
     # above stayed in place — an unpinned half of a claim this leg advertises.
     #
-    # #4282 (2026-10-27): the selection used to live in `TortoiseSDK.commit_session`,
-    # which this change deleted. It survives, single-sourced, in
-    # `hosted_api._capture_lane()`, and the two lanes still dispatch to the two
-    # extractors there. Pinned against `sdk.py` it would now pass vacuously (an
-    # `assert selected` on a deleted function cannot be anything but absent), so
-    # the pin follows the code rather than being dropped.
+    # ⚠️ The selection is read in `hosted_api._capture_lane()` and nowhere in `sdk.py`
+    # any more (`TORTOISE_SESSION_EXTRACTOR` has no `ast.If`/`ast.IfExp` there at all), so
+    # this pin resolves it in `hosted_api`. It is a PRESENCE assertion: pointed at
+    # `sdk.py` it would RED loudly, which is exactly why it was re-derived to the module
+    # that carries the code rather than left behind.
+    #
+    # ⚠️ NOT single-sourced: `_capture_lane()`'s own docstring says "single source of
+    # truth", and `hosted_api.py` spells the same `== "m2"` selection THREE times — in
+    # `_capture_lane()`, in the `elif` that decides which extractor RUNS inside
+    # `_capture_session_impl`, and again where the capture's extractor record is built
+    # (`_capture_extractor_record`). A default flipped in one copy and not the others would
+    # leave the RECORDED lane disagreeing with the EXECUTED one; the duplication is filed
+    # rather than fixed here (this lane deletes surface, it does not re-plumb hosted
+    # capture) — tortoise#10485.
     hosted = (PKG / "hosted_api.py").read_text(encoding="utf-8")
     htree = ast.parse(hosted)
     lanes = [
@@ -3449,7 +3457,10 @@ def test_the_default_ingestion_path_reaches_the_binder():
     )
     # The DISPATCH must be pinned positionally — which callee sits in WHICH
     # branch — not by substring. A `"sdk._extract_session_llm" in hosted` test
-    # is satisfied by the historical comment at `hosted_api.py:14929`
+    # is satisfied by the historical comment at the `_capture_session_impl`
+    # call site in `hosted_api.py` (named by SYMBOL — a bare line number is
+    # what this file's citation-qualification leg,
+    # `test_the_correction_changelog_qualifies_its_line_citations`, refuses in the documents)
     # (`# sdk._extract_session_llm/_extract_session_v2 (#822).`), so it passed
     # on a swapped dispatch and on both sites removed — how that was measured is
     # in the PR body. This is the #8601 regression the original `sdk.py` arm

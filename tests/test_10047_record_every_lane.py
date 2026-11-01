@@ -264,8 +264,10 @@ def test_the_index_relink_pass_binds_the_default_graph_tenant(
 #     reaches `write_live_record` / `_apply_and_journal` / `_emit_event` /
 #     `_journal_entity_event`, transitively through the module's own call
 #     graph (#10380 review P1: the previous hand-picked list missed the SDK's
-#     own aliases — `create_entity`, `supersede`, `batch_create_points`,
-#     `index_file` — so a lane using them was invisible);
+#     own aliases — `create_entity` and `supersede` are the live evidence; the
+#     other two the review measured, `batch_create_points` and `index_file`, were
+#     among the 26 dead public methods #4282 DELETED on 2026-10-27, so they can no
+#     longer witness anything);
 #   * the lanes come from `tortoise/hosted_api.py` — every place an ORG-scoped
 #     SDK is opened, through ANY of the construction helpers a lane uses
 #     (`_make_sdk(namespace=<not a literal>)` / `_make_sdk(graph_name=…)` /
@@ -317,8 +319,8 @@ _RECORD_WRITE_SEEDS = frozenset({
 #: named carrier makes the derivation match LESS while still passing. ArchUnit
 #: ships the same rule for the same reason — "Fail Rules on Empty Should", a
 #: rule that matches nothing is not a pass — so the set is derived AND a pinned
-#: core is asserted INSIDE it. The four aliases are the ones the #10380 review
-#: measured as uncaught under the old hand-picked list.
+#: core is asserted INSIDE it. The aliases below are ones the #10380 review measured as
+#: uncaught under the old hand-picked list (#4282 deleted two of the four it named).
 _PINNED_CORE_VERBS = frozenset({
     # the seeds themselves, plus the module-level carriers in `sdk.py`
     "write_live_record", "_apply_and_journal", "_emit_event",
@@ -328,9 +330,13 @@ _PINNED_CORE_VERBS = frozenset({
     "create_direct_edge", "index_directory", "ingest_corpus", "update_point",
     "supersede_point", "promote_point", "retract_point", "invalidate_point",
     "delete_point", "mitigate_operator", "annotate_operator", "checkpoint",
-    "record_calibration", "set_point_baseline", "compute_confidence",
+    "set_point_baseline", "compute_confidence",
     # … and the aliases the hand-picked list missed (#10380 review P1)
-    "batch_create_points", "create_entity", "index_file", "supersede",
+    # ⚠️ #4282 DELETED three names this floor used to carry — `record_calibration`,
+    # `batch_create_points` and `index_file`. They are removed from the floor because
+    # a non-vacuity check may only demand names that EXIST; the alias coverage the
+    # floor exists for still has `create_entity` and `supersede` as live witnesses.
+    "create_entity", "supersede",
 })
 
 
@@ -638,15 +644,16 @@ def _flagged(source: str) -> list[str]:
     return _unbound_record_writes(ast.parse(source))
 
 
-@pytest.mark.parametrize("verb", ["batch_create_points", "create_entity",
-                                  "supersede", "index_file", "create_point"])
+@pytest.mark.parametrize("verb", ["create_entity", "supersede",
+                                  "link_entities", "ingest", "create_point"])
 def test_a_lane_using_an_sdk_alias_is_caught(verb):
     """P1 (#10380): the verbs are DERIVED, so an alias is not a blind spot.
 
     Mutation this reddens on: replacing `_RECORD_EMITTING_VERBS` with the old
-    hand-picked frozenset — `batch_create_points`, `create_entity`, `supersede`
-    and `index_file` are all absent from it, so four of these five cases go
-    silent while still reporting a clean scan.
+    hand-picked frozenset. Four of these five cases (`create_entity`, `supersede`,
+    `link_entities`, `ingest`) are absent from it, so they redden at the non-vacuity
+    assertion above and the scan assertion below is never reached — which is the point:
+    under that mutation the guard's own scan would be silent for any lane using them.
     """
     assert verb in _RECORD_EMITTING_VERBS, (
         f"{verb} reaches a record append in tortoise/sdk.py, so it must be a "

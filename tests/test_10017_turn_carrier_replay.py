@@ -120,6 +120,36 @@ def _turn_ids(sdk) -> list[str]:
     return sorted(sdk_mod._capture_turn_ids(sdk._get_proj(), SESSION_ID))
 
 
+def _drive_turn_writer(sdk, turns=None) -> None:
+    """Drive the SURVIVING turn writer — `sdk.capture_session` is gone (#4282).
+
+    `#4282` (2026-10-27) DELETED the public `TortoiseSDK.capture_session` wrapper as part
+    of the authorised SDK-surface reduction. Every leg below is about the TURN CARRIER —
+    that a turn is a record row and not a graph node, that the change-feed does not
+    announce it on the armed lane, and that a journaled replay reproduces it — and that
+    behaviour lives in the module-level `_write_session_and_turns`, which
+    `test_the_carrier_carries_the_ENCODED_identity_stamps` in this same file has always
+    driven directly.
+
+    ⚠️ WHAT WAS LOST WITH THE DOOR, stated because it is not nothing: the wrapper did more
+    than wrap — it resolved the extractor, minted the `sessionCaptured` Event, ran
+    `_materialize_session_source` and ran the extraction — `test_9078`'s restored legs drive
+    the mint, the materialization and the extraction, plus the shared writer, to reach the
+    record's event stream. It also returned a
+    receipt, and it was read at TWO call sites this change replaces: the shared
+    `_capture_with_record_armed` helper (behind the armed legs that use it), and
+    `test_the_carrier_survives_an_unimportable_embeddings_seam` — both `assert
+    res["ok"] is True`. Those gates are gone with the wrapper and nothing here
+    re-establishes them. What remains is what this file is about: the carrier's own
+    survival and replay, asserted through the journal, the store, the planned projection
+    SQL and the module's own pins.
+    """
+    sdk_mod._write_session_and_turns(
+        sdk._get_proj(), sdk, SESSION_ID, CONV if turns is None else turns,
+        now="2026-10-25T00:00:00+00:00")
+
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # R2 — the carrier: a turn is a record row and NO graph node
 # ════════════════════════════════════════════════════════════════════════════
@@ -196,8 +226,7 @@ def _capture_with_record_armed(sdk, monkeypatch, turns=CONV) -> None:
             tid for tid in _held.get(sid, ())
             if int(tid.rpartition("_t")[2]) >= first))
 
-    res = sdk.capture_session(turns, session_id=SESSION_ID)
-    assert res["ok"] is True
+    _drive_turn_writer(sdk, turns)
     held[SESSION_ID] = [f"{SESSION_ID}_t{i}" for i in range(len(turns))]
     sdk._stub_record_turn_rows = held
 
@@ -522,8 +551,7 @@ def test_the_carrier_survives_an_unimportable_embeddings_seam(
     # it reaches the CARRIER's stamp import and nothing on the construction
     # path.
     monkeypatch.setitem(sys.modules, "tortoise.embeddings", None)
-    res = armed_sdk.capture_session(CONV, session_id=SESSION_ID)
-    assert res["ok"] is True
+    _drive_turn_writer(armed_sdk)
     records = _records(_journal_of(armed_sdk))
     assert [r for r in records if r["type"] == rp.TURNS_RECORD_TYPE], (
         "the carrier never reached the journal — the capture ended on the "
@@ -538,7 +566,7 @@ def test_the_GRAPH_held_lane_still_announces_its_turns(tmp_path, monkeypatch):
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=_journal(tmp_path))
     try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)
+        _drive_turn_writer(sdk)
         rows = sdk._get_proj().g.query(
             "MATCH (e:GraphEvent {type:'PointAdded'}) RETURN e.payload"
         ).result_set
@@ -627,7 +655,7 @@ def test_a_delete_with_no_journal_record_RESURRECTS_the_turns(tmp_path):
     log_path = _journal(tmp_path)
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
     try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)   # graph-held lane
+        _drive_turn_writer(sdk)   # graph-held lane
         removed = _delete_turn_nodes_like_a_purge(sdk)
         assert removed == EXPECTED_TURN_IDS
         assert _turn_ids(sdk) == []
@@ -651,7 +679,7 @@ def test_a_journaled_removal_survives_the_rebuild(tmp_path):
     log_path = _journal(tmp_path)
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
     try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)
+        _drive_turn_writer(sdk)
         removed = _delete_turn_nodes_like_a_purge(sdk)
         outcomes = sdk._journal_turn_removal(removed)
 
