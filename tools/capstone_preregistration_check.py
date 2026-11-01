@@ -1418,7 +1418,17 @@ def _document_has_deviations(directory: Path) -> bool:
                  if ln.strip().startswith("## Deviations")), None)
     if head is None:
         return False
-    body = lines[head + 1:]
+    # ⛔ The scan is bounded at the SECTION, not just at the entry (#10215 round 9).
+    # `body = lines[head + 1:]` ran to EOF, so ANY later `### D…`-prefixed heading — a
+    # `### Denominator floors`, a `### Data sources` under `## Appendix`, a fenced
+    # example — donated its body to an otherwise EMPTY Deviations section. Measured:
+    # `## Deviations` / `## Appendix` / `### Data sources` / text returned True. That is
+    # the "add one line to clear the finding" exit round 7 closed, reachable one section
+    # over, and it is a false PASS of a §8 gate. A section ends at the next heading of
+    # level 2 or shallower.
+    section_end = next((j for j in range(head + 1, len(lines))
+                        if 0 < _heading_level(lines[j]) <= 2), len(lines))
+    body = lines[head + 1:section_end]
     for i, line in enumerate(body):
         if not line.startswith("### D"):
             continue

@@ -2897,6 +2897,15 @@ def test_the_deviation_section_is_detected_from_a_REAL_ENTRY_not_a_mention():
             "## Deviations\n\n### D1\n\n#### Original rule\n\n## 9. Next\n\nprose\n")
         assert check._document_has_deviations(d) is False, (
             "the entry ends at its own level or shallower, not at its own subsections")
+        # ⛔ round 9: an EMPTY Deviations section passed whenever a LATER section had a
+        # `### D…`-prefixed heading — the section was never bounded, so a `### Data
+        # sources` under `## Appendix` donated its body. Measured True before the fix.
+        for later in ("## 9. Provenance\n\n### Denominator floors\n\n| n | src |\n",
+                      "## Appendix\n\n### Data sources\n\ncorpus at x.\n",
+                      "## Appendix\n\n```markdown\n### D1\n\nexample\n```\n"):
+            (d / check.PREREG_NAME).write_text("## Deviations\n\n" + later)
+            assert check._document_has_deviations(d) is False, (
+                f"a heading in a LATER section is not this section's entry: {later!r}")
 
 
 def test_the_shipped_record_carries_no_retired_key():
@@ -2909,4 +2918,9 @@ def test_the_shipped_record_carries_no_retired_key():
     which build their own non-shallow repository (#10215 round 8).
     """
     assert check.check_steps_block_is_pre_scored(PREREG.parent) == []
-    assert check.STEPS_PINNED_AFTER not in _record()
+    # ⛔ Read the FILE (#10215 round 9): `_record()` is a fixture BUILDER — it parses
+    # the document's pins into a fixed literal dict and never opens the machine record,
+    # so asserting against it was green whatever `preregistration.json` contained.
+    shipped = json.loads((PREREG.parent / check.MACHINE_RECORD).read_text())
+    assert check.STEPS_PINNED_AFTER not in shipped, (
+        "the shipped record re-gained the retired key")
