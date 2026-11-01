@@ -1020,10 +1020,15 @@ _ORG_WIDE_OPENER_ALLOWLIST = {
     #   pre-#3543 `team_{id}`, and "neither listed") on the server's LISTING
     #   (#10510, round 7 — the name-only open minted the absent `org_{prior}`
     #   and lost the creator's fork). What the earlier round removed is not the
-    #   gate: it is the COST. The listing probe and the control-plane name read
-    #   now run in the caller's `_cp_offload` worker and reach the open as
-    #   `prior_listed` / `prior_moved` (review P2 at `50f0a9c53`); the closure
-    #   still CONSTRUCTS on the loop (tortoise#7500).
+    #   gate: it is the COST. The two facts are sampled OFF the loop and reach
+    #   the open as `prior_listed` / `prior_moved` (review P2 at `50f0a9c53`) —
+    #   each in the worker of the lane its own dependency uses: the
+    #   `organizations.graph_name` read in `_cp_offload`'s `org` pool (#7678),
+    #   and the LISTING probe in `_graph_offload`'s `graph` pool, because it is
+    #   a `db.list_graphs()` graph read (#3718/#3773; review P2 at `6e49c4fa9`,
+    #   which is why "the caller's `_cp_offload` worker" — the door this reason
+    #   named before — is no longer where the listing runs). The closure still
+    #   CONSTRUCTS on the loop (tortoise#7500).
     "provision_tenant": 1,
     "register_user": 3,
     "_eager_provision_org_graph": 1,
