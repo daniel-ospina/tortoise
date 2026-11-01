@@ -467,8 +467,7 @@ credential through a 60s cache, so a promotion becomes visible to MCP within tha
 TTL; a capture admitted before it keeps the graph it resolved. Nothing is
 re-homed, copied or replayed.
 
-#### The org's onboarding record follows the move (it is the one org-level store
-kept INSIDE the default graph)
+#### The org's onboarding record follows the move (it is the one org-level store kept INSIDE the default graph)
 
 The conversion above is right for graph DATA and wrong for `:OnboardingState`,
 the one org-level record stored in a tenant graph: every org-level reader now
