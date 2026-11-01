@@ -286,8 +286,13 @@ def _auth_branch_comment() -> str:
     elsewhere cannot satisfy — or break — the claim this guard pins.
     """
     lines = MIDDLEWARE.read_text(encoding="utf-8").splitlines()
+    # Matches the BRANCH (`if (url.pathname.startsWith("/auth/")) {`), not every
+    # mention of the prefix: the stray-code guard's exemption predicate above the
+    # host block also tests `startsWith("/auth/")` (PR #10514), and locating that
+    # line would pin the rationale of a branch the predicate merely names.
     branch = next(
-        (i for i, line in enumerate(lines) if 'url.pathname.startsWith("/auth/")' in line),
+        (i for i, line in enumerate(lines)
+         if 'if (url.pathname.startsWith("/auth/"))' in line),
         None,
     )
     assert branch is not None, (

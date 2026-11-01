@@ -45,11 +45,15 @@ const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains
 // — which rendered normally, ignored the parameter and silently discarded the
 // code. The user saw a product page and the connector was never connected; the
 // code was burned, so their natural "try again" cost a fresh authorize request
-// and looked like a flaky connector. Supabase documents the mechanism ("If
-// omitted—or not accepted—the Site URL serves as the default redirect
-// destination"), and RFC 9700 puts the obligation on the receiving side:
-// verify the response arrived at the EXPECTED redirect URI and ABORT the flow
-// on a mismatch.
+// and looked like a flaky connector. Supabase documents HALF the mechanism —
+// "The Site URL in URL Configuration defines the default redirect URL when no
+// `redirectTo` is specified in the code" (docs/guides/auth/redirect-urls) — and
+// the other half ("or `redirectTo` was not accepted") is not in that page: it is
+// THIS project's own measurement, that a VALID code arriving on the Site URL is
+// GoTrue's allow-list-rejection signature (issue #10088, 2026-10-26
+// re-measurement). RFC 9700 puts the obligation on the receiving side: verify
+// the response arrived at the EXPECTED redirect URI and ABORT the flow on a
+// mismatch.
 //
 // This project serves no OAuth callback on ANY path — the callback moved to the
 // app origin (#4054), which is exactly why the `/auth/*` surface 302s there —
@@ -218,6 +222,39 @@ export const onRequest: PagesFunction = async (context) => {
     "/signin", "/signin.html",
   ]);
   const COMPANY_HOSTS = new Set(["premiselabs.co"]);
+  // Trailing-slash-stripped pathname, the form every path set below is keyed on.
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+
+  // ── A stray OAuth authorization response is REFUSED before ANY branch runs ──
+  // It sits ABOVE the host-consolidation block because THAT block is a
+  // forwarding branch: it returns 301s that PRESERVE the query string
+  // (`+ url.search`), so a code on `premiselabs.co/docs`, `/faq`, `/signin` or
+  // `/blog/*` was carried in a `Location` to the tortoise host and only refused
+  // after that extra hop — one more URL, one more CDN log line, one more browser
+  // history entry containing the credential, for no gain. The refusal is keyed
+  // to the PARAMETER, so it belongs ahead of every branch that can put the code
+  // in a `Location`, not merely ahead of the branches that render.
+  //
+  // EXEMPT — the surfaces where a `code` may legitimately be present, because
+  // they hand the response to the origin that OWNS the flow and can redeem it:
+  //   * the auth surface — `/auth` (+`.html`) and the `/auth/*` BFF subtree,
+  //     where `/auth/callback` really does exchange a code (pinned by
+  //     #4054/#4346; its wrong-origin allow-list entry is the OPEN audit #8680);
+  //   * `/admin`, the operator console on the session origin (#4171/#4409);
+  //   * the APP_ONLY pages, which the company-host block 301s to that same app
+  //     origin (`/signup`, `/welcome`, `/invite-accept`).
+  // Everything else in this project can only RENDER a page, so a code on it is
+  // un-redeemable and is refused here. The guard below (after the 30x branches)
+  // stays as the backstop for anything exempt-shape that still reaches it.
+  const forwardsCredential =
+    APP_ONLY.has(path) ||
+    url.pathname.startsWith("/auth/") ||
+    url.pathname === "/admin" ||
+    url.pathname === "/admin/" ||
+    url.pathname.startsWith("/admin/");
+  if (!forwardsCredential && isStrayAuthorizationCode(url)) {
+    return strayReturnRefusal();
+  }
 
   // Blog prefix rule (#1796): /blog and /blog/<anything> (incl. trailing
   // slash) are tortoise-host-only — 301 to the canonical host. Exact prefix
@@ -233,7 +270,6 @@ export const onRequest: PagesFunction = async (context) => {
   // Host-header hygiene: strip port + trailing dot before matching.
   const hostKey = host.replace(/:\d+$/, "").replace(/\.$/, "");
   if (COMPANY_HOSTS.has(hostKey)) {
-    const path = url.pathname.replace(/\/+$/, "") || "/";
     if (isBlogPath) {
       // path already has trailing slashes stripped (replace above) → /blog/ → /blog
       const target = "https://tortoise.premiselabs.co" + path + url.search;
@@ -367,16 +403,15 @@ export const onRequest: PagesFunction = async (context) => {
     });
   }
 
-  // ── A stray OAuth authorization response is REFUSED before any page renders ──
-  // Placed HERE, after every routing decision that can legitimately consume or
-  // forward a credential, and BEFORE the first branch that can render:
-  //   * `/auth` and `/auth/*` returned above — that surface 302s to the origin
-  //     that owns the flow cookie, where a code CAN be exchanged (pinned by
-  //     #4054/#4346; its wrong-origin allow-list entry is the OPEN audit #8680);
-  //   * `/admin` also returned above, to the same app origin (#4171);
-  // so the guard covers every page this project actually SERVES — the class the
-  // issue names ("hand the user a marketing page with a stray `code=`"). Placing
-  // it after the asset rewrite below would leave `/` rendering the product page.
+  // ── Backstop for the same refusal (the primary guard is above the host block) ──
+  // The primary guard refused every non-exempt path before any branch ran, so a
+  // code reaches HERE only on an exempt surface that did NOT return above — today
+  // that is an `APP_ONLY` page on a host the consolidation block does not handle
+  // (`/signup?code=…` on the tortoise host, which `_redirects` sends to the app's
+  // sign-up page and which cannot redeem a code either). Keeping the check here
+  // means a future branch added above it cannot silently turn the refusal into a
+  // render: the property "no page of this project renders around a stray code"
+  // does not depend on the ordering being re-derived.
   if (isStrayAuthorizationCode(url)) {
     return strayReturnRefusal();
   }

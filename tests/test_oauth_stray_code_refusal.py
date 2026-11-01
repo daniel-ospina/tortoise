@@ -19,10 +19,14 @@ authorization code to a marketing page —
     https://tortoise.premiselabs.co/?code=50605f24-15a1-40f0-8e86-f3722cccce13#
 
 — which renders normally, ignores the parameter, and silently discards the code
-(the user sees a product page and nothing happened). Google's docs and this
-repo's own record both describe the mechanism: *"If omitted—or not accepted—the
-Site URL serves as the default redirect destination"* (Supabase
-redirect-urls); the fallback appends the PKCE `?code=` to that Site URL.
+(the user sees a product page and nothing happened). Supabase's redirect-URLs
+doc states half the mechanism verbatim — *"The Site URL in URL Configuration
+defines the default redirect URL when no `redirectTo` is specified in the code"*
+— and the other half ("or the `redirectTo` was not ACCEPTED and the Site URL was
+substituted for it") is this project's own measurement, not a quotation: a VALID
+code arriving on the Site URL is GoTrue's allow-list-rejection signature (issue
+#10088, 2026-10-26 re-measurement comment). The fallback appends the PKCE
+`?code=` to that Site URL, which is the URL above.
 
 WHAT THE FIX IS, AND WHAT IT IS NOT
 -----------------------------------
@@ -42,9 +46,11 @@ marketing hosts, `tortoise.premiselabs.co` = the Site URL). So the refusal
 belongs in `website/functions/_middleware.ts` — the one file every request to
 that project passes through — and it must fire **before** the page renders.
 
-This is RFC 9700's rule read from the receiving side: *"clients should verify
-that the authorization response was received at the expected redirect URI and
-abort the flow when there is a mismatch"*. Aborting means a **named error page
+This is RFC 9700 §4.4.2.2's rule read from the receiving side, quoted
+verbatim: *"Clients MUST check that the authorization response was received from
+the correct issuer by comparing the distinct redirection URI for the issuer to
+the URI where the authorization response was received on. If there is a
+mismatch, the client MUST abort the flow."* Aborting means a **named error page
 with no credential in it** — not a normal render, not a redirect that forwards
 the code somewhere else, and not an echo of the code (a code in a URL leaks
 through browser history, `Referer`, CDN logs and analytics; `Referrer-Policy:
@@ -198,18 +204,72 @@ def test_an_authorization_code_at_the_site_root_is_refused_with_a_named_error(
     )
 
 
-def test_the_refusal_is_not_limited_to_the_root_path() -> None:
-    """This project serves NO OAuth callback on ANY path.
+@pytest.mark.parametrize(
+    "host,path",
+    [
+        # Every renderable path class, on both marketing hosts. `/docs`, `/faq`
+        # and `/signin` are TORTOISE_ONLY and `/blog` is the blog prefix rule — on
+        # the company host all four are reached THROUGH a query-preserving 301, so
+        # pinning only the tortoise host is what let PR #10514 review finding 1
+        # stand for three rounds.
+        (TORTOISE_HOST, "/docs"),
+        (TORTOISE_HOST, "/product"),
+        (TORTOISE_HOST, "/blog"),
+        (TORTOISE_HOST, "/signin"),
+        (COMPANY_HOST, "/docs"),
+        (COMPANY_HOST, "/blog"),
+        (COMPANY_HOST, "/signin"),
+        (COMPANY_HOST, "/faq"),
+    ],
+)
+def test_the_refusal_is_not_limited_to_the_root_path(host: str, path: str) -> None:
+    """This project serves NO OAuth callback on ANY path, on EITHER host.
 
     The callback moved to the app origin (#4054), which is why the `/auth/*`
     surface 302s there. So a code arriving at `/docs`, `/product`, `/blog` or any
     other page of this project is equally un-redeemable, and a guard keyed to the
     root path only would leave the same silent dead end on every other page the
     Site URL could have been set to.
+
+    ⛔ PARAMETRIZED BY HOST, and that is the point (PR #10514 review, finding 1):
+    on `premiselabs.co` these paths returned the host-consolidation **301**
+    BEFORE the guard ran, carrying the code in its `Location`
+    (`premiselabs.co/docs?code=…` → `301 → tortoise.premiselabs.co/docs?code=…`),
+    and a tortoise-host-only parametrization could not see it. The 301s belong to
+    the SEO consolidation decision and their query-preserving shape is pinned by
+    `tests/test_admin_origin_redirect.py`; what changed is that the guard now runs
+    AHEAD of them, so no `Location` this project constructs carries a credential.
     """
-    cases = [_case(f"/docs?code={STRAY_CODE}"), _case(f"/product?code={STRAY_CODE}")]
-    for where, res in zip(["/docs", "/product"], _run(cases)):
-        _assert_named_refusal(res, f"{where}?code=…")
+    (res,) = _run([_case(f"{path}?code={STRAY_CODE}", host=host)])
+    _assert_named_refusal(res, f"{host}{path}?code=…")
+    # Restated here because it is the finding: a 301 out of the consolidation
+    # block is exactly the forwarding this guard exists to prevent.
+    assert res["location"] is None, (
+        f"{host}{path}?code=… was forwarded to {res['location']!r} instead of refused "
+        "— the company-host consolidation 301 preserves `url.search`, so a guard "
+        "placed below it puts the code in a second URL (and CDN log) for nothing"
+    )
+
+
+def test_a_company_host_product_404_still_precedes_the_guard() -> None:
+    """The one path where a stray code is answered before any guard — recorded, not fixed.
+
+    `premiselabs.co/product` (+`.html`) is 404'd at the very top of the middleware
+    because that page exists only on the tortoise host; that branch precedes the
+    refusal. It forwards nothing and renders nothing, so the credential neither
+    leaks nor is silently burned by a marketing page — but it is the one shape
+    where the answer is a bare 404 rather than the named refusal, and the issue's
+    residual list records it. Pinned so a future reordering is a visible change
+    rather than a silent one.
+    """
+    (res,) = _run([_case(f"/product?code={STRAY_CODE}", host=COMPANY_HOST)])
+    assert res["status"] == 404, (
+        f"premiselabs.co/product?code=… answered {res['status']}, want 404 — either "
+        "the host-only 404 branch moved (record the new shape) or the page started "
+        "rendering on the company host"
+    )
+    assert res["location"] is None, res
+    assert STRAY_CODE not in res["body"], "the 404 echoed the authorization code"
 
 
 def test_the_provider_ERROR_shape_keeps_the_1224_banner_reachable() -> None:
@@ -251,7 +311,8 @@ def test_the_provider_ERROR_shape_keeps_the_1224_banner_reachable() -> None:
         )
 
 
-def test_the_moved_auth_surface_still_redirects_and_is_NOT_refused() -> None:
+@pytest.mark.parametrize("host", [TORTOISE_HOST, COMPANY_HOST])
+def test_the_moved_auth_surface_still_redirects_and_is_NOT_refused(host: str) -> None:
     """A deliberate exemption: `/auth/callback` keeps its 302 to the app origin.
 
     The legacy `tortoise.premiselabs.co/auth/callback` allow-list entry is
@@ -260,8 +321,12 @@ def test_the_moved_auth_surface_still_redirects_and_is_NOT_refused() -> None:
     #4054/#4346 (`tests/test_admin_origin_redirect.py`) is therefore preserved
     exactly: the code is forwarded to the origin that owns the flow cookie,
     which is where the exchange can actually happen.
+
+    Both hosts, because the refusal was hoisted ABOVE the branches that return
+    these 30x (PR #10514 review, finding 1) — an exemption hole would turn this
+    pinned redirect into a 400 on either of them.
     """
-    (res,) = _run([_case(f"/auth/callback?code={STRAY_CODE}")])
+    (res,) = _run([_case(f"/auth/callback?code={STRAY_CODE}", host=host)])
     assert res["status"] == 302, (
         f"/auth/callback answered {res['status']} — the moved auth surface must keep "
         "its 302 to the app origin (a refusal here would break the staged #8680 audit)"
