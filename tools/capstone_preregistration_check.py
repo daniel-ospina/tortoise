@@ -160,6 +160,13 @@ DOCUMENT_SHA_PIN = "document_sha256"
 #: The status a log carries when no threshold existed to score it against.
 UNSCORED = "UNPREREGISTERED"
 
+#: The record field that says WHICH scored log a `steps` pin postdates (#10215).
+#: `written_before_any_scored_run` describes the record's ORIGINAL freeze; the step
+#: set is the acceptance rule V5 applies, so when it is authored after a scored log
+#: exists the blanket claim cannot cover it and the record must say so by name
+#: (a PROTOCOL DEVIATION under §8 of the argument).
+STEPS_PINNED_AFTER = "steps_pinned_after_scored_log"
+
 #: Every ``verdict=``/``result=`` value in an exempt log must be this. A WHITELIST, not a blacklist
 #: of four known-bad strings: a closed bad-list silently admits the next scored vocabulary, which is
 #: the inverse of the gap the exemption exists to close (#9075 review P2).
@@ -1320,6 +1327,47 @@ def check_single_measured_log(directory: Path) -> list[str]:
     ]
 
 
+def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
+    """A ``steps`` pin authored AFTER a scored log is a PROTOCOL DEVIATION (#10215).
+
+    ``written_before_any_scored_run`` describes the record's ORIGINAL freeze, and the
+    ``steps`` block is not original: it is the acceptance rule V5 applies
+    (``capstone_verdict_check.py::_step_accounting`` rules 1 and 4), so pinning it in
+    the record once a scored log exists is the "rule chosen after the number" shape
+    this whole artefact exists to prevent — while the blanket freeze claim makes the
+    record read as if the new content were covered by it.
+
+    The failure closed here is a FALSE PASS, not a wording problem: measured at
+    ``#10215``'s head, ``capstone-measured-e0fc940b.log`` (a COMPLETED run carrying
+    E3/E4/E5 rows) was already on ``main`` when the ``steps`` block was authored, and
+    this checker printed OK over it because it tested the freeze claim only for
+    truthiness.
+
+    §8 of the argument is the rule: after the first scored log, a change like this is
+    recorded in a ``## Deviations`` section, and the record names WHICH log it
+    postdates rather than resting on the blanket claim.
+    """
+    record = _record_for_steps(directory)
+    if "steps" not in record:
+        return []
+    scored = sorted(p.name for p in directory.glob(SCORED_LOG_GLOB))
+    if not scored:
+        return []
+    declared = str(record.get(STEPS_PINNED_AFTER) or "").strip()
+    if declared in scored:
+        return []                       # the honest shape: it names its postdate
+    return [
+        f"{MACHINE_RECORD} carries a `steps` block while {len(scored)} scored log(s) "
+        f"already exist ({', '.join(scored)}) and it declares {STEPS_PINNED_AFTER}="
+        f"{declared!r} — the step set IS the acceptance rule V5 applies, so pinning it "
+        "after a scored run is a PROTOCOL DEVIATION (§8), not a pre-registration edit: "
+        f"the record must name the scored log it postdates in {STEPS_PINNED_AFTER!r} and "
+        "the argument must record the change in a `## Deviations` section with the date, "
+        "the original rule, the new rule and the reason. A blanket "
+        "written_before_any_scored_run cannot cover content added after the number was seen"
+    ]
+
+
 def check_completeness(rows: list[dict[str, str]]) -> list[str]:
     failures: list[str] = []
     if not rows:
@@ -1515,6 +1563,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
         ordering = "UNVERIFIED (--no-git)"
     report["ordering"] = ordering
     failures += check_machine_record(directory, pins)
+    failures += check_steps_block_is_pre_scored(directory)
     # #10215: the step set the capstone's gate reads. Checked after the record so both halves are
     # already known to PARSE; a partition failure here is a weakened gate, not a document nit.
     failures += check_step_partition(pins, _record_for_steps(directory))

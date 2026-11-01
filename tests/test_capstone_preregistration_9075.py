@@ -2694,3 +2694,54 @@ def test_a_conditional_step_without_a_record_block_fails():
     rec = _record()
     failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
     assert any("carries no steps block" in f for f in failures), failures
+import json
+
+
+def _deviation_dir(tmp_path, *, steps=True, field="capstone-measured-e0fc940b.log",
+                   scored=True):
+    """A throwaway bundle dir: a machine record (± a steps block) and ± a scored log."""
+    record = {"schema": check.PREREG_SCHEMA,
+              "written_before_any_scored_run": True,
+              "written_before_any_scored_run_basis": f"no SCORED run; {check.UNSCORED}",
+              "document": "PRE-REGISTRATION.md"}
+    if steps:
+        record["steps"] = {"conditional": [{"step": "S2.3"}]}
+    if field:
+        record["steps_pinned_after_scored_log"] = field
+    (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(record))
+    if scored:
+        (tmp_path / "capstone-measured-e0fc940b.log").write_text(
+            "# generated: 2026-10-23T23:16:55Z\n# result: COMPLETED\n")
+    return tmp_path
+
+
+def test_a_steps_pin_added_after_a_scored_log_is_a_deviation(tmp_path):
+    """#10215 review: the blanket `written_before_any_scored_run` cannot cover a rule
+    that was authored AFTER the number was seen.
+
+    The `steps` block IS the acceptance rule V5 applies, so pinning it once a scored
+    log exists is the "rule chosen after the number" shape §8 exists to prevent. The
+    failure this closes is a FALSE PASS — the checker tested the freeze claim only for
+    truthiness, and printed OK over exactly this state.
+    """
+    failures = check.check_steps_block_is_pre_scored(_deviation_dir(tmp_path, field=""))
+    assert failures, "a steps pin postdating a scored log must not pass silently"
+    assert check.STEPS_PINNED_AFTER in failures[0], failures
+    assert "PROTOCOL DEVIATION" in failures[0], failures
+
+
+def test_a_record_that_NAMES_the_log_it_postdates_passes(tmp_path):
+    """The honest shape: the record says which scored log the pin postdates."""
+    assert check.check_steps_block_is_pre_scored(_deviation_dir(tmp_path)) == []
+
+
+def test_a_steps_pin_with_no_scored_log_needs_no_deviation(tmp_path):
+    """Pre-scored, §8's revision rule applies instead — nothing to record."""
+    assert check.check_steps_block_is_pre_scored(
+        _deviation_dir(tmp_path, field="", scored=False)) == []
+
+
+def test_the_real_bundle_names_the_log_its_steps_pin_postdates():
+    """The shipped record must satisfy the rule it is judged by — this reds if the
+    field is dropped while the scored log stands."""
+    assert check.check_steps_block_is_pre_scored(PREREG.parent) == []
