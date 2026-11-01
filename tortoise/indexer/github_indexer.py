@@ -908,10 +908,13 @@ class GitHubIndexer:
                                          "product-implementer"):
                 del obj[_k]
         obj_id = obj["id"]
-        # Previous issue-state from the PRE-EXISTING Object.status — read
-        # BEFORE applying the fresh Object (a new Object defaults to
-        # status='live', which would otherwise be misread as a prior open
-        # state and mint a spurious `-closed` on first ingest).
+        # Previous issue-state from the PRE-EXISTING Object.status — read BEFORE
+        # applying the fresh Object so the probe describes the PREVIOUS
+        # incarnation, never the one this call folds. (Since #9974 R1 a
+        # status-less birth stores NO status and `_object_state_to_issue_state`
+        # maps absence to None, so the ordering is now belt-and-braces: the
+        # fabricated `'live'` default that a read-after would have misread as a
+        # prior `open` no longer exists. Keep the ordering; the reason changed.)
         prev_state = self._object_state_to_issue_state(proj, obj_id)
         # #7951: this Object is written through the SDK's live entity door —
         # it journals on FIRST registration and applies the same record on

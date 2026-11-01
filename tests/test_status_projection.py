@@ -897,13 +897,17 @@ class TestWorkItemFold:
 
 class TestReadSide:
     def test_object_result_carries_the_status_the_graph_holds(self):
-        """#9974 R1: the read carries the status the GRAPH holds.
+        """#9974 R1: the read RENDERS the stored status.
 
-        For a status-less birth that is now ABSENT (the graph stores no fabricated
-        `live`), and the result omits the key — the graph's own reading of an
-        absent status is LIVE (`live._terminal_excluded`). The anti-vacuity half
-        is the second leg below: a status the caller DID supply is still carried,
-        so this cannot pass by the read dropping `status` altogether.
+        For a status-less birth the graph now holds NOTHING (the fabricated
+        `live` is gone), and the hit renders that absence as ``"live"`` through
+        ``live.status_as_reported`` — so a consumer comparing ``== "live"``
+        keeps matching a live Object. (The raw node echo — ``create_object`` /
+        ``get_entity`` — reports the record honestly: absent stays absent.)
+
+        The anti-vacuity half is the second leg below: a status the caller DID
+        supply (``draft``) is still carried, so this cannot pass by the read
+        defaulting everything to live.
         """
         sdk = _fresh_sdk()
         try:

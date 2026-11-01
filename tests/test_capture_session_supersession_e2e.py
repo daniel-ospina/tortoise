@@ -271,7 +271,10 @@ def test_two_session_contradiction_supersedes_object(sdk):
     proj = sdk._get_proj()
     a1 = _object(proj, "approach-A")
     assert a1 is not None, "s1 must create Object approach-A"
-    assert (a1[1] or "live") == "live", a1
+    # #9974 R1: STRICT — the successor Objects are minted with no status, so
+    # the stored birth is `None` (absent), and `or "live"` would accept a
+    # reinstated fabricated `'live'` as well as the correct absence.
+    assert a1 is not None and a1[1] is None, a1
 
     res2 = sdk.capture_session(CONV_S2, session_id="s2")
     assert res2["ok"] is True, res2
@@ -286,7 +289,7 @@ def test_two_session_contradiction_supersedes_object(sdk):
     # successor approach-B created and live
     b = _object(proj, "approach-B")
     assert b is not None, "successor approach-B missing from the graph"
-    assert (b[1] or "live") == "live", f"successor must stay live: {b!r}"
+    assert b is not None and b[1] is None, f"successor must stay live: {b!r}"
 
     # indicator 2's linking point: the s2 statement about the replacement
     # is aboutObject-linked to the successor approach-B
@@ -326,7 +329,7 @@ def test_chain_pin_and_no_double_fold(sdk):
     b = _object(proj, "approach-B")
     assert b and b[1] == "superseded" and b[2] == "approach-C", b
     c = _object(proj, "approach-C")
-    assert c is not None and (c[1] or "live") == "live", c
+    assert c is not None and c[1] is None, c
 
     # NOTE (observed, documented — not asserted): s3's own replacement claim
     # ("approach C replaces approach B") is folded by E7 as a PARAPHRASE of

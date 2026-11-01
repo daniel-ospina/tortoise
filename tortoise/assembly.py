@@ -2776,7 +2776,12 @@ def _state_header_hit(sr: dict, label: str,
     else:
         text = f"STATE ({label}): {status or 'live'}"
         sb = {"content_snippet": ""}
-    return {"content": text, "kind": "state", "status": status,
+    # #9974 R1: the READ half. A status-less birth stores nothing, so `status`
+    # is "" here; the rendered line already says `live` (`status or 'live'`),
+    # and the STRUCTURED field must agree with the line it accompanies — a
+    # consumer comparing `hit["status"] == "live"` would otherwise stop
+    # matching a live entity whose record stated no status.
+    return {"content": text, "kind": "state", "status": status or "live",
             "superseded_by": sb}
 
 

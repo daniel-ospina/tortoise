@@ -3209,7 +3209,10 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     assert _object_superseded_events(proj) == 1, \
         "rejected conflict must not journal a second event"
     c_state = _entity_fold_state(proj, "successor-C")
-    assert c_state is not None and (c_state[0] or "live") == "live", c_state
+    # #9974 R1: STRICT — `(x or "live") == "live"` passes under the very
+    # defect this PR removes (a re-fabricated birth stores `'live'`); the
+    # absent birth is `None`, and a fold would store `'superseded'`.
+    assert c_state is not None and c_state[0] is None, c_state
     assert c_state[1] is None, f"successor-C must never be folded: {c_state}"
 
 
@@ -3337,7 +3340,7 @@ def test_apply_supersessions_chain_converges_both_orders(sdk):
             f"[{prefix}] payload-literal A.supersededBy=B: {a}"
         assert b == ("superseded", prefix + "-C"), \
             f"[{prefix}] B.supersededBy=C: {b}"
-        assert c is not None and (c[0] or "live") == "live" \
+        assert c is not None and c[0] is None \
             and c[1] is None, f"[{prefix}] C must stay live: {c}"
     # journal parity: both arms journaled exactly one ObjectSuperseded per
     # fold (fold-A/rev-A then fold-B/rev-B — no skip line for either).
@@ -3383,7 +3386,7 @@ def test_apply_supersessions_chain_three_link_reverse(sdk):
     assert _entity_fold_state(proj, "t3-B") == ("superseded", "t3-C")
     assert _entity_fold_state(proj, "t3-C") == ("superseded", "t3-D")
     d = _entity_fold_state(proj, "t3-D")
-    assert d is not None and (d[0] or "live") == "live" and d[1] is None, d
+    assert d is not None and d[0] is None and d[1] is None, d  # #9974 R1
 
 
 def test_apply_supersessions_chain_mixed_id_name_forms(sdk):
@@ -3487,7 +3490,7 @@ def test_apply_supersessions_inpayload_identical_to_guard_h(sdk):
     assert applied == 0, \
         f"A must stay live (gate is the discriminator): {warns}"
     a = _entity_fold_state(proj, "gh-A")
-    assert a is not None and (a[0] or "live") == "live" and a[1] is None, a
+    assert a is not None and a[0] is None and a[1] is None, a  # #9974 R1
     assert _entity_fold_state(proj, "gh-B") == ("superseded", "gh-C")
     assert _object_superseded_events(proj) == 1, \
         "no second journal — B→C deduped silently, A→B skipped"
@@ -3524,10 +3527,10 @@ def test_apply_supersessions_cycle_deterministic(sdk):
     ])
     assert _entity_fold_state(proj, "c1-A") == ("superseded", "c1-B")
     c1b = _entity_fold_state(proj, "c1-B")
-    assert c1b is not None and (c1b[0] or "live") == "live", c1b
+    assert c1b is not None and c1b[0] is None, c1b  # #9974 R1
     assert _entity_fold_state(proj, "c2-B") == ("superseded", "c2-A")
     c2a = _entity_fold_state(proj, "c2-A")
-    assert c2a is not None and (c2a[0] or "live") == "live", c2a
+    assert c2a is not None and c2a[0] is None, c2a  # #9974 R1
 
 
 def test_apply_supersessions_same_ref_stability(sdk):
@@ -3637,7 +3640,7 @@ def test_apply_supersessions_cycle_predecessor_hoisted(sdk):
     assert _entity_fold_state(proj, "h3-C") == ("superseded", "h3-A")
     assert _entity_fold_state(proj, "h3-A") == ("superseded", "h3-B")
     b = _entity_fold_state(proj, "h3-B")
-    assert b is not None and (b[0] or "live") == "live", b
+    assert b is not None and b[0] is None, b  # #9974 R1
 
 
 def test_apply_supersessions_chain_idless_target_is_refused(sdk):
@@ -3771,7 +3774,7 @@ def test_apply_supersessions_cycle_and_entangled_reverse_emission_literal(sdk):
     assert c == ("superseded", "cy3-A"), c
     assert _entity_fold_state(proj, "cy3-A") == ("superseded", "cy3-B")
     b_live = _entity_fold_state(proj, "cy3-B")
-    assert b_live is not None and (b_live[0] or "live") == "live", b_live
+    assert b_live is not None and b_live[0] is None, b_live  # #9974 R1
 
     # (b) entangled reverse [B→C, B→A, A→B] — A stays live (emission-literal)
     _seed("re1")
@@ -3786,7 +3789,7 @@ def test_apply_supersessions_cycle_and_entangled_reverse_emission_literal(sdk):
     b = _entity_fold_state(proj, "re1-B")
     assert b == ("superseded", "re1-C"), b
     a_b = _entity_fold_state(proj, "re1-A")
-    assert a_b is not None and (a_b[0] or "live") == "live", a_b
+    assert a_b is not None and a_b[0] is None, a_b  # #9974 R1
 
     # (c) entangled [B→A, B→C, A→B] — garbage claim wins the middle (literal)
     _seed("re2")
@@ -3801,7 +3804,7 @@ def test_apply_supersessions_cycle_and_entangled_reverse_emission_literal(sdk):
     b2 = _entity_fold_state(proj, "re2-B")
     assert b2 == ("superseded", "re2-A"), b2
     a_c = _entity_fold_state(proj, "re2-A")
-    assert a_c is not None and (a_c[0] or "live") == "live", a_c
+    assert a_c is not None and a_c[0] is None, a_c  # #9974 R1
 
 
 def test_apply_supersessions_self_supersession_skipped(sdk):
