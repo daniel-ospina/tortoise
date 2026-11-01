@@ -2995,7 +2995,7 @@ export function recordSweepFailure(storeDir: string, reason: string): void {
 
 export function captureHealthLine(
   dir: string,
-  opts: { apiKey?: string; storeSyncDir?: string } = {},
+  opts: { apiKey?: string; storeSyncDir?: string; bounds?: SpoolBounds } = {},
 ): CaptureHealth {
   const base = spoolHealthLine(dir, opts);
   // The store is DERIVED from the spool root (both live under `~/.tortoise/`)
@@ -3015,7 +3015,10 @@ export function captureHealthLine(
   return { ...base, line: `${base.line}, ${parts.join(", ")}` };
 }
 
-function spoolHealthLine(dir: string, opts: { apiKey?: string } = {}): CaptureHealth {
+function spoolHealthLine(
+  dir: string,
+  opts: { apiKey?: string; bounds?: SpoolBounds } = {},
+): CaptureHealth {
   // ONE read-only pass answers both questions (`countPendingEntries` then
   // `spoolSaturated` walked `entries/` twice for one printed line).
   const scan = scanSpool(dir);
@@ -3042,7 +3045,16 @@ function spoolHealthLine(dir: string, opts: { apiKey?: string } = {}): CaptureHe
   // A READ-ONLY question (`repair: false`): a health line must not quarantine,
   // record or unlink the spool it is describing — and it reuses the scan it
   // already paid for.
-  const saturated = spoolSaturated(dir, DEFAULT_BOUNDS, {}, { repair: false, scan });
+  // `bounds` are the ceilings the box actually runs with: SATURATED is a
+  // statement ABOUT them, so a caller (a test, a fleet surface) that knows the
+  // real pair passes it rather than inheriting the module default. Mirrors the
+  // Python leg's `capture_health_line(..., bounds=...)`.
+  const saturated = spoolSaturated(
+    dir,
+    opts.bounds ?? DEFAULT_BOUNDS,
+    {},
+    { repair: false, scan },
+  );
   // A marker we cannot UNDERSTAND is not a marker — the same rule this file
   // applies to `terminal_failure` and to a corrupt backoff window. A hand-edited
   // or foreign `status.json` carrying `{"state": "blocked"}` (or a status that

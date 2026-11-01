@@ -4160,7 +4160,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 15}
+                             "pi": 16}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4263,12 +4263,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 15`` from
+    Mutation: delete ``// tortoise-hook-version: 16`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 15
+    assert hook_install.read_hook_version(_PI_SRC) == 16
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4283,8 +4283,21 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: edit at generation 3: no test watched, because every install test copies the
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
+#: Generation 16 (capture-loss, #10479): the seam stops EVICTING an undelivered
+#: capture to make room (the prune candidate set is filed-entries-only), refuses
+#: a growth that would push a legal stored entry past the per-entry bound instead
+#: of marking it terminal, credits reclaimable orphan bytes in `spoolSaturated` so
+#: the refusal cannot outlive the condition it measures, and reports a sixth
+#: health state `capture: SATURATED` — the ceiling-filled-by-terminal-entries case
+#: that used to read `capture: OK (0 queued)`, byte-identical to a healthy box.
+#: Behaviour moved, so the generation moved with it: an installed generation-15
+#: copy keeps the old evicting prune and would otherwise read as a local edit.
+#: The digest was re-recorded once INSIDE this PR (the Pi leg also gained the
+#: single-scan health read — `scanSpool`), which is the rewrite the rule above
+#: permits for a generation that has never been on `main`: there is no installed
+#: copy to misclassify. It freezes the moment generation 16 lands.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    15, "7fc5bad634e5d33388feab25c1a770403648212e07a648f5c99f23d5564b0a9f")
+    16, "a6309b899a80fe6c4fd2932d97fe164c3ddc25b758d9f4da7d48adc6019524df")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4386,6 +4399,13 @@ _GENERATION_DIGESTS = {
     # below permits, and it is recorded here rather than left to look like a
     # refresh-to-green.
     15: "7fc5bad634e5d33388feab25c1a770403648212e07a648f5c99f23d5564b0a9f",
+    # Generation 16: see the pinned pair above — the capture-loss rule change.
+    # Its digest was re-recorded ONCE inside the same PR (aa930a306 ->
+    # 2dd323151: the Pi leg gained the single-scan health read on top of the
+    # rule), which the rule at the top of this file permits for exactly the
+    # reason it permits generation 15's: no installed copy can carry generation
+    # 16 — it has never been on `main`. Once it lands, this entry is frozen.
+    16: "a6309b899a80fe6c4fd2932d97fe164c3ddc25b758d9f4da7d48adc6019524df",
 }
 
 

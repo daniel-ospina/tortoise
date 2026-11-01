@@ -828,18 +828,29 @@ def _read_refusal_stamp(root: Path) -> dict | None:
     return record if isinstance(record, dict) else None
 
 
-def _entries_dir_stamp(root: Path) -> int:
+def _entries_dir_stamp(root: Path) -> str:
     """A cheap fingerprint of the spool state a refusal was measured against.
 
-    ``entries/``'s mtime moves on create, unlink and rename — exactly the
-    transitions that can change "is anything evictable?" — and does NOT move
-    when a refused session re-snapshots, because a refusal writes nothing at
-    all. That is what makes the stamp hold across a refused session's turns
-    while still letting the next refusal after a drain be recorded.
+    ``<digest of the meta-name set>:<entries/ mtime>``, read with ONE ``scandir``
+    and no file reads. A refused session's own re-snapshots change NEITHER (a
+    refusal writes nothing at all), so the stamp holds across its turns; a drain,
+    an admission or a reaping changes at least one, so the next refusal is
+    recorded. The NAME DIGEST is what makes membership changes exact — directory
+    timestamps are coarse on some filesystems (tmpfs ticks at ~4 ms), so a
+    removal and a re-admission inside one tick would otherwise look like the same
+    state.
+
+    Fails toward RECORDING — an unreadable ``entries/`` yields a stamp that
+    matches nothing measured on a readable spool.
     """
-    with contextlib.suppress(OSError):
-        return _entries_dir(root).stat().st_mtime_ns
-    return 0
+    try:
+        with os.scandir(_entries_dir(root)) as entries:
+            names = sorted(e.name for e in entries if e.name.endswith(".meta.json"))
+        mtime = _entries_dir(root).stat().st_mtime_ns
+    except OSError:
+        return "unreadable"
+    digest = hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest()[:16]
+    return f"{digest}:{mtime}"
 
 
 def _record_refusal(root: Path, record: dict) -> dict:
@@ -2233,7 +2244,12 @@ def _read_sweep_status(store: Path) -> tuple[bool, str | None] | None:
     return (parsed.get("ok") is True, reason if isinstance(reason, str) and reason else None)
 
 
-def capture_health_line(root: Path, *, api_key: str | None = None) -> CaptureHealth:
+def capture_health_line(
+    root: Path,
+    *,
+    api_key: str | None = None,
+    bounds: Bounds = DEFAULT_BOUNDS,
+) -> CaptureHealth:
     """The ONE per-box health line (agent-infra#2100), byte-identical to the Pi leg's.
 
     An operator (or `tortoise doctor`, or whoever reads the lane log after it
@@ -2242,9 +2258,14 @@ def capture_health_line(root: Path, *, api_key: str | None = None) -> CaptureHea
     either, so the spelling is pinned by a cross-leg parity test that executes
     the real TypeScript against this same directory.
 
-    ``OK`` / ``DRAINING`` / ``BLOCKED`` / ``INACTIVE`` / ``UNREADABLE`` are five
-    DIFFERENT answers on purpose: "nothing to file", "waiting", "refused",
-    "capture is off", and "could not look" must never read alike.
+    ``OK`` / ``DRAINING`` / ``BLOCKED`` / ``SATURATED`` / ``INACTIVE`` /
+    ``UNREADABLE`` are six DIFFERENT answers on purpose: "nothing to file",
+    "waiting", "refused", "full and refusing new work", "capture is off", and
+    "could not look" must never read alike.
+
+    ``bounds`` are the ceilings the box actually runs with: ``SATURATED`` is a
+    statement ABOUT them, so a caller (a test, a fleet surface) that knows the
+    real pair passes it rather than inheriting the module default.
 
     The SPOOL state is the base; two STORE-SYNC terms are appended to it when
     the backstop that shares this directory has something to report — a
@@ -2267,10 +2288,16 @@ def capture_health_line(root: Path, *, api_key: str | None = None) -> CaptureHea
     reported ``BLOCKED`` forever on a box that was filing perfectly is how an
     operator learns to ignore the line.
     """
-    return _with_store_sync_terms(_spool_health_line(root, api_key=api_key), root)
+    return _with_store_sync_terms(
+        _spool_health_line(root, api_key=api_key, bounds=bounds), root)
 
 
-def _spool_health_line(root: Path, *, api_key: str | None = None) -> CaptureHealth:
+def _spool_health_line(
+    root: Path,
+    *,
+    api_key: str | None = None,
+    bounds: Bounds = DEFAULT_BOUNDS,
+) -> CaptureHealth:
     """The SPOOL half of the health line — every state, no store-sync terms.
 
     ``SATURATED`` is the sixth state and it exists because the other five could
@@ -2306,7 +2333,9 @@ def _spool_health_line(root: Path, *, api_key: str | None = None) -> CaptureHeal
     # quarantines, records or unlinks): a health line must not mutate the spool
     # it is describing, and it must not pay a second full scan for the second
     # question — one printed line used to cost two passes over the whole spool.
-    saturated = spool_saturated(root, repair=False, _scan=scan.scan_args())
+    # `bounds` are the ceilings the caller says this box runs with: SATURATED is
+    # a statement ABOUT them.
+    saturated = spool_saturated(root, bounds, repair=False, _scan=scan.scan_args())
     status = recorded.get("status") if recorded is not None else None
     blocked_status = (
         status
