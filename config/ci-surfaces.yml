@@ -1985,10 +1985,11 @@ surfaces:
   # It was here once, on the false premise that `website/functions/_middleware.ts`
   # "matches no `SOURCE_PATTERNS` entry and falls through to `core`". It does match:
   # `tools/ci_selection.py` lists it in `SOURCE_PATTERNS["onboarding"]` (:495), and a
-  # named-surface match REPLACES the `core` fallback (:3084-3085 vs :3172-3179) — so on a
-  # `_middleware.ts`-only diff the selection is `['onboarding']` and a `core`-only row runs
-  # in NO leg, exactly when the guard's subject changes. Measured: with the row here,
-  # `select(["website/functions/_middleware.ts"])` → 145 files, suite ABSENT. It lives on
+  # named-surface match REPLACES the `core` fallback (:3146-3153 skips `core` in the match
+  # loop; :3239-3240 adds it ONLY when nothing matched) — so on a `_middleware.ts`-only
+  # diff the selection is `['onboarding']` and a `core`-only row runs in NO leg, exactly
+  # when the guard's subject changes. Measured: with the row NOT on this arm,
+  # `select(["website/functions/_middleware.ts"])` → 146 files, suite ABSENT. It lives on
   # the `onboarding` arm (see that entry), which is the surface whose source it reads.
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
@@ -5999,8 +6000,9 @@ surfaces:
   # named-surface match REPLACES the `core` fallback, so an onboarding-only diff
   # (the one diff that can break the refusal) runs no leg containing this suite
   # if it is registered on `core` alone. Measured with the row on `core`:
-  # `select(["website/functions/_middleware.ts"])` → `['onboarding']`, 145 files,
-  # suite ABSENT. Without the row anywhere `python3 tools/ci_selection.py
+  # `select(["website/functions/_middleware.ts"])` → `['onboarding']`, 146 files,
+  # suite ABSENT (147 with the row on THIS arm). Without the row anywhere
+  # `python3 tools/ci_selection.py
   # --integrity` exits 1 with `manifest drift: ['test_oauth_stray_code_refusal.py']`.
   # Same file, same Node middleware harness as `test_admin_origin_redirect.py` above.
   - test_oauth_stray_code_refusal.py

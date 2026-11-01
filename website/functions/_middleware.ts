@@ -257,12 +257,22 @@ export const onRequest: PagesFunction = async (context) => {
   // stays as the backstop for anything exempt-shape that still reaches it.
   //
   // ⚠ Because this exemption sits IN FRONT of the primary guard, these shapes
-  // still construct a `Location` that carries the code on the company host
-  // (`premiselabs.co/signup?code=…` → `app.premiselabs.co/signup?code=…`). That
-  // is the one exception to the "no `Location`" framing in the header above, it
-  // is deliberate (the pinned redirect wins), and the PR's Residual list records
-  // it. Do NOT "complete" the guard by refusing these — that reverses #4054/
-  // #4171/#4409 with nothing in the change saying so.
+  // still construct a `Location` that carries the code. That is the one exception
+  // to the "no `Location`" framing in the header above, it is deliberate (the
+  // pinned redirect wins), and the PR's Residual list records it — split in TWO,
+  // because the two classes are NOT the same shape and the earlier one-line
+  // version of this note under-reported the second (PR #10514 review, finding 4):
+  //   * `APP_ONLY` (`/signup`, `/welcome`, `/invite-accept`) — HOST-SPLIT: the
+  //     company host 301s to the app origin carrying the code
+  //     (`premiselabs.co/signup?code=…` → `app.premiselabs.co/signup?code=…`); on
+  //     `tortoise.*`/previews there is no middleware branch, so the request falls
+  //     to the BACKSTOP below and is refused 400;
+  //   * `/auth`, `/auth.html` (301), `/auth/*` (302) and `/admin`, `/admin/*`
+  //     (302) — HOST-INDEPENDENT: those branches run on every host, so their
+  //     `Location` carries the code on `premiselabs.co`, on `tortoise.*` and on a
+  //     `*.pages.dev` preview alike. Measured on all three hosts.
+  // Do NOT "complete" the guard by refusing these — that reverses #4054/#4171/
+  // #4409 with nothing in the change saying so.
   const forwardsCredential =
     APP_ONLY.has(path) ||
     url.pathname.startsWith("/auth/") ||

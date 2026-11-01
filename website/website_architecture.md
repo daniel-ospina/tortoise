@@ -47,15 +47,30 @@ Host routing lives in `website/functions/_middleware.ts`:
   the guard and return their pinned 30x **below** it. The reason is the pinned decision, NOT
   redemption: only `/auth/callback` exchanges a code, and refusing one on the others would replace a
   decided redirect with a 400 (the signup funnel, the operator console, a stale bookmark — #4328).
-  **The exemption is host-split, and only the company host has a pinned redirect to preserve:** on the
-  exact `premiselabs.co` host those shapes keep their 301 to the app origin (and its `Location` does
-  carry the code — the recorded residual); on `tortoise.*`/previews there is no middleware redirect
-  to keep, so an exempt-shaped request carrying a `code` falls through to the **backstop** at
-  `_middleware.ts:432` and is refused with the same 400 (`/signup?code=…` on the tortoise host —
-  pinned by the suite)
+  **The host-split applies to `APP_ONLY` ONLY, and the residual is on EVERY host, not just the
+  company one** (corrected in PR #10514's review, finding 1 — the earlier text called the whole
+  exemption host-split and put the code-carrying `Location` on the company host alone, which the
+  middleware contradicts on both counts):
+  - the three host-split pages — `/signup`, `/welcome`, `/invite-accept` + `.html` twins — are the
+    only host-split shapes. (They are members of the code's `APP_ONLY` set, but so are `/auth` and
+    `/auth.html`, which are NOT host-split: the `/auth` 301 branch answers first, unconditionally.
+    `APP_ONLY` is therefore NOT a synonym for this class — it is a wider set whose members answer
+    differently, and naming the three explicitly is deliberate.) On the exact `premiselabs.co` host
+    the middleware 301s them to the app origin with the code in its `Location` (the recorded
+    residual); on `tortoise.*`/previews there is no middleware branch to keep, so the request falls
+    through to the **backstop** at `_middleware.ts:442` and is refused with the same 400
+    (`/signup?code=…` on the tortoise host — pinned by the suite).
+  - `/auth`, `/auth.html` (301), `/auth/*` (302) and `/admin`, `/admin/*` (302) are
+    **host-independent**: those branches run on every host, so an exempt-shaped request carrying a
+    `code` gets a `Location` that carries the code on `premiselabs.co`, on `tortoise.*` and on a
+    `*.pages.dev` preview alike, and is never refused. **This is the larger half of the residual**
+    and it is the half the #8680 audit has to read — a lane that took the old text at face value
+    would have concluded the code-bearing `Location` existed on the company host only.
 - **auth surfaces redirect to the app origin — and WHICH layer does it depends on the host:**
-  - the middleware's `APP_ONLY` branch (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
-    twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`),
+  - the middleware's `APP_ONLY` **branch** (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
+    twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`) — but `/auth` and
+    `/auth.html` also have their own **unconditional** 301 below, so for those two the branch is not
+    what preserves the redirect on `tortoise.*`/previews (`:59-62`);
   - `/auth` and `/auth.html` 301 **unconditionally** — the redirect #4054 shipped, left alone because
     it is already in browsers' caches and changing it is its own decision — while `/auth/*` answers
     **302** (`#4346`) and `/admin` **302**s (`#4409`), all **unconditionally** (those cover
@@ -65,7 +80,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - on the tortoise host the other three (`/signup`, `/welcome`, `/invite-accept` + twins) are 301'd
     by the **static** `website/_redirects`, not by the middleware. Deleting those rules breaks the
     tortoise host — the middleware does not cover it **for an ordinary request**. It DOES answer
-    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:432`
+    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:442`
     returns the 400 before `context.next()` reaches `_redirects`, so `tortoise…/signup?code=…` is a
     refusal, not a 301. Do not "fix" that by adding a middleware redirect for it — the backstop's
     own comment forbids reversing the exemption that way
