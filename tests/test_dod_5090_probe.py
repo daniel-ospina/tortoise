@@ -810,6 +810,34 @@ def test_an_unreadable_surface_is_named_not_silently_excluded(tmp_path, monkeypa
     assert shipped["searched"] == [], shipped
 
 
+def test_the_reader_answers_from_the_4097_TRUTHY_contract(tmp_path, monkeypatch):
+    """A SIXTH mirror of the truthiness vocabulary would fail bullet 1 OPEN.
+
+    `tortoise/env_truthy.py` is *"The single declared env-truthiness contract
+    (#4097)"*, and `embed_gate.embed_gate_enabled()` (the gate itself) reads it.
+    A local vocabulary here is unpinned to that contract, so if the contract
+    narrowed — `env_truthy`'s own docstring records V3, truthy-minus-`on`, as a
+    divergence that made `=on` silently do nothing — `FLAG=on` would read ON to
+    this instrument and OFF to the gate. That is the one input that moves
+    bullet 1 toward `MET` without measuring (review round 10, P3).
+    """
+    import tortoise.env_truthy as env_truthy
+
+    (tmp_path / ".env.example").write_text("TORTOISE_EMBED_GATE=on\n",
+                                           encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")["on"] is True
+
+    # Narrow the CONTRACT (V3: `on` is not truthy there any more) and the
+    # instrument must narrow with it, because the gate reads the same set.
+    monkeypatch.setattr(env_truthy, "TRUTHY", frozenset({"1", "true", "yes"}))
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")["on"] is False, (
+        "the reader answered from its own copy of the vocabulary, not #4097's: "
+        "`FLAG=on` reads ON here and OFF to embed_gate_enabled()`"
+    )
+    assert not hasattr(probe, "TRUTHY"), "the tool carries a second copy of the contract"
+
+
 def test_a_writer_that_names_an_unserved_label_scores_NOT_MET(tmp_path, monkeypatch):
     """The VERDICT, not just the set difference (review round 3, P3)."""
     (tmp_path / "tortoise").mkdir()
@@ -866,10 +894,25 @@ def test_a_collection_of_patterns_is_a_second_rule_set(tmp_path, monkeypatch):
 
 
 def test_served_labels_are_the_RUNNERS_declaration():
-    """`VALID_ENTITY_TYPES` + `entity_label`, not a second lookup table."""
-    from tortoise.security import VALID_ENTITY_TYPES, entity_label
+    """`VALID_ENTITY_TYPES` + `entity_label` — pinned to the ANSWER, not its clone.
 
-    assert probe.served_labels() == {entity_label(t) for t in VALID_ENTITY_TYPES}
+    ⛔ The assertion used to be `probe.served_labels() == {entity_label(t) for t
+    in VALID_ENTITY_TYPES}` — the implementation's own right-hand side, so it
+    could not go red except by editing `served_labels()` to something
+    VALUE-UNEQUAL. The declaration it claims to forbid
+    (`ENTITY_TYPE_LABELS.values()`) is value-equal today, so even switching to
+    the thing the docstring warns about stayed green: a falsifier with no
+    discriminating power (review round 10, P3). It matters because a type the
+    runner serves but the map does not would empty `served`, make
+    `orphans = labels - served` non-empty, and flip bullet 2 to a false
+    `NOT MET` — a figure this PR publishes into `#5090` — with the "pin" green.
+
+    The literal reds on any widening of the runner's vocabulary and sends the
+    reader to the one place that must agree.
+    """
+    assert probe.served_labels() == {
+        "Point", "Event", "Subject", "Source", "Object"
+    }
 
 
 
@@ -903,6 +946,41 @@ def test_two_package_inits_keep_distinct_writer_identities(tmp_path, monkeypatch
     written = probe.written_labels(writers)
     assert written["tortoise.alpha::_upsert_point"] == "Point", written
     assert written["tortoise.beta::_upsert_point"] == "Object", written
+
+
+def test_a_same_named_point_writer_in_another_module_gets_no_override(
+        tmp_path, monkeypatch):
+    """`WRITER_LABEL_OVERRIDES` is keyed by `module::name`, not by a bare name.
+
+    The comment claimed `module::name` scoping while the LOOKUP was
+    `node.name` — so a `_point` in ANY module was ASSIGNED `Point` with no
+    Cypher evidence, handed to bullet 2 as the writer's own label, and reported
+    as a documented override (review round 10, P3). There is one `_point`
+    today, so nothing read wrong yet; `_point` is a plausible name (this tree
+    carries `_point_key`, `_point_raw_refs`, …) and `embedding_writers()`
+    promises "otherwise `UNKNOWN` — reported, never guessed".
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    for module in ("api", "other"):
+        (tmp_path / "tortoise" / f"{module}.py").write_text(
+            "from .embeddings import encode_for_row\n"
+            "def _point(p):\n"
+            "    vec = encode_for_row('x', None)\n"
+            "    return vec\n",
+            encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    writers = probe.embedding_writers()
+    assert writers["tortoise.api::_point"]["label"] == "Point", writers
+    assert writers["tortoise.other::_point"]["label"] == "UNKNOWN", (
+        "a same-named writer in another module inherited the override: "
+        f"{writers['tortoise.other::_point']}"
+    )
+    # ...and only the documented writer is REPORTED as overridden.
+    assert probe._overridden_writers() == {"tortoise.api::_point"}, (
+        probe._overridden_writers()
+    )
 
 
 def test_a_duplicate_writer_identity_holds_bullet_two_at_partial(monkeypatch):

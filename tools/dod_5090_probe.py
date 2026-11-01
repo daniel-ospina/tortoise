@@ -218,7 +218,13 @@ WRITER_LABEL_OVERRIDES: dict[str, str] = {
     # `tortoise/api.py`'s ingest closure computes the vector and stamps the
     # journal; its Cypher carries no `MERGE (:Label`. It feeds the `:Point`
     # write (`api.py:318` -> projection's point clause).
-    "_point": "Point",
+    #
+    # ⛔ Keyed by `module::name`, the SAME identity the writer map uses — a bare
+    # function name is not an identity: `_point` is a plausible name in any
+    # module (this tree already carries `_point_key`, `_point_raw_refs`, …), and
+    # a bare-name lookup ASSIGNED `Point` to any same-named writer with no
+    # Cypher evidence while the comment above claimed the opposite.
+    "tortoise.api::_point": "Point",
 }
 
 
@@ -354,13 +360,6 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 hits = {lab for lab in module_labels
                         if stem.lower().endswith(lab.lower())}
                 label = hits.pop() if len(hits) == 1 else "UNKNOWN"
-            if label == "UNKNOWN" and node.name in WRITER_LABEL_OVERRIDES:
-                # The label is recorded, and `score_path_bullet` reports it as
-                # an OVERRIDE (not a Cypher derivation) by matching the
-                # `module::name` key — so a same-named writer in another module
-                # cannot silently inherit it.
-                label = WRITER_LABEL_OVERRIDES[node.name]
-                overridden.add(f"{module}::{node.name}")
             # ⛔ Keyed by the DOTTED module path, not by the file's stem: a bare
             # name merges two writers across modules (last-path-wins, no
             # sentinel) and silently SHRINKS both rows — `main` is exactly such
@@ -368,6 +367,14 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # module: it collapses every package `__init__.py` into `__init__`
             # (review round 5, P2).
             key = f"{module}::{node.name}"
+            if label == "UNKNOWN" and key in WRITER_LABEL_OVERRIDES:
+                # The label is recorded, and `score_path_bullet` reports it as
+                # an OVERRIDE (not a Cypher derivation) by matching the SAME
+                # `module::name` key — so a same-named writer in another module
+                # cannot silently inherit it (review round 10, P3: the lookup
+                # was `node.name`, so it could).
+                label = WRITER_LABEL_OVERRIDES[key]
+                overridden.add(key)
             if key in writers:
                 writers[key] = {
                     "callee": callee,
@@ -410,10 +417,15 @@ CONFIG_SURFACES: tuple[str, ...] = (
 )
 
 
-#: Values a shipped config can use to switch a flag ON. Compose's own spec
-#: (`container_spec.md` §environment) spells the boolean `true`/`false`/`yes`/
-#: `no`; `1`/`on` are the shell spellings this repo also uses.
-TRUTHY: tuple[str, ...] = ("1", "true", "yes", "on")
+#: ⛔ There is deliberately NO truthy vocabulary in this module. The values a
+#: shipped config can use to switch a flag ON are `tortoise/env_truthy.py`'s
+#: `TRUTHY` — *"The single declared env-truthiness contract (#4097)"*, whose own
+#: docstring enumerates the five divergent conventions it replaced. A local
+#: tuple would be a sixth mirror and nothing would pin it to the contract, while
+#: `embed_gate.embed_gate_enabled()` reads the contract: if the contract narrowed
+#: (e.g. dropped `on`, V3 in that docstring), `FLAG=on` would read ON to this
+#: instrument and OFF to the gate — the one input that moves bullet 1, failing
+#: OPEN (review round 10, P3). `flag_in_shipped_configs` imports it per call.
 
 
 def _assigned_value(line: str, flag: str) -> str | None:
@@ -491,6 +503,8 @@ def flag_in_shipped_configs(flag: str) -> dict:
     read; `unreadable` names any path the walk could not read (oversize, I/O
     error) so "nowhere" cannot silently exclude a file that does set it.
     """
+    from tortoise.env_truthy import is_truthy
+
     hits: list[str] = []
     searched: list[str] = []
     mentions: list[str] = []
@@ -517,7 +531,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
             mentions.append(posix)
             for line in text.splitlines():
                 value = _assigned_value(line, flag)
-                if value is not None and value.lower() in TRUTHY:
+                if value is not None and is_truthy(value):
                     hits.append(f"{posix}: {line.strip()[:90]}")
     return {"on": bool(hits), "files": hits, "searched": searched,
             "mentions": mentions, "unreadable": unreadable,
