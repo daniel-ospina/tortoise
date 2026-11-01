@@ -610,13 +610,33 @@ mechanisms:
       declared mechanism is the `HOLD` disposition (invariant I1: an unresolved
       identity is NEVER asserted `new`), the run-level `HOLD` set carried to a
       later run, and the single S3-attach/S5-connect/S6-commit transaction (I3).
-      ⚠️ What RUNS is the INVERTED policy, pinned to the code by
-      `test_the_failure_policy_absence_is_pinned_to_the_inverted_render`: S3's
-      lookup degrades instead of raising (correct, #3679) and the renderer then
-      tells the model *"no existing items available; assume everything is new"* —
-      the duplication-manufacturing direction G3 names. #5087 (E1) is the code
-      half the design itself names, and this row is what makes the absence
-      visible instead of assumed.
+      ⚠️ **WHAT EXISTS (#5095, the RECORD half — and it is deliberately NOT a
+      state flip):** `tortoise/failure_policy.py` reads the lookup's state
+      (`resolved` / `partial` / `unresolved`) off `search_graph`'s
+      `query_coverage` + `query_results` — the queries that ACTUALLY ran, which
+      `degraded` alone cannot express (a degraded lookup has zero priors; the
+      swallowed `query 2..N` failure is the partial shape, and on a real S2
+      output the shipped budget of 15 starves the 18th query in the POINT leg).
+      The renderer no longer invites `new`, `execute_embed`'s
+      `link_before_create` reports `found: null` for a candidate whose own query
+      did not run (per candidate, not per run), and `extract_session_v2` carries
+      an always-present `identity` block plus a warning that fires when a candidate's
+      own identity query did not run (a budget cut that touches only non-candidate
+      queries gets its own sentence — the two are different facts).
+      ⛔ **WHAT IS STILL ABSENT — and this is why the row stays
+      `not-implemented`:** nothing suppresses a create. I1's *"never mint it"*
+      needs a CREATE gate inside S5, and NOT `execute_embed({})`: that function
+      is the sole carrier for retractions (whose same-session leg needs no graph
+      lookup), supersessions and chain notes, so a wholesale suppression drops
+      memory I2 forbids dropping (#5095's PLAN-VERIFY round 1 measured it).
+      §4.4's carry-forward store also does not exist. Pinned by
+      `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence`, which
+      asserts a CALL that the mint is still UNGATED (`execute_embed` commits a
+      Point and an entity for an unresolved lookup — the day a create gate lands
+      it reds and this row must flip), together with
+      `test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render`,
+      which pins the record half's presence and this row's state. #5087 (E1)
+      remains the code-owner of the mint half.
       ⚠️ NOT registered as one mechanism: §4.4 also gives each of the eight
       steps its own direction and transaction boundary. Those are per-step
       policies of THIS mechanism, not eight more mechanisms, and a row per step
