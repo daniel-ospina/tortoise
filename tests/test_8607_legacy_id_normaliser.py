@@ -252,7 +252,7 @@ def test_the_target_is_the_existing_canonical_minter():
 def test_a_normalised_point_key_is_an_entity_handle_not_a_minted_ulid():
     """⚠️ The DECISION this pass makes, pinned where it can be seen.
 
-    The target is ``entity_name_id``'s handle — ``poi-<sha256[:26]>`` — which is
+    The target is ``legacy_ids._derived_legacy_handle``'s — ``poi-<sha256[:26]>`` — which is
     NOT the ``<ts-hex>-<uuid12>`` shape ``create_point`` mints (and warns about
     when it is handed anything else). A normalised ``:Point`` key space is
     therefore the entity-handle spelling, and the label carries BOTH canonical
@@ -410,6 +410,45 @@ def test_a_target_collision_is_refused():
     assert any("target collision" in p for p in exc.value.problems), exc.value.problems
 
 
+def test_a_multi_label_node_is_in_the_collision_universe():
+    """⛔ A ``:Point``+``:Session`` node is skipped by the SCOPE branch, but its
+    ``id`` is still a ``:Point`` key — a rename that lands on it merges two
+    nodes. Measured before the fix: this dump was ACCEPTED by ``build_plan`` and
+    ``apply_plan`` left both nodes carrying the same ``id``.
+
+    A real ``dump_graph`` artifact carries multi-label nodes, so this is the
+    population the live pass would meet, not a fabricated edge case.
+    """
+    dump = _dump()
+    collision = canonical_id("Point", "p-0000001")
+    # The picked label is the out-of-scope :Session, so the scope branch skips
+    # this node entirely — before the fix, so did the collision universe.
+    dump["nodes"].append(
+        _node(10_003, ["Point", "Session"], id=collision, sessionId="session_abc123def456")
+    )
+    dump["node_count"] = len(dump["nodes"])
+    with pytest.raises(LegacyIdError) as exc:
+        build_plan(dump)
+    assert any("target collision" in p for p in exc.value.problems), exc.value.problems
+
+
+def test_a_preexisting_duplicate_on_an_out_of_scope_label_does_not_block_the_pass():
+    """A duplicate `:Session` id cannot make a RENAME ambiguous, so it is not a refusal.
+
+    Only a REKEYED label can be a rename target, so refusing here would be a
+    false block: a real dump that happens to carry two nodes under one
+    `:Session` key would refuse the whole pass for a collision it cannot cause.
+    The duplicate is still registered in the collision universe.
+    """
+    dump = _dump()
+    session_id = "session_dup_4a3b2c1d0e9f"
+    dump["nodes"].append(_node(10_008, ["Session"], id=session_id, sessionId=session_id))
+    dump["nodes"].append(_node(10_009, ["Session"], id=session_id, sessionId=session_id))
+    dump["node_count"] = len(dump["nodes"])
+    plan = build_plan(dump)  # must not raise
+    assert len(plan.renames) == census(dump).legacy, "the in-scope renames still plan"
+
+
 def test_a_duplicate_dump_id_is_refused():
     dump = _dump()
     dump["nodes"].append(_node(1, ["Point"], id="p-0000999", content="positional clash"))
@@ -466,7 +505,10 @@ def test_a_shared_key_property_is_out_of_scope_in_both_label_orders(labels):
     caller-supplied `session_*` key in one order and skip it in the other.
     """
     dump = _dump()
-    dump["nodes"].append(_node(10_006, labels, id="session_9f8a7b6c5d4e"))
+    # A DISTINCT session id: reusing the base fixture's `:Session` key here would
+    # make two nodes share one Session identity, which the collision universe
+    # (correctly) refuses — and that is not what this test is about.
+    dump["nodes"].append(_node(10_006, labels, id="session_7d6e5f4a3b2c"))
     dump["node_count"] = len(dump["nodes"])
     plan = build_plan(dump)  # must not raise
     assert [r for r in plan.renames if r.dump_id == 10_006] == [], (
@@ -475,7 +517,7 @@ def test_a_shared_key_property_is_out_of_scope_in_both_label_orders(labels):
     assert census(dump).out_of_scope["Session"] == 2
     out, _ = apply_plan(dump, plan)
     node = next(n for n in out["nodes"] if n["dump_id"] == 10_006)
-    assert node["props"]["id"] == "session_9f8a7b6c5d4e", "the session key is untouched"
+    assert node["props"]["id"] == "session_7d6e5f4a3b2c", "the session key is untouched"
 
 
 def test_a_padded_key_is_refused_rather_than_silently_trimmed():
@@ -1122,7 +1164,7 @@ def test_a_report_with_no_renames_cannot_pose_as_an_undo(tmp_path):
 
     Run documented step 2 twice: the second pass renames nothing and rewrites
     the report with `renames: []`. Step 3 then "restores" the normalised dump,
-    exits 0, and the original ids survive in NO artifact — `entity_name_id` is a
+    exits 0, and the original ids survive in NO artifact — `_derived_legacy_handle` is a
     sha256, so they are not re-derivable.
     """
     from tools.legacy_id_normalise import main
@@ -1316,7 +1358,7 @@ def test_a_second_pass_over_a_different_dump_cannot_overwrite_the_first_plan(tmp
     Measured before the guard: pass 1 over dump A writes plan.json; `rm` the dump
     (the documented workflow — the plan IS the way back); pass 2 over dump B with
     the same `--report` overwrites it, exits 0, and A's original ids then survive
-    in no file. `entity_name_id` is a sha256, so they are not re-derivable.
+    in no file. `_derived_legacy_handle` hashes the OLD key, so they are not re-derivable.
     """
     from tools.legacy_id_normalise import main
 

@@ -72,8 +72,8 @@ original keys back.
 
 ## The mapping, and why it is not a new id scheme
 
-``new = _derived_legacy_handle(label, old)`` — a MIGRATION-ONLY handle
-(``tortoise/ids.py``), applied to the node's already-unique key. §1.4 rule 1:
+``new = _derived_legacy_handle(label, old)`` — a MIGRATION-ONLY handle defined
+**in this module**, applied to the node's already-unique key. §1.4 rule 1:
 *"the legacy id is already the node's unique key; the rewrite is a rename of
 the key value, not a merge"*. So the target is one a reader can recompute, and
 there is no second MINTER to drift. The resulting handle is canonical by
@@ -244,8 +244,26 @@ DECLARED_OUT_OF_SCOPE: dict[str, str] = {
         "mints the default, otherwise the customer's own id), i.e. content the "
         "harness will supply again — §1.4: opaque and valid"
     ),
-    "Subject": "keyed on `name` (§1.1); §1.2 clause 2 — a rename of a name is a NEW node",
-    "Object": "keyed on `name` (§1.1); §1.2 clause 2 — a rename of a name is a NEW node",
+    # ⚠️ The key cited here is `id`, NOT `name`. §1.1's `:Subject`/`:Object` row is
+    # the pre-#3590 key and carries a CORRECTION (2026-10-24, #9881): #3590 made
+    # `name` a MUTABLE natural key two live entities may share, and #9881 moved the
+    # record with it — `public.subject.node_key` / `public.object.node_key` ARE the
+    # `id` (the `node_key = id` conjunct of
+    # `CHECK (name IS NOT NULL AND id IS NOT NULL AND node_key = id)`), and
+    # ``cache_projection.KEY_PROPERTY`` reads `id` for both labels. So they are
+    # re-keyable BY THE CONTRACT and are excluded by the SCOPE RULING alone —
+    # quoting the retired ground would leave a reader unable to tell whether the
+    # exclusion is a decision or a stale inference. It is a decision (2026-10-10).
+    "Subject": (
+        "excluded by the 2026-10-10 scope ruling, not by its key: §1.1's name-keyed "
+        "row is superseded (#9881) and the contract key is `id`, so a rename here "
+        "would be in-contract — it is out of THIS pass by decision"
+    ),
+    "Object": (
+        "excluded by the 2026-10-10 scope ruling, not by its key: §1.1's name-keyed "
+        "row is superseded (#9881) and the contract key is `id`, so a rename here "
+        "would be in-contract — it is out of THIS pass by decision"
+    ),
     "Source": "keyed on `url` (§1.1)",
 }
 
@@ -693,6 +711,48 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
     legacy_seen: dict[tuple[str, str], int] = {}
     seen_dump_ids: dict[int, str] = {}
 
+    # ⛔ Invariant 3 must cover EVERY contract key in the post-pass key space, not
+    # only the key of the ONE label `_node_label` picked. A `:Point`+`:Session`
+    # node is skipped by the scope branch below (the picked label may be the
+    # out-of-scope `:Session`), yet its `id` IS a `:Point` key that a rename can
+    # land on — and a real `dump_graph` artifact carries multi-label nodes.
+    # Measured before this pass: a dump of `[Point{p-0000001}, Point+Session{
+    # poi-b3c35c6d…}]` was ACCEPTED and both nodes left carrying one `id`.
+    # A legacy old key registered here cannot produce a false collision: every
+    # rename target is canonical and no legacy key is.
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue          # counted by the malformed/skip branches below
+        dump_id = node.get("dump_id")
+        if not isinstance(dump_id, int) or isinstance(dump_id, bool):
+            continue
+        for node_label in _labels(node):
+            key_prop = KEY_PROPERTY.get(node_label)
+            if key_prop is None:
+                continue
+            value = _props(node).get(key_prop)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            held = final_keys.get((node_label, value))
+            if held is not None and held != dump_id:
+                # ⚠️ Only a REKEYED label's duplicate can ever make a rename
+                # ambiguous: `renames.append` below is unreachable unless
+                # `scope == REKEYED`, so no target can ever be a `(Session, …)`
+                # or a `(Object, …)` key. Refusing on those would be a FALSE
+                # BLOCK — a real dump carrying one duplicated `:Session` id
+                # would refuse the whole pass for a collision it cannot cause.
+                # The duplicate is still registered (as `held`, the first
+                # holder) so the key space stays complete; it is reported only
+                # where a rename could actually land on it.
+                if node_label in REKEY_SCOPE:
+                    problems.append(
+                        f"duplicate identity: :{node_label} {value!r} is carried "
+                        f"by both dump_id {held} and {dump_id} — two nodes "
+                        "already share one key, which no rename can fix"
+                    )
+                continue
+            final_keys[(node_label, value)] = dump_id
+
     for node in nodes:
         if not isinstance(node, dict):
             problems.append(f"malformed node row: {node!r}")
@@ -750,16 +810,9 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
             continue
         value = raw
         if is_canonical(value):
-            # Invariant 4: a canonical id is never a candidate. A snapshot that
-            # carries the same canonical id twice is a duplicate identity, not
-            # a rename.
-            if (label, value) in final_keys:
-                problems.append(
-                    f"duplicate identity: :{label} {value!r} is carried by both "
-                    f"dump_id {final_keys[(label, value)]} and {dump_id} — two "
-                    "nodes already share one key, which no rename can fix"
-                )
-            final_keys[(label, value)] = dump_id
+            # Invariant 4: a canonical id is never a candidate. The key space
+            # above already registered this (label, key) and its duplicate
+            # check, so there is nothing left to add here.
             continue
         if (label, value) in legacy_seen:
             problems.append(
