@@ -273,9 +273,15 @@ def _insert_columns(sql: str) -> list[str]:
 
 
 def test_a_narrative_carrying_record_projects_the_narrative_home():
-    """The layer-1 commit writes `story_arc` onto the transcript `:Source`; the
-    record must land it in the narrative home, in the SAME batch as the source
-    row (never as a separate replay that can be lost)."""
+    """A narrative-carrying record lands in the narrative home, in the SAME
+    batch as the source row (never as a separate replay that can be lost).
+
+    ⛔ This measures the RECORD's own `story_arc`, not a node's. The layer-1
+    commit used to write `story_arc` onto the transcript `:Source` as well, and
+    #10000 deleted that write — the `SessionNarrated` carrier is its only
+    writer now — so this pin seeds the record directly, which is the fold it is
+    about (`record_projection._narrative_statements`).
+    """
     record = {
         "type": "SourceCreated",
         "url": "session:s_9555",

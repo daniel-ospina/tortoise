@@ -143,8 +143,14 @@ from .projection import _graph_metadata_write_scope
 # projection package (one home), not in a second copy at this call site.
 from .projection import _stored_prop_value, _UNSTORED
 from .projection.entities import (  # #3998: the declared :Source surface
+    # #10389 review P2 (#3860 one-table rule): the label → server-managed set
+    # table is read by BOTH this live tenant route AND the replay fold
+    # (`projection._fold_entity_mutation`). Two copies of the contract is how the
+    # copy that drifts stops being true — and a set read by one arm is exactly
+    # the asymmetry that left an `EntityMutated {label: "Event"}` line replaying
+    # the narrative onto the anchor §9.1(b) calls prose-free.
+    _SERVER_MANAGED_PROPS_BY_LABEL,
     _SOURCE_NODE_PROP_NAMES,
-    _SOURCE_SERVER_MANAGED_PROPS,
     filter_source_props,
 )
 # #8006: the `search_keys` flatten rule has ONE home — the projection module that
@@ -5400,6 +5406,176 @@ _SIGNUP_TOKEN_RECOVER_LOCK = threading.Lock()
 #: author-label residual — documented).
 _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
+
+
+from tortoise.record_projection import (  # noqa: E402
+    _SESSION_COORDINATE_KEYS as _NARRATIVE_SESSION_COORDINATE_KEYS,
+)
+
+#: §9.1's narrative key, and the SESSION it must name — read from the record's
+#: own projection (`_SESSION_COORDINATE_KEYS`) rather than re-typed (#10389 review
+#: cycle 2 P3): a spelling this door accepts and the projection no longer
+#: recognises would file nothing, silently, which is the defect being closed.
+_NARRATIVE_PROP = "story_arc"
+_NARRATIVE_SESSION_KEYS: tuple[str, ...] = _NARRATIVE_SESSION_COORDINATE_KEYS
+
+
+def _refuse_unpaired_narrative(props: dict, *, door: str,
+                              label: str | None = None,
+                              journal_armed: bool = True) -> None:
+    """§9.1's narrative must NAME its session, or it has no home at all (#10000).
+
+    THE RULE, verbatim (`docs/architecture/STORAGE-ARCHITECTURE.md` §9.1/D1):
+    "The S1 narrative (the connected prose form of a captured session) is stored
+    as **text in Postgres, together with the raw agent-session transcript it was
+    derived from** — not in the graph, not a `Document` node, not a `Point`."
+    The PAIRING is the session: `record_projection._narrative_statements` is
+    shape-keyed and files a narrative under `_session_coordinate(record)`
+    (`sessionId`/`session_id`). A narrative that names no session therefore
+    matches nothing, and the graph refuses the key on BOTH folds (§9.1's other
+    half, `projection.entities._EVENT_HANDLED` /
+    `_DOC_PASSTHROUGH_HANDLED`) — so the call stores §9.1's text NOWHERE its own
+    readers look.
+
+    MEASURED, Arm B (`tortoise_record_app`, so the record ACCEPTS the write),
+    same prose, one variable — the session coordinate:
+
+        create_event(..., story_arc=<prose>, sessionId='nstory-door-session-1')
+          journal : EventRecorded carries story_arc + sessionId
+          Postgres: public.session_narrative = (session_id, 91 chars, the prose)
+          graph   : prose hits 0 (fingerprint Event 2 + Meta 1 — not empty)
+
+        create_event(..., story_arc=<prose>)            # the unpaired call
+          journal : EventRecorded carries story_arc, sessionId NULL
+          Postgres: NO row (the shape rule has no coordinate to key on)
+          graph   : dropped by the fold — one warning, no error, no store
+
+    ⇒ The unpaired shape is the ONLY one with nowhere to go, and before this
+    guard it was accepted and dropped (silent in effect: the caller's 2xx says
+    nothing about §9.1's home). It is REFUSED here instead.
+
+    ⛔ AT THE DOOR, NEVER IN THE FOLD. The fold that drops the key is also the
+    REPLAY fold (`rebuild_all`, `recover_from_log`, `backup.restore`), so a
+    refusal there would redden every rebuild of a journal holding a legacy
+    `story_arc` line. A legacy line replays to the fold's named warning, which
+    is the declared trade; a NEW write is refused before anything is written.
+
+    ⚠️ Scope: it refuses `story_arc` on every shape that would NOT land in
+    §9.1's home, and accepts only the one that does. Three refusals, one rule —
+    the prose must be in Postgres-with-its-session and on NO node:
+
+      * an UPDATE door (`label is None`) — an update writes caller props straight
+        onto the node (`SET n += $props`), so on `:Point`/`:Object`/`:Subject` it
+        would carry the prose into the graph AND, once the record names the
+        session, file the row as well: two drifting homes, the duplicate
+        §9.1(b)/R7 exists to remove. Measured at #10389's head:
+        `update_entity(<object>, story_arc=…, sessionId=…)` wrote the prose onto
+        the `:Object` node and into `public.session_narrative`. ⛔ THIS ARM NEVER
+        SEES `:Event`/`:Source`: `_update_entity` calls it AFTER their
+        `_SERVER_MANAGED_PROPS_BY_LABEL` blocks, which own those refusals and
+        their messages (#10389 review cycle 2 — placed first it shadowed them and
+        made the table's entries dead code).
+      * a label whose fold does NOT refuse the key (`:Point`, `:Object`,
+        `:Subject`) — the open `#228` passthrough persists it, so a PAIRED write
+        would put the prose on a node while the record files it, and an UNPAIRED
+        one would store a graph copy of §9.1's text. `_NARRATIVE_LABELS` is the
+        closed set whose folds DO refuse it (measured: `create_object(...)`, and
+        `create_point("statement", "a claim", story_arc=…)` which persisted
+        `(:Point {story_arc: <the prose>})`).
+      * a create with NO JOURNAL — `sdk._emit_event` returns before the record
+        leg when no log is configured, so the record home is unreachable and the
+        prose is in no store, with a 2xx and no advisory (the exact class this
+        change closes; the commit path already reports it via
+        `hosted_api._report_narrative_home`, the tenant doors have no receipt
+        channel).
+
+    ⚠️ THE POINT DOORS CALL IT TOO (#10389 review cycle 3): `create_point` and
+    `update_point` have their own funnels, and NEITHER could be left to the fold
+    — the `:Point` fold does not refuse the key, and `update_point` writes raw
+    `SET n += $props` and journals `PointRevised`, so a fold-only deny would make
+    a rebuild DELETE a property the live write accepted (live ≠ replay). Both
+    pass `label="Point"`, which is outside `_NARRATIVE_LABELS`.
+    The residual that REMAINS is a LEGACY one and is #10429's: a journal that
+    already carries `story_arc` for a Point replays through `_upsert_point_props`,
+    which this helper never sees (it is the fold). No new write lands the key
+    on any node after this change.
+    """
+    if not isinstance(props, dict):
+        return
+    value = props.get(_NARRATIVE_PROP)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return
+    if not isinstance(value, str):
+        # ⛔ A NON-STRING narrative is the same silent loss in a different
+        # costume (#10389 review cycle 2 P2, measured): the fold drops the key
+        # and `record_projection._narrative_statements` projects only a
+        # non-empty `str`, so `story_arc={"a": …}` / `[<prose>]` / `42` all
+        # answered 2xx with the narrative in NO store. Refused here rather than
+        # coerced: `_jsonb_or_scalar` would put a dict in a TEXT column, which is
+        # a false claim about §9.1's prose, not a narrative.
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} must be the narrative TEXT (§9.1/D1, #10000): "
+            f"got {type(value).__name__}. The record projects only a non-empty "
+            f"string into `public.session_narrative.narrative` and the graph "
+            f"refuses the key, so this value would be stored in no store at "
+            f"all. Pass the prose as a string, together with "
+            f"{' or '.join(_NARRATIVE_SESSION_KEYS)!r}."
+        )
+    if label is None:
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} cannot be written through {door}: §9.1/D1 puts "
+            f"the S1 narrative in `public.session_narrative` (filed by its "
+            f"session), and an update writes caller props straight onto the "
+            f"node — so this call puts the prose on the graph and, once the "
+            f"record names the session, in the table too: two homes drifting "
+            f"apart, and §9.1's row is not filed BY the update either way. "
+            f"Write the narrative through the capture / commit path (it carries "
+            f"its own session), or create the carrier with `sessionId=`."
+        )
+    if label not in _NARRATIVE_LABELS:
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} cannot be written on a {label} (#10000): "
+            f"§9.1/D1 puts the S1 narrative in `public.session_narrative` and "
+            f"NOT on a node, but the {label} fold does not refuse the key — its "
+            f"open passthrough would persist the prose on the node, so this "
+            f"write would store §9.1's text in the graph whether or not it also "
+            f"reached the record. The labels whose folds refuse it are "
+            f"{sorted(_NARRATIVE_LABELS)}; for anything else, keep the prose out "
+            f"of a node payload and file it through the capture / commit path."
+        )
+    if not any(isinstance(props.get(k), str) and props[k].strip()
+               for k in _NARRATIVE_SESSION_KEYS):
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} names no session, so §9.1's narrative has "
+            f"nowhere to go (#10000): the record files it under its session "
+            f"(`public.session_narrative`, keyed by session_id) and the graph "
+            f"refuses the key on the {label} fold, so {door} would store the "
+            f"prose in no store at all. Pass {' or '.join(_NARRATIVE_SESSION_KEYS)!r} "
+            f"naming the session this narrative was distilled from (that is the "
+            f"transcript it is paired with, §9.1), or write the narrative through "
+            f"the capture / commit path that carries its own session."
+        )
+    if not journal_armed:
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} has no record to be filed in (#10000): this "
+            f"SDK was built without an `event_log_path` (no journal), so the "
+            f"record leg is unreachable — `sdk._emit_event` returns before it — "
+            f"and §9.1's narrative would be stored NOWHERE while {door} answered "
+            f"success. Configure `event_log_path` (and `TORTOISE_RECORD_DSN`) so "
+            f"the record can hold it, or write the narrative through the capture "
+            f"/ commit path."
+        )
+
+
+#: The labels whose projection fold REFUSES `story_arc` (`_EVENT_HANDLED`,
+#: `_DOC_PASSTHROUGH_HANDLED`, `_SOURCE_SERVER_MANAGED_PROPS`) — i.e. the only
+#: labels on which a paired narrative is guaranteed to land in the RECORD and
+#: on NO node. Closed set, not a denylist: a label that grows a refusal belongs
+#: here deliberately, and one that does not (`:Point`, `:Object`, `:Subject`)
+#: stays out — measured, `create_object`/`create_subject`/`create_point` all
+#: persist the key through the open `#228` passthrough.
+_NARRATIVE_LABELS: frozenset = frozenset({"Event", "Source", "Document"})
+
 
 
 def _sanitize_props(props: dict, *, reject_id: bool = False,
@@ -10996,6 +11172,13 @@ class TortoiseSDK:
         # as the entity funnel (`_refuse_unapproved_kind`).
         self._refuse_unapproved_kind("pointKind", kind)
         _coerce_props(props)
+        # #10000 / §9.1: the POINT door is closed too (#10389 review cycle 3).
+        # The Point fold does not refuse `story_arc`, so this door persisted
+        # §9.1's prose on a node (measured: `create_point("statement",
+        # "a claim", story_arc=<prose>)` → `(:Point {story_arc: <the prose>})`).
+        # `"Point"` is outside `_NARRATIVE_LABELS`, so this refuses on the label.
+        _refuse_unpaired_narrative(props, door="create_point", label="Point",
+                                   journal_armed=bool(self._event_log_path))
         # #9287: the props passthrough can carry `pointKind` itself and it WINS
         # over the positional kind (measured: `create_point("statement", …,
         # pointKind="\u2003statement\u2003")` stored the padded value), so the same
@@ -15894,6 +16077,13 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #10000 / §9.1: `update_point` writes with a raw `SET n += $props` and
+        # consults no point deny-set, so it accepted the narrative and journalled
+        # it as `PointRevised` — measured at #10389 review cycle 3, which is also
+        # why this cannot be left to the fold's `_POINT_DENY` alone: a rebuild
+        # would then DELETE a property the live write accepted (live ≠ replay).
+        _refuse_unpaired_narrative(props, door="update_point", label="Point",
+                                   journal_armed=bool(self._event_log_path))
         # #9287: an UPDATE is a WRITE, and ``pointKind`` is writable through it
         # (measured: ``update_point(id, pointKind='\u2003observation\u2003')``
         # stored the padded value and the gate never demanded it) — the same
@@ -38731,6 +38921,14 @@ class TortoiseSDK:
         # closes open under another name; and it runs BEFORE any write, so a
         # refusal leaves the graph untouched.
         self._refuse_unapproved_kinds_in_props(props)
+        # #10000 / §9.1: a narrative must NAME its session or it is stored
+        # nowhere — see `_refuse_unpaired_narrative`. This funnel is where every
+        # create door MEETS (`create_entity`, `create_event`, `create_document`,
+        # `create_source`), and the refusal runs BEFORE any write, so nothing is
+        # applied and nothing is journalled.
+        _refuse_unpaired_narrative(props, door=f"create_{label.lower()}",
+                                   label=label,
+                                   journal_armed=bool(self._event_log_path))
         # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
         # funnel only ever creates Subject/Object/Event/Document/Source —
         # ``create_entity("Point", …)`` raises `unknown type`
@@ -39159,6 +39357,36 @@ class TortoiseSDK:
         """
         return stored_source_document_kinds(g, id_val)
 
+    def _label_reachable_by(self, g, label: str, id_val: str) -> int:
+        """Count the `:<label>` nodes the WRITE below would reach for `id_val`.
+
+        ONE implementation of the key discipline, because a guard whose
+        predicate differs from the write's is decoration: the write resolves a
+        canonical label by its PRIMARY key then its SECONDARY
+        (`secondary_entity_id_props`), so a stub keyed only by the secondary one
+        (a url-only `:Source` minted by `_link_source`) IS writable — and a
+        guard that matched only the primary would report itself satisfied while
+        that write landed.
+
+        The order mirrors the write's own: the PRIMARY key first (byte-identical
+        MATCH text and #327 index plan), the secondary only on a miss. The key
+        set is DERIVED from the same declarations the write and the fold use
+        (#3860's one-table rule) rather than hardcoded, so a future secondary
+        key cannot reopen the bypass silently (#5196 review round 3, P2).
+        """
+        from tortoise.projection import secondary_entity_id_props
+
+        _keys = (_ENTITY_ID_PROP.get(label, "id"),
+                 *secondary_entity_id_props(label))
+        for _k in _keys:
+            _hit = g.query(
+                f"MATCH (n:{label} {{{_k}:$id}}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _hit:
+                return _hit
+        return 0
+
     def _source_reachable_by(self, g, id_val: str) -> int:
         """Count the `:Source` nodes the WRITE below would reach for `id_val`.
 
@@ -39172,25 +39400,11 @@ class TortoiseSDK:
 
         The order mirrors the write's own discipline: the PRIMARY key is tried
         first (byte-identical MATCH text and #327 index plan) and the secondary
-        only on a miss.
+        only on a miss. The resolution itself lives in `_label_reachable_by`
+        (#10389 review P2): one predicate for every label, so the `:Event`
+        guard added beside it cannot drift from the `:Source` one.
         """
-        # #5196 review round 3, P2: derive the key set from the SAME declaration
-        # the write and the fold use (#3860's one-table rule), not a hardcoded
-        # `url`. Today `_CANONICAL_ENTITY_SECONDARY_ID_PROPS` yields exactly
-        # `("url",)`, so this is a drift guard rather than a live hole: a future
-        # secondary key would otherwise reopen the url-stub bypass silently.
-        from tortoise.projection import secondary_entity_id_props
-
-        _keys = (_ENTITY_ID_PROP.get("Source", "id"),
-                 *secondary_entity_id_props("Source"))
-        for _k in _keys:
-            _hit = g.query(
-                f"MATCH (n:Source {{{_k}:$id}}) RETURN count(n)",
-                params={"id": id_val},
-            ).result_set[0][0]
-            if _hit:
-                return _hit
-        return 0
+        return self._label_reachable_by(g, "Source", id_val)
 
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
@@ -39506,6 +39720,14 @@ class TortoiseSDK:
         # ``['dev','marketing']``. Same rule, same funnel, same refusal as the
         # create doors because it is the SAME helper.
         self._refuse_unapproved_kinds_in_props(props)
+        # #10000 / §9.1: the UPDATE door has the same hole as the create doors —
+        # measured at #10389's head, `update_entity(<object>, story_arc=<prose>,
+        # sessionId=…)` writes caller props straight onto the node (`SET n +=
+        # $props`), so the prose lands in the GRAPH as well as the record, and on
+        # a `:Point`/`:Object`/`:Subject` nothing refuses it. ⛔ It runs AFTER the
+        # `:Event`/`:Source` server-managed blocks BELOW (they own their own
+        # refusal, and their message is what two pins assert) — see the call
+        # there, not here.
         # #9287: ``update_entity`` is the SECOND documented UPDATE door onto a
         # ``:Point`` (``commit_schema`` lists the pair: ``update_point`` /
         # ``_update_entity``) and it writes caller props with a live
@@ -39539,6 +39761,33 @@ class TortoiseSDK:
             # stub ACCEPTED `update_entity(text=<2 KB>)`, persisting the payload
             # live and into the EntityMutated journal, while the guard reported
             # itself satisfied.
+            # ── #10000 (D1, §9.1): the :Event anchor, same gate ──
+            # The narrative's prose-free state on the AgentSession `:Event` is a
+            # PINNED property of this change (`tests/test_commit_endpoint.py`
+            # ::TestFourNodeChain) and the commit writer's `e.story_arc` SET is
+            # deleted. `_EVENT_HANDLED` closes the `EventRecorded` fold, but this
+            # route writes caller props straight through `SET n += $props` in the
+            # non-Point label loop below and NEVER consults a label skip-set — so
+            # without this refusal the generic tenant surface
+            # (`tortoise_update_entity`) puts the prose back on that very node,
+            # JOURNALLED into an `EntityMutated` record a `rebuild_all` restores:
+            # the `__runId` hole (#5196 round 3) one property and one label over.
+            # Resolved with the SAME predicate the write uses
+            # (`_label_reachable_by`), and only when a managed key is actually
+            # supplied, so an ordinary `update_entity(<eventId>, status=…)` pays
+            # no extra round trip.
+            _event_managed = sorted(
+                k for k in props
+                if k in _SERVER_MANAGED_PROPS_BY_LABEL["Event"])
+            if _event_managed and self._label_reachable_by(
+                    self._get_proj().g, "Event", id_val):
+                raise ValueError(
+                    f"{_event_managed!r} is not a caller-settable property on "
+                    f"an :Event — the S1 narrative lives in "
+                    f"`public.session_narrative`, never on a node (§9.1/D1, "
+                    f"#10000). The key is READ back from a legacy node that "
+                    f"still carries it, and refused on every write door."
+                )
             _is_source = self._source_reachable_by(self._get_proj().g, id_val)
             if _is_source:
                 # #5140 P1: the `documents` METER KEY (#1726 predicate) cannot
@@ -39552,7 +39801,9 @@ class TortoiseSDK:
                         self._stored_source_document_kinds(
                             self._get_proj().g, id_val),
                         props, surface="update_entity", none_demotes=True)
-                _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
+                _managed = sorted(
+                    k for k in props
+                    if k in _SERVER_MANAGED_PROPS_BY_LABEL["Source"])
                 if _managed:
                     # #3998: the STATE and the merge TOKEN are refused through the
                     # generic surface.
@@ -39613,6 +39864,19 @@ class TortoiseSDK:
                         f"(D30/#3919, #3998). Declared :Source properties: "
                         f"{sorted(_SOURCE_NODE_PROP_NAMES)}."
                     )
+        # #10000 / §9.1: the UPDATE door, AFTER the label-owned refusals above
+        # (#10389 review cycle 1 P1). A narrative cannot be FILED by an update —
+        # the write is `SET n += $props` on whatever label `id_val` resolves to,
+        # so on `:Point`/`:Object`/`:Subject` it puts §9.1's prose on the node
+        # (measured: `update_entity(<object>, story_arc=…, sessionId=…)` left the
+        # prose on the `:Object` AND filed the record row — two drifting homes),
+        # and on `:Event`/`:Source` it is refused by their own server-managed
+        # blocks above. Ordered HERE so those two keep their own message: placed
+        # before them this guard shadowed `_SERVER_MANAGED_PROPS_BY_LABEL` and
+        # turned the table's `story_arc` entry into dead code (measured, review
+        # cycle 2). The call is unconditional on label because the label is only
+        # resolved inside this method; it runs only when the key is present.
+        _refuse_unpaired_narrative(props, door="update_entity", label=None)
         # #5482: `search_keys` must reach the graph FLAT, exactly as it does on
         # `create_point` and `update_point` — both flatten immediately after
         # `_sanitize_props`, and this surface did not. It wrote caller props
