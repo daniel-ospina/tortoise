@@ -18770,8 +18770,16 @@ class TortoiseSDK:
                     continue
                 _rdict = (dict(_rel.properties)
                           if hasattr(_rel, "properties") else {})
+                # ⛔ Only a STRING token reaches the predicate: a raw-written
+                # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
+                # and ``direction_flows`` tests membership in a frozenset — so
+                # handing it over aborts the supersede with a ``TypeError`` the
+                # guard is not about. Junk reads as ABSENT (the same "absent ⇒
+                # the type's mutual/one-way default" reading ``normalize``
+                # uses), never as a third state.
+                _raw_dir = _rdict.get("direction")
                 _eff_dir = self._canonical_direction(
-                    _rtype, _rdict.get("direction"))
+                    _rtype, _raw_dir if isinstance(_raw_dir, str) else None)
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
                 else:

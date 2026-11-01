@@ -1292,6 +1292,32 @@ def test_supersede_repoint_survives_a_far_endpoint_with_no_id(lane):
     assert _direct_rows(lane, old) == []
 
 
+def test_supersede_repoint_survives_a_unhashable_stored_direction(lane):
+    """A raw-written NON-SCALAR ``direction`` must not abort the supersede.
+
+    ``live.direction_flows`` tests membership in a frozenset, so an unhashable
+    property value (a list/map) raises ``TypeError`` — a traceback aborting a
+    supersede the guard is not about. Junk reads as ABSENT (the edge's type
+    default), which is the same reading ``claim_class.normalize`` gives a
+    hand-edited marker, never a third state.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+    t = lane.create_point("statement", "computed peer",
+                          claim_class="derived")["id"]
+    lane.create_direct_edge("IMPL", old, t)
+    lane._get_proj().g.query(
+        "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) "
+        "SET r.direction = ['sideways']",
+        params={"a": old, "b": t})
+
+    lane.supersede_point(old, new)  # must not raise
+
+    assert _direct_rows(lane, new)[0][0] == new
+
+
 def test_supersede_repoint_refuses_the_backward_leg_too(lane):
     """The mirror: a legal ``->`` edge flips into the override on re-point.
 
