@@ -32,7 +32,7 @@ deliberately mechanical so a later lane re-runs it instead of re-reading prose:
 | 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate) | a stated predicate exists, ONE rule set (identity, not a copy), AND every embedding write path reaches it with the gate ON by default |
 | 2 | same (`written labels ⊆ served labels`) | every label a write path embeds is one `run_vector_query` serves |
 | 3 | same (forces all three mechanisms through `run_vector_query`) | `index` / `scan` / `scan_fallback` are distinguishable in the caller's trace |
-| 4 | same (searches for a V1 ruling) | a decision record exists — *implementation is the follow-up work a ruling creates, and is not what this row can see* |
+| 4 | same (searches for a V1 ruling) | **`MET` is unreachable here**: the bullet is *decided **and implemented***, and this row cannot measure implementation — a record at most carries it to `PARTIAL`, and no record is `NOT MET` |
 
 ⚠️ **Bullet 1's `PARTIAL` is the honest answer at HEAD and it is not a bug
 report.** The rule is stated (`tortoise/embed_gate.py::embedding_verdict`) and
@@ -205,6 +205,11 @@ WRITER_LABEL_OVERRIDES: dict[str, str] = {
 }
 
 
+#: `{root: {module::name, …}}` — filled by `_embedding_writers`, so the row can
+#: say which written labels were assigned rather than derived.
+_OVERRIDDEN_BY_ROOT: dict[Path, frozenset[str]] = {}
+
+
 def embedding_writers() -> dict[str, dict]:
     """Every function that produces a stored vector, and what it writes.
 
@@ -233,6 +238,7 @@ def embedding_writers() -> dict[str, dict]:
 @functools.lru_cache(maxsize=8)
 def _embedding_writers(root: Path) -> dict[str, dict]:
     writers: dict[str, dict] = {}
+    overridden: set[str] = set()
     seam_module = root / "tortoise/embeddings.py"
     for path in sorted((root / "tortoise").rglob("*.py")):
         if path == seam_module:
@@ -303,7 +309,12 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                         if stem.lower().endswith(lab.lower())}
                 label = hits.pop() if len(hits) == 1 else "UNKNOWN"
             if label == "UNKNOWN" and node.name in WRITER_LABEL_OVERRIDES:
+                # The label is recorded, and `score_path_bullet` reports it as
+                # an OVERRIDE (not a Cypher derivation) by matching the
+                # `module::name` key — so a same-named writer in another module
+                # cannot silently inherit it.
                 label = WRITER_LABEL_OVERRIDES[node.name]
+                overridden.add(f"{path.stem}::{node.name}")
             # ⛔ Keyed by `module::name`: a bare name merges two writers across
             # modules (last-path-wins, no sentinel) and silently SHRINKS both
             # rows — `main` is exactly such a name, and it is the only ungated
@@ -323,7 +334,13 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 "kind": kind,
                 "label": label,
             }
+    _OVERRIDDEN_BY_ROOT[root] = frozenset(overridden)
     return writers
+
+
+def _overridden_writers() -> set[str]:
+    """Writers whose label came from a documented OVERRIDE, not from Cypher."""
+    return set(_OVERRIDDEN_BY_ROOT.get(REPO_ROOT, frozenset()))
 
 
 def _write_seams_that_embed() -> dict[str, str]:
@@ -374,8 +391,13 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 # that merely MENTIONS the flag (`# see TORTOISE_EMBED_GATE`)
                 # is not an assignment. Measured: `# TORTOISE_EMBED_GATE=1`
                 # read as ON — the one input that can flip bullet 1 to MET.
-                if not stripped or stripped[0] in "#;-" or flag not in stripped:
+                # ⛔ `-` starts a YAML LIST ITEM (`- KEY=1`, standard for a
+                # docker-compose `environment:` block), not a comment. Only a
+                # `---` document marker is skipped.
+                if (not stripped or stripped[0] == "#" or stripped.startswith("---")
+                        or stripped.startswith(";") or flag not in stripped):
                     continue
+                stripped = stripped.lstrip("-").lstrip()
                 value = stripped.split(flag, 1)[1].lstrip("=: \t").strip()
                 value = value.split()[0] if value.split() else ""
                 value = value.strip("'\"").lower()
@@ -490,8 +512,17 @@ def written_labels(writers: dict[str, dict] | None = None) -> dict[str, str]:
     reported, never guessed.
     """
     writers = embedding_writers() if writers is None else writers
-    return {w: d["label"] for w, d in sorted(writers.items())
-            if d["kind"] in ("gated", "ungated")}
+    # `unresolved_write` is INCLUDED and mapped to UNKNOWN: a function that
+    # writes an embedding without a recognised producer call is a write path
+    # whose label this instrument could not resolve, so it must hold the row —
+    # excluding it made the row claim `written ⊆ served` over a set that left
+    # out the very paths its sibling row flags (this tool's own review, P1).
+    return {
+        w: (d["label"] if d["kind"] in ("gated", "ungated")
+            else "UNKNOWN(unresolved producer)")
+        for w, d in sorted(writers.items())
+        if d["kind"] in ("gated", "ungated", "unresolved_write")
+    }
 
 
 def unparsed_modules(writers: dict[str, dict] | None = None) -> list[str]:
@@ -534,7 +565,7 @@ def score_path_bullet() -> Row:
         notes.append(f"unresolved writers (hold this row at PARTIAL): {sorted(unknown)}")
     if unparsed:
         notes.append(f"unparseable modules (hold this row at PARTIAL): {unparsed}")
-    overridden = sorted(w for w in written if w in WRITER_LABEL_OVERRIDES)
+    overridden = sorted(_overridden_writers() & set(written))
     if overridden:
         notes.append(
             f"labels assigned by the DOCUMENTED override, not derived from "

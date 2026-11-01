@@ -146,17 +146,29 @@ def test_every_embedding_write_path_reaches_the_gate_seam():
             f"{writer} embeds a written row without reaching encode_for_row — "
             f"the ungated-primitive state #5008 closed. Measured seams: {sorted(seams)}"
         )
-    # And the derived labels must not invent one.
+    # And every UNRESOLVED writer is REPORTED (it holds bullet 2 at PARTIAL),
+    # never silently dropped from the written set.
     written = probe.written_labels()
-    assert not [v for v in written.values() if v.startswith("UNKNOWN")], written
+    unresolved = [w for w, v in written.items() if v.startswith("UNKNOWN")]
+    assert unresolved, written
+    assert probe.score_path_bullet().verdict == "PARTIAL"
 
 
 def test_every_embedded_label_has_a_query_path():
-    """Bullet 2: nothing is STORED that `run_vector_query` cannot query."""
+    """Bullet 2: nothing is STORED that `run_vector_query` cannot query.
+
+    At HEAD the row is `PARTIAL` — not because a stored label is unserved (none
+    is), but because 14 write paths write an embedding with no recognised
+    producer call, so their label cannot be resolved and the row must not claim
+    a complete measurement over them.
+    """
     row = probe.score_path_bullet()
-    assert row.verdict == "MET", row.observed
-    written = set(probe.written_labels().values())
-    assert written <= probe.served_labels(), written - probe.served_labels()
+    assert row.verdict in ("MET", "PARTIAL"), row.observed
+    resolved = {v for v in probe.written_labels().values()
+                if not v.startswith("UNKNOWN")}
+    assert resolved <= probe.served_labels(), resolved - probe.served_labels()
+    if any(v.startswith("UNKNOWN") for v in probe.written_labels().values()):
+        assert row.verdict == "PARTIAL", row.verdict
 
 
 # ── Bullet 3 — the fallback announces itself ───────────────────────────────
