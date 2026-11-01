@@ -1597,8 +1597,7 @@ def _execute(plan: dict, args, target: dict) -> int:
     FIELDS. A row whose text changed after the live census would pass step 1,
     and the census's field comparison is the instrument that covers it.
     """
-    from tortoise.projection import (FalkorProjection,
-                                    _apply_first_write_scope)
+    from tortoise.projection import FalkorProjection, _apply_first_write_scope
     from tortoise.sdk import TortoiseSDK
 
     # ⛔ 0a. THE JOURNAL IS NAMED BY THE APPROVED PLAN, AND MUST ALREADY EXIST.
