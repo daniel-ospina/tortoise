@@ -63,9 +63,16 @@ def test_the_four_bullets_are_scored_verbatim():
     rows = report["rows"]
     assert len(rows) == 4, rows
     assert [r["bullet"] for r in rows] == [1, 2, 3, 4], rows
-    assert [r["text"] for r in rows] == list(probe.BULLETS), (
-        "the scored text drifted from #5090's `## Definition of done`"
-    )
+    # A LITERAL, not `probe.BULLETS` on both sides: comparing the tool's
+    # constant to itself could only detect a dropped row, never a re-worded
+    # one (this file's own review, P3). These strings are `#5090`'s
+    # `## Definition of done`, verbatim.
+    assert [r["text"] for r in rows] == [
+        "A stated, enforced rule for what earns an embedding.",
+        "No vector is stored without a path to query it.",
+        "A fallback query reports the fallback.",
+        "V1 is decided and implemented.",
+    ], "the scored text drifted from #5090's `## Definition of done`"
     for r in rows:
         assert r["verdict"] in probe.VERDICTS, r
         # A bullet without a command is UNSCORED, not met (#10465 target 1).
@@ -137,7 +144,7 @@ def test_every_embedding_write_path_reaches_the_gate_seam():
             f"the ungated-primitive state #5008 closed. Measured seams: {sorted(seams)}"
         )
     # And the derived labels must not invent one.
-    written = probe.written_labels(seams)
+    written = probe.written_labels()
     assert not [v for v in written.values() if v.startswith("UNKNOWN")], written
 
 
@@ -207,3 +214,80 @@ def test_the_census_refuses_an_embedded_engine():
     for every label, which is not the same fact as "nothing is indexed"."""
     with pytest.raises(SystemExit):
         probe._connect("file:///tmp/whatever.db")
+
+
+# ── The falsifiers the review asked for ────────────────────────────────────
+
+
+def test_a_writer_that_names_an_unserved_label_reads_NOT_MET(tmp_path, monkeypatch):
+    """Bullet 2's `NOT MET` branch must be reachable (review P1 #3).
+
+    A writer whose own Cypher names `:Document` — a label `run_vector_query`
+    does not serve — is the stored-and-unqueryable class the bullet forbids. A
+    label map drawn from the query vocabulary itself can never produce it.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "writer.py").write_text(
+        "from .embeddings import encode_for_row\n"
+        "def _upsert_document(ev):\n"
+        "    emb = encode_for_row('x', 3)\n"
+        "    q = 'MERGE (n:Document {id: 1}) SET n.embedding = $emb'\n"
+        "    return q, emb\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    written = probe.written_labels()
+    assert written == {"_upsert_document": "Document"}, written
+    served = probe.served_labels()
+    assert "Document" not in served, served
+    assert set(written.values()) - served == {"Document"}
+
+
+def test_a_write_path_outside_the_gate_is_counted(tmp_path, monkeypatch):
+    """Bullet 1 must SEE an ungated writer (review P1 #4) — a map that only
+    looks for the gated call cannot report the bypass it is meant to catch."""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n"
+        "def compute_session_embedding(t):\n    return [0.0]\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "writer.py").write_text(
+        "from .embeddings import compute_session_embedding\n"
+        "def main(event):\n"
+        "    emb = compute_session_embedding('x')\n"
+        "    set_embedding_clause('e')\n"
+        "    return emb\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    writers = probe.embedding_writers()
+    assert writers["main"]["kind"] == "ungated", writers
+
+
+def test_the_predicate_count_searches_the_embed_path_not_a_whitelist(
+        tmp_path, monkeypatch):
+    """A THIRD pattern-owning module on the embed path is drift (review P1 #2).
+
+    A two-file whitelist reports this tree as drift-free; the import-graph walk
+    cannot.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_A = re.compile(r'#\\d+')\nRULES = ('r',)\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nfrom . import embed_rules\n"
+        "RULE_SET = value_gate.RULES\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embed_rules.py").write_text(
+        "import re\n_B = re.compile(r'\\d{4}')\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embeddings.py").write_text("# seam\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 2, counted
+    assert "tortoise/embed_rules.py" in counted["owners"], counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_measure_restores_the_gate_flags(monkeypatch):
+    """A read-only instrument must not leave the caller's process un-gated."""
+    monkeypatch.setenv("TORTOISE_EMBED_GATE", "1")
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
+    probe.measure()
+    assert os.environ["TORTOISE_EMBED_GATE"] == "1"
+    assert os.environ["TORTOISE_VALUE_GATE"] == "1"
