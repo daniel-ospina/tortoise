@@ -18661,10 +18661,11 @@ class TortoiseSDK:
         # judged here, on the pair the graph will hold after the write.
         #
         # ⛔ ONE predicate: ``claim_class.direction_blocks_create``, fed the
-        # edge's stored direction canonicalized with ``_canonical_direction`` —
-        # the same predicate and the same canonicalizer as ``create_operator``,
-        # ``create_direct_edge``, ``ingest``'s partial-absorb branch and
-        # #10195's operator pre-flight above. A second copy of "may this edge
+        # edge's stored direction — a string verbatim, the edge TYPE's default
+        # when ABSENT, both ways for a present non-string (see the per-row
+        # note) — and, for the first two, the same canonicalizer as
+        # ``create_operator``, ``create_direct_edge``, ``ingest``'s
+        # partial-absorb branch and #10195's operator pre-flight above. A second copy of "may this edge
         # exist" would be a finding of its own. The REFUSAL message is that
         # predicate's own (``override_refusal``), with this surface named —
         # the caller's ways out are the same ones it states.
@@ -18846,8 +18847,10 @@ class TortoiseSDK:
                 # so no reader ever sees a door-made absent edge. A *string*
                 # token passes through verbatim (one outside the vocabulary is
                 # read by ``direction_flows`` as both ways — the leg set the EP
-                # backstop sees, so a door reading it more narrowly would keep
-                # a factor the load side drops); an ABSENT token takes the
+                # backstop sees, so a door reading it more narrowly would judge
+                # ONE leg of a two-leg factor (the backstop NARROWS, it does not
+                # drop — measured: such a factor loads as ``'<-'`` with
+                # ``skipped == []``); an ABSENT token takes the
                 # edge TYPE's default (what ``create_direct_edge``
                 # canonicalizes it to before judging — deliberately NOT
                 # ``ep.py``'s ``coalesce(r.direction, 'bidirectional')``, which

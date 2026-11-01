@@ -1543,6 +1543,23 @@ def test_supersede_repoint_reads_a_junk_direction_as_both_ways(lane):
         lane.supersede_point(old, new)
     assert _props(lane, new).get("status") == "live"
 
+    # (a2) the HASHABLE half of the same rule: ``direction_flows`` reads ``3``
+    # as both ways, so the backward leg must be judged too (a branch that sent a
+    # hashable junk value to the type default would be the same fail-open).
+    h_old = lane.create_point("statement", "computed h1",
+                              claim_class="derived")["id"]
+    h_new = lane.create_point("statement", "authored h2")["id"]  # asserted
+    h_t = lane.create_point("statement", "computed h peer",
+                            claim_class="derived")["id"]
+    lane.create_direct_edge("NAND", h_old, h_t, direction="->")
+    lane._get_proj().g.query(
+        "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
+        "SET r.direction = 3",
+        params={"a": h_old, "b": h_t})
+    with pytest.raises(ValueError, match="re-pointing the NAND edge"):
+        lane.supersede_point(h_old, h_new)
+    assert _props(lane, h_new).get("status") == "live"
+
     # (b) …and the same-class transfer is not aborted by the junk token.
     same_old = lane.create_point("statement", "computed s1",
                                  claim_class="derived")["id"]
