@@ -1189,8 +1189,9 @@ def _bounds_an_instant(value: object) -> bool:
     ``"day"`` precision ``validity.effective_precision`` reports beside it —
     and a numeric too large for ``float()`` cannot turn the parity above into an
     ``OverflowError`` on the read path. ``tests/test_2350_validity_precision.py``
-    ::test_an_epoch_zero_start_renders_no_window_is_recorded pins the epoch-0
-    reading (it pinned the ABSENCE before #9741).
+    ::test_an_epoch_zero_start_renders_its_day pins the epoch-0 reading (it
+    pinned the ABSENCE, under the old name ``…_renders_no_window_is_recorded``,
+    before #9741).
     """
     if isinstance(value, (int, float)):
         return True
@@ -1310,8 +1311,13 @@ def _hit_prefix(h: dict) -> str:
     """
     if "lme_session_index" in h:
         idx = h["lme_session_index"]
+        # #9741 review P3: ``idx >= 0`` raised TypeError for a present-but-not-
+        # int index (a JSON round-trip yields ``"0"``), i.e. the same
+        # one-bad-hit-denies-the-read class, and ``_session_admission_key``
+        # already guards this field — the two readers must agree on its type.
         prefix = (f"[session {idx}]"
-                  if idx is not None and idx >= 0 else "[session ?]")
+                  if isinstance(idx, int) and not isinstance(idx, bool)
+                  and idx >= 0 else "[session ?]")
     else:
         sid = hit_session_id(h)
         prefix = f"[session {sid}]" if sid else "[session ?]"
@@ -1522,7 +1528,11 @@ def _has_claim_text(h: dict) -> bool:
     """
     if str(h.get("content") or "").strip():
         return True
-    return bool(_validity_marker(h))
+    # #9741 review P2: the SAME containment as the render path. This predicate
+    # gates admission on the ask lane (``assemble_context`` /
+    # ``session_blocks``), where an unguarded raising marker denied the whole
+    # read — the door ``_safe_marker`` exists for.
+    return bool(_safe_marker(h))
 
 
 def assemble_context(

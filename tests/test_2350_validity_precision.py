@@ -878,10 +878,9 @@ def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_it_sees():
     short-circuit, not just its ``_created_sort_key`` gate.
 
     Scope, precisely: this pins the PREDICATE parity (the two helpers agree on
-    every value either is handed). It does not claim the RENDERER consults the
-    predicate for every bound — a falsey numeric is dropped upstream by
-    ``(raw_vf or "")``; that residual is pinned separately in
-    ``test_an_epoch_zero_start_renders_no_window_is_recorded``.
+    every value either is handed). The renderer consults it for every bound
+    since #9741 (the old ``(raw_vf or "")`` truthiness drop is gone), pinned by
+    ``test_an_epoch_zero_start_renders_its_day``.
 
     ``effective_precision`` short-circuits ``int``/``float`` BEFORE ordering,
     deliberately: an integer too large for ``float()`` raises ``OverflowError``
