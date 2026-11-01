@@ -2408,13 +2408,31 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
     # ``None`` ("no journal configured") and the pre-fix tree would also read
     # ``[] == []`` — a test that passes with the guard deleted proves nothing.
     # The handle is lazy (``_event_log is None``), so setting the path is
-    # enough; the shape is the one `tests/test_7951_update_point_outbox.py`
-    # uses.
+    # enough to make ``_emit_event`` journal.
+    #
+    # ⚠️ HONEST LIMIT: this is set AFTER the projection was created, so
+    # ``_proj._bind_journal(...)`` (run once, at projection creation) already
+    # bound ``None`` and the #7951 single-writer guard is NOT armed here — a
+    # different regime from an SDK built with ``event_log_path=`` (the shape
+    # `tests/test_7951_update_point_outbox.py` uses). This test measures what
+    # the DOOR commits to (its own ``_emit_event`` call), which is the surface
+    # the defect lives on; it does not claim to cover the guard.
     import json
     _journal_dir = tempfile.mkdtemp(prefix="tortoise_validity_journal_")
     _journal_path = os.path.join(_journal_dir, "events.jsonl")
     sdk._event_log_path = _journal_path
     sdk._event_log = None
+    try:
+        _assert_absent_takes_no_work(sdk, _journal_path)
+    finally:
+        shutil.rmtree(_journal_dir, ignore_errors=True)
+
+
+def _assert_absent_takes_no_work(sdk, _journal_path):
+    """The body of the #10119 side-effect assertions (own function so the
+    journal tree is reclaimed on FAILURE, not only on success — the #4096
+    hygiene class this file pins for its own fixture)."""
+    import json
 
     def _ep_version():
         rows = sdk._get_proj().g.query(
@@ -2490,5 +2508,4 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
     assert _ep_version() != _ep_real_before, (
         "a real revision did not advance the EP epoch")
     assert real in sdk._dirty_roots
-    shutil.rmtree(_journal_dir, ignore_errors=True)
 

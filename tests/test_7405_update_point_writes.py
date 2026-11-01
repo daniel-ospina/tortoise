@@ -1095,6 +1095,17 @@ def test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract(
     and nothing may report it as a graph replacement either: the caller gets
     the same empty contract, because a state-independent abort never armed the
     witness.
+
+    ⚠️ A PREDECESSOR REVISION'S CLAIM HERE WAS MEASURED FALSE — read this
+    before deleting the test. `784d0c26a` concluded that "a present target
+    matches", so a PRESENT-target replacement would pass on both trees and
+    nothing should be added. That reasoning misses the window this gate exists
+    for: a target PRESENT at the guard read can VANISH before the write
+    (rebuild / replay), and the write then legitimately matches zero rows —
+    the shape below. Measured on that revision's tree, with the arming gate
+    mutated to `if keep:`: THIS test fails (the aborted statement is re-issued
+    three times and the bare write-slot ``ResponseError`` escapes). It is not a
+    test that passes with the guard deleted.
     """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
