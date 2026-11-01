@@ -3444,6 +3444,89 @@ def test_both_halves_ok_is_all_terms_for_the_nary_width():
     ).both_halves_ok(AssemblyShape.ORDERING) is True
 
 
+def test_render_nary_dropped_subject_keeps_the_chain_not_the_binary_claim():
+    """#2653 review finding: the arm is chosen by the QUESTION's term count
+    ALONE, never by how many subjects survived resolution.
+
+    A three-way question whose third subject resolved but contributed no
+    state/spine row (`len(order) < 3`) used to fall through to the TWO-subject
+    arm, which states one sentence — "couch came first on …" — and silently
+    withholds the second subject of a comparison the question asked about
+    three. The N-ary arm stays selected, so the line is the CHAIN of the
+    subjects that did resolve, both of them dated, and the dropped subject
+    contributes nothing (never a fabricated row).
+    """
+    dated = [("obj-a", "couch", _D(2026, 8, 10)),
+             ("obj-b", "dog bed", _D(2026, 8, 14))]
+    cands = [_cand("obj-a", "couch", 0), _cand("obj-b", "dog bed", 1),
+             # resolved, then dropped: no timeline row, no state row
+             _cand("obj-c", "phantom shelf", 2)]
+    hits = synthesize_hits(_nary_slices(dated),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    chain = [h for h in hits if h.get("kind") == "ordering"]
+    assert len(chain) == 1, hits
+    assert chain[0]["content"] == (
+        "couch came first on 2026-08-10, then dog bed on 2026-08-14"), \
+        f"a dropped subject must keep the chain, not the binary claim: " \
+        f"{chain[0]['content']!r}"
+    assert "phantom shelf" not in chain[0]["content"]
+
+
+def test_render_nary_first_day_group_of_three_says_all_three():
+    """#2653 review finding: "both" is a TWO-subject word. The first day of
+    an N>=3 chain can hold three or more subjects, and "couch and dog bed and
+    bookshelf both appeared on …" is simply wrong — the count picks the word.
+    (The two-subject tie keeps "both":
+    ``test_render_nary_ordering_tie_group_then_rest``.)"""
+    same_day = [("obj-a", "couch", _D(2026, 8, 10)),
+                ("obj-b", "dog bed", _D(2026, 8, 10)),
+                ("obj-c", "bookshelf", _D(2026, 8, 10))]
+    cands = [_cand(o, n, i) for i, (o, n, _d) in enumerate(same_day)]
+    hits = synthesize_hits(_nary_slices(same_day),
+                           shape=AssemblyShape.ORDERING, candidates=cands,
+                           halves=_THREE_TERMS)
+    assert hits[0]["content"] == (
+        "couch and dog bed and bookshelf all three appeared on 2026-08-10"), \
+        f"tie-group phrasing drifted: {hits[0]['content']!r}"
+
+
+def test_nary_colon_list_rejects_a_fragment_of_a_quoted_option():
+    """#2653 review finding: a colon INSIDE a quoted option must not mint a
+    fragment as the first list member. Splitting "'Live: My Cousin Vinny',
+    the chair, or the lamp" at the inner colon leaves "My Cousin Vinny'" — a
+    term that closes a quote it never opened — and the original list only
+    survives whole if the colon is not read as the introducer at all.
+
+    The tell is the PREFIX, which still holds the unmatched delimiter; two
+    subjects that legitimately end in a quote — an inch mark (5") and a
+    possessive (the girls') — leave no such character there and stay
+    accepted, as do genuine quoted option lists (every option re-opens its
+    quote).
+    """
+    fragment = ("Which came first: 'Live: My Cousin Vinny', the chair, "
+                "or the lamp?")
+    terms = extract_subject_terms(fragment)
+    assert not [t for t in terms if t.endswith("'") and not t.startswith("'")], \
+        f"a fragment closing an unopened quote was minted as an option: {terms}"
+    # the whole quoted option survives as option 1 (the fragment is not a
+    # list member, so the colon is not an introducer)
+    assert terms == ["'Live: My Cousin Vinny'", "the chair", "the lamp"], terms
+    assert classify_question(fragment) is AssemblyShape.ORDERING
+    # POSITIVE CONTROLS — the guard must not over-reject:
+    # (a) a genuine quoted option list (every option re-opens its quote)
+    assert extract_subject_terms(
+        "Which came first: 'Star Wars: A New Hope', 'Empire', or the lamp?") == [
+            "'Star Wars: A New Hope'", "'Empire'", "the lamp"]
+    # (b) an inch mark, (c) a possessive — no unmatched delimiter in the prefix
+    assert extract_subject_terms(
+        'which came first: a 5" screen, the chair, or the lamp?') == [
+            'a 5" screen', "the chair", "the lamp"]
+    assert extract_subject_terms(
+        "which came first: the girls' room, the chair, or the lamp?") == [
+            "the girls' room", "the chair", "the lamp"]
+
+
 def test_render_interval_diff_via_shared_helper():
     """interval: the diff line uses the SHARED _norm_date helper (same date
     semantics as the as-of boundary): buying (2026-08-10) -> selling

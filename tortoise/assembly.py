@@ -1170,7 +1170,14 @@ def _reads_as_list(opts: list[str], prefix: str) -> bool:
         return True
     closer = first[-1:]
     if opts[1][:1] != closer:
-        return True
+        # The next option does not re-open this quote. If the prefix DOES hold
+        # an unmatched delimiter of that kind, then the quote opts[0] closes
+        # was opened BEFORE the colon: opts[0] is a FRAGMENT cut out of a
+        # quoted option ("... 'Live: Tonight', the chair, or the lamp" would
+        # mint "Tonight'" as option 1), not a list member — reject. An inch
+        # mark (5") or a possessive ("the girls'") leaves no such char in the
+        # prefix, so those stay accepted.
+        return prefix.rfind(closer) < 0
     at = prefix.rfind(closer)
     if at < 0:
         return True
@@ -3038,7 +3045,14 @@ def synthesize_hits(
         # N-ary (#2653): the questions' OWN term count decides the arm, so the
         # two-option path below stays byte-identical (its goldens are pinned).
         n_terms = len(halves) if halves else len(order)
-        if n_terms >= 3 and len(order) >= 3:
+        if n_terms >= 3:
+            # N>=3 is decided by the QUESTION's term count ALONE, never by how
+            # many subjects survived resolution: when a resolved subject is
+            # dropped (no state/spine rows, or two terms resolving to the same
+            # oid, so `len(order) < 3`) the binary arm below must NOT run — a
+            # 3-way question rendered as "... came first" states a two-subject
+            # winner the question never asked for. Fail closed instead: emit
+            # nothing here and let the per-subject sections carry the evidence.
             # Chain over the SAME dated spine (earliest dated row per
             # subject — the binary path's own anchor). The FULL order is
             # claimed ONLY when EVERY subject is dated: a chain missing a
@@ -3059,10 +3073,21 @@ def synthesize_hits(
                               for oid, nm in group]
                     joined = " and ".join(labels)
                     if gi == 0:
-                        pieces.append(
-                            f"{joined} came first on {_fmt_date(d)}"
-                            if len(labels) == 1 else
-                            f"{joined} both appeared on {_fmt_date(d)}")
+                        if len(labels) == 1:
+                            pieces.append(
+                                f"{joined} came first on {_fmt_date(d)}")
+                        elif len(labels) == 2:
+                            pieces.append(
+                                f"{joined} both appeared on {_fmt_date(d)}")
+                        else:
+                            # "both" is a TWO-subject word: the first day of an
+                            # N>=3 chain can hold three or more subjects, and
+                            # "a and b and c both appeared" is simply wrong.
+                            word = {3: "three", 4: "four", 5: "five"}.get(
+                                len(labels), str(len(labels)))
+                            pieces.append(
+                                f"{joined} all {word} appeared on "
+                                f"{_fmt_date(d)}")
                     else:
                         pieces.append(f"then {joined} on {_fmt_date(d)}")
                 if pieces:
