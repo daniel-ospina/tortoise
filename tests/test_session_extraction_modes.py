@@ -385,6 +385,77 @@ def test_env_example_states_the_real_session_extraction_provider_set():
     )
 
 
+# ── The runbook's venice row must state the lane each rule holds for ──────
+
+def test_the_runbook_venice_row_states_the_lane_each_rule_holds_for(monkeypatch):
+    """#8133 review round 7: ``docs/infra-runbook.md`` §4.6 is the table the
+    operator reads BEFORE setting the key on the hosted deployment, and the two
+    capture lanes disagree about what a venice key does.
+
+    - the SESSION lane walks ``sdk._SESSION_LLM_PROVIDER_PRIORITY``, where
+      venice is appended LAST and is therefore inert whenever a legacy key is
+      present (``test_a_venice_key_does_not_take_over_a_multi_key_deployment``);
+    - the HOSTED v2 lane does not read that tuple at all — it resolves through
+      ``resolve_extractor_provider`` → ``build_extractor_model``, which rotates
+      over the whole configured pool per the #1549 pilot.
+
+    The row this replaces said "a venice key present alongside a legacy key
+    NEVER takes the capture over" as a flat statement about the product. On the
+    hosted deployment — the default lane, and the one this PR newly gives the
+    key to (``deploy-hosted.yml:944``) — that is false: with three keys set the
+    pool is ``RotatingModel``, venice-first at weight 0.50. An operator sets the
+    key expecting a fallback and gets ~half of session extraction served by
+    venice at a different cost/quality mix.
+
+    Derived, not literal: the share is read off the pool the code actually
+    builds, so re-weighting #1549 reds this test instead of leaving the row
+    narrating an old pilot. Non-vacuity (measured against the pre-fix row):
+    neither ``hosted`` nor ``0.50`` appears, so both assertions fail there.
+    """
+    from pathlib import Path
+
+    from tests._provider_env import pin_provider_routing_env
+    from tortoise.model_adapters import build_extractor_model
+
+    pin_provider_routing_env(monkeypatch)  # a hermetic pool, not this box
+    for name in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "VENICE_API_KEY"):
+        monkeypatch.setenv(name, "sk-test-8133")
+
+    pool = build_extractor_model()
+    assert type(pool).__name__ == "RotatingModel", (
+        "three configured providers no longer build the #1549 rotation — this "
+        "pin assumes the rotating pool"
+    )
+    providers = [getattr(p, "provider", "") for p in pool.providers]
+    assert providers[0] == "venice", (
+        f"the rotation is no longer venice-first: {providers} — the runbook "
+        f"row's share belongs to whichever lane leads the pool"
+    )
+    share = pool.weights[0]
+
+    runbook = (Path(__file__).resolve().parent.parent / "docs/infra-runbook.md").read_text()
+    row = next(
+        (ln for ln in runbook.splitlines() if ln.startswith("| `VENICE_API_KEY`")),
+        None,
+    )
+    assert row, (
+        "docs/infra-runbook.md §4.6 no longer carries a `VENICE_API_KEY` row — "
+        "the key this PR newly delivers to the hosted deployment is undocumented"
+    )
+    assert "session" in row.lower(), (
+        "the venice row no longer names the SESSION lane, so its 'never takes "
+        f"the capture over' claim reads as a product-wide one (#8133 r7): {row}"
+    )
+    assert "hosted" in row.lower(), (
+        "the venice row does not name the HOSTED v2 lane, which rotates over "
+        f"the pool and does take the capture over: {row}"
+    )
+    assert f"{share:.2f}" in row, (
+        f"the venice row does not state the #1549 share the pool actually "
+        f"gives it ({share:.2f}), so the operator cannot price the key: {row}"
+    )
+
+
 # ── The "keyless capture" helpers must scrub the DERIVED provider set ──────
 #
 # #8133 registered ``venice`` in ``ingest._PROVIDERS``, which is the registry
