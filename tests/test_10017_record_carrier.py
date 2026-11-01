@@ -574,3 +574,58 @@ def test_a_shorter_recapture_removes_the_turn_on_both_routes(
     # The graph half: the rebuild does not resurrect it either.
     ids = _replay_both(tmp_path, monkeypatch, journal)
     assert stale not in ids
+
+
+# ── §2b the ENRICHED branch is inside the declaration too (#8488) ──────────
+
+
+def test_an_enriched_capture_journals_no_UNDECLARED_snapshot_key(sdk, monkeypatch):
+    """#8488 (review round 2, P1): the enriched turn snapshot is DECLARED.
+
+    When `TORTOISE_CONTEXT_ENRICH` is ON the writer puts the enriched text on
+    the SAME per-turn snapshot as the vector it describes. `TURNS_SNAPSHOT_KEYS`
+    and `TURNS_SNAPSHOT_OPTIONAL_KEYS` are the contract step 7 inherits, and the
+    failure mode of a key outside both is silent rather than loud: it lands in
+    the props JSON tail on the record-armed lane instead of a declared field.
+
+    Nothing in the existing suite could see that: the key only appears when the
+    gate is ON, and every other capture leg runs with it unset — so the drift
+    was dormant, not absent. This leg reads the ON writer's own journal.
+    """
+    from tortoise import model_adapters
+    from tortoise.context_enrich import ENRICH_ENV
+
+    class _Rewriter:
+        def complete(self, *, system, user):
+            return "ENRICHED " + user.split(
+                "TARGET turn (rewrite this one):\n", 1)[1].split("\n\n", 1)[0]
+
+    from tortoise.sdk import _capture_enriched_texts
+
+    monkeypatch.setenv(ENRICH_ENV, "1")
+    monkeypatch.setattr(model_adapters, "build_extractor_model",
+                        lambda *a, **kw: _Rewriter())
+    # The REAL chain: the gate reads `TORTOISE_CONTEXT_ENRICH`, the model seam
+    # is patched (no network), and `_write_capture_turns` is where the snapshot
+    # is built — the same `enrich_fn` `capture_session` passes (`sdk.py:13349`).
+    _capture(sdk[0], TURNS, enrich_fn=_capture_enriched_texts)
+
+    snaps = _turn_snapshots(sdk[1])
+    assert len(snaps) == len(TURNS), snaps
+    declared = rp.TURNS_SNAPSHOT_KEYS | rp.TURNS_SNAPSHOT_OPTIONAL_KEYS
+    for snap in snaps:
+        # Non-vacuous: the leg is about the ENRICHED payload, so the enriched
+        # key must actually be there.
+        assert "embeddingText" in snap, (
+            "the gate was ON but the snapshot carried no embeddingText — this "
+            "leg would then assert nothing about the key it exists for")
+        undeclared = sorted(set(snap) - declared)
+        assert not undeclared, (
+            f"the ENRICHED capture journalled {undeclared}, which is in neither "
+            "TURNS_SNAPSHOT_KEYS nor TURNS_SNAPSHOT_OPTIONAL_KEYS — on the "
+            "record-armed lane that key rides the props JSON tail instead of a "
+            "declared field (#8488)")
+        # …and the rest of the branch contract still holds for the enriched
+        # snapshot (its text is attested, so the identity stamps ride with it).
+        _assert_snapshot_contract(snap, optional={"embeddingText"},
+                                 context="an ENRICHED capture")
