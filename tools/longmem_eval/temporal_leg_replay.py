@@ -42,6 +42,7 @@ import json
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from tortoise.coverage_loop import facet_window_bounds
 from tortoise.temporal_leg import (
     DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
     DEFAULT_TEMPORAL_LEG_LIMIT,
@@ -97,6 +98,22 @@ def replay(questions: list[dict], *, window: int,
         base_order = sorted(range(len(contents)), key=lambda i: (-sim[i], i))
 
         constraint = detect_time_constraint(q["question"])
+        # #10538: the SHIPPED wiring resolves the question's own date range
+        # with the ONE resolver (``retrieve.py`` passes
+        # ``anchor=question_date``) and hands it to the leg. Without this the
+        # proxy is inert on exactly the anchor-less ``interval``/``recency``
+        # class the window arm targets — the leg promotes on session
+        # clustering inside the window when NO anchor matched — so an ON/OFF
+        # reading taken through it would attribute nothing to the arm while
+        # ``temporal_leg.py``'s measured budget table cites this file as its
+        # source (review cycle 5, #10549). ``ordering`` has no computable
+        # bound (``facet_window_bounds`` returns ``None``) → ``None`` → the
+        # pre-#10538 replay. Keep this line-for-line with ``retrieve.py``.
+        date_window = None
+        if constraint.kind in ("interval", "recency"):
+            date_window = facet_window_bounds(
+                constraint.kind, constraint.start, constraint.end, None,
+                anchor=q.get("question_date") or None)
         candidates = [
             {"id": str(i), "session_date": date_of[i],
              "session_id": sid_of[i], "content": contents[i]}
@@ -107,7 +124,7 @@ def replay(questions: list[dict], *, window: int,
         order_ids, picks = temporal_leg_fusion_order(
             candidates, anchors=constraint.anchors, window=window,
             limit=limit, bucket_cap=bucket_cap, weight=weight,
-            placement=placement)
+            placement=placement, date_window=date_window)
         leg_order = [int(pid) for pid in order_ids]
         if picks:
             fired += 1

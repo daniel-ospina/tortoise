@@ -349,11 +349,18 @@ no candidate is dated, which the caller treats as "leg inert".
 
     picks: list[str] = []
     seen: set[str] = set()
-    #: ids sharing at least one content token with some anchor
+    #: the ids phase 2 is allowed to spread over: every candidate sharing at
+    #: least one content token with some anchor (phase 1), OR — when no anchor
+    #: matched anything and the visible slots are session-clustered — every
+    #: PROMOTABLE candidate whose session date is inside the question's
+    #: ``date_window`` (#10538). The window branch runs precisely because no
+    #: anchor matched, so its members need not share an anchor token.
     relevant: set[str] = set()
-    #: #10538: the (date, session) bucket the reader already holds at the
-    #: promotion ceiling — never re-emitted by the window path.
-    exclude_bucket: tuple[str, str] | None = None
+    #: #10538: the (date, session) buckets the reader ALREADY holds in the
+    #: visible head slice — never spent on a pick by the window path. See the
+    #: window branch below for why this is the whole slice and not just the
+    #: bucket sitting at the promotion ceiling.
+    held_buckets: set[tuple[str, str]] = set()
     #: true per-(date, session) cap accounting ACROSS both phases — a
     #: phase-1 anchor pick consumes its bucket's slot.
     bucket_counts: dict[tuple[str, str], int] = {}
@@ -411,20 +418,31 @@ no candidate is dated, which the caller treats as "leg inert".
             relevant = {c["id"] for c in promotable
                         if _in_date_window(c.get("session_date"),
                                            date_window)}
-            # The reader ALREADY holds the session sitting at the promotion
-            # ceiling, so promoting a second item from that same bucket is a
-            # structural no-op: it re-emits an id that is already in the head
-            # slice and the fused order comes out byte-identical while the
+            # Every bucket the reader ALREADY holds in the visible head slice
+            # is excluded wholesale, so every pick is a session the reader
+            # does NOT already have. The slice includes the candidate sitting
+            # AT the promotion ceiling (index ``head``): a pick from that
+            # bucket re-emits an id already in the head slice at its own
+            # index, so the fused order comes out byte-identical while the
             # stats report ``applied``/``picks=1`` (review cycle 3, #10549 —
             # the ``TORTOISE_LME_TEMPORAL_LEG_LIMIT=1`` conservative arm did
-            # nothing at all). Drop that bucket so every pick is a session the
-            # reader does NOT already have.
-            if 0 <= head < len(candidates):
-                exclude_bucket = _bucket_key(candidates[head])
+            # nothing at all).
+            #
+            # ⚠️ The ceiling bucket ALONE is not enough (review cycle 5): with
+            # the shipped geometry ``window=12, limit=2`` (``ceiling=10``) and
+            # a head slice of ``sA``×8 + ``sB``×2, the ceiling bucket is
+            # ``sB`` — so the SECOND half of the budget was spent re-adding
+            # ``sA``, the session owning 8 of the 10 visible slots, and it
+            # EVICTED ``b3``/``sB`` (a different session) from the window: the
+            # inverse of the unit's objective. Every bucket the head holds is
+            # therefore excluded, not just the one at the boundary.
+            held_buckets = {_bucket_key(c)
+                            for c in candidates[:max(head, 0) + 1]}
         if not relevant:
             return []
 
-    # ── phase 2: date/session spread over the ANCHOR-RELEVANT evidence ──
+    # ── phase 2: date/session spread over ``relevant`` (anchor-relevant, or
+    # #10538 in-window) evidence ──
     # dict preserves insertion order → buckets are ordered by the semantic
     # rank of their first member (deterministic). ``bucket_cap`` is a true
     # cap across both phases: a bucket that already supplied a phase-1
@@ -436,7 +454,7 @@ no candidate is dated, which the caller treats as "leg inert".
         buckets.setdefault(_bucket_key(c), []).append(c["id"])
     for round_idx in range(bucket_cap):
         for key, members in buckets.items():
-            if key == exclude_bucket and round_idx == 0:
+            if key in held_buckets:
                 continue
             if round_idx < len(members):
                 if bucket_counts.get(key, 0) >= bucket_cap:
@@ -481,11 +499,18 @@ def temporal_leg_empty_reason(*, dated: int, anchors: int, weight: float,
         eligible candidate (no match at all, or every match already sits
         inside the excluded visible head and therefore needs no lift)
     ``no_window_candidates``   — #10538: no anchors, a date window WAS
-        supplied, and it selected nothing (no in-window promotable hit, or
-        the visible slots were not session-clustered so the spread correctly
-        declined to fire). Distinct from ``no_anchors`` on purpose: the two
-        are different code paths and the ON/OFF reconstruction surface must
-        not launder a windowed miss as an anchor miss.
+        supplied, and the window path promoted nothing. THREE reachable
+        causes, and the trace cannot tell them apart: (a) it selected no
+        in-window promotable hit at all; (b) the visible slots were not
+        session-clustered, so the spread correctly declined to fire; (c) it
+        DID select candidates and the slots WERE clustered, but every
+        in-window bucket is one the reader already holds in the visible head
+        slice (``held_buckets``), so the exclusion starved the pick set —
+        measured on a single-session pool (14 × one session, ``window=12``),
+        where (a) and (b) are both FALSE. Named here rather than left
+        implicit because this is the ON/OFF reconstruction surface and a
+        windowed miss must not be laundered as an anchor miss. Distinct from
+        ``no_anchors`` on purpose: the two are different code paths.
 
     ``budget`` defaults to 1 so a caller that does not track it keeps the
     pre-budget behavior.

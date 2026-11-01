@@ -191,25 +191,109 @@ def test_the_conservative_limit_one_arm_is_not_a_no_op():
     assert order != base, "limit=1 must lift a NEW session, not re-emit the ceiling id"
 
 
+def test_a_pick_never_re_adds_a_session_the_visible_head_already_holds():
+    """Review cycle 5 (#10549), the MEASURED production geometry: ``window=12,
+    limit=2`` ⇒ ``ceiling=10``, and the head slice holds ``sA``×8 + ``sB``×2.
+    Excluding only the bucket AT the ceiling (``b3``/``sB``) spent the second
+    half of the budget re-adding ``sA`` — the session owning 8 of the 10
+    visible slots, i.e. the one the reader already has — and EVICTED ``b3``
+    (``sB``, a DIFFERENT session) from the 12-window: the inverse of the
+    unit's objective. Pre-fix this probe yields ``picks == ['c1', 'a8']`` with
+    ``b3`` at index 12."""
+    pool = (
+        [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
+          "content": "alpha"} for i in range(8)]
+        + [{"id": "b1", "session_id": "sB", "session_date": "2023-04-14",
+            "content": "alpha"},
+           {"id": "b2", "session_id": "sB", "session_date": "2023-04-14",
+            "content": "alpha"},
+           {"id": "b3", "session_id": "sB", "session_date": "2023-04-14",
+            "content": "alpha"},
+           {"id": "c1", "session_id": "sC", "session_date": "2023-04-19",
+            "content": "alpha"},
+           {"id": "a8", "session_id": "sA", "session_date": "2023-04-11",
+            "content": "alpha"}]
+    )
+    session_of = {c["id"]: c["session_id"] for c in pool}
+    base = [c["id"] for c in pool]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=12, limit=2,
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks == ["c1"], picks
+    head_sessions = {c["session_id"] for c in pool[:10]}
+    assert not head_sessions & {session_of[p] for p in picks}, (
+        f"a pick re-added a session the visible head already holds: "
+        f"head={sorted(head_sessions)} picks="
+        f"{[(p, session_of[p]) for p in picks]}")
+    # ...and the slot it spent must not evict a DIFFERENT session from the
+    # window (pre-fix ``b3`` fell out at index 12).
+    assert order.index("b3") < 12, (
+        f"the pick evicted b3/sB from the reader's window: {order}")
+    assert order != base, "a windowed pick must move something (non-vacuity)"
+    assert ({session_of[i] for i in order[:12]}
+            >= {session_of[i] for i in base[:12]}), "session coverage must not drop"
+
+
 def test_the_head_placement_arm_declines_on_an_unclustered_window():
     """Cycle 2 finding #1 named the ``placement=\"head\"`` arm specifically (it
-    sets ``head_excl = 0``, so the gate sees ``head == 0``): with the real
-    window in hand it must still decline on a well-spread visible slice. This
-    is the only path that exercises ``elif window > 0``."""
+    sets ``head_excl = 0``, so the gate sees ``head == 0``): the CLUSTERING
+    sample must then be the caller's real ``window``, not the promotion
+    ``limit``.
+
+    ⚠️ Review cycle 5 finding: the earlier version of this test could not fail
+    if the ``elif window > 0`` branch were wrong — ``limit=1`` made the
+    fallback sample one slot, so the two samples agreed and the ``< 3`` guard
+    declined either way. This pool separates them: ``candidates[:3]``
+    (``sA``×2 + ``sB``) IS clustered while ``candidates[:9]`` is NOT, so a
+    branch that read the (caller-clamped) budget instead of the window would
+    FIRE here. The budget must be ≥ 3 for the two samples to differ at all:
+    ``effective_promotion_budget(9, 3) == 3``."""
     pool = [
-        {"id": f"x{i}", "session_id": f"s{i}", "session_date": "2023-04-11",
-         "content": "alpha"} for i in range(2)
-    ] + [
-        {"id": "p2", "session_id": "sP", "session_date": "2023-04-12",
+        {"id": "x0", "session_id": "sA", "session_date": "2023-04-11",
          "content": "alpha"},
-        {"id": "q2", "session_id": "sQ", "session_date": "2023-04-13",
+        {"id": "x1", "session_id": "sA", "session_date": "2023-04-11",
+         "content": "alpha"},
+        {"id": "x2", "session_id": "sB", "session_date": "2023-04-12",
+         "content": "alpha"},
+        {"id": "x3", "session_id": "sC", "session_date": "2023-04-13",
+         "content": "alpha"},
+        {"id": "x4", "session_id": "sD", "session_date": "2023-04-14",
+         "content": "alpha"},
+        {"id": "x5", "session_id": "sE", "session_date": "2023-04-15",
+         "content": "alpha"},
+        {"id": "x6", "session_id": "sF", "session_date": "2023-04-16",
+         "content": "alpha"},
+        {"id": "x7", "session_id": "sG", "session_date": "2023-04-17",
+         "content": "alpha"},
+        {"id": "x8", "session_id": "sH", "session_date": "2023-04-18",
          "content": "alpha"},
     ]
     order, picks = temporal_leg_fusion_order(
-        pool, anchors=(), window=4, limit=1, placement="head",
+        pool, anchors=(), window=9, limit=3, placement="head",
         date_window=("2023-04-10", "2023-04-20"))
-    assert picks == [], picks
+    assert picks == [], (
+        f"the gate read the budget-sized sample instead of the window: {picks}")
     assert order == [c["id"] for c in pool]
+
+
+def test_the_head_placement_arm_fires_on_a_clustered_window():
+    """The positive control for the test above: the SAME arm, on a pool whose
+    window sample IS clustered, must promote a new session — and it reaches
+    that verdict through ``elif window > 0`` (``head == 0``), so a branch that
+    read ``candidates[:max(limit, 1)]`` instead of the window declines and this
+    test fails. Together the pair pins the sample the gate reads."""
+    pool = (
+        [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
+          "content": "alpha"} for i in range(4)]
+        + [{"id": "b1", "session_id": "sB", "session_date": "2023-04-14",
+            "content": "alpha"}]
+    )
+    base = [c["id"] for c in pool]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=4, placement="head",
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks == ["b1"], picks
+    assert order.index("b1") < base.index("b1"), order
 
 
 def test_the_fused_caller_declines_on_an_unclustered_window():
