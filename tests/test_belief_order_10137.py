@@ -11,9 +11,11 @@ still SHIPS each hit's ``ep`` block (``confidence_mean``, ``has_ep``,
 from "belief was never consulted" — the same shape that lets a published
 number read as evidence for a layer that did not participate.
 
-The contract under test: every returned hit that carries an ``ep`` block says
-``ep.informed_order`` — ``"consulted"`` when the ordering read the belief, and
-``"not_consulted"`` when it did not.
+The contract under test has THREE states, not two: a hit that carries an ``ep``
+block says ``ep.informed_order == "consulted"`` when the ordering read the
+belief, ``"not_consulted"`` when it did not, and carries **no key at all** when
+the stage that produced the order cannot say (a ranker whose read is not
+observable). Absence is the honest third answer, never a guess.
 
 MUST run against a live FalkorDB (Docker). Test-prefixed isolated graph.
 """
@@ -329,9 +331,12 @@ def test_an_unobservable_re_ranker_cannot_inherit_the_pool_label(sdk):
     stale `not_consulted` left in place. Otherwise an unobservable re-rank
     ships a false `not_consulted` on a belief-ranked order.
     """
-    sdk.create_point("statement", "unicorn deploy", status="live")
-    sdk.create_point("statement", "the deploy pipeline pushes the release",
-                     status="live")
+    believed = sdk.create_point(
+        "statement", "unicorn deploy", status="live")["id"]
+    other = sdk.create_point(
+        "statement", "the deploy pipeline pushes the release", status="live")["id"]
+    sdk.set_point_baseline(believed, 10.0, 1.0)
+    sdk.set_point_baseline(other, 2.0, 1.0)
 
     from tortoise.ranking import StateRanker
 
@@ -377,3 +382,31 @@ def test_an_unobservable_re_ranker_cannot_inherit_the_pool_label(sdk):
         assert "informed_order" not in r["ep"], (
             "the unobservable re-rank must clear the pool's claim, not inherit "
             "it")
+
+
+def test_a_neutral_default_is_not_a_consulted_belief(sdk):
+    """Review round 6, P1 — a row with NO prior is not a belief measurement.
+
+    `_fetch_point_signals` answers a ROW for a claim that has no persisted
+    α/β, with the neutral Beta(1,1) mean 0.5. Keying "the read answered" on row
+    membership therefore labelled a belief-free row ``consulted`` while the same
+    hit said ``has_ep: False`` — two contradictory claims on one hit. The read
+    supplies a MEASUREMENT or it does not; the label follows that.
+    """
+    _seed(sdk)
+    before = sdk.tortoise_fts_query(_QUERY, order_by="graph", limit=10)
+    assert any(r["ep"].get("informed_order") == "consulted" for r in before)
+
+    _strip_belief(sdk)
+    after = sdk.tortoise_fts_query(_QUERY, order_by="graph", limit=10)
+    assert after
+    for r in after:
+        assert r["ep"]["has_ep"] is False
+        assert r["ep"].get("informed_order") != "consulted", (
+            "the belief read supplied only the neutral default, so belief did "
+            "not inform this order")
+
+    state = sdk.recall_state(query=_QUERY, limit=10)
+    assert state
+    for r in state:
+        assert r["ep"].get("informed_order") != "consulted"

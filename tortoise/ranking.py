@@ -643,7 +643,8 @@ class GraphRanker:
         signals = self._fetch_signals(ids, entity_type) if self.projection is not None else {}
         self.signals_read = bool(signals)
         signals = signals or {}
-        self.signals_answered = frozenset(signals)
+        self.signals_answered = frozenset(
+            pid for pid, sig in signals.items() if sig.get("has_prior"))
         contested_boosts: dict[str, float] = {}
         if query and self.projection is not None and _w4_flag_on():
             contested_boosts = resolve_contested_relevance(
@@ -797,7 +798,12 @@ class GraphRanker:
             # #3276: has_ep == EP measured (ep_measured_cypher) — a #2199
             # baseline prior alone is prior-only, NOT measured.
             f"  {ep_measured_cypher('n')} AS has_ep, "
-            "  n.status, coalesce(n.outdated, false)"
+            "  n.status, coalesce(n.outdated, false), "
+            # #10137 review round 6: a row is a MEASUREMENT only when the node
+            # carries a persisted α/β. `has_ep` is #3276's narrower "EP measured
+            # this" and a #2199 baseline prior is prior-only — but it IS a
+            # belief value the score multiplies in, so it counts here.
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_prior"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
@@ -806,6 +812,9 @@ class GraphRanker:
             pid = row[0]
             variance = _beta_variance(float(row[4]), float(row[5]))
             has_ep = bool(row[6])
+            # Test doubles mirror the pre-round-6 row shape; falling back to
+            # has_ep keeps them honest without inventing a prior.
+            has_prior = bool(row[9]) if len(row) > 9 else has_ep
             # #2490: terminal rows (status in the terminal vocab OR the legacy
             # outdated flag) never surface as measured/contested EP. The len
             # guard tolerates test doubles mirroring the pre-#2490 row shape
@@ -820,6 +829,7 @@ class GraphRanker:
                 # Uncalibrated (no persisted α/β) is NOT contested.
                 "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
                 "is_event": False,
+                "has_prior": has_prior,
             }
         return out
 
@@ -1022,7 +1032,8 @@ class StateRanker:
                 except Exception as e:  # pragma: no cover — defensive
                     logger.warning("StateRanker signal fetch failed (%s): %s", et, e)
             self.signals_read = bool(signals)
-            self.signals_answered = frozenset(signals)
+            self.signals_answered = frozenset(
+                pid for pid, sig in signals.items() if sig.get("has_prior"))
         else:
             signals = self._embedded_signals(results)
             # #10137 review round 4: the embedded `state_confidence` IS the
@@ -1171,7 +1182,11 @@ class StateRanker:
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  ep_degree + about_degree AS degree, "
-            "  n.status, coalesce(n.outdated, false)"
+            "  n.status, coalesce(n.outdated, false), "
+            # #10137 review round 6 — see GraphRanker: has_prior distinguishes
+            # "the read answered with a belief" from "it answered with the
+            # neutral Beta(1,1) default".
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_prior"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
@@ -1187,9 +1202,11 @@ class StateRanker:
             if len(row) > 6 and is_terminal_status(row[5], bool(row[6])):
                 has_ep = False
             variance = _beta_variance(alpha, beta)
+            has_prior = bool(row[7]) if len(row) > 7 else has_ep
             out[pid] = {
                 "confidence": round(alpha / (alpha + beta), 6) if (alpha + beta) > 0 else NEUTRAL_CONFIDENCE,
                 "has_ep": has_ep,
+                "has_prior": has_prior,
                 "degree": degree,
                 "variance": variance,
                 # #2598: the staged state rides the SAME batch read EP already
@@ -1239,6 +1256,12 @@ class StateRanker:
             out[oid] = {
                 "confidence": round(mean, 6),
                 "has_ep": len(confs) > 0,
+                # #10137: the Object's belief is the MEAN of its about-Points,
+                # so it is a measurement only when at least one of them carried
+                # one — otherwise `NEUTRAL_CONFIDENCE` is an absence default.
+                "has_prior": any(
+                    point_sigs[p].get("has_prior") for p in pids
+                    if p in point_sigs),
                 "degree": about_degree,
                 "variance": 0.0,
                 "contested": False,
