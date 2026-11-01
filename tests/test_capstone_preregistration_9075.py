@@ -91,6 +91,9 @@ def test_the_real_registration_is_complete_and_orders_against_its_logs():
     """
     report = check.run(PREREG_DIR, use_git=True, use_corpus=True)
     assert report["ok"], report["failures"]
+    # The base the verdict was measured against is REPORTED (#10463 review cycle 2, finding 5): a
+    # green line must not read the same whether it measured the published base or this branch's HEAD.
+    assert report["ordering_base"] in {"origin/main", "main", "HEAD"}, report["ordering_base"]
     ids = [r["id"] for r in report["rows"]]
     assert "E1" in ids and "E4" in ids and "E5" in ids
     # E2 is allowed to be split; both halves must exist and be complete.
@@ -1555,9 +1558,12 @@ ORDERING_HALF_INVOCATION = (
     # is now "the registration was PUBLISHED on the base before the log's add-commit", so the base is
     # an INPUT the step must pass — inferring `origin/main` would answer the wrong question on a PR
     # that targets another branch, and a stale/absent base must reach the tool as such.
+    # `|| 'main'` is load-bearing (review cycle 2, finding 2): on a `push` event `github.base_ref` is
+    # empty, so the bare form renders `origin/` — unresolvable — and this unconditional step would
+    # exit 2 on every push to `main`.
     "python3 tools/capstone_preregistration_check.py "
     "--dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis "
-    '--base-ref "origin/${{ github.base_ref }}"'
+    '--base-ref "origin/${{ github.base_ref || \'main\' }}"'
 )
 
 #: The only `if:` forms that do not drop enforcement. Judged on its own (`_SAFE_STEP_KEYS`
@@ -2641,10 +2647,10 @@ def _publish_base(repo: Path) -> None:
     _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
 
 
-def _commit_prereg(repo: Path, epoch: int) -> Path:
+def _commit_prereg(repo: Path, epoch: int, text: str = "x\n") -> Path:
     target = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("x\n")
+    target.write_text(text)
     _git(repo, "add", str(target.relative_to(repo)))
     _git(repo, "commit", "-q", "-m", "add prereg", epoch=epoch)
     return target
@@ -2682,11 +2688,14 @@ def test_a_registration_added_by_the_same_change_is_refused(tmp_path, monkeypatc
 
 
 def test_the_refusal_is_not_a_no_op_when_the_base_is_missing(tmp_path, monkeypatch):
-    """A checkout WITH a remote but NO resolvable base fails closed (UNPROVABLE), never green.
+    """A checkout WITH a remote but NO resolvable base FAILS CLOSED — exit 2, never green.
 
     Losing this arm would let an environment change silently downgrade the check to the
     PR-internal rule this change exists to remove — a gate that passes because it could not read its
-    subject. Reported as `HistoryUnavailable` (the documented third outcome), not as a violation.
+    subject. ⛔ It is a PLAIN `CheckError` (exit 2), deliberately NOT `HistoryUnavailable`: that
+    class IS the non-failing third outcome `run()` folds to `ok=True`, and raising it here made the
+    tool exit 0 on a full-history checkout that could not name its base (review cycle 1, finding 1).
+    `HistoryUnavailable` remains the shallow-clone answer only.
     """
     repo = _repo(tmp_path, monkeypatch)
     # Force a branch name that is NOT `main`, so the only reason the base is unresolvable is the
@@ -2697,7 +2706,12 @@ def test_the_refusal_is_not_a_no_op_when_the_base_is_missing(tmp_path, monkeypat
     anchor.write_text("base\n")
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-q", "-m", "base", epoch=1_700_000_000)
-    prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    # The registration is the REAL document, not a stub (review cycle 2, finding 3): with `"x\n"`,
+    # `run()` refused on the missing pins block BEFORE reaching the base arm, so the test passed even
+    # with F1 fully reverted and could not tell the fail-open from the fix.
+    prereg = _commit_prereg(
+        repo, epoch=1_700_000_100,
+        text=(PREREG_DIR / check.PREREG_NAME).read_text())
     log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_200)
     # ⛔ Asserted through the ENTRY POINT, not just the raise (review cycle 1, finding 6): a previous
     # version of this test asserted only `pytest.raises`, and the exception was one `run()` folded
@@ -2706,6 +2720,9 @@ def test_the_refusal_is_not_a_no_op_when_the_base_is_missing(tmp_path, monkeypat
     with pytest.raises(check.CheckError) as exc:
         check.check_ordering(prereg, [log])
     assert "no base ref" in str(exc.value), str(exc.value)
+    # …and it must NOT be the NON-FAILING third outcome: `HistoryUnavailable` subclasses CheckError,
+    # so `pytest.raises(CheckError)` alone cannot distinguish the fail-open from the fix.
+    assert not isinstance(exc.value, check.HistoryUnavailable), type(exc.value).__name__
     # …and the ENTRY POINT must not report success either: 2 ("cannot read my subject"), never 0.
     assert check.main(["--dir", str(repo / "docs" / "evidence" / "7949-capstone"),
                        "--no-corpus"]) == 2

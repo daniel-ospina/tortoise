@@ -487,7 +487,12 @@ jobs:
         # base is an INPUT, not an inference. Without it the tool falls back to `origin/main`, which
         # would answer the wrong question on a PR that targets another branch. `github.base_ref` is
         # the branch this PR merges INTO, which is exactly the ref the claim is about.
-        run: python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis --base-ref "origin/${{ github.base_ref }}"
+        #
+        # ⛔ `|| 'main'` is LOAD-BEARING, not decoration (review cycle 2, finding 2): on a `push`
+        # event `github.base_ref` is EMPTY, so the bare form renders `origin/` — a ref that can never
+        # resolve — and this step is unconditional, so it would exit 2 on EVERY push to `main`, i.e.
+        # red main on a branch name rather than on an ordering. On a push the base IS `main`.
+        run: python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis --base-ref "origin/${{ github.base_ref || 'main' }}"
       - name: Secrets scan (evidence artifacts, #1349)
         # Evidence commits (T8/T15/T16) must never carry live keys. The
         # provenance writer redacts (primary defense); this grep is the

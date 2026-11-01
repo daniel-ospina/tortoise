@@ -41,8 +41,14 @@ It verifies five things, and it fails on each of them for a specific reason:
    registration *and* a log has nothing on the base to appeal to, so it is **REFUSED**: the
    registration must land first, in its own PR. That is the arm that stops a contribution instead
    of reddening `main` afterwards, and it is tested (`test_a_registration_added_by_the_same_change
-   _is_refused`). A checkout with a remote but no resolvable base fails closed (`UNPROVABLE`)
-   rather than silently degrading to the PR-internal rule this change removed.
+   _is_refused`).
+
+   **Two different failures, two different codes — and the distinction is load-bearing.** A
+   SHALLOW clone is the documented third outcome (`UNPROVABLE`, exit 0): CI test jobs are shallow by
+   design and refusing there would red a correctly ordered tree. A checkout with a remote but NO
+   resolvable base ref is NOT that: it raises a plain `CheckError` (exit 2). Folding it into the
+   third outcome made the tool exit 0 while it could not name its base — a fail-open, found by
+   review cycle 1 and closed in review cycle 2.
 
    **The one exception, and why it is not a loophole.** ``e1-e2.log`` was landed by ``#9110``
    *before* this registration existed, from a lane that correctly refused to score it. A bare date
@@ -1025,9 +1031,11 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     green line reads exactly like a log that was ordered — the silent-green shape this tool exists
     to refuse (see the ``--no-git``/``--no-corpus`` rule ninety lines below).
 
-    Raises ``HistoryUnavailable`` (a ``CheckError``) when this checkout is shallow, or when it has
-    a remote but no resolvable base ref: with neither, the comparison cannot be evaluated at all,
-    and a wrong verdict is worse than no verdict.
+    Raises ``HistoryUnavailable`` (a ``CheckError``, the NON-FAILING third outcome) when this
+    checkout is shallow: the add-commit epochs are not here, and a wrong verdict is worse than no
+    verdict. Raises a PLAIN ``CheckError`` (exit 2) when the base ref cannot be resolved in a
+    full-history checkout — that is not "unprovable", it is "this environment cannot name the ref
+    the claim is about", and it must never report success.
     """
     failures: list[str] = []
     exempt = _pins_mapping(pins or {}, "pre_existing_unscored_logs")
