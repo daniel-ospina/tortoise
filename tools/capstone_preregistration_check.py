@@ -57,9 +57,11 @@ It verifies five things, and it fails on each of them for a specific reason:
      carries NO information: a squash merge of a correctly ordered branch and a single commit
      written after the numbers were read produce the IDENTICAL git object. Reporting that as a
      violation is a wrong verdict; passing it silently is a hole. So it requires a DISCLOSURE
-     (``pins.atomic_add_ordering``: ``reason`` + ``branch_commits``), which is bound to this document
-     by ``document_sha256`` so it is a reviewable artefact rather than a comment, and which is
-     printed on every run as ``ordering: ATOMIC-ADD declared``. A disclosure for a log that is NOT
+     (``atomic_add_ordering`` in ``preregistration.json``: ``reason`` + ``branch_commits``) —
+     deliberately NOT in the pins block, because that block lives inside the document
+     ``document_sha256`` freezes, and re-cutting the digest makes the record describe a document
+     that post-dates the run, which the run probe refuses and the bundle's own errata forbids — and
+     which is printed on every run. A disclosure for a log that is NOT
      atomic, or that is not present, fails — a waiver that is routine is the silent-pass shape.
 
    The two rejected routes, on the record: **re-adding the log in a fresh commit** is exactly the
@@ -922,28 +924,39 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
 #: The external convergence (OSF registries' read-only timestamped snapshots plus versioned
 #: amendments; ``preregister``-style ledgers that anchor content DIGESTS because git history is
 #: rewritable) says the same thing: bind by content and DISCLOSE, never by position in a history
-#: the merge strategy can rewrite.
-ATOMIC_ADD_PIN = "atomic_add_ordering"
+#: ⛔ WHERE THE DISCLOSURE LIVES (#10531 review cycle 2, P1). NOT in the pre-registration's pins
+#: block: that block is inside the document `document_sha256` freezes, so adding to it re-cuts the
+#: digest — and a re-cut makes the record describe a document that POST-DATES the run, which is
+#: exactly what `tools/s3_prior_ablation.py`'s record↔document cross-check refuses (`REFUSED — the
+#: pre-registration at cfa3de857 hashes to sha256:70264efe…, but preregistration.json pins …`) and
+#: what this bundle's own errata forbids ("editing it would re-cut the registration this
+#: falsification is reported against"). A disclosure is a claim about HISTORY, and history is the
+#: machine record's subject — the same home `written_before_any_scored_run_basis` already uses. The
+#: document stays byte-identical; nothing about the disclosure's standing is lost (the record is
+#: committed, reviewed, and printed on every run).
+ATOMIC_ADD_KEY = "atomic_add_ordering"
 
 #: A commit sha as the leading token of a ``branch_commits`` entry. FORMAT only — resolvability is
-#: checked, but NOT required (#10531 review P1): a squash merge deletes the branch, so requiring the
+#: deliberately NOT required (#10531 review P1): a squash merge deletes the branch, so requiring the
 #: object to be present would make the disclosure permanently red in exactly the case it exists for
-#: — the stuck light this change removes. Where the object IS here, ``_commit_exists`` records that
-#: it resolves; where it is not, the entry is still a checkable claim (a reader with the PR can
-#: resolve it) rather than a shrug.
+#: — the stuck light this change removes. It is still a checkable claim: a reader with the PR
+#: resolves the sha, and the ``verifiable_by`` route in the entry needs no object at HEAD.
 COMMIT_SHA_TOKEN = re.compile(r"^[0-9a-f]{7,40}$")
 
 
-def _commit_exists(sha: str) -> bool:
-    """Is this sha a commit object in THIS checkout? Never raises; absence is a fact, not an error."""
+def _record_atomic_add(directory: Path) -> dict:
+    """The ``atomic_add_ordering`` block from the bundle's machine record.
+
+    Returns ``{}`` when the record cannot be read at all: ``check_machine_record`` owns that
+    failure, and reporting it here too would make one defect look like two.
+    """
     try:
-        out = subprocess.run(
-            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
-            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
-        )
-    except OSError:  # pragma: no cover - git absent
-        return False
-    return out.returncode == 0
+        record = json.loads((directory / MACHINE_RECORD).read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    return _mapping(record, ATOMIC_ADD_KEY, MACHINE_RECORD)
 
 
 def _atomic_add_failure(name: str, declared: object, prereg_epoch: int) -> str | None:
@@ -957,33 +970,33 @@ def _atomic_add_failure(name: str, declared: object, prereg_epoch: int) -> str |
     """
     if not isinstance(declared, dict):
         return (
-            f"{name}: pins.{ATOMIC_ADD_PIN}[{name!r}] is {type(declared).__name__}, expected a "
+            f"{name}: {MACHINE_RECORD}.{ATOMIC_ADD_KEY}[{name!r}] is {type(declared).__name__}, expected a "
             "mapping carrying the disclosure fields — an unparseable disclosure is a refusal"
         )
     reason = declared.get("reason")
     if not isinstance(reason, str) or not reason.strip():
         return (
-            f"{name}: pins.{ATOMIC_ADD_PIN}[{name!r}] carries no reason — an atomic add at "
+            f"{name}: {MACHINE_RECORD}.{ATOMIC_ADD_KEY}[{name!r}] carries no reason — an atomic add at "
             f"{prereg_epoch} is indistinguishable from a laundering commit without a stated ground"
         )
     commits = declared.get("branch_commits")
     if not isinstance(commits, list) or not commits:
         return (
-            f"{name}: pins.{ATOMIC_ADD_PIN}[{name!r}].branch_commits names no commit — the "
+            f"{name}: {MACHINE_RECORD}.{ATOMIC_ADD_KEY}[{name!r}].branch_commits names no commit — the "
             "disclosure must say where the ordering DID exist, or a reader cannot check the claim "
             "it is being asked to accept"
         )
     for entry in commits:
         if not isinstance(entry, str) or not entry.strip():
             return (
-                f"{name}: pins.{ATOMIC_ADD_PIN}[{name!r}].branch_commits carries "
+                f"{name}: {MACHINE_RECORD}.{ATOMIC_ADD_KEY}[{name!r}].branch_commits carries "
                 f"{type(entry).__name__ if not isinstance(entry, str) else 'an empty string'}, "
                 "expected a commit summary — a disclosure no reader can follow is a refusal"
             )
         token = entry.split()[0]
         if not COMMIT_SHA_TOKEN.match(token):
             return (
-                f"{name}: pins.{ATOMIC_ADD_PIN}[{name!r}].branch_commits entry {entry!r} does not "
+                f"{name}: {MACHINE_RECORD}.{ATOMIC_ADD_KEY}[{name!r}].branch_commits entry {entry!r} does not "
                 "begin with a commit sha — name the commit, or the disclosure asserts a history "
                 "without pointing at it"
             )
@@ -992,7 +1005,8 @@ def _atomic_add_failure(name: str, declared: object, prereg_epoch: int) -> str |
 
 def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                    exempted: list[str] | None = None,
-                   atomic_added: list[str] | None = None) -> list[str]:
+                   atomic_added: list[str] | None = None,
+                   atomic_pins: dict | None = None) -> list[str]:
     """``[]`` when every log is either after the registration or provably unscored.
 
     ``exempted``, when given, is APPENDED with the name of every log the content arm exempted
@@ -1022,7 +1036,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             if not ok:
                 failures.append(f"{log.name}: exempted, but the log {why}")
 
-    atomic = _pins_mapping(pins or {}, ATOMIC_ADD_PIN)
+    atomic = dict(atomic_pins or {})
     #: Set by the arms below: the logs this tree PROVES entered with the registration. Distinct from
     #: the ``atomic_added`` out-param on purpose — the out-param reports, this decides.
     atomic_seen: set[str] = set()
@@ -1031,11 +1045,10 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # a disclosure naming an absent log was invisible whenever the registration was uncommitted or
     # carried no add-commit, so a stale waiver could sit undetected in exactly the states where the
     # rest of the ordering half is not looking. It needs no history — it reads names.
-    present = {p.name for p in logs}
     for name in sorted(set(atomic) - present):
         failures.append(
-            f"pins.{ATOMIC_ADD_PIN} discloses {name!r}, which is not in this directory — an "
-            "atomic-add disclosure that names no log is a stale waiver"
+            f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY} discloses {name!r}, which is not in this directory "
+            "— an atomic-add disclosure that names no log is a stale waiver"
         )
     if history_unavailable():
         raise HistoryUnavailable(HISTORY_UNAVAILABLE, failures)
@@ -1056,6 +1069,19 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         )
         return failures
     prereg_epoch = min(prereg_epochs)
+    # ⛔ EVERY present disclosure is TYPE-CHECKED once, here, before the per-log arms (#10531 review
+    # cycle 2, P2). The arms previously validated only the SCORED atomic path, so a disclosure on an
+    # atomic-and-unscored log was never checked (`reason: {a: 1}` was accepted), and the field rules
+    # applied to whichever arm happened to run first rather than to the disclosure itself.
+    disclosure_failed: set[str] = set()
+    for name in sorted(set(atomic) & present):
+        problem = _atomic_add_failure(name, atomic.get(name), prereg_epoch)
+        if problem:
+            disclosure_failed.add(name)
+            failures.append(
+                f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY}[{name!r}] is not a usable disclosure. "
+                f"{problem}"
+            )
     for log in logs:
         log_epochs = _added_epochs(log)
         if not log_epochs:
@@ -1117,14 +1143,15 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             # ATOMIC ADD (#10531): the pair entered the repository in one commit — a squash merge of
             # an ordered branch, or a single commit written after the numbers were read. The git
             # object is identical, so the comparison answers nothing; the disclosure is required.
-            problem = _atomic_add_failure(log.name, atomic.get(log.name), prereg_epoch)
-            if problem:
+            if log.name in disclosure_failed:
+                continue  # the specific field failure is already reported above
+            if log.name not in atomic:
                 failures.append(
                     f"{log.name}: added at {log_epoch}, the SAME commit that added "
                     f"{PREREG_NAME} ({prereg_epoch}) — the ordering is atomic, so git cannot show "
                     f"which came first (a squash merge of an ordered branch and one commit "
                     f"written after the numbers look identical). Disclose it under "
-                    f"pins.{ATOMIC_ADD_PIN} or the ordering is unproven. {problem}"
+                    f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY} or the ordering is unproven."
                 )
                 continue
             # ⛔ The STATE is derived HERE, never read back from the caller's out-param (#10531
@@ -1143,9 +1170,9 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     for name in sorted(set(atomic) & present):
         if name not in atomic_seen:
             failures.append(
-                f"pins.{ATOMIC_ADD_PIN} discloses {name!r} as an atomic add, but it is not one — "
-                "a disclosure granted to an ORDINARILY ordered log would hide a real ordering "
-                "failure, the same rule pins.pre_existing_unscored_logs applies"
+                f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY} discloses {name!r} as an atomic add, but it is "
+                "not one — a disclosure granted to an ORDINARILY ordered log would hide a real "
+                "ordering failure, the same rule pins.pre_existing_unscored_logs applies"
             )
     return failures
 
@@ -1548,7 +1575,8 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
         try:
             content_exempt: list[str] = []
             atomic_added: list[str] = []
-            failures += check_ordering(prereg, logs, pins, content_exempt, atomic_added)
+            failures += check_ordering(prereg, logs, pins, content_exempt, atomic_added,
+                                       _record_atomic_add(directory))
             report["ordering_exempt"] = sorted(content_exempt)
             report["ordering_atomic_add"] = sorted(atomic_added)
             # ⛔ A DECLARED ordering is not a COMPARED one, and the claim line must say so (#10531
@@ -1557,9 +1585,9 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
             # indistinguishable from one the gate actually compared — the exemption half already
             # qualifies its claim for exactly this reason. The commits are carried too, because the
             # history the disclosure rests on is the only part a reader can go and check.
-            pins_atomic = _pins_mapping(pins, ATOMIC_ADD_PIN)
+            atomic_pins = _record_atomic_add(directory)
             detail = {
-                name: [str(c) for c in (pins_atomic.get(name) or {}).get("branch_commits") or []]
+                name: [str(c) for c in (atomic_pins.get(name) or {}).get("branch_commits") or []]
                 for name in sorted(atomic_added)
             }
             if detail:
@@ -1695,6 +1723,14 @@ def main(argv: list[str] | None = None) -> int:
             unchecked.append(f"ordering NOT checked ({report['ordering']})")
         if report.get("corpus") != "verified":
             unchecked.append(f"corpus pins NOT checked ({report.get('corpus')})")
+        if report.get("ordering_atomic_add"):
+            # The VERDICT line must not read as a comparison the gate did not make (#10531 review
+            # cycle 2, P2): the claim line and `machine record run-order claim` are both qualified,
+            # and a verdict that says "the ordering holds" beside them contradicts them.
+            unchecked.append(
+                "ordering HOLDS BY DISCLOSURE, not by comparison (atomic add: "
+                + ", ".join(report["ordering_atomic_add"]) + ")"
+            )
         if report["ok"] and not unchecked:
             print("OK — every criteria row is complete, the ordering holds, "
                   "the E4 denominator is 15, and the pins match the tree")
@@ -1722,7 +1758,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"{', '.join(report['ordering_atomic_add'])} entered the repository in ONE "
                   "commit (a squash merge of an ordered branch, or a single commit written after "
                   "the numbers — git cannot tell them apart), so no epoch comparison can order "
-                  f"them; the disclosure in pins.{ATOMIC_ADD_PIN} is the record of it:")
+                  f"them; the disclosure in {MACHINE_RECORD}.{ATOMIC_ADD_KEY} is the record of it:")
             for name, commits in sorted(report.get("ordering_atomic_add_commits", {}).items()):
                 for commit in commits:
                     print(f"  {name}: {commit}")

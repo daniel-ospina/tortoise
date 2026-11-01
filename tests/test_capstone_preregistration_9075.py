@@ -364,13 +364,18 @@ def test_ordering_fails_when_the_log_predates_the_registration(tmp_path, monkeyp
 
 
 def _atomic_pins(name: str, **overrides) -> dict:
-    """A complete atomic-add disclosure for ``name``, with fields overridable."""
+    """A complete atomic-add disclosure for ``name``, as the MACHINE RECORD carries it.
+
+    The disclosure lives in `preregistration.json`, NOT in the pre-registration's pins block: that
+    block is inside the document `document_sha256` freezes, so adding to it re-cuts the digest and
+    the record then describes a document that post-dates the run (#10531 review cycle 2, P1).
+    """
     entry = {
         "reason": "the bars were committed before any arm ran",
         "branch_commits": ["a1075dfc2 prereg: amend definitions before any run"],
     }
     entry.update(overrides)
-    return {check.ATOMIC_ADD_PIN: {name: entry}}
+    return {name: entry}
 
 
 def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
@@ -402,7 +407,7 @@ def test_an_undisclosed_atomic_add_fails(tmp_path, monkeypatch):
     failures = check.check_ordering(prereg, [log])
     assert len(failures) == 1, failures
     assert "the SAME commit that added" in failures[0], failures
-    assert check.ATOMIC_ADD_PIN in failures[0], failures
+    assert check.ATOMIC_ADD_KEY in failures[0], failures
 
 
 def test_a_disclosed_atomic_add_passes_and_is_reported(tmp_path, monkeypatch):
@@ -410,7 +415,7 @@ def test_a_disclosed_atomic_add_passes_and_is_reported(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     added: list[str] = []
-    failures = check.check_ordering(prereg, [log], _atomic_pins(log.name), None, added)
+    failures = check.check_ordering(prereg, [log], None, None, added, _atomic_pins(log.name))
     assert failures == [], failures
     assert added == [log.name]
 
@@ -425,8 +430,8 @@ def test_the_three_argument_form_agrees_with_the_reported_one(tmp_path, monkeypa
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     pins = _atomic_pins(log.name)
-    assert check.check_ordering(prereg, [log], pins) == []
-    assert check.check_ordering(prereg, [log], pins, None, []) == []
+    assert check.check_ordering(prereg, [log], None, None, None, pins) == []
+    assert check.check_ordering(prereg, [log], None, None, [], pins) == []
 
 
 def test_an_atomic_and_unscored_log_may_be_disclosed(tmp_path, monkeypatch):
@@ -434,20 +439,26 @@ def test_an_atomic_and_unscored_log_may_be_disclosed(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
-    assert check.check_ordering(prereg, [log], _atomic_pins(log.name)) == []
+    assert check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name)) == []
 
 
 def test_a_typed_shrug_is_not_a_disclosure(tmp_path, monkeypatch):
     """REGRESSION (#10531 review P2): `str({})` is truthy, so a truthiness test let a shrug pass."""
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
-    assert check.check_ordering(prereg, [log], {check.ATOMIC_ADD_PIN: {
-        log.name: {"reason": {"a": 1}, "branch_commits": ["a1075dfc2 x"]}}}) != []
-    assert check.check_ordering(prereg, [log], {check.ATOMIC_ADD_PIN: {
-        log.name: {"reason": "because", "branch_commits": [{}]}}}) != []
-    # A commit entry that names no commit sha points at nothing a reader can resolve.
-    assert check.check_ordering(prereg, [log], {check.ATOMIC_ADD_PIN: {
-        log.name: {"reason": "because", "branch_commits": ["some commit message"]}}}) != []
+    bad = [
+        {"reason": {"a": 1}, "branch_commits": ["a1075dfc2 x"]},
+        {"reason": "because", "branch_commits": [{}]},
+        # A commit entry that names no commit sha points at nothing a reader can resolve.
+        {"reason": "because", "branch_commits": ["some commit message"]},
+    ]
+    for entry in bad:
+        failures = check.check_ordering(prereg, [log], None, None, None, {log.name: entry})
+        assert failures, entry
+    # The SAME entries are refused when the log is atomic AND provably unscored (cycle-2 P2).
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    for entry in bad:
+        assert check.check_ordering(prereg, [log], None, None, None, {log.name: entry}), entry
 
 
 def test_the_cli_prints_the_declared_atomic_add_and_its_commits(capsys):
@@ -482,8 +493,8 @@ def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, m
     for entry in ({"reason": "", "branch_commits": ["a1075dfc2 x"]},
                   {"reason": "because", "branch_commits": []},
                   {"reason": "because"},):
-        failures = check.check_ordering(prereg, [log], {check.ATOMIC_ADD_PIN: {log.name: entry}})
-        assert failures and "the SAME commit that added" in failures[0], failures
+        failures = check.check_ordering(prereg, [log], None, None, None, {log.name: entry})
+        assert failures and "not a usable disclosure" in failures[0], failures
 
 
 def test_a_disclosure_for_a_normally_ordered_log_fails(tmp_path, monkeypatch):
@@ -496,7 +507,7 @@ def test_a_disclosure_for_a_normally_ordered_log_fails(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
     log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_100)
-    failures = check.check_ordering(prereg, [log], _atomic_pins(log.name))
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
     assert len(failures) == 1, failures
     assert "not one" in failures[0], failures
 
@@ -504,7 +515,7 @@ def test_a_disclosure_for_a_normally_ordered_log_fails(tmp_path, monkeypatch):
 def test_a_disclosure_naming_an_absent_log_fails(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
-    failures = check.check_ordering(prereg, [log], _atomic_pins("gone.log"))
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins("gone.log"))
     assert any("stale waiver" in f for f in failures), failures
 
 
@@ -517,7 +528,7 @@ def test_the_attack_is_still_undeclarable(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_000)
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
-    failures = check.check_ordering(prereg, [log], _atomic_pins(log.name))
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
     assert any("not strictly after" in f for f in failures), failures
     assert any("not one" in f for f in failures), failures
 

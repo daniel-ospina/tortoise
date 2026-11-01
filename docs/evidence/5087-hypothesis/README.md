@@ -392,7 +392,9 @@ survive because they are parsed out of the **commit**, never this file.
    than the worktree. ⚠️ On `main` those two epochs no longer EXIST: `#10468` was merged as a
    squash (`cfa3de857`), which collapsed both commits into one, so `git log --diff-filter=A`
    reports the same epoch for the document and for its log and no epoch comparison can order them.
-   The ordering is therefore carried by `pins.atomic_add_ordering` in `PRE-REGISTRATION.md` — and it
+   The ordering is therefore carried by `atomic_add_ordering` in `preregistration.json` (deliberately NOT in the
+   pre-registration's pins block: that block is inside `document_sha256`, and re-cutting the digest
+   would make the record describe a document that post-dates the run) — and it
    is still checkable, by CONTENT rather than by position: `git diff --stat a1075dfc2 325f2a1a5 --
    docs/evidence/5087-hypothesis/` lists only `README.md` and the log, so the pre-registration is
    byte-identical at the commit that froze the bars and at the commit that added the measurement. **No
