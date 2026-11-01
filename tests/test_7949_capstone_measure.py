@@ -1555,7 +1555,8 @@ def test_the_e3_narration_never_claims_the_amended_denominator_counts_object():
     # (383 = Point 338 + Event 45 + Document 0) — so the line called 383 pre-amendment and then said
     # the registered reading is narrower than 383. And the row claimed to report "BOTH readings"
     # while its value carries only `148/383` (`"433" in note` is False). Both are now stated where
-    # the pre-amendment figure actually lives — §10.1's table — and the claims are pinned as the
+    # the pre-amendment figure actually lives — §9's provenance table (`:687`); §10.1 RESTATES the
+    # pair as prose bullets and has no table of its own — and the claims are pinned as the
     # true ones, not as fragments that merely rhyme with them.
     assert "narrower than the figure above" not in line, line
     assert "PRE-AMENDMENT reading and is retained" not in line, line
