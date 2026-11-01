@@ -2142,6 +2142,19 @@ class TestS5:
         registering the full-ref key the mint is invisible to the operator
         pass — the edge still drops AND the minted Point is orphaned, which is
         exactly the outcome the pre-pass exists to prevent.
+
+        ⚠️ The LENGTH is pinned against `_write_span`, not against a literal
+        1000 (#10513 review cycle 15): this pin used to read
+        `len(content) == 1000`, i.e. it pinned the HARD clamp that the write path
+        no longer uses. Leaving the mint on that clamp made it fabricate a value
+        from a split token and made a byte-identical ref miss the `n in point_ids`
+        dedup, so the mint now cuts with the SAME helper as the write — and for a
+        ref whose 1000th character lands inside a long token, that helper drops
+        the split token WHOLE (here: `long endpoint claim `, 20 chars). That is
+        the same tail-loss the write takes on the same text, disclosed in the
+        row's (1b) block rather than absorbed; the #2552 property this test
+        exists for — the minted Point is REACHABLE from the operator — is
+        unchanged and is what the assertions above it verify.
         """
         long_ref = "long endpoint claim " + ("x" * 1500)
         embed = json.loads(json.dumps(S2_FIXTURE))
@@ -2156,7 +2169,11 @@ class TestS5:
         assert r["stats"]["operator_endpoints_minted"] == 1
         minted = [p for p in r["payload"]["points"] if p["id"] == ops[0]["src"]]
         assert len(minted) == 1
-        assert len(minted[0]["content"]) == 1000
+        span = v2._write_span(long_ref.strip(), v2._MAX_CONTENT)
+        # the shape is only interesting because the two cuts DIFFER:
+        assert span != long_ref.strip()[:v2._MAX_CONTENT]
+        assert minted[0]["content"] == span, (
+            minted[0]["content"][-12:], span[-12:])
 
     def test_over_long_entity_name_is_never_minted_as_a_claim_point(self):
         """#5069: the entity guard keyed ``emitted_entity_names`` on the FULL
