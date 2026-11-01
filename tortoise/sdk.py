@@ -5264,9 +5264,11 @@ class _WriteNotLanded(Exception):
     sentinel on those would turn a benign ``update_point`` on a target that
     VANISHED between the guard read and the write (or on any door whose write
     legitimately matches zero rows) into a stale ``ResponseError`` after four
-    attempts. (Pre-#10119 the same sentence named a ``<missing id>``; that shape
-    is now refused at the guard read before any write, so it reaches no abort
-    at all — see ``_graph_write_with_retry``'s note.) The gate in
+    attempts. (Pre-#10119 the same sentence named a ``<missing id>``; the
+    NON-STATUS shape is now refused at the guard read before any write, while a
+    STATUS-carrying call still takes the guarded promote write — so the absent
+    shape this latch can still meet is the status-carrying one, plus the target
+    that vanished.) The gate in
     ``_graph_write_with_retry`` therefore LATCHES the first
     graph-deleted-or-replaced abort of the call (a later write-slot abort must
     neither arm it nor disarm it — a rebuild is itself a concurrent writer) and
@@ -9372,9 +9374,8 @@ class TortoiseSDK:
                 # write-slot and MISCONF arms are retried too and say nothing
                 # about node existence, so they must not ARM the witness (a
                 # target that VANISHED between the guard read and the write
-                # keeps returning `{}` — an id absent at entry never reaches
-                # this code at all, #10119), and a later one must not DISARM
-                # it either.
+                # keeps returning `{}`), and a later one must not DISARM it
+                # either.
                 raise _WriteNotLanded(armed_abort)
             return result
 
