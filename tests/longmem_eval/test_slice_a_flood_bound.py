@@ -32,7 +32,11 @@ Two independent jobs:
        statement is REGROUPED by design — so its own scope is stated rather
        than read as a duplicate-free guarantee it never made;
      * the receipt names NO reader and NO judge — it can never be quoted as
-       the old T's end-to-end measurement.
+       the old T's end-to-end measurement;
+     * every emitted ratio carries the LEG that produced it: `value_pairs[]`
+       emits content and quote separately, and `refused_pairs[]` names which
+       of `_same_fact`'s two call sites refused and measures both quantities
+       from the hits it compared (never one label over two, #8945/#10508).
 """
 
 from __future__ import annotations
