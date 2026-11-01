@@ -28,20 +28,20 @@ END $$;
 -- `_provision_graph`/`ensure_default_graph_row` mint) plus a CUSTOM graph in
 -- its own namespace — the exact pair a promotion moves between.
 INSERT INTO public.organizations (id, name, graph_name)
-VALUES ('10180-promote', 'Promote Org', 'org_10180_promote'),
-       ('10180-other', 'Other Org', 'org_10180_other');
+VALUES ('10180promote', 'Promote Org', 'org_10180promote'),
+       ('10180other', 'Other Org', 'org_10180other');
 
 INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
-VALUES ('g_10180default0001', '10180-promote', 'default', 'default',
-        'org_10180_promote', 'active'),
-       ('g_10180promote0002', '10180-promote', 'new-extractor', 'custom',
-        'org_10180_promote_g_10180promote0002', 'active'),
-       ('g_10180foreign0003', '10180-other', 'theirs', 'custom',
-        'org_10180_other_theirs', 'active');
+VALUES ('g_10180default0001', '10180promote', 'default', 'default',
+        'org_10180promote', 'active'),
+       ('g_10180promote0002', '10180promote', 'new-extractor', 'custom',
+        'org_10180promote_g_10180promote0002', 'active'),
+       ('g_10180foreign0003', '10180other', 'theirs', 'custom',
+        'org_10180other_theirs', 'active');
 
 SELECT tests.assert(
   (SELECT count(*) FROM public.graphs
-    WHERE org_id = '10180-promote' AND kind = 'default'
+    WHERE org_id = '10180promote' AND kind = 'default'
       AND status <> 'deleted') = 1,
   '#10180: setup — one live default row before the move');
 
@@ -52,7 +52,7 @@ SELECT tests.assert(
 -- a promotion that left it behind would publish the default with the OLD
 -- namespace while `stable_id` named the NEW row.
 SELECT tests.assert(
-  (public.promote_default_graph('10180-promote', 'g_10180promote0002')
+  (public.promote_default_graph('10180promote', 'g_10180promote0002')
      ->> 'already_default')::boolean = false,
   '#10180: a promotion of a custom graph is a MOVE, not an already-default no-op');
 
@@ -70,12 +70,12 @@ SELECT tests.assert(
 
 SELECT tests.assert(
   (SELECT namespace FROM public.graphs WHERE id = 'g_10180default0001')
-    = 'org_10180_promote',
+    = 'org_10180promote',
   '#10180: the demoted graph keeps its OWN namespace — no data moves');
 
 SELECT tests.assert(
-  (SELECT graph_name FROM public.organizations WHERE id = '10180-promote')
-    = 'org_10180_promote_g_10180promote0002',
+  (SELECT graph_name FROM public.organizations WHERE id = '10180promote')
+    = 'org_10180promote_g_10180promote0002',
   '#10180: the org''s default NAMESPACE follows the promoted graph');
 
 -- §3 of 20261028000001: a `kind='default'` row's namespace must BE the org's
@@ -84,13 +84,13 @@ SELECT tests.assert(
 SELECT tests.assert(
   (SELECT g.namespace = o.graph_name
      FROM public.graphs g JOIN public.organizations o ON o.id = g.org_id
-    WHERE g.org_id = '10180-promote' AND g.kind = 'default'
+    WHERE g.org_id = '10180promote' AND g.kind = 'default'
       AND g.status = 'active'),
   '#10180: the default row''s namespace still IS the org''s graph_name after a move');
 
 SELECT tests.assert(
   (SELECT count(*) FROM public.graphs
-    WHERE org_id = '10180-promote' AND kind = 'default'
+    WHERE org_id = '10180promote' AND kind = 'default'
       AND status <> 'deleted') = 1,
   '#10180: the org has EXACTLY one live default row after the move');
 
@@ -100,7 +100,7 @@ SELECT tests.assert(
 DO $$
 BEGIN
   INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
-  VALUES ('g_10180duplicate04', '10180-promote', 'dupe', 'default',
+  VALUES ('g_10180duplicate04', '10180promote', 'dupe', 'default',
           'org_10180_dupe', 'active');
   RAISE EXCEPTION
     'ASSERTION FAILED: a SECOND live kind=''default'' row was accepted after a promotion';
@@ -110,7 +110,7 @@ END $$;
 
 SELECT tests.assert(
   (SELECT count(*) FROM public.graphs
-    WHERE org_id = '10180-promote' AND kind = 'default'
+    WHERE org_id = '10180promote' AND kind = 'default'
       AND status <> 'deleted') = 1,
   '#10180: the failed second default left exactly one live default row');
 
@@ -120,10 +120,10 @@ SELECT tests.assert(
 CREATE TEMP TABLE _10180_before AS
   SELECT g.id, g.kind, g.namespace, o.graph_name
     FROM public.graphs g JOIN public.organizations o ON o.id = g.org_id
-   WHERE g.org_id = '10180-promote';
+   WHERE g.org_id = '10180promote';
 
 SELECT tests.assert(
-  (public.promote_default_graph('10180-promote', 'g_10180promote0002')
+  (public.promote_default_graph('10180promote', 'g_10180promote0002')
      ->> 'already_default')::boolean,
   '#10180: promoting the current default reports already_default');
 
@@ -132,7 +132,7 @@ SELECT tests.assert(
     SELECT 1 FROM public.graphs g
       JOIN public.organizations o ON o.id = g.org_id
       JOIN _10180_before b ON b.id = g.id
-     WHERE g.org_id = '10180-promote'
+     WHERE g.org_id = '10180promote'
        AND (g.kind, g.namespace, o.graph_name)
            IS DISTINCT FROM (b.kind, b.namespace, b.graph_name)),
   '#10180: the idempotent arm moved no graph row (kind, namespace and org pointer unchanged)');
@@ -144,17 +144,17 @@ SELECT tests.assert(
 -- agree — the drift then survived the very verb that exists to converge them.
 -- Re-assert the post-state, because this arm is the only one that writes
 -- without moving a default.
-UPDATE public.organizations SET graph_name = 'org_10180_promote'
- WHERE id = '10180-promote';
+UPDATE public.organizations SET graph_name = 'org_10180promote'
+ WHERE id = '10180promote';
 
 SELECT tests.assert(
-  (public.promote_default_graph('10180-promote', 'g_10180promote0002')
+  (public.promote_default_graph('10180promote', 'g_10180promote0002')
      ->> 'namespace_repaired')::boolean,
   '#10180: promoting the current default REPORTS the namespace repair');
 
 SELECT tests.assert(
-  (SELECT graph_name FROM public.organizations WHERE id = '10180-promote')
-    = 'org_10180_promote_g_10180promote0002',
+  (SELECT graph_name FROM public.organizations WHERE id = '10180promote')
+    = 'org_10180promote_g_10180promote0002',
   '#10180: the idempotent arm converged organizations.graph_name onto the default row''s namespace');
 
 SELECT tests.assert(
@@ -170,7 +170,7 @@ SELECT tests.assert(
 -- (a) unknown / foreign graph — no existence oracle: same error either way.
 DO $$
 BEGIN
-  PERFORM public.promote_default_graph('10180-promote', 'g_10180nothere00');
+  PERFORM public.promote_default_graph('10180promote', 'g_10180nothere00');
   RAISE EXCEPTION 'ASSERTION FAILED: an unknown graph id was accepted';
 EXCEPTION WHEN others THEN
   IF SQLERRM NOT LIKE 'promote_default_graph: graph not found%' THEN
@@ -180,7 +180,7 @@ END $$;
 
 DO $$
 BEGIN
-  PERFORM public.promote_default_graph('10180-promote', 'g_10180foreign0003');
+  PERFORM public.promote_default_graph('10180promote', 'g_10180foreign0003');
   RAISE EXCEPTION 'ASSERTION FAILED: another org''s graph was promoted';
 EXCEPTION WHEN others THEN
   IF SQLERRM NOT LIKE 'promote_default_graph: graph not found%' THEN
@@ -192,9 +192,9 @@ END $$;
 DO $$
 BEGIN
   INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
-  VALUES ('g_10180trashed005', '10180-promote', 'trashed', 'custom',
-          'org_10180_promote_trashed', 'deleted');
-  PERFORM public.promote_default_graph('10180-promote', 'g_10180trashed005');
+  VALUES ('g_10180trashed005', '10180promote', 'trashed', 'custom',
+          'org_10180promote_trashed', 'deleted');
+  PERFORM public.promote_default_graph('10180promote', 'g_10180trashed005');
   RAISE EXCEPTION 'ASSERTION FAILED: a tombstoned graph was promoted';
 EXCEPTION WHEN others THEN
   IF SQLERRM NOT LIKE 'promote_default_graph: graph is in the trash%' THEN
@@ -206,9 +206,9 @@ END $$;
 DO $$
 BEGIN
   INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
-  VALUES ('g_10180archived06', '10180-promote', 'archived', 'custom',
-          'org_10180_promote_archived', 'archived');
-  PERFORM public.promote_default_graph('10180-promote', 'g_10180archived06');
+  VALUES ('g_10180archived06', '10180promote', 'archived', 'custom',
+          'org_10180promote_archived', 'archived');
+  PERFORM public.promote_default_graph('10180promote', 'g_10180archived06');
   RAISE EXCEPTION 'ASSERTION FAILED: a non-active graph was promoted';
 EXCEPTION WHEN others THEN
   IF SQLERRM NOT LIKE 'promote_default_graph: graph is not active%' THEN
@@ -219,7 +219,7 @@ END $$;
 -- (d) an unknown organization.
 DO $$
 BEGIN
-  PERFORM public.promote_default_graph('10180-nobody', 'g_10180promote0002');
+  PERFORM public.promote_default_graph('10180nobody', 'g_10180promote0002');
   RAISE EXCEPTION 'ASSERTION FAILED: an unknown organization was accepted';
 EXCEPTION WHEN others THEN
   IF SQLERRM NOT LIKE 'promote_default_graph: unknown organization%' THEN
@@ -238,9 +238,9 @@ END $$;
 DO $$
 BEGIN
   INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
-  VALUES ('g_10180unfollow07', '10180-promote', 'nofollow', 'custom',
-          'team_10180_someone_else', 'active');
-  PERFORM public.promote_default_graph('10180-promote', 'g_10180unfollow07');
+  VALUES ('g_10180unfollow07', '10180promote', 'nofollow', 'custom',
+          'team_10180someone_else', 'active');
+  PERFORM public.promote_default_graph('10180promote', 'g_10180unfollow07');
   RAISE EXCEPTION 'ASSERTION FAILED: an unfollowable namespace was promoted';
 EXCEPTION WHEN others THEN
   IF SQLERRM NOT LIKE
@@ -253,42 +253,42 @@ END $$;
 -- …and the LEGACY per-graph spelling IS followable, so a graph minted before the
 -- #3543 rename must still be promotable (the oldest orgs are the ones most
 -- likely to have outgrown their first graph). Accepted here; the Python gate
--- that OPENS it is pinned in `tests/test_10180_promote_default_graph.py`.
+-- that OPENS it is pinned in `tests/test_10180promote_default_graph.py`.
 INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
-VALUES ('g_10180legacy0008', '10180-promote', 'legacy', 'custom',
-        'team_10180_promote_g_10180legacy0008', 'active');
+VALUES ('g_10180legacy0008', '10180promote', 'legacy', 'custom',
+        'team_10180promote_g_10180legacy0008', 'active');
 
 SELECT tests.assert(
-  (public.promote_default_graph('10180-promote', 'g_10180legacy0008')
+  (public.promote_default_graph('10180promote', 'g_10180legacy0008')
      ->> 'namespace')
-    = 'team_10180_promote_g_10180legacy0008',
+    = 'team_10180promote_g_10180legacy0008',
   '#10180: a pre-#3543 `team_` per-graph namespace is a promotable target');
 
 SELECT tests.assert(
-  (SELECT graph_name FROM public.organizations WHERE id = '10180-promote')
-    = 'team_10180_promote_g_10180legacy0008',
+  (SELECT graph_name FROM public.organizations WHERE id = '10180promote')
+    = 'team_10180promote_g_10180legacy0008',
   '#10180: …and the org pointer follows it, so the gate can open it');
 
 -- Put the org back on the current-spelling default for the sections below.
-SELECT public.promote_default_graph('10180-promote', 'g_10180promote0002');
+SELECT public.promote_default_graph('10180promote', 'g_10180promote0002');
 
 -- After all six refusals the state is EXACTLY as the successful move left it:
 -- still one live default, still the promoted graph, org pointer unchanged.
 SELECT tests.assert(
   (SELECT count(*) FROM public.graphs
-    WHERE org_id = '10180-promote' AND kind = 'default'
+    WHERE org_id = '10180promote' AND kind = 'default'
       AND status <> 'deleted') = 1,
   '#10180: the refusals left exactly one live default (never zero)');
 
 SELECT tests.assert(
   (SELECT id FROM public.graphs
-    WHERE org_id = '10180-promote' AND kind = 'default'
+    WHERE org_id = '10180promote' AND kind = 'default'
       AND status <> 'deleted') = 'g_10180promote0002',
   '#10180: a refused promotion did not disturb the current default');
 
 SELECT tests.assert(
-  (SELECT graph_name FROM public.organizations WHERE id = '10180-promote')
-    = 'org_10180_promote_g_10180promote0002',
+  (SELECT graph_name FROM public.organizations WHERE id = '10180promote')
+    = 'org_10180promote_g_10180promote0002',
   '#10180: a refused promotion did not disturb the org namespace');
 
 -- ── 5. Atomicity: an abort MID-MOVE calls the FUNCTION and leaves it whole ─
@@ -313,7 +313,7 @@ CREATE TRIGGER _10180_refuse_pointer
 
 DO $$
 BEGIN
-  PERFORM public.promote_default_graph('10180-promote', 'g_10180default0001');
+  PERFORM public.promote_default_graph('10180promote', 'g_10180default0001');
   RAISE EXCEPTION 'ASSERTION FAILED: the drill trigger did not fire';
 EXCEPTION WHEN others THEN
   IF SQLERRM NOT LIKE '%drill: abort after the demote%' THEN
@@ -326,13 +326,13 @@ DROP FUNCTION public._10180_refuse_pointer();
 
 SELECT tests.assert(
   (SELECT id FROM public.graphs
-    WHERE org_id = '10180-promote' AND kind = 'default'
+    WHERE org_id = '10180promote' AND kind = 'default'
       AND status <> 'deleted') = 'g_10180promote0002',
   '#10180: a mid-move abort rolled the function''s demote AND promote back');
 
 SELECT tests.assert(
-  (SELECT graph_name FROM public.organizations WHERE id = '10180-promote')
-    = 'org_10180_promote_g_10180promote0002',
+  (SELECT graph_name FROM public.organizations WHERE id = '10180promote')
+    = 'org_10180promote_g_10180promote0002',
   '#10180: a mid-move abort left the org pointer untouched too');
 
 SELECT tests.assert(
@@ -345,23 +345,23 @@ SELECT tests.assert(
 -- the unique index (a 500 for a caller who did nothing wrong). The lock is
 -- `FOR UPDATE` on the ORGANIZATION row, taken BEFORE the target is read.
 -- PGlite is ONE session, so a real two-transaction race is not expressible
--- here; `tests/test_10180_promote_default_graph.py` pins the shape of the
+-- here; `tests/test_10180promote_default_graph.py` pins the shape of the
 -- statement and this asserts the effect that matters at the DB level: a SECOND
 -- promotion of another graph still lands on exactly one default.
 INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
-VALUES ('g_10180third00007', '10180-promote', 'third', 'custom',
-        'org_10180_promote_third', 'active');
+VALUES ('g_10180third00007', '10180promote', 'third', 'custom',
+        'org_10180promote_third', 'active');
 
-SELECT public.promote_default_graph('10180-promote', 'g_10180third00007');
+SELECT public.promote_default_graph('10180promote', 'g_10180third00007');
 SELECT tests.assert(
   (SELECT count(*) FROM public.graphs
-    WHERE org_id = '10180-promote' AND kind = 'default'
+    WHERE org_id = '10180promote' AND kind = 'default'
       AND status <> 'deleted') = 1,
   '#10180: a second, sequential promotion still leaves exactly ONE live default');
 
 SELECT tests.assert(
   (SELECT id FROM public.graphs
-    WHERE org_id = '10180-promote' AND kind = 'default'
+    WHERE org_id = '10180promote' AND kind = 'default'
       AND status <> 'deleted') = 'g_10180third00007',
   '#10180: the second promotion took effect (the lock did not strand it)');
 
@@ -370,5 +370,5 @@ SELECT tests.assert(
   '#10180: the previously promoted graph was demoted in turn');
 
 -- ── 7. Cleanup (the harness is shared; this suite owns only its own rows) ──
-DELETE FROM public.graphs WHERE org_id LIKE '10180-%';
-DELETE FROM public.organizations WHERE id LIKE '10180-%';
+DELETE FROM public.graphs WHERE org_id LIKE '10180%';
+DELETE FROM public.organizations WHERE id LIKE '10180%';

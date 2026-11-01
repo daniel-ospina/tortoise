@@ -115,6 +115,23 @@ Consequences (E2E-5 exit gate):
   record tenant is that row's id). Captures already in flight keep the graph they
   resolved at admission. The ONE org-level record that lives inside a graph —
   `:OnboardingState` — IS carried (see §6), and the response reports it.
+  ⛔ **The target's namespace must be one the org-wide lanes can FOLLOW.** The
+  verb writes the target row's `namespace` into `organizations.graph_name`, and
+  every resolver derives the default from that column through ONE shape test
+  (`supabase_control.per_graph_namespace_prefixes`): `org_{org_id}_{gid}` (what
+  `insert_graph`/`_provision_graph` mint) or the pre-#3543
+  `team_{org_id}_{gid}` that no data migration rewrites — plus the org's own
+  bare `org_{org_id}`/`team_{org_id}`, which the historical open already
+  resolves (that is what promoting the ORIGINAL graph back looks like). Any
+  other shape is refused `409 GRAPH_NAMESPACE_UNFOLLOWABLE`: accepting it would
+  succeed and then route every org-wide lane back to the graph the same call
+  demoted (records filed under the promoted graph, nodes written to the demoted
+  one). Check before you promote —
+  `SELECT id, name, namespace FROM public.graphs WHERE org_id = '<org>' AND status = 'active'`.
+  A target that is already the current default also refuses
+  `409 GRAPH_DEFAULT_DRIFT` when the org carries two ACTIVE default rows: that
+  arm returns before the demote, so it cannot be the call that converges the
+  drift — promote the intended graph instead, which does.
 - **No key rotation** — every pre-epic key is `graph_id NULL` +
   `scopes []` + `delegation_depth NULL` = the `legacy_full_access` class
   (resolution derives full team/default-graph access; byte-identical
