@@ -95,6 +95,19 @@ Checked against the two recorded decision homes, both verified present on
 
 ``#3524`` is **CLOSED** and its body never carried (i) — so nothing but #8218
 tracks this half.
+
+Known residual — #10482 (filed, NOT fixed here)
+---------------------------------------------
+A CIMD client chooses its own host, including its **leftmost labels**, and
+readers anchor on exactly those: ``https://claude.ai.mcp-relay.example/…``
+renders ``claude.ai.mcp-relay.example (…) wants to access your Tortoise MCP
+surface.`` — a *backed*, unlabelled identity whose first three tokens are a
+brand the client does not own. Strictly narrower than the pre-fix shape (an
+owned, fully-printed domain instead of arbitrary free text), which is why it is
+filed rather than re-worded here; the leading candidate fix is to stop
+presenting the host AS the client's name ("An app at <host>"), which changes
+only `consent_client_line`. Tracked in **#10482** — the one home a later lane
+actually reads.
 """
 
 from __future__ import annotations
@@ -216,6 +229,11 @@ def _cimd_host(client_id: object) -> str | None:
     # the next one.
     if not parsed.hostname.isascii():
         return None
+    # ⛔ What this does NOT refuse: the host's LEFTMOST LABELS are the client's
+    # to choose, so a brand-prefixed host (`claude.ai.mcp-relay.example`) still
+    # renders as a backed name. Known residual, documented in the module
+    # docstring and tracked in #10482 — deliberately not a denylist of brand
+    # tokens, which is the "special-case one forbidden word" non-fix.
     return parsed.hostname
 
 

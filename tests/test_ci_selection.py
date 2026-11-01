@@ -2178,7 +2178,7 @@ def test_a_client_identity_only_diff_runs_the_consent_identity_guards():
     registered — so a diff that touched ONLY the rule ran no test that pins it,
     while a diff to the render site that merely CALLS it (`tortoise/oauth.py`)
     ran two. That is the #2938/#3154/#4367 silent-drop class, on exactly the file
-    a follow-up (the CIMD brand-prefix residual) would change.
+    a follow-up (the CIMD brand-prefix residual, #10482) would change.
 
     Asserts the SELECTION, not the registration, so it reds on the pre-fix
     patterns.
