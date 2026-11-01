@@ -5885,7 +5885,12 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         capture_consent_enabled,
         record_capture_declined,
     )
-    from tortoise.capture_spool import _terminal_marker, flush_spool, read_spool_meta
+    from tortoise.capture_spool import (
+        DISCARD_SPOOL_SATURATED,
+        _terminal_marker,
+        flush_spool,
+        read_spool_meta,
+    )
     if not capture_consent_enabled():
         # Durable + one-time: a stale copied hook discards this stderr
         # (`2>/dev/null`), so the same notice is also written to
@@ -5907,7 +5912,25 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         print(f"spool discard ({d['reason']}): {d['detail']}", file=_sys.stderr)
 
     if not written["written"] and written["bytes"] == 0:
-        # The entry exceeded the per-entry bound (the discard above names it).
+        # The write was refused BEFORE anything reached the disk. TWO different
+        # causes land here and they are not the same event:
+        #
+        #   * `entry_too_large` on a FRESH snapshot — the capture itself is
+        #     unfilable, nothing was written and nothing was kept. A failure.
+        #   * `spool_saturated` — the box refuses NEW work to keep an undelivered
+        #     backlog. Nothing was oversized and nothing was LOST, so reporting
+        #     "the entry exceeded the per-entry bound" (this branch's pre-fix
+        #     reading of a zero-byte refusal) named the wrong cause and exited 1
+        #     for a refusal that destroyed nothing.
+        if any(d.get("reason") == DISCARD_SPOOL_SATURATED
+               for d in written["discards"]):
+            print(f"capture REFUSED: session {session_id} was not spooled — the "
+                  "local spool is at its ceiling with nothing evictable, so new "
+                  "capture is refused rather than deleting an undelivered "
+                  "capture.", file=_sys.stderr)
+            print("run 'tortoise session drain' once the backlog can be filed, "
+                  "then re-capture this session", file=_sys.stderr)
+            return 0
         return 1
 
     summary = flush_spool(root, _session_post(api_key, api_url), only_session_id=session_id)
