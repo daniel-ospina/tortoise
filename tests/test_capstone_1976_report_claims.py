@@ -111,6 +111,7 @@ Static: doc-text scans plus file reads. No network, DB or graph.
 
 from __future__ import annotations
 
+import ast
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -320,6 +321,45 @@ def test_indicator_two_is_graded_on_the_anchor_measurement():
 # --------------------------------------------------------------------------- #
 
 
+def _imported_names_from(source: str, module: str) -> set[str]:
+    """Every name `source` imports FROM `module`, read as statements, not as lines.
+
+    The claim this serves is an import PATH, so the fact to assert is that the
+    statement exists — a parenthesised import says exactly the same thing across
+    several physical lines, and `pyproject.toml`'s `line-length = 100` is what
+    wraps a four-name import of `tortoise.env_truthy` onto them. A line-anchored
+    regex reports that reformat as a broken claim, which is a guard failing for
+    the shape of the code rather than for the property it names (#10467 `test (h)`).
+    """
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module == module:
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+def test_the_import_reader_of_the_pin_below_reads_statements_not_lines():
+    """The pin must fail on a REMOVED import and pass on a REFORMATTED one.
+
+    Without this, `_imported_names_from` returning a set for any reason would make
+    the assertions it backs vacuous — so both directions are pinned here: a name
+    that is not imported is not reported, and a parenthesised (wrapped) form is.
+    """
+    assert _imported_names_from(
+        "from tortoise.env_truthy import is_truthy\n", "tortoise.env_truthy"
+    ) == {"is_truthy"}, "the reader reports a name nothing imports"
+    assert _imported_names_from(
+        "from tortoise.env_truthy import (  # a comment\n    env_flag,\n)\n",
+        "tortoise.env_truthy",
+    ) == {"env_flag"}, (
+        "the reader is blind to a wrapped import, so the claim pins below would "
+        "red on a reformat rather than on a broken claim"
+    )
+    assert _imported_names_from(
+        "import env_flag\nfrom tortoise.other import env_flag\n", "tortoise.env_truthy"
+    ) == set(), "the reader attributes an import of another module to this one"
+
+
 def test_the_anchor_head_suites_really_import_the_modules_the_commit_changed():
     """If this stops holding, the report's caveat is overstated and must be re-derived.
 
@@ -330,17 +370,13 @@ def test_the_anchor_head_suites_really_import_the_modules_the_commit_changed():
     seed = (ROOT / "tests" / "test_onboarding_seed_endpoint.py").read_text(
         encoding="utf-8"
     )
-    assert re.search(
-        r"^from tortoise\.hosted_api import .*_make_sdk", seed, re.MULTILINE
-    ), (
+    assert "_make_sdk" in _imported_names_from(seed, "tortoise.hosted_api"), (
         "tests/test_onboarding_seed_endpoint.py no longer imports `_make_sdk` from "
         "`tortoise.hosted_api`, so the cross-head caveat's import path no longer holds"
     )
 
     hosted = (ROOT / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
-    assert re.search(
-        r"^from tortoise\.env_truthy import .*env_flag", hosted, re.MULTILINE
-    ), (
+    assert "env_flag" in _imported_names_from(hosted, "tortoise.env_truthy"), (
         "tortoise/hosted_api.py no longer imports `env_flag` from "
         "`tortoise.env_truthy` — the module `9c2137470` rewrote"
     )
