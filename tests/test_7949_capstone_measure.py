@@ -1847,6 +1847,99 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         f"only {checked} live cites were resolved — the sweep is not reading the bundle")
 
 
+def test_the_bare_continuation_cites_name_what_they_say():
+    """A BARE `:NNNN` continuation is invisible to the sweep above — pin it here.
+
+    `_BUNDLE_CITE` requires a cite to NAME ITS FILE, so the docs' house style —
+    `` `extractor_v2.py:9056` … `:9060` ``, where the file is named once for
+    several numbers — produces cites the sweep neither resolves NOR reports
+    `unmatched`. They are simply invisible, which is how SIX wrong numbers
+    survived three review rounds in a bundle whose thesis is "a claim nothing
+    re-checks can rot silently" (#5095 review round 3, finding 1: three in
+    `README.md`, three in `docs/00_index.md` + this probe, the last three a bare
+    `+50` bump over sites whose true shift was `+192`/`+199`).
+
+    Each row states the document, a phrase that must sit on ONE line of it, and,
+    per cited number, what `tortoise/extractor_v2.py` must read there. The phrase
+    is what makes this a claim about the SENTENCE rather than about a markdown
+    line number (which would rot exactly as fast as the cites do), and it must
+    occur exactly once in the document — an ambiguous phrase reds instead of
+    silently checking the easier of two matches.
+
+    Non-vacuity: measured on this head's parent, where `docs/00_index.md` said
+    `whose call is :9136` and this probe said `:9426-9430` for the vet block,
+    `:9044` for the early return and `:8781` for the `_edus_from_conversation`
+    call: every one of those rows FAILS the two checks below (the number is not
+    on the phrase's line, and the old number carries other code).
+    """
+    rows = (
+        # `each VET pass is gated on the LIST` — the gate AND its call, twice.
+        ("docs/00_index.md", "each VET pass is gated on the LIST", (
+            ("9178", "if vet_enabled and embed_list:"),
+            ("9179", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("9300", "if vet_enabled and complete_list:"),
+            ("9301", "vet_union_stats, _w, _ = _run_vet_pass("),
+        )),
+        # the VET block's start; its three lines of keys close on line 9446
+        ("docs/00_index.md", "emitted unconditionally at", (
+            ("9459", 'result["classify_later"] = {'),
+            ("9469", 'result["vet"] = {'),
+        )),
+        # `_IDLE_CITES["vet"]`: the early return and the surface it emits
+        ("probes/capstone_measure.py", "its vet surface", (
+            ("9087", "if not edus:"),
+            ("9103", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+        )),
+        # ...and the same claim in the rule's own docstring
+        ("probes/capstone_measure.py", "with the flag ON", (
+            ("9103", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+        )),
+        ("probes/capstone_measure.py", "follows at", (
+            ("9086", "edus = _edus_from_conversation(conversation)"),
+        )),
+        # the S2.2/S2.3 block this probe names as the #9116 seam's subject
+        ("probes/capstone_measure.py", 'result["vet"]`` at', (
+            ("9469", 'result["vet"] = {'),
+            ("9473", ("exact", "}")),
+        )),
+    )
+    docs = dict(_BUNDLE_DOCS)
+    sources = {name: path.read_text(encoding="utf-8").splitlines()
+               for name, path in _BUNDLE_SOURCES.items()}
+    failures: list[str] = []
+    for doc_label, phrase, cites in rows:
+        lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
+        hits = [ln for ln in lines if phrase in ln]
+        if len(hits) != 1:
+            failures.append(
+                f"{doc_label}: the scoping phrase {phrase!r} occurs {len(hits)} "
+                f"time(s) — this pin needs exactly one line to scope the cite "
+                f"to, so re-word the pin's phrase rather than letting it bind "
+                f"the easier of two matches")
+            continue
+        line = hits[0]
+        for number, anchor in cites:
+            if f":{number}" not in line and f"-{number}" not in line:
+                failures.append(
+                    f"{doc_label}: the sentence containing {phrase!r} does not "
+                    f"cite :{number} — a bare continuation is invisible to "
+                    f"_BUNDLE_CITE, so this pin is the only thing reading it")
+                continue
+            got = sources["extractor_v2"][int(number) - 1]
+            if isinstance(anchor, tuple):
+                if got.strip() != anchor[1]:
+                    failures.append(
+                        f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                        f"{got.strip()!r}, not exactly {anchor[1]!r}")
+            elif anchor not in got:
+                failures.append(
+                    f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                    f"{got.strip()!r}, which carries no {anchor!r}")
+    assert not failures, (
+        "a bare `:NNNN` continuation names code it does not name — re-derive the "
+        "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
+
+
 def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
     """A cite on ANOTHER epic's index row is not this bundle's to verify.
 
