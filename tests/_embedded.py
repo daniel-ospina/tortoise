@@ -257,6 +257,106 @@ def serialize_embedded_construction(monkeypatch) -> None:
     monkeypatch.setattr(FalkorProjection, "__init__", _serialized_proj_init)
 
 
+# ── #10437: the embedded start wait is a LOAD bound, not a fixed 10 s ─────
+#
+# redislite waits `RedisMixin.start_timeout` (upstream default 10 s) for the
+# daemonized `redis-server` to create its unix socket and then raises
+# `RedisLiteServerStartError("The redis-server process failed to start")` —
+# even when the start has simply been SLOW, because `subprocess.call` already
+# returned 0 and the server is running. So that message cannot distinguish
+# "dead" from "starved", and a shard that treats it as a product verdict
+# fails a test whose premise was never established (#5049: a wall-clock expiry
+# is evidence about machine load, not about the property under test).
+#
+# MEASURED on the box that hosts the self-hosted runner (`pi-runner-x64-1`,
+# machine `cmux`), 2026-11-01: one embedded start is ~0.16-0.26 s at 4-way
+# concurrency and ~1.4 s cold, so the default bound is only 4-8x a quiet-host
+# start. The shards run 4 xdist workers BESIDE other CI jobs and the fleet's
+# own sessions, so the tail of that distribution reaches 10 s.
+#
+# COST of leaving it at the default, measured: run 41253635128, leg
+# `test-slow (a)` redded
+# `tests/test_mcp_http.py::TestToolCallAdmissionBoundary::test_each_rejected_member_is_named[None-member0]`
+# on exactly this error — a file no part of that PR touched — and
+# `ci-introduced-failure` then blocked the merge, because main's FAILURE-ONLY
+# baseline cannot certify an id it never ran. The same host condition had
+# already redded the open-health path: #10437's own `_probe_error` chain exists
+# because a store redislite had just spawned produced a 2 x 10 s socket
+# TIMEOUT that read as corruption.
+#
+# Lifting the bound for the TEST SESSION is the shape #1988 already settled on
+# in three places — `tests/test_eval_ingest_retry.py:109`,
+# `tests/test_eval_resume_retry_failed.py:84` and `tools/longmem_eval/run.py:313`
+# each set 60 — so this is not a new policy, it is the single place that stops a
+# fourth copy being needed and covers every file that spawns an embedded server.
+# It is NOT a product change: `tortoise/` keeps redislite's default in
+# production, so a real deployment's start timeout is untouched.
+#
+# The wait stays BOUNDED — a genuinely hung `redis-server` still raises, one
+# longer bound later. That is the property `EMBEDDED_CONSTRUCTION_LOCK`'s
+# blast-radius note above records as deliberate ("a hung start is a louder
+# failure than a silent second daemon"). It also does not weaken the guard in
+# `tortoise/embedded_lifecycle.py`: a start refused there refuses before any
+# socket wait begins.
+EMBEDDED_START_TIMEOUT_FLOOR = 60
+
+# The `source` the session fixture passes, in ONE place so the fixture that
+# applies the floor and the test that attests it cannot drift apart.
+EMBEDDED_FLOOR_FIXTURE_SOURCE = "tests/conftest.py::_embedded_start_timeout_floor"
+
+# Every call `raise_embedded_start_timeout_floor` made, in order, as
+# `(source, prev, post)`.
+#
+# ⛔ A RECORD is what makes "the session fixture applied the floor"
+# ATTRIBUTABLE; the live class attribute does NOT, and that is measured rather
+# than feared. The three #1988 call sites above each assign
+# `Redis.start_timeout = 60` themselves and never restore it, so once any file
+# that spawns an embedded server has run in this process `Redis.start_timeout >=
+# 60` is already TRUE — and stays true with this module's assignment deleted.
+# `--dist loadfile` hands a worker more than one file, so that ordering happens
+# in a real run: a bare `>=` assertion is green under the very mutant it claims
+# to catch. `post` is read BACK from the class after the assignment, so deleting
+# the assignment while keeping the append still reds the pin.
+# Pinned by
+# `tests/test_embedded_lifecycle.py::test_the_embedded_start_timeout_floor_reaches_the_client_tortoise_builds`.
+START_TIMEOUT_APPLICATIONS: list[tuple[str, float, float]] = []
+
+
+def raise_embedded_start_timeout_floor(source: str = "direct") -> float:
+    """#10437: lift redislite's socket-wait bound for this test process.
+
+    Returns the bound in effect BEFORE the call, so a caller (and its test) can
+    see what changed. RAISE-ONLY: a bound already above the floor is kept — the
+    floor is a minimum for a loaded host, never a cap for a caller that
+    deliberately widened it further.
+
+    ``source`` names the caller and is recorded with the bound before and after
+    the assignment (see ``START_TIMEOUT_APPLICATIONS``): attribution, not
+    bookkeeping, because the three #1988 call sites set the same value and a
+    caller cannot be told apart from them by the number alone.
+
+    Set on `redislite.client.Redis`, which is the class this package's embedded
+    client is built from: `redislite/falkordb_client.py` does
+    ``from .client import Redis``, so `falkordb_client.Redis is client.Redis`
+    (measured, and pinned by
+    `tests/test_embedded_lifecycle.py::test_the_embedded_start_timeout_floor_reaches_the_client_tortoise_builds`).
+    Setting it on the CLASS is what redislite reads at ``__init__`` time, so no
+    per-instance plumbing is needed; a client that already exists keeps its
+    own bound, which is why this runs in a session fixture BEFORE any
+    construction rather than lazily.
+    """
+    try:
+        from redislite.client import Redis
+    except Exception:  # redislite absent — nothing to widen, nothing to claim
+        return 0
+    prev = getattr(Redis, "start_timeout", 0)
+    if prev < EMBEDDED_START_TIMEOUT_FLOOR:
+        Redis.start_timeout = EMBEDDED_START_TIMEOUT_FLOOR
+    START_TIMEOUT_APPLICATIONS.append(
+        (source, prev, getattr(Redis, "start_timeout", 0)))
+    return prev
+
+
 # ── Epic #1686: worker-thread probe ───────────────────────────────────────
 def _worker_stem_embedded_probe(results: list, path: str) -> None:
     """#1686 probe: report (inherited_stem, is_embedded, graph_name) from a
