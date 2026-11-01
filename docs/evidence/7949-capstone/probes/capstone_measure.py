@@ -1471,20 +1471,49 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
                             f"(queries={queries}, degraded={degraded or 'none'}) — "
                             "a degraded search is not S3")
 
+    # ⛔ THE BRACKET MUST SUM TO THE TOTAL IT RENDERS BESIDE (#10525 review P2).
+    # ``per_label`` is the WIDER instrument census — it carries ``:Object`` for
+    # ``s3_prior_ablation`` (see ``CENSUS_LABELS``) — while ``derived_total`` is E3's row
+    # (``Point`` + the link-anchored classes). Rendering every block beside the narrower
+    # total put two irreconcilable numbers on ONE line: the shipped log's own S5 line is
+    # ``433 … [Point 338, Object 50, Event 45]`` (``capstone-measured-e0fc940b.log:26``),
+    # so the same graph would now print ``383 … [Document 0, Event 45, Object 50,
+    # Point 338]`` — parts summing to 433 beside a total of 383, in the bundle whose
+    # subject is that a number must be carried by what backs it. The narrowing had been
+    # applied to the denominator and not to the WITNESS that renders next to it.
+    # The classes the census carries but E3's row does not are therefore named APART
+    # from the total rather than dropped: a reader not told ``:Object`` is excluded reads
+    # its absence from the bracket as "the graph held none".
+    census_per_label = census_data.get("per_label") or {}
+    e3_census = [(label, census_per_label[label]) for label in DERIVED_LABELS
+                 if label in census_per_label]
+    outside_census = [(label, block) for label, block in census_per_label.items()
+                      if label not in DERIVED_LABELS]
     if census_data.get("derived_total"):
         per_label = ", ".join(
             f"{label} {block['nodes']} ({block['anchored']} anchored)"
-            for label, block in census_data["per_label"].items())
+            for label, block in e3_census)
+        outside = ", ".join(
+            f"{label} {block['nodes']} ({block['anchored']} anchored)"
+            for label, block in outside_census)
+        outside_note = (
+            f"; outside E3's row — counted by this census, NOT by the total above, "
+            f"because their links carry no sourceVersion BY DESIGN (#5199 option A): "
+            f"[{outside}]" if outside else "")
         operators = ", ".join(f"{name}={count}" for name, count in
                               sorted(census_data["operator_relationships"].items()))
         observed["S5"] = (
             f"the graph write landed: {census_data['derived_total']} derived "
-            f"node(s) written by the run [{per_label}]; "
+            f"node(s) written by the run [{per_label}]{outside_note}; "
             f"stats.operator_endpoints_minted={endpoints}; operator-shaped "
             f"relationships written [{operators or 'none'}]")
     else:
-        unobserved["S5"] = ("the run's own graph carries no derived node "
-                            "(Point/Object/Event) — nothing was written")
+        outside_note = (
+            f" (the census did carry {', '.join(label for label, _ in outside_census)}, "
+            f"which E3's row does not count)" if outside_census else "")
+        unobserved["S5"] = (f"the run's own graph carries no derived node "
+                            f"({'/'.join(DERIVED_LABELS)}, E3's classes) — nothing was "
+                            f"written{outside_note}")
 
     if census_data.get("points") and \
             census_data.get("event_stamped_points") is not None:

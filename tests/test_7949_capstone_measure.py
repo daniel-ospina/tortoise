@@ -918,9 +918,15 @@ _FULL_STATS = {
                           "s2": {"p": {"m": {"calls": 1}}}}},
 }
 
+#: A census with the REAL key shape: `per_label` is the WIDER instrument census (it
+#: carries `:Object` for `s3_prior_ablation`, see `CENSUS_LABELS`), while `derived_total`
+#: is E3's row — `Point` + the link-anchored classes. So the blocks sum to 12 and the
+#: total is 11 (#10525 review P2). A fixture whose two halves agree cannot catch a
+#: witness that renders one beside the other.
 _FULL_CENSUS = {
-    "derived_total": 12,
+    "derived_total": 11,
     "per_label": {"Point": {"nodes": 10, "anchored": 8},
+                  "Document": {"nodes": 0, "anchored": 0},
                   "Object": {"nodes": 1, "anchored": 0},
                   "Event": {"nodes": 1, "anchored": 1}},
     "operator_relationships": {"IMPL": 1},
@@ -955,6 +961,53 @@ def test_a_witnessed_vet_surface_makes_s2_2_observed():
     assert "S2.3" in observed and "S2.3" not in unobserved, observed
     assert list(observed) == list(measure.STEPS), observed
     assert not unobserved, unobserved
+
+
+def test_the_s5_bracket_sums_to_the_total_the_line_names():
+    """A witness whose parts sum to a different total than its own is not a witness.
+
+    `derived_total` is E3's row (`Point` + the link-anchored classes). `per_label` is the
+    wider instrument census — it carries `:Object` for `tools/s3_prior_ablation.py`'s
+    `created_counts` (see `CENSUS_LABELS`) — so rendering EVERY block beside the narrower
+    total prints two irreconcilable numbers on one line. That is what this PR's own
+    narrowing left behind: the shipped log's S5 line is
+    `… 433 … [Point 338, Object 50, Event 45]` (`capstone-measured-e0fc940b.log:26`), and
+    after the E3 re-registration the same graph emits
+    `… 383 … [Document 0, Event 45, Object 50, Point 338]` — parts summing to 433 beside a
+    total of 383, in the bundle whose entire subject is that a number must be carried by
+    what backs it.
+
+    Non-vacuity: at the pre-fix head the census below renders
+    `11 derived node(s) … [Point 10 (8 anchored), Object 1 (0 anchored), Event 1 (1
+    anchored)]` — three labels where E3's set has three but a different one, and parts
+    summing to 12 beside a total of 11 — so both the label-set assertion and the sum
+    assertion fail there.
+    """
+    observed, _unobserved = measure.observe_steps([_run()], _FULL_CENSUS)
+    line = observed["S5"]
+    total = int(re.match(r"the graph write landed: (\d+) derived", line).group(1))
+    bracket = re.search(r"\[([^\]]*)\]", line).group(1)
+    counts = {label: int(n) for label, n in
+              re.findall(r"(\w+) (\d+) \(\d+ anchored\)", bracket)}
+    assert set(counts) == set(measure.DERIVED_LABELS), (counts, line)
+    assert sum(counts.values()) == total, (
+        f"the S5 bracket sums to {sum(counts.values())} beside a total of {total}: {line}")
+    # and the class the row excludes is NAMED as excluded, not silently dropped: a reader
+    # not told `:Object` is outside the total reads its absence as "the graph held none".
+    assert "outside E3's row" in line, line
+    outside = line.split("outside E3's row", 1)[1]
+    assert "Object 1 (0 anchored)" in outside, line
+    assert "Object" not in counts, counts
+
+
+def test_the_unobserved_s5_names_the_current_class_set():
+    """The negative arm carried the RETIRED set long after the positive one moved."""
+    empty = {"derived_total": 0, "per_label": {}, "operator_relationships": {},
+             "points": 0, "event_stamped_points": 0, "graph_events": 0}
+    _observed, unobserved = measure.observe_steps([_run()], empty)
+    cause = unobserved["S5"]
+    assert "/".join(measure.DERIVED_LABELS) in cause, cause
+    assert "Point/Object/Event" not in cause, cause
 
 
 def test_a_stats_home_for_the_classify_surface_also_counts():
