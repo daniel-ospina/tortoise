@@ -225,12 +225,17 @@ naming the offending files. That refusal is the pin working, not a broken checko
 never ran"*. Reproducing at a later head therefore needs a **new pre-registration** (that is the
 cost of the frozen §6 pin, and it is the property that makes the recorded bars untunable).
 
-Check the admission first. The pathspec is exactly the pin's allowlist — `is_evidence_or_tool`
-admits `docs/`, `tools/` and `tests/` and refuses everything else — so **empty output means the pin
-admits this head**. (The *unrestricted* diff `718ee3b49..a1075dfc2` is not empty: it is the same
-three evidence/tooling files the log's `source_sha..head changed files` line lists, which is the pin
-doing its job, not a violation of it.) This is a `git diff`, not the probe: it exits 0 either way,
-and only the probe refuses — at `exit 3`, further down.
+Check the admission first. The pathspec is exactly ONE of the pin's two rules — `is_evidence_or_tool`
+admits `docs/`, `tools/` and `tests/` and refuses everything else — so **empty output means no
+production code moved, which is NECESSARY but not sufficient**. The pin applies a second, stricter
+rule on top: `METRIC_ARTIFACT_PREFIXES` — `docs/evidence/7949-capstone/probes/` and
+`tests/eval/write_path/` — must not differ **at all**, and both of those directories sit *inside* the
+prefixes the pathspec excludes, so a head that moved only `grading.py` prints **nothing** above and
+the probe still refuses at `exit 3` (`metric-definition file(s) differ …`). The pathspec cannot see
+that axis; the probe is the only check for it. (The *unrestricted* diff `718ee3b49..a1075dfc2` is not
+empty: it is the same three evidence/tooling files the log's `source_sha..head changed files` line
+lists, which is the pin doing its job, not a violation of it.) This is a `git diff`, not the probe:
+it exits 0 either way, and only the probe refuses — at `exit 3`, further down.
 
 ```bash
 git diff --name-only 718ee3b497539540ea10269e7ccfe9b0867d010f HEAD \

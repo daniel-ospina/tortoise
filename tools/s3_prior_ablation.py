@@ -5,7 +5,10 @@ THE QUESTION. The extractor epic's central hypothesis is that *telling extractio
 exists in the graph* (S3 prior-injection) *reduces what it creates*. This probe measures it on the
 frozen ``tests/eval/write_path`` corpus as a two-arm ablation over ``TortoiseSDK.capture_session``
 (the real entry point), one full replay of the 7 sessions per arm, onto a FRESH disposable graph
-per arm:
+per arm — and "fresh" is ASSERTED, not assumed: a non-zero baseline census is REFUSED
+(`assert_fresh_graph`), because a reused `--graph-prefix` (or an epoch-second collision in the
+default name) makes every printed delta arithmetically correct while the E2a guard is scored over
+a previous run's Points:
 
 * **OFF arm** — ``extractor_v2.search_graph`` is REPLACED in-process by a stub returning a healthy
   zero-result search (``degraded=False``, no entities/points/events, ``queries_run=0``, a reason
@@ -95,7 +98,6 @@ EVIDENCE_DIR = ROOT / "docs/evidence/5087-hypothesis"
 PREREG_REL = "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md"
 CAPSTONE_CENSUS = ROOT / "docs/evidence/7949-capstone/probes/capstone_measure.py"
 PINS_FENCE = "```yaml prereregistration-pins"
-ARMS = ("OFF", "ON")
 VERDICT_SUPPORTED = "HYPOTHESIS-SUPPORTED"
 VERDICT_FALSIFIED = "HYPOTHESIS-FALSIFIED"
 VERDICT_REFUSED = "REFUSED"
@@ -367,6 +369,28 @@ def created_counts(data: dict) -> dict:
     }
 
 
+def assert_fresh_graph(before: dict, *, arm: str, graph: str, uri: str) -> None:
+    """Every count in the arm's baseline census must be **0** — a reused graph is REFUSED.
+
+    ``created`` per session is ``after - before`` and ``real_facts`` grades the arm's WHOLE graph
+    (``read_point_contents``), and BOTH stay arithmetically correct over a graph that already held
+    Points — which is what makes a reused graph SILENT: the deltas and the ratio look right while
+    the E2a guard is scored over a previous run's Points. Two ways to reach it without meaning to:
+    ``--graph-prefix`` reuses a namespace on purpose, and the default name
+    ``s3ablate_<head8>_<epoch-second>`` collides when two runs start inside the same second.
+
+    The pre-registration's "FRESH disposable graph" (§0) was a premise no code checked (review
+    P2). It is checked here, before the first session is captured, and the baseline is printed so
+    the log carries the evidence that it was zero rather than an assurance that it was.
+    """
+    dirty = {key: value for key, value in before.items() if value}
+    if dirty:
+        refuse(f"s3-ablation: REFUSED — the {arm} arm's graph {graph} is NOT fresh: its baseline "
+               f"census is {dirty} (every count must be 0). Its per-session deltas would still "
+               "add up, but the E2a guard grades the arm's WHOLE graph, so it would be scored "
+               f"over a previous run's Points. Use a new --graph-prefix, or drop the graph at {uri}")
+
+
 def read_point_contents(uri: str) -> list[dict]:
     """Every ``:Point`` in the arm's graph, as grading input (NOT a census).
 
@@ -427,7 +451,7 @@ def off_arm_stub(mode: str) -> dict:
     }
 
 
-def arm_s3_state(arm: str, search: dict, witness_source: str = "receipt") -> dict:
+def arm_s3_state(arm: str, search: dict) -> dict:
     """The receipt's S3 state, and whether it PROVES the arm it claims to be."""
     search = search or {}
     queries_run = int(search.get("queries_run") or 0)
@@ -505,6 +529,14 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
     try:
         sdk = TortoiseSDK(graph_name=graph)
         before = created_counts(census(uri))
+        # "A FRESH disposable graph" is a PREMISE of the measurement (pre-registration §0), so it is
+        # refused when false instead of assumed (review P2): a reused `--graph-prefix`, or two runs
+        # colliding inside one epoch second on the default name, leaves every printed delta correct
+        # while the E2a guard is scored over the previous run's Points. The baseline is printed for
+        # the same reason the bars are: the log must carry what the run was measured against.
+        assert_fresh_graph(before, arm=arm, graph=graph, uri=uri)
+        log(f"  [{arm}] graph baseline before session 1: {before} — every count 0, the graph is "
+            "fresh (asserted, not assumed)")
         for sid in sessions:
             started = time.time()
             # A session's witness must be THIS session's: cleared per session so a session that
@@ -701,6 +733,10 @@ def decide(bars: dict, floors: dict, off: dict, on: dict) -> dict:
     else:
         payload["why"] = (f"E1 not met: ratio {ratio:.3f} > {bars['primary_ratio_max']} — telling "
                           "extraction what exists does not reduce what it creates")
+        # Rule 5 freezes the verdict TEXT as `HYPOTHESIS-FALSIFIED (ratio X)`. Only the rule-4 branch
+        # set it, so the branch that actually fired at this head logged the bare token (the committed
+        # log's `VERDICT:` line) — a reader could not tell a rule-5 falsification from a bare word.
+        payload["verdict_text"] = f"{VERDICT_FALSIFIED} (ratio {ratio:.3f})"
     return payload
 
 
@@ -803,6 +839,21 @@ def bars_log_line(bars: dict) -> str:
 def floors_log_line(floors: dict) -> str:
     """The log header that names every REFUSED floor, round-trippable by ``ast.literal_eval``."""
     return f"floors: {dict(floors)}"
+
+
+def arm_integrity_line(off: dict, on: dict) -> str:
+    """The ARM INTEGRITY log line, counted over the sessions that ACTUALLY ran.
+
+    The fractions were hardcoded ``/7``, so the line carried a denominator no arm produced — the
+    corpus is pinned, but the log should not be a second copy of that fact, and a denominator that
+    cannot follow the run is the class of defect this bundle exists to close (review P3).
+    """
+    off_proven = sum(1 for row in off["sessions"] if row["s3"]["proven"])
+    on_proven = sum(1 for row in on["sessions"] if row["s3"]["proven"])
+    return (f"ARM INTEGRITY: OFF {off_proven}/{len(off['sessions'])} proven "
+            f"(real search_graph calls {off['real_search_calls']}), "
+            f"ON {on_proven}/{len(on['sessions'])} resolved "
+            f"(real search_graph calls {on['real_search_calls']})")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -997,10 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
     log(f"COUNTS: created extraction nodes OFF={result.get('created_off', arms['OFF']['totals']['extraction_nodes'])} "
         f"ON={result.get('created_on', arms['ON']['totals']['extraction_nodes'])}")
     log(f"RATIO: {result['ratio'] if result['ratio'] is None else round(result['ratio'], 4)}")
-    log(f"ARM INTEGRITY: OFF {sum(1 for r in arms['OFF']['sessions'] if r['s3']['proven'])}/7 proven "
-        f"(real search_graph calls {arms['OFF']['real_search_calls']}), "
-        f"ON {sum(1 for r in arms['ON']['sessions'] if r['s3']['proven'])}/7 resolved "
-        f"(real search_graph calls {arms['ON']['real_search_calls']})")
+    log(arm_integrity_line(arms["OFF"], arms["ON"]))
     log(f"REAL FACTS: OFF {arms['OFF']['real_facts']['survived']}/{arms['OFF']['real_facts']['total']} "
         f"ON {arms['ON']['real_facts']['survived']}/{arms['ON']['real_facts']['total']}")
     log(f"OPERATOR EDGES: OFF {arms['OFF']['totals']['operator_edges']} "

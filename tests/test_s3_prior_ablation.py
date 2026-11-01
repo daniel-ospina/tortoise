@@ -125,7 +125,7 @@ def test_arm_integrity_precedes_any_ratio(probe):
     assert "13 of 14" in result["why"]
 
 
-def test_ratio_near_one_is_falsified(probe):
+def test_the_ratio_near_one_is_falsified(probe):
     """The falsifier: telling extraction what exists does NOT reduce creates."""
     off = _arm(14, [40] * 7, facts=60, operator_edges=10)
     on = _arm(14, [40] * 7, facts=60, operator_edges=10)
@@ -133,6 +133,21 @@ def test_ratio_near_one_is_falsified(probe):
     assert result["verdict"] == probe.VERDICT_FALSIFIED
     assert result["ratio"] == pytest.approx(1.0)
     assert result["primary_met"] is False
+
+
+def test_rule_5_freezes_the_ratio_into_the_verdict_text(probe):
+    """PRE-REGISTRATION rule 5 freezes `HYPOTHESIS-FALSIFIED (ratio X)`, not a bare token.
+
+    Only the rule-4 branch (guard-violated) set `verdict_text`; the branch that ACTUALLY fired at
+    this head — E1 not met, ratio ≈ 1.0 — set none, so the log emitted `VERDICT: HYPOTHESIS-FALSIFIED`
+    with no number and no rule label (the committed log's line 58). A verdict mapping is only
+    faithful if the text the document froze is the text the run prints.
+    """
+    off = _arm(14, [40] * 7, facts=60, operator_edges=10)
+    on = _arm(14, [47] * 7, facts=60, operator_edges=10)
+    result = probe.decide(BARS, FLOORS, off, on)
+    assert result["verdict"] == probe.VERDICT_FALSIFIED
+    assert result["verdict_text"] == "HYPOTHESIS-FALSIFIED (ratio 1.175)"
 
 
 def test_primary_bar_met_with_guards_held_is_supported(probe):
@@ -419,6 +434,80 @@ def test_the_off_stub_never_increments_the_real_call_counter():
     assert 'calls["intercepted"] += 1' in body.group(0)
 
 
+# ── the fresh-graph premise (review P2) ────────────────────────────────────
+#
+# The pre-registration's "FRESH disposable graph" (§0) was a premise no code checked. Every printed
+# delta is `after - before`, so it stays arithmetically correct over a graph that already held
+# Points — while `real_facts` grades the arm's WHOLE graph, so the E2a guard would be scored over a
+# previous run's Points. `--graph-prefix` makes that reachable on purpose, and the default name
+# (`s3ablate_<head8>_<epoch-second>`) collides when two runs start inside the same second.
+
+#: A baseline census with every count 0 — a fresh disposable graph.
+_ZERO_CENSUS = {"points": 0, "point_composition": {}, "per_label": {}, "label_counts": {},
+                "operator_relationships": {}}
+
+
+def _run_one_off_arm(probe, monkeypatch, census):
+    """Drive `run_arm` with fakes: no graph, no key, no model call."""
+    import tortoise.sdk as sdk_module
+
+    captured = {"sessions": 0}
+
+    class FakeSDK:
+        def __init__(self, graph_name=None):
+            self.graph_name = graph_name
+
+        def capture_session(self, turns, session_id=None):
+            captured["sessions"] += 1
+            return {"ok": True, "stats": {"llm": {"calls": 1}},
+                    "search": probe.off_arm_stub("real")}
+
+    monkeypatch.setattr(sdk_module, "TortoiseSDK", FakeSDK)
+    monkeypatch.setattr(probe, "_turns", lambda sid: [{"role": "user", "content": "hi"}])
+    monkeypatch.setattr(probe, "read_point_contents", lambda uri: [])
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/tortoise_test_matrix")
+    lines: list[str] = []
+    return probe.run_arm("OFF", "g", ["wp01"], census, {}, lines.append), captured, lines
+
+
+def test_a_reused_graph_is_refused_before_any_session_is_captured(probe, monkeypatch, capsys):
+    """A non-zero baseline must REFUSE (exit 3) — not merely be printed.
+
+    Behavioral, not a source poke: the fake census reports 12 Points already in the arm's graph, so
+    the pre-fix code (which read the baseline and asserted nothing) proceeded to capture the
+    session and score it; the fixed code refuses first, and no model call happens.
+    """
+    reused = dict(_ZERO_CENSUS, points=12)
+    with pytest.raises(SystemExit) as refusal:
+        _run_one_off_arm(probe, monkeypatch, lambda uri: reused)
+    assert refusal.value.code == 3, "a reused graph is a REFUSAL (3), never a crash (1)"
+    assert "is NOT fresh" in capsys.readouterr().err
+
+
+def test_a_fresh_graph_prints_the_zero_baseline_it_ran_on(probe, monkeypatch, capsys):
+    """A fresh graph runs, and the log carries the baseline it was measured against."""
+    result, captured, lines = _run_one_off_arm(probe, monkeypatch, lambda uri: dict(_ZERO_CENSUS))
+    assert captured["sessions"] == 1
+    assert result["totals"]["extraction_nodes"] == 0
+    baseline = [line for line in lines if "graph baseline" in line]
+    assert baseline, f"the log must print the baseline census, got: {lines}"
+    assert "every count 0" in baseline[0], baseline[0]
+
+
+def test_the_integrity_log_counts_the_sessions_the_arm_actually_ran(probe):
+    """The line was hardcoded `/7` — a denominator no arm produced."""
+    def arm(sessions: int, proven: int, calls: int) -> dict:
+        return {"real_search_calls": calls,
+                "sessions": [{"s3": {"proven": index < proven}} for index in range(sessions)]}
+
+    line = probe.arm_integrity_line(arm(7, 7, 47), arm(7, 7, 40))
+    assert "OFF 7/7 proven" in line and "ON 7/7 resolved" in line, line
+    shrunk = probe.arm_integrity_line(arm(3, 2, 5), arm(3, 3, 5))
+    assert "OFF 2/3 proven" in shrunk and "ON 3/3 resolved" in shrunk, shrunk
+    assert "/7 proven" not in PROBE.read_text(), (
+        "the integrity line must interpolate the arm's session count, never a literal")
+
+
 # ── the metric-definition pin (review r3 P2a) ──────────────────────────────
 #
 # The path allowlist answers "is this production code?". It does not answer "is this the code that
@@ -569,8 +658,8 @@ def test_the_reproduce_section_states_the_head_its_pin_admits(probe):
         "REFUSED at exit 3 BY DESIGN — otherwise the refusal reads as a broken checkout")
 
 
-def test_the_admission_check_is_the_pin_itself_not_a_stricter_one(probe):
-    """r6 F2: the section demanded an EMPTY `source_sha..HEAD` diff — the pin never did.
+def test_the_admission_check_is_a_necessary_condition_not_the_whole_pin(probe):
+    """r6 F2 found the section demanding an EMPTY diff; this is the SAME defect one axis over.
 
     `is_evidence_or_tool` admits `docs/`, `tools/` and `tests/`, so at `a1075dfc2` — the ONE head
     the section declared admissible — the unrestricted diff prints three files (the same three the
@@ -578,9 +667,15 @@ def test_the_admission_check_is_the_pin_itself_not_a_stricter_one(probe):
     saw non-empty output at the only "admitted" head and concluded the bundle was stale or that
     reproduction needed a new pre-registration, for a head the probe in fact admits.
 
-    So the check now carries the pin's own allowlist as a pathspec, and this test compares the two
-    instead of asking a reader to. Fixing the prose without the pathspec — or the pathspec without
-    the prose — leaves the section describing a rule the code does not have.
+    The check then carried the pin's allowlist as a pathspec and the section said **empty output
+    means the pin admits this head** — which is FALSE, because the allowlist is only ONE of the two
+    rules `assert_source_sha` applies. `METRIC_ARTIFACT_PREFIXES` is strictly stronger and BOTH of
+    its prefixes sit INSIDE the excluded `docs/`/`tests/` prefixes, so a head that moved only
+    `grading.py` printed nothing at the documented check and the probe still refused at `exit 3`:
+    the section sent a reader into a refusal by following its own advice.
+
+    So the prose now says NECESSARY, and this test compares the pathspec **and both prefix tuples**
+    so the two cannot drift on that axis again (the pathspec alone can never express the second).
     """
     import re
 
@@ -595,6 +690,33 @@ def test_the_admission_check_is_the_pin_itself_not_a_stricter_one(probe):
         f"({list(probe.EVIDENCE_OR_TOOL_PREFIXES)}): a check excluding more than the pin does "
         "reports a broken bundle at a head the pin admits, and one excluding less reports a "
         "refusal the pin will not make")
+    assert "NECESSARY but not sufficient" in section, (
+        "empty pathspec output is a NECESSARY condition: the pin also refuses any movement under "
+        "METRIC_ARTIFACT_PREFIXES, which the pathspec cannot see")
+    for prefix in probe.METRIC_ARTIFACT_PREFIXES:
+        assert prefix.rstrip("/") in section, (
+            f"the section must name the stricter rule's prefix {prefix!r}: it is the axis the "
+            "documented pathspec cannot express, so a reader is sent to a refusal without it")
+
+
+def test_a_metric_artifact_move_is_invisible_to_the_documented_pathspec(probe):
+    """The claim in `## Reproduce`, measured with the module's own two predicates.
+
+    Both halves are properties the tests must not re-derive by inspection: every metric artifact is
+    (a) under a prefix the pinned allowlist ADMITS — so the documented pathspec, which excludes
+    `docs/`, `tools/` and `tests/`, prints nothing for it — and (b) under a prefix the pin REFUSES,
+    which is why the section cannot say "empty output means admitted".
+    """
+    for prefix in probe.METRIC_ARTIFACT_PREFIXES:
+        assert prefix.startswith(probe.EVIDENCE_OR_TOOL_PREFIXES), (
+            f"{prefix!r} is inside the allowlist, which is exactly why the pathspec cannot see it")
+    for path in ("docs/evidence/7949-capstone/probes/capstone_measure.py",
+                 "tests/eval/write_path/grading.py",
+                 "tests/eval/write_path/corpus.py"):
+        assert probe.is_evidence_or_tool(path), (
+            f"{path} is under docs/ or tests/, so the documented pathspec prints nothing for it")
+        assert probe.is_metric_artifact(path), (
+            f"{path} computes a reported number, so the pin refuses its movement at exit 3")
 
 
 def test_a_later_head_that_moved_a_config_file_refuses_the_pin(probe, monkeypatch, tmp_path):
