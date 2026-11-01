@@ -1357,9 +1357,14 @@ def test_the_S5_mint_span_is_token_safe_so_it_cannot_fabricate_a_value():
         line for line in mint.splitlines() if not line.lstrip().startswith("#"))
     assert "content[:_MAX_QUOTE]" not in mint, (
         "the S5 mint quotes are still hard-cut — the value can be fabricated")
-    assert mint.count("_write_span(content, _MAX_QUOTE)") >= 3, (
-        "all three S5 quote spans (probe, anchor, stored quote) must cut with "
-        "the module's one truncation helper")
+    assert "_quote_span = _write_span(content, _MAX_QUOTE," in mint, (
+        "the S5 quote spans must cut with the module's one truncation helper")
+    assert "hard_cut_single_token=False" in mint, (
+        "the S5 site must refuse the single-token HARD fallback — on a ref that "
+        "is one whitespace-free token it would stamp a quote that misstates "
+        "its own value, and this site has no divergence check to catch it")
+    assert mint.count('pt_entry["quote"] = _quote_span') == 1, (
+        "the stored quote must be the SAME span that was probed and anchored")
 
 
 def test_a_refusal_over_the_judged_cap_never_tokenises_the_unclamped_text():
@@ -1401,3 +1406,92 @@ def test_a_refusal_over_the_judged_cap_never_tokenises_the_unclamped_text():
     assert "continue" in after, (
         "the bound must SKIP the over-cap key, not truncate it (a truncated key "
         "describes a string the mint never produces)")
+
+
+def test_a_numeral_in_another_script_keeps_its_OWN_decimal_separator():
+    """Cycle 17 P2: folding the digits left the numeral fragmented.
+
+    Folding the `Nd` digits (cycle 16) made `４.２` agree with `4.2` — but only
+    when the separator was ASCII. A decimal script brings its OWN separator, and
+    `_VALUE_DECIMALS` only knows the ASCII dot, so the numeral split into two
+    runs that `_value_core` joined with `/`: measured, `４．２` (U+FF0E) and
+    `٤٫٢` (U+066B) both read `('', '4/2', None)` and DIVERGED from `4.2`,
+    refusing a truthful point — the same false-accusation class the cycle-16
+    fold claimed to close, and stated as closed in the row.
+
+    ⛔ The fail-open half is asserted too: that same `/` join made an
+    Arabic-locale decimal compare EQUAL to a genuine ASCII `4/2` ratio. One root
+    cause, both directions.
+    """
+    for token in ("\uff14\uff0e\uff12", "\u0664\u066b\u0662"):
+        assert v2._value_core(token) == ("", "4.2", None), token
+        assert not v2._value_slot_divergence(
+            f"the p95 hit {token} seconds", "the p95 hit 4.2 seconds"), token
+
+    # POSITIVE CONTROL — the fold must not make a DIFFERENT value agree, and it
+    # must not make a genuine ratio look like a decimal.
+    assert v2._value_slot_divergence(
+        "the p95 hit \uff14\uff0e\uff13 seconds", "the p95 hit 4.2 seconds")
+    assert v2._value_slot_divergence(
+        "the ratio is 4/2", "the ratio is \u0664\u066b\u0662"), (
+        "an Arabic decimal separator is not a solidus — the join artifact must "
+        "not survive as agreement")
+
+    # A THOUSANDS separator folds to `,`, which `_separator_reads_ambiguously`
+    # then excludes from the judged set (no locale-free identity, so no
+    # judgement) — this module's own doctrine for an ambiguous numeral.
+    assert v2._value_core("4\u066c200") is None
+
+
+def test_the_S5_mint_leaves_a_single_token_ref_UNQUOTED_rather_than_misquoting_it():
+    """Cycle 17 P2: `_write_span`'s single-token fallback is still a HARD cut.
+
+    When the text is ONE whitespace-free token longer than the cap there is no
+    token boundary to cut at, so `_write_span` falls back to `s[:cap]`. On the
+    CONTENT path that is the pinned pre-existing shape
+    (`test_quote_capped_at_200`). At the S5 MINT site it stamped a quote that
+    misstates its own content — and S5 has NO `_value_slot_divergence` call to
+    refuse it. Measured: an operator ref of
+    `"storage/" + "d"*190 + "12.5" + "z"*40` (242 chars, one token) stored the
+    quote tail `dddddddddddd12` against a content holding `12.5…`, silently.
+
+    The site now asks for `hard_cut_single_token=False` and names the drop in
+    its warnings, so an absent quote replaces a misstating one.
+    """
+    ref = "storage/" + "d" * 190 + "12.5" + "z" * 40
+    assert len(ref) > v2._MAX_QUOTE and " " not in ref
+
+    # The default is UNCHANGED — the content path keeps its pinned hard cut.
+    assert v2._write_span(ref, v2._MAX_QUOTE) == ref[:v2._MAX_QUOTE]
+    # The S5 mode refuses to fabricate.
+    assert v2._write_span(ref, v2._MAX_QUOTE,
+                          hard_cut_single_token=False) == ""
+    # …and the divergence it dodged is real, not hypothetical: the hard cut
+    # misstates the value, the empty span cannot.
+    assert v2._value_slot_divergence(ref, ref[:v2._MAX_QUOTE])
+    assert v2._value_slot_divergence(
+        ref, v2._write_span(ref, v2._MAX_QUOTE, hard_cut_single_token=False)) == ()
+
+    # A MULTI-token ref is unaffected — it has a boundary, so it still quotes.
+    multi = "long endpoint claim " + "x" * 300
+    span = v2._write_span(multi, v2._MAX_QUOTE, hard_cut_single_token=False)
+    assert span and span == "long endpoint claim ", repr(span)
+
+    # End to end: the minted point is UNQUOTED and the drop is NAMED, never
+    # silent. An unannounced loss is the rule-#9906 defect. `edus` is supplied
+    # because the S5 quote spans are only reached when a transcript exists.
+    embed = {
+        "entities": [], "points": [], "events": [], "chain_notes": [],
+        "link_before_create": [],
+        "operators": [{"src": ref, "dst": "the quota is 20 requests",
+                       "op_type": "IMPL"}],
+    }
+    result = v2.execute_embed(embed, {}, session_id="s_10360", edus=[
+        {"index": 0, "role": "user", "text": "maybe try intervals for speed"}])
+    minted = [p for p in result["payload"]["points"] if p["id"].startswith("pt")]
+    single = [p for p in minted if "storage/" in p.get("content", "")]
+    assert single, "the endpoint was not minted at all — this pin needs it to be"
+    assert single[0]["quote"] == "", (
+        "a single-token ref must not carry a quote that misstates its value")
+    assert any("no token-safe quote" in w for w in result["warnings"]), (
+        "the withheld quote must be NAMED, not silent")

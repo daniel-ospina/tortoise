@@ -655,11 +655,22 @@ mechanisms:
       an operator ref of `"a " * 99 + "12.5 seconds overall"` minted a quote
       ending `a a a 12` against a `12.5 seconds overall` content with no warning.
       All three spans now cut with `_write_span`, so this bullet's "impossible by
-      construction" is true of the CLAMP as well as the text it clamps;
+      construction" is true of the CLAMP as well as the text it clamps —
+      including `_write_span`'s SINGLE-TOKEN fallback, which is a HARD cut on the
+      content path (pinned, unchanged) but which this site refuses
+      (`hard_cut_single_token=False`): a ref that is one whitespace-free token
+      longer than the cap gets NO quote and a named warning, because an absent
+      quote is honest and a misstating one is not (measured: a 242-char
+      single-token ref stored the quote tail `dddddddddddd12` against a content
+      holding `12.5…`, silently — S5 has no divergence check to refuse it);
       (e2) a value written in a NON-ASCII decimal script is judged as the value
-      it is (the fold was added in cycle 16 alongside (e1)), and the whole `Pd`
-      dash family reads as one minus — before that, `４.２`/`4.2` and
-      `‑5`/`-5` each refused a truthful point; (f) the rule
+      it is — its `Nd` digits AND its own decimal separator
+      (`\uff0e`/`\u066b`, cycle 17) or thousands separator
+      (`\uff0c`/`\u066c`, which folds to `,` and is then outside the judged set
+      as ambiguous) — and the whole `Pd` dash family reads as one minus. Before
+      that, `４.２`/`4.2`, `４．２`/`4.2` and `‑5`/`-5` each refused a truthful
+      point, and the fragmenting separator also made an Arabic decimal compare
+      EQUAL to a genuine ASCII `4/2` ratio; (f) the rule
       REFUSES, it does not REPAIR — retaining by substituting the verbatim value
       into the claim is the follow-up; (g) a LEADING CURRENCY SYMBOL is FORM, not
       value — `_value_core` reads the numeric core and the unit written AFTER the

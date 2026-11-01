@@ -4059,6 +4059,21 @@ def _carries_value(*texts: object) -> bool:
 #: tolerance bound is MEASURED (see ``_value_slot_divergence``).
 _VALUE_DECIMALS = re.compile(r"\d+(?:\.\d+)?")
 
+# The decimal and thousands separators a NON-ASCII decimal script brings with its
+# digits (#10513 review cycle 17 P2). Folding the digits alone left the numeral
+# fragmented — `４．２` read `4/2` and DIVERGED from `4.2`, while also AGREEING
+# with a real ASCII `4/2` ratio. DECIMAL separators fold to `.`; THOUSANDS
+# separators fold to `,`, which `_separator_reads_ambiguously` then excludes from
+# the judged set (this module's doctrine for an ambiguous numeral: no locale-free
+# identity, so no judgement). `\u3002` is deliberately absent — it is a prose full
+# stop, never a decimal point.
+_SCRIPT_SEPARATORS = str.maketrans({
+    "\uff0e": ".",   # FULLWIDTH FULL STOP (CJK decimal point)
+    "\u066b": ".",   # ARABIC DECIMAL SEPARATOR
+    "\uff0c": ",",   # FULLWIDTH COMMA (ambiguous: decimal in some locales)
+    "\u066c": ",",   # ARABIC THOUSANDS SEPARATOR
+})
+
 #: An ISO date. The pipeline derives these from "yesterday" / "November 9"
 #: (normatively), so the FORM is not a value identity the guarantee can judge —
 #: a date slot is outside the judged set, exactly like a clock.
@@ -4304,6 +4319,19 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
             str(unicodedata.digit(ch)) if unicodedata.category(ch) == "Nd" else ch
             for ch in raw
         )
+        # ⛔ THE DIGITS ALONE ARE NOT THE NUMERAL: a decimal script brings its
+        # OWN separator, and `_VALUE_DECIMALS` only knows the ASCII dot, so the
+        # numeral fragmented into two runs that `_value_core` joined with `/`
+        # (#10513 review cycle 17 P2, measured): `\uff14\uff0e\uff12` (fullwidth
+        # full stop) and `\u0664\u066b\u0662` (Arabic decimal separator) read
+        # `('', '4/2', None)` and DIVERGED from `4.2`, refusing a truthful point
+        # — while ALSO agreeing with a genuine ASCII `4/2` ratio, which is the
+        # fail-open half of the same root cause. Fold the script-local DECIMAL
+        # separators to `.` and the THOUSANDS separators to `,` (the latter then
+        # hits `_separator_reads_ambiguously` and is outside the judged set,
+        # this module's own doctrine for an ambiguous numeral). U+3002 `。` is
+        # NOT folded: it is a full stop in prose, never a decimal point.
+        raw = raw.translate(_SCRIPT_SEPARATORS)
     # ⛔ NO SEPARATOR IS INTERPRETED HERE (#10513 review cycle 12 P1). A
     # separator-bearing token has no locale-free value identity, so it has no
     # identity at all and this returns None — the SAME predicate
@@ -4534,7 +4562,8 @@ def _value_core_str(identity: tuple) -> str:
     return f"{sign}{core}{unit or ''}"
 
 
-def _write_span(text: object, cap: int) -> str:
+def _write_span(text: object, cap: int, *,
+                hard_cut_single_token: bool = True) -> str:
     """The part of ``text`` the WRITE keeps, cut at a TOKEN boundary.
 
     #10513 review cycle-13 P2, measured: the rule was fed the UNCLAMPED pair, to
@@ -4587,7 +4616,16 @@ def _write_span(text: object, cap: int) -> str:
         # all — the verbatim anchor is the thing a value-bearing point exists to
         # carry — so fall back to the cap itself, which is the pre-existing
         # behaviour for this shape (`test_quote_capped_at_200`).
-        return s[:cap]
+        #
+        # ⛔ BUT A HARD CUT HERE FABRICATES A VALUE, and the S5 MINT site has no
+        # `_value_slot_divergence` call to catch it (#10513 review cycle 17 P2,
+        # measured): an operator ref of `"storage/" + "d"*190 + "12.5" + "z"*40`
+        # (242 chars, one token) minted a stored quote ending `dddddddddddd12`
+        # against a content holding `12.5…`, with NO warning — the value the
+        # graph records is not the value the point states. A caller that cannot
+        # report the divergence asks for `hard_cut_single_token=False` and gets
+        # "" instead: an ABSENT quote is honest, a misstating one is not.
+        return s[:cap] if hard_cut_single_token else ""
     return cut
 
 
@@ -9081,8 +9119,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # safe "by construction" because `quote` is the point's OWN text;
             # its own CLAMP is the reachable divergence, and it is now cut the
             # same way every other span in this module is.
-            _probe = {"content": content,
-                      "quote": _write_span(content, _MAX_QUOTE)}
+            #
+            # ⛔ AND `hard_cut_single_token=False` (#10513 review cycle 17 P2,
+            # measured): `_write_span` still falls back to the HARD `[:cap]` cut
+            # when the text is ONE whitespace-free token longer than the cap —
+            # there is no token boundary to cut at. On the content path that
+            # fallback is the pinned pre-existing shape, but HERE it stamped a
+            # quote that MISSTATES its own content: an operator ref of
+            # `"storage/" + "d"*190 + "12.5" + "z"*40` (242 chars, one token)
+            # stored the quote tail `dddddddddddd12` against a content holding
+            # `12.5…`, silently — this site has no `_value_slot_divergence` call
+            # to refuse it. An ABSENT quote is honest; a misstating one is not,
+            # so this site asks for "" and names it in the warnings.
+            _quote_span = _write_span(content, _MAX_QUOTE,
+                                      hard_cut_single_token=False)
+            if not _quote_span and content:
+                warnings.append(
+                    f"minted endpoint ({where}) is one token longer than the "
+                    f"{_MAX_QUOTE}-char quote cap, so it has no token-safe "
+                    "quote — left unquoted rather than quoting a cut that "
+                    "misstates its own value")
+            _probe = {"content": content, "quote": _quote_span}
             _scratch: list[str] = []
             _turn = _resolve_source_turn(_probe, edus, warnings=_scratch)
             if _turn is None:
@@ -9091,13 +9148,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     "left unquoted (no source_turn_id)")
             else:
                 _turn_text = _turn_text_by_index(edus, _turn)
-                _anchor = re.sub(r"\s+", " ",
-                                 _write_span(content, _MAX_QUOTE).strip().lower())
+                _anchor = re.sub(r"\s+", " ", _quote_span.strip().lower())
                 _verbatim = bool(_anchor) and re.sub(
                     r"\s+", " ", _turn_text.lower()).find(_anchor) >= 0
                 pt_entry["source_turn_id"] = _turn
                 if _verbatim:
-                    pt_entry["quote"] = _write_span(content, _MAX_QUOTE)
+                    pt_entry["quote"] = _quote_span
                 # #2684 (Slice B): a MINTED ENDPOINT is a statement Point, so a
                 # VALUE-BEARING one takes the same verbatim-span gate the model
                 # path takes ABOVE, in S1/S2 (``_value_verbatim_span``, stamping at
