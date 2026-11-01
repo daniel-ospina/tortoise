@@ -2122,10 +2122,20 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("E1-E5-PROOFS.md", "_step_accounting` (`:379`) refuses a GREEN row whose", (
             ("379", "def _step_accounting("),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "run left a REQUIRED step out", (
-            ("475", "missing = [s for s in required if s not in observed]"),
-            ("477", "GREEN with steps not observed in the run:"),
-        ), "capstone_verdict_check"),
+    )
+    # The SAME document states two of its claims as the RULE's own text rather than a
+    # line number — a quoted rule cannot drift by an insertion above it, which is why
+    # #10215's review moved those two numbers twice inside one PR. A quote still rots
+    # if the gate renames the message, so each quote is held against the gate's text
+    # as well: the doc must carry it (markdown wraps it, so whitespace is normalised)
+    # and the gate must still say it.
+    quotes = (
+        ("E1-E5-PROOFS.md",
+         "missing = [s for s in required if s not in observed]",
+         "capstone_verdict_check"),
+        ("E1-E5-PROOFS.md",
+         "GREEN with steps not observed in the run:",
+         "capstone_verdict_check"),
     )
     docs = dict(_BUNDLE_DOCS)
     sources = {name: path.read_text(encoding="utf-8").splitlines()
@@ -2164,6 +2174,19 @@ def test_the_bare_continuation_cites_name_what_they_say():
                 failures.append(
                     f"{source_label}:{number} (cited by {doc_label}) reads "
                     f"{got.strip()!r}, which carries no {anchor!r}")
+    for doc_label, quoted, source_key in quotes:
+        source_label = f"{source_key}.py"
+        doc_text = " ".join(docs[doc_label].read_text(encoding="utf-8").split())
+        if " ".join(quoted.split()) not in doc_text:
+            failures.append(
+                f"{doc_label} no longer carries the rule text {quoted!r} this pin "
+                f"holds {source_label} to — re-quote the rule from the gate rather "
+                f"than dropping the claim")
+        if not any(quoted in ln for ln in sources[source_key]):
+            failures.append(
+                f"{doc_label} quotes {quoted!r} as the rule, but {source_label} no "
+                f"longer says it — re-quote from the gate, do not leave a quote the "
+                f"code has moved past")
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))

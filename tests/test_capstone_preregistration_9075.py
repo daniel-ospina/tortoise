@@ -2723,7 +2723,10 @@ def test_the_wrong_typed_record_field_exits_2_and_says_why(tmp_path, capsys):
     code = check.main(["--dir", str(directory), "--no-git", "--no-corpus", "--json"])
     out = capsys.readouterr()
     assert code == 2, out.err
-    body = json.loads(out.out.strip().splitlines()[-1])
+    # ⛔ The WHOLE payload, not its last line: `#10468` made the error branch pretty-print
+    # (`indent=2`), so `splitlines()[-1]` is `}` and this assertion parsed nothing. The property
+    # under test is the exit CODE and that the message names the field — never the line shape.
+    body = json.loads(out.out)
     assert body["ok"] is False
     assert "unconditional" in body["error"]
 
@@ -2954,3 +2957,64 @@ def test_the_shipped_record_carries_no_retired_key():
     shipped = json.loads((PREREG.parent / check.MACHINE_RECORD).read_text())
     assert check.STEPS_PINNED_AFTER not in shipped, (
         "the shipped record re-gained the retired key")
+
+
+# ── #10509 / #10468: the step rule is scoped to the bundles that HAVE a step set ────────────
+#
+# `#10468` put a SECOND pre-registered bundle on the tool's `--dir` (`#10463`'s two-arm S3
+# ablation). That bundle is a different epic with no eight-step concept, so an unscoped
+# `check_step_partition` refused it on every run for not declaring a step set it never had —
+# while `--dir` repeatability is exactly what makes one invocation read both.
+
+#: The other pre-registered bundle on the CI invocation's `--dir` list (#10468).
+NO_STEPS_BUNDLE = REPO_ROOT / "docs" / "evidence" / "5087-hypothesis"
+
+
+def test_the_second_bundle_really_declares_no_step_set():
+    """The premise, asserted rather than assumed: this bundle has no `steps` block on either side.
+
+    If it ever gains one the scope test below stops testing what it claims, so the premise is
+    pinned here rather than left to a comment.
+    """
+    pins = check.parse_pins((NO_STEPS_BUNDLE / check.PREREG_NAME).read_text())
+    assert "steps" not in pins, sorted(pins)
+    record = json.loads((NO_STEPS_BUNDLE / check.MACHINE_RECORD).read_text())
+    assert "steps" not in record, sorted(record)
+
+
+def test_a_bundle_with_no_step_set_is_not_refused_by_the_partition_rule():
+    """REGRESSION (#10509 rebase): the unscoped rule failed this bundle for declaring nothing.
+
+    The message was `pins.steps is empty — the capstone's step gate reads this split…`. True of the
+    capstone; false of a bundle whose epic has no such gate, and it is not the bundle's defect to
+    repair by inventing an eight-step declaration. `#no-git`/`--no-corpus` isolate the rule: the
+    ordering half of this bundle is a separate finding and is not what this test is about.
+    """
+    report = check.run(NO_STEPS_BUNDLE, use_git=False, use_corpus=False)
+    assert not any("pins.steps" in f for f in report["failures"]), report["failures"]
+    assert report["ok"], report["failures"]
+
+
+def test_the_capstone_bundle_is_STILL_governed_even_with_no_step_set_declared(tmp_path):
+    """The scope must not be a blanket waiver: the capstone bundle never escapes by dropping it.
+
+    This is the `DEFAULT_PREREG_DIR` arm of `check_step_partition_applies`. A document that loses
+    its block must still be refused — otherwise "we deleted the split" and "the split was never
+    ours" would read identically, which is the widening the rule exists to prevent.
+    """
+    assert check.check_step_partition_applies(PREREG_DIR, {}, {}) is True
+    assert check.check_step_partition_applies(NO_STEPS_BUNDLE, {}, {}) is False
+
+
+def test_the_CI_multi_bundle_invocation_is_green_on_the_second_bundle(capsys):
+    """End to end, the shape CI runs: `--dir` twice, and the second bundle must not red the run.
+
+    `--no-git`/`--no-corpus` again isolate the rule: the corpus half imports `tortoise`, and the
+    ordering half is this bundle's separate finding (#10509 does not touch it).
+    """
+    code = check.main(["--dir", str(PREREG_DIR), "--dir", str(NO_STEPS_BUNDLE),
+                       "--no-git", "--no-corpus", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    assert payload["ok"] is True
+    assert [r["ok"] for r in payload["reports"]] == [True, True], payload["reports"]

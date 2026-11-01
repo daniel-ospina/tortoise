@@ -833,6 +833,46 @@ def _record_for_steps(directory: Path) -> dict:
     return record if isinstance(record, dict) else {}
 
 
+def check_step_partition_applies(directory: Path, pins: dict, record: dict) -> bool:
+    """Whether this bundle is one whose step set :func:`check_step_partition` governs (#10215).
+
+    The step set is a CAPSTONE declaration, not a property of every pre-registration this tool can
+    read. ``tools/capstone_verdict_check.py`` pins conditionality to ONE artifact
+    (``RECORD_ARTIFACT``, ``docs/evidence/7949-capstone/preregistration.json``) for the same reason:
+    a second place a step set can be declared is a second place the epic's gate can be weakened.
+
+    ⛔ The scope is not a hole, and it is not a blanket waiver. `#10468` put a SECOND
+    pre-registered bundle on this tool's ``--dir`` — ``#10463``'s two-arm S3 ablation, which has no
+    eight-step concept at all — so an unscoped rule failed that bundle on every run for not
+    declaring a step set it never had. The rule therefore applies to:
+
+      * the capstone bundle, ALWAYS (``DEFAULT_PREREG_DIR``) — so deleting its ``steps`` block is
+        still a refusal rather than a silent widening of the required step set; and
+      * any bundle that DECLARES a step set on either side — if you declare one, it must be a
+        partition of the epic's eight and the document and record must agree.
+
+    A bundle that declares none is not asked to invent one. Nothing is weakened by skipping it:
+    V5/G5 read the split from ``RECORD_ARTIFACT`` alone and REFUSE when it is absent, so a capstone
+    bundle that loses the block fails closed at the gate itself rather than at this pre-check.
+    """
+    if record.get("steps"):
+        return True
+    try:
+        # ⛔ Guarded: `_pins_mapping` RAISES on a present-but-wrong-typed `steps` pin, and
+        # `check_step_partition` reports that as a FINDING (exit 1), not a parse error. Letting it
+        # escape here would turn a malformed `steps` block into exit 2 and change an exit code this
+        # PR has a test for.
+        if _pins_mapping(pins, "steps"):
+            return True
+    except CheckError:
+        return True          # unreadable is not "absent" — `check_step_partition` reports it
+    try:
+        relative = directory.resolve().relative_to(REPO_ROOT)
+    except (ValueError, OSError):
+        return False
+    return relative.as_posix() == DEFAULT_PREREG_DIR
+
+
 def _measured_locations(record: dict) -> list[str]:
     """Every place the machine record carries a MEASUREMENT, as human-readable labels.
 
@@ -1719,7 +1759,12 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     failures += check_steps_block_is_pre_scored(directory)
     # #10215: the step set the capstone's gate reads. Checked after the record so both halves are
     # already known to PARSE; a partition failure here is a weakened gate, not a document nit.
-    failures += check_step_partition(pins, _record_for_steps(directory))
+    # SCOPED to the bundles the rule governs (`check_step_partition_applies`): `#10468` added a
+    # second pre-registered bundle to `--dir` that has no eight-step concept, and demanding one of
+    # it reds a correct tree.
+    steps_record = _record_for_steps(directory)
+    if check_step_partition_applies(directory, pins, steps_record):
+        failures += check_step_partition(pins, steps_record)
 
     if use_corpus:
         corpus_state = "verified"
