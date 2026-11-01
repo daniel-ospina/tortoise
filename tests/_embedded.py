@@ -300,14 +300,40 @@ def serialize_embedded_construction(monkeypatch) -> None:
 # socket wait begins.
 EMBEDDED_START_TIMEOUT_FLOOR = 60
 
+# The `source` the session fixture passes, in ONE place so the fixture that
+# applies the floor and the test that attests it cannot drift apart.
+EMBEDDED_FLOOR_FIXTURE_SOURCE = "tests/conftest.py::_embedded_start_timeout_floor"
 
-def raise_embedded_start_timeout_floor() -> float:
+# Every call `raise_embedded_start_timeout_floor` made, in order, as
+# `(source, prev, post)`.
+#
+# ⛔ A RECORD is what makes "the session fixture applied the floor"
+# ATTRIBUTABLE; the live class attribute does NOT, and that is measured rather
+# than feared. The three #1988 call sites above each assign
+# `Redis.start_timeout = 60` themselves and never restore it, so once any file
+# that spawns an embedded server has run in this process `Redis.start_timeout >=
+# 60` is already TRUE — and stays true with this module's assignment deleted.
+# `--dist loadfile` hands a worker more than one file, so that ordering happens
+# in a real run: a bare `>=` assertion is green under the very mutant it claims
+# to catch. `post` is read BACK from the class after the assignment, so deleting
+# the assignment while keeping the append still reds the pin.
+# Pinned by
+# `tests/test_embedded_lifecycle.py::test_the_embedded_start_timeout_floor_reaches_the_client_tortoise_builds`.
+START_TIMEOUT_APPLICATIONS: list[tuple[str, float, float]] = []
+
+
+def raise_embedded_start_timeout_floor(source: str = "direct") -> float:
     """#10437: lift redislite's socket-wait bound for this test process.
 
     Returns the bound in effect BEFORE the call, so a caller (and its test) can
     see what changed. RAISE-ONLY: a bound already above the floor is kept — the
     floor is a minimum for a loaded host, never a cap for a caller that
     deliberately widened it further.
+
+    ``source`` names the caller and is recorded with the bound before and after
+    the assignment (see ``START_TIMEOUT_APPLICATIONS``): attribution, not
+    bookkeeping, because the three #1988 call sites set the same value and a
+    caller cannot be told apart from them by the number alone.
 
     Set on `redislite.client.Redis`, which is the class this package's embedded
     client is built from: `redislite/falkordb_client.py` does
@@ -326,6 +352,8 @@ def raise_embedded_start_timeout_floor() -> float:
     prev = getattr(Redis, "start_timeout", 0)
     if prev < EMBEDDED_START_TIMEOUT_FLOOR:
         Redis.start_timeout = EMBEDDED_START_TIMEOUT_FLOOR
+    START_TIMEOUT_APPLICATIONS.append(
+        (source, prev, getattr(Redis, "start_timeout", 0)))
     return prev
 
 

@@ -377,8 +377,11 @@ def _warning_table_problems(section: str) -> list[str]:
     synthetic sections, so each arm has a case that proves it fires.
 
     Three arms, because each fails where the others cannot:
-      * no key may be advertised that the product does not emit (the 2026-10-30
-        regression, #10438);
+      * no key may be advertised that the product's CLOSED SET (`WARNING_KEYS`,
+        §3.2) does not contain — the 2026-10-30 regression, #10438. This arm is
+        set-relative, not emission-relative: an emitted key that is MISSING from
+        the set is the other direction, owned by
+        `test_sdk_success_response_key_set_equal`;
       * the enumeration must be COMPLETE — the subset arm alone passes a
         truncated list (one key short, heading still declaring the true size),
         which is a reader believing a key does not exist when the engine emits
