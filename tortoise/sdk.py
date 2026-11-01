@@ -11720,7 +11720,7 @@ class TortoiseSDK:
                 # update_point prop path on a dedup hit. update_point writes the
                 # node property but never calls _link_source, so the Point would
                 # end up carrying `extractedFrom` with NO `:Source` edge — still
-                # an orphan — and `list_drafts` reads that prop, so it would
+                # an orphan — and `paginated_query` returns `properties(n)`, so it would
                 # report provenance that does not exist as an edge. It is not
                 # replayed either (_revise_point restores content/embedding
                 # only), so the rebuilt graph drops the prop entirely and
@@ -20296,7 +20296,8 @@ class TortoiseSDK:
         # (limit=0 → hasMore = skip + 0 < total always True on non-empty
         # graphs → infinite pagination loop) or passing raw negatives into
         # Cypher. Mirrors the guard in tortoise_query (mcp_server.py) and
-        # the other paginators (list_drafts, belief_timeline).
+        # the other paginator (belief_timeline); `list_drafts`, which had the same
+        # shape, was DELETED by #4282.
         if skip < 0:
             raise ValueError(f"skip must be >= 0, got {skip}")
         if limit < 1:

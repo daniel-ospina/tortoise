@@ -27,7 +27,7 @@ The system under test is the epistemic layer in three compositions, each with it
 |---|---|---|
 | **EP engine** (`TortoiseEP` + `quadrature.phi_*`) | Beta-message belief propagation over IMPL/NAND factors | Property tests (§2) |
 | **Graph as built by the pipeline** (extraction → operators → supersession → dream) | The *input* the engine reasons over | Graph-quality tests (§3) |
-| **Query/endpoint surface** (`get_confidence`, `traverse` *(deleted by #4282; the surviving walk is `explore_connections`)*, `get_contested_claims`, ledger, bi-temporal) | What a user/agent actually experiences | Reasoning-endpoint scenarios (§4) |
+| **Query/endpoint surface** (`get_confidence`, `traverse` *(deleted by #4282 — its recorded destination `explore_connections` has no `def` on `TortoiseSDK` yet, so the live in-process read is `expand_relationships` (all relationship types, one point); the MCP walks are `tortoise_traverse` (all types) and the filtered `tortoise_analyze` / `tortoise_compute_confidence`, which take `rel_filter` and `direction`)*, `get_contested_claims`, ledger, bi-temporal) | What a user/agent actually experiences | Reasoning-endpoint scenarios (§4) |
 | **Whole system under hostile input** | Noise, loops, Sybil, flapping | Adversarial tests (§5) |
 
 **Method rules (non-negotiable):**
@@ -200,7 +200,7 @@ End-to-end, through the public surface. Each scenario = setup → action → que
 ### R2 — "What contradicts my decision?"
 
 - **Setup:** decision D(T1); two attackers C1, C2 `NAND→` D.
-- **Query:** `traverse(D, "NAND", direction="incoming")`.
+- **Query:** `traverse(D, "NAND", direction="incoming")` — ⚠️ **`traverse` is DELETED by #4282** (recorded destination `explore_connections`, no `def` on `TortoiseSDK` yet). The filtered read itself is still reachable, but not from the SDK: the MCP tools `tortoise_analyze` and `tortoise_compute_confidence` take `rel_filter` and `direction`, and `tortoise/analyze.py`'s `counter_arguments` template already returns exactly this scenario's answer — NAND contradictors of a target as `(id, content, confidence)` ordered strongest-first. Its caveat is the addressing: the template matches `target.content CONTAINS $entity` rather than by id, so an id-addressed caller must go through `expand_relationships(D)` (all relationship types for the point) and filter client-side.
 - **Accept:** returns exactly {C1, C2} with each attacker's confidence and tier; sorted by message strength (the strongest attacker first); ledger shows both negative lines. Zero NAND edges found for an undecided claim is a graph-quality failure (G1).
 
 ### R3 — "Why does the graph believe X?" — ledger-vs-EP consistency

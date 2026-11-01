@@ -268,7 +268,7 @@ response_fields:
 # Restoring either as a declared surface is a SURFACE CHANGE and needs owner approval (#4282).
 - response: tortoise_traverse
   field: idx
-  emitted_when: always, on every hop in nodes[] — the traversed edge's idx (the value the #4282-deleted `sdk:traverse` used to return; the surviving SDK walk is `explore_connections`) (#6101)
+  emitted_when: "always, on every hop in nodes[] — the traversed edge's idx (the value the #4282-deleted `sdk:traverse` used to return; its recorded destination `explore_connections` has NO `def` on `TortoiseSDK` yet (Phase 2), so the live in-process read is `expand_relationships` — all relationship types, one point, no type/direction filter — and the MCP walk is `tortoise_traverse`) (#6101)"
   unchanged_when_off: n/a — not flag-gated; additive key on each nodes[] entry, present (null where the edge carries
     no idx), and node/relationship/depth are unchanged
 - response: tortoise_entity_profile
