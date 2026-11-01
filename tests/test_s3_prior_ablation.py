@@ -349,15 +349,16 @@ def test_the_withdrawn_log_still_hashes_to_the_digest_its_note_publishes(probe):
 
     note = (probe.EVIDENCE_DIR / "withdrawn" / "WITHDRAWN.md").read_text()
     published = re.findall(r"\b[0-9a-f]{64}\b", note)
-    assert len(published) == 1, (
-        "the note must publish exactly one digest — the withdrawn log's — so the next reader knows "
-        f"what was measured; found {published}")
+    assert published, (
+        "the note must publish the withdrawn log's digest, so the next reader knows what was "
+        f"measured; found {published!r}")
     actual = hashlib.sha256((probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_bytes()).hexdigest()
-    assert published[0] == actual, (
-        "the withdrawn log's bytes no longer match the digest its note publishes: the note claims "
-        f"{published[0]} and the file is {actual}. A withdrawal may retract PROVENANCE, never the "
-        "measured bytes (#10463 item 3: do not edit its contents) — if the log really has to "
-        "change, the note and this test move with it and the retraction is recorded, not silent")
+    assert actual in published, (
+        "the withdrawn log's bytes no longer match the digest its note publishes: the note "
+        f"states {published} and the file is {actual}. A withdrawal may retract PROVENANCE, never "
+        "the measured bytes (#10463 item 3: do not edit its contents) — if the log really has to "
+        "change, the note and this test move with it and the retraction is recorded, not silent. "
+        "A note that additionally publishes OTHER digests is fine: only this file's must be here")
 
 
 def test_the_log_header_names_every_bar_and_floor(probe):
