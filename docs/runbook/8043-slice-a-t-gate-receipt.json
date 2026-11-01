@@ -273,14 +273,22 @@
           "arm": "post_2978_assembly",
           "a": "the tea set cost 300 dollars",
           "b": "the cat sheds a lot",
+          "a_id": "v1",
+          "b_id": "f00",
+          "leg": "quote",
           "same_source_turn": true,
+          "content_overlap": 0.0,
           "quote_overlap": 0.0
         },
         {
           "arm": "post_2978_assembly_value_marked",
           "a": "the tea set cost 300 dollars",
           "b": "the cat sheds a lot",
+          "a_id": "v1",
+          "b_id": "f00",
+          "leg": "quote",
           "same_source_turn": true,
+          "content_overlap": 0.0,
           "quote_overlap": 0.0
         }
       ],

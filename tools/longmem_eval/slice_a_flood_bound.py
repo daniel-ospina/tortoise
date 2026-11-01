@@ -579,6 +579,104 @@ def _shares_source_turn(a: dict[str, Any], b: dict[str, Any]) -> bool:
     return bool(ta) and ta == tb
 
 
+def _refused_leg(
+    a: str, b: str, hits: tuple[dict[str, Any], dict[str, Any]] | None
+) -> str:
+    """WHICH of ``_same_fact``'s two value-guard call sites refused ``a``/``b``.
+
+    ``_pkg_differ_value_critical`` has two call sites in the product and they
+    receive DIFFERENT KINDS of string (#10508 review round 3, Finding 2):
+
+      * the near-verbatim leg passes the pair's normalized **CONTENT**
+        (``tortoise/retrieval.py``: ``_pkg_differ_value_critical(ca, cb)``);
+      * the same-source-turn leg passes the verbatim **QUOTE** spans
+        (``_pkg_differ_value_critical(qa, qb)``).
+
+    A counter that records only the arguments therefore cannot say which
+    quantity a refusal PUBLISHED — and publishing a content ratio under the
+    key ``quote_overlap`` is #8945 item 2 ("two quantities under one label")
+    one field lower in the same verdict. So the leg is named here, from the
+    strings each site passes, and the two quantities are emitted separately.
+
+    The identity of the refusing site is read off the HITS the product
+    compared (registered by :func:`_probe_value_guard`'s ``_same_fact``
+    wrapper), never guessed from a pool-wide lookup: a quote-keyed pool index
+    cannot resolve a CONTENT argument at all, and where the argument IS a quote
+    every shared-quote hit answers the lookup, so it returns an arbitrary
+    member instead of the hit actually compared.
+
+    ⛔ When the pair's content and its quote are byte-identical (a statement
+    extracted verbatim), BOTH sites would pass these same strings. The
+    product's branch order decides: the content leg RETURNS at its own branch,
+    so the quote leg is only ever reached with a content overlap BELOW the
+    near-verbatim threshold. No case is resolved by a plausible default — an
+    unrecognised pair is a loud error, because a guessed label is exactly the
+    defect this function exists to remove.
+    """
+    if hits is None:
+        raise RuntimeError(
+            "the value guard was called outside `_same_fact`, so which leg "
+            "refused is unknown — the receipt cannot label a ratio it did not "
+            "disambiguate (#8945)"
+        )
+    ha, hb = hits
+    ca = retrieval._pkg_norm(str(ha.get("content") or ""))
+    cb = retrieval._pkg_norm(str(hb.get("content") or ""))
+    qa = str(ha.get("quote") or "")
+    qb = str(hb.get("quote") or "")
+    content_match = (a, b) == (ca, cb)
+    quote_match = bool(qa and qb) and (a, b) == (qa, qb)
+    if content_match and quote_match:
+        below = retrieval._pkg_overlap(ca, cb) < DEFAULT_PACKAGE_VERBATIM_OVERLAP
+        return "quote" if below else "content"
+    if content_match:
+        return "content"
+    if quote_match:
+        return "quote"
+    raise RuntimeError(
+        "the refused pair's arguments match neither the compared hits' "
+        f"normalized CONTENT nor their QUOTE spans (a={a!r}, b={b!r}) — the "
+        "product's guard call sites no longer pass the strings this receipt "
+        "labelled, so the label would be a guess (#10508 review, Finding 2)"
+    )
+
+
+def _refused_pair_record(arm: str, rp: dict[str, Any]) -> dict[str, Any]:
+    """One ``refused_pairs`` record — each quantity measured from ITS strings.
+
+    ``content_overlap`` is the ratio of the CONTENT leg (0.90 near-verbatim);
+    ``quote_overlap`` the ratio of the same-source-turn leg (0.75), and
+    ``leg`` names the one that actually refused. Both are computed from the
+    hits the product compared, which the probe registers, so nothing here has
+    to look a hit up by a string — a quote-keyed lookup cannot resolve a
+    content argument at all and picks an arbitrary member among shared quotes.
+    """
+    ha, hb = rp["hits"]
+    ca = retrieval._pkg_norm(str(ha.get("content") or ""))
+    cb = retrieval._pkg_norm(str(hb.get("content") or ""))
+    qa = str(ha.get("quote") or "")
+    qb = str(hb.get("quote") or "")
+    return {
+        "arm": arm,
+        "a": rp["a"],
+        "b": rp["b"],
+        # WHICH of the two hits the guard compared (ids, not a string lookup)
+        "a_id": ha.get("id"),
+        "b_id": hb.get("id"),
+        # WHICH leg refused, so a content ratio is never published under a
+        # quote label (the surviving #8945 item 2, one field lower).
+        "leg": rp["leg"],
+        # The same predicate the value-pairs block uses, and the one
+        # `_same_fact` gates on (#10508 Finding 2) — not raw equality, and
+        # resolved from the COMPARED hits rather than a quote-keyed index.
+        "same_source_turn": _shares_source_turn(ha, hb),
+        # Each quantity from its own leg's strings, so the label is true of the
+        # number beside it.
+        "content_overlap": round(retrieval._pkg_overlap(ca, cb), 4),
+        "quote_overlap": round(retrieval._pkg_overlap(qa, qb), 4),
+    }
+
+
 @contextmanager
 def _probe_value_guard() -> Iterator[dict[str, Any]]:
     """Count `_pkg_differ_value_critical` calls/refusals for the duration.
@@ -589,23 +687,51 @@ def _probe_value_guard() -> Iterator[dict[str, Any]]:
     receipt asserting it while every gate stayed green. So the counters are
     recorded in the receipt and asserted by the test — the sentence is
     composed FROM them, and a change in the mechanism moves them.
+
+    It also records WHICH LEG refused and the two HITS the product compared
+    (#10508 review round 3, Finding 2). The guard is called with strings, and
+    two different call sites pass two different kinds of string — so the args
+    alone cannot say which quantity a refusal published. ``_same_fact`` is
+    wrapped to register the pair being compared, which is what makes the leg
+    (and the pair's own turn relationship) a fact rather than an inference.
     """
     original = retrieval._pkg_differ_value_critical
+    original_same_fact = retrieval._same_fact
     counts: dict[str, Any] = {"calls": 0, "refusals": 0, "refused_pairs": []}
+    comparing: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    def _registering_same_fact(
+        a: dict[str, Any], b: dict[str, Any]
+    ) -> bool:
+        comparing.append((a, b))
+        try:
+            return original_same_fact(a, b)
+        finally:
+            comparing.pop()
 
     def _counting(a: str, b: str) -> bool:
         counts["calls"] += 1
         out = original(a, b)
         if out:
             counts["refusals"] += 1
-            counts["refused_pairs"].append({"a": a, "b": b})
+            hits = comparing[-1] if comparing else None
+            counts["refused_pairs"].append(
+                {
+                    "a": a,
+                    "b": b,
+                    "hits": hits,
+                    "leg": _refused_leg(a, b, hits),
+                }
+            )
         return out
 
     retrieval._pkg_differ_value_critical = _counting
+    retrieval._same_fact = _registering_same_fact
     try:
         yield counts
     finally:
         retrieval._pkg_differ_value_critical = original
+        retrieval._same_fact = original_same_fact
 
 
 def _value_pairs_sentence(value_pairs: list[dict[str, Any]]) -> str:
@@ -962,7 +1088,6 @@ def measure() -> dict[str, Any]:
     }
     total_calls = sum(guard_calls.values())
     total_refusals = sum(guard_refusals.values())
-    _pool_by_quote = {h.get("quote"): h for h in pool if h.get("quote")}
     refused_pairs = []
     for arm_name, g in (
         ("post_2978_assembly", assembly_guard),
@@ -970,28 +1095,7 @@ def measure() -> dict[str, Any]:
         ("provenance_free_assembly", bare_guard),
     ):
         for rp in g["refused_pairs"]:
-            ha, hb = _pool_by_quote.get(rp["a"]), _pool_by_quote.get(rp["b"])
-            refused_pairs.append(
-                {
-                    "arm": arm_name,
-                    "a": rp["a"],
-                    "b": rp["b"],
-                    # The same predicate the value-pairs block uses, and the one
-                    # `_same_fact` gates on (#10508 Finding 2) — not raw equality.
-                    "same_source_turn": (
-                        _shares_source_turn(ha, hb) if ha and hb else None
-                    ),
-                    # No `hasattr` guard: the attribute lives in the module
-                    # this instrument just imported, so the guard could only
-                    # be False after a rename — and it would then report a
-                    # plausible `null` instead of failing. A loud error is the
-                    # only honest outcome for a receipt field that vanished
-                    # (#8945).
-                    "quote_overlap": round(
-                        retrieval._pkg_overlap(rp["a"], rp["b"]), 4
-                    ),
-                }
-            )
+            refused_pairs.append(_refused_pair_record(arm_name, rp))
 
     receipt: dict[str, Any] = {
         "issue": 8043,

@@ -395,6 +395,124 @@ def test_refused_pair_overlap_is_measured_not_silently_null(receipt: dict) -> No
     )
 
 
+def test_a_content_leg_refusal_is_published_as_the_content_quantity() -> None:
+    """#10508 review round 3, Finding 2 (P3): ``refused_pairs`` published ONE
+    label over TWO quantities — #8945 item 2, surviving one field lower.
+
+    ``_pkg_differ_value_critical`` has two call sites in ``_same_fact`` and
+    they pass different KINDS of string: normalized CONTENT for the
+    near-verbatim leg (0.90), verbatim QUOTE spans for the same-source-turn leg
+    (0.75). A counter that recorded only the arguments published a CONTENT
+    ratio under the key ``quote_overlap`` whenever the content leg fired — the
+    defect one field lower in the very verdict #8945 exists to fix.
+
+    This drives the REAL product guard with a pair that can only be refused by
+    the CONTENT leg (content overlap 0.90 with a differing number, quote spans
+    disjoint), so the branch is exercised rather than assumed. The fixture
+    receipt cannot see it: its only refusal comes from the quote leg.
+
+    Pre-fix this reds: there is no ``leg``, no ``content_overlap``, and the
+    number published as ``quote_overlap`` was ``_pkg_overlap(a, b)`` over the
+    two CONTENT strings — 0.9 under the 0.75 same-turn label.
+    """
+    content_a = "the tea set from the antique shop on elm street cost 300 dollars total"
+    content_b = "the tea set from the antique shop on elm street cost 400 dollars total"
+    quote_a = "she mentioned the antique shop purchase"
+    quote_b = "it had already been paid for"
+    a = instrument._point(
+        "cl1", content_a, session="s1", index=0, quote=quote_a, source_turn="c1",
+        fact=instrument.FACT_OTHER,
+    )
+    b = instrument._point(
+        "cl2", content_b, session="s1", index=1, quote=quote_b, source_turn="c1",
+        fact=instrument.FACT_OTHER,
+    )
+
+    from_content = round(
+        retrieval._pkg_overlap(
+            retrieval._pkg_norm(content_a), retrieval._pkg_norm(content_b)
+        ),
+        4,
+    )
+    from_quote = round(retrieval._pkg_overlap(quote_a, quote_b), 4)
+    # the precondition that makes this pair CONTENT-leg-only
+    assert from_content >= retrieval.DEFAULT_PACKAGE_VERBATIM_OVERLAP, from_content
+    assert from_quote < retrieval.DEFAULT_PACKAGE_SAME_TURN_OVERLAP, from_quote
+    assert from_content != from_quote
+
+    with instrument._probe_value_guard() as guard:
+        assert retrieval._same_fact(a, b) is False, (
+            "precondition: the CONTENT leg refuses this pair"
+        )
+    assert guard["refusals"] == 1, guard
+    record = instrument._refused_pair_record("synthetic", guard["refused_pairs"][0])
+
+    assert record["leg"] == "content", record
+    assert record["a_id"] == "cl1" and record["b_id"] == "cl2", record
+    # each quantity under its own name, measured from its own leg's strings
+    assert record["content_overlap"] == from_content, record
+    assert record["quote_overlap"] == from_quote, record
+    # the refusal is NOT labelled with the quote ratio — the #8945 defect
+    assert record["content_overlap"] != record["quote_overlap"], record
+
+
+def test_refused_pairs_name_the_leg_and_its_own_quantity(receipt: dict) -> None:
+    """#10508 review round 3, Finding 2: every published refusal names WHICH
+    leg refused and which two HITS were compared, and each ratio is measured
+    from its own leg's strings.
+
+    The previous block resolved the hits with a **quote-keyed** pool index:
+    a CONTENT argument is not a quote so it yielded ``null``, and where the
+    argument *is* a quote every hit sharing it answered the lookup, so it
+    returned an arbitrary member instead of the hit the guard compared.
+    """
+    pairs = receipt["verdicts"]["value_safety"]["refused_pairs"]
+    assert pairs, "precondition: the arms refuse at least one pair"
+    pool, _census = instrument.build_c2_pool()
+    hits = {h.get("id"): h for h in pool}
+    for p in pairs:
+        assert p["leg"] in ("content", "quote"), p
+        ha, hb = hits[p["a_id"]], hits[p["b_id"]]
+        from_content = round(
+            retrieval._pkg_overlap(
+                retrieval._pkg_norm(str(ha.get("content") or "")),
+                retrieval._pkg_norm(str(hb.get("content") or "")),
+            ),
+            4,
+        )
+        from_quote = round(
+            retrieval._pkg_overlap(
+                str(ha.get("quote") or ""), str(hb.get("quote") or "")
+            ),
+            4,
+        )
+        assert p["content_overlap"] == from_content, (p, from_content)
+        assert p["quote_overlap"] == from_quote, (p, from_quote)
+        # the strings the guard received are the ones the named leg passes
+        leg_strings = (ha, hb) if p["leg"] == "content" else None
+        if leg_strings is not None:  # content leg
+            assert p["a"] == retrieval._pkg_norm(str(ha.get("content") or "")), p
+            assert p["b"] == retrieval._pkg_norm(str(hb.get("content") or "")), p
+        else:  # quote leg
+            assert p["a"] == str(ha.get("quote") or ""), p
+            assert p["b"] == str(hb.get("quote") or ""), p
+
+    # This fixture trips ONLY the quote leg (v1's content is its quote and the
+    # other side is a quote span), which is exactly why the content-leg branch
+    # is pinned executably above instead of from the receipt.
+    assert {p["leg"] for p in pairs} == {"quote"}, pairs
+
+    source = (ROOT / "tools" / "longmem_eval" / "slice_a_flood_bound.py").read_text()
+    assert "_pool_by_quote" not in source, (
+        "a quote-keyed pool index is back — it cannot resolve a CONTENT argument "
+        "and picks an arbitrary member among shared quotes (#10508 Finding 2)"
+    )
+    assert '"quote_overlap": round(retrieval._pkg_overlap(rp["a"], rp["b"]), 4)' not in source, (
+        "one label over two quantities is back: the refusal is published as "
+        "the overlap of the strings the guard received, whichever leg sent them"
+    )
+
+
 def test_content_and_quote_overlaps_are_measured_from_different_strings(
     receipt: dict,
 ) -> None:
