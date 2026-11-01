@@ -4149,9 +4149,12 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     # occurrence of the last run and produced a nonsense unit (review cycle 2, P3
     # — 1044 such tokens over a docs corpus, 13 of them mapped).
     suffix = re.sub(r"[^a-z%]+", "", raw[matches[-1].end():].lower())
-    # An UNMAPPED suffix is returned AS ITSELF rather than dropped: dropping it
-    # makes "a unit I have not seen" compare equal to "no unit", i.e. a
-    # wildcard over exactly the units this table does not know.
+    # An UNMAPPED suffix is returned AS ITSELF so the IDENTITY keeps the
+    # spelling — and `_value_identity_matches` then deliberately treats a unit
+    # it does not know as UNSTATED (fail open), because `800millis`/`800ms` and
+    # `32-byte`/`32-bytes` are one unit spelled two ways (#10360 review cycle 3,
+    # P2). Knowledge of a unit is `_UNIT_EQUIV`'s job, and the test file asserts
+    # `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` so a fusable unit is never unknown.
     return (sign, "/".join(out), _UNIT_EQUIV.get(suffix, suffix or None))
 
 
