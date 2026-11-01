@@ -1189,8 +1189,22 @@ def _installer_env(tmp_path, agents=None):
     hidden by the host (#8392 review). `launchctl`/`plutil` are shadowed too, so
     an accidental install path can never reach the live launchd domain.
 
-    Only `uname`/`launchctl`/`plutil` are stubbed; `git`, `gh` and `python3`
+    Only `uname`/`launchctl`/`plutil` are stubbed on PATH; `git` and `python3`
     fall through to the host, which the installer's preflight needs.
+
+    ⛔ `gh` is NOT taken from the host. It is pinned through the installer's
+    own `CI_REPAIR_GH` seam (tools/install-ci-check-repair-schedule.sh:109) to a
+    stub in this sandbox, because a PATH lookup made this whole file host-
+    dependent: it resolved on the macOS dev box (a `gh` on PATH) and refused on
+    any runner that ships no `gh` — `ERROR: refusing to install: no usable 'gh'
+    (current: '<none>')`, `assert 2 == 0`, red on six tests in one shard
+    (#10500 CI job 124879926455). That is the same class the queue-reconcile
+    sibling already records in config/ci-surfaces.yml: "`gh`-absence is
+    expressed through `GH_BIN`, NOT through the sandbox PATH". Presence belongs
+    on the same seam for the same reason, and the sibling at
+    `test_launcher_hands_the_plist_arguments_to_the_tool` already does it.
+    Nothing here measures gh, so a stub is the honest double: these tests pin
+    the RENDERED plist and the argument order, not gh's behaviour.
     """
     repo = Path(__file__).resolve().parents[1]
     bindir = tmp_path / "bin"
@@ -1199,6 +1213,7 @@ def _installer_env(tmp_path, agents=None):
         ("uname", "#!/usr/bin/env bash\necho Darwin\n"),
         ("launchctl", "#!/usr/bin/env bash\nexit 0\n"),
         ("plutil", "#!/usr/bin/env bash\nexit 0\n"),
+        ("gh", "#!/usr/bin/env bash\nprintf '[]'\nexit 0\n"),
     ):
         stub = bindir / name
         stub.write_text(body, encoding="utf-8")
@@ -1206,10 +1221,13 @@ def _installer_env(tmp_path, agents=None):
     env = {**os.environ,
            "AGENTS_DIR": str(agents or (tmp_path / "LaunchAgents")),
            "TORTOISE_REPO": str(repo),
+           # The preflight's `gh` requirement, satisfied from the sandbox instead
+           # of from whichever host happens to have gh on PATH.
+           "CI_REPAIR_GH": str(bindir / "gh"),
            "CI_REPAIR_ALLOW_NONSTANDARD_AGENTS_DIR": "1",
            "CI_REPAIR_ALLOW_WORKTREE_INSTALL": "1",
            # Prepend (not replace): the installer's preflight still needs the
-           # host's git/gh/python3, while the stubs win every lookup they own.
+           # host's git/python3, while the stubs win every lookup they own.
            "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
     return env
 
