@@ -233,7 +233,12 @@ def _rewrite_one(
     # The target clause is a SUFFIX on purpose (review round 3, P2): everything
     # before it is byte-identical across the window's calls, which is the stable
     # prefix prompt caching keys on. Test: `test_the_prefix_is_stable_across_the_
-    # windows_calls_so_the_rewrite_can_be_cached`.
+    # windows_calls_so_it_can_be_cached`.
+    # ⛔ Same trap as the line above (review round 5, P3): an earlier version of
+    # this comment said `…_so_the_rewrite_can_be_cached`, which greps to nothing
+    # — so a lane asking "is the render order still pinned?" reads the pin as
+    # MISSING, in the very block that states the rule. Both citations here are
+    # now the literal test names; keep them literal.
     user = f"{window_block}\n\n{_target_clause(index)}"
     try:
         rewritten = complete_fn(system=_SYSTEM_PROMPT, user=user)

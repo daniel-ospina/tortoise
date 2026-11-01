@@ -34,6 +34,7 @@ network call.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import ClassVar
 
 import numpy as np
@@ -705,3 +706,46 @@ def test_the_event_api_boundary_refuses_a_caller_supplied_embedding_text(tmp_pat
     with pytest.raises(ValueError, match="embeddingText"):
         api.add_point("a statement", {"source_id": "doc-1"},
                       embeddingText="attacker-chosen")
+
+
+# ── 9. The module's own citations resolve to real tests (round 5, P3) ──────
+
+def test_every_test_name_the_module_cites_resolves_to_a_real_test():
+    """`tortoise/context_enrich.py` names its own pins in prose, on purpose: a
+    lane that is about to change a rule is meant to be able to grep for the
+    test that holds it.
+
+    Twice now a name in that prose grepped to nothing — round 4 cited
+    `…_as_data` and round 5 cited `…_so_the_rewrite_can_be_cached` (the real
+    names end `…_as_untrusted_data` and `…_so_it_can_be_cached`). Both read as a
+    MISSING test rather than a typo, in exactly the lane deciding whether the
+    rule still has one. So the citations are pinned.
+
+    The comment is line-wrapped, which is how round 5's defect stayed invisible
+    to a plain scan: one name is split across two comment lines. The source is
+    therefore squashed (comment markers and ALL whitespace removed) before the
+    backticked names are read, so the reassembled name is the thing compared.
+
+    Scope, stated rather than implied: this pins the class that has actually
+    recurred — a FULL `test_…` name that does not resolve. An abbreviated
+    citation (round 4's `…_as_data`) carries no `test_` prefix to anchor on and
+    is out of scope here; the fix for that class is to stop abbreviating.
+    """
+    root = Path(__file__).resolve().parent.parent
+    squashed = re.sub(r"\s+", "", (root / "tortoise" / "context_enrich.py")
+                      .read_text(encoding="utf-8").replace("#", ""))
+    cited = set(re.findall(r"`(test_[A-Za-z0-9_]+)`", squashed))
+    assert cited, (
+        "the module cites no test at all — this leg would then pin nothing")
+    defined = set(re.findall(
+        r"^def (test_[A-Za-z0-9_]+)",
+        Path(__file__).resolve().read_text(encoding="utf-8"), re.MULTILINE))
+    assert defined, "no tests found in this file — the reference set is empty"
+    # A citation split across lines is legitimately a PREFIX of the real name
+    # (the fragment still greps to the test); a citation that resolves to
+    # NEITHER a real name nor a prefix of one greps to nothing, which is rot.
+    unresolved = sorted(n for n in cited
+                        if not any(d.startswith(n) for d in defined))
+    assert not unresolved, (
+        "the module cites a test name that greps to nothing, so a later lane "
+        f"reads the pin as missing: {unresolved}")
