@@ -112,7 +112,10 @@ const HTML_SITES = [
   ['website/apps/dashboard/functions/welcome.ts', 1],
   ['website/apps/dashboard/functions/auth/confirm.ts', 1],
   ['website/apps/dashboard/functions/admin/[[path]].ts', 3],
-  ['website/functions/_middleware.ts', 1],
+  // TWO HTML paths: the root marketing document (`RELAXED_CSP`) and the stray
+  // authorization-response refusal (#10088 ask 3), which stamps the strict
+  // credential-refusal policy — see `STRICT_LOCAL_POLICY` below.
+  ['website/functions/_middleware.ts', 2],
   ['website/functions/blog/_lib.ts', 1],
 ]
 
@@ -126,13 +129,18 @@ const HTML_SITES = [
  *
  * `strictCspWithNonce` is a call, not a constant — the same value `isCspValue`
  * already accepts for this site's stamp.
+ *
+ * An ARRAY means "this site serves more than one HTML path, and the EXACT set of
+ * policies its stamps must name is this one" — one policy per path, no more and
+ * no fewer. `_middleware.ts` is the only such site: `/` renders the marketing
+ * document, the refusal renders a page that must make no outbound request at all.
  */
 const HTML_SITE_POLICY = {
   'website/apps/dashboard/functions/auth/index.ts': 'RELAXED_CSP',
   'website/apps/dashboard/functions/welcome.ts': 'RELAXED_CSP',
   'website/apps/dashboard/functions/auth/confirm.ts': 'strictCspWithNonce',
   'website/apps/dashboard/functions/admin/[[path]].ts': 'ADMIN_CSP',
-  'website/functions/_middleware.ts': 'RELAXED_CSP',
+  'website/functions/_middleware.ts': ['RELAXED_CSP', 'STRAY_RETURN_CSP'],
   'website/functions/blog/_lib.ts': 'RELAXED_CSP',
 }
 
@@ -239,6 +247,38 @@ const CSP_CONSTANTS = new Set(['RELAXED_CSP', 'STRICT_CSP', 'ADMIN_CSP'])
 
 /** Every name a policy binding may carry (the constants plus the nonce factory). */
 const POLICY_NAMES = new Set([...CSP_CONSTANTS, 'strictCspWithNonce'])
+
+/**
+ * The ONE locally-declared policy constant the guard accepts, per site, and why it
+ * is deliberately NOT in `CSP_CONSTANTS`.
+ *
+ * `website/functions/_middleware.ts` serves two HTML responses: the root marketing
+ * document (`RELAXED_CSP`, audited above) and the stray authorization-response
+ * refusal (#10088 ask 3), which arrives CARRYING an authorization code and must
+ * therefore make NO outbound request at all — not even the analytics/beacon origins
+ * `RELAXED_CSP` deliberately allows (see the exception recorded in
+ * `website/functions/_shared/security-headers.ts`). That policy is declared locally
+ * rather than in the shared module because it is not one of the audited marketing
+ * policies: adding it there would put a beacon-less policy into the set §3/§4
+ * iterate and invite exactly the "unify them" edit that would relax a page holding
+ * a credential.
+ *
+ * Accepting the NAME is scoped to the declaring file: in every other file an
+ * identifier outside `CSP_CONSTANTS` still records as `(Identifier)` and fails the
+ * entitlement check, so this cannot become a general escape hatch. The VALUE is
+ * checked separately (`test('the credential-refusal policy is a no-outbound policy…')`)
+ * — otherwise a later edit could keep the name and swap in a relaxed value with
+ * every assertion green, which is the exact regression this file exists to stop.
+ */
+const STRICT_LOCAL_POLICY = {
+  'website/functions/_middleware.ts': 'STRAY_RETURN_CSP',
+}
+
+/** The local policy names `relPath` may stamp, or null when it may stamp none. */
+function localPolicyNames(relPath) {
+  const name = STRICT_LOCAL_POLICY[relPath]
+  return name ? new Set([name]) : null
+}
 
 // ── the beacon allowances, shared by §3 (served interstitial) and §4b ────────
 //
@@ -390,9 +430,11 @@ function policyProblems(name, value) {
   return wrong
 }
 
-function isCspValue(node) {
+function isCspValue(node, extraNames = null) {
   if (!node) return false
-  if (node.type === 'Identifier') return CSP_CONSTANTS.has(node.name)
+  if (node.type === 'Identifier') {
+    return CSP_CONSTANTS.has(node.name) || Boolean(extraNames?.has(node.name))
+  }
   if (node.type === 'CallExpression' && node.callee?.type === 'Identifier') {
     return node.callee.name === 'strictCspWithNonce'
   }
@@ -556,7 +598,7 @@ function functionNodes(ast) {
  * a concat, a computed key) counts as an UNATTRIBUTABLE stamp — fail-closed, and
  * the surplus above the expected count names the file.
  */
-function countStamps(ast) {
+function countStamps(ast, extraNames = null) {
   let count = 0
   visitNodes(ast.program, (node) => {
     // The same header-name reading as `stampConstants`: case-insensitive, and a
@@ -569,20 +611,20 @@ function countStamps(ast) {
     // policy went uncounted), so the shapes are pinned by the reader test below.
     if (node.type === 'ObjectProperty') {
       const name = cspHeaderName(node.key)
-      if (name === 'content-security-policy' && isCspValue(node.value)) count += 1
+      if (name === 'content-security-policy' && isCspValue(node.value, extraNames)) count += 1
       else if (node.computed && name === null) count += 1
       return
     }
     const method = headerCallMethod(node)
     if (method === 'set' || method === 'append') {
       const name = cspHeaderName(node.arguments?.[0])
-      if (name === 'content-security-policy' && isCspValue(node.arguments?.[1])) count += 1
+      if (name === 'content-security-policy' && isCspValue(node.arguments?.[1], extraNames)) count += 1
       else if (name === null) count += 1
     }
     // A third stamp shape: `h["Content-Security-Policy"] = CONST`.
     if (node.type === 'AssignmentExpression' && node.left?.type === 'MemberExpression') {
       const name = cspHeaderName(node.left.property)
-      if (name === 'content-security-policy' && isCspValue(node.right)) count += 1
+      if (name === 'content-security-policy' && isCspValue(node.right, extraNames)) count += 1
       else if (name === null && node.left.computed) count += 1
     }
     // A FOURTH stamp shape: a pair in an array-of-pairs `HeadersInit` —
@@ -605,7 +647,7 @@ function countStamps(ast) {
     if (node.type === 'ArrayExpression' && node.elements?.length === 2) {
       if (
         cspHeaderName(node.elements[0]) === 'content-security-policy' &&
-        isCspValue(node.elements[1])
+        isCspValue(node.elements[1], extraNames)
       ) {
         count += 1
       }
@@ -615,7 +657,10 @@ function countStamps(ast) {
 }
 
 function stampCount(relPath) {
-  return countStamps(parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath))
+  return countStamps(
+    parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath),
+    localPolicyNames(relPath),
+  )
 }
 
 /**
@@ -720,10 +765,10 @@ function badPolicyBindings(relPath) {
  * `HTML_SITE_POLICY`). Same AST shapes as `stampCount`, so the two cannot
  * disagree about what a stamp is.
  */
-function stampNames(ast) {
+function stampNames(ast, extraNames = null) {
   const names = []
   const record = (node) => {
-    if (!isCspValue(node)) {
+    if (!isCspValue(node, extraNames)) {
       // A stamp whose value is NOT a policy binding — a string literal, a member
       // expression, an unmodelled call — is invisible to every name-based check,
       // and a browser INTERSECTS two CSP headers, so a beacon-less literal added
@@ -784,7 +829,10 @@ function stampNames(ast) {
 }
 
 function stampConstants(relPath) {
-  return stampNames(parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath))
+  return stampNames(
+    parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath),
+    localPolicyNames(relPath),
+  )
 }
 
 /**
@@ -801,6 +849,77 @@ function stampConstants(relPath) {
  */
 function attributableStamps(relPath) {
   return stampConstants(relPath).filter((name) => name !== '(unreadable header name)')
+}
+
+/**
+ * The string VALUE of an expression built only from string literals: `"a" + "b"`,
+ * a template with no substitutions, or either nested. Anything else is null — an
+ * interpolated or computed policy is not readable, and the caller fails closed on
+ * it rather than assuming the shape it cannot see.
+ */
+function stringValueOf(node) {
+  if (!node) return null
+  if (node.type === 'StringLiteral') return String(node.value)
+  if (node.type === 'TemplateLiteral' && (node.expressions ?? []).length === 0) {
+    return node.quasis.map((q) => q.value.cooked ?? q.value.raw).join('')
+  }
+  if (node.type === 'BinaryExpression' && node.operator === '+') {
+    const left = stringValueOf(node.left)
+    const right = stringValueOf(node.right)
+    return left === null || right === null ? null : left + right
+  }
+  return null
+}
+
+/** Every declaration of `name` in `relPath`, as resolved strings (null = unreadable). */
+function localPolicyValue(relPath, name) {
+  const ast = parseSource(readFileSync(join(repoRoot, relPath), 'utf8'), relPath)
+  const values = []
+  visitNodes(ast.program, (node) => {
+    if (
+      node.type === 'VariableDeclarator' &&
+      node.id?.type === 'Identifier' &&
+      node.id.name === name
+    ) {
+      values.push(stringValueOf(node.init))
+    }
+  })
+  return values
+}
+
+/**
+ * What is wrong with a CREDENTIAL-REFUSAL policy, or [] when it is the shape it
+ * claims. This is the half that keeps `STRICT_LOCAL_POLICY` from being a hole: the
+ * guard accepts that NAME for one file, so a later edit could keep the name and
+ * swap in anything — including a copy of `RELAXED_CSP` — with the entitlement
+ * check still green. The page arrives carrying an authorization code, so the bar
+ * is "no outbound request of any kind": `default-src 'none'`, no http(s) origin,
+ * no wildcard, nothing embeddable, and not even the beacon the audited policies
+ * allow by design.
+ */
+function refusalPolicyProblems(policy) {
+  if (typeof policy !== 'string') {
+    return ['the policy is not a plain string constant this scan can read (fail closed)']
+  }
+  const lower = policy.toLowerCase()
+  const problems = []
+  if (!/(^|;)\s*default-src\s+'none'/.test(lower)) problems.push("no `default-src 'none'`")
+  const origins = lower.match(/https?:\/\//g) ?? []
+  if (origins.length) {
+    problems.push(
+      `carries ${origins.length} http(s) origin(s) — a page that arrives with an ` +
+        'authorization code must make NO outbound request, the analytics/beacon ' +
+        'origins included',
+    )
+  }
+  if (lower.includes('*')) problems.push('carries a wildcard token')
+  if (!/(^|;)\s*base-uri\s+'none'/.test(lower)) problems.push("no `base-uri 'none'`")
+  if (!/(^|;)\s*frame-ancestors\s+'none'/.test(lower)) problems.push("no `frame-ancestors 'none'`")
+  const script = /(^|;)\s*script-src([^;]*)/.exec(lower)
+  if (script && !/^\s*'none'\s*$/.test(script[2])) {
+    problems.push("a `script-src` directive that is not 'none' (`default-src 'none'` must govern)")
+  }
+  return problems
 }
 
 /**
@@ -1831,9 +1950,12 @@ test('each HTML-producing site stamps the policy constant its surface is entitle
   )
   const wrong = []
   for (const [rel, expected] of Object.entries(HTML_SITE_POLICY)) {
+    // A site may be entitled to MORE than one policy — one per HTML path — so the
+    // assertion is SET equality: an extra stamp reds exactly as a missing one does.
+    const entitled = Array.isArray(expected) ? expected : [expected]
     const found = new Set(stampConstants(rel))
-    if (found.size !== 1 || !found.has(expected)) {
-      wrong.push(`${rel}: expected ${expected}, found ${[...found].join(', ') || '(none)'}`)
+    if (found.size !== entitled.length || entitled.some((name) => !found.has(name))) {
+      wrong.push(`${rel}: expected ${entitled.join(' + ')}, found ${[...found].join(', ') || '(none)'}`)
     }
     const shadowed = badPolicyBindings(rel)
     if (shadowed.length) {
@@ -1848,6 +1970,63 @@ test('each HTML-producing site stamps the policy constant its surface is entitle
     [],
     'an HTML site stamps a policy other than the one its surface requires — a ' +
       'lower-tier policy (e.g. RELAXED_CSP for the ADMIN_CSP console) silently weakens it',
+  )
+})
+
+test('the credential-refusal policy is a no-outbound policy, not a relaxed one under a stricter name', () => {
+  // `STRICT_LOCAL_POLICY` lets one file stamp ONE identifier the audited set does
+  // not contain, because the refusal page (#10088 ask 3) must be served with no
+  // outbound allowance at all. That scoping is only safe if the VALUE behind the
+  // name is pinned too: otherwise "STRAY_RETURN_CSP" could hold a copy of
+  // `RELAXED_CSP` (beacon origins included) and the entitlement test above would
+  // stay green while the page holding a credential loads third-party scripts.
+  for (const [rel, name] of Object.entries(STRICT_LOCAL_POLICY)) {
+    const values = localPolicyValue(rel, name)
+    assert.equal(
+      values.length,
+      1,
+      `${rel}: expected exactly one \`${name}\` declaration, found ${values.length} — ` +
+        'the policy must be a single readable constant, not a computed or inlined value',
+    )
+    assert.deepEqual(
+      refusalPolicyProblems(values[0]),
+      [],
+      `${rel}: \`${name}\` is not the credential-refusal shape it claims to be`,
+    )
+  }
+
+  // ⛔ NON-VACUITY, on the same function the assertion above uses. A name-only
+  // check would pass every one of these; the point is that it does not.
+  const widenedValue = [
+    "default-src 'none'",
+    "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+  ].join('; ')
+  assert.notDeepEqual(
+    refusalPolicyProblems(widenedValue),
+    [],
+    'a refusal policy granting a script origin (the beacon) was accepted — the page ' +
+      'arrives with an authorization code and must make no outbound request',
+  )
+  assert.notDeepEqual(
+    refusalPolicyProblems("default-src 'self'; base-uri 'none'; frame-ancestors 'none'"),
+    [],
+    "a refusal policy whose default-src is not 'none' was accepted",
+  )
+  assert.notDeepEqual(
+    refusalPolicyProblems("default-src 'none'; img-src *; base-uri 'none'; frame-ancestors 'none'"),
+    [],
+    'a refusal policy carrying a wildcard was accepted',
+  )
+  assert.notDeepEqual(refusalPolicyProblems(null), [], 'an unreadable policy was accepted (must fail closed)')
+  // …and the real shape passes, so the four failures above are not the function
+  // rejecting everything.
+  assert.deepEqual(
+    refusalPolicyProblems(
+      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    ),
+    [],
   )
 })
 

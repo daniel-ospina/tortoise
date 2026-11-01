@@ -34,6 +34,116 @@ import { RELAXED_CSP } from "./_shared/security-headers.ts";
 
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
+// ── A stray OAuth authorization response must be REFUSED, not rendered (#10088 ask 3) ──
+//
+// The measured failure (issue #10088, D2): GoTrue did not honour `redirect_to`,
+// substituted the project **Site URL**, and delivered a LIVE authorization code
+// to a marketing page —
+//
+//     https://tortoise.premiselabs.co/?code=50605f24-15a1-40f0-8e86-f3722cccce13#
+//
+// — which rendered normally, ignored the parameter and silently discarded the
+// code. The user saw a product page and the connector was never connected; the
+// code was burned, so their natural "try again" cost a fresh authorize request
+// and looked like a flaky connector. Supabase documents HALF the mechanism —
+// "The Site URL in URL Configuration defines the default redirect URL when no
+// `redirectTo` is specified in the code" (docs/guides/auth/redirect-urls) — and
+// the other half ("or `redirectTo` was not accepted") is not in that page: it is
+// THIS project's own measurement, that a VALID code arriving on the Site URL is
+// GoTrue's allow-list-rejection signature (issue #10088, 2026-10-26
+// re-measurement). RFC 9700 puts the obligation on the receiving side: verify
+// the response arrived at the EXPECTED redirect URI and ABORT the flow on a
+// mismatch.
+//
+// This project serves no OAuth callback on ANY path — the callback moved to the
+// app origin (#4054), which is exactly why the `/auth/*` surface 302s there —
+// so a `code` arriving here is always misdirected. The refusal is therefore keyed
+// to the PARAMETER, not to a path, and it fires before any asset is fetched: a
+// page that renders and discards the credential is the defect, and a page that
+// renders AROUND the refusal is the same defect with nicer words.
+//
+// What the refusal deliberately does NOT do:
+//   * no Location — forwarding a code the AS never issued for that origin only
+//     moves the misdirection (and the wrong-origin `/auth/callback` case is a
+//     recorded, pinned 302 whose cleanup is the OPEN audit #8680, not this lane);
+//   * no echo of `code`/`error_description` — a credential in a URL leaks via
+//     browser history, `Referer`, CDN logs and analytics, and OAuth error text
+//     is attacker-influenced; hence `Referrer-Policy: no-referrer` and a CSP
+//     that permits no third-party resource at all;
+//   * no cacheability — `no-store`, or a cached refusal would be served to the
+//     next ordinary visitor of the page it refuses.
+//
+// `code_challenge` (a PKCE verifier HASH, present on ordinary authorize links)
+// and a bare `error` (which a marketing link may legitimately carry) are NOT the
+// authorization-response shape and deliberately fall through — an over-block
+// here would fail closed on a real visitor.
+//
+// ⛔ `code` ONLY — GoTrue's ERROR shape (`error` + `error_description` /
+// `error_code`) is deliberately NOT refused, and that is a recorded behaviour,
+// not an oversight. `website/product.html:349-355` documents it and its handler
+// at `:510-535` renders the #1224 banner on exactly this URL:
+//
+//     <!-- OAuth error banner (#1224): Supabase redirects here with
+//          ?error=...&error_code=bad_oauth_state when the OAuth state TTL
+//          expired mid-login — surface it instead of failing silently. -->
+//
+// That shape carries NO credential, so refusing it protects nothing, and it
+// would retire the banner: an expired dashboard-login state would be answered
+// with this page's connector instructions ("start again from your MCP client …
+// ChatGPT: Settings → Connectors"), which are wrong for a plain login and whose
+// retry path leads to the connector, not back to the sign-in. Ask 3 is about a
+// stray `code`; the error shape already did what the ask wants ("surface it
+// instead of failing silently"), so it keeps doing it.
+const STRAY_RETURN_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; " +
+  "form-action 'none'; frame-ancestors 'none'";
+
+// `code` ONLY — see the header block above for why GoTrue's `error` shape is
+// left to `website/product.html`'s #1224 banner. `has()` is an exact-key match,
+// so `code_challenge` cannot be mistaken for `code`.
+function isStrayAuthorizationCode(url: URL): boolean {
+  return url.searchParams.has("code");
+}
+
+function strayReturnRefusal(): Response {
+  // Self-contained: no external stylesheet, no font, no script. The page must
+  // not make a single outbound request while a credential is in its URL.
+  const body = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>This sign-in did not return to the connector</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#0b0b0d;color:#f2f2f4;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:34rem;padding:2.5rem 1.5rem}
+h1{font-size:1.35rem;line-height:1.3;margin:0 0 1rem}
+p{margin:0 0 1rem;color:#c9c9d1}
+a{color:#8ab4ff}
+</style></head><body><main>
+<h1>This sign-in did not return to the connector</h1>
+<p>Your browser arrived here with a one-time sign-in code, but this page is not
+the one that code belongs to, so it cannot be completed here. Nothing was
+connected, and the code has now expired.</p>
+<p><strong>To finish connecting, start again from your MCP client</strong> (for example
+ChatGPT: <em>Settings &rarr; Connectors &rarr; Connect another account</em>) and complete the
+sign-in in the window it opens.</p>
+<p>If it keeps happening, please <a href="/contact">tell us</a> — quote the time you
+tried, not the code.</p>
+<p><a href="/">Continue to the site</a></p>
+</main></body></html>`;
+  return new Response(body, {
+    status: 400,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy": STRAY_RETURN_CSP,
+      ...HSTS,
+    },
+  });
+}
+
 export const onRequest: PagesFunction = async (context) => {
   const url = new URL(context.request.url);
   const host = context.request.headers.get("host") || "";
@@ -112,6 +222,66 @@ export const onRequest: PagesFunction = async (context) => {
     "/signin", "/signin.html",
   ]);
   const COMPANY_HOSTS = new Set(["premiselabs.co"]);
+  // Trailing-slash-stripped pathname, the form every path set below is keyed on.
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+
+  // ── A stray OAuth authorization response is REFUSED before ANY branch runs ──
+  // It sits ABOVE the host-consolidation block because THAT block is a
+  // forwarding branch: it returns 301s that PRESERVE the query string
+  // (`+ url.search`), so a code on `premiselabs.co/docs`, `/faq`, `/signin` or
+  // `/blog/*` was carried in a `Location` to the tortoise host and only refused
+  // after that extra hop — one more URL, one more CDN log line, one more browser
+  // history entry containing the credential, for no gain. The refusal is keyed
+  // to the PARAMETER, so it belongs ahead of every branch that can put the code
+  // in a `Location`, not merely ahead of the branches that render.
+  //
+  // EXEMPT — the surfaces where a `code` is forwarded rather than refused. The
+  // reason is NOT "the origin can redeem it" (PR #10514 review, finding 2: that
+  // premise is false for five of the six shapes, and the backstop's own comment
+  // down this file says so — the app's `signup.html` reads `next`/`mode`/
+  // `error`, `invite-accept.html` reads `token`, `welcome.html` and `/admin`
+  // read nothing, and `/auth` hands off to an app page that redeems nothing
+  // either). The reason is that these redirects are PINNED DECISIONS, and
+  // refusing a code on one of them would replace a decided redirect with a 400:
+  //   * the auth surface — `/auth` (+`.html`) and the `/auth/*` BFF subtree
+  //     (#4054/#4346). This is the ONE shape that redeems a code today:
+  //     `/auth/callback` really does exchange it (its wrong-origin allow-list
+  //     entry is the OPEN audit #8680, not this lane's);
+  //   * `/admin`, the operator console on the session origin (#4171/#4409);
+  //   * the APP_ONLY pages, which the company-host block 301s to that same app
+  //     origin (`/signup`, `/welcome`, `/invite-accept`, #4054). A refusal here
+  //     would break the signup funnel, the operator console, or turn a stale
+  //     bookmark / pre-cutover email link into the dead end #4328 rejects.
+  // Everything else in this project can only RENDER a page, so a code on it is
+  // un-redeemable and is refused here. The guard below (after the 30x branches)
+  // stays as the backstop for anything exempt-shape that still reaches it.
+  //
+  // ⚠ Because this exemption sits IN FRONT of the primary guard, these shapes
+  // still construct a `Location` that carries the code. That is the one exception
+  // to the "no `Location`" framing in the header above, it is deliberate (the
+  // pinned redirect wins), and the PR's Residual list records it — split in TWO,
+  // because the two classes are NOT the same shape and the earlier one-line
+  // version of this note under-reported the second (PR #10514 review, finding 4):
+  //   * `APP_ONLY` (`/signup`, `/welcome`, `/invite-accept`) — HOST-SPLIT: the
+  //     company host 301s to the app origin carrying the code
+  //     (`premiselabs.co/signup?code=…` → `app.premiselabs.co/signup?code=…`); on
+  //     `tortoise.*`/previews there is no middleware branch, so the request falls
+  //     to the BACKSTOP below and is refused 400;
+  //   * `/auth`, `/auth.html` (301), `/auth/*` (302) and `/admin`, `/admin/*`
+  //     (302) — HOST-INDEPENDENT: those branches run on every host, so their
+  //     `Location` carries the code on `premiselabs.co`, on `tortoise.*` and on a
+  //     `*.pages.dev` preview alike. Measured on all three hosts.
+  // Do NOT "complete" the guard by refusing these — that reverses #4054/#4171/
+  // #4409 with nothing in the change saying so.
+  const forwardsCredential =
+    APP_ONLY.has(path) ||
+    url.pathname.startsWith("/auth/") ||
+    url.pathname === "/admin" ||
+    url.pathname === "/admin/" ||
+    url.pathname.startsWith("/admin/");
+  if (!forwardsCredential && isStrayAuthorizationCode(url)) {
+    return strayReturnRefusal();
+  }
 
   // Blog prefix rule (#1796): /blog and /blog/<anything> (incl. trailing
   // slash) are tortoise-host-only — 301 to the canonical host. Exact prefix
@@ -127,7 +297,6 @@ export const onRequest: PagesFunction = async (context) => {
   // Host-header hygiene: strip port + trailing dot before matching.
   const hostKey = host.replace(/:\d+$/, "").replace(/\.$/, "");
   if (COMPANY_HOSTS.has(hostKey)) {
-    const path = url.pathname.replace(/\/+$/, "") || "/";
     if (isBlogPath) {
       // path already has trailing slashes stripped (replace above) → /blog/ → /blog
       const target = "https://tortoise.premiselabs.co" + path + url.search;
@@ -259,6 +428,19 @@ export const onRequest: PagesFunction = async (context) => {
       status: 302,
       headers: { Location: APP_ORIGIN + "/admin" + url.search, ...HSTS },
     });
+  }
+
+  // ── Backstop for the same refusal (the primary guard is above the host block) ──
+  // The primary guard refused every non-exempt path before any branch ran, so a
+  // code reaches HERE only on an exempt surface that did NOT return above — today
+  // that is an `APP_ONLY` page on a host the consolidation block does not handle
+  // (`/signup?code=…` on the tortoise host, which `_redirects` sends to the app's
+  // sign-up page and which cannot redeem a code either). Keeping the check here
+  // means a future branch added above it cannot silently turn the refusal into a
+  // render: the property "no page of this project renders around a stray code"
+  // does not depend on the ordering being re-derived.
+  if (isStrayAuthorizationCode(url)) {
+    return strayReturnRefusal();
   }
 
   // On the tortoise host, the raw /product, /product.html and /index.html

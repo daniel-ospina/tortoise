@@ -31,7 +31,15 @@
 
 const csp = (...directives: string[]): string => directives.join("; ");
 
-/** Static assets (`website/_headers` `/*`) and every Function-rendered HTML page. */
+/** Static assets (`website/_headers` `/*`) and every Function-rendered HTML page.
+ *
+ * ⛔ One DELIBERATE exception: the stray-return refusal page in
+ * `website/functions/_middleware.ts` (#10088 ask 3) is served with its own
+ * `default-src 'none'` policy (`STRAY_RETURN_CSP`) instead of this one. It arrives
+ * carrying an authorization code, so it must make no outbound request at all —
+ * including the analytics/beacon origins this policy deliberately allows. Do not
+ * "unify" them: relaxing that page is the leak the policy exists to prevent.
+ */
 export const RELAXED_CSP = csp(
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com https://cdnjs.cloudflare.com https://us-assets.i.posthog.com https://www.googletagmanager.com https://connect.facebook.net https://challenges.cloudflare.com https://static.ads-twitter.com",
