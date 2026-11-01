@@ -537,7 +537,7 @@ def test_an_atomic_disclosure_does_not_cover_a_later_in_place_edit(tmp_path, mon
     _git(repo, "add", str(log.relative_to(repo)))
     _git(repo, "commit", "-q", "-m", "rewrite the number", epoch=1_700_086_400)
     failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
-    assert any("MODIFIED at" in f for f in failures), failures
+    assert any("not an ancestor of" in f for f in failures), failures
 
 
 def test_a_valid_json_non_object_record_is_a_parse_error_not_a_traceback(tmp_path):
@@ -549,6 +549,24 @@ def test_a_valid_json_non_object_record_is_a_parse_error_not_a_traceback(tmp_pat
         (bundle / check.MACHINE_RECORD).write_text(body)
         with pytest.raises(check.CheckError):
             check.check_machine_record(bundle, {})
+
+
+def test_a_backdated_edit_does_not_beat_the_touch_bound(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-9 P1): the touch bound must be TOPOLOGY, not `%ct`.
+
+    The cycle-8 bound compared `max(_touch_epochs(log)) > prereg_epoch` — a `%ct` comparison in a
+    module whose own cycle-5 finding says `%ct` is attacker-controlled. The forward-dated rewrite was
+    caught; the BACKDATED one passed green. Whether a touching commit is behind the registration is
+    a fact about the graph.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo, epoch=1_700_000_000)
+    log.write_text("x\nthe number is now 0.100\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    # BACKDATED: a committer date far EARLIER than the registration's.
+    _git(repo, "commit", "-q", "-m", "rewrite, backdated", epoch=1_600_000_000)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("not an ancestor of" in f for f in failures), failures
 
 
 def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
@@ -979,7 +997,7 @@ def test_an_exempted_log_edited_after_the_registration_fails(tmp_path, monkeypat
     _git(repo, "commit", "-q", "-m", "rewrite the log", epoch=1_700_000_200)
 
     failures = check.check_ordering(prereg, [log], _exempt())
-    assert failures and "MODIFIED at" in failures[0], failures
+    assert failures and "not an ancestor of" in failures[0], failures
 
 
 @pytest.mark.parametrize("old,new,bad", [
@@ -1513,16 +1531,18 @@ def test_the_touch_history_sees_a_merge_commit(tmp_path, monkeypatch):
     """
     repo = _repo(tmp_path, monkeypatch)
     log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000)
-    # A side branch edits the log, then main merges it with --no-ff.
+    # The registration lands FIRST, then a side branch edits the log and main merges it --no-ff.
+    # The bound is TOPOLOGY now (#10531 cycle-9), so the late commit must be a descendant of the
+    # registration: an edit that is an ANCESTOR of it was visible to its author and is not a defect.
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     _git(repo, "checkout", "-q", "-b", "side")
     log.write_text(UNSCORED_LOG.replace("after_share=0.6", "after_share=0.25"))
     _git(repo, "add", str(log.relative_to(repo)))
     _git(repo, "commit", "-q", "-m", "side edit", epoch=1_700_000_050)
     _git(repo, "checkout", "-q", "-")
     _git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side", epoch=1_700_000_200)
-    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log], _exempt())
-    assert failures and "MODIFIED at" in failures[0], failures
+    assert failures and "not an ancestor of" in failures[0], failures
 
 
 # ── round-5: shallow CI, glued markers, unreadable status, wrong-typed inputs ──

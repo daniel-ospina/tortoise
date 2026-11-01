@@ -704,6 +704,53 @@ def _touch_epochs(path: Path) -> list[int]:
     return sorted(int(x) for x in out.stdout.split() if x.strip().isdigit())
 
 
+def _touch_commits(path: Path) -> list[str]:
+    """Every commit sha that TOUCHED ``path`` (``--full-history``, so a merge on a side branch counts).
+
+    ⛔ TOPOLOGY, NOT DATES (#10531 review cycle 9, P1). `_touch_epochs` answers the same question in
+    ``%ct``, and ``%ct`` is attacker-controlled (``GIT_COMMITTER_DATE``) — the lesson this module
+    already learned for the ADD-commit in cycle 5. A number rewritten in a commit whose dates were
+    set to look EARLIER than the registration defeated the epoch bound and passed green. Whether a
+    touching commit is *behind* the registration is a fact about the graph, not about a clock.
+    """
+    try:
+        rel = path.resolve().relative_to(REPO_ROOT)
+    except ValueError:
+        return []
+    try:
+        out = subprocess.run(
+            ["git", "log", "--full-history", "--format=%H", "--", str(rel)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError:  # pragma: no cover - git absent
+        return []
+    if out.returncode != 0:
+        return []
+    return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+
+def _late_touches(path: Path, prereg_sha: str) -> list[str]:
+    """Commit shas that touched ``path`` and are NOT ancestors of the registration's add-commit.
+
+    An EMPTY list means every change to the file is contained in the registration's own history, so
+    the file's content cannot postdate the thresholds. Any non-empty entry is a change the
+    registration could not have seen — the laundering shape, whatever the commit's dates say.
+    """
+    return [sha for sha in _touch_commits(path) if not _is_ancestor(sha, prereg_sha)]
+
+
+def _atomic_detail_entry(block: dict) -> dict:
+    """The printed detail for ONE disclosed log — one construction, so the arms cannot drift.
+
+    Duplicating this literal is what produced the "header with zero commit lines" defect twice
+    (#10531 review cycles 6 and 9).
+    """
+    return {
+        "squash_merge": str(block.get("squash_merge") or ""),
+        "branch_commits": [str(c) for c in block.get("branch_commits") or []],
+    }
+
+
 def _mapping(container: dict, key: str, where: str) -> dict:
     """A sub-block as a mapping, or a CheckError — never a bare ``dict()``/``.get()`` crash.
 
@@ -1159,14 +1206,23 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     "exemption needs its CONTENT to predate the registration, not just its add"
                 )
                 continue
-            latest = max(touches)
-            if latest >= prereg_epoch:
+            # ⛔ ANCESTRY, NOT THE EPOCH (#10531 review cycle 9, P2). `latest >= prereg_epoch` was
+            # BOTH bypassable (a backdated edit) AND permanently unsatisfiable for an exempt log
+            # whose add-commit IS the registration's — the squash shape this PR exists for, with no
+            # exit short of rewriting history. Whether a touching commit is BEHIND the registration
+            # is topology.
+            late = _late_touches(log, prereg_sha)
+            if late:
                 failures.append(
-                    f"{log.name}: exempted, but it was MODIFIED at {latest}, which is not "
-                    f"strictly before the pre-registration's add-commit {prereg_epoch} — an "
-                    "in-place edit can put a measurement number into a grandfathered log after "
-                    "the thresholds were written, and the add-commit cannot see that"
+                    f"{log.name}: exempted, but commit {late[0][:9]} changed it and is not an "
+                    f"ancestor of the pre-registration's add-commit {prereg_sha[:9]} — an "
+                    "in-place edit can put a measurement number into a grandfathered log after the "
+                    "thresholds were written, and the add-commit cannot see that"
                 )
+                # ⛔ And then LEAVE (#10531 review cycle 9, P2): every other failure path in this
+                # function continues, and this one did not, so a waiver the arm had just DENIED was
+                # still reported as a granted declaration.
+                continue
             # ⛔ Record the atomic state before this `continue` (#10531 review cycle 4, P2): an
             # exempt log that IS atomic and carries a disclosure reached the anti-rot loop and was
             # told "but it is not one" — the cycle-3 defect class resurfacing through this arm.
@@ -1177,11 +1233,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     atomic_added.append(log.name)
                 if (atomic_detail is not None and log.name in atomic
                         and log.name not in disclosure_failed):
-                    block = atomic[log.name]
-                    atomic_detail[log.name] = {
-                        "squash_merge": str(block.get("squash_merge") or ""),
-                        "branch_commits": [str(c) for c in block.get("branch_commits") or []],
-                    }
+                    atomic_detail[log.name] = _atomic_detail_entry(atomic[log.name])
             continue
         # ⛔ ATOMIC IS IDENTICAL-SHA, NOT EQUAL-EPOCH (#10531 review cycle 4, P1). Two DISTINCT
         # commits can share a second, and git orders those by ancestry — so an `==` epoch test would
@@ -1280,13 +1332,18 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             # `document_sha256` covers only the registration, nothing pins the log's bytes. That is
             # a NEW silent-green path, which is the one thing this change may never add. The
             # disclosure can only cover the content that entered WITH the registration.
-            touches = _touch_epochs(log)
-            if touches and max(touches) > prereg_epoch:
+            # ⛔ TOPOLOGY, NOT THE DATE (#10531 review cycle 9, P1). The first version of this bound
+            # compared `max(_touch_epochs(log))` with `prereg_epoch` — a `%ct` comparison in a
+            # module whose own cycle-5 finding says `%ct` is attacker-controlled. The rewrite the
+            # forward-dated test killed passed green when BACKDATED. Whether a touching commit is
+            # behind the registration is a fact about the graph.
+            late = _late_touches(log, prereg_sha)
+            if late:
                 failures.append(
-                    f"{log.name}: the pair is atomic, but the log was MODIFIED at {max(touches)}, "
-                    f"after the pre-registration's add-commit {prereg_epoch} — the disclosure can "
-                    "only cover the content that entered with the registration, and an in-place "
-                    "edit can move a number after the thresholds were written"
+                    f"{log.name}: the pair is atomic, but commit {late[0][:9]} changed it and is "
+                    f"not an ancestor of {PREREG_NAME}'s add-commit {prereg_sha[:9]} — the "
+                    "disclosure can only cover the content that entered with the registration, and "
+                    "an in-place edit can move a number after the thresholds were written"
                 )
                 continue
             # ⛔ The STATE is derived HERE, never read back from the caller's out-param (#10531
@@ -1298,11 +1355,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             if atomic_added is not None:
                 atomic_added.append(log.name)
             if atomic_detail is not None:
-                block = atomic[log.name]
-                atomic_detail[log.name] = {
-                    "squash_merge": str(block.get("squash_merge") or ""),
-                    "branch_commits": [str(c) for c in block.get("branch_commits") or []],
-                }
+                atomic_detail[log.name] = _atomic_detail_entry(atomic[log.name])
             continue
         if log_epoch <= prereg_epoch:
             # THE ATTACK, and the conservative catch-all. Untouched and undeclarable (#10531).
