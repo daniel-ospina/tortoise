@@ -222,6 +222,19 @@ STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 #: registered, so the set follows the writer's constant and the gate derives the same one.
 DERIVED_LABELS = ("Point", *sorted(_derivation_label_classes()))
 
+#: The node classes the CENSUS enumerates per label — ⛔ NOT the E3 row selector above.
+#: ``per_label`` is the census's per-class node/anchor block, and a SECOND instrument reads it:
+#: ``tools/s3_prior_ablation.py``'s ``created_counts`` takes ``per_label["Object"]["nodes"]`` as
+#: the ``objects`` numerator of ``extraction_nodes = claims + objects + events`` (#10463/#10468),
+#: on live data, three times per run. Enumerating ``per_label`` with ``DERIVED_LABELS`` made that
+#: key VANISH when #9736 narrowed E3 to the anchored classes — so every future ablation run would
+#: print ``objects=0`` while the graph held Objects, silently recomputing #10463's published ratio
+#: on a narrower definition than its committed log was measured with, with no error and no refusal
+#: (#10525 review P1, the silent-zero shape). The census's set is therefore its OWN: E3's classes
+#: UNION the mention class E3 deliberately excludes, so a change to the E3 row can never re-narrow
+#: an instrument that is not about E3.
+CENSUS_LABELS = tuple(sorted(set(DERIVED_LABELS) | {"Object"}))
+
 #: The relationship type that points FROM a derived node at its source. The
 #: anchor is a property of that DERIVATION LINK, so the derived node is its
 #: START: ``(Point)-[:extractedFrom]->(GraphEvent|Event)``.
@@ -1521,7 +1534,7 @@ def census(uri: str) -> dict:
     ).result_set}
 
     per_label: dict[str, dict[str, int]] = {}
-    for label in DERIVED_LABELS:
+    for label in CENSUS_LABELS:
         # Per-label queries rather than one grouped query: `labels(n)[0]` would
         # group a multi-labelled node under the wrong key, and the denominator is
         # exactly the thing this census may not get subtly wrong.
@@ -1569,6 +1582,13 @@ def census(uri: str) -> dict:
         relationship_counts[str(name)] = int(count)
         relationship_anchored[str(name)] = int(anchored)
 
+    # E3's totals are summed over the E3 ROW's classes ONLY. ``per_label`` is the wider,
+    # instrument-wide census (it carries ``:Object`` for ``s3_prior_ablation``), so summing
+    # every block here would put the mention class straight back into E3's denominator and
+    # report ``148/433`` beside a registration that names ``148/383`` — the exact defect
+    # #9736 exists to remove, reintroduced from the other side.
+    e3_blocks = [per_label[label] for label in DERIVED_LABELS if label in per_label]
+
     event_stamped = projection.g.query(
         "MATCH (n:Point) WHERE n.eventId IS NOT NULL RETURN count(*)").result_set
 
@@ -1580,8 +1600,8 @@ def census(uri: str) -> dict:
         "label_counts": label_counts,
         "per_label": per_label,
         "point_composition": composition,
-        "derived_total": sum(block["nodes"] for block in per_label.values()),
-        "anchored_total": sum(block["anchored"] for block in per_label.values()),
+        "derived_total": sum(block["nodes"] for block in e3_blocks),
+        "anchored_total": sum(block["anchored"] for block in e3_blocks),
         "points": int(label_counts.get("Point", 0)),
         "graph_events": int(label_counts.get("GraphEvent", 0)),
         "event_stamped_points": (int(event_stamped[0][0])

@@ -736,6 +736,99 @@ def test_the_e3_census_counts_references_inbound_and_extractedfrom_outbound():
     assert "SOURCE of at least one extractedFrom" in measure.E3_RULE
 
 
+# ── the census's per-label set is NOT the E3 row selector (#10525 review P1) ──
+
+#: The shipped log's own per-label block, re-used as canned Cypher rows
+#: (`capstone-measured-e0fc940b.log:32-34` + `:Point` composition).
+_CENSUS_ROWS = {
+    "Point": (338, 141, 141, 0),
+    "Object": (50, 0, 0, 0),
+    "Event": (45, 7, 0, 7),
+    "Document": (0, 0, 0, 0),
+}
+
+
+class _CannedQuery:
+    """A census-shaped fake: the REAL statements, answered per statement."""
+
+    def __init__(self, cypher: str) -> None:
+        if "UNWIND labels(n)" in cypher:
+            rows = [["Point", 338], ["Object", 50], ["Event", 45]]
+        elif "RETURN n.name" in cypher:                                    # object_names
+            rows = [["the quarry"]]
+        elif "eventId IS NOT NULL" in cypher:                              # event_stamped
+            rows = [[159]]
+        elif "type(r) AS t" in cypher:                                     # relationships
+            rows = [["extractedFrom", 150, 141], ["references", 7, 7],
+                    ["aboutObject", 211, 0]]
+        elif "AS points" in cypher:                                        # composition
+            rows = [[338, 159, 29, 150, 9, 141, 0, 0, 0]]
+        else:                                                             # anchor census
+            label = re.match(r"MATCH \(n:(\w+)\)", cypher).group(1)
+            rows = [list(_CENSUS_ROWS[label])]
+        self.result_set = rows
+
+
+class _CannedGraph:
+    def query(self, cypher: str) -> _CannedQuery:
+        return _CannedQuery(cypher)
+
+
+def _canned_census(monkeypatch) -> dict:
+    """Run the REAL `census()` against canned rows, with no database anywhere."""
+    projection = types.ModuleType("tortoise.projection")
+    projection.FalkorProjection = type(
+        "FalkorProjection", (),
+        {"from_uri": staticmethod(lambda uri: types.SimpleNamespace(g=_CannedGraph()))},
+    )
+    monkeypatch.setitem(sys.modules, "tortoise", types.ModuleType("tortoise"))
+    monkeypatch.setitem(sys.modules, "tortoise.projection", projection)
+    return measure.census("fake://canned")
+
+
+def test_the_census_enumerates_object_even_though_e3_no_longer_does(monkeypatch):
+    """#10525 review P1 — a SILENT ZERO on a sibling instrument, from an E3-only change.
+
+    `tools/s3_prior_ablation.py`'s `created_counts` reads `per_label["Object"]["nodes"]` as the
+    `objects` numerator of `extraction_nodes = claims + objects + events` (#10463), on live data
+    three times per run. Enumerating `per_label` with `DERIVED_LABELS` deleted that key when #9736
+    narrowed E3 to the anchored classes, so every future ablation run printed `objects=0` while the
+    graph held Objects — and `git grep` found no test anywhere that could see it.
+
+    Non-vacuity: at the pre-fix head `per_label` carries Point/Document/Event only, so the first
+    assertion reds (and `created_counts` in the sibling test returns 0 objects).
+    """
+    data = _canned_census(monkeypatch)
+    assert "Object" in data["per_label"], sorted(data["per_label"])
+    assert data["per_label"]["Object"]["nodes"] == 50, data["per_label"]["Object"]
+    # The row SELECTOR is unchanged and still names what #9736 registered: `:Object` is not in it.
+    assert "Object" not in measure.DERIVED_LABELS, measure.DERIVED_LABELS
+    assert set(measure.DERIVED_LABELS) <= set(measure.CENSUS_LABELS)
+    # …and E3's totals stay on the ROW's classes: 338 + 45 + 0, never 433.
+    assert data["derived_total"] == 383, data["derived_total"]
+    assert data["anchored_total"] == 148, data["anchored_total"]
+
+
+def test_the_sibling_ablation_instrument_still_counts_objects(monkeypatch):
+    """The consumer of the census, called as it calls itself (`created_counts`).
+
+    This is the end the P1 was measured from: the census's shape is only worth pinning because
+    `extraction_nodes` — #10463's primary denominator/numerator, published as `ratio=0.870` — is
+    `extraction_claims + objects + events`. A census that drops `Object` narrows a published ratio
+    with no error, no refusal and no log line.
+    """
+    spec = _ilu.spec_from_file_location("s3_prior_ablation_pure",
+                                        str(_REPO / "tools/s3_prior_ablation.py"))
+    assert spec and spec.loader
+    s3 = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(s3)
+    counts = s3.created_counts(_canned_census(monkeypatch))
+    assert counts["objects"] == 50, counts
+    assert counts["extraction_claims"] == 150, counts
+    assert counts["events"] == 45, counts
+    assert counts["extraction_nodes"] == 245, counts
+
+
 # ── the eight steps: measured, derived, never assigned (#9089 round 5 F3) ─
 
 _FULL_STATS = {

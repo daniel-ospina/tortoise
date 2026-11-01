@@ -410,8 +410,8 @@ losing a value is acceptable*.
 - **It does not authorise a delete.** The salience labels are a **detection** spec (§1.3); 4 of the
   25 are owner-ruled must-keeps, and `DESTRUCTIVE_DISPOSITIONS` is empty by construction. E1 moves a
   **share of what is written**, never a row that already exists.
-- **It does not decide the v4 design.** §10's Option 4 stays provisional until E5 reports; this file
-  scores it, it does not settle it.
+- **It does not decide the v4 design.** `EXTRACTOR-V4-ARCHITECTURE.md` §10's Option 4 stays
+  provisional until E5 reports; this file scores it, it does not settle it.
 - **It does not authorise a diagnostic run on the held-out half** (§2.2).
 - **It does not permit a rate on a refused denominator**: below a floor, the answer is REFUSED.
 
@@ -656,7 +656,13 @@ changes a pin or a threshold must state the reason in its message.
 **After the first scored evidence log,** any change to a metric, a denominator or a threshold is a
 **protocol deviation**. It is recorded in a `## Deviations` section appended below — with the date,
 the original value, the new value, and the reason — and the *original* rows are struck through rather
-than edited. A silently edited threshold after an evidence log is the failure this whole artefact
+than edited. **One exception, because the alternative is worse:** the **criteria table in §3.1 is
+machine-parsed** (§7 item 6 reads E3's two cells to check them against the writer's constant), and a
+`~~struck~~` cell would either red that check or require the parser to un-strike text it is judging.
+Those rows are therefore **amended in place** — the original value and the reason live in the
+`## Deviations` entry (§10.1), which is where a reader and the blame trail both find them. Struck
+prose outside that table (§3.4) still carries its own inline `(amended, §10.1: …)` marker, so an
+amendment is never invisible either way. A silently edited threshold after an evidence log is the failure this whole artefact
 exists to make impossible, and it is visible to review because the file's blame shows an edit after a
 log's add-commit.
 
@@ -767,7 +773,9 @@ incapable* of carrying the anchor this row demands, and no denominator can make 
 while they are counted as derivations. The same log computes the writer-class figure — anchored / the
 class that is *expected to* derive — at **141/150 = 0.940000**. **This amendment does NOT adopt that
 denominator**: `Point` is in the class set by the issue's own resolution, and switching to a
-"expected-to-derive" subset would be exactly the re-definition §1b forbids. It is recorded as the
+"expected-to-derive" subset would be exactly the re-definition §7 item 6 refuses (it requires E3's
+cells to name *exactly* `{Point} ∪ _DERIVATION_REFERENCES_LABELS`, so a subset fails the rule rather
+than satisfying it). It is recorded as the
 finding that #9736's remaining attribution — *lost link, or a writer that never derives?* — still owns.
 `measurement_visible_to_author` for E3 therefore stays **`false`**: the field asks whether the
 measurement was visible to the **registration's** author, and this one postdates the registration by two
@@ -822,7 +830,10 @@ quoted because neither may be called final until the populations are reconciled,
 is not a reason to move the bar.
 
 **Not a duplicate of any earlier amendment.** `git log -S'measurement_visible_to_author'` over
-`preregistration.json` returns **exactly one commit — `a6085af84`, the original** — and the two files'
+`preregistration.json` returns **exactly one hit *before* this amendment — `a6085af84`, the
+original**; the second hit is this commit, which introduces `measurement_visible_to_author_basis` —
+a string that carries the search term, so any count written as a bare total moves the moment the
+amendment lands. The claim is scoped to the history it is about; and the two files'
 history holds **no earlier `## Deviations` entry at all**: before this one, the only change to either
 file after its add-commit was `ef231735b` (2026-10-29, #5087 / PR #10072), which touched §3's
 CONTROL/TREATMENT arm paragraph and re-cut `document_sha256` **once** — a re-cut of the digest, not an
