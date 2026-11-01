@@ -618,6 +618,15 @@ surfaces:
   # run no guard for the field it emits. The `core` arm (below) is the primary
   # one — it pins tortoise/residency.py (no SOURCE_PATTERN) and tortoise/sdk.py.
   - test_residency_marker.py
+  # #8447: the TRUNCATION marker — the `truncated` / `total_available` fields
+  # on the shipped GET /v1/search response (a limit-capped read says so, and an
+  # exact total is published only when it is exact). Registered here for the
+  # same reason as the two rows above: the route that serves the fields lives
+  # in tortoise/hosted_api.py, an EXACT `api` SOURCE_PATTERN match, so without
+  # this arm a hosted_api.py-only change would run no guard for the fields it
+  # emits. The `core` arm (below) is the primary one — it pins
+  # tortoise/truncation.py (no SOURCE_PATTERN) and tortoise/sdk.py.
+  - test_8447_truncation_marker.py
   - test_hosted_aboutobject_journal_4240.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous
   # FalkorDB I/O on the event loop. Same dual registration as the three guards
@@ -1507,6 +1516,12 @@ surfaces:
   # every surface except the one that drains. The `core` row is the other half
   # (`session_events_drain.py` matches no named surface); BOTH are required.
   - test_6388_session_events_drain.py
+  # #6388 part 2: the startup assert is reached from BOTH halves it spans — the
+  # predicate in `capture_install.py` (no named surface → `core`) and its three
+  # callsites in `tortoise/__main__.py` (an EXACT `api` SOURCE_PATTERN, which
+  # REPLACES the `core` fallback in `select()`). Same dual registration, for the
+  # same reason, as `test_capture_install.py` and `test_6388_session_events_drain.py`.
+  - test_6388_startup_seam_assert.py
   # #4197: the saved-backlog CLI surface lives in `tortoise/__main__.py` — an
   # exact `api` SOURCE_PATTERN (it is NOT a SHARED_MODULE, so a `__main__.py`
   # change selects `api`, not the full matrix). The file's largest subject is
@@ -3777,6 +3792,10 @@ surfaces:
   # `api` for the `__main__.py` callsite (see the `api` entry) — the same shape
   # `test_capture_spool.py` carries one block up.
   - test_6388_session_events_drain.py
+  # #6388 part 2: `capture_install.startup_seam_report` matches no named
+  # SOURCE_PATTERNS entry, so the mechanism half falls through to `core`; the
+  # `api` row above covers a `__main__.py`-only diff. BOTH are required.
+  - test_6388_startup_seam_assert.py
   # #3516 §B: the capture-lane marker. `tortoise/capture_spool.py` (the spool
   # carry-forward), `tortoise/pi-hooks/` (the producer stamp) and
   # `tortoise/projection/entities.py` (the journal fold) match no named surface
@@ -4938,6 +4957,16 @@ surfaces:
   # DUAL-REGISTERED with `api` (above) for the hosted /v1/search field.
   - test_residency_marker.py
   - test_reconciliation.py
+  # #8447: the TRUNCATION marker's ONE home. `core` is the primary arm:
+  # neither tortoise/truncation.py nor tortoise/sdk.py's marker seam matches an
+  # `api` SOURCE_PATTERN, so a change to `truncation.py` alone falls through to
+  # `core`. What it pins is the CONTRACT the marker turns on — a cut read is
+  # marked and a complete one is positively marked complete, a total is
+  # published only when it is exact, and an absent verdict is a refusal, never
+  # a defaulted `False` (that default IS the silent-subset bug). The fields' own
+  # surface is DUAL-REGISTERED with `api` (above) for the hosted /v1/search
+  # response.
+  - test_8447_truncation_marker.py
   # #9189 (§17.2): the reconciler's PRODUCTION TRIGGER. `tortoise/reconciliation.py`
   # had a comparison and no production caller (measured at `f96a18da1` and
   # re-derived for #9189), so "continuous reconciliation" had a mechanism and no
@@ -5154,6 +5183,17 @@ surfaces:
   # said "One file read", the pre-#10117 shape — the file reads FIVE artifacts and builds two
   # full requests since; the index is read because its `#5087` row publishes the same §7 pair).
   - test_s2_decision_record_5087.py
+  # #10463: the two-arm S3 prior-injection ablation probe (`tools/s3_prior_ablation.py`) — the
+  # verdict mapping (E3 → REFUSED floors → primary bar → guards, in that precedence), the
+  # concentration statistic, the evidence-path refusal and the `--prereg` pins parse. `core` is
+  # also the lane a diff to the new probe falls through to (it matches no SOURCE_PATTERNS entry),
+  # so this membership is what makes `--integrity` able to classify the file at all. DB-free,
+  # graph-free and key-free: the run itself needs a live graph and a model key and is NOT
+  # exercised here, so what this file pins is the arithmetic and the refusals, never a run.
+  # ALSO `tier1`, because half of what it guards lives under `docs/` (the pre-registration's pins
+  # block and the measured log) and a docs-only diff runs `tier1` only — which is exactly the
+  # change class that could edit a bar after the numbers landed.
+  - test_s3_prior_ablation.py
   # #5008: the S5 EMBED gate — `tortoise/embed_gate.py` (the predicate, whose
   # rule set IS `tortoise/value_gate.py`'s: one rule set, two questions,
   # `STORAGE-ARCHITECTURE.md` §12.2a) plus its submission seam
@@ -6899,6 +6939,7 @@ tier1:
 - test_batch_integration_doctrine.py  # #10399 review: the batch-integration doctrine's commands must RUN (marker filter, lane-before-suite, `git revert -m 1`, the landing-time `origin/main == $PINNED` assertion) — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_9664_premise_census.py  # #9664 review P2: the capstone census measures the clause it prints (two-clause premises, all three completion gates, the corrected tool names) — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_s2_decision_record_5087.py  # #10072 review round 17 P2: S2-DECISION-SEAM.md §8's tables must be tables (GFM ends a table at a blank line and markdownlint cannot see it) and must cite siblings by name, not ordinal — a docs-only diff runs `tier1` only; dual-registered with `core`
+- test_s3_prior_ablation.py  # #10463: the S3 prior-injection ablation's pre-registered bars and measured log live under `docs/evidence/5087-hypothesis/`, so a docs-only diff (which runs `tier1` only) is exactly the change that can move a threshold after the numbers landed — dual-registered with `core`
 - test_7818_ontology_record.py  # #7818: docs/ONTOLOGY.md §4.7 coverage-boundary record vs `_covers` (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_8474_ontology_record.py  # #8474: docs/ONTOLOGY.md §4.6 rawState/rawStateAt availability record vs the declared write surface (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_7818_plan_record_5362.py  # #7818/#5362: the #5362 plan's RES-1 / out-of-scope read-path record vs the shipped reply contract (hermetic doc pin; a docs-only plan edit runs only tier1) — dual-registered with `core`
@@ -8653,7 +8694,7 @@ durations:
   test_postmerge_dedup.py: 0.7  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_session_index_health.py: 1.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.1
   test_suspension_parity.py: 2.5
-  test_substrate_map.py: 3.7  # #5086: 37 cases (`grep -c '^def test_'` -> 37; pytest collects 37, re-derived at this head, which is the cycle-9 union of 34 plus #10356's shallow-channel control (landed on `main` independently as `test_a_shallow_checkout_cannot_call_an_ancestor_drift`, which the #10406 merge of `main` KEEPS under its own name with every assertion — no landed control was renamed or retired — EXTENDED with #10420's unresolvable arm where `_is_shallow_clone()` answers `None`) plus #10420's real-git premise control `test_status_1_for_a_PRESENT_yet_grafted_commit_is_the_real_git_verdict` plus #10406's fix-lane control `test_an_unreadable_completeness_answer_cannot_certify_drift`). The 4.33 s wall / 4.4 s testcase sum quoted below was measured at an EARLIER head and is deliberately NOT re-attributed to this one. ⚠️ Do NOT read the seconds as a property of the file — its cost is the repo conftest import/teardown plus a bounded `git merge-base`, one `git ls-files` population read and a few `Path.read_text` spies, and re-timings of the SAME cases on this box have ranged 1.95 s to 8.99 s (`--junitxml` sum; the 8.99 s reading was taken while other suites ran on the host). The 3.7 weight sits inside that range and is deliberately unchanged; `tools/ci_timing.py --refresh-durations` replaces it from junit on a push-to-main sweep. ⛔ This count has gone stale TWELVE times (17 -> 19 -> 21 -> 22 -> 25 -> 28 -> 30 -> 31 -> 33 -> 34 -> 35 -> 36 -> 37) — the cycle-3 fixes added two cases and left "17", the cycle-4 fixes added two more and left "19", the leaf-row control left "21", the cycle-5 controls left "22", the cycle-6 controls (the timeout arm's one report token, the test oracle's bound, and the module-scope `try:` leaf control) left "25", the cycle-7 controls (the class/loop/`TYPE_CHECKING`-`else:` leaf arms and the non-allowlisted-prefix family control) left "28", the cycle-8 per-row family control left "30", and the two cycle-9 lanes left "31" and then "33" — their union was the 34 that #10356's shallow-channel control carried to 35, and the merge of that fix with #10420's (whose stub control supersets it, plus a real-git control for the premise) leaves the 36 there, and #10406's fix-lane control for an UNREADABLE exit-0 completeness answer (`_is_shallow_clone()` may not read `yes`/`TRUE`/empty as `False`, which is what certifies drift) carries it to the 37 here — and the chain above terminates on that asserted 37, as its own ENTRY RULE requires; ⛔ ENTRY RULE: every entry in that chain is the count AFTER that cycle's controls, never before, and the number must be re-derived with `grep -c '^def test_'` rather than trusted from this note — this row has already carried a past state as a current one (#10021's defect) more often than any other. The pre-fix 0.4 covered a 13-case file whose only cost was the conftest import/teardown; the cases added by the #5086 review fixes drive `sys.executable` subprocesses, real `git` calls, a `git ls-files` population read and a `Path.read_text` spy, so the weight carries real seconds. ⚠️ Still DB-free, graph-free and network-free.
+  test_substrate_map.py: 3.7  # #5086: 38 cases (`grep -c '^def test_'` -> 38; pytest collects 38, re-derived at this head, which is the cycle-9 union of 34 plus #10356's shallow-channel control (landed on `main` independently as `test_a_shallow_checkout_cannot_call_an_ancestor_drift`, which the #10406 merge of `main` KEEPS under its own name with every assertion — no landed control was renamed or retired — EXTENDED with #10420's unresolvable arm where `_is_shallow_clone()` answers `None`) plus #10420's real-git premise control `test_status_1_for_a_PRESENT_yet_grafted_commit_is_the_real_git_verdict` plus #10406's fix-lane control `test_an_unreadable_completeness_answer_cannot_certify_drift`). The 4.33 s wall / 4.4 s testcase sum quoted below was measured at an EARLIER head and is deliberately NOT re-attributed to this one. ⚠️ Do NOT read the seconds as a property of the file — its cost is the repo conftest import/teardown plus a bounded `git merge-base`, one `git ls-files` population read and a few `Path.read_text` spies, and re-timings of the SAME cases on this box have ranged 1.95 s to 8.99 s (`--junitxml` sum; the 8.99 s reading was taken while other suites ran on the host). The 3.7 weight sits inside that range and is deliberately unchanged; `tools/ci_timing.py --refresh-durations` replaces it from junit on a push-to-main sweep. ⛔ This count has gone stale THIRTEEN times (17 -> 19 -> 21 -> 22 -> 25 -> 28 -> 30 -> 31 -> 33 -> 34 -> 35 -> 36 -> 37 -> 38) — the cycle-3 fixes added two cases and left "17", the cycle-4 fixes added two more and left "19", the leaf-row control left "21", the cycle-5 controls left "22", the cycle-6 controls (the timeout arm's one report token, the test oracle's bound, and the module-scope `try:` leaf control) left "25", the cycle-7 controls (the class/loop/`TYPE_CHECKING`-`else:` leaf arms and the non-allowlisted-prefix family control) left "28", the cycle-8 per-row family control left "30", and the two cycle-9 lanes left "31" and then "33" — their union was the 34 that #10356's shallow-channel control carried to 35, and the merge of that fix with #10420's (whose stub control supersets it, plus a real-git control for the premise) leaves the 36 there, and #10406's fix-lane control for an UNREADABLE exit-0 completeness answer (`_is_shallow_clone()` may not read `yes`/`TRUE`/empty as `False`, which is what certifies drift) carries it to the 37 here — and #10468's lane adds the control for a FALSE RED that patch produced (`Path.read_text` is patched on the CLASS, so a reaper worker thread's `/proc/<pid>/stat` read (`tortoise/embedded_reaper.py:991`) was recorded as `_label_hits`'s own and compared against the tracked population, reddening the required `test` job — CI `test (a)`, run 41319892722, job 124892295398 — with no defect behind it; the recorder is now thread-scoped), carrying it to the 38 here — and the chain above terminates on that asserted 38, as its own ENTRY RULE requires; ⛔ ENTRY RULE: every entry in that chain is the count AFTER that cycle's controls, never before, and the number must be re-derived with `grep -c '^def test_'` rather than trusted from this note — this row has already carried a past state as a current one (#10021's defect) more often than any other. The pre-fix 0.4 covered a 13-case file whose only cost was the conftest import/teardown; the cases added by the #5086 review fixes drive `sys.executable` subprocesses, real `git` calls, a `git ls-files` population read and a `Path.read_text` spy, so the weight carries real seconds. ⚠️ Still DB-free, graph-free and network-free.
   test_2206_confidence_surfaces.py: 78.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.2
   test_2350_validity_precision.py: 9.5  # #2350: required for the durations coverage half as well as the surface half (#4348 trap — do not drop the row without re-deriving the floor at that head) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.6
   test_ask_regression_llm.py: 0.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.5
