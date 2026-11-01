@@ -1417,6 +1417,68 @@ def test_supersede_repoint_refuses_the_backward_leg_too(lane):
     assert _direct_rows(lane, new) == []
 
 
+def test_supersede_repoint_does_not_judge_a_non_point_far_endpoint(lane):
+    """A non-``:Point`` endpoint is not a CLAIM — on either id type (#7902).
+
+    Measured mirror of the guard's own rule: the same wiring on a ``:Subject``
+    far endpoint must behave identically whether its id is a string or an
+    integer. Reading the integer one as an asserted CLAIM would refuse a
+    transfer the load side keeps — a claim-ness check, not an id-type check,
+    is what decides.
+    """
+    for far_id in ("subj-1", 900):
+        old = lane.create_point("statement", f"computed v1 {far_id}",
+                                claim_class="derived")["id"]
+        new = lane.create_point("statement", f"computed v2 {far_id}",
+                                claim_class="derived")["id"]
+        lane._get_proj().g.query(
+            "MATCH (old:Point {id:$old}) "
+            "CREATE (s:Subject {id:$sid})-"
+            "[:IMPL {direction: 'bidirectional'}]->(old)",
+            params={"old": old, "sid": far_id})
+
+        lane.supersede_point(old, new)  # must not raise
+        assert _direct_rows(lane, new), (far_id, _direct_rows(lane, new))
+
+
+def test_supersede_repoint_judges_a_non_string_id_successor(lane):
+    """The SUCCESSOR's own class, not a blanket ``asserted`` (#9727, r3 mirror).
+
+    ``classes_for_ids`` drops a non-``str`` id, so the successor fell through to
+    ``None`` — which ``direction_blocks_create`` reads as the asserted default.
+    That is a fail-open on one shape and a false refusal on the other, measured
+    both ways: (a) an int-id DERIVED successor over an ASSERTED source mints
+    ``asserted -[IMPL]-> derived``, whose backward leg is the override
+    ``create_direct_edge`` refuses; (b) the same int-id DERIVED successor over a
+    DERIVED far endpoint must transfer.
+    """
+    def _raw(source, target, mark_int_successor=None):
+        lane._get_proj().g.query(
+            "MATCH (a:Point {id:$a}), (b:Point {id:$b}) "
+            "CREATE (a)-[:IMPL {direction: 'bidirectional'}]->(b)",
+            params={"a": source, "b": target})
+
+    # (a) the override must be refused.
+    a_src = lane.create_point("statement", "authored source")["id"]
+    a_old = lane.create_point("statement", "computed v1",
+                              claim_class="derived")["id"]
+    _raw(a_src, a_old)
+    lane._get_proj().g.query(
+        "CREATE (n:Point {id: 777, claimClass: 'derived'})")
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(a_old, 777)
+
+    # (b) the same-class transfer must still go through.
+    b_old = lane.create_point("statement", "computed b1",
+                              claim_class="derived")["id"]
+    b_t = lane.create_point("statement", "computed b peer",
+                            claim_class="derived")["id"]
+    _raw(b_old, b_t)
+    lane._get_proj().g.query(
+        "CREATE (n:Point {id: 778, claimClass: 'derived'})")
+    lane.supersede_point(b_old, 778)  # must not raise
+
+
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
 
 def _raw_direct_edge(lane, src, tgt, *, direction):

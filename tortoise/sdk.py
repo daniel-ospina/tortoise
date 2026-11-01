@@ -18738,19 +18738,45 @@ class TortoiseSDK:
         _direct_rows: dict[str, list] = {
             _direction: _direct_incident_edges(_direction)
             for _direction in ("out", "in")}
-        # ⛔ The class probe is asked of STRING ids only: the traversal above is
-        # unlabelled, so a raw/legacy far endpoint may carry NO ``id`` property
-        # (ep.py's Batch-3 NULL guard exists for exactly that shape).
-        # ``classes_for_ids`` already ignores a non-string id, so filtering here
-        # costs the guard nothing and keeps it from ABORTING a supersede it is
-        # not about with a ``TypeError`` on ``sorted`` (#10195 review P3's
-        # lesson, one arm over).
+        # ⛔ ONE class reader for BOTH endpoints, and it mirrors the creation
+        # doors exactly: an id that is an id-ADDRESSABLE string is resolved by
+        # the fan-out probe (``claim_class.classes_for_ids``, #7822); any other
+        # id — a raw-written non-string / empty one, which the transfer's
+        # ``MATCH {id:$tid}`` may still RESOLVE — is resolved by a
+        # ``:Point``-anchored marker probe instead, because handing it to
+        # ``classes_for_ids`` would silently describe nothing (that helper
+        # filters non-``str`` ids) and ``None`` reads as "asserted" downstream,
+        # which is a fail-open on one axis and a false refusal on the other
+        # (measured both: an int-id derived far endpoint, and an int-id derived
+        # SUCCESSOR). An endpoint with NO ``:Point`` row is not a CLAIM
+        # (:Subject/:Object/:Event, #7902) — ``None`` — and nothing can override
+        # it, nor it anything.
+        def _claim_classes_for(node_id) -> frozenset[str] | None:
+            if isinstance(node_id, str) and node_id:
+                return _direct_classes.get(node_id)
+            if node_id is None or node_id == "":
+                return None
+            _rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) "
+                "RETURN coalesce(n.claimClass, 'asserted')",
+                params={"id": node_id},
+            ).result_set
+            return frozenset(
+                _claim_class.normalize(_r[0]) for _r in _rows) or None
+
+        # ⛔ The id list handed to ``classes_for_ids`` is STRINGS only, and
+        # ``new_id`` is NOT unioned in: a non-string successor id would make
+        # ``sorted`` raise ``TypeError`` on a mixed set — aborting a supersede
+        # the guard is not about (#10195 review P3's lesson, one arm over).
         _direct_other_ids = sorted(
             {row[2] for _rows in _direct_rows.values() for row in _rows
              if row[2] != new_id
-             and isinstance(row[2], str) and row[2]} | {new_id})
+             and isinstance(row[2], str) and row[2]})
         _direct_classes = _claim_class.classes_for_ids(
-            proj.g, _direct_other_ids)
+            proj.g, _direct_other_ids + ([new_id]
+                                         if isinstance(new_id, str) and new_id
+                                         else []))
+        _new_classes = _claim_classes_for(new_id)
         for _direction, _rows in _direct_rows.items():
             for _row in _rows:
                 _rtype, _rel, _tid = _row[0], _row[1], _row[2]
@@ -18759,57 +18785,44 @@ class TortoiseSDK:
                     # case) — nothing is re-pointed, so nothing is judged.
                     continue
                 _row_labels = set(_row[4] or ()) if len(_row) > 4 else set()
-                if new_label is None or not (
-                        _row_labels & set(EPISTEMIC_LABELS)):
-                    # The transfer below writes NO edge for this row (the
-                    # #8622 endpoint-label condition) — it only deletes.
+                # The transfer writes an edge only when BOTH endpoints resolve
+                # to an epistemic label (the #8622 condition); a row it deletes
+                # instead is nothing to judge.
+                if not (_row_labels & set(EPISTEMIC_LABELS)) or not new_label:
                     continue
-                if _tid is None or _tid == "":
-                    # NO id property at all: the transfer's
-                    # ``MATCH (t {id:$tid})`` cannot resolve it, so the MERGE
-                    # writes nothing and only the delete-leg runs — the same
-                    # outcome the pre-guard code had, and nothing to judge.
+                # …and the #2351 rule is asked of CLAIMS only. ``Point``-first
+                # label order means this is the label the doors resolve too, so
+                # a :Subject/:Object/:Event endpoint skips on both sides.
+                if new_label != "Point":
                     continue
-                if isinstance(_tid, str) and _tid not in _direct_classes:
-                    # A string id with no ``:Point`` row is not a CLAIM
-                    # (:Subject/:Object/:Event — #7902): nothing can override
-                    # it, and it can override nothing. (An ABSENT id never
-                    # reaches here — the label probe below skips it with the
-                    # rows the transfer writes no edge for.)
+                _tid_label = next(
+                    (lbl for lbl in EPISTEMIC_LABELS if lbl in _row_labels),
+                    None)
+                if _tid_label != "Point":
                     continue
-                if isinstance(_tid, str):
-                    _tid_classes = _direct_classes.get(_tid)
-                else:
-                    # ⛔ A NON-STRING id the transfer's ``MATCH (t {id:$tid})``
-                    # still RESOLVES (measured: an integer ``id``): the fan-out
-                    # probe is id-ADDRESSABLE only, so it cannot describe this
-                    # endpoint — but the edge IS written, so it must be judged.
-                    # The row's own marker carries the only verdict there is,
-                    # and absence of one is ``asserted`` (the ``normalize``
-                    # rule). Skipping it here would be a fail-open on exactly
-                    # the axis the id filter above closes.
-                    _tid_classes = {_claim_class.normalize(
-                        _row[5] if len(_row) > 5 else None)}
+                _tid_classes = _claim_classes_for(_tid)
+                if _new_classes is None or _tid_classes is None:
+                    # No ``:Point`` row behind that id — not a claim; the guard
+                    # has no verdict to give and must not invent one.
+                    continue
                 _rdict = (dict(_rel.properties)
                           if hasattr(_rel, "properties") else {})
                 # ⛔ Only a STRING token reaches the predicate: a raw-written
                 # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
                 # and ``direction_flows`` tests membership in a frozenset — so
                 # handing it over aborts the supersede with a ``TypeError`` the
-                # guard is not about. Junk reads as ABSENT (the same "absent ⇒
-                # the type's mutual/one-way default" reading ``normalize``
-                # uses), never as a third state.
+                # guard is not about. Junk reads as ABSENT (the edge type's own
+                # default), the same reading ``claim_class.normalize`` gives a
+                # hand-edited marker: never a third state.
                 _raw_dir = _rdict.get("direction")
                 _eff_dir = self._canonical_direction(
                     _rtype, _raw_dir if isinstance(_raw_dir, str) else None)
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
+                    _src_classes, _tgt_classes = _new_classes, _tid_classes
                 else:
                     _src_id, _tgt_id = _tid, new_id
-                _src_classes = (_direct_classes.get(new_id)
-                                if _src_id == new_id else _tid_classes)
-                _tgt_classes = (_direct_classes.get(new_id)
-                                if _tgt_id == new_id else _tid_classes)
+                    _src_classes, _tgt_classes = _tid_classes, _new_classes
                 if _claim_class.direction_blocks_create(
                         _eff_dir, _src_classes, _tgt_classes):
                     # ⛔ It names the WIRING IT JUDGED, not ``old->new``: on the
