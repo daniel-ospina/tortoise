@@ -3914,6 +3914,85 @@ def test_record_arming_secret_is_staged_from_its_own_github_secret():
         )
 
 
+def _build_block_runbook_section() -> str:
+    """The runbook's `/health` `build` block entry, verbatim (#10467 review P3).
+
+    Every other `/health` addition of this kind landed with an operator entry —
+    `record` (#9548, `### Arming the Postgres record`), `change_feed` (#9208, in
+    the flap-register row) — because "what `/health` publishes and whether it
+    folds into `status`" already has its home in this document (AGENTS.md →
+    Documentation Filing Protocol: update the file that owns the topic).
+
+    Scoped to the section, and the section is located by its TITLE TEXT rather
+    than its number: a renumber (4.3 -> 4.4) must not red this, while a deletion
+    or a rename must.
+    """
+    text = _RUNBOOK.read_text(encoding="utf-8")
+    marker = "Which build is serving"
+    assert marker in text, (
+        f"docs/infra-runbook.md has no {marker!r} section — the operator's only "
+        "reading of the `build` block (#10467) is gone, and the four subtleties "
+        "it documents (no `status` fold, `build_identified: false`, "
+        "`commit_dirty: null`, carried-vs-applied migrations) go with it"
+    )
+    body = text.split(marker, 1)[1]
+    return body.split("\n## ", 1)[0].split("\n### ", 1)[0]
+
+
+def test_the_health_build_block_is_documented_for_operators():
+    """#10467 review P3: the additive `/health` block must be readable WITHOUT
+    reading `tortoise/hosted_api.py`.
+
+    Four subtleties ride on this block and every one of them is a misread an
+    operator will make under pressure: it deliberately does not fold into
+    `status` (so `status: ok` is not "current"), `build_identified: false` is the
+    "cannot check" refusal (not "no build"), `commit_dirty` is **`null` on
+    production today** because nothing stamps `TORTOISE_GIT_DIRTY` (`null` is NOT
+    "clean"), and `migrations_head` is the population the IMAGE carries — not the
+    set applied to the database. A stale deploy with `build_identified: true` and
+    a null `commit_dirty` is exactly the case that reads as clean if the runbook
+    is silent.
+
+    Pre-fix this reds at the marker: the runbook's §4 has 4.1 (client effect) and
+    4.2 (billing mirror) and nothing about `build`.
+    """
+    section = _build_block_runbook_section()
+    # Reflow-proof: the assertions below are about CLAUSES, and markdown is free
+    # to wrap them (the #10083 F3 lesson — a literal single-space pattern reds a
+    # wording-identical reflow).
+    flat = " ".join(section.split())
+    assert "curl" in section and "/health" in section, (
+        "the entry has no runnable /health recipe — the whole point is that this "
+        "reading needs no shell, no key and no database"
+    )
+    for field in ("version", "commit_sha", "commit_dirty", "build_identified",
+                  "started_at", "migrations_head", "migrations_source"):
+        assert field in section, (
+            f"the field table omits `{field}` — a reader who has the field but no "
+            "meaning reads it wrong (a `null` `commit_dirty` as clean, an "
+            "`unknown` `migrations_source` as the checkout)"
+        )
+    assert re.search(r"does NOT fold into `status`", flat), (
+        "the entry never says the block does not fold into `status` — an operator "
+        "who reads `status: ok` as 'current' restarts a healthy machine, and a "
+        "future change that DID fold staleness in would look documented-ok"
+    )
+    assert re.search(r"`null` means \*\*NOT STAMPED\*\*", flat), (
+        "the entry does not say `commit_dirty: null` means NOT STAMPED — nothing "
+        "stamps `TORTOISE_GIT_DIRTY` yet, so `null` is silence, never 'clean'"
+    )
+    assert re.search(r"NOT \"which migration has been APPLIED", flat), (
+        "the entry does not refuse the applied reading — `migrations_head` is the "
+        "highest migration the IMAGE CARRIES, and `supabase-deploy` applies the "
+        "schema, so publishing it as 'applied' is a false PASS on the question "
+        "this block exists to answer"
+    )
+    assert "schema_migrations" in section, (
+        "the entry refuses the applied reading without saying where the applied "
+        "set actually lives — a reader with no pointer substitutes this field"
+    )
+
+
 def _superseded_census_note() -> str:
     """The epic's #9548 supersession note for the first census command, verbatim.
 
