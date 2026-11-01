@@ -948,6 +948,14 @@ def test_an_empty_record_declares_partial_not_complete():
 #: and `_project_journal_rows` honours that declaration (and only that one).
 _UNWRAP_MARK = "jsonb_typeof(payload -> 'event') = 'object'"
 
+#: The `restatus` leg's id predicate, as `_LIFECYCLE_EVENTS_FOR_ONE_SQL` spells it.
+#: The fake parses the KEY out of the statement it is handed (see
+#: `_project_journal_rows`) instead of assuming `id`, so a clause rewritten to a
+#: different column cannot keep passing. ⚠️ It is unambiguous: every other
+#: narrowing clause interpolates `_PAYLOAD_EVENT`, a `COALESCE(...)` expression,
+#: so the ONLY literal `payload ->> '<key>'` in the statement is the id one.
+_ID_CLAUSE_RE = re.compile(r"payload ->> '(\w+)' = %s")
+
 
 def _project_journal_rows(sql: str, rows, params):
     """Emulate the JSONB projection `_LIFECYCLE_EVENTS_SQL` asks Postgres for.
@@ -976,6 +984,23 @@ def _project_journal_rows(sql: str, rows, params):
     # every event and silently pass a reader that folds nothing.
     name_target = params[-4] if (narrow and len(params) >= 4) else None
     id_target = params[-1] if (narrow and len(params) >= 4) else None
+    # ⛔ #9974 review round 11 (P2): THE FAKE MUST EMULATE THE PREDICATE IT WAS
+    # GIVEN. It used to take both coordinates from the reader's INTENDED shape,
+    # which left it unable to fail in the two ways that matter:
+    #   * a NULL name bind — `name_target in names` is True for a row whose
+    #     `object` is also NULL, so a NULL bind acted as a WILDCARD, where
+    #     Postgres evaluates `payload ->> 'object' = NULL` as NULL (never true)
+    #     and only the id clause can match;
+    #   * the id coordinate was compared against `payload -> 'id'` whichever
+    #     expression the SQL actually asked for, so rewriting that clause to
+    #     `payload ->> 'key'` — a plausible temptation, since the record's own key
+    #     resolution is `payload.get("id") or payload.get("key")` — kept both
+    #     read-door tests green while production filtered the row out and
+    #     `read_node` answered no `status` where the rebuild folded one.
+    # The key is now READ OUT OF THE STATEMENT, so an unmodelled rewrite finds
+    # nothing here either.
+    _id_clause = _ID_CLAUSE_RE.search(sql)
+    id_key = _id_clause.group(1) if _id_clause else None
     out = []
     for row in rows:
         payload = row.get("payload")
@@ -989,7 +1014,7 @@ def _project_journal_rows(sql: str, rows, params):
             row["about_entities"] = src.get("about_entities")
             row["about_entities_camel"] = src.get("aboutEntities")
             row["label"] = src.get("label")
-            row["node_id"] = src.get("id")
+            row["node_id"] = src.get(id_key or "id")
             state = src.get("state")
             row["restatus_status"] = (state.get("status")
                                       if isinstance(state, dict) else None)
@@ -997,9 +1022,13 @@ def _project_journal_rows(sql: str, rows, params):
             about = row.get("about_entities") or row.get("about_entities_camel")
             names = [row.get("object_name")]
             names.extend(about if isinstance(about, list) else [about])
-            matched = (name_target in names
-                       or (id_target is not None
-                           and row.get("node_id") == id_target))
+            matched = (
+                (name_target is not None and name_target in names)
+                or (id_key is not None
+                    and id_target is not None
+                    and row.get("event_type") == "EntityMutated"
+                    and row.get("node_id") == id_target)
+            )
             if not matched:
                 continue
         out.append(row)
@@ -2216,17 +2245,40 @@ def test_an_empty_string_status_is_folded_because_the_graph_stores_it():
     Excluding `''` at the reader (the first draft's "repair") kept an earlier
     terminal fold, so the rebuilt cache HID a name the graph resolves — the very
     direction the exclusion claimed to avoid. Folding it reproduces the graph.
-    """
-    import inspect as _inspect
 
-    src = _inspect.getsource(cp._lifecycle_events)
-    assert "or not restatus" not in src, (
-        "the reader drops the empty string again — `''` is a stored value, and "
-        "skipping it makes the rebuild keep an earlier terminal fold"
+    ⛔ ASSERTED THROUGH THE READER, NOT ON ITS SOURCE TEXT (#9974 review round
+    11, P2). The first version matched two spellings — `"or not restatus"` in
+    `_lifecycle_events`' source and `"<> ''"` in the SQL — and so pinned nothing
+    about behaviour: `if restatus == "": continue`, `if not restatus.strip():`,
+    `length(...) > 0` and `<> ''''` all leave both strings untouched while
+    dropping the value. The leg below fails on ANY of them, because it asks the
+    single-row door what it actually answers.
+    """
+    from tortoise import record_serve as rs
+
+    # Two writes on one Object, in journal order: terminal, then the empty
+    # string. The graph ends LIVE (an earlier terminal fold must not survive),
+    # so every door that reads the record must answer `''` too.
+    conn = _FakeConn({
+        "object": [{"id": "o-5", "name": "acme-5", "object_kind": "service",
+                    "props": {}}],
+        "journal_event": [
+            {"seq": 1, "payload": {"type": "EntityMutated", "op": "restatus",
+                                   "label": "Object", "id": "o-5",
+                                   "state": {"status": "archived"}}},
+            {"seq": 2, "payload": {"type": "EntityMutated", "op": "restatus",
+                                   "label": "Object", "id": "o-5",
+                                   "state": {"status": ""}}},
+        ],
+    })
+    answered = rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                            key="o-5")
+    assert answered is not None and answered.get("status") == "", (
+        f"the read door answered status={answered.get('status') if answered else None!r} "
+        "where the graph holds '' — a reader that drops the empty string keeps "
+        "the earlier terminal fold and hides a name the graph resolves"
     )
-    assert "<> ''" not in cp._LIFECYCLE_EVENTS_SQL, (
-        "the SQL excludes the empty string — same defect, one layer down"
-    )
+
     # …and the fold applies it, over an earlier terminal value.
     row = {"id": "o-5", "name": "acme-5", "object_kind": "service"}
     folded = cp.apply_event_stream_folds(

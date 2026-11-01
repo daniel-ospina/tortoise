@@ -480,10 +480,19 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   ⚠️ Also STATED BOUND — a null-valued `state.status` (`update_entity(obj,
 #:   status=None)`) is NOT modelled: the graph applies `SET n += {status: null}`,
 #:   which REMOVES the property, while this reader skips a non-string value and
-#:   keeps whatever an earlier fold left. The two disagree only when an explicit
-#:   null follows a restatus/connector fold on the same node; closing it means
-#:   modelling an explicit removal as a fold output, which is its own change and
-#:   is recorded on #9974 rather than assumed here.
+#:   keeps whatever an earlier fold left. The two DISAGREE in two reachable
+#:   places, and the second needs no stream fold at all (#9974 review round 11):
+#:   (a) an explicit null arriving AFTER a restatus/connector fold on the same
+#:   node, and (b) an explicit null after the carrier derivation —
+#:   `update_entity(obj, status='superseded', supersededBy='p2')` then
+#:   `update_entity(obj, status=None)` leaves the graph LIVE (the `SET n += {status:
+#:   null}` removes the property, and `live._terminal_excluded` reads only
+#:   `n.status`) while the record's surviving `superseded_by` still derives
+#:   `superseded` through :data:`DERIVED_FROM_RECORD`, so the rebuild HIDES a name
+#:   the graph resolves. (b) predates this change; only the scope of the residual
+#:   is at issue here. Closing either means modelling an explicit removal as a
+#:   fold output, which is its own change and is recorded on #9974 rather than
+#:   assumed here.
 #:
 #: `(property, source properties, value)`, applied in :func:`node_from_row` only
 #: where the record is SILENT about the target property — which, for a name the
@@ -531,9 +540,14 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #: copy of the vocabulary, which §"Whichever it is" on #10198 forbids: the
 #: vocabulary has ONE home, :mod:`tortoise.status_folds`.
 #:
-#: WHAT IT READS. `public.journal_event`, the record's own history, restricted to
-#: `event_type = 'EventRecorded'` and ordered by `seq` — the per-graph journal
-#: position, which is exactly the order the live fold applies events in. The
+#: WHAT IT READS. `public.journal_event`, the record's own history, ordered by
+#: `seq` — the per-graph journal position, which is exactly the order the live
+#: fold applies events in. It reads TWO writers, not one (#9974):
+#: `event_type = 'EventRecorded'` (the connector/pack lifecycle leg), and
+#: `event_type = 'EntityMutated'` rows whose payload carries a STRING
+#: `state.status` (a caller's explicit lifecycle write — see
+#: :data:`_LIFECYCLE_EVENTS_SQL` for why the predicate is the payload and never
+#: the `op` label). The
 #: per-event payload keys (`eventKind`/`object`/`about_entities`) are the
 #: projection's contract (#7969); they are read HERE, in the projection, and
 #: nowhere else. The payload is unwrapped to the event ITSELF first, because the
@@ -543,11 +557,17 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #:
 #: HOW IT FOLDS. The LIVE fold's semantics, imported rather than restated:
 #:
-#: * **the events replayed in `seq` order**, over the ones that name the Object —
-#:   its `object` (the event's declared target) or one of its `about_entities`
-#:   (the loose list the extraction pipeline emits instead). `about_entities` is
-#:   PREFERRED over `aboutEntities`, not unioned with it, exactly as the live
-#:   fold reads them;
+#: * **the events replayed in `seq` order**, over the ones that name the Object.
+#:   The connector/pack leg names it by NAME — its `object` (the event's declared
+#:   target) or one of its `about_entities` (the loose list the extraction
+#:   pipeline emits instead), with `about_entities` PREFERRED over
+#:   `aboutEntities`, not unioned with it, exactly as the live fold reads them.
+#:   ⛔ The `restatus`/state-op leg names it by ID (`payload ->> 'id'`), because a
+#:   state op is what `sdk.update_entity` applies as `MATCH (n:$label {id:$rid})
+#:   SET n += $state` — a name-keyed predicate would have been the wrong
+#:   coordinate and would have dropped the very record this leg exists to read.
+#:   The two coordinates are unioned in
+#:   :data:`_LIFECYCLE_EVENTS_FOR_ONE_SQL`, not substituted for each other;
 #: * **pack-declared folds first**, guarded to an Object whose `objectKind` is
 #:   the DECLARING pack's namespaced kind; **then the built-in connector
 #:   compatibility fold**, guarded to an Object whose kind declares NO lifecycle
