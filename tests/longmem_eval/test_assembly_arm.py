@@ -429,7 +429,11 @@ def test_nary_ordering_chain_admits_every_gold_vs_legacy(sdk, monkeypatch):
         f"assembled post-cap lines must carry all three gold ids; "
         f"missing {sorted(missing)} of {sorted(ids)}")
 
-    # (4) THE ACCEPTANCE COMPARISON — gold admission >= legacy A-arm.
+    # (4) THE ACCEPTANCE COMPARISON — gold admission >= legacy A-arm. NOTE
+    # what enforces it: `not blind` above already pins 3/3, so this line is
+    # implied by it rather than an independent guard. Kept explicit because
+    # it IS the issue's indicator, and labelled so it is never mistaken for a
+    # second measurement.
     assert len(b_golds) >= len(a_golds), (
         f"gold admission regressed against the A arm: B={b_golds} "
         f"A={a_golds}")

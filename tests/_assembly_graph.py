@@ -454,16 +454,30 @@ def build_nary_ordering_substrate(sdk: TortoiseSDK,
     aboutObject GOLD row each, plus a crowd of rows that carry all three
     question nouns and NO aboutObject edge.
 
-    The two halves of the geometry this substrate exists to measure:
+    The two halves of the geometry this substrate exists to measure —
+    MEASURED, not predicted (60 crowd rows, pinned caps:
+    ``TORTOISE_ASK_RETRIEVAL_LIMIT=40`` / ``CONTEXT_ITEM_CAP=40``):
 
     * **B (assembled)** resolves each of the three terms and walks ITS OWN
       subgraph, so the three golds are reachable by construction — the N-ary
       chain decomposes into per-subject slices over the same dated spine.
-    * **A (legacy)** pools ONE fulltext result set for the whole question.
-      ``crowd_rows`` rows each carry all three nouns and therefore outrank
-      every gold (which carries ONE), so at the DEFAULT pool depth the
-      window fills with crowd rows and the golds do not reach the reader.
-      That binding is the measurement — not an accident of authoring order.
+      Measured block: **5** evidence chunks (Current-Date header + the chain
+      line + the three gold rows), **zero** crowd rows.
+    * **A (legacy)** pools ONE result set for the whole question and **admits
+      all three golds too** — its entity-anchored leg (question nouns →
+      Objects → their aboutObject points) reaches them even though the window
+      also fills with crowd rows. Measured block: **41** chunks, **37** of
+      them crowd rows.
+
+    ⛔ SO THIS SUBSTRATE MEASURES **PRECISION**, NOT ADMISSION. Do not read
+    ``crowd_rows`` as starving legacy's gold admission: it does not, and a
+    test that pins ``legacy admits fewer than 3`` on THIS geometry would be
+    pinning a falsehood. (The measured admission parity is also not an
+    EP-rerank artifact — re-measured with the golds' EP neutralised, same
+    3/3.) Authoring order relative to the crowd was NOT controlled for; this
+    module's sibling geometry note (``build_deep_rank_substrate``) is the
+    record that this engine's tied-row order is authoring-dependent, which is
+    exactly why the crowd is not offered here as an admission mechanism.
 
     The crowd rows are deliberately NOT aboutObject-linked: they are ordinary
     chatter, so they cannot enter any subject slice and cannot alter the

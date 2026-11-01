@@ -3049,10 +3049,16 @@ def synthesize_hits(
             # N>=3 is decided by the QUESTION's term count ALONE, never by how
             # many subjects survived resolution: when a resolved subject is
             # dropped (no state/spine rows, or two terms resolving to the same
-            # oid, so `len(order) < 3`) the binary arm below must NOT run — a
-            # 3-way question rendered as "... came first" states a two-subject
-            # winner the question never asked for. Fail closed instead: emit
-            # nothing here and let the per-subject sections carry the evidence.
+            # oid, so `len(order) < n_terms`) the binary arm below must NOT run —
+            # a 3-way question rendered as "... came first" states a two-subject
+            # winner the question never asked for.
+            # WHAT SHIPS (state it as it is, not as stronger than it is): the
+            # chain is stated over the subjects that REACHED the slices, so
+            # `came first` is scoped to that surviving set and the dropped
+            # subject is carried by its own section below (no fabricated row,
+            # no claim about it). Only when the chain cannot be stated at all
+            # — a surviving subject with no dated row — does this emit
+            # nothing and leave the evidence entirely to the sections.
             # Chain over the SAME dated spine (earliest dated row per
             # subject — the binary path's own anchor). The FULL order is
             # claimed ONLY when EVERY subject is dated: a chain missing a

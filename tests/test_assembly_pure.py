@@ -3498,11 +3498,15 @@ def test_nary_colon_list_rejects_a_fragment_of_a_quoted_option():
     term that closes a quote it never opened — and the original list only
     survives whole if the colon is not read as the introducer at all.
 
-    The tell is the PREFIX, which still holds the unmatched delimiter; two
-    subjects that legitimately end in a quote — an inch mark (5") and a
-    possessive (the girls') — leave no such character there and stay
-    accepted, as do genuine quoted option lists (every option re-opens its
-    quote).
+    The tell is the PREFIX, which still holds the unmatched delimiter.
+
+    ⛔ THE CONTROLS MUST REACH THE BRANCH. The new decision is the value
+    returned when ``opts[1]`` does NOT re-open ``opts[0]``'s quote, so a
+    control only exercises it when ``opts[0]`` itself ENDS in the delimiter
+    (``the girls'`` / ``a 5"``) — an option that merely CONTAINS an inch mark
+    or a possessive (``a 5" screen`` / ``the girls' room``) returns at the
+    earlier ``first[-1:] not in ("'", '"')`` guard and proves nothing about
+    it. Both kinds are pinned below, labelled for which one they cover.
     """
     fragment = ("Which came first: 'Live: My Cousin Vinny', the chair, "
                 "or the lamp?")
@@ -3513,18 +3517,57 @@ def test_nary_colon_list_rejects_a_fragment_of_a_quoted_option():
     # list member, so the colon is not an introducer)
     assert terms == ["'Live: My Cousin Vinny'", "the chair", "the lamp"], terms
     assert classify_question(fragment) is AssemblyShape.ORDERING
-    # POSITIVE CONTROLS — the guard must not over-reject:
-    # (a) a genuine quoted option list (every option re-opens its quote)
+    # POSITIVE CONTROL, ACCEPTANCE SIDE — these two options END in the
+    # delimiter, so they reach `prefix.rfind(closer) < 0` (the branch-level
+    # pin for that side is `test_reads_as_list_...` below; through
+    # `extract_subject_terms` the non-explicit fallback reaches the same
+    # answer, so the extraction assertion alone would NOT discriminate).
+    assert extract_subject_terms(
+        "which came first: the girls', the chair, or the lamp?") == [
+            "the girls'", "the chair", "the lamp"]
+    assert extract_subject_terms(
+        'which came first: a 5", the chair, or the lamp?') == [
+            'a 5"', "the chair", "the lamp"]
+    # POSITIVE CONTROL — a genuine quoted option list (every option re-opens
+    # its quote, so this takes the OTHER branch and pins that it still reads
+    # as a list)
     assert extract_subject_terms(
         "Which came first: 'Star Wars: A New Hope', 'Empire', or the lamp?") == [
             "'Star Wars: A New Hope'", "'Empire'", "the lamp"]
-    # (b) an inch mark, (c) a possessive — no unmatched delimiter in the prefix
+    # NOT a branch control: these merely CONTAIN the delimiter inside a
+    # longer option, so they never reach the new decision — kept as ordinary
+    # extraction assertions (an inch mark / possessive mid-option).
     assert extract_subject_terms(
         'which came first: a 5" screen, the chair, or the lamp?') == [
             'a 5" screen', "the chair", "the lamp"]
     assert extract_subject_terms(
         "which came first: the girls' room, the chair, or the lamp?") == [
             "the girls' room", "the chair", "the lamp"]
+
+
+def test_reads_as_list_pins_both_sides_of_the_quote_branch():
+    """#2653 review finding — the BRANCH-LEVEL pin for the one decision
+    ``_reads_as_list`` gained: what to answer when ``opts[1]`` does NOT
+    re-open the quote ``opts[0]`` ends with.
+
+    Both polarities are pinned here because neither is observable end-to-end:
+    through ``extract_subject_terms`` a rejected introducer colon falls back
+    to the marker-word span and reaches the SAME options, so an extraction
+    assertion cannot tell ``True`` from ``False`` at this line. A `return
+    False` mutation fails the first two assertions; the pre-fix `return True`
+    fails the third.
+    """
+    from tortoise.assembly import _reads_as_list
+    # ACCEPT: a possessive / an inch mark before the colon leaves no unmatched
+    # delimiter in the prefix, so the colon IS an introducer.
+    assert _reads_as_list(["the girls'", "the chair", "the lamp"],
+                          "which came first") is True
+    assert _reads_as_list(['a 5"', "the chair", "the lamp"],
+                          "which came first") is True
+    # REJECT: the prefix holds the delimiter that opened the quote opts[0]
+    # closes — opts[0] is a FRAGMENT cut out of a quoted option, not a member.
+    assert _reads_as_list(["Tonight'", "the chair", "the lamp"],
+                          "Which came first: 'Live") is False
 
 
 def test_render_interval_diff_via_shared_helper():
