@@ -290,6 +290,115 @@ def test_the_byte_bound_REFUSES_new_work_when_only_undelivered_remain(tmp_path):
     assert any(d["reason"] == "spool_saturated" for d in read_discards(root))
 
 
+def test_the_byte_bound_bounds_GROWTH_of_an_existing_entry(tmp_path):
+    """capture-loss residual 6: admission used to be asked about the spool AS IT
+    IS ("is it already at a ceiling?"), never about the write itself — and
+    `max_entry_bytes` is PER-ENTRY. So an EXISTING entry could grow the spool past
+    `max_total_bytes` with no eviction path at all: the reviewer measured 3.07x the
+    byte ceiling with an EMPTY ledger, and the theoretical worst case
+    (`max_entries` x `max_entry_bytes`) is far above the declared ceiling.
+    Admission now projects the write, so the declared bound is the real bound.
+
+    MUTATION THAT REDS THIS: drop `projected_bytes` / `replaces_session_id` from
+    the `spool_saturated` call -> the big turn lands, `written` is True, and the
+    bytes on disk exceed the ceiling.
+    """
+    from tortoise import capture_spool as sp
+
+    roomy = sp.Bounds(max_total_bytes=10_000_000, max_entry_bytes=100_000)
+    write_spool_entry(tmp_path, _snapshot("g", [{"role": "user", "content": "a"}]), roomy)
+    settled = sp._entry_bytes(tmp_path, "g")
+    # Room for the entry as it stands plus a LITTLE — not for a big append. The
+    # entry stays under `max_entry_bytes`, so the PER-ENTRY bound is not what
+    # refuses it: only the aggregate byte ceiling can.
+    tight = sp.Bounds(max_entries=100, max_total_bytes=settled + 50,
+                      max_entry_bytes=100_000)
+
+    # A small append still fits: the bound refuses only what does not.
+    small = write_spool_entry(
+        tmp_path,
+        _snapshot("g", [{"role": "user", "content": "a"},
+                        {"role": "assistant", "content": "b"}]),
+        tight)
+    assert small["written"] is True, "a growth that FITS must not be refused"
+    kept = len(read_spool_turns(tmp_path, "g"))
+
+    big = write_spool_entry(
+        tmp_path,
+        _snapshot("g", [{"role": "user", "content": "a"},
+                        {"role": "assistant", "content": "y" * 20_000}]),
+        tight)
+
+    assert big["written"] is False, "a growth that crosses the ceiling is REFUSED"
+    assert read_spool_meta(tmp_path, "g") is not None, "what we already had is KEPT"
+    assert len(read_spool_turns(tmp_path, "g")) == kept, "the stored turns are untouched"
+    refused = [d for d in read_discards(tmp_path) if d["reason"] == "spool_saturated"]
+    assert refused and refused[-1]["session_id"] == "g"
+    assert "GROWTH" in refused[-1]["detail"], (
+        "the ledger must distinguish a refused growth from a refused new session")
+    # The declared bound is now the REAL bound.
+    assert sp._entry_bytes(tmp_path, "g") <= tight.max_total_bytes
+
+
+def test_a_single_new_entry_cannot_cross_the_byte_ceiling_on_its_own(tmp_path):
+    """The other direction of the same projection gap: a NEW entry large enough to
+    cross the byte ceiling by itself was admitted, because `spool_saturated`
+    answered about the PRESENT total (which was under the ceiling) and nothing is
+    evictable afterwards.
+
+    MUTATION THAT REDS THIS: call `spool_saturated(root, bounds)` without the
+    projection -> the big session is written and the spool sits over its ceiling.
+    """
+    from tortoise import capture_spool as sp
+
+    write_spool_entry(tmp_path, _snapshot("small", [{"role": "user", "content": "a"}]),
+                      sp.Bounds(max_total_bytes=10_000_000, max_entry_bytes=100_000))
+    settled = sp._entry_bytes(tmp_path, "small")
+    tight = sp.Bounds(max_entries=100, max_total_bytes=settled + 50,
+                      max_entry_bytes=100_000)
+
+    big = write_spool_entry(
+        tmp_path,
+        _snapshot("big-new", [{"role": "assistant", "content": "z" * 20_000}]),
+        tight)
+
+    assert big["written"] is False
+    assert read_spool_meta(tmp_path, "big-new") is None, "nothing to keep: never on disk"
+    assert any(d["reason"] == "spool_saturated" and d["session_id"] == "big-new"
+               for d in read_discards(tmp_path))
+    assert sp._entry_bytes(tmp_path, "small") <= tight.max_total_bytes
+
+
+def test_the_entry_being_written_cannot_admit_itself(tmp_path):
+    """A FILED entry normally makes room (it is the zero-cost reclaim). The entry
+    BEING WRITTEN cannot: `prune_spool` is handed `keep_session_id` and never
+    evicts it, so counting it as reclaimable would admit a write nothing can make
+    room for.
+
+    MUTATION THAT REDS THIS: drop the `!= replaces_session_id` guard from
+    `spool_saturated` -> the growth of the only, already-filed entry is admitted.
+    """
+    from tortoise import capture_spool as sp
+
+    roomy = sp.Bounds(max_total_bytes=10_000_000, max_entry_bytes=100_000)
+    write_spool_entry(tmp_path, _snapshot("only", [{"role": "user", "content": "a"}]),
+                      roomy)
+    flush_spool(tmp_path, _Server().post, now=time.time())
+    assert _entry_is_filed(read_spool_meta(tmp_path, "only")), "the premise: it is on the wire"
+    size = sp._entry_bytes(tmp_path, "only")
+    tight = sp.Bounds(max_entries=100, max_total_bytes=size + 50, max_entry_bytes=100_000)
+
+    bigger = write_spool_entry(
+        tmp_path,
+        _snapshot("only", [{"role": "user", "content": "a"},
+                           {"role": "assistant", "content": "w" * 20_000}]),
+        tight)
+
+    assert bigger["written"] is False, (
+        "the entry being written must never count as its own reclaim")
+    assert sp._entry_bytes(tmp_path, "only") <= tight.max_total_bytes
+
+
 # ── (4) Endpoint unreachable → retry with backoff, never a loss ────────────
 
 
@@ -2187,33 +2296,100 @@ def test_session_drain_exits_zero_with_no_config_and_with_a_corrupt_config(
     assert cli.main(["session", "drain"]) == 0, "a corrupt config is not an error"
 
 
-def test_the_entry_too_large_branch_records_before_removing(tmp_path):
-    """`entry_too_large` is the ONE branch that deletes a PREVIOUSLY SPOOLED
-    entry — so it is the branch where the record-before-remove order matters
-    most. It must go through `_discard_entry`, not unlink-then-record.
+def test_an_over_bound_entry_is_RETAINED_and_marked_terminal_not_unlinked(tmp_path):
+    """capture-loss residual 5: `entry_too_large` was the ONE branch that
+    deleted a PREVIOUSLY SPOOLED entry. A small, perfectly fileable conversation
+    (1032 bytes in the reviewer's reproduction) was destroyed by a single
+    oversized turn — below every OTHER ceiling, with nothing to show for it but a
+    ledger line. The turn log is the only copy of a conversation that never
+    reached the graph, so it is RECORDED and KEPT, marked terminal exactly like a
+    permanent HTTP refusal (`_quarantine_entry`, #7708), and never retried.
 
-    MUTATION THAT REDS THIS: restore the inline
-    `_remove_entry_files(...)` + `record_discard(...)` pair.
+    MUTATION THAT REDS THIS: restore `_discard_entry(...)` (or any
+    `_remove_entry_files` call) in the over-bound branch -> the log and meta are
+    gone and `entry_too_large` reads as a loss again.
+    """
+    from tortoise import capture_spool as sp
+
+    log_path = sp._log_path(tmp_path, "sess-big")
+    write_spool_entry(tmp_path, _snapshot("sess-big"))
+    before = read_spool_turns(tmp_path, "sess-big")
+    assert before, "the small conversation really is on disk first"
+
+    result = sp.write_spool_entry(
+        tmp_path,
+        _snapshot("sess-big", turns=[*TURNS, {"role": "user", "content": "more"}]),
+        bounds=sp.Bounds(max_entry_bytes=1))
+
+    assert result["written"] is False
+    assert result["discards"][-1]["reason"] == "entry_too_large"
+    # The capture SURVIVES — bytes and all.
+    assert read_spool_meta(tmp_path, "sess-big") is not None, "the meta is KEPT"
+    assert log_path.stat().st_size > 0, "the turn log is KEPT"
+    assert read_spool_turns(tmp_path, "sess-big") == before, "content is untouched"
+    # …and is terminal, so the drain neither retries nor re-POSTs it.
+    meta = read_spool_meta(tmp_path, "sess-big")
+    assert meta["terminal_failure"]["reason"] == "entry_too_large"
+    assert sp._terminal_marker(meta) is not None
+    # Reported honestly: nothing was destroyed, so it is not a loss.
+    assert sp.is_lost_discard(result["discards"][-1]) is False
+    assert flush_spool(tmp_path, _Server().post, now=time.time()).lost == []
+
+
+def test_an_over_bound_growth_records_ONCE_not_on_every_turn(tmp_path):
+    """A session re-snapshots on EVERY turn. A retained over-bound entry is
+    terminal and can never shrink below the bound, so recording again on each
+    turn would append one ledger line per turn forever — the amplification this
+    module refuses elsewhere (#4714). One refusal, one line.
+
+    MUTATION THAT REDS THIS: drop the `_terminal_marker(prior)` early return ->
+    three ledger lines for one refusal.
+    """
+    from tortoise import capture_spool as sp
+
+    write_spool_entry(tmp_path, _snapshot("grow"))
+    bounds = sp.Bounds(max_entry_bytes=1)
+    for extra in ("one", "two", "three"):
+        sp.write_spool_entry(
+            tmp_path,
+            _snapshot("grow", turns=[*TURNS, {"role": "user", "content": extra}]),
+            bounds=bounds)
+
+    recorded = [d for d in read_discards(tmp_path)
+                if d["reason"] == "entry_too_large"]
+    assert len(recorded) == 1, f"one refusal, one ledger line: {len(recorded)}"
+    assert read_spool_meta(tmp_path, "grow") is not None
+
+
+def test_the_entry_too_large_branch_records_before_marking_terminal(tmp_path):
+    """The ledger line is durable BEFORE the entry's terminal marker is written.
+
+    `entry_too_large` used to delete a PREVIOUSLY SPOOLED entry, so the
+    record-before-remove order mattered most here. It no longer removes anything —
+    but the same ordering rule still governs the state change it DOES make (a
+    SIGKILL between the two must leave a recorded refusal, never a silent
+    terminal entry).
+
+    MUTATION THAT REDS THIS: write the marker first (or record after).
     """
     from tortoise import capture_spool as sp
 
     write_spool_entry(tmp_path, _snapshot("sess-big"))
     order: list[str] = []
-    real_record, real_remove = sp.record_discard, sp._remove_entry_files
+    real_record, real_write = sp.record_discard, sp._write_meta
     sp.record_discard = lambda root, rec: (order.append("record"),
                                            real_record(root, rec))[1]
-    sp._remove_entry_files = lambda root, sid: (order.append("remove"),
-                                                real_remove(root, sid))[1]
+    sp._write_meta = lambda root, m: (order.append("write"),
+                                      real_write(root, m))[1]
     try:
         result = sp.write_spool_entry(
             tmp_path,
             _snapshot("sess-big", turns=[*TURNS, {"role": "user", "content": "more"}]),
             bounds=sp.Bounds(max_entry_bytes=1))
     finally:
-        sp.record_discard, sp._remove_entry_files = real_record, real_remove
-    assert order == ["record", "remove"], (
-        f"the reason must be durable BEFORE the previously spooled entry is "
-        f"removed: {order}")
+        sp.record_discard, sp._write_meta = real_record, real_write
+    assert order == ["record", "write"], (
+        f"the reason must be durable BEFORE the entry is marked terminal: {order}")
     assert result["discards"][-1]["reason"] == "entry_too_large"
 
 

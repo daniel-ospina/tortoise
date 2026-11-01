@@ -966,6 +966,13 @@ export const RETRY_MAX_MS = 6 * 60 * 60 * 1000;
 export const MAX_ATTEMPTS = 64;
 
 /** Discard reasons — every one is written to `discarded.jsonl` (observable). */
+/** An entry that can never be filed: its bytes exceed `maxEntryBytes`, so no
+ *  attempt could ever succeed. RECORDED and KEPT when the entry already exists on
+ *  disk (marked `terminal_failure`, never retried) — NEVER unlinked
+ *  (capture-loss residual 5). It used to be the ONE branch that deleted a
+ *  PREVIOUSLY SPOOLED capture: a 1 KB conversation was destroyed by one
+ *  oversized turn, below every other ceiling. A fresh snapshot that is oversized
+ *  was never on disk, so there the record alone is the whole story. */
 export const DISCARD_ENTRY_TOO_LARGE = "entry_too_large";
 export const DISCARD_COUNT_EXCEEDED = "spool_count_exceeded";
 export const DISCARD_BYTES_EXCEEDED = "spool_total_bytes_exceeded";
@@ -1731,32 +1738,61 @@ export function writeSpoolEntry(
   const entryBytes = Buffer.byteLength(metaText, "utf8") + logBytesAfter;
 
   // Per-entry bound: an entry that can never be filed (too large to be a legal
-  // capture) is DISCARDED with a reason rather than written and forgotten.
+  // capture) is RECORDED with a reason rather than written and forgotten — and
+  // NEVER unlinked when there is anything on disk to keep (residual 5).
   if (entryBytes > bounds.maxEntryBytes) {
-    // `discardEntry` records the reason BEFORE removing the files. Unlinking by
-    // hand first (the old code) left the SIGKILL / ENOSPC window open — in the
-    // one branch that deletes a PREVIOUSLY SPOOLED entry.
+    const detail = `entry is ${entryBytes} bytes > maxEntryBytes=${bounds.maxEntryBytes}`;
+    // The entry already on disk is the ONLY copy of a conversation that never
+    // reached the graph, so it is RETAINED and marked terminal, exactly like a
+    // permanent HTTP refusal (`quarantineEntry`, #7708). This branch used to be
+    // the one place that deleted a PREVIOUSLY SPOOLED capture: one oversized turn
+    // destroyed a small, perfectly fileable transcript, below every other ceiling.
+    // A refusal is a delay the operator can reverse (`--retry-terminal`), an
+    // unlink is a loss nobody can.
+    if (prior) {
+      const marker = terminalMarker(prior);
+      if (marker !== undefined && marker.reason === DISCARD_ENTRY_TOO_LARGE) {
+        // Already recorded + terminal for THIS reason: a growing session
+        // re-snapshots on every turn, and a transcript that cannot shrink below
+        // the bound must not append a ledger line per turn.
+        return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
+      }
+      discards.push(
+        quarantineEntry(dir, prior, DISCARD_ENTRY_TOO_LARGE, detail, Date.now()),
+      );
+      return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
+    }
+    // A FRESH snapshot that is oversized was never on disk — nothing to retain.
     discards.push(
-      discardEntry(
-        dir,
-        { session_id: snapshot.sessionId, capture_key: meta.capture_key } as SpoolMeta,
-        DISCARD_ENTRY_TOO_LARGE,
-        `entry is ${entryBytes} bytes > maxEntryBytes=${bounds.maxEntryBytes}`,
-      ),
+      recordDiscard(dir, {
+        session_id: snapshot.sessionId,
+        capture_key: meta.capture_key,
+        reason: DISCARD_ENTRY_TOO_LARGE,
+        detail,
+      }),
     );
     return { written: false, bytes: 0, discards };
   }
 
   // ⛔ ADMISSION CONTROL — never eviction — when the spool is full of work that
-  // has never been delivered (capture-loss). Refuse the NEW session, loudly and
-  // in the ledger, and KEEP the backlog: its turn logs are the only copy the
-  // spool holds, while this snapshot's conversation is still in the harness's
-  // own session log. A cap that deletes undelivered work to admit new work
-  // destroys exactly what the queue exists to deliver.
+  // has never been delivered (capture-loss). Refuse the write, loudly and in the
+  // ledger, and KEEP the backlog: its turn logs are the only copy the spool
+  // holds, while the conversation this write could not admit is still in the
+  // harness's own session log. A cap that deletes undelivered work to admit new
+  // work destroys exactly what the queue exists to deliver.
   //
-  // `prior` only guards the REFUSAL: an existing entry may always grow (that
-  // adds no count, and `maxEntryBytes` bounds it).
-  if (!prior && spoolSaturated(dir, bounds)) {
+  // The question is asked about the spool as it will EXIST AFTER this write
+  // (`entryBytes`, and `replacesSessionId` for a GROWTH) — not about the spool as
+  // it is now. Asking about the present left the ceilings unenforceable in both
+  // directions: a new entry could cross the byte ceiling on its own, and an
+  // EXISTING entry could grow past it with no eviction path at all (measured
+  // 3.07x the byte ceiling with an empty ledger — capture-loss residual 6).
+  if (
+    spoolSaturated(dir, bounds, {
+      projectedBytes: entryBytes,
+      replacesSessionId: prior ? snapshot.sessionId : undefined,
+    })
+  ) {
     discards.push(
       recordDiscard(dir, {
         session_id: snapshot.sessionId,
@@ -1765,11 +1801,16 @@ export function writeSpoolEntry(
         detail:
           `spool is at its ceiling (maxEntries=${bounds.maxEntries},` +
           ` maxTotalBytes=${bounds.maxTotalBytes}) with NOTHING evictable —` +
-          " this NEW session was REFUSED rather than evicting an UNDELIVERED" +
-          " entry; its transcript is still in the harness session log",
+          ` this ${prior ? "session GROWTH" : "NEW session"} was REFUSED rather` +
+          " than evicting an UNDELIVERED entry; the turns the spool already" +
+          " holds are kept, and any newer turn is still in the harness session log",
       }),
     );
-    return { written: false, bytes: 0, discards };
+    return {
+      written: false,
+      bytes: prior ? spoolEntryBytes(dir, snapshot.sessionId) : 0,
+      discards,
+    };
   }
 
   try {
@@ -1959,20 +2000,51 @@ export function pruneSpool(
  * so it is a first-class, reported state rather than an eviction trigger.
  *
  * Both ceilings are checked, because either one can bind.
+ *
+ * PROJECTION (capture-loss residual 6): a write path does not ask about the spool
+ * as it is, it asks whether the write ITSELF can land — pass its post-write size
+ * as `projectedBytes`, and `replacesSessionId` when the write EXTENDS an existing
+ * entry rather than adding one. Asking about the PRESENT state only leaves both
+ * ceilings unenforceable in the two directions a write can cross them: a NEW
+ * entry may be large enough to cross the byte ceiling on its own, and an EXISTING
+ * entry may grow past it with no eviction path at all (measured 3.07x the byte
+ * ceiling with an empty ledger). With a projection the comparison is `>` (the
+ * write must not land OVER a ceiling); without one it stays `>=` (a spool exactly
+ * AT a ceiling has no room for even a zero-byte entry). The Python twin
+ * (`capture_spool.spool_saturated`) states the same rule.
  */
-export function spoolSaturated(dir: string, bounds: SpoolBounds = DEFAULT_BOUNDS): boolean {
+export function spoolSaturated(
+  dir: string,
+  bounds: SpoolBounds = DEFAULT_BOUNDS,
+  projection: { projectedBytes?: number; replacesSessionId?: string } = {},
+): boolean {
   const { metas } = listSpoolEntries(dir);
-  const total =
+  let total =
     metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
     orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
-  // STRICT: the question is whether ADDING an entry would cross the ceiling, so a
-  // spool exactly AT the count ceiling is already saturated.
-  if (metas.length < bounds.maxEntries && total < bounds.maxTotalBytes) return false;
+  const { projectedBytes, replacesSessionId } = projection;
+  if (projectedBytes === undefined && replacesSessionId === undefined) {
+    // STRICT: the question is whether ADDING an entry would cross the ceiling, so
+    // a spool exactly AT the count ceiling is already saturated.
+    if (metas.length < bounds.maxEntries && total < bounds.maxTotalBytes) return false;
+  } else {
+    const count = metas.length + (replacesSessionId === undefined ? 1 : 0);
+    if (replacesSessionId !== undefined) {
+      // A GROWTH replaces this entry's bytes instead of adding a second copy of
+      // them, and adds no count.
+      total -= spoolEntryBytes(dir, replacesSessionId);
+    }
+    total += projectedBytes ?? 0;
+    if (count <= bounds.maxEntries && total <= bounds.maxTotalBytes) return false;
+  }
   // Over a ceiling: only a FILED entry may make room. A quarantined orphan is
   // NOT "safe" here — its delivered-ness is unknowable (quarantineLog removed
   // the meta, the only copy of `filed_key`), so admitting a new capture on the
-  // strength of one would delete a possibly-undelivered transcript.
-  return !metas.some((m) => entryFiled(m));
+  // strength of one would delete a possibly-undelivered transcript. The entry
+  // being written can never reclaim ITSELF: `pruneSpool` is told to keep it
+  // (`keepSessionId`), so counting it would admit a write nothing can make room
+  // for.
+  return !metas.some((m) => entryFiled(m) && m.session_id !== replacesSessionId);
 }
 
 /**
