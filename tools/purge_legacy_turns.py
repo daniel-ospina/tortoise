@@ -1547,6 +1547,51 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _recheck_problems(recheck: dict, planned_ids: list[str]
+                      ) -> tuple[list[str], list[str], list[str]]:
+    """Split ONE narrowed census re-verdict into the three diagnoses it can mean.
+
+    Returns `(lost, drifted, uncompared)`, each a sorted id list:
+
+    * `lost` — the id has no record row NOW (`missing_in_record`): the record
+      is RECORD-BEHIND for it and the graph copy is the only copy. Deleting it
+      destroys the transcript.
+    * `drifted` — the row exists on both sides but a parity FIELD disagrees
+      (text, speaker, kind, status, createdAt, or the vector): the record holds
+      a DIFFERENT transcript, so a delete substitutes one for the other
+      silently (#10483 review, P2-1 — the class this gate used to refuse at
+      plan time only).
+    * `uncompared` — a planned id the re-read could not compare AT ALL: gone
+      from the graph, no longer `is_episodic`, re-wired to another Session, no
+      longer turn-shaped, or unreadable. Not lossy by itself, but the set the
+      DELETE would touch is then not the set that was approved.
+
+    `census()` groups its problems BY SESSION and states the compared-and-
+    matching ids in its own `dry_run.would_delete_ids`, so these three are read
+    out of the verdict rather than by re-implementing the field comparison —
+    one comparison, one verdict.
+    """
+    lost: set[str] = set()
+    drifted: set[str] = set()
+    # Every id the re-read actually COMPARED and found clean — the census emits
+    # this list from the same per-session node map it compared, so it is the
+    # compared set for a clean session, not an inference from a count.
+    compared: set[str] = {str(t) for t in
+                          (recheck.get("dry_run") or {})
+                          .get("would_delete_ids") or ()}
+    for verdict in recheck["parity"]["failed_sessions"]:
+        for problem in verdict.get("problems") or ():
+            node = problem.get("node")
+            if not isinstance(node, str):
+                continue
+            compared.add(node)
+            (lost if problem.get("problem") == "missing_in_record"
+             else drifted).add(node)
+    planned = set(planned_ids)
+    uncompared = planned - compared
+    return sorted(lost & planned), sorted(drifted & planned), sorted(uncompared)
+
+
 def _execute(plan: dict, args, target: dict) -> int:
     """The destructive arm. ⛔ NEVER RUN IN THE LANE THAT WROTE IT (#10017).
 
@@ -1565,14 +1610,21 @@ def _execute(plan: dict, args, target: dict) -> int:
             refused up front, never discovered after a session has already been
             deleted (a rebuild would resurrect those turns while this run
             failed);
-        1. PER SESSION, immediately before its delete: the RECORD must still
-            hold every planned id. The record is read once in `main`, and
+        1. PER SESSION, immediately before its delete: the session's parity is
+            re-COMPARED — both stores re-read at their narrowest (`node_keys=`
+            on the record, `node_ids=` on the graph) and handed to the census's
+            own comparison — and the run refuses if the record lost a row
+            (`record-behind`), if either store was REWRITTEN after the census
+            (`mismatch`), or if a planned turn is no longer comparable
+            (`exact-set-mismatch`). The record is read once in `main`, and
             between that census and session k's delete sit a paged graph read,
-            a tenant record read and k-1 deletes — a row lost in that window
-            makes RECORD-BEHIND invisible and the graph copy the only copy
-            (#10483 review, P0). Kubernetes states the same rule on the delete
-            itself: `DeleteOptions.preconditions` — "must be fulfilled before a
-            deletion is carried out" (`k8s.io/apimachinery/pkg/apis/meta/v1`);
+            a tenant record read and k-1 deletes, so a row lost OR REWRITTEN in
+            that window made the loss invisible and the graph copy the only
+            copy (#10483 review, P0 then P2-1). Kubernetes states the same rule
+            on the delete itself: `DeleteOptions.preconditions` — "must be
+            fulfilled before a deletion is carried out", and what it carries is
+            the target's `UID` **and** `ResourceVersion`, i.e. identity and
+            version, never the key alone;
         2. delete the exact planned ids per session and VERIFY absence — inside
            an `_apply_first_write_scope(...)` declaration (§17.1, #9124 /
            #9206). At that moment the graph IS journal-backed (`sdk._get_proj()`
@@ -1592,10 +1644,11 @@ def _execute(plan: dict, args, target: dict) -> int:
             and "only part of the set is gone after it" are different
             diagnoses and an operator cannot act on one shared name.
 
-    ⛔ Residual, stated rather than left to be assumed: step 1 re-verifies that
-    each planned KEY is still in the record; it does not re-compare the parity
-    FIELDS. A row whose text changed after the live census would pass step 1,
-    and the census's field comparison is the instrument that covers it.
+    ⛔ Residual, stated rather than left to be assumed: step 1 compares the
+    fields the census compares, on both sides, at the moment of the delete. A
+    change landing BETWEEN that re-read and the `DETACH DELETE` in the same
+    session is still outside any check this tool can make — no store here
+    offers a conditional delete — and the window is one statement wide.
     """
     from tortoise.projection import FalkorProjection, _apply_first_write_scope
     from tortoise.sdk import TortoiseSDK
@@ -1724,20 +1777,45 @@ def _execute(plan: dict, args, target: dict) -> int:
         sid, ids = entry["session"], list(entry["ids"])
         if not ids:
             continue
-        # ⛔ THE TOCTOU GATE: re-verify the RECORD for this session immediately
-        # before its DELETE, through the census's own record leg (one
-        # implementation of the read, `node_keys=` scoped to the planned ids).
+        # ⛔ THE TOCTOU GATE: re-COMPARE this session's parity FIELDS
+        # immediately before its DELETE, through the census's own legs and its
+        # own comparison (one implementation of each: `node_keys=` on the
+        # record side, `node_ids=` + this run's own graph handle on the graph
+        # side).
+        #
+        # It used to re-verify KEY PRESENCE only, which left the class this
+        # gate refuses at PLAN time open at DELETE time: a re-capture or
+        # redaction upsert on the record, or a `update_point` on the graph,
+        # rewrites a turn whose key is still present — so the delete removed
+        # the graph copy of the OLD text while the record served the NEW one,
+        # and the old text existed nowhere (#10483 review, P2-1). Kubernetes
+        # states the rule the guard now follows on the delete itself:
+        # `DeleteOptions.preconditions` carries the target's `UID` **and**
+        # `ResourceVersion` — identity AND version, not the key alone — and is
+        # "fulfilled before a deletion is carried out … If not possible, a 409
+        # Conflict status will be returned".
         try:
             held = census_mod.read_record_turns(
                 record_dsn, target.get("org_id"), target.get("graph_id"),
-                node_keys=ids)["rows_by_key"]
+                node_keys=ids)
+            now_graph = census_mod.read_graph_turns(
+                None, None, None, node_ids=ids, g=proj.g)
+            recheck = census_mod.census(now_graph, held, sample=0)
         except census_mod.CensusError as exc:
             sys.stderr.write(
-                f"purge_legacy_turns: the record could not be re-read before "
-                f"session {sid}'s delete ({exc}) — nothing in this session was "
-                f"deleted.\n")
+                f"purge_legacy_turns: the record or the graph could not be "
+                f"re-read before session {sid}'s delete ({exc}) — nothing in "
+                f"this session was deleted. {deleted_total} node(s) were "
+                f"deleted and journaled BEFORE this check.\n")
             return 3
-        lost = [tid for tid in ids if tid not in held]
+        except (KeyError, TypeError, ValueError) as exc:
+            sys.stderr.write(
+                f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_NOT_CLEAN}: the "
+                f"re-read of session {sid} could not be compared ({exc}) — "
+                f"nothing in this session was deleted. {deleted_total} "
+                f"node(s) were deleted and journaled BEFORE this check.\n")
+            return 3
+        lost, drifted, uncompared = _recheck_problems(recheck, ids)
         if lost:
             sys.stderr.write(
                 f"purge_legacy_turns: REFUSED {REFUSE_RECORD_BEHIND}: session "
@@ -1748,6 +1826,30 @@ def _execute(plan: dict, args, target: dict) -> int:
                 f"is stale; backfill first. {deleted_total} node(s) were "
                 f"deleted and journaled BEFORE this check, and this run stops "
                 f"here.\n")
+            return 2
+        if drifted:
+            sys.stderr.write(
+                f"purge_legacy_turns: REFUSED {REFUSE_MISMATCH}: session {sid} "
+                f"MISMATCHES at delete time — {len(drifted)} planned turn(s) "
+                f"were rewritten AFTER the census, so the graph copy and the "
+                f"record copy are no longer the same transcript: "
+                f"{', '.join(drifted[:10])}. Deleting the graph copy here "
+                f"would substitute one transcript for the other silently. "
+                f"Re-run the census and re-approve. {deleted_total} node(s) "
+                f"were deleted and journaled BEFORE this check, and this run "
+                f"stops here.\n")
+            return 2
+        if uncompared:
+            sys.stderr.write(
+                f"purge_legacy_turns: REFUSED {REFUSE_EXACT_SET_MISMATCH}: "
+                f"session {sid} no longer holds {len(uncompared)} approved "
+                f"turn(s) as a comparable turn — gone from the graph, no "
+                f"longer `is_episodic`, re-wired to another Session, or no "
+                f"longer turn-shaped: {', '.join(uncompared[:10])}. The "
+                f"approved set is not the live set, so what this session's "
+                f"DELETE would touch is not what was approved. {deleted_total} "
+                f"node(s) were deleted and journaled BEFORE this check, and "
+                f"this run stops here.\n")
             return 2
         # ⛔ THE WRITE-LANE DECLARATION (§17.1, #9124 / #9206). At this moment
         # the graph IS journal-backed: `sdk._get_proj()` above bound the

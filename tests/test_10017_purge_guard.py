@@ -578,7 +578,8 @@ class _FakeGraph:
 
 
 def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
-                 journal_configured=True, journal_result=True):
+                 journal_configured=True, journal_result=True,
+                 graph_fields=None, graph_missing=()):
     """Replace the SDK / projection seams `_execute` imports, and record what
     they were asked to do.
 
@@ -588,10 +589,35 @@ def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
     (`tortoise/sdk.py::_derive_graph_name`) — so a run that never HANDS the
     graph over is visible here instead of being satisfied by the fixture
     (#10483 review round 7, P1-A).
+
+    `graph_fields` / `graph_missing` drive the NARROWED graph re-read `_execute`
+    makes immediately before each session's delete (`read_graph_turns(node_ids=…)`,
+    #10483 review P2-1): per-node field overrides, and ids the graph no longer
+    returns. The fake mirrors the real leg's return shape, so the census's OWN
+    comparison decides parity — this fixture never spells a verdict.
     """
     graph = _FakeGraph(survivors_after)
     journaled: list[str] = []
     handed_graph_names: list = []
+    overrides = dict(graph_fields or {})
+    absent = {str(t) for t in graph_missing}
+
+    def fake_read_graph(uri=None, db_path=None, graph_name=None, *,
+                        node_ids=None, g=None):
+        wanted = [str(t) for t in (node_ids or ())]
+        nodes: dict[str, dict] = {}
+        for tid in wanted:
+            if tid in absent:
+                continue
+            match = purge.census_mod._TURN_ID_RE.match(tid)
+            entry = {"id": tid, "content": None, "speaker": None,
+                     "status": None, "createdAt": None,
+                     "pointKind": "event", "is_operator": False,
+                     "embedding": None,
+                     "sessions": {match.group("sid")} if match else set()}
+            entry.update(overrides.get(tid) or {})
+            nodes[tid] = entry
+        return {"nodes": nodes, "unidentifiable": []}
 
     class _Proj:
         def __init__(self, *args, **kwargs):
@@ -625,10 +651,28 @@ def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
 
     monkeypatch.setattr("tortoise.projection.FalkorProjection", _Proj)
     monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _SDK)
+    monkeypatch.setattr(purge.census_mod, "read_graph_turns", fake_read_graph)
     # What the tool HANDED the SDK (`graph_name=`), so a test can pin that the
     # binding is explicit rather than derived from a fixture.
     graph.sdk_graph_names = handed_graph_names
     return graph, journaled
+
+
+def _record_row(tid: str, **over) -> dict:
+    """One `public.point` row as the census reads it, matching a default graph
+    node field-for-field.
+
+    A row carrying only `node_key` is NOT a parity row: the graph holds
+    `pointKind: "event"`, so the census's own field comparison reports a
+    `pointKind` mismatch — which is the comparison working, not a fixture
+    problem. Both sides are therefore stated here, so a test that wants drift
+    has to introduce it deliberately.
+    """
+    row = {"node_key": tid, "content": None, "speaker": None,
+           "status": None, "created_at": None, "point_kind": "event",
+           "embedding": None, "is_episodic": True}
+    row.update(over)
+    return row
 
 
 def _patch_record(monkeypatch, rows_by_key: dict):
@@ -660,7 +704,8 @@ class _Exec:
 def _exec_setup(tmp_path, monkeypatch, *, ids=("s1_t0",), session="s1",
                 journal_lines=1, plan_journal="same", argv_journal="same",
                 survivors_after=(), sdk_graph="g", journal_configured=True,
-                journal_result=True, record_keys=None, graph_name="g"):
+                journal_result=True, record_keys=None, graph_name="g",
+                graph_fields=None, graph_missing=()):
     """A hermetic `_execute` call: real args, real plan, fake stores.
 
     `graph_name=None` OMITS `--graph-name`, which is the case the SDK/census
@@ -689,9 +734,11 @@ def _exec_setup(tmp_path, monkeypatch, *, ids=("s1_t0",), session="s1",
     graph, journaled = _patch_store(monkeypatch, survivors_after=survivors_after,
                                     sdk_graph=sdk_graph,
                                     journal_configured=journal_configured,
-                                    journal_result=journal_result)
+                                    journal_result=journal_result,
+                                    graph_fields=graph_fields,
+                                    graph_missing=graph_missing)
     if record_keys is None:
-        record_keys = {tid: {"node_key": tid} for tid in ids}
+        record_keys = {tid: _record_row(tid) for tid in ids}
     record_calls = _patch_record(monkeypatch, record_keys)
     return _Exec(args, plan, target, graph, journaled, record_calls)
 
@@ -929,7 +976,7 @@ def test_execute_refuses_when_the_record_lost_a_row_before_the_delete(
     k's DELETE runs. A row lost in that window makes RECORD-BEHIND invisible and
     the graph copy the only copy — so no DELETE may be issued."""
     setup = _exec_setup(tmp_path, monkeypatch, ids=("s1_t0", "s1_t1"),
-                        record_keys={"s1_t0": {"node_key": "s1_t0"}})
+                        record_keys={"s1_t0": _record_row("s1_t0")})
     rc = purge._execute(setup.plan, setup.args, setup.target)
     assert rc == 2
     assert setup.graph.statements("DETACH DELETE") == []
@@ -960,7 +1007,8 @@ def test_execute_verifies_the_record_once_per_session_before_that_delete(
         target=target, health=_health(), restore_proof=_proof(session="s1"),
         target_note="t", recovery_missing=[], journal_path=str(journal))
     graph, journaled = _patch_store(monkeypatch, sdk_graph="g")
-    calls = _patch_record(monkeypatch, {"s1_t0": {}, "s2_t0": {}})
+    calls = _patch_record(monkeypatch, {tid: _record_row(tid)
+                                        for tid in ("s1_t0", "s2_t0")})
     rc = purge._execute(plan, args, target)
     assert rc == 0
     assert [c["node_keys"] for c in calls] == [["s1_t0"], ["s2_t0"]]
@@ -985,7 +1033,7 @@ def test_execute_stops_before_the_session_whose_record_row_is_gone(
         target=target, health=_health(), restore_proof=_proof(session="s1"),
         target_note="t", recovery_missing=[], journal_path=str(journal))
     _patch_store(monkeypatch, sdk_graph="g")
-    _patch_record(monkeypatch, {"s1_t0": {}})
+    _patch_record(monkeypatch, {"s1_t0": _record_row("s1_t0")})
     rc = purge._execute(plan, args, target)
     assert rc == 2
     err = capsys.readouterr().err
@@ -1029,6 +1077,59 @@ def test_a_full_sweep_prints_purged_and_exits_zero(tmp_path, monkeypatch,
     assert rc == 0
     assert "purged     : 2 turn node(s)" in captured.out
     assert purge.REFUSE_PARTIAL_SWEEP not in captured.err
+
+
+def test_execute_refuses_a_record_rewritten_after_the_census_before_the_delete(
+        tmp_path, monkeypatch, capsys):
+    """P2-1: the KEY was still present, so the old re-verify passed — and the
+    delete removed the graph's copy of the OLD transcript while the record now
+    served a DIFFERENT one, which exists nowhere else.
+
+    Pre-fix this run DELETED (the membership read `tid not in held` is False for
+    a rewritten row) and exited 0; `DETACH DELETE` == [] is what makes this
+    test fail on that code rather than merely describing it.
+    """
+    setup = _exec_setup(
+        tmp_path, monkeypatch,
+        record_keys={"s1_t0": _record_row("s1_t0", content="redacted")},
+        graph_fields={"s1_t0": {"content": "the original transcript"}})
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    assert setup.journaled == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_MISMATCH in err and "s1_t0" in err
+    assert "rewritten AFTER the census" in err
+
+
+def test_execute_refuses_a_GRAPH_node_rewritten_after_the_census(
+        tmp_path, monkeypatch, capsys):
+    """The other direction of P2-1: an `update_point` on the graph side moves
+    the transcript while the record row stands still. Checking only the record
+    cannot see it, so the re-read has to cover BOTH stores."""
+    setup = _exec_setup(
+        tmp_path, monkeypatch,
+        record_keys={"s1_t0": _record_row("s1_t0",
+                                          content="the original transcript")},
+        graph_fields={"s1_t0": {"content": "a rewritten graph turn"}})
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_MISMATCH in err and "s1_t0" in err
+
+
+def test_execute_refuses_a_planned_turn_that_is_no_longer_comparable(
+        tmp_path, monkeypatch, capsys):
+    """A planned turn the narrowed re-read cannot compare at all — gone from the
+    graph, un-flagged, re-wired or re-kinded — is an EXACT-SET divergence, not a
+    parity pass: the set the DELETE would touch is not the approved set."""
+    setup = _exec_setup(tmp_path, monkeypatch, graph_missing=("s1_t0",))
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_EXACT_SET_MISMATCH in err and "s1_t0" in err
 
 
 def test_the_delete_declares_an_apply_first_write_lane(tmp_path, monkeypatch,
