@@ -18686,19 +18686,21 @@ class TortoiseSDK:
         def _direct_incident_edges(_direction: str) -> list:
             """The 2a-DIRECT population for ONE direction (query + op filter).
 
-            ONE collection, read by the pre-flight above AND by the transfer
-            loop below: the population the door judges and the population it
-            mutates must be the same set, and two queries that drifted apart
-            would be a fail-open nobody notices.
+            ONE collection IMPLEMENTATION — every caller reads its own CURRENT
+            state. Two queries that drifted apart would be a fail-open nobody
+            notices, so the query and its operator filter live here only. The
+            pre-flight's up-front snapshot and each transfer pass's re-read are
+            deliberately separate (see the transfer loop's note): the
+            ``out`` pass mutates the graph the ``in`` pass must then read, so
+            hoisting ONE capture into both passes is the measured
+            double-re-point defect, not a de-duplication.
             """
             if _direction == "out":
                 _dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
-                       "RETURN type(r), r, t.id, ID(r), labels(t), "
-                       "coalesce(t.claimClass, 'asserted')")
+                       "RETURN type(r), r, t.id, ID(r), labels(t)")
             else:
                 _dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
-                       "RETURN type(r), r, t.id, ID(r), labels(t), "
-                       "coalesce(t.claimClass, 'asserted')")
+                       "RETURN type(r), r, t.id, ID(r), labels(t)")
             _rows = proj.g.query(_dq, params={"old_id": old_id}).result_set
             if not _rows:
                 return []
@@ -18819,14 +18821,16 @@ class TortoiseSDK:
                 # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
                 # and ``direction_flows`` tests membership in a frozenset — so
                 # handing it over aborts the supersede with a ``TypeError`` the
-                # guard is not about. A NON-SCALAR reads as ABSENT (the edge
-                # type's own default), the same reading
-                # ``claim_class.normalize`` gives a hand-edited marker: never a
-                # third state. ⚠️ A *string* outside the vocabulary is NOT
-                # remapped: it passes through and ``direction_flows`` reads it
-                # as both ways — deliberately, because that is the leg set the
-                # EP backstop sees for the same token (a door that read it more
-                # narrowly would keep a factor the load side drops).
+                # guard is not about. ⚠️ The three cases below are DIFFERENT
+                # and each is read the way the load side reads it: a *string*
+                # token passes through verbatim (one outside the vocabulary is
+                # read by ``direction_flows`` as both ways — the leg set the EP
+                # backstop sees, so a door reading it more narrowly would keep
+                # a factor the load side drops); an ABSENT token takes the
+                # edge TYPE's default (what ``create_direct_edge``
+                # canonicalizes it to before judging); a PRESENT non-string
+                # token is judged BOTH ways, because that is what
+                # ``direction_flows`` and ``ep.py`` read for it.
                 _raw_dir = _rdict.get("direction")
                 if isinstance(_raw_dir, str):
                     _eff_dir = self._canonical_direction(_rtype, _raw_dir)

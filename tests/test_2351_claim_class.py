@@ -1462,7 +1462,8 @@ def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
     and the edge IS re-pointed — while the class probe is id-ADDRESSABLE only
     (``classes_for_ids`` drops a non-``str`` id). Skipping such a row would be a
     fail-open on exactly the axis the string filter closes, so the verdict comes
-    from the row's own marker (absence ⇒ ``asserted``). MEASURED pre-fix: the
+    from the ``:Point``-anchored marker probe ``_claim_classes_for`` uses for a
+    non-string id (absence of the property ⇒ ``asserted``). MEASURED pre-fix: the
     illegal wiring was ALLOWED for ``id=777`` while the identical wiring with
     ``id='777'`` was refused.
     """
@@ -1525,12 +1526,13 @@ def test_supersede_repoint_reads_a_junk_direction_as_both_ways(lane):
 
 
 def test_supersede_repoint_reads_a_non_string_id_endpoints_own_marker(lane):
-    """The row's own marker, not a blanket ``asserted`` default.
+    """The endpoint's own marker, not a blanket ``asserted`` default.
 
     A NON-STRING id cannot be resolved by the id-addressable class probe, so the
-    verdict comes from the row (``coalesce(t.claimClass, 'asserted')``). Reading
+    verdict comes from the ``:Point``-anchored marker probe
+    (``_claim_classes_for``). Reading
     that endpoint as a bare ``asserted`` instead would REFUSE this legal
-    ``derived -> derived`` transfer, which is the over-refusal the row marker
+    ``derived -> derived`` transfer, which is the over-refusal the marker probe
     exists to prevent — the guard must be neither a fail-open nor a fail-closed
     on an axis it cannot resolve.
     """
@@ -1623,7 +1625,7 @@ def test_supersede_repoint_judges_a_non_string_id_successor(lane):
     ``create_direct_edge`` refuses; (b) the same int-id DERIVED successor over a
     DERIVED far endpoint must transfer.
     """
-    def _raw(source, target, mark_int_successor=None):
+    def _raw(source, target):
         lane._get_proj().g.query(
             "MATCH (a:Point {id:$a}), (b:Point {id:$b}) "
             "CREATE (a)-[:IMPL {direction: 'bidirectional'}]->(b)",
