@@ -436,6 +436,74 @@ def test_the_census_payload_needs_the_probe_and_the_index_to_agree():
     assert census["labels"]["Point"]["payload"]["derived_payload_B"] == 2 * 384 * 4
 
 
+def test_the_census_does_not_claim_coverage_it_could_not_measure():
+    """`unindexed = 0` needs BOTH numbers; with one unreadable it is a claim.
+
+    Measured failure this pins (review round 7, P2): a covering `embedding`
+    index plus an unreadable stored width printed `unindexed=0` — full coverage,
+    measured-looking — beside `payload=UNMEASURED(stored width not probeable)`
+    in the same row. `0` is the one column this instrument quotes into `#5090`'s
+    body as the epic's cost figure, so it is the last column allowed to say `0`
+    without having measured anything.
+    """
+    # (a) the width probe returned nothing (a vecf32 read that yielded no row)
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"],
+        vectors={"Point": (5, None)},
+    )
+    row = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                              graph_names=["g"])["labels"]["Point"]
+    assert row["indexed"] is True, row
+    assert str(row["unindexed"]).startswith("UNMEASURED"), row
+    assert "stored width" in row["unindexed"], row
+
+    # (b) the width probe RAISED — the same branch via the swallowed exception
+    class _RaisingWidth(_CensusGraph):
+        def query(self, cypher, params=None, timeout=None):
+            if "RETURN n.embedding" in cypher:
+                raise RuntimeError("Timeout reading from socket")
+            return super().query(cypher, params, timeout)
+
+    graph = _RaisingWidth([_index_row("Point", "embedding", 384)], ["Point"],
+                          {"Point": (5, [0.0] * 384)})
+    row = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                              graph_names=["g"])["labels"]["Point"]
+    assert str(row["unindexed"]).startswith("UNMEASURED"), row
+
+    # (c) the catalogue row carries no dimension — `dimension` is REQUIRED in a
+    # vector index's OPTIONS, so its absence is an unreadable cell, not a label
+    # with no dimension.
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", None)],
+        labels=["Point"],
+        vectors={"Point": (5, [0.0] * 384)},
+    )
+    row = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                              graph_names=["g"])["labels"]["Point"]
+    assert str(row["unindexed"]).startswith("UNMEASURED"), row
+    assert "index dimension" in row["unindexed"], row
+
+
+def test_the_census_still_reports_zero_when_there_is_nothing_to_cover():
+    """The refusal above must not over-refuse: 0 stored vectors needs no width.
+
+    `stored == 0` is a measured zero (`MATCH … RETURN count(n)` answered), so
+    `unindexed = 0` is provable without a probe — pinning it keeps the new
+    `UNMEASURED` branch from turning an empty label into an unmeasured one.
+    """
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"],
+        vectors={"Point": (0, None)},
+    )
+    row = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                              graph_names=["g"])["labels"]["Point"]
+    assert row["stored"] == 0, row
+    assert row["unindexed"] == 0, row
+    assert row["payload"]["derived_payload_B"] == 0, row
+
+
 def test_the_census_measures_the_graph_its_row_NAMES(monkeypatch):
     """`--graph B` with a `--uri …/A` must query B (review P1, no falsifier)."""
     selected: list[str] = []
@@ -567,11 +635,34 @@ def test_the_predicate_walk_follows_plain_import_and_multiline_from(
     assert counted["verdict"] == "DRIFT", counted
 
 
-def test_the_shipped_default_is_searched_not_assumed():
-    """`measure()` clears the ambient env, so the default must be read from config."""
+def test_the_shipped_default_is_searched_not_assumed(monkeypatch):
+    """The default is READ from the shipped surfaces, and the row reports it.
+
+    ⛔ Deliberately NOT `assert shipped["on"] is False`. That pins TODAY's
+    answer to a question `#5090` intends to change — row 1's recorded remainder
+    is "turn the flag on and measure the rate on real rows" — so the day it is
+    done this falsifier would red on a CORRECT change, and the cheapest-looking
+    repair would be to weaken it: a pinned answer to a moving question is the
+    stale-flag class `#10465` exists to end (review round 7, P3). What is pinned
+    here is the real-tree MECHANISM the synthetic roots cannot cover: the walk
+    reaches the repository's own shipped surfaces, an ON claim is sourced from a
+    file the walk actually read, and `score_rule_bullet` reports the SAME read
+    rather than only the ambient env — `measure()` clears the env, so an
+    env-only read would report `False` forever and bullet 1 could never see a
+    shipped default.
+    """
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
-    assert shipped["on"] is False, shipped["files"]
-    assert shipped["surfaces"], shipped
+    assert isinstance(shipped["on"], bool), shipped
+    # The flag is MENTIONED in the shipped tree (this repo's `config/` does), so
+    # the walk returning nothing would mean it searched a path that does not
+    # exist — the silent-`False` shape the round-3 P2 was filed for.
+    assert shipped["searched"], shipped
+    for hit in shipped["files"]:  # an ON claim is SOURCED, never asserted
+        assert hit.split(":")[0] in shipped["searched"], hit
+    row = probe.score_rule_bullet()
+    note = next(n for n in row.notes if n.startswith("gate enabled by default:"))
+    assert f"gate enabled by default: {shipped['on']}" in note, (note, shipped)
 
 
 def test_a_writer_that_names_an_unserved_label_scores_NOT_MET(tmp_path, monkeypatch):

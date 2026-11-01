@@ -1138,8 +1138,9 @@ def vector_census(graph, graph_name: str, at: str | None = None,
         dim = idx["dimension"] if covering and isinstance(idx["dimension"], int) else None
         # The stored WIDTH is probed once, before either column is written:
         # `unindexed` must not claim "covered" when the index and the stored
-        # vectors disagree on dimension (the `#4280` class), and the payload is
-        # derived from the same number.
+        # vectors disagree on dimension (the `#4280` class), nor when either
+        # number is unreadable (review round 7, P2), and the payload is derived
+        # from the same number.
         width = None
         if isinstance(stored, int) and stored > 0:
             try:
@@ -1158,6 +1159,24 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             unindexed = "UNMEASURED(stored count unreadable)"
         elif covering and width is not None and dim is not None and width != dim:
             unindexed = f"UNMEASURED(index dim {dim} != stored width {width})"
+        elif covering and stored != 0 and (width is None or dim is None):
+            # ⛔ A covering index is not a PROVED coverage. `unindexed = 0`
+            # claims every stored vector is inside the index, and that claim
+            # needs BOTH numbers: the index's dimension and the stored width.
+            # This branch is the `#4280` disagreement one step weaker — the
+            # inputs are not known, so they cannot be compared — and it used to
+            # fall through to `0`, printing a measured-looking figure beside a
+            # `payload` column that said `UNMEASURED` (review round 7, P2).
+            # The dimension is REQUIRED in a vector index's OPTIONS
+            # (docs.falkordb.com › Indexing › Vector Index), so an absent one is
+            # an unreadable catalogue cell, not a label with no dimension;
+            # `width` is None when the vecf32 probe failed or returned nothing.
+            missing = " and ".join(
+                name for name, value in
+                (("the index dimension", dim), ("the stored width", width))
+                if value is None
+            )
+            unindexed = f"UNMEASURED(coverage not provable: {missing} unreadable)"
         elif covering:
             unindexed = 0
         else:
