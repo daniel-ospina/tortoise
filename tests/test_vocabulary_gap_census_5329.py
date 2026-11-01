@@ -182,7 +182,7 @@ def test_an_oversize_token_is_counted_but_not_retained():
     assert v2.fold_allowed(f"we ship {blob} now", "we ship now")
     snap = v2.vocabulary_gap_snapshot()
     assert blob not in snap["tokens"]
-    assert snap["oversize_tokens_omitted"] == 1
+    assert snap["oversize_observations"] == 1
     assert all(len(t) <= v2._VOCABULARY_GAP_MAX_TOKEN for t in snap["tokens"])
 
 
