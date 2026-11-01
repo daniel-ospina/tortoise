@@ -706,6 +706,13 @@ def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
     which IS stored and then breaks the direct-edge terminal check) is scoped by
     `_status_is_stored_unhashable` rather than by "not a string".
 
+    ⛔ PREMISE CHANGE (#9974 R1): the dropped value used to leave the node at a
+    FABRICATED `status = 'live'` (the door's `out["status"] = "live"`, now
+    deleted, and the fold's `coalesce($st,'live')`, now `$st`). An Object is now
+    born DERIVED-OR-ABSENT, so "the dict was DROPPED" is pinned as the property
+    being ABSENT (`[[None]]`) — strictly stronger than `'live'`, which a
+    reinstated fabrication would still satisfy.
+
     Pre-fix this test fails too: the frozenset membership test raised
     `TypeError` before any of these writes could be reached.
     """
@@ -1891,9 +1898,15 @@ def test_object_item_status_is_accepted_when_a_holder_owns_the_name(sdk):
     The merge does not overwrite an existing node's `status` (it is
     projection-owned for `:Object`), so an item re-declaring a status for a name
     that already has a holder is DROPPED and the writer accepts it — measured:
-    `create_object("Held", status=["retracted"])` stores `'live'`. Refusing the
+    `create_object("Held", status=["retracted"])` leaves the node with NO stored
+    status. Refusing the
     bundle here would reject a write the writer performs, and the HOLDER's own
     array status is the case the direct-route leg catches.
+
+    ⛔ PREMISE CHANGE (#9974 R1): the holder used to carry a FABRICATED
+    `status = 'live'` seeded by the door/fold default; that default is gone, so
+    the holder is born DERIVED-OR-ABSENT and the merge still writes nothing.
+    Pinned as ABSENCE — strictly stronger than `'live'`.
     """
     sdk.create_object("Held")
     bundle = {
@@ -2331,7 +2344,13 @@ def test_second_same_name_item_declaring_array_is_dropped(sdk):
     because a name 2+ LIVE carriers hold is now REFUSED (R8) rather than minted
     past, which would test the ambiguity arm instead of this one. Refusing the
     declaration rejected a bundle the writer performs (measured at the writer:
-    one node, status `live`, array not stored).
+    one node, array not stored).
+
+    ⛔ PREMISE CHANGE (#9974 R1): "the writer performs it" used to leave a
+    FABRICATED `status = 'live'` on the node. The door/fold default is gone, so
+    the first item mints a status-less node and the second item's `status` is
+    still dropped — the claim is now pinned as ABSENCE (`None`), which a
+    reinstated fabrication would fail.
     """
     bundle = {
         "entities": [

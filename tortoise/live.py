@@ -278,8 +278,9 @@ def is_draft_status(status) -> bool:
 def is_terminal_status(status, outdated: bool = False) -> bool:
     """Python mirror of the Cypher terminal predicate (status in the
     terminal vocab OR the legacy ``outdated=true`` flag). NULL/absent status
-    is LIVE (the entity write path defaults ``coalesce($st, n.status,
-    'live')``) — mirrors ``_terminal_excluded``'s NULL handling.
+    is LIVE — the legacy-node rule, and since #9974 R1 the ordinary birth state
+    of a status-less Object/Subject (that fold seeds ``status=$st``,
+    derived-or-absent) — mirrors ``_terminal_excluded``'s NULL handling.
 
     ``outdated`` is contractually a BOOLEAN (server-managed since #2491; the
     journal fold enforces the type). This mirror reads it by ``bool()``

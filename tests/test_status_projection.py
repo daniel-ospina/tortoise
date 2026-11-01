@@ -1468,12 +1468,21 @@ class TestBirthStatusIsDerivedNotFabricated:
         finally:
             sdk.close()
 
-    def test_a_caller_supplied_birth_status_still_lands_on_both_routes(
+    def test_a_caller_supplied_birth_status_survives_the_live_write_and_replay(
             self, tmp_path):
         """Anti-vacuity: DERIVED means the record's value is carried, not lost.
 
         Without this leg the test above would pass if the birth status were
         simply dropped — the same fabrication failure in the other direction.
+
+        ⛔ SCOPE, stated (#9974 review P2-4): this covers the LIVE WRITE and the
+        JSONL replay only. It is NOT "both routes" in the sense of live vs
+        RECORD-SOURCED: on the record-sourced route (`cache_projection`,
+        `node_from_row`) a caller-supplied birth status is still DROPPED, because
+        `ObjectRegistered`/`SubjectAdded` are not `EventRecorded` and the layer
+        tables never store `status`. That is the PR's named residual — see
+        `cache_projection`'s STATED BOUND — and this leg must not be read as
+        covering it.
         """
         events = tmp_path / "events"
         events.mkdir()
