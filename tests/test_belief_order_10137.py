@@ -274,6 +274,19 @@ def test_an_unobservable_ranker_makes_no_claim(sdk):
     assert opaque.calls[0][1] == [r["id"] for r in rows], (
         "the opaque ranker's order must be the one shipped, or the label "
         "assertion below certifies nothing")
+
+    # The twin (#10137 review round 7, P2): the SAME data through an OBSERVABLE
+    # ranker must carry the claim and return the same order. Without it, "no
+    # key" is also satisfied by `origin/main`, where the key never exists — the
+    # control has to be a claim the pre-fix tree cannot make.
+    from tortoise.ranking import GraphRanker
+    twin = sdk.tortoise_fts_query(_QUERY, order_by="graph", limit=10,
+                                  graph_ranker=GraphRanker(sdk._get_proj()))
+    assert {r["id"] for r in twin} == {r["id"] for r in rows} and twin
+    assert any(r["ep"].get("informed_order") == "consulted" for r in twin), (
+        "the observable ranker must claim 'consulted' on the same population")
+
+
     for r in rows:
         assert "informed_order" not in r["ep"]
 
@@ -405,6 +418,15 @@ def test_a_neutral_default_is_not_a_consulted_belief(sdk):
         assert r["ep"].get("informed_order") != "consulted", (
             "the belief read supplied only the neutral default, so belief did "
             "not inform this order")
+
+    # the THIRD label site (#10137 review round 7, P1): `order_by="confidence"`
+    # sorts on the same belief mean, so a neutral default is not a measurement
+    # here either.
+    conf = sdk.tortoise_fts_query(_QUERY, order_by="confidence", limit=10)
+    assert conf
+    for r in conf:
+        assert r["ep"]["has_ep"] is False
+        assert r["ep"].get("informed_order") != "consulted"
 
     state = sdk.recall_state(query=_QUERY, limit=10)
     assert state

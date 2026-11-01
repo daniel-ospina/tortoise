@@ -803,7 +803,8 @@ class GraphRanker:
             # carries a persisted α/β. `has_ep` is #3276's narrower "EP measured
             # this" and a #2199 baseline prior is prior-only — but it IS a
             # belief value the score multiplies in, so it counts here.
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_prior"
+            "  (n.confidence IS NOT NULL OR n.posterior_alpha IS NOT NULL "
+            "   OR n.ep_alpha IS NOT NULL) AS has_prior"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
@@ -1186,7 +1187,8 @@ class StateRanker:
             # #10137 review round 6 — see GraphRanker: has_prior distinguishes
             # "the read answered with a belief" from "it answered with the
             # neutral Beta(1,1) default".
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_prior"
+            "  (n.confidence IS NOT NULL OR n.posterior_alpha IS NOT NULL "
+            "   OR n.ep_alpha IS NOT NULL) AS has_prior"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
