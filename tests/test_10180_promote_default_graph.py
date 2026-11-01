@@ -1290,6 +1290,73 @@ def test_the_mcp_capture_data_half_and_its_record_tenant_are_one_snapshot(monkey
         == NEW_ID
 
 
+def test_the_capture_admission_key_names_the_graph_the_capture_opens(monkeypatch):
+    """The in-flight capture KEY and the capture's OPEN must describe ONE graph.
+
+    `_capture_session_key` scopes an in-flight capture by tenant AND by "the
+    graph the capture will ACTUALLY write to" (#3365). The MCP
+    `tortoise_session_capture` tool hands the impl a dict with no
+    `graph_namespace` (it is frozen — `tools/surface-guard.py`), and the WRITE
+    resolves that field inside `_hydrate_default_namespace`; the KEY is computed
+    before that hydration, so it must resolve the same value from the same
+    source or the two describe different graphs.
+
+    FAIL-ON: keying the bare dict on a PROMOTED org lands the key in the DEMOTED
+    graph's bucket (`org_{org_id}`) while the capture writes the promoted one.
+    Both halves of the #3365 class follow: a FALSE 409 (a graph-bound key bound
+    to the demoted graph shares that bucket, so a legitimate capture of another
+    graph is refused) and a reopened #3129 SILENT-LOSS window (one session
+    captured through two lanes on ONE physical graph keys into two buckets, so
+    both pass admission and the second is served a 0-extract replay).
+    """
+    from tortoise import mcp_auth
+
+    _hosted(monkeypatch)
+
+    mcp_wide = {"org_id": TEAM}                    # what the MCP tool builds
+    rest_wide = {"org_id": TEAM,                   # what the REST seam builds
+                 "graph_namespace": f"org_{TEAM}_{NEW_ID}"}
+    bound_demoted = {"org_id": TEAM, "graph_id": OLD_ID,
+                     "graph_namespace": f"org_{TEAM}"}
+    bound_custom = {"org_id": TEAM, "graph_id": OTHER_ID,
+                    "graph_namespace": f"org_{TEAM}_{OTHER_ID}"}
+
+    # The credential this request was ADMITTED with is the PROMOTED one.
+    token = mcp_auth._current_graph_namespace.set(f"org_{TEAM}_{NEW_ID}")
+    try:
+        mcp_key = ha._capture_session_key(mcp_wide, "sess")
+        rest_key = ha._capture_session_key(rest_wide, "sess")
+        custom_key = ha._capture_session_key(bound_custom, "sess")
+    finally:
+        mcp_auth._current_graph_namespace.reset(token)
+
+    # (1) key == write. The org-wide MCP capture writes the PROMOTED graph, and
+    #     its key says so — so it lands in the SAME bucket as the equivalent
+    #     org-wide REST credential, which is the graph two lanes must share.
+    assert mcp_key == f"{TEAM}:org_{TEAM}_{NEW_ID}:sess", (
+        "the admission key must name the graph the capture will WRITE "
+        f"(the promoted default), got {mcp_key!r}")
+    assert mcp_key == rest_key, (
+        "two org-wide captures of one session on the SAME physical graph must "
+        f"share one bucket — got {mcp_key!r} vs {rest_key!r}")
+
+    # (2) NO FALSE 409: a graph-bound key bound to the DEMOTED graph is a
+    #     DIFFERENT graph, so it must not collide with the promoted capture.
+    assert ha._capture_session_key(bound_demoted, "sess") != mcp_key, (
+        "a demoted-graph bucket must not refuse a promoted-graph capture")
+
+    # (3) NON-VACUITY: with NOTHING carried (a transport that resolved no
+    #     credential) the same dict keeps the historical bucket, so (1) is
+    #     discriminating rather than a constant, and no org is moved by accident.
+    assert ha._capture_session_key(mcp_wide, "sess") == \
+        f"{TEAM}:org_{TEAM}:sess"
+
+    # (4) NOT WIDENED onto a custom graph: a GRAPH-BOUND key answers with ITS
+    #     own namespace whatever the ambient credential is — the #2023 guard
+    #     that keeps org-level state out of a caller's own graph.
+    assert custom_key == f"{TEAM}:org_{TEAM}_{OTHER_ID}:sess", custom_key
+
+
 # ── 13. The org-id-only lanes reuse the credential — no read, one answer ────
 # Round 2 of the review found the request lanes still reaching the READ form:
 # `_maybe_apply_completion` (every capture) and the onboarding projection/PATCH
