@@ -23750,10 +23750,8 @@ def _carry_onboarding_state(org_id: str, previous_ns: str | None,
     finally:
         for _sdk in (src_sdk, dst_sdk):
             if _sdk is not None:
-                try:
+                with contextlib.suppress(Exception):
                     _sdk.close()
-                except Exception:
-                    pass
 
 
 class GraphPromote(BaseModel):
@@ -23931,7 +23929,7 @@ async def promote_graph(graph_id: str, request: Request, org_id: str,
                 org_id, result.get("previous_namespace"),
                 result.get("namespace")),
             op="carry_onboarding_state")
-    except Exception as e:  # noqa: BLE001 — the move stands; report the carry
+    except Exception as e:  # the move stands; report the carry, never raise
         _logger.error(
             "onboarding carry did not run for %s (move committed): %s",
             org_id, e)
