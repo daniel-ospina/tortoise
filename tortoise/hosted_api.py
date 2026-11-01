@@ -32828,7 +32828,7 @@ _NAMESPACE_NOT_RESOLVED = _NamespaceNotResolved()
 def _graph_has_org_namespace(
         org_id: str, *,
         listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
-        moved: str | None | _NamespaceNotResolved = _NAMESPACE_NOT_RESOLVED,
+        moved: str | _NamespaceNotResolved | None = _NAMESPACE_NOT_RESOLVED,
 ) -> bool:
     """Existence check WITHOUT constructing the ORG projection (constructing
     org_{tid} would materialize an absent org graph — a read-path write,
@@ -33054,7 +33054,7 @@ def _registry_existing_graphs() -> set[str] | None:
 def _open_org_graph_sdk(
         org_id: str, *,
         listed: set[str] | _ProbeNotSampled | None = _PROBE_NOT_SAMPLED,
-        moved: str | None | _NamespaceNotResolved = _NAMESPACE_NOT_RESOLVED,
+        moved: str | _NamespaceNotResolved | None = _NAMESPACE_NOT_RESOLVED,
 ) -> TortoiseSDK | None:
     """SDK on the org's DEFAULT graph, or None when the server lists neither
     the canonical nor the pre-rename name.
