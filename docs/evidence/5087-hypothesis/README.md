@@ -263,7 +263,12 @@ it touches no count, no denominator and no bar.
     not an ancestor of `HEAD` — the plan must *precede* the run it arbitrates. ⚠️ **What this does
     not establish about the measured run:** it was taken *before* either guard existed, so the only
     evidence that its bars came from a document that preceded it is the one it already carried — its
-    `prereg=` line and the ordering the gate checks. **No number moves**; the guards can only refuse a
+    `prereg=` line and, on the contribution branch, the commit ordering. ⛔ **That ordering is not
+    readable from merged history** (the squash merge collapsed both add-commits into one), so the
+    ordering half of `capstone_preregistration_check.py` now examines **no** log for this bundle — the
+    log is under `withdrawn/`, outside its non-recursive glob — and the provenance is withdrawn (see
+    `withdrawn/WITHDRAWN.md`; #10463 records it PROVISIONAL). **No number moves**; the guards can only
+    refuse a
     run.
 
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
@@ -391,8 +396,10 @@ survive because they are parsed out of the **commit**, never this file.
    branch**: there the add-commit (`00:12:17Z`) strictly precedes the measured log's
    add-commit (`325f2a1a5`, `00:26:01Z`), and the bars are read out of that commit rather than the
    worktree. ⛔ That ordering is **not readable from merged history** — the squash merge collapsed
-   both add-commits into one commit, so `capstone_preregistration_check.py`'s ordering half now
-   reads the *same* epoch for the two paths. The provenance is therefore **withdrawn** (see
+   both add-commits into one commit, so *at the squash* `capstone_preregistration_check.py`'s
+   ordering half read the *same* epoch for the two paths, and at this head it reads **no** log for
+   this bundle at all (the log is under `withdrawn/`, outside the non-recursive glob). The
+   provenance is therefore **withdrawn** (see
    `withdrawn/WITHDRAWN.md`; #10463 records the ordering claim as PROVISIONAL). This sentence keeps
    the history, not the assurance. **No
    bar, floor, denominator or number moves**; the defect is a process claim, and it is withdrawn
