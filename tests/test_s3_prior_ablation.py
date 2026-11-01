@@ -948,6 +948,11 @@ def test_the_bundle_does_not_claim_every_refusal_precedes_the_log(probe):
     assert "`--overwrite` replaces it" in flat, (
         "such a log carries no `RATIO:`/`VERDICT:`, so it is replaceable — the reader needs that "
         "to recover from a refusal they can only see after it happened")
+    assert "Four refusals are raised AFTER the log exists" in flat, (
+        "the count must follow the code: the fresh-graph refusal is a fourth, and a stated count "
+        "that the code does not have is the defect this test exists for")
+    assert "arm graph that is not fresh" in flat, (
+        "the fresh-graph refusal (review P2) must be named where the bundle enumerates them")
 
 
 def test_a_post_arm_refusal_REALLY_leaves_the_measured_sessions(probe, monkeypatch, tmp_path):
