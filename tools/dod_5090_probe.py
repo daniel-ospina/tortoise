@@ -457,7 +457,9 @@ def _assigned_value(line: str, flag: str) -> str | None:
     # `name: verify FLAG=1 takes effect` fail here, which is the point.
     if not stripped.startswith(flag):
         return None
-    rest = stripped[len(flag):]
+    # `KEY : value` is valid YAML (the space before the indicator is not part
+    # of the key), so the separator is looked for after an `lstrip`.
+    rest = stripped[len(flag):].lstrip()
     if rest[:1] not in ("=", ":"):
         return None
     value = rest[1:].strip()

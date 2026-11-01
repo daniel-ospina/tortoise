@@ -752,6 +752,7 @@ def test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default(
 @pytest.mark.parametrize("text", [
     "environment:\n  - TORTOISE_EMBED_GATE=1\n",            # compose array
     "environment:\n  TORTOISE_EMBED_GATE: \"true\"\n",      # compose map
+    "environment:\n  TORTOISE_EMBED_GATE : 1\n",           # YAML spaced key
     "TORTOISE_EMBED_GATE=yes\n",                            # .env / dotenv
     "ENV TORTOISE_EMBED_GATE=on\n",                          # Dockerfile
     "export TORTOISE_EMBED_GATE=1\n",                        # shell
