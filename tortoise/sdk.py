@@ -32699,8 +32699,17 @@ class TortoiseSDK:
         elif isinstance(_own, (list, tuple)) and any(
                 isinstance(r, str) and r.strip() for r in _own):
             # KEPT AS AN ARRAY, every member intact: no collapse, no type
-            # change. (`_validate_extracted_from` refuses a list with a blank
-            # member at the door, so there is nothing to filter here.)
+            # change, and NO member is filtered — a blank one included. The
+            # gate does not promise there is none: `_own` above was read back
+            # from the NODE, and the door that writes this prop,
+            # `update_point(extractedFrom=…)`, validates nothing (the same
+            # function says so above, where `_point_source_refs` is narrowed),
+            # so a stored array CAN carry a blank member. The rule here is the
+            # survivor's SHAPE, and the array is carried VERBATIM — filtering
+            # it would be this fold editing the provenance it exists to keep.
+            # The `any()` above decides one thing only: whether the array is
+            # material at all (a wholly blank one falls through to
+            # `accumulated[0]`, like a sourceless Point).
             _primary_ref = list(_own)
         else:
             _primary_ref = None

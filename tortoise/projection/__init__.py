@@ -8307,6 +8307,18 @@ def journal_recreate_seqs(events) -> set[int]:
     ``seq`` is the enumerate index over the SAME ordered ``events`` list the
     replay engines walk (the seq space ``journal_hard_delete_seqs`` documents),
     so a fold can ask ``seq in journal_recreate_seqs(events)``.
+
+    ⚠️ Deliberately **NOT** fold-aware, so the mirror above is no longer
+    LITERAL (#10010 review): ``_rebuild_all_replay`` excludes an evidence fold
+    from its ``is_recreate`` arm (:func:`record_is_evidence_fold`), so a
+    ``delete → fold`` ordering is a re-creation here and is refused there. No
+    observable divergence is constructible today — every prop that arms a gate
+    on this set (``tags``, ``_REVISION_PROVENANCE_PROPS``) is read off a node
+    the hard delete already removed, and both consumers (``_apply_one``'s
+    carry-forward and pass 1a's #4042 wipe) land on a FRESH node, so both end
+    empty. Recorded here, next to the code, because the next editor of this
+    function needs to know the two readings differ BY DESIGN — this is a note
+    about a mirror, not evidence of a defect.
     """
     armed: set[str] = set()
     recreate: set[int] = set()
