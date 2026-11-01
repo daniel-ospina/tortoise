@@ -415,6 +415,14 @@ def test_env_example_states_the_real_session_extraction_provider_set():
 #: was INLINED in two test bodies, so a guard keyed on ``(module, helper)`` could
 #: not see it. Its new ``_keyless`` helper plus this entry are the repair, which
 #: is why the durability claim above now holds for that module too.
+#:
+#: ``tests/test_doctor.py`` was the next module in that population (review rounds
+#: 6-7): its hand-list lived in the ``clean_llm_env`` FIXTURE, not in a capture
+#: helper, so neither the sweep nor this guard could reach it. It is not a capture
+#: path — the premise is doctor's keyless ⚠️/❌ line — but the mechanism is the
+#: same one, and after #8133 an ambient ``VENICE_API_KEY`` flipped doctor's line to
+#: ``✅ … (venice, model deepseek-v4-flash)`` while CI (no such key) stayed green.
+#: Its ``_keyless_llm_env`` helper is what the fixture now calls.
 _KEYLESS_CAPTURE_HELPERS = (
     ("tests.test_turn_embedding_write_path_4194", "_keyless"),
     ("tests.test_capture_secret_redaction_4911", "_keyless"),
@@ -422,6 +430,7 @@ _KEYLESS_CAPTURE_HELPERS = (
     ("tests.test_session_semantic_retrieval", "_keyless"),
     ("tests.test_4199_dense_scope_coverage", "_offline_llm"),
     ("tests.test_8501_capture_path_anchor", "_keyless"),
+    ("tests.test_doctor", "_keyless_llm_env"),
 )
 
 
