@@ -262,11 +262,16 @@ export const onRequest: PagesFunction = async (context) => {
   // pinned redirect wins), and the PR's Residual list records it — split in TWO,
   // because the two classes are NOT the same shape and the earlier one-line
   // version of this note under-reported the second (PR #10514 review, finding 4):
-  //   * `APP_ONLY` (`/signup`, `/welcome`, `/invite-accept`) — HOST-SPLIT: the
-  //     company host 301s to the app origin carrying the code
-  //     (`premiselabs.co/signup?code=…` → `app.premiselabs.co/signup?code=…`); on
-  //     `tortoise.*`/previews there is no middleware branch, so the request falls
-  //     to the BACKSTOP below and is refused 400;
+  //   * the three host-split pages — `/signup`, `/welcome`, `/invite-accept`
+  //     (+ `.html` twins) — HOST-SPLIT: the company host 301s to the app origin
+  //     carrying the code (`premiselabs.co/signup?code=…` →
+  //     `app.premiselabs.co/signup?code=…`); on `tortoise.*`/previews there is no
+  //     middleware branch, so the request falls to the BACKSTOP below and is
+  //     refused 400. ⛔ These three are MEMBERS of `APP_ONLY` (`:185-190`) but not
+  //     the whole of it: `APP_ONLY` also holds `/auth` and `/auth.html`, which are
+  //     host-INDEPENDENT (next bullet). `APP_ONLY` is NOT a synonym for this
+  //     class, and a reader who treats it as one concludes `/auth` on
+  //     `tortoise.*` is a 400 — it is a 301 carrying the code (measured);
   //   * `/auth`, `/auth.html` (301), `/auth/*` (302) and `/admin`, `/admin/*`
   //     (302) — HOST-INDEPENDENT: those branches run on every host, so their
   //     `Location` carries the code on `premiselabs.co`, on `tortoise.*` and on a

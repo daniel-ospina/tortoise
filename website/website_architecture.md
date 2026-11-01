@@ -38,9 +38,10 @@ Host routing lives in `website/functions/_middleware.ts`:
   a 400 with a named error page, on BOTH hosts, and **ahead of the company-host consolidation 301s**
   — the one refusal-shaped branch that supersedes the general "consolidate to the canonical host"
   rule, because a `Location` would carry the credential to a second URL. (The one branch it does NOT
-  supersede is the company-host `/product` + `/product.html` 404, which sits above the guard and
-  forwards nothing and renders nothing, so `premiselabs.co/product?code=…` answers a bare 404 —
-  recorded, and pinned so a reordering is visible.) The **exception** is the
+  supersede is the **non-tortoise-host** `/product` + `/product.html` 404 (`!host.startsWith("tortoise.")`
+  at `_middleware.ts:152-157`, so previews answer it too — not only the company host), which sits
+  above the guard and forwards nothing and renders nothing, so `premiselabs.co/product?code=…`
+  answers a bare 404 — recorded, and pinned so a reordering is visible.) The **exception** is the
   surfaces whose redirects are pinned decisions — `/auth`, `/auth/*` (where `/auth/callback` is the
   one shape that actually redeems a code; its wrong-origin allow-list entry is the OPEN audit
   #8680), `/admin`, and the `APP_ONLY` pages the company host 301s to the app origin — which **skip**
@@ -53,9 +54,12 @@ Host routing lives in `website/functions/_middleware.ts`:
   middleware contradicts on both counts):
   - the three host-split pages — `/signup`, `/welcome`, `/invite-accept` + `.html` twins — are the
     only host-split shapes. (They are members of the code's `APP_ONLY` set, but so are `/auth` and
-    `/auth.html`, which are NOT host-split: the `/auth` 301 branch answers first, unconditionally.
-    `APP_ONLY` is therefore NOT a synonym for this class — it is a wider set whose members answer
-    differently, and naming the three explicitly is deliberate.) On the exact `premiselabs.co` host
+    `/auth.html`, which are NOT host-split: those two also carry their own **unconditional** 301
+    (`_middleware.ts:344-349`), which is what covers `tortoise.*`/previews — on the company host the
+    `APP_ONLY` branch at `_middleware.ts:311-317` returns first, so branch order differs by host
+    while the outcome does not. `APP_ONLY` is therefore NOT a synonym for this class — it is a wider
+    set whose members answer differently, and naming the three explicitly is deliberate.) On the
+    exact `premiselabs.co` host
     the middleware 301s them to the app origin with the code in its `Location` (the recorded
     residual); on `tortoise.*`/previews there is no middleware branch to keep, so the request falls
     through to the **backstop** at `_middleware.ts:442` and is refused with the same 400
@@ -70,7 +74,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - the middleware's `APP_ONLY` **branch** (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`) — but `/auth` and
     `/auth.html` also have their own **unconditional** 301 below, so for those two the branch is not
-    what preserves the redirect on `tortoise.*`/previews (`:59-62`);
+    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:344-349`);
   - `/auth` and `/auth.html` 301 **unconditionally** — the redirect #4054 shipped, left alone because
     it is already in browsers' caches and changing it is its own decision — while `/auth/*` answers
     **302** (`#4346`) and `/admin` **302**s (`#4409`), all **unconditionally** (those cover
