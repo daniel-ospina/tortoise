@@ -949,6 +949,56 @@ def test_an_epoch_zero_start_renders_its_day():
                              "end_state": "open"}) == "[valid since 2025-01-01]"
 
 
+def test_the_epoch_zero_start_survives_the_wire_and_renders_its_day(lane):
+    """#9741 review P3-2: the epoch-0 closure must be reachable from the
+    PRODUCT read path, not only from a hand-built dict.
+
+    ``create_point(validFrom=0)`` stores a real epoch instant (the write
+    boundary orders it — ``tests/test_validity_windows.py`` pins the write), but
+    every wire hop dropped it, because each one tested TRUTHINESS:
+
+      * ``search_engine.fetch_point_epistemic_state`` — ``row[2] or None``
+      * ``SearchResult.to_dict`` — ``if self.valid_from:``
+      * the embedded fallback — ``if st.get(key):``
+
+    so the hit arrived with NO start at all while ``valid_from_precision:
+    "day"`` rode beside it: the renderer said "no window recorded" next to a
+    precision that names one — the exact drift the epoch-0 test above was
+    written to detect, one layer up. ``[valid since 1970-01-01]`` was reachable
+    only for hand-built dicts.
+
+    Fails pre-fix on BOTH wire surfaces: ``valid_from`` was absent from the hit
+    (primary and embedded) and the marker was ``""``.
+    """
+    from tortoise.retrieval import _validity_marker
+    from tortoise.sdk import _decorate_fallback_hits
+
+    sdk, _events = lane
+    zero = sdk.create_point("statement", "epoch zero", validFrom=0)
+    plain = sdk.create_point("statement", "undated")
+    # non-vacuous: the bound IS stored as the number 0 (not normalised away at
+    # the write boundary) — otherwise the read side has nothing to preserve.
+    assert _props(sdk, zero["id"])["validFrom"] == 0, _props(sdk, zero["id"])
+
+    hit = next(r for r in _scan(sdk) if r["id"] == zero["id"])
+    assert hit["valid_from"] == 0, hit
+    assert hit["valid_from_precision"] == "day", hit
+    assert _validity_marker(hit) == "[valid since 1970-01-01]"
+
+    by_id = {r["id"]: r for r in _decorate_fallback_hits(
+        [{"id": zero["id"]}, {"id": plain["id"]}], sdk._get_proj().g)}
+    assert by_id[zero["id"]]["valid_from"] == 0, by_id[zero["id"]]
+    assert _validity_marker(by_id[zero["id"]]) == "[valid since 1970-01-01]"
+
+    # CONTROL — absence keeps its ABSENT spelling on both surfaces (a missing
+    # key, never a fabricated bound), so this fix cannot pass by emitting keys
+    # everywhere.
+    plain_hit = next(r for r in _scan(sdk) if r["id"] == plain["id"])
+    assert "valid_from" not in plain_hit, plain_hit
+    assert _validity_marker(plain_hit) == ""
+    assert "valid_from" not in by_id[plain["id"]], by_id[plain["id"]]
+
+
 # ── #9741: a NUMBER is a legal bound; one bad point never denies the read ──
 
 def test_a_numeric_start_renders_its_utc_day_in_epoch_seconds():
@@ -1125,7 +1175,98 @@ def test_an_unreadable_end_never_reads_as_an_open_window():
         "[valid 2024-06-01 → TBD]"
 
 
+def test_an_unreadable_expiry_never_reads_as_an_open_window():
+    """#9741 review P2-1 — the THIRD end-bearing field, same arm, same reading.
 
+    ``end_unreadable`` read ``valid_to`` and nothing else, so a record whose
+    ONLY asserted end is the expiry stamp fell through to the open arm when
+    that stamp could not be dated::
+
+        {"valid_from": "2024-06-01", "expired_at": <junk>}
+            -> "[valid since 2024-06-01]"   ("still true")
+
+    — while ``time_aware.is_stale_entry`` resolves ``valid_to`` AND
+    ``expired_at`` through the one resolver and reads a present-but-un-pinnable
+    one as ENDED. One stored fact, two answers across the two surfaces #2350's
+    3-state end exists to reconcile (the #9202 owner ruling: an end column
+    carrying a value is an ASSERTED end, never an open one). It cannot be
+    delegated to ``_end_state_is_unknown``: on the wire ``end_state`` is
+    resolved from ``valid_to`` ONLY, so ``end_state: "known"`` says nothing
+    about the expiry.
+
+    Fails pre-fix: every junk-expiry shape rendered ``[valid since
+    2024-06-01]``.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    # the vocabulary's own END_UNKNOWN form — what an un-datable stored end
+    # must join, whatever column carries it.
+    tbd_end = _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                                "valid_to": "TBD", "end_state": "unknown"})
+    assert tbd_end == "[valid since 2024-06-01; end unknown]"
+    for unstatable in ({"nested": 1}, ["x"], float("nan"), 1719792000000,
+                       10 ** 20):
+        got = _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                                "expired_at": unstatable,
+                                "end_state": "known"})
+        assert got == tbd_end, (unstatable, got)
+    # the distinction this arm keeps: an ABSENT expiry is still the open
+    # reading (a bound was not stored ⇒ nothing was asserted).
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                             "end_state": "known"}) == \
+        "[valid since 2024-06-01]"
+    # GUARD — a STATABLE ``valid_to`` owns the window's end: an unstatable
+    # expiry beside it loses only its decoration (never relabels the end).
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                             "valid_to": "2024-09-01",
+                             "expired_at": {"nested": 1},
+                             "end_state": "known"}) == \
+        "[valid 2024-06-01 → 2024-09-01]"
+    # ... and a STATABLE expiry beside a stated end still renders (unchanged).
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                             "valid_to": "2024-09-01",
+                             "expired_at": "2026-01-02",
+                             "end_state": "known"}) == \
+        "[valid 2024-06-01 → 2024-09-01; expired 2026-01-02]"
+
+
+def test_an_unreadable_expiry_on_the_search_wire_states_the_end(lane):
+    """#9741 review P2-1 end-to-end: the expiry half reaches the renderer from
+    the SURFACE, and the resolved state cannot answer for it.
+
+    ``end_state`` on the wire is resolved from ``valid_to`` ONLY
+    (``sdk._resolve_end_state``), so this hit's ``end_state`` is ``open``
+    while the record asserts an end in ``expired_at`` — which is exactly why
+    the arm has to read the bound instead of the state.
+
+    The fixture is a row written directly (an expiry stored in a shape the
+    renderer cannot date), the same technique the ``valid_to`` end test above
+    uses for pre-ruling rows.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    sdk, _events = lane
+    p = sdk.create_point("statement", "junk expiry", validFrom="2024-06-01")
+    dated = sdk.create_point("statement", "dated end",
+                             validFrom="2024-06-01", validTo="2024-09-01")
+    for pid in (p["id"], dated["id"]):
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$i}) SET n.expiredAt = $v",
+            params={"i": pid, "v": ["x"]})
+    hits = {r["id"]: r for r in _scan(sdk)}
+
+    hit = hits[p["id"]]
+    # non-vacuous: the unreadable expiry IS on the wire the renderer consumes,
+    # and the state beside it says the end is OPEN (resolved from the absent
+    # ``valid_to``) — the disagreement this fix removes.
+    assert hit["expired_at"] == ["x"], hit
+    assert hit["end_state"] == "open", hit
+    assert _validity_marker(hit) == "[valid since 2024-06-01; end unknown]"
+
+    # CONTROL — a dated ``valid_to`` keeps the stated end, expiry or not.
+    assert hits[dated["id"]]["end_state"] == "known", hits[dated["id"]]
+    assert _validity_marker(hits[dated["id"]]) == \
+        "[valid 2024-06-01 → 2024-09-01]"
 
 
 def test_a_numeric_start_through_the_public_write_renders_the_start(lane):

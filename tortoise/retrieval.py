@@ -1092,6 +1092,14 @@ def _validity_marker(h: dict) -> str:
         calls un-datable is never interpolated as if it were a date
         (``[valid 2024-01-01 → TBD]``, the #9741 residual). The state is
         CONSUMED, never re-decided here — see :func:`_end_state_is_unknown`.
+        The THIRD end-bearing field joins them (#9741 review P2-1): a stored
+        ``expired_at`` that names no instant, with no ``valid_to`` stating the
+        end, renders the same ``… ; end unknown`` form. The expiry stamp is an
+        ASSERTED end — ``time_aware.is_stale_entry`` resolves both end fields
+        and reads a present-but-un-pinnable one as ENDED — so its
+        unreadability can never render as "still true". It is gated on
+        ``not valid_to``: a STATABLE end owns the window's end and is never
+        relabelled by an unstatable expiry beside it.
       - undated hits → NO validity marker (byte-identical rendering)
       - a PRESENT but UNORDERABLE start (``valid_from="TBD"`` /
         ``"not-a-date"``) → the start clause is OMITTED, never interpolated
@@ -1203,7 +1211,30 @@ def _validity_marker(h: dict) -> str:
     # (Same class as #9741 review P2's start/end asymmetry, found in the same
     # read of the same arm — a PRESENT unstatable bound must never be relabelled
     # as the absence of one.)
-    end_unreadable = _bound_present(raw_vt) and not vt
+    #
+    # ⛔ ALL THREE bound fields are in this arm, not two (#9741 review P2-1).
+    # ``expired_at`` was left out, so a record whose ONLY asserted end is the
+    # expiry stamp fell through to the open arm whenever that stamp could not
+    # be dated — ``{valid_from: "2024-06-01", expired_at: [...]}`` rendered
+    # ``[valid since 2024-06-01]``, "still true", for a window
+    # ``time_aware.is_stale_entry`` resolves to ENDED (it reads ``valid_to``
+    # AND ``expired_at``, and treats present-but-un-pinnable as stale). One
+    # stored fact, two answers, across the two surfaces #2350's 3-state end
+    # exists to reconcile. The census above already saw the bound, which made
+    # the wrong reading sharper rather than smaller.
+    #
+    # Gated on ``not vt``: a STATABLE ``valid_to`` owns the window's end and is
+    # never relabelled by an unstatable expiry riding beside it as a
+    # decoration. Only when nothing else states an end does the expiry's own
+    # unreadability decide the reading.
+    #
+    # This cannot be delegated to ``_end_state_is_unknown``: on the wire
+    # ``end_state`` is resolved from ``valid_to`` ONLY
+    # (``sdk._resolve_end_state(valid_to, valid_to_precision)``), so a hit
+    # carrying ``end_state: "known"`` says nothing about ``expired_at`` — the
+    # expiry half has to be read from the bound itself.
+    end_unreadable = (_bound_present(raw_vt) and not vt) or (
+        not vt and _bound_present(raw_ex) and not ex)
     # #9741 review P2: the arm is gated on whether a start was STORED, not on
     # whether it produced display text. Gating on the display string made an
     # unreadable start indistinguishable from an absent one, so it discarded a
