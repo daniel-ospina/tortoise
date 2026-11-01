@@ -29,8 +29,6 @@ Lane: embedded (``TORTOISE_TEST_CARVE_OUT=1``) or any ``TORTOISE_DB_URI``
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 
 import pytest
 
@@ -40,7 +38,6 @@ from tortoise.truncation import (
     mark_truncation,
     truncation_field,
 )
-
 
 # ── the marker's own contract ────────────────────────────────────────────
 
