@@ -439,6 +439,65 @@ def declared_conditional(prereg_record: dict | None) -> tuple[dict[str, dict], s
     return declared, ""
 
 
+def _failure_text(result: dict) -> str:
+    """The receipt's own error/warning surfaces, as one searchable string.
+
+    ONE reader for this, because two is how a refusal message came to assert a
+    failure marker the receipt never carried (#10215 review r2 P2).
+    """
+    return " ".join(
+        str(entry)
+        for key in ("errors", "diagnostics", "warnings")
+        for entry in (result.get(key) or ()))
+
+
+def _map_candidate_count(result: dict) -> int | None:
+    """How many candidates the S2 map produced, off the receipt's own witness.
+
+    ``None`` when the receipt carries no usable count — a different fact from
+    ``0``, and both refuse an idle claim: an EMPTY item set skips the pass's
+    ``try`` and leaves the same ``{enabled: true, s2: {}, union: {}}`` shape as a
+    pass that found nothing to do.
+    """
+    stats = result.get("stats") or {}
+    witness = stats.get("step_witness") if isinstance(stats, dict) else None
+    map_block = witness.get("map") if isinstance(witness, dict) else None
+    map_items = (map_block or {}).get("items") if isinstance(map_block, dict) else None
+    return (sum(int(n or 0) for n in map_items.values())
+            if isinstance(map_items, dict) else None)
+
+
+def _idle_cause(result: dict, key: str, block: dict) -> str:
+    """Why a PRESENT surface is not a witnessed-idle pass — one cause, named.
+
+    G5 used to answer this by ELIMINATION over two possibilities ("the flag was
+    off" / "a failure marker IS present"). #10215's review added a FOURTH
+    exclusion to :func:`observe_idle` — a positive candidate count — and the
+    elimination then asserted a fact about the receipt that was false: a
+    zero-candidate receipt carries no failure marker at all, and the refusal told
+    its reader one was present (#10215 review r2 P2). #9823's rule is that the
+    cause is NAMED, so the predicates are shared with the witness rather than
+    re-derived here.
+    """
+    if block.get("enabled") is not True:
+        return ("its own `enabled` reads False — the pass was not enabled, so it "
+                "was never idled")
+    markers = _IDLE_FAILURE_MARKERS.get(key)
+    if not markers:
+        return (f"there is no idle witness for {key!r}, so an idle claim for this "
+                "step cannot be made from the receipt at all")
+    hit = [m for m in markers if m in _failure_text(result)]
+    if hit:
+        return (f"a failure marker for it IS present on the receipt ({hit[0]!r}), "
+                "so the fail-open path fired rather than the pass finding nothing "
+                "to do")
+    count = _map_candidate_count(result)
+    return ("the receipt carries no usable candidate count for the map "
+            f"({count!r}): an EMPTY item set skips the pass's `try` and leaves "
+            "this same shape, so 'the map typed every candidate' cannot be told "
+            "apart from 'there was nothing to classify'")
+
+
 def observe_idle(result: dict) -> dict[str, str]:
     """Which CONDITIONAL steps were ENABLED, did NO work, and did NOT FAIL.
 
@@ -475,19 +534,15 @@ def observe_idle(result: dict) -> dict[str, str]:
     stats = result.get("stats") or {}
     witness = stats.get("step_witness") if isinstance(stats, dict) else None
     witness = witness if isinstance(witness, dict) else {}
-    failure_text = " ".join(
-        str(entry)
-        for key in ("errors", "diagnostics", "warnings")
-        for entry in (result.get(key) or ()))
+    failure_text = _failure_text(result)
 
     idle: dict[str, str] = {}
     # The candidate set the map produced, off the receipt's own witness (#10215
     # review P2): an idle claim needs candidates that WENT unclassified, so "the
     # map typed everything" and "there was nothing" must not read the same.
-    map_block = witness.get("map") if isinstance(witness, dict) else None
-    map_items = (map_block or {}).get("items") if isinstance(map_block, dict) else None
-    candidate_count = (sum(int(n or 0) for n in map_items.values())
-                       if isinstance(map_items, dict) else None)
+    # Shared with `_idle_cause`: G5's refusal names the SAME predicates, so the
+    # message and the witness cannot drift apart (#10215 review r2 P2).
+    candidate_count = _map_candidate_count(result)
     for key, step in _IDLE_SURFACES.items():
         block = result.get(key)
         if not isinstance(block, dict) or not block:
@@ -1273,13 +1328,12 @@ def main(argv: list[str] | None = None) -> int:
         # Name the CAUSE, not the union of the possibilities: #9823's whole point
         # is that "flag off", "failed" and "nothing to do" send a reader to three
         # different places, and one message for all of them is how #9116 was
-        # mis-blamed the first time. By elimination here the block either says the
-        # flag was off, or a failure marker is present.
-        cause = ("its own `enabled` reads False — the pass was not enabled, so it "
-                 "was never idled"
-                 if block.get("enabled") is not True else
-                 "a failure marker for it IS present on the receipt, so the "
-                 "fail-open path fired rather than the pass finding nothing to do")
+        # mis-blamed the first time. The cause is derived by `_idle_cause`, which
+        # reads the SAME predicates as `observe_idle` — the two-branch elimination
+        # this replaces asserted "a failure marker IS present" over a receipt whose
+        # only exclusion was a ZERO candidate count, which carries no marker at all
+        # (#10215 review r2 P2).
+        cause = _idle_cause(result, surface or "", block)
         return refuse(
             f"the conditional step {step} is neither observed nor idle: its "
             f"surface IS present and reads {_summary_block(block)}, and {cause}. "

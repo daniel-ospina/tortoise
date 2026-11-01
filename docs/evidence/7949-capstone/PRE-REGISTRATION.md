@@ -564,10 +564,13 @@ steps:
         `_collect_classify_items` (tortoise/extractor_v2.py:8666, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
-        the run's own classify surface reads enabled=true with empty s2/union AND the receipt's
+        the run's own classify surface reads enabled=true with empty s2/union, the receipt's
         error/warning surfaces carry no `classify(S2) failed` / `classify(union) failed` /
         `classify-later init failed` — the fail-open path leaves the SAME empty counters, so the
-        absence of a failure marker is what separates 'nothing to do' from 'crashed'
+        absence of a failure marker is what separates 'nothing to do' from 'crashed' — AND the
+        receipt's `step_witness` carries a POSITIVE candidate count for the map: an absent or zero
+        count is the shape an EMPTY item set leaves when it skips the pass's `try`, so it cannot
+        support an idle claim (#10215 review r2 P2)
       evidence_issue: 10215
 e4_denominator: 15
 denominator_floors:
@@ -686,8 +689,10 @@ evidence or its evidence issue.
 
 1. every **unconditional** step is observed in the one pass (unchanged);
 2. every **conditional** step is either observed, or declared **idle** with its basis, where *idle* is a
-   **witnessed** state: the pass's flag was **ON**, its `s2`/`union` counters are **empty**, and the
-   receipt's own error/warning surfaces carry **no failure marker** for it;
+   **witnessed** state: the pass's flag was **ON**, its `s2`/`union` counters are **empty**, the
+   receipt's own error/warning surfaces carry **no failure marker** for it, and the receipt's
+   `step_witness` carries a **positive candidate count** for the map (an absent or zero count is the
+   shape an EMPTY item set leaves when it skips the pass's `try`, so it cannot support an idle claim);
 3. a step may not leave the gate by being omitted from both lists — required ∪ conditional must be
    exactly the eight (§4.1), and the two must be disjoint;
 4. the conditional **set** is read from the record **at the pre-registration commit**, never from the

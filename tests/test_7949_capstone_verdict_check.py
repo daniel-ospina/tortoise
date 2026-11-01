@@ -1489,6 +1489,57 @@ def test_a_g5_refusal_names_an_incomplete_seam_as_the_seam(
     assert "accounts for the missing" not in reason, reason
 
 
+def test_a_zero_candidate_g5_refusal_names_the_candidate_count_not_a_marker(
+        tmp_path, monkeypatch):
+    """The FOURTH idle exclusion must be named as itself (#10215 review r2 P2).
+
+    `observe_idle` refuses an idle claim when the receipt carries no candidate count
+    (or zero), because an EMPTY item set skips the pass's `try` and leaves the
+    identical `enabled=true`/`s2={}`/`union={}` shape. G5's cause was still an
+    ELIMINATION over two possibilities — flag off / *"a failure marker for it IS
+    present on the receipt, so the fail-open path fired"* — so this receipt sent its
+    reader to debug a crash that never happened, and the refusal asserted a fact
+    about the receipt that is false: the error surfaces are empty and there is no
+    marker.
+
+    Non-vacuity: on the pre-fix arm the reason contains "failure marker for it IS
+    present" and never mentions the candidate count (measured, #10215 review r2).
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1},
+        steps={"unconditional": [s for s in cvc.STEPS if s != "S2.3"],
+               "conditional": [{"step": "S2.3", "condition": "the map typed "
+                                "everything", "idle_evidence": "enabled, no "
+                                "activity, no failure", "evidence_issue": 10215}]}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    empty_map = {"entities": [], "events": [], "points": [], "operators": []}
+    classify = {"enabled": True, "s2": {}, "union": {}}
+
+    class _ZeroCandidateSDK:
+        def capture_session(self, _turns, session_id=None):
+            # flag ON, no activity, no error surface — and NOTHING to classify
+            return _seam_receipt(classify_later=classify, embed_list=empty_map)
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _ZeroCandidateSDK)
+    out = tmp_path / "g5-zero-candidates.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    # the witness refuses this receipt ...
+    assert probe.observe_idle(_seam_receipt(classify_later=classify,
+                                            embed_list=empty_map)) == {}
+    # ... and G5 names THAT cause instead of a failure marker the receipt lacks
+    assert "candidate count" in reason, reason
+    assert "failure marker" not in reason, reason
+
+
 def test_a_degraded_search_refuses_the_completed_table(tmp_path, monkeypatch):
     """END TO END (#10214 review, P1): a degraded search cannot emit a table.
 
