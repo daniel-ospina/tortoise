@@ -190,7 +190,14 @@ not evidence for this run:
 
     - `--health-url` — THIS RUN reads the deployment's own `/health` and
       stamps `read_at` with its own clock. It is what `--execute` REQUIRES:
-      the arming fact and its age are then a measurement, not a claim.
+      the arming fact and its age are then a measurement, not a claim. ⛔ The
+      scheme is an ALLOWLIST (`http`/`https`, `_HEALTH_URL_SCHEMES`):
+      `urllib.request`'s default opener also serves `file:` and `data:`, so
+      without it `--health-url file:///tmp/h.json` read the operator's own
+      text, stamped it with a fresh `read_at`, and satisfied the very fence
+      this section states — the strongest precondition in the tool, satisfiable
+      by a text editor (#10483 review round 10, P2). Any other scheme is
+      `_HealthUnreadable` → exit 3, "an absence is NOT established".
     - `--health-json` — a captured body, for a PREVIEW. It carries the
       deployment's own `fetched_at` (#9548 added it for exactly this reader);
       a capture that states no instant at all (a body saved before that field
@@ -1306,6 +1313,23 @@ class _HealthUnreadable(Exception):
     """`--health-url` could not be read — exit 3, an absence is NOT established."""
 
 
+#: The ONLY schemes `--health-url` will speak. An ALLOWLIST, deliberately, not a
+#: denylist of `file:`/`data:`: `urllib.request`'s default opener dispatches
+#: `file:`, `data:`, `ftp:` and anything else a registered handler claims, so a
+#: denylist is only correct until the next handler exists and the allowlist is
+#: correct until this tool chooses otherwise.
+_HEALTH_URL_SCHEMES = ("http", "https")
+
+
+def _health_url_scheme(url: str) -> str:
+    """The URL's scheme, lower-cased; `""` when it names none."""
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(url or "").scheme or "").lower()
+    except Exception:      # pragma: no cover - urlparse is total for str input
+        return ""
+
+
 def _fetch_health(url: str, *, timeout: float = 10.0) -> dict:
     """Read the deployment's own `/health` AT RUN TIME and stamp the read.
 
@@ -1318,9 +1342,30 @@ def _fetch_health(url: str, *, timeout: float = 10.0) -> dict:
     Only `host[:port]` is published onto the evidence (`health_url`): a URL can
     carry credentials in its userinfo, and a plan artefact is shared — the same
     leak the target block already refuses (#10483 review round 2, P1-B).
+
+    ⛔ THE SCHEME IS CHECKED BEFORE THE OPEN, and that check is the difference
+    between a MEASUREMENT and a claim wearing a measurement's timestamp.
+    `urllib.request.urlopen` serves `file:` and `data:` through the same default
+    opener, so `--health-url file:///tmp/h.json` returned the operator's own
+    text and this function then stamped it with `datetime.now()` — manufacturing
+    the two facts (`read_at`, `health_url`) that `--execute` requires, which is
+    precisely what `--health-json` is refused for (#10483 review round 10, P2).
+    A scheme that is not in `_HEALTH_URL_SCHEMES` is `_HealthUnreadable`: exit
+    3, "an absence is NOT established", never a pass and never a refusal that
+    names a precondition as failed.
     """
     import urllib.request
     from datetime import UTC, datetime
+    scheme = _health_url_scheme(url)
+    if scheme not in _HEALTH_URL_SCHEMES:
+        # The URL is NOT echoed: it can carry credentials in its userinfo
+        # (P1-B above), and a scheme name is all the operator needs.
+        raise _HealthUnreadable(
+            f"the URL scheme is {scheme or '(none)'!r} and only "
+            f"{'/'.join(_HEALTH_URL_SCHEMES)} are read — a body served from "
+            f"any other scheme is NOT this run's measurement of the "
+            f"deployment, and stamping it with a fresh instant would launder "
+            f"an operator-written body into arming evidence")
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             body = json.loads(response.read().decode("utf-8"))

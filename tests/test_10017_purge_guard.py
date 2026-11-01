@@ -1833,6 +1833,77 @@ def test_the_live_health_read_stamps_its_own_instant_and_drops_credentials(
     assert "SEKRIT" not in json.dumps(body)
 
 
+@pytest.mark.parametrize("url, scheme_hint", [
+    ("file:///tmp/health.json", "file"),
+    ("data:application/json,%7B%22record%22%3A%7B%22armed%22%3Atrue%7D%7D", "data"),
+    ("/tmp/health.json", "(none)"),
+])
+def test_a_health_url_must_be_http_or_https_and_says_which_scheme_it_refused(
+        url, scheme_hint):
+    """⛔ `--health-url` is the ONE input `--execute` trusts as a measurement.
+
+    `urllib.request`'s default opener also serves `file:` and `data:`, so
+    before this gate `--health-url file:///tmp/h.json` read the operator's own
+    text and `_fetch_health` then stamped it with `datetime.now()` — minting
+    exactly the two things a captured `--health-json` body is REFUSED for
+    (`read_at` and `health_url`; #10483 review round 10, P2). Reproduced against
+    the stdlib alone before the fix. The scheme is an allowlist, not a denylist,
+    so a handler registered later cannot widen the door on its own.
+    """
+    with pytest.raises(purge._HealthUnreadable) as excinfo:
+        purge._fetch_health(url)
+    message = str(excinfo.value)
+    assert repr(scheme_hint) in message          # names what it would not read
+    assert "http/https" in message               # …and what it would
+    # A URL can carry credentials in its userinfo, so it is never echoed — and
+    # neither is anything a `data:` URL carries.
+    assert url not in message
+    assert "/tmp/health.json" not in message
+    assert "application/json" not in message
+
+
+def test_the_health_scheme_allowlist_still_reads_a_real_deployment(monkeypatch):
+    """The gate refuses schemes, not deployments: `http`/`https` still read."""
+    payload = _health()
+
+    class _Response:
+        def read(self):
+            return json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    seen: list[str] = []
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda url, timeout=None: (seen.append(url),
+                                                   _Response())[1])
+    for url in ("https://tortoise.example/health",
+                "HTTP://tortoise.example:8080/health"):
+        body = purge._fetch_health(url)
+        assert purge._age_seconds(body["read_at"]) is not None
+    assert seen == ["https://tortoise.example/health",
+                    "HTTP://tortoise.example:8080/health"]
+
+
+def test_execute_refuses_a_file_scheme_health_url_before_any_delete(
+        tmp_path, monkeypatch, capsys):
+    """BY EFFECT, through `main`: on the pre-fix code this SAME invocation read
+    the operator's file, stamped its own instant, cleared every arming check and
+    reached `_execute` (rc 0). Now it exits 3 and touches nothing."""
+    hand_written = _write(tmp_path, "hand.json", _health())
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        health_url="file://" + hand_written)
+    assert rc == 3
+    assert called == []                      # the delete path was never reached
+    err = capsys.readouterr().err
+    assert "'file'" in err and "ARMED" in err
+
+
 def test_execute_wiring_reads_the_health_from_the_deployment_when_given_a_url(
         tmp_path, monkeypatch):
     """The strong path through `main`: no operator-authored file at all."""
