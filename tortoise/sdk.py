@@ -4126,7 +4126,7 @@ def _rec_point_id(rec: dict):
 
 #: The chunk a journal presence scan reads at a time (#10515). Bounded so the
 #: scan's peak memory is the chunk, not the journal: a full-parsed
-#: ``EventLog.read_all()`` was measured at 681 ms and a 136 MB spike on 100k
+#: ``EventLog.read_all()`` was measured at 631.7 ms and a 136 MB spike on 100k
 #: records, which is not a price a TYPO may pay.
 _JOURNAL_SCAN_CHUNK = 1 << 20
 
@@ -4171,6 +4171,17 @@ def _journal_presence_mentions(path, point_id: str) -> dict[str, bool]:
     Returns a ``{point_id: present}`` dict — ``{}`` when the journal never names
     it (the typo shape). A record naming the id that no rule can classify leaves
     it absent, which is the same answer as today.
+
+    RESIDUALS, named rather than claimed away (review round 2):
+
+    * the needle is the raw id bytes, so an id containing ``"``, ``\\`` or a
+      control character is JSON-ESCAPED in the record and never matches its own
+      line — that id reads as a typo. SDK-minted ids are hex-and-dash tokens, so
+      this needs a caller-supplied id; it is bounded and stated, not silent
+      reasoning;
+    * the splitter handles ``\\n``, ``\\r\\n`` and bare ``\\r`` (``EventLog``
+      documents all three), but a line SPLIT ACROSS TWO CHUNKS is carried by
+      ``tail`` and parsed only once complete.
     """
     needle = str(point_id).encode('utf-8')
     state: dict[str, bool] = {}
@@ -4184,10 +4195,12 @@ def _journal_presence_mentions(path, point_id: str) -> dict[str, bool]:
             lines = buf.split(b'\n')
             tail = lines.pop()          # a partial line — carried, never parsed
             for line in lines:
-                if needle in line:
-                    _apply_journal_presence(line, point_id, state)
-    if needle in tail:
-        _apply_journal_presence(tail, point_id, state)
+                for sub in line.split(b'\r'):
+                    if needle in sub:
+                        _apply_journal_presence(sub, point_id, state)
+    for sub in tail.split(b'\r'):
+        if needle in sub:
+            _apply_journal_presence(sub, point_id, state)
     return state
 
 
@@ -9656,10 +9669,11 @@ class TortoiseSDK:
         synthetic 100k-record (23.7 MB) journal it measured **631.7 ms** and a
         **136 MB** RSS spike. This scan measured **97.5 ms** for a miss (the typo
         shape) and **115.5 ms** for a hit, with a **4.6 MB** peak — 6.5x faster
-        and 30x lighter, and linear in journal size (~0.4 ms per 1k records). The
-        result is memoised on the journal file's ``os.stat`` identity (inode +
-        size + mtime_ns), so a stream of absent writes pays it once, and the memo
-        is not invalidated until the journal actually changes.
+        and 30x lighter, and linear in journal size (97.5 ms / 100k records =
+        ~1 ms per 1k records). The result is memoised on the journal file's
+        ``os.stat`` identity (inode + size + mtime_ns): repeats of the SAME id pay
+        nothing while the journal is unchanged, and a DIFFERENT id pays one scan
+        per journal state.
 
         ⛔ NOT ``EventLog.position()`` (review B2). That read takes the
         process-wide append lock AND the cross-process ``flock``, opens the
@@ -9668,29 +9682,54 @@ class TortoiseSDK:
         ``append`` proceeds unserialised. Measured by the reviewer with a peer
         holding the lock: a plain TYPO'd ``update_point`` went from 1.8 ms to
         5006 ms and degraded every writer on that journal. ``os.stat`` is O(1),
-        takes no lock, needs no write permission, and its inode+mtime_ns also
-        closes the same-length-replacement hole a record COUNT has (review B3).
+        takes no lock and needs no write permission.
+
+        ⛔ THE MEMO IS PER ID, AND A MISS EXTENDS IT (review round 2, finding 1).
+        The first cut cached a SINGLE id's answer under a journal-wide key, so the
+        next absent write for a DIFFERENT id read a fabricated ``False`` — and in
+        the #7405 window the journal does not change while the arm refuses, so the
+        key never moved: the FIRST loss was reported and every later one went
+        silent, which is the defect this fix exists to remove. The memo now holds
+        ``{id: present}`` and an id it has not seen forces its own scan, so the
+        cost is one scan per DISTINCT absent id per journal state (stated, not
+        hidden — repeats of the same id are free).
+
+        RESIDUAL, named rather than claimed closed (review round 2, finding 2): the
+        stat identity is ``dev+ino+size+mtime_ns``, so a same-inode, same-SIZE
+        rewrite whose ``mtime_ns`` lands in the SAME tick is indistinguishable and
+        the memo answers stale. ``EventLog``'s own position block names the same
+        residual for the same reason. It needs a same-size in-place journal swap
+        inside one clock tick; it is not covered by a record-count stamp either,
+        which is the hole it was chosen over.
         """
         log = self._get_event_log()
         if log is None:
             return None
         stat_key = self._journal_stat_key(log)
-        cache = getattr(self, '_journal_known_ids_cache', None)
+        cache = getattr(self, '_journal_presence_memo', None)
+        known: dict[str, bool] = {}
         if cache is not None and stat_key is not None and cache[0] == stat_key \
                 and cache[2] is log:
-            return cache[1].get(point_id, False)
+            known = cache[1]
+            if point_id in known:
+                return known[point_id]
         try:
             seen = _journal_presence_mentions(log.path, point_id)
-        except Exception:  # noqa: BLE001, RUF100 — reported below, never fatal
+        except FileNotFoundError:
+            # No journal FILE yet is the ordinary early-life typo path (a lane with
+            # a configured path and nothing written). Silent, by indicator 2.
+            seen = {}
+        except Exception:  # noqa: BLE001, RUF100 — reported by the caller
             _logger.warning(
                 "journal could not be read to check whether %r is a known "
                 "point; an absent live read is reported as UNJUDGED rather "
                 "than asserted to be a typo (#10515)",
                 point_id, exc_info=True)
             return None
+        known[point_id] = seen.get(point_id, False)
         if stat_key is not None:
-            self._journal_known_ids_cache = (stat_key, seen, log)
-        return seen.get(point_id, False)
+            self._journal_presence_memo = (stat_key, known, log)
+        return known[point_id]
 
     @staticmethod
     def _journal_stat_key(log):
@@ -9698,6 +9737,11 @@ class TortoiseSDK:
 
         ``None`` when the path cannot be stat'd (an in-memory log, a scratch
         lane): the answer is then simply not memoised, never guessed.
+
+        ``st_dev``/``st_ino`` catch a REPLACEMENT journal; ``st_size`` catches an
+        append; ``st_mtime_ns`` catches a same-size rewrite in a later tick. The
+        one shape it cannot see is a same-inode, same-size rewrite inside ONE
+        tick — named as a residual in :meth:`_journal_knows_point`.
         """
         path = getattr(log, 'path', None)
         if not path:
@@ -9729,6 +9773,11 @@ class TortoiseSDK:
           probe could not run);
         * ``journal_known`` — the journal carries the id and the LIVE graph does
           not, i.e. a real point whose projection is behind;
+        * ``journal_unreadable`` — a journal IS configured and the read failed
+          (permissions, I/O, a path removed mid-flight). Unjudged is not "a typo":
+          nothing can tell what was lost, so it is reported as its own reason
+          rather than folded into silence (review round 2, finding 3). A missing
+          journal FILE is the ordinary early-life typo path and stays silent;
         * neither — absent from BOTH, the typo shape, and it stays silent.
 
         Rides the existing ``monitoring`` seam (``metrics()``
@@ -9742,10 +9791,14 @@ class TortoiseSDK:
         proj = getattr(self, '_proj', None)
         if self._graph_presence(proj) is not True:
             reason = 'graph_unavailable'
-        elif self._journal_knows_point(point_id) is True:
-            reason = 'journal_known'
         else:
-            return
+            known = self._journal_knows_point(point_id)
+            if known is None:
+                reason = 'journal_unreadable'
+            elif known is True:
+                reason = 'journal_known'
+            else:
+                return
         monitoring.record_silent_revision_loss(reason)
         _logger.warning(
             "update_point(%r): the LIVE graph does not hold this point, but %s "
@@ -9753,9 +9806,12 @@ class TortoiseSDK:
             "is a rebuild in flight (#7405) the write is lost; if the id is a "
             "typo, ignore this line (#10515)",
             point_id,
-            "the graph key could not be confirmed"
-            if reason == 'graph_unavailable'
-            else "the journal still carries the id",
+            {
+                'graph_unavailable': "the graph key could not be confirmed",
+                'journal_known': "the journal still holds the id",
+                'journal_unreadable': "the journal could not be READ to rule "
+                                      "a typo out",
+            }[reason],
         )
 
     def _graph_write_with_retry(self, fn, *, what: str, witness=None):

@@ -1285,6 +1285,63 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
         assert not any("will not be replayed" in r.getMessage()
                        for r in caplog.records), (
             "a write after a hard delete must not warn about a lost revision")
+
+        # ── the memo is PER-ID, not per-journal-state (review round 2, find 1) ──
+        # The rebuild window is exactly the state in which the journal does NOT
+        # change while the arm refuses, so a memo that cached ONE id's answer
+        # under a journal-wide key answered a fabricated "typo" for the next id —
+        # the FIRST loss was reported and every later one went silent. Two
+        # distinct journal-known ids, in one journal state, both must count.
+        p1, p2 = _pid(sdk), _pid(sdk)
+        sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids DETACH DELETE n",
+            {"ids": [p1, p2]})
+        assert not sdk.get_point(p1) and not sdk.get_point(p2)
+        two_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(p1, confidence=0.9) == {}
+            assert sdk.update_point(p2, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == two_before + 2, (
+            "two journal-known points in ONE journal state must BOTH be "
+            "counted — a single-slot memo answers 'typo' for the second, "
+            "which is the silence #10515 removes")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_unconfirmable_graph_reports_the_loss_with_its_own_reason(tmp_path):
+    """#10515 `graph_unavailable`: a graph that cannot be CONFIRMED is not a typo.
+
+    The rebuild/replace window is the shape the issue is about, and it is reached
+    here the way the engine produces it: the target is absent from the live graph
+    AND the graph key probe answers 0 (`_AbortOnceGraph(present=False)`), so the
+    absence cannot be judged at all. The reply stays `{}`; the signal fires with
+    its own reason, because "unjudged" and "no such point" are different facts.
+    """
+    from tortoise import monitoring
+
+    sdk = _sdk(tmp_path, "absentunavailable")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": pid})
+        assert not sdk.get_point(pid)
+        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE, aborts=0,
+                                present=False)
+        proj.g = proxy
+
+        before = monitoring.silent_revision_loss_counts().get(
+            "graph_unavailable", 0)
+        assert sdk.update_point(pid, confidence=0.9) == {}
+        after = monitoring.silent_revision_loss_counts().get(
+            "graph_unavailable", 0)
+        assert after == before + 1, (
+            "an absent read on a graph whose key cannot be confirmed must be "
+            "reported as graph_unavailable — the caller cannot tell it from a "
+            "typo otherwise")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
