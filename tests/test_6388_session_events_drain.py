@@ -281,6 +281,150 @@ def test_the_seal_of_a_drained_plain_day_does_not_re_file_it(tmp_path: Path) -> 
     assert summary["queued"] == 0
 
 
+def test_the_seal_of_a_partly_drained_plain_day_files_only_the_tail(
+        tmp_path: Path) -> None:
+    """The carry across the seal is an index PREFIX, not "all or nothing".
+
+    Guards the new machinery: with one row per FIGURE the seal has to MOVE the
+    plain file's row into the archive's key (`_carry_sealed_days`), and it must
+    move the state AS IT STANDS — a day sealed while only a prefix had drained
+    still owes its tail. A carry that reset instead would re-POST the whole day
+    (duplicates); a carry that assumed "fully drained" would strand the tail.
+    """
+    import gzip
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    records = [_record(f"s{i}") for i in range(6)]
+    plain = _write_day(root, "2026-10-01.jsonl", records)
+
+    first = Recorder()
+    assert _drain(root, store, first, max_records=2)["filed"] == 2
+
+    # tools/seal_session_events.py: gzip the settled day, then remove the plain.
+    (root / "archive").mkdir(parents=True, exist_ok=True)
+    with gzip.open(root / "archive" / "2026-10-01.jsonl.gz", "wt",
+                   encoding="utf-8") as fh:
+        fh.write(plain.read_text(encoding="utf-8"))
+    plain.unlink()
+
+    second = Recorder()
+    summary = _drain(root, store, second)
+    assert second.session_ids == [f"s{i}" for i in range(2, 6)]  # the TAIL only
+    assert summary["filed"] == 4
+    assert summary["queued"] == 0
+
+
+def test_an_undrained_archive_is_filed_even_when_the_plain_day_exists(
+        tmp_path: Path) -> None:
+    """P1 (pre-fix reproduction): the dual-shape day DROPPED the archive entirely.
+
+    `_candidate_files` kept ONE path per day, so `archive/X.jsonl.gz` was
+    discarded from the listing the moment `X.jsonl` existed — not the index
+    space, the FILE. An archive nobody had drained yet was therefore never read:
+    its records were neither filed nor dead-lettered, no counter mentioned them,
+    and `queued` read 0. That is the state this module exists to forbid (#3870),
+    and it is reachable in normal operation — the seal keys "today" on the LOCAL
+    clock while the producer names the day in UTC, so a UTC day already behind
+    local today is sealable, and a session ending later that UTC day re-creates
+    the plain file.
+
+    Pre-fix this fails at the first assert: only `B0` reaches the wire.
+    """
+    import gzip
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    (root / "archive").mkdir(parents=True)
+    archived = [f"A{i}" for i in range(5)]
+    with gzip.open(root / "archive" / "2026-10-01.jsonl.gz", "wt",
+                   encoding="utf-8") as fh:
+        for sid in archived:
+            fh.write(json.dumps(_record(sid)) + "\n")
+    # NOTHING has drained the archive yet; then a later session re-creates the
+    # plain file for the same UTC day.
+    _write_day(root, "2026-10-01.jsonl", [_record("B0")])
+
+    post = Recorder()
+    summary = _drain(root, store, post)
+
+    # Both shapes are FILES, so both are read — the archive (older) first.
+    assert post.session_ids == archived + ["B0"]
+    assert summary["files"] == 2
+    assert summary["filed"] == 6
+    assert summary["queued"] == 0
+    assert summary["dead_lettered"] == 0
+    assert summary["unreadable"] == []
+
+    # …and it converges: neither file is read again on the next pass.
+    again = Recorder()
+    second = _drain(root, store, again)
+    assert again.session_ids == []
+    assert second["filed"] == 0
+    assert second["queued"] == 0
+
+
+def test_a_partly_drained_archive_keeps_its_own_index_space(
+        tmp_path: Path) -> None:
+    """The archive's `consumed` indexes the ARCHIVE, not the day it shares.
+
+    A big day is normally PARTLY drained (the cap is per pass), so the
+    mid-archive state is the ordinary state: the plain file appearing must not
+    move the archive's cursor. Pre-fix the archive was not read at all, so the
+    unfiled tail was stranded while `queued` reported 0.
+    """
+    import gzip
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    (root / "archive").mkdir(parents=True)
+    archived = [f"A{i}" for i in range(6)]
+    with gzip.open(root / "archive" / "2026-10-01.jsonl.gz", "wt",
+                   encoding="utf-8") as fh:
+        for sid in archived:
+            fh.write(json.dumps(_record(sid)) + "\n")
+
+    first = Recorder()
+    run = _drain(root, store, first, max_records=2)          # partial: A0, A1
+    assert first.session_ids == archived[:2]
+    assert run["stopped"] == "batch"
+
+    _write_day(root, "2026-10-01.jsonl", [_record("B0")])    # the day comes back
+
+    rest = Recorder()
+    summary = _drain(root, store, rest)
+    assert rest.session_ids == archived[2:] + ["B0"]         # tail not stranded
+    assert summary["queued"] == 0
+
+
+def test_a_day_file_replaced_by_a_different_file_is_a_new_index_space(
+        tmp_path: Path) -> None:
+    """`consumed` indexes a FILE: a replaced file starts at index 0 again.
+
+    Drained to index 3 of 3, then the day file is REPLACED (a restore, an
+    operator move, a rewrite). The replacement's records are not the ones the
+    cursor counted, so applying the old prefix SKIPS them: 3 records neither
+    filed nor dead-lettered, `queued 0`. The identity bind is (device, inode) —
+    exactly what changed.
+
+    `os.replace`, not unlink-then-write, so the OLD inode is still in use when
+    the replacement is created: the two identities cannot collide, which makes
+    this deterministic instead of dependent on the filesystem reusing an inode.
+    """
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    target = _write_day(root, "2026-10-01.jsonl",
+                        [_record(f"old-{i}") for i in range(3)])
+    first = Recorder()
+    assert _drain(root, store, first)["filed"] == 3
+
+    replacement = _write_day(root, "2026-10-01.jsonl.new",
+                             [_record(f"new-{i}") for i in range(3)])
+    os.replace(replacement, target)
+
+    second = Recorder()
+    summary = _drain(root, store, second)
+    assert second.session_ids == [f"new-{i}" for i in range(3)]
+    assert summary["queued"] == 0
+    assert "different file" in summary["detail"]
+
+
 def test_the_pass_is_bounded_and_says_how_much_is_left(tmp_path: Path) -> None:
     """One pass can never be an unbounded hammer: cap, cadence, queue depth."""
     root, store = tmp_path / "session-events", tmp_path / "store-sync"

@@ -48,6 +48,17 @@ nothing, ever). Two escape hatches keep that rule from becoming a trap:
   dropped, reported as ``stuck`` — so one record the server will not take in
   this billing period cannot gate the other 61,996 forever.
 
+**A cursor belongs to a FILE, not to a day name.** A day has two possible files
+(``X.jsonl`` and ``archive/X.jsonl.gz``) and they can hold DIFFERENT records, so
+each one gets its own index space (``_queue_key``) and each space is bound to one
+file IDENTITY — ``(device, inode)`` — with a re-read as the reset direction
+(``_Cursor.note_identity``). The seal MOVES a day's index space into the archive
+rather than starting a new one (``_carry_sealed_days``), so sealing a drained day
+re-files nothing, while an archive nobody has drained is still read. A single
+cursor row per day name was the P1 of #10486's review: the archive was dropped
+from the listing entirely, its records neither filed nor dead-lettered, and
+``queued`` read 0.
+
 **A verdict that did not persist is not a verdict.** The dead-letter write is
 checked: a record whose dead letter could not be written is a DEFERRAL, never a
 "handled" — crossing a cursor on a row that does not exist is how a record
@@ -96,10 +107,17 @@ __all__ = [
     "read_dead_letter_count",
 ]
 
-#: How many records ONE pass may POST. The measured rate that made the backlog
-#: (222–263 records/day on the box in #6388) is well inside this, so a healthy
-#: box drains in ONE pass; a blocked box that comes back online works the
-#: backlog down over passes instead of firing 61,997 POSTs at once.
+#: How many records ONE pass may POST.
+#:
+#: This is a POST BUDGET, NOT a day's worth of arrival. The measured rate that
+#: made the backlog (222–263 records/day on the box in #6388) is ABOVE this cap,
+#: so a full day of arrival takes at least TWO passes — the arithmetic an earlier
+#: version of this comment got wrong ("well inside this, so a healthy box drains
+#: in ONE pass": 222 > 200, #10486 review P2). Two passes a day is the normal
+#: cadence, not a backlog: the leg rides Pi's ``session_start``/``agent_end``, so
+#: one pass covers a typical increment and the next one finishes the day. A
+#: blocked box that comes back online works a 61,997-record backlog down over
+#: passes instead of firing 61,997 POSTs at once.
 MAX_RECORDS_PER_RUN = 200
 #: Consecutive TRANSIENT refusals a single record may END A PASS with. Past it,
 #: the record is skipped (un-consumed) for the rest of each pass and reported as
@@ -127,7 +145,14 @@ DEAD_LETTER_MAX_ROWS = 500
 #: ``TORTOISE_SESSION_EVENTS_DIR`` overrides the substrate root, so a box whose
 #: substrate is not beside its spool is still drainable.
 SESSION_EVENTS_DIR_ENV = "TORTOISE_SESSION_EVENTS_DIR"
-CURSOR_VERSION = 2
+#: v3 keys every cursor row by the day AND the shape of the file it describes,
+#: and binds that row to the file's identity. v2 wrote ONE row per day, tagged
+#: with the shape it happened to be describing (`load` re-keys it).
+CURSOR_VERSION = 3
+#: The archive shape's queue-key suffix: ``2026-10-01#gz``. The plain shape keeps
+#: the bare day name, so an ordinary day's dead-letter ``path`` row still reads
+#: ``2026-10-01#3``.
+GZ_KEY_SUFFIX = "#gz"
 
 
 def default_session_events_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -184,12 +209,11 @@ def cursor_dir(env: Mapping[str, str] | None = None) -> Path:
 
 
 def _day_key(path: Path) -> str:
-    """The QUEUE identity of a day file: its day, not its path.
+    """The DAY a day file belongs to — ``archive/2026-10-01.jsonl.gz`` ⇒ ``2026-10-01``.
 
-    ``2026-10-01.jsonl`` and ``archive/2026-10-01.jsonl.gz`` are the SAME queue
-    entry at two moments in the seal lifecycle (``tools/seal_session_events.py``
-    gzips a settled day and removes the plain file). Keying by path re-filed a
-    whole day the moment it was sealed and left two cursor rows for one day.
+    The day is the human-facing grouping (and a dead-letter row's label), NOT the
+    queue identity: a day has two possible FILES and they can hold different
+    records, so the cursor's key adds the shape (:func:`_queue_key`).
     """
     name = path.name
     for suffix in (".jsonl.gz", ".jsonl", ".gz"):
@@ -199,27 +223,57 @@ def _day_key(path: Path) -> str:
 
 
 def _shape_of(path: Path) -> str:
-    """Which of the day's two files this is — its index space, not its name.
+    """Which of the day's two FILES this is — its index space, not its name.
 
-    ``archive/X.jsonl.gz`` (``"gz"``) and ``X.jsonl`` (``"plain"``) are the same
-    QUEUE entry across a seal, but two different FILES; see
-    :meth:`_Cursor.note_shape` for why the cursor has to know which one it is
-    looking at.
+    ``archive/X.jsonl.gz`` (``"gz"``) and ``X.jsonl`` (``"plain"``) are two
+    different files that happen to share a day; each gets its own cursor row
+    (:func:`_queue_key`), and each row is bound to one file IDENTITY
+    (:meth:`_Cursor.note_identity`).
     """
     return "gz" if path.name.endswith(".gz") else "plain"
 
 
-def _candidate_files(root: Path) -> list[Path]:
-    """Every day file the substrate holds, OLDEST first.
+def _queue_key(path: Path) -> str:
+    """A day FILE's queue identity: its day AND its shape — never its path.
 
-    Both shapes count, and that is load-bearing: a drain that read only
-    ``*.jsonl`` would SILENTLY SKIP every day sealed before it was drained —
-    records neither filed nor dead-lettered, which is precisely the state this
-    module exists to make unreachable. A day present in BOTH shapes (a seal that
-    landed between our listing and its unlink) is read from the plain file only:
-    the same records twice would be two POSTs of one session.
+    ``X.jsonl`` keeps the bare day (so an ordinary day's dead-letter ``path`` row
+    still reads ``2026-10-01#3``); ``archive/X.jsonl.gz`` gets ``2026-10-01#gz``.
+
+    ⛔ ONE ROW PER DAY WAS THE P1 OF #10486's REVIEW. A single row can describe
+    only one file, so pairing ``archive/X.jsonl.gz`` with ``X.jsonl`` dropped one
+    of them from the listing entirely: an archive nobody had drained yet was
+    never read, its records neither filed nor dead-lettered, and ``queued`` read
+    0 — the exact state this module exists to make unreachable. Two shapes are
+    two files (this PR's own suite writes a plain day whose records are
+    DISJOINT from the archive's), so they get two index spaces.
+
+    Keying by PATH instead would re-file a whole day the moment the seal renamed
+    the file, which is why the DAY is still in the key: the seal MOVES a day's
+    index space into the archive rather than starting a new one
+    (:func:`_carry_sealed_days`).
     """
-    found: dict[str, list[Path]] = {}
+    day = _day_key(path)
+    return day if _shape_of(path) == "plain" else f"{day}{GZ_KEY_SUFFIX}"
+
+
+def _candidate_files(root: Path) -> list[tuple[str, Path]]:
+    """Every day FILE the substrate holds, as ``(queue_key, path)``, OLDEST first.
+
+    Both shapes count, and BOTH are returned even when a day has both. A drain
+    that read only ``*.jsonl`` would SILENTLY SKIP every day sealed before it was
+    drained; a drain that read only the plain file of a dual-shape day skips the
+    ARCHIVE — records neither filed nor dead-lettered, which is precisely the
+    state this module exists to make unreachable.
+
+    A day that exists in both shapes is read once per shape over the seal's
+    lifetime, so the records an archive and a re-created plain file have in
+    COMMON can be POSTed twice. That duplicate is the ACCEPTED cost, not an
+    accident: the server upserts on ``session_id``, and the alternative — a skip
+    — is a lost capture (#3870). It is the trade every log shipper makes:
+    Filebeat's default file identity is device+inode, it guarantees at-least-once
+    delivery, and when a file's identity changes it re-sends the whole content.
+    """
+    found: dict[str, Path] = {}
     for directory in (root / "archive", root):
         try:
             names = sorted(p.name for p in directory.iterdir() if p.is_file())
@@ -229,14 +283,31 @@ def _candidate_files(root: Path) -> list[Path]:
             if not (name.endswith(".jsonl") or name.endswith(".jsonl.gz")):
                 continue
             path = directory / name
-            found.setdefault(_day_key(path), []).append(path)
-    # PLAIN WINS when a day is present in both shapes (a seal that landed between
-    # our listing and its unlink, or an in-place gzip): the plain file is the one
-    # a writer is appending to, and reading the same records twice would be two
-    # POSTs of one session. Chosen explicitly rather than by scan order.
-    picked = [next((p for p in paths if not p.name.endswith(".gz")), paths[-1])
-              for paths in found.values()]
-    return sorted(picked, key=_day_key)
+            # ONE path per queue key: `root` is scanned second, so the writer's
+            # own file wins over an (unusual) uncompressed copy in `archive/` —
+            # the seal only ever writes `.gz` there.
+            found[_queue_key(path)] = path
+    # Oldest day first, and within a day the archive before its plain file: a
+    # deterministic order so two passes over the same substrate scan the same
+    # way (`probes` rotation and the per-pass cap both depend on it).
+    return sorted(found.items(),
+                  key=lambda item: (_day_key(item[1]),
+                                    0 if _shape_of(item[1]) == "gz" else 1))
+
+
+def _identity_of(path: Path) -> tuple[int, int] | None:
+    """A file's identity — ``(device, inode)`` — or ``None`` when it cannot be stat'd.
+
+    A PATH is not an identity: the seal renames the file, the writer re-creates a
+    day it already left, and the OS reuses the name for a different file. The
+    pair log shippers key a consumer position on is device+inode (Filebeat's
+    default ``file_identity``), so that is what the cursor records.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (int(st.st_dev), int(st.st_ino))
 
 
 def _read_lines(path: Path) -> list[str] | None:
@@ -391,7 +462,16 @@ class _Cursor:
                 strikes = value.get("strikes")
                 crossed = value.get("crossed")
                 total = value.get("total")
-                days[str(key)] = {
+                # v2 wrote ONE row per DAY, tagged with the shape it was
+                # describing (`shape`); v3 keys a row by the day AND the shape,
+                # so a v2 row is re-keyed onto the FILE it was actually
+                # tracking. A row with no usable `shape` keeps the day name,
+                # which is the plain space.
+                shape = value.get("shape") if value.get("shape") in ("plain", "gz") else None
+                queue_key = f"{key}{GZ_KEY_SUFFIX}" if shape == "gz" else str(key)
+                dev = value.get("dev")
+                ino = value.get("ino")
+                days[queue_key] = {
                     # A hand-edited / corrupt count is read as "nothing
                     # consumed": the safe direction is a re-POST (idempotent
                     # upsert), never a silently skipped record.
@@ -406,63 +486,89 @@ class _Cursor:
                         str(k): v for k, v in (strikes or {}).items()
                         if isinstance(v, int) and v > 0
                     } if isinstance(strikes, dict) else {},
-                    # WHICH SHAPE this index space belongs to (see
-                    # `note_shape`). Absent on a cursor written before the
-                    # dual-shape fix, which is treated as "unknown", not as a
-                    # transition.
-                    "shape": value.get("shape") if value.get("shape") in ("plain", "gz")
-                    else None,
+                    # The ONE FILE this space belongs to (`note_identity`).
+                    # Absent on a row written before the identity binding —
+                    # read as "unknown", which adopts the file it first sees
+                    # rather than re-filing a backlog on upgrade.
+                    "dev": dev if isinstance(dev, int) else None,
+                    "ino": ino if isinstance(ino, int) else None,
                 }
         return cls(str(root), days)
 
     def day(self, key: str) -> dict:
         return self.days.setdefault(key, {"consumed": 0, "crossed": [], "strikes": {},
-                                          "total": -1, "probes": 0, "shape": None})
+                                          "total": -1, "probes": 0,
+                                          "dev": None, "ino": None})
 
-    def note_shape(self, key: str, shape: str) -> str | None:
-        """Bind this day's cursor to the SHAPE the index space belongs to.
+    def reset_space(self, key: str) -> None:
+        """Start this day FILE's index space over — nothing is dropped.
 
-        The cursor is keyed by DAY and ``consumed`` is an index into that day's
-        file — but a day has TWO possible files and they are not one index
-        space. ``archive/X.jsonl.gz`` and ``X.jsonl`` are the same queue entry
-        only while the SEAL is what separates them: the seal moves the file, so
-        the archive holds exactly the records the plain file held. A plain file
-        that appears AFTER an archive was drained is a DIFFERENT file — the
-        substrate's writer re-created the day for a session that ended after the
-        seal — and its records start at index 0 again. Applying the archive's
-        ``consumed`` to it skips them all, silently (reproduced: 4 records
-        neither filed nor dead-lettered, ``queued 0``, stable across passes).
+        ``consumed`` is an index into ONE file. When that file is gone — the seal
+        carried the space away, the day was restored or rewritten, or the OS
+        reused the day's name for a different file — the index no longer means
+        anything, and applying it SKIPS records that were never filed. The safe
+        direction is a re-read: the server upserts on ``session_id`` (a re-read
+        is idempotent), whereas a skip is a lost capture (#3870).
 
-        So an ``gz → plain`` transition RESETS this day's index space. Every
-        other transition keeps it:
-
-        * ``plain → gz`` is the seal, the archive a gzip of the plain file we
-          just drained — same records, same indices, nothing re-filed (the
-          idempotency `_day_key` exists for).
-        * ``plain → plain`` is an append to the same file — a valid prefix.
-        * ``gz → gz`` is a re-seal of the same day — a valid prefix too.
-
-        The unsafe direction is the one comparable systems resolve the same way:
-        a consumer position is per FILE IDENTITY, and when identity cannot be
-        proven the read is repeated rather than skipped (Logstash's ``sincedb``
-        keys on inode + major + minor for exactly this, and documents that on
-        inode reuse "a previously seen file will be read again"). A re-read is
-        idempotent — the server upserts on ``session_id`` — whereas a skip is a
-        lost capture (#3870).
-
-        Returns a human-readable detail when it reset, else ``None``.
+        The STRIKES/``probes`` state belongs to the index space being discarded
+        for the same reason: stale strikes from the previous space made unrelated
+        records read as ``stuck`` sooner (found in review).
         """
         day = self.day(key)
-        previous = day.get("shape")
-        day["shape"] = shape
-        if previous != "gz" or shape != "plain":
-            return None
         day["consumed"] = 0
         day["crossed"] = []
         day["strikes"] = {}
         day["probes"] = 0
-        return (f"{key}: a plain file replaced the drained archive — "
-                f"re-filing the day (a new index space)")
+        day["total"] = -1
+
+    def note_identity(self, key: str, identity: tuple[int, int] | None,
+                      total: int) -> str | None:
+        """Bind this index space to ONE FILE IDENTITY, resetting it when it changed.
+
+        A consumer position is per FILE, not per name. ``consumed`` is an index
+        into the file this row was built from, so it may only be applied to that
+        same file: ``X.jsonl`` re-created after the seal renamed it (a session
+        ending later that same day) starts at index 0 again, and applying the old
+        ``consumed`` to it skipped every new record — 4 records neither filed nor
+        dead-lettered, ``queued 0``, stable across passes (reproduced).
+
+        Identity is ``(device, inode)``, the pair log shippers key a consumer
+        position on because a path is not an identity. Filebeat's default
+        ``file_identity`` is ``inode_deviceid``, and it documents the failure
+        direction taken here: when a file's identity changes it re-sends the
+        whole content (at-least-once, duplicates accepted) rather than resuming
+        mid-file.
+
+        A recorded ``total`` LARGER than the file's is the same finding by a
+        second route: a day file only ever appends, so a SHORTER file is not the
+        file the cursor was reading. That is also what catches an inode REUSED
+        for a smaller file after the original was unlinked.
+
+        STATED RESIDUAL — the same one Filebeat carries: an inode reused for a
+        file that is not shorter is indistinguishable from an append, and its
+        records would be skipped. The seal's own "a differing archive is never
+        clobbered" rule plus the ``consumed > total`` guard (`_bind_day`) are
+        what keep that state unusable rather than routine.
+
+        An UNRECORDED identity (a cursor written before this binding) adopts
+        whatever it is first shown, so an upgrade never re-files a backlog; a
+        ``None`` identity (an unstattable file) records nothing.
+
+        Returns a human-readable detail when the space reset, else ``None``.
+        """
+        day = self.day(key)
+        recorded = (day.get("dev"), day.get("ino"))
+        recorded_total = day.get("total")
+        detail: str | None = None
+        if recorded != (None, None) and identity is not None and recorded != identity:
+            detail = f"{key}: a different file (device/inode changed) — re-filing the day"
+        elif isinstance(recorded_total, int) and recorded_total > total >= 0:
+            detail = f"{key}: the file is shorter than the cursor records — re-filing the day"
+        if identity is not None:
+            day["dev"], day["ino"] = identity
+        if detail is not None:
+            self.reset_space(key)
+        return detail
 
     def consumed(self, key: str) -> int:
         return int(self.day(key).get("consumed") or 0)
@@ -542,6 +648,60 @@ class _Cursor:
             {"version": CURSOR_VERSION, "root": self.root,
              "days": dict(sorted(self.days.items()))},
             indent=1, sort_keys=True) + "\n"
+
+
+def _carry_sealed_days(cursor: _Cursor, entries: list[tuple[str, Path]]) -> list[str]:
+    """MOVE a drained day's cursor into its ARCHIVE space when the seal moved the file.
+
+    ``tools/seal_session_events.py`` gzips a settled day and removes the plain
+    file, so the archive holds exactly the records the plain file held: the index
+    space travels WITH the file. Carrying it is what stops a seal from re-POSTing
+    a whole day (``test_the_seal_of_a_drained_plain_day_does_not_re_file_it``),
+    now that the two shapes have separate rows (:func:`_queue_key`).
+
+    Only for a day with NO plain file. With both shapes present the archive is
+    either a conflicting re-seal (the seal never clobbers a differing archive) or
+    a seal caught between its write and its unlink, and each shape then drains in
+    its OWN space — that is the P1 fix: the archive is read instead of dropped.
+
+    The moved row must not claim the plain file's identity: the archive is a
+    DIFFERENT file, so its identity is recorded fresh by the next pass.
+    """
+    details: list[str] = []
+    with_plain = {_day_key(path) for _key, path in entries if _shape_of(path) == "plain"}
+    for key, path in entries:
+        if _shape_of(path) != "gz":
+            continue
+        day = _day_key(path)
+        if day in with_plain or key in cursor.days or day not in cursor.days:
+            continue
+        row = cursor.days.pop(day)
+        row["dev"] = None
+        row["ino"] = None
+        cursor.days[key] = row
+        details.append(f"{day}: the seal moved the drained day into the archive — "
+                       f"carrying its cursor (nothing re-filed)")
+    return details
+
+
+def _bind_day(cursor: _Cursor, key: str, path: Path, total: int) -> str | None:
+    """Bind one FILE's index space BEFORE any index is read — plan and pass.
+
+    ONE definition, called by both the ``--dry-run`` plan and the pass: a plan
+    that answered "how much is left" under a different binding would be a second
+    answer to the same question (the divergence ``--dry-run`` already had for
+    ``cursor_dir``).
+    """
+    detail = cursor.note_identity(key, _identity_of(path), total)
+    if detail is None and cursor.consumed(key) > total:
+        # The file is SHORTER than the cursor claims (a restored or rewritten
+        # day, an inode reused for a smaller file). The safe reading is "nothing
+        # is known about these records": re-file the day rather than cross
+        # records that were never filed.
+        cursor.reset_space(key)
+        detail = f"{key}: cursor exceeded the file, re-filing"
+    cursor.set_total(key, total)
+    return detail
 
 
 def _write_cursor(store: Path, cursor: _Cursor) -> None:
@@ -675,16 +835,22 @@ def drain_session_events(
         "detail": "",
     }
 
-    files = _candidate_files(root_path)
-    summary["files"] = len(files)
+    entries = _candidate_files(root_path)
+    summary["files"] = len(entries)
     cursor = _Cursor.load(store_path, root_path)
+    # BEFORE the plan or the pass reads a single index: a day whose plain file the
+    # seal removed has had its index space MOVED into the archive, not restarted
+    # (see `_carry_sealed_days`).
+    sealed = _carry_sealed_days(cursor, entries)
+    if sealed:
+        summary["detail"] = sealed[-1]
 
     if dry_run:
         # A plan answers "how big is the backlog" — so it counts, and moves
         # nothing. Reported by both callers (`--dry-run` on the sweep CLI).
         summary["status"] = "dry_run"
         queued = 0
-        for path in files:
+        for key, path in entries:
             total = _count_records(path)
             if total is None:
                 summary["unreadable"].append(str(path))
@@ -692,8 +858,7 @@ def drain_session_events(
             # The plan must answer the SAME question the real pass does, so it
             # applies the same index-space binding — in memory only, since a
             # dry run writes no cursor.
-            key = _day_key(path)
-            cursor.note_shape(key, _shape_of(path))
+            _bind_day(cursor, key, path, total)
             if only_session_id is None:
                 queued += cursor.queued(key, total)
             else:
@@ -711,14 +876,13 @@ def drain_session_events(
         summary["dead_letters_total"] = read_dead_letter_count(store_path)
         return summary
 
-    if not files:
+    if not entries:
         summary["dead_letters_total"] = read_dead_letter_count(store_path)
         return summary
 
     stopped: str | None = None
 
-    for path in files:
-        key = _day_key(path)
+    for key, path in entries:
         lines = _read_lines(path)
         if lines is None:
             # A whole day that cannot be read is REPORTED, never counted as an
@@ -727,28 +891,13 @@ def drain_session_events(
             summary["unreadable"].append(str(path))
             continue
         total = len(lines)
-        # BEFORE any index is read: bind this day's cursor to the shape it was
-        # built from. A plain file that replaced a drained archive is a NEW
-        # index space, and applying the old `consumed` to it skipped every new
-        # record (see `_Cursor.note_shape`).
-        rebound = cursor.note_shape(key, _shape_of(path))
-        cursor.set_total(key, total)
+        # BEFORE any index is read: bind THIS file's index space to ITS identity
+        # (`_bind_day`), so a day re-created after the seal, a rewritten day, or
+        # an archive nobody had drained yet is never read against another file's
+        # `consumed`.
+        rebound = _bind_day(cursor, key, path, total)
         if rebound:
             summary["detail"] = rebound
-        if cursor.consumed(key) > total:
-            # The file is SHORTER than the cursor claims (a restored or rewritten
-            # day). The safe reading is "nothing is known about these records":
-            # re-file the day rather than cross records that were never filed.
-            cursor.day(key)["consumed"] = 0
-            cursor.day(key)["crossed"] = []
-            # The STRIKES/`probes` state belongs to the index space being
-            # discarded, exactly as `note_shape` already treats it there: stale
-            # strikes from the previous space made unrelated records in the
-            # rewritten day read as `stuck` sooner (found in review). Nothing was
-            # dropped, but the fairness was wrong.
-            cursor.day(key)["strikes"] = {}
-            cursor.day(key)["probes"] = 0
-            summary["detail"] = f"{key}: cursor exceeded the file, re-filing"
         settled = _file_age(path, clock) > SETTLE_GRACE_SECONDS
         # The probe slots: `STUCK_RETRIES_PER_PASS` struck records per day file,
         # chosen by a rotating ordinal so every struck record is eventually
@@ -845,8 +994,7 @@ def drain_session_events(
     # the cursor for days this pass did not read (they can only have GROWN, so a
     # stale total under-counts, and the next pass corrects it).
     queued = 0
-    for path in files:
-        key = _day_key(path)
+    for key, path in entries:
         total = cursor.day(key).get("total", -1)
         if not isinstance(total, int) or total < 0:
             counted = _count_records(path)
