@@ -209,9 +209,18 @@ def test_a_venice_only_deployment_extracts(monkeypatch):
     "no-provider"`` — silently, while the receipt blamed a key the operator HAD
     configured. The three readings must agree, and agree on venice.
 
-    ``resolve_extractor_provider()``'s standalone-venice branch is the recorded
-    decision (#1549, on main), so the fix is to make the lane gate see what the
-    v2 extractor can already serve — not to refuse venice-only deployments.
+    ``resolve_extractor_provider()``'s standalone-venice branch is what the tree
+    does today (#1549, on main) — PRECEDENT, not a recorded decision. No
+    recorded decision reaches this: #8133 records the product question as OPEN
+    ("needs the owner's call on one question … is ``venice`` a supported
+    standalone primary, or is it intentionally fallback-only?"), and its
+    2026-11-01 relay comment states in terms that venice-primary behaviour is
+    "a thing the code does today … precedent, not a decision". The direction is
+    nonetheless the one #8133's Objective and Targets direct — make the lane
+    gate agree with the v2 resolver — so the fix is to make the lane gate see
+    what the v2 extractor can already serve, not to refuse venice-only
+    deployments. A fallback-only RULING would reopen that, and would say so on
+    #8133.
     """
     from tortoise import hosted_api
     from tortoise.model_adapters import resolve_extractor_provider
@@ -321,12 +330,19 @@ def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
 #: ``test_backlog_process_notes_a_missing_key_only_for_a_self_hosted_target``,
 #: which is red on a venice-configured box with the hand-list and green with the
 #: derived set.
+#:
+#: ``tests/test_8501_capture_path_anchor.py`` was the module this sweep first
+#: missed (review round 4): it declared no helper at all — the four-key hand-list
+#: was INLINED in two test bodies, so a guard keyed on ``(module, helper)`` could
+#: not see it. Its new ``_keyless`` helper plus this entry are the repair, which
+#: is why the durability claim above now holds for that module too.
 _KEYLESS_CAPTURE_HELPERS = (
     ("tests.test_turn_embedding_write_path_4194", "_keyless"),
     ("tests.test_capture_secret_redaction_4911", "_keyless"),
     ("tests.test_capture_redaction_sinks_5445", "_keyless"),
     ("tests.test_session_semantic_retrieval", "_keyless"),
     ("tests.test_4199_dense_scope_coverage", "_offline_llm"),
+    ("tests.test_8501_capture_path_anchor", "_keyless"),
 )
 
 

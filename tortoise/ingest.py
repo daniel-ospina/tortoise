@@ -72,9 +72,13 @@ _PROVIDERS = {
     # venice.ai — the #1549 3-provider rotation lane, OpenAI-compatible at
     # ``/v1`` (``models.OpenAICompatModel`` appends ``/chat/completions``).
     # Registered on main by ``model_adapters.resolve_extractor_provider``, whose
-    # ``if vz_key:`` branch returns venice as a STANDALONE PRIMARY — so #8133
-    # was this entry missing, not a product decision to keep venice
-    # fallback-only.
+    # ``if vz_key:`` branch returns venice as a STANDALONE PRIMARY. ⚠️ That is
+    # PRECEDENT, not a recorded decision: #8133 records the product question
+    # (is venice a supported standalone primary, or intentionally fallback-only?)
+    # as OPEN and no owner ruling answers it. This entry is justified by #8133's
+    # OBJECTIVE — the lane gate and the v2 resolver must agree on what "a
+    # provider is configured" means — not by a decision that venice is primary.
+    # A fallback-only ruling would reopen this, and would say so on #8133.
     "venice": ("https://api.venice.ai/api/v1", "VENICE_API_KEY"),
 }
 
