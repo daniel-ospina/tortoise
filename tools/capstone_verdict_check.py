@@ -110,6 +110,7 @@ import argparse
 import json
 import re
 import subprocess
+import posixpath
 from pathlib import Path
 
 SCHEMA = "capstone-verdict-v1"
@@ -320,6 +321,15 @@ class Findings:
 #: a reviewed edit to a hash-pinned artefact rather than a lane's local choice.
 RECORD_STEPS_KEY = "steps"
 
+#: The ONE artifact whose ``steps`` block may declare conditionality (#10215
+#: review P1). The log names its OWN ``prereg.artifact`` and that string was
+#: passed to ``git show`` verbatim, so any committed JSON in the repo could have
+#: declared a step conditional and dropped it out of ``steps_required`` — a
+#: bypass reachable from exactly the hand-edited log this gate's threat model
+#: already assumes. The decision lives in ONE hash-pinned file; a log pointing
+#: anywhere else is refused rather than trusted.
+RECORD_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
+
 
 def _record_conditional(repo: Path, prereg_sha: str | None,
                         artifact: str) -> tuple[set[str] | None, str]:
@@ -334,7 +344,15 @@ def _record_conditional(repo: Path, prereg_sha: str | None,
         return None, "the log names no pre-registration sha"
     if not artifact or not isinstance(artifact, str):
         return None, "the log names no pre-registration artifact"
-    blob = _git(repo, "show", f"{prereg_sha}:{artifact}")
+    # The path is PINNED, never taken from the log (#10215 review P1): a log that
+    # can name any committed JSON can mint its own conditional set.
+    normalised = posixpath.normpath(artifact.strip().replace("\\", "/"))
+    if normalised != RECORD_ARTIFACT:
+        return None, (f"the log's pre-registration artifact is {artifact!r}, but the "
+                      f"step declaration lives only in {RECORD_ARTIFACT!r} — a "
+                      "conditional set read from any other file is not the frozen "
+                      "record, whatever it contains")
+    blob = _git(repo, "show", f"{prereg_sha}:{normalised}")
     if blob.returncode != 0:
         return None, f"{prereg_sha}:{artifact} does not resolve in this checkout"
     try:
@@ -464,6 +482,15 @@ def _step_accounting(repo: Path, run: dict, observed: tuple,
                                "with no basis — an idle claim without the run's own "
                                "evidence (flag ON, no activity, no fail-open error) "
                                "is a claim, not a witness"))
+        elif state == "observed" and step not in observed:
+            # `observed` is the STRONGEST claim a conditional step can make, so it
+            # may not be a word the log types: a step declared observed has to be
+            # in the pass's own observation set (#10215 review P2). Without this a
+            # log could account S2.3 as `observed` while `steps_observed` omits it.
+            out.append(("V5", f"GREEN with conditional step {step} accounted as "
+                               "state='observed' but absent from the run's own "
+                               "steps_observed — the strongest claim needs the "
+                               "observation behind it, not just the word"))
     return out
 
 

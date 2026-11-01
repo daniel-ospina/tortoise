@@ -459,6 +459,15 @@ def observe_idle(result: dict) -> dict[str, str]:
       whose kind was missing or ``unclassified``, i.e. the map already typed
       everything. That is a property of the candidate set, not a defect.
 
+    ⛔ **The candidate count must be POSITIVE** (#10215 review P2). Both classify
+    passes also sit behind ``if classify_later and embed_list:`` /
+    ``if classify_later and complete_list:``, so an EMPTY list skips the ``try``
+    entirely and leaves the same ``enabled=True``/``s2={}``/``union={}`` shape with
+    no error marker. Without the count, this function would write the basis *"the
+    map had already typed every candidate"* over a run that had no candidates at
+    all — a false fact in a verdict's own evidence. ``step_witness['map']['items']``
+    is the receipt's own count, so the distinction is read, never assumed.
+
     Nothing here is a wrapper's memory: the block is read off the pipeline's own
     return (top level) or the receipt's forwarded witness sub-key, and the
     failure text off the receipt's own error surfaces.
@@ -472,6 +481,13 @@ def observe_idle(result: dict) -> dict[str, str]:
         for entry in (result.get(key) or ()))
 
     idle: dict[str, str] = {}
+    # The candidate set the map produced, off the receipt's own witness (#10215
+    # review P2): an idle claim needs candidates that WENT unclassified, so "the
+    # map typed everything" and "there was nothing" must not read the same.
+    map_block = witness.get("map") if isinstance(witness, dict) else None
+    map_items = (map_block or {}).get("items") if isinstance(map_block, dict) else None
+    candidate_count = (sum(int(n or 0) for n in map_items.values())
+                       if isinstance(map_items, dict) else None)
     for key, step in _IDLE_SURFACES.items():
         block = result.get(key)
         if not isinstance(block, dict) or not block:
@@ -486,13 +502,19 @@ def observe_idle(result: dict) -> dict[str, str]:
         hit = [m for m in markers if m in failure_text]
         if hit:
             continue                      # fail-open fired: indistinguishable
+        if not candidate_count:
+            # No candidate count on the receipt, or ZERO candidates: an empty
+            # embed list skips the pass's `try` and leaves this same shape, so
+            # "nothing to do" cannot be claimed from it.
+            continue
         idle[step] = (
             "the pass was ENABLED and did NO work: its stats block reads "
             f"{_summary_block(block)} and the receipt's own error/warning "
             "surfaces carry no failure marker for it "
             f"({', '.join(markers)}), so it was gated out by an EMPTY ITEM SET "
-            "rather than by a failure — the map had already typed every "
-            "candidate, so there was nothing for this pass to assign")
+            "rather than by a failure — the map produced "
+            f"{candidate_count} candidate(s) and had already typed every one of "
+            "them, so there was nothing for this pass to assign")
     return idle
 
 
