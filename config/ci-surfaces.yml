@@ -922,6 +922,11 @@ surfaces:
   # -> ['api','core','onboarding'] and this file IS in that selection's
   # `test_files`, so the `api` arm already covers it and no extra row is owed.
   # Re-derive if a further source file joins the diff.
+  # RE-DERIVED at review of `b6796d349` — a FIFTH changed source had joined:
+  # `tortoise/onboarding/state.py` (`copy_org_state` / `carry_onboards_edge`, the
+  # carry's write path). It is NOT covered by `api`: an onboarding-only diff
+  # resolves to `['onboarding']` ALONE (measured — see the `onboarding` arm,
+  # where the suite is DUAL-REGISTERED for exactly this reason).
   - test_10180_promote_default_graph.py
   - test_export_cli.py
   - test_export_pack_config.py
@@ -5813,6 +5818,20 @@ surfaces:
   # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
   # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
   - test_9157_eager_init_declared.py
+  # #10180 review P2: DUAL-REGISTERED with `api` (the row there carries the
+  # promote-verb rationale). `tortoise/onboarding/state.py` is the module that
+  # carries the CARRY's write path (`carry_onboards_edge`, `copy_org_state`) and
+  # is an `onboarding` SOURCE_PATTERNS PREFIX match, which REPLACES the `core`
+  # fallback in `select()` — so a diff touching only that file selects
+  # `['onboarding']` and NEVER executes the `api` arm. Measured before this row
+  # existed: `--changed-files tortoise/onboarding/state.py` -> surfaces
+  # `['onboarding']`, 145 `test_files`, this suite ABSENT. The class is the
+  # #1349/#2938/#3154 silent-drop, and it is not covered by the sibling pin
+  # below: `test_9079_onboarding_declared_lane.py` is on this surface but pins
+  # the carry's STATEMENT SHAPES (the §17.1 write walk), not its semantics —
+  # union/no-regress, `already_present` never overwrites, `not_in_target`
+  # declines, and the reported reason set — which THIS file is the only pin for.
+  - test_10180_promote_default_graph.py
   # #9668 review P1: MULTI-REGISTERED (`core` + `api` + THIS surface). The third
   # pin in this suite reads `website/apps/dashboard/src/captureStatus.js` — the
   # JS reader that CANNOT import the Python formatter, so its receipt-family
