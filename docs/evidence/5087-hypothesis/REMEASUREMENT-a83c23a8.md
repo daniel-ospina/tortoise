@@ -20,12 +20,12 @@ overstated it.
 
 ⚠️ **Read this before quoting `0.988`.** The same pinned tree, corpus and 7 sessions produced an **untreated**
 baseline of `284` in the recorded run and `253` here — a **31-node (10.9 %) drift in the arm that received no
-treatment**, roughly three times the 3-node ON−OFF difference. This instrument cannot resolve an effect below
+treatment**, roughly ten times the 3-node ON−OFF difference. This instrument cannot resolve an effect below
 about 11 % between runs, so the defensible sentence is *"no measurable effect at ~0.99, well inside the ~11 %
 between-run drift this instrument shows on its untreated arm"* — **not** *"priors cut creates by 1 %"*. If you
 need one number, quote the pair (`253 / 250`) beside the drift, or quote `0.870` and `0.988` together as the
-range this corpus supports. The six-decimal ratio is an arithmetic artefact of a 3-node difference, not a
-measurement that fine.
+range this corpus supports. The four-decimal ratio `0.9881` is an arithmetic artefact of a 3-node difference
+(`250 / 253`), not a measurement that fine.
 
 ## 1. Why a second run exists at all
 
@@ -102,8 +102,11 @@ nothing in the epic's plan changes because of the re-measurement. What changes i
 write: `0.870` supports *"priors reduce creates by about a seventh, but not enough to clear the bar"*; `0.988`
 supports *"priors do not measurably change creates at all"*. The second is the one this corpus supports — but
 **only at the resolution in the warning at the top of this file**: an 11 % between-run drift on the untreated
-arm is larger than every per-session delta in both runs, and far larger than the 3-node difference between the
-two arms here.
+arm is larger **in nodes** than every per-session delta in both runs (the largest is `15`, in the recorded run),
+and roughly ten times the 3-node difference between the two arms here. Read as a *percentage of its own session*
+the comparison inverts, and the record must not hide that: `wp02` fell `51 → 36` (**−29.4 %**) in the recorded
+run and `wp03` fell `41 → 31` (**−24.4 %**) in this one, both larger than the 10.9 % drift. The drift bounds the
+**between-run** comparison of two totals; it does not bound a single session's own swing.
 
 ## 5. Method differences, disclosed — and the one thing that did NOT move
 
