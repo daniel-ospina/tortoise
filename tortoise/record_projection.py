@@ -827,13 +827,17 @@ class OpDispatch:
     who COMPUTES the value — #9974 measured the gap that left: the record stored
     nothing, the cache derived nothing, and a record-sourced rebuild
     materialized a superseded entity with NO `status`, which
-    `live._terminal_excluded` reads as LIVE. The computing half is
-    `cache_projection.DERIVED_FROM_RECORD` (from this module's own PRIMARY
+    `live._terminal_excluded` reads as LIVE. The computing half is now TWO legs
+    of `cache_projection`: `DERIVED_FROM_RECORD` (from this module's own PRIMARY
     carriers, `superseded_by` / `superseded_at`, the same OR-predicate the
-    record's `public.*_current_status` views use); its docstring names the
-    statuses the record carries NO signal for at all (an explicit `restatus`,
-    whose only carrier is `public.journal_event.payload`) — those stay an
-    ownership decision, not a silent success.
+    record's `public.*_current_status` views use) and `EVENT_STREAM_FOLDS` —
+    the connector/pack vocabulary (#10198) and an explicit state op's
+    `state.status` (#9974), read from `public.journal_event.payload`, which IS
+    this module's own layer-1 record. So an explicit `restatus` is no longer
+    uncomputable: it is dropped HERE by design and folded THERE from the record
+    itself. (This paragraph used to end "those stay an ownership decision, not a
+    silent success" — true before #9974's second leg, and the contradiction the
+    detail gate caught.)
     """
 
     table_for_label: Mapping[str, str]
