@@ -1472,6 +1472,12 @@ def test_every_hosted_auth_seam_stamps_the_same_field():
 
     FAIL-ON: a new seam (or a reverted stamp) that resolves an org-wide
     credential without it silently keeps the historical open.
+
+    #10180 review round 9: the two seams that RESOLVE the pair now stamp the
+    namespace the DEFAULT ROW returned (`_pair_ns` / the pair tuple), not the org
+    row's name beside a separately-read id — see
+    `test_every_credential_resolver_takes_the_pair_from_one_read` for the pin that
+    no seam can regress to the two-read shape.
     """
     from pathlib import Path
 
@@ -1479,7 +1485,7 @@ def test_every_hosted_auth_seam_stamps_the_same_field():
     seams = {
         "supabase_control.py": '"graph_namespace": graph_namespace',
         "hosted_api.py": '"graph_namespace": row.get("graph_name")',
-        "oauth.py": 'org["graph_namespace"] = _default_ns',
+        "oauth.py": 'org["graph_namespace"] = _pair_ns',
     }
     for rel, needle in seams.items():
         src = (root / rel).read_text(encoding="utf-8")
@@ -1853,6 +1859,113 @@ def test_the_default_graph_pair_is_read_at_one_instant(monkeypatch):
     assert (name_before, tenant_after) == (None, NEW_ID), (
         "the fixture no longer reproduces the split — the test above would be "
         f"vacuous. got {(name_before, tenant_after)!r}")
+
+
+def test_the_credential_pair_follows_the_default_row_not_the_org_row(monkeypatch):
+    """A credential's OPEN and its TENANT come from one row, at one instant.
+
+    FAIL-ON (#10180 review round 9): the pre-fix credential shape took the id
+    from `public.graphs` and the namespace from `organizations.graph_name` — two
+    reads, two instants. A `promote_default_graph` committing between them hands
+    the credential a namespace from the DEMOTED graph and a tenant on the
+    PROMOTED one, so the data plane writes one graph while the record files
+    under the other. The two facts are answers about ONE row, so they are read
+    from one, and the ONE-READ assertion below is the property, not a detail.
+
+    The divergence is constructed rather than raced: after a real promotion the
+    org row is put back to the pre-promotion name, which is a state the verb
+    itself repairs (`namespace_repaired`) and therefore one that exists.
+    """
+    from tortoise.supabase_control import default_graph_pair_for_credential
+
+    fake = _fake_org_row(monkeypatch, f"org_{TEAM}")
+    fake.rpc("promote_default_graph",
+             {"p_org_id": TEAM, "p_graph_id": NEW_ID}, representation=True)
+    # The drift the verb repairs: the ROW moved, the org pointer is stale.
+    fake.tables["organizations"][0]["graph_name"] = f"org_{TEAM}"
+    org_namespace = fake.tables["organizations"][0]["graph_name"]
+
+    reads: list[str] = []
+    orig_query = fake.query
+
+    def _counted_query(table, **kw):
+        if table == "graphs":
+            reads.append(table)
+        return orig_query(table, **kw)
+
+    monkeypatch.setattr(fake, "query", _counted_query)
+    tenant, namespace = default_graph_pair_for_credential(
+        fake, TEAM, org_namespace, context="review pin")
+
+    assert namespace != org_namespace, (
+        "the fixture does not diverge — the org row and the default row say the "
+        "same namespace, so this test could not tell the two sources apart")
+    assert (tenant, namespace) == (NEW_ID, f"org_{TEAM}_{NEW_ID}"), (
+        "the credential's namespace and tenant must describe the SAME default "
+        f"row; got {(tenant, namespace)!r} — a graph/data split (#10025)")
+    assert len(reads) == 1, (
+        f"the pair cost {len(reads)} `graphs` reads — two reads are two "
+        "instants, and a promotion between them is the split this pin exists "
+        "to make impossible")
+
+
+def test_every_credential_resolver_takes_the_pair_from_one_read():
+    """The three credential classes must call the PAIR home, not the id-only one.
+
+    Enumerated with the AST rather than by grep, because the failure mode is a
+    NEW resolver (or a reverted one) that names the id and takes the namespace
+    off the org row beside it — which no behavioural test of the other two lanes
+    can see. FAIL-ON: reverting any of the three sites to
+    `default_graph_id_for_credential` reds this, naming the function.
+    """
+    import ast
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    resolvers = (("tortoise/supabase_control.py", "resolve_api_key"),
+                 ("tortoise/hosted_api.py", "_session_user_org"),
+                 ("tortoise/oauth.py", "resolve_oauth_access_token"))
+    for rel, fname in resolvers:
+        tree = ast.parse((repo / rel).read_text(encoding="utf-8"))
+        fn = next((n for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and n.name == fname), None)
+        assert fn is not None, f"{fname} is gone from {rel} — re-derive this pin"
+        callees = {
+            (c.func.id if isinstance(c.func, ast.Name)
+             else c.func.attr if isinstance(c.func, ast.Attribute) else None)
+            for c in ast.walk(fn) if isinstance(c, ast.Call)
+        }
+        assert "default_graph_pair_for_credential" in callees, (
+            f"{fname} ({rel}) does not take the default-graph PAIR — its "
+            "namespace and its record tenant would come from two reads, and a "
+            "`promote_default_graph` landing between them splits the credential "
+            "across the demoted and the promoted graph")
+        assert "default_graph_id_for_credential" not in callees, (
+            f"{fname} ({rel}) still calls the id-only home — the namespace it "
+            "puts beside that id comes from the org row, i.e. another instant")
+
+    # And no OTHER module may reintroduce the id-only CALL on a credential path:
+    # the pair is the one home, and an empty caller list is what keeps it one.
+    # Scanned by CALL (AST), not by text — these modules legitimately NAME the
+    # id-only home in prose that explains why they do not use it.
+    stray = []
+    for path in sorted((repo / "tortoise").rglob("*.py")):
+        if path.name == "supabase_control.py":
+            continue
+        mod = ast.parse(path.read_text(encoding="utf-8"))
+        for call in ast.walk(mod):
+            if not isinstance(call, ast.Call):
+                continue
+            name = (call.func.id if isinstance(call.func, ast.Name)
+                    else call.func.attr if isinstance(call.func, ast.Attribute)
+                    else None)
+            if name == "default_graph_id_for_credential":
+                stray.append(path.relative_to(repo).as_posix())
+                break
+    assert stray == [], (
+        "the id-only credential home has CALLERS again — use "
+        f"`default_graph_pair_for_credential`: {stray}")
 
 
 def test_the_bind_takes_a_pre_resolved_tenant_without_reading(monkeypatch):

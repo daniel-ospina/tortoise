@@ -7259,7 +7259,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         _ORG_ADDITIVE_IMPORT_TIER,
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
-        default_graph_id_for_credential,
+        default_graph_pair_for_credential,
     )
     row = await _cp_offload(
         lambda: _orgs_row_fail_soft(
@@ -7333,10 +7333,13 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         # #10180: the org's DEFAULT graph namespace, carried on the credential so
         # this lane resolves the same default `resolve_api_key` gives a
         # key-auth request (`graph_namespace`) — including after the default has
-        # been PROMOTED into another namespace. `graph_name` rides
-        # `_QUOTA_SELECT` (base 0006), so this costs no extra read; None on a
-        # pre-graph_name row, which `_default_graph_name` reads as "fall back to
-        # the historical namespace=org_id open" rather than as a graph name.
+        # been PROMOTED into another namespace. This is the FALLBACK value (the
+        # org row's `graph_name`, in `_QUOTA_SELECT`, so no extra read): the pair
+        # read below REPLACES it with the default ROW's namespace, which is the
+        # one the record tenant beside it names. It survives only when that read
+        # could not answer at all — and then it is `None` on a pre-graph_name
+        # row, which `_default_graph_name` reads as "fall back to the historical
+        # namespace=org_id open" rather than as a graph name.
         "graph_namespace": row.get("graph_name"),
         # #2475: dashboard_key_login doubles as the UI state the dashboard
         # switch renders (website/apps/dashboard main.jsx: aria-checked /
@@ -7369,20 +7372,35 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     #
     # ⚠️ The offload RESULT is not a tenant id by construction: on a refused
     # submission / missed wait bound, `best_effort=True` returns the
-    # `OFFLOAD_REFUSED` sentinel rather than `None` (see `_cp_offload`).
+    # `OFFLOAD_REFUSED` sentinel rather than a value (see `_cp_offload`).
     # `record_tenant_for` type-checks `str`, so the refusal direction is already
     # fail-closed — but the sentinel must not sit in a field NAMED
     # `default_graph_id`, so it is normalised here and a later consumer cannot
     # inherit it.
-    _resolved_default_graph_id = await _cp_offload(
-        lambda: default_graph_id_for_credential(
+    #
+    # #10180 review: the lookup returns the PAIR — the tenant id AND the default
+    # row's namespace from ONE read — so a `promote_default_graph` commit cannot
+    # land between the namespace this dict carries and the tenant beside it. Two
+    # reads are two instants, and the split they allow (open the DEMOTED graph,
+    # file every record row under the PROMOTED one) is the `derived != measured`
+    # class #10025 exists to remove.
+    _resolved_pair = await _cp_offload(
+        lambda: default_graph_pair_for_credential(
             cp, org_id, row.get("graph_name"),
             context="session auth self-heal"),
         op="default_graph_row", best_effort=True)
+    if isinstance(_resolved_pair, tuple) and len(_resolved_pair) == 2:
+        _pair_id, _pair_ns = _resolved_pair
+    else:
+        # OFFLOAD_REFUSED (or any shape that is not the pair): name no tenant,
+        # and leave `graph_namespace` at the org row's fallback value.
+        _pair_id, _pair_ns = None, None
     org["default_graph_id"] = (
-        _resolved_default_graph_id
-        if isinstance(_resolved_default_graph_id, str) and _resolved_default_graph_id
+        _pair_id
+        if isinstance(_pair_id, str) and _pair_id
         else None)
+    if isinstance(_pair_ns, str) and _pair_ns:
+        org["graph_namespace"] = _pair_ns
     # #1913: post-auth abuse evaluation — the session-JWT lane was the
     # abuse-blind hole (key lanes call _abuse_post_auth in get_current_org /
     # _get_current_org_supabase; session-driven REST calls never recorded an
