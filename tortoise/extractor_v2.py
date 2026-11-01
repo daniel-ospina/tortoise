@@ -6316,7 +6316,7 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
         return "unreadable", _UNREADABLE
     finally:
         if absorbed_fold:
-            _VOCABULARY_GAPS.record(absorbed)
+            _record_vocabulary_gap(absorbed)
 
 
 def distinguishing_difference(a: str, b: str) -> str | None:
@@ -11466,7 +11466,11 @@ class _VocabularyGapCensus:
                 "pair_read_residual": sum(
                     sum(c.values()) for c in self._paired.values()),
                 "truncated_observations": self._truncated,
-                "oversize_tokens_omitted": self._oversize,
+                # OBSERVATIONS, not distinct tokens: the same oversize blob
+                # absorbed by five folds counts 5. Named for what it counts, so
+                # the sibling above reads as an observation count too rather
+                # than as a distinct-vs-occurrences pair.
+                "oversize_observations": self._oversize,
                 "cap": _VOCABULARY_GAP_CAP,
                 "max_token_chars": _VOCABULARY_GAP_MAX_TOKEN,
             }
@@ -11511,7 +11515,7 @@ def vocabulary_gap_report() -> dict[str, int]:
     tokens it stops GROWING, and oversize tokens are never retained, while this
     return value carries neither fact. Read ``vocabulary_gap_snapshot()`` when
     the completeness of the sample matters — it reports ``distinct_tokens``,
-    ``truncated_observations`` and ``oversize_tokens_omitted`` alongside it.
+    ``truncated_observations`` and ``oversize_observations`` alongside it.
     """
     return _VOCABULARY_GAPS.report()
 
@@ -11524,3 +11528,19 @@ def vocabulary_gap_snapshot() -> dict[str, Any]:
 def reset_vocabulary_gap_census() -> None:
     """Clear the census (a measurement window boundary; never a decision)."""
     _VOCABULARY_GAPS.reset()
+
+
+def _record_vocabulary_gap(absorbed: list[str]) -> None:
+    """Count one FOLD's absorbed tokens, and NEVER raise out of the boundary.
+
+    The guarantee is LOCAL to this call on purpose.  ``_boundary`` invokes this
+    from its ``finally:``, so an escaping exception would leave ``fold_allowed``
+    entirely and abort the capture — strictly worse than the refusal that
+    function's fail-closed branch exists to produce.  ``record()`` swallows
+    everything today; this wrapper keeps the invariant even if a future sink
+    (a per-tenant census, a second destination) stops doing so, without spending
+    a line above `def extract_session_v2(` — the #7949 bundle's cites are typed
+    against those line numbers, and every line added there re-stales them.
+    """
+    with contextlib.suppress(Exception):  # observability never decides
+        _VOCABULARY_GAPS.record(absorbed)
