@@ -4131,6 +4131,35 @@ def _rec_point_id(rec: dict):
 _JOURNAL_SCAN_CHUNK = 1 << 20
 
 
+_NON_POINT_ENTITY_LABELS_CACHE: frozenset[str] | None = None
+
+
+def _record_owns_point(label) -> bool:
+    """May an ``EntityMutated``-style ``label`` own a POINT node?
+
+    A MIRROR of the projection's own ``_owns_point`` (``projection/__init__.py``),
+    because the presence fold must answer the question the repo's other folds
+    answer: a delete naming a DIFFERENT canonical kind does not own a Point.
+    Without this, an ``EntityMutated {op: delete}`` for an ``Object`` whose id
+    collides with a point id folds that POINT to absent — i.e. a genuine lost
+    revision goes SILENT, the dangerous direction (review round 4, finding 1,
+    second half).
+
+    The labels are resolved LAZILY and once, so importing ``sdk`` does not pull
+    the projection in; an unresolvable set keeps the legacy ID-WIDE semantics
+    (unknown ⇒ possibly owns a Point), exactly as the fold falls back.
+    """
+    global _NON_POINT_ENTITY_LABELS_CACHE
+    if _NON_POINT_ENTITY_LABELS_CACHE is None:
+        try:
+            from .projection import _NON_POINT_ENTITY_LABELS
+            _NON_POINT_ENTITY_LABELS_CACHE = frozenset(_NON_POINT_ENTITY_LABELS)
+        except Exception:  # noqa: BLE001, RUF100 — fall back to legacy semantics
+            _NON_POINT_ENTITY_LABELS_CACHE = frozenset()
+    return not (isinstance(label, str)
+                and label in _NON_POINT_ENTITY_LABELS_CACHE)
+
+
 def _apply_journal_presence(line: bytes, point_id: str,
                             state: dict[str, bool]) -> None:
     """Fold ONE journal line into *state* for *point_id* (#10515 review B1).
@@ -4146,6 +4175,16 @@ def _apply_journal_presence(line: bytes, point_id: str,
         return
     if not isinstance(rec, dict):
         return
+    # ⛔ THE REPO'S ONE NORMALIZATION RULE (review round 4, finding 1). The
+    # projection folds `{**ev, **ev['point']}` on EVERY presence path (`_norm`,
+    # `projection/__init__.py`), because the same record has a FLAT (API) and a
+    # NESTED (script/`#325`) shape. Reading the raw record folded a nested
+    # `PointsMerged` / `EntityMutated op=delete` to PRESENT — so a deliberately
+    # merged-away or deleted point was reported as a lost revision, which is the
+    # false positive the earlier rounds removed for the flat shape.
+    point = rec.get('point')
+    if isinstance(point, dict):
+        rec = {**rec, **point}
     kind = rec.get('type')
     # `PointsMerged` names its ids in `keep_id` / `merge_ids`, NOT under `id` or
     # `point` — so it never reaches `_rec_point_id` and a merged-away point folded
@@ -4162,6 +4201,8 @@ def _apply_journal_presence(line: bytes, point_id: str,
     if _rec_point_id(rec) != point_id:
         return
     if kind == 'EntityMutated' and rec.get('op') == 'delete':
+        if not _record_owns_point(rec.get('label')):
+            return          # a delete of another KIND never owns a Point
         state[point_id] = False
     elif kind == 'PointRetracted' and rec.get('deleted'):
         # The HARD delete (`_deleted_point_payload` writes `deleted`
@@ -16914,7 +16955,16 @@ class TortoiseSDK:
             # and it is deliberately a chunked read of `os.stat` + a byte scan,
             # never `EventLog.position()` — that one takes the append flock and
             # can cost a typo 5 s (review B2).
-            self._report_absent_revision(id)
+            try:
+                self._report_absent_revision(id)
+            except Exception:  # noqa: BLE001, RUF100 — the report is DIAGNOSTIC
+                # A diagnostic must never turn the documented `{}` absent reply
+                # into a raise: the reply contract is the caller's, the report is
+                # ours. Recorded at debug so the swallow is findable (review
+                # round 4, non-blocking 1).
+                _logger.debug(
+                    "the #10515 absent-revision report failed for %r", id,
+                    exc_info=True)
             return {}
         # ⛔ ORDERING (#10495 review P3). This block runs AFTER the ABSENT
         # early return above, not before it. `encode_for_row` is a real

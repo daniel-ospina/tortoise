@@ -1332,6 +1332,27 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
         assert not any("will not be replayed" in r.getMessage()
                        for r in caplog.records), (
             "a write after a merge must not warn about a lost revision")
+
+        # ── ... and the same in the NESTED record shape (review round 4, find 1) ──
+        # The same record has a FLAT (API) and a NESTED (script, #325) shape, and
+        # the projection normalizes both (`_norm`). A fold that read only the raw
+        # record reported a nested merge as "the journal still holds the id" — the
+        # false positive the earlier rounds removed for the flat shape.
+        keep2 = _pid(sdk)
+        loser2 = _pid(sdk)
+        sdk._get_event_log().append(
+            {"type": "PointsMerged",
+             "point": {"keep_id": keep2, "merge_ids": [loser2]}})
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": loser2})
+        assert not sdk.get_point(loser2)
+        nested_before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(loser2, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == nested_before, (
+            "a NESTED PointsMerged record must fold exactly as the flat one — a "
+            "bare top-level read reports a deliberate merge as a lost revision")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
