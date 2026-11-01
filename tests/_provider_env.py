@@ -23,6 +23,8 @@ so it cannot drift the way a literal list does:
 - ``tortoise.model_adapters._PROVIDER_KEY_ENV`` — the key envs of the v2
   adapter routing pool (``deepseek-direct`` / ``openrouter`` / ``venice``) used
   by ``resolve_extractor_provider()`` (the inner gate).
+- the provider/lane SELECTOR envs, which are literals in ``sdk`` /
+  ``model_adapters`` and have no registry to derive from.
 
 ⚠️ State of the two sets, so this docstring cannot be read as a claim about
 ``VENICE`` that the tree has outgrown: when #3695 was filed, ``VENICE_API_KEY``
@@ -34,8 +36,6 @@ so the two derivations agree today; the union stays because a future
 single-registry registration must not be able to hide behind the agreement.
 ``provider_key_envs()`` here is the ONE copy of that union: ``conftest`` and the
 keyless-capture guard both call it rather than re-deriving it.
-- the provider/lane SELECTOR envs, which are literals in ``sdk`` /
-  ``model_adapters`` and have no registry to derive from.
 
 ``TORTOISE_SESSION_LLM_MOCK`` is deliberately NOT pinned: it is the offline
 extraction seam, not a routing input, and a module that pins the mock seam
