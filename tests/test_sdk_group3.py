@@ -741,8 +741,11 @@ def test_fold_stores_superseded_by_verbatim_independently_of_the_write_path(sdk)
     assert applied == 1, f"the fold must apply: {warns}"
 
     # (a) the WRITE path stored the successor's name verbatim (no cap).
+    # #9974 R1: `long_name` is a `create_entity` birth with no status, so the
+    # property is ABSENT (absent READS live via `live._terminal_excluded`);
+    # `[[None]]` also reds if the fabricated `'live'` birth seed returns.
     assert proj.g.query("MATCH (o:Object {name:$n}) RETURN o.status",
-                        params={"n": long_name}).result_set == [["live"]], \
+                        params={"n": long_name}).result_set == [[None]], \
         "write path must store the >200-char Object name verbatim (#3574)"
 
     rows = proj.g.query(

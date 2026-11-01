@@ -276,8 +276,12 @@ class TestShapeBDeleteThenRegister:
         s2, _oid = self._build(tmp_path, events)
         proj = s2._get_proj()
         live = _objects(proj)
-        # #9974 R1: an absent status READS live (live._terminal_excluded).
-        assert live and (live[0][2] or "live") == "live", live
+        # #9974 R1: the re-created Object's birth status is DERIVED-OR-ABSENT, so
+        # it is ABSENT here — pinned strictly (`is None`, not `or "live"`) so
+        # this leg still reds if the fabricated `'live'` seed is reinstated. An
+        # absent status READS live (`live._terminal_excluded`), which is the
+        # half the "buried" claim below relies on.
+        assert live and live[0][2] is None, live
         for engine in ENGINES:
             replay = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
             assert _objects(replay) == live, f"{engine} buried shape B: {_objects(replay)}"

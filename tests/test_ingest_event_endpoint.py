@@ -698,8 +698,10 @@ def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
 
     Only `:Subject`'s writer validates its `status` vocabulary. The `:Object`
     and `:Event` writers do NOT: a NON-PERSISTABLE value (a dict, bytes, a set)
-    is **dropped** by the writer — measured on this head, the node keeps
-    `status = 'live'` — so refusing it would reject a bundle the writer
+    is **dropped** by the writer — which since #9974 R1 leaves the Object with
+    **no stored status at all** (the fold seeds `status=$st`, derived-or-absent;
+    an absent status READS live) — so refusing it would reject a bundle the
+    writer
     accepts. That is the over-rejection class round 4 of this PR already fixed
     once, and it is why the array refusal (a PERSISTABLE unhashable value,
     which IS stored and then breaks the direct-edge terminal check) is scoped by
@@ -727,9 +729,13 @@ def test_direct_route_object_and_event_status_values_not_over_rejected(sdk):
     assert created["created"]["connections"] == 1
     assert _count(sdk, "MATCH (n:Object {name:'Alpha'}) RETURN count(n)") == 1
     # The dict is DROPPED, not stored verbatim — the mechanism the scoping
-    # above depends on, so it is asserted rather than described.
+    # above depends on, so it is asserted rather than described. Post-#9974 R1
+    # the dropped value leaves NO stored status at all (no fabricated `live`
+    # default either), so `[[None]]` is the discriminating assertion: a dict
+    # reaching the node would read back as itself, a reinstated birth default
+    # would read back `'live'`.
     assert sdk._get_proj().g.query(
-        "MATCH (n:Object {name:'Alpha'}) RETURN n.status").result_set == [["live"]]
+        "MATCH (n:Object {name:'Alpha'}) RETURN n.status").result_set == [[None]]
     assert _count(sdk, "MATCH (n:Event {name:'Happened'}) RETURN count(n)") == 1
 
 
@@ -1888,7 +1894,10 @@ def test_object_item_status_is_accepted_when_a_holder_owns_the_name(sdk):
     The merge does not overwrite an existing node's `status` (it is
     projection-owned for `:Object`), so an item re-declaring a status for a name
     that already has a holder is DROPPED and the writer accepts it — measured:
-    `create_object("Held", status=["retracted"])` stores `'live'`. Refusing the
+    `create_object("Held", status=["retracted"])` leaves the node with NO stored
+    status at all (#9974 R1: derived-or-absent — the door no longer writes a
+    `live` birth status and the fold seeds `status=$st`), which READS live.
+    Refusing the
     bundle here would reject a write the writer performs, and the HOLDER's own
     array status is the case the direct-route leg catches.
     """
@@ -1902,8 +1911,13 @@ def test_object_item_status_is_accepted_when_a_holder_owns_the_name(sdk):
     assert sdk._validate_bundle(bundle) == []
     created = sdk.ingest(bundle)
     assert created["created"]["connections"] == 1
+    # #9974 R1: neither the array nor a fabricated default lands — the first
+    # `create_object("Held")` leaves the property ABSENT, the MERGE's ON MATCH
+    # arm never writes `status`, and `_OBJECT_HANDLED` keeps the extras lane off
+    # it, so no writer can produce a value here. `[[None]]` therefore reds both
+    # if the item's array is stored AND if a birth default is reinstated.
     assert sdk._get_proj().g.query(
-        "MATCH (n:Object {name:'Held'}) RETURN n.status").result_set == [["live"]]
+        "MATCH (n:Object {name:'Held'}) RETURN n.status").result_set == [[None]]
 
 
 def test_operator_shaped_holder_with_array_status_is_refused_in_phase1(sdk):
@@ -2327,7 +2341,9 @@ def test_second_same_name_item_declaring_array_is_dropped(sdk):
     because a name 2+ LIVE carriers hold is now REFUSED (R8) rather than minted
     past, which would test the ambiguity arm instead of this one. Refusing the
     declaration rejected a bundle the writer performs (measured at the writer:
-    one node, status `live`, array not stored).
+    one node, the array not stored — and since #9974 R1 NO stored status at all,
+    since the first item's status-less birth leaves the property ABSENT and an
+    absent status READS live).
     """
     bundle = {
         "entities": [
@@ -2344,7 +2360,10 @@ def test_second_same_name_item_declaring_array_is_dropped(sdk):
     rows = sdk._get_proj().g.query(
         "MATCH (o:Object {name:'Acme'}) RETURN o.id, o.status").result_set
     assert len(rows) == 1, rows
-    assert rows[0][1] == "live", rows
+    # #9974 R1: derived-or-absent — the dropped array leaves the node with no
+    # stored status (it READS live). Discriminating in both directions: a stored
+    # array reads back as itself, a reinstated birth default as `'live'`.
+    assert rows[0][1] is None, rows
 
 
 def test_two_bundle_refs_to_one_shared_name_are_a_self_edge(sdk):

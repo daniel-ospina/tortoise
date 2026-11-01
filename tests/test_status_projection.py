@@ -509,13 +509,13 @@ class TestProjectionFold:
             # fabricated `live` the fold used to seed and the door used to write
             # into the creation record. This leg's claim is unchanged and is what
             # it must keep saying: an Object the journal never superseded is NOT
-            # `superseded` on replay. An absent status reads LIVE
-            # (`live._terminal_excluded`), so the assertion is on the CONTRACT
-            # (not terminal, no carrier) rather than on a literal the projection
-            # has no derivation for.
-            assert rows[0][0] in (None, "live"), (
-                "an Object the journal never superseded came back "
-                f"`superseded` from replay: {rows!r}")
+            # `superseded` on replay. The replay record carries no status, so the
+            # value is ABSENT, and absent READS LIVE (`live._terminal_excluded`) —
+            # asserting `is None` keeps BOTH halves: a fold reads `'superseded'`,
+            # and a re-instated `coalesce($st, 'live')` seed reads `'live'`.
+            assert rows[0][0] is None, (
+                "the replayed registration fabricated a birth status — the "
+                f"journal carries none: {rows!r}")
             assert rows[0][1] is None, rows
         finally:
             sdk.close()
@@ -1464,12 +1464,20 @@ class TestBirthStatusIsDerivedNotFabricated:
         finally:
             sdk.close()
 
-    def test_a_caller_supplied_birth_status_still_lands_on_both_routes(
+    def test_a_caller_supplied_birth_status_lands_on_the_write_and_jsonl_routes(
             self, tmp_path):
         """Anti-vacuity: DERIVED means the record's value is carried, not lost.
 
         Without this leg the test above would pass if the birth status were
         simply dropped — the same fabrication failure in the other direction.
+
+        SCOPE, stated so the name does not overstate it: the two routes pinned
+        here are (1) the LIVE write (door + fold) and (2) the JSONL replay of the
+        record that write journaled. It does NOT cover the record-sourced route
+        (``cache_projection.node_from_row``), where a caller-supplied birth
+        status is still dropped — the residual this PR names in its body
+        (#9974 R1); closing it needs the record to carry a carrier column, a
+        different change than this one.
         """
         events = tmp_path / "events"
         events.mkdir()

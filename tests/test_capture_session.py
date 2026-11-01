@@ -2630,7 +2630,13 @@ def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
     rows = sdk._get_proj().g.query(
         "MATCH (o:Object {name:$n}) RETURN o.status",
         params={"n": "approach-A"}).result_set
-    assert rows and rows[0][0] == "live", \
+    # #9974 R1: the birth status is DERIVED-OR-ABSENT — ``approach-A`` is a
+    # ``create_entity`` birth with no status, so the property is ABSENT (and an
+    # absent status READS live through ``live._terminal_excluded``). Pinned as
+    # ``is None`` rather than ``(v or "live") == "live"`` so this leg ALSO reds
+    # if the fabricated ``'live'`` seed is reinstated; a fold would read
+    # ``'superseded'``, so the anti-fold claim is unchanged.
+    assert rows and rows[0][0] is None, \
         (f"fold must never fire for a dangling successor: {rows!r}")
 
 
@@ -3821,7 +3827,12 @@ def test_apply_supersessions_self_supersession_skipped(sdk):
     assert applied == 0, "self-supersession must never apply"
     assert any("self-supersession" in w for w in warns), warns
     state = _entity_fold_state(proj, "plan-X")
-    assert state == ("live", None), \
+    # #9974 R1: ``plan-X`` was created with no status, so its birth status is
+    # ABSENT, not the fabricated ``'live'`` the fold used to seed. ``(None,
+    # None)`` keeps BOTH claims of this leg discriminating: a self-fold reads
+    # ``('superseded', 'plan-X')``, and a reinstated fabrication reads
+    # ``('live', None)``.
+    assert state == (None, None), \
         f"self-supersession folded plan-X onto itself: {state!r}"
     assert _object_superseded_events(proj) == 0, \
         "no ObjectSuperseded may be journaled for a self-supersession"
@@ -3886,7 +3897,9 @@ def test_apply_supersessions_mixed_id_name_self_alias_skipped(sdk):
     assert applied == 0, "id/name-aliased self-supersession must never apply"
     assert any("self-supersession" in w for w in warns), warns
     state = _entity_fold_state(proj, "plan-X")
-    assert state == ("live", None), \
+    # #9974 R1: absent birth status (see the self-supersession leg above) —
+    # ``(None, None)`` reds both on a fold and on a reinstated fabrication.
+    assert state == (None, None), \
         f"mixed alias folded plan-X onto itself: {state!r}"
 
 
@@ -3968,7 +3981,11 @@ def test_apply_supersessions_dead_dup_candidate_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    assert by_id[id_a] == "live", \
+    # #9974 R1: ``id_a`` is a ``create_entity`` birth, so its status is ABSENT
+    # (absent READS live — ``live._terminal_excluded``). Asserting the absent
+    # value keeps the leg discriminating in BOTH directions: a fold reads
+    # ``'superseded'``, a reinstated fabrication reads ``'live'``.
+    assert by_id[id_a] is None, \
         f"A must stay live — its only successor carrier is dead: {by_id}"
     assert by_id["obj-planx-dead"] == "superseded", by_id
 
@@ -4002,7 +4019,8 @@ def test_apply_supersessions_deprecated_carrier_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    assert by_id[id_a] == "live", \
+    # #9974 R1: absent birth status — see the dead-duplicate leg above.
+    assert by_id[id_a] is None, \
         f"A must stay live — its only other carrier is deprecated: {by_id}"
 
 
@@ -4035,7 +4053,8 @@ def test_apply_supersessions_idless_live_carrier_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    assert by_id[id_a] == "live", \
+    # #9974 R1: absent birth status — see the dead-duplicate leg above.
+    assert by_id[id_a] is None, \
         f"A must stay live — its only other carrier is id-less: {by_id}"
 
 
@@ -7802,11 +7821,20 @@ def test_apply_supersessions_concurrent_divergent_fold_one_wins(
                 "MATCH (o:Object {name:'race-O'}) RETURN count(o)",
             ).result_set[0][0]
             assert n == 1, f"{label} must see exactly ONE race-O: {n}"
+        # The liveness premise must NOT filter the literal ``status:'live'``:
+        # since #9974 R1 a status-less birth stores NO status, so that literal
+        # matches ZERO newborn Objects where it used to match every live one.
+        # The supported filter is the terminal predicate's NULL-tolerant arm
+        # (``live._terminal_excluded``), spelled here so the premise stays
+        # discriminating — a terminal race-O still counts 0.
+        _live_or_absent = "(o.status IS NULL OR o.status <> 'superseded')"
         n1 = proj1.g.query(
-            "MATCH (o:Object {name:'race-O', status:'live'}) RETURN count(o)",
+            "MATCH (o:Object {name:'race-O'}) WHERE " + _live_or_absent +
+            " RETURN count(o)",
         ).result_set[0][0]
         n2 = proj2.g.query(
-            "MATCH (o:Object {name:'race-O', status:'live'}) RETURN count(o)",
+            "MATCH (o:Object {name:'race-O'}) WHERE " + _live_or_absent +
+            " RETURN count(o)",
         ).result_set[0][0]
         assert n1 == 1 and n2 == 1, (
             f"both projs must see the SAME live race-O: proj1={n1} "
