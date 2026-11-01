@@ -80,6 +80,7 @@ untouched `org_{org_id}`, legacy `team_{org_id}`, registry `org_{name}`.
 | `_data_sdk` / `_data_graph_name` | REST data plane + admission gate | open the moved namespace when it moved |
 | `mcp_auth._get_org_sdk` | MCP data plane | same, via `moved_default_namespace` |
 | `_sweep_events`, `_dream_worker._open_sdk`, `_dispatch_webhooks_sync`, `org_info`, `list_packs`, `upload_pack_manifest`, `_org_proj`, `_open_org_graph_sdk`, `_graph_available`, `_get_onboarding_projection`, `patch_onboarding_state`, `_run_indexing`, `_relink_sessions_after_index`, `_run_docs_indexing`, `_run_onboarding_seed`, `_run_starter_seed`, `_seed_demo_graph`, `_seed_demo_sync`, `import_org` | `hosted_api` | all now open through `_org_sdk` |
+| `:OnboardingState` + `COMPLETED_STEP` / `onboards` edges | the default graph (an org-level record stored in a tenant graph) | CARRIED by the promotion itself (`_carry_onboarding_state` → `onboarding.state.copy_org_state`), because the readers above now open the promoted graph; reported in the response as `onboarding_state` |
 | `quota._count_resource` points/sessions/documents | `_check_org_limit` | gets the default-graph SDK explicitly (money gate) |
 | `graph_metadata`, `backup_sweep.enumerate_org_graphs` | dashboard + backups | read `graph_name`, which the promotion moves — consistent by construction |
 | provisioning/creation sites (`provision_tenant`, `register_user`, `_eager_provision_org_graph`, `_drop_org_graph_impl`, `_open_org_graph_sdk`'s canonical branch) | `hosted_api` | stay historical; reasons recorded in the inventory test |
@@ -130,6 +131,7 @@ head, which is the attestation gate.
 * R5 A migration version collides with `origin/main` (append-only, aborts `db push`) → renumbered to `20261102000001`; `supabase/migrations` has no duplicate prefix; the PGlite harness applies every migration first.
 * R6 The promote endpoint is reachable by a data-plane key, or leaks existence across orgs → 403/404 tests.
 * R7 The verb makes a previously-impossible interleaving reachable: a DELETE tombstoning the DEFAULT row (nothing could change `kind` before). → `soft_delete_graph`'s tombstone PATCH now carries the `kind != 'default'` predicate and returns its rowcount, and the endpoint re-reads to answer 403 rather than 404; mutation-proved.
+* R8 A promotion strands the org's ONBOARDING record in the demoted graph (it is the one org-level store kept INSIDE a default graph, and every org-level reader in this change now opens the promoted one), so onboarding re-opens and the `fork`/`compact` choice is lost. → `_carry_onboarding_state` copies it from the namespace the same transaction demoted (reported as `onboarding_state` in the response, `carry_failed` on failure, repaired by re-promoting the current default), and `_graph_has_org_namespace` asks about the DEFAULT namespace so deleting the demoted graph cannot re-strand the projection. Pinned by `test_the_promotion_carries_the_orgs_onboarding_record` (which reds with the carry removed) + the `absent`/`already_present`/repair arms + `test_the_existence_gate_follows_a_promoted_default`.
 
 **Out of scope — must NOT be raised** (note, file, do not chase):
 

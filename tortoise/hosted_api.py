@@ -23601,6 +23601,103 @@ async def _apply_graph_rename(
     return {"graph_id": graph_id, "name": name}
 
 
+def _historical_onboarding_source(org_id: str, namespace: str) -> str | None:
+    """The graph an org's onboarding record may still be sitting in (#10180).
+
+    Only the HISTORICAL tenant names are candidates, and only ones the server
+    actually LISTS: ``_make_sdk(namespace=…)`` re-derives ``org_{org_id}`` and
+    would MINT it, which is the pin-4 read-path write this tree bans. A name the
+    probe never observed is never opened.
+    """
+    listed = _registry_existing_graphs() or set()
+    for candidate in (f"org_{org_id}", f"team_{org_id}"):
+        if candidate != namespace and candidate in listed:
+            return candidate
+    return None
+
+
+def _carry_onboarding_state(org_id: str, previous_ns: str | None,
+                            namespace: str | None) -> dict:
+    """#10180 — carry the org's ONBOARDING record into the graph that is now
+    the default. Returns the report the endpoint puts in its response.
+
+    WHY THE VERB MUST DO THIS. ``:OnboardingState`` + its step edges are
+    org-level state that is STORED IN THE DEFAULT GRAPH, and this change
+    converts every org-level reader onto the PROMOTED default. A move that left
+    the record behind would serve ``flow_defaults()`` over an org that had
+    completed: ``onboarding_complete`` flips to the legacy jsonb answer, the
+    onboarding tool group is re-exposed to agents, the dashboard wizard
+    re-opens, and the org's ``fork``/``compact`` choice is lost — a silent
+    regression of state ``onboarding.state`` documents as MONOTONIC.
+
+    WHY IT IS NOT IN THE TRANSACTION. The move is one SQL transaction; the
+    record lives in a graph, so it CANNOT join it. The response is therefore
+    where its verdict belongs (``onboarding_state``), and the copy is
+    idempotent so a retry converges instead of duplicating.
+
+    TWO ARMS, both reported:
+
+    1. A REAL MOVE carries from ``previous_namespace`` — the namespace of the
+       row the SAME transaction demoted, taken from its own result, so there is
+       no second read to straddle the move. Unconditional: the demoted graph's
+       node is the authoritative one (org-level lanes wrote there until this
+       instant), so it wins over a stale node a custom graph may have picked up.
+    2. The IDEMPOTENT arm (the target is already the default, so the RPC reports
+       no previous namespace) REPAIRS: if the target holds no node it carries
+       from the listed historical name. That is what makes a failed carry — and
+       an org promoted before this carry existed — recoverable by re-promoting
+       the current default, mirroring the RPC's own idempotent-arm repair
+       (``namespace_repaired``). It never overwrites a present node.
+
+    Best-effort by contract: the move has already COMMITTED when this runs, so
+    a graph failure must not fail the verb — it is reported as
+    ``carry_failed`` with its exception type (never silently reported as done).
+    """
+    report: dict = {"migrated": False, "reason": "no_move", "from": None,
+                    "to": namespace, "steps": 0, "status": None}
+    if not namespace:
+        return {**report, "reason": "no_namespace"}
+    source = previous_ns if previous_ns and previous_ns != namespace else None
+    src_sdk = dst_sdk = None
+    try:
+        if source is None:
+            dst_sdk = _make_sdk(graph_name=namespace)
+            if _os.read_onboarding_node(dst_sdk._get_proj(), org_id) is not None:
+                # Never overwrite: the idempotent arm only ever repairs an
+                # ABSENT record, so a repeated promote cannot churn state.
+                return {**report, "reason": "already_present"}
+            source = _historical_onboarding_source(org_id, namespace)
+            if source is None:
+                return {**report, "reason": "no_source"}
+        dst_sdk = dst_sdk or _make_sdk(graph_name=namespace)
+        src_sdk = _make_sdk(graph_name=source)
+        carried = _os.copy_org_state(src_sdk._get_proj(),
+                                    dst_sdk._get_proj(), org_id)
+        if not carried.get("migrated"):
+            # The source graph exists and is listed but holds no node: nothing
+            # to carry, and saying so is the point (silence would read as
+            # "migrated" to the caller).
+            return {**report, "from": source, "reason": "absent"}
+        return {"migrated": True, "reason": "copied", "from": source,
+                "to": namespace,
+                "steps": len(carried.get("steps") or []),
+                "status": carried.get("status")}
+    except Exception as e:  # the move already committed — report, never raise
+        _logger.error(
+            "onboarding carry failed for %s (%s -> %s): the org's onboarding "
+            "record is still in the PREVIOUS default graph; re-promoting the "
+            "current default repairs it: %s",
+            org_id, previous_ns, namespace, e)
+        return {**report, "from": source, "reason": "carry_failed",
+                "error": type(e).__name__}
+    finally:
+        for _sdk in (src_sdk, dst_sdk):
+            if _sdk is not None:
+                try:
+                    _sdk.close()
+                except Exception:
+                    pass
+
 
 class GraphPromote(BaseModel):
     """#10180 — POST /v1/graphs/{graph_id}/promote body: DELIBERATELY EMPTY.
@@ -23680,6 +23777,18 @@ async def promote_graph(graph_id: str, request: Request, org_id: str,
       keeps its own data and stays a normal custom graph (list it, read it with
       a graph-bound key, back it up).
 
+    * THE ORG'S ONBOARDING RECORD FOLLOWS THE MOVE. ``:OnboardingState`` and its
+      step edges are org-level state STORED IN THE DEFAULT GRAPH, and every
+      org-level reader in this change now opens the PROMOTED default — so the
+      record is CARRIED across by ``_carry_onboarding_state`` and the outcome is
+      reported in ``onboarding_state`` (``migrated``/``reason``/``from``/``to``/
+      ``steps``). Without it a promotion would serve ``flow_defaults()`` over an
+      org that had completed: onboarding re-opens, the tool group is re-exposed
+      to agents, and the recorded ``fork``/``compact`` is lost. It cannot join
+      the SQL transaction (a second store), so the response is where its verdict
+      lives; it is idempotent, and re-promoting the current default REPAIRS a
+      carry that failed.
+
     Response echoes the move (``graph_id``, ``name``, ``namespace``,
     ``previous_default_graph_id``, ``already_default``) and restates the tenant
     consequence in machine-readable fields so a client never has to infer it
@@ -23755,6 +23864,24 @@ async def promote_graph(graph_id: str, request: Request, org_id: str,
         raise HTTPException(status_code=e.status, detail=detail) from None
     # Audit: an org-wide tenancy pointer moved, so it must be attributable
     # (`graph_packs_update` is the neighbouring per-graph audit event).
+    # #10180: the onboarding record's carry runs FIRST, so the audit event and
+    # the response report the same verdict. `_graph_offload` for the graph I/O;
+    # a bound/503 escape is caught because the MOVE has already committed and
+    # must still answer 200.
+    try:
+        onboarding_state = await _graph_offload(
+            lambda: _carry_onboarding_state(
+                org_id, result.get("previous_namespace"),
+                result.get("namespace")),
+            op="carry_onboarding_state")
+    except Exception as e:  # noqa: BLE001 — the move stands; report the carry
+        _logger.error(
+            "onboarding carry did not run for %s (move committed): %s",
+            org_id, e)
+        onboarding_state = {"migrated": False, "reason": "carry_failed",
+                           "from": result.get("previous_namespace"),
+                           "to": result.get("namespace"), "steps": 0,
+                           "status": None, "error": type(e).__name__}
     await _async_audit(
         request, org_id, "graph_promote_default",
         resource_type="graph", resource_id=result.get("graph_id"),
@@ -23764,7 +23891,10 @@ async def promote_graph(graph_id: str, request: Request, org_id: str,
                 "namespace_repaired": bool(result.get("namespace_repaired")),
                 "previous_default_graph_id": result.get(
                     "previous_default_graph_id"),
-                "namespace": result.get("namespace")})
+                "namespace": result.get("namespace"),
+                "onboarding_state_migrated": bool(
+                    onboarding_state.get("migrated")),
+                "onboarding_state_reason": onboarding_state.get("reason")})
     return {
         # The graph that is now the default (its real `public.graphs` id).
         "graph_id": result.get("graph_id") or target,
@@ -23784,6 +23914,11 @@ async def promote_graph(graph_id: str, request: Request, org_id: str,
         "record_tenant": {"org_id": org_id,
                           "graph_id": result.get("graph_id") or target},
         "org_wide_credentials_land_in": result.get("namespace"),
+        # #10180: the org-level state that lives INSIDE the default graph moved
+        # with it (or did not — and why). Machine-readable for the same reason
+        # `in_flight_captures` is: an operator must not have to infer from prose
+        # whether the org's onboarding record followed its graph.
+        "onboarding_state": onboarding_state,
         "in_flight_captures": (
             "not re-homed — each request resolves its graph once at admission, "
             "so work already admitted finishes against the graph it started on"),
@@ -32657,6 +32792,18 @@ def _graph_has_org_namespace(
         # connection failure — treat as graph-up-unknown → the projection
         # falls through to the read (which raises → 'unavailable' markers)
         return True
+    # #10180: a PROMOTED org's default graph is a per-graph namespace
+    # (`org_{org_id}_{gid}`), and the promotion CARRIES the org's onboarding
+    # record into it (`_carry_onboarding_state`). So for such an org "does it
+    # have an org graph" is a question about the DEFAULT — asking only about the
+    # historical names answered False the moment the demoted graph was deleted
+    # (it is an ordinary custom graph now), which sent the projection down the
+    # no-write FLOW-defaults path over a graph that is present. `None` from the
+    # resolver (fail-soft: unreadable control plane) keeps the historical
+    # probe below, i.e. the pre-#10180 answer.
+    moved = _org_default_namespace(org_id)
+    if moved is not None:
+        return moved in listed
     return any(name in listed
                for name in (f"org_{org_id}", f"team_{org_id}"))
 

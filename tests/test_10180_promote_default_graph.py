@@ -77,7 +77,19 @@ def _seed(fake: FakeControlPlane) -> None:
 
 @pytest.fixture
 def sb(monkeypatch):
-    """Supabase-mode TestClient with a fake control plane + temp DB."""
+    """Supabase-mode TestClient with a fake control plane + temp DB.
+
+    #10180: quiesced via the documented seam (``tests/_http_fixtures``), because
+    the promote path now touches the GRAPH as well as the control plane (the
+    onboarding carry), which put its latency across the window in which the
+    lifespan's un-quiesced boot sweep lands its own
+    ``metering_repair_period_bounds`` RPC — the exact `rpc_calls` race that
+    helper exists to remove. Without it the three exact-`rpc_calls` assertions
+    below read that unrelated sweep as a second call of the verb.
+    """
+    from tests._http_fixtures import quiesce_testclient_background_work
+
+    quiesce_testclient_background_work(monkeypatch)
     fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": [],
                              "graphs": []})
@@ -1622,3 +1634,172 @@ def test_no_sdk_is_constructed_inside_a_control_plane_worker():
         "path from the thread's stale stamp and the job writes a store its "
         "reader never reads (#7500). Off-load the READ and build on the loop "
         "with `_org_sdk_from_name`.")
+
+
+# ── 9. The org's onboarding record follows the move (#10180, review P2) ────
+#
+# :OnboardingState + its COMPLETED_STEP edges are the ONE org-level record kept
+# INSIDE a default graph, and every org-level reader in this change now opens
+# the PROMOTED default. A move that left the record behind serves
+# `flow_defaults()` over an org that had completed — onboarding re-opens, the
+# tool group is re-exposed to agents, the `fork`/`compact` choice is lost — so
+# the verb carries it and reports the outcome.
+
+_OLD_NS = f"org_{TEAM}"
+_NEW_NS = f"org_{TEAM}_{NEW_ID}"
+_COMPLETE_STEPS = ("team-named", "harness-connected", "first-points-filed",
+                   "decide-completed")
+
+
+def _onboarding_state():
+    from tortoise.onboarding import state as _os
+    return _os
+
+
+def _seed_onboarding(namespace: str, *, steps=_COMPLETE_STEPS,
+                     status: str | None = None, fork: str | None = None,
+                     compact: bool = False) -> None:
+    """Write a REAL OnboardingState into `namespace` (the embedded lane)."""
+    _os = _onboarding_state()
+    sdk = ha._make_sdk(graph_name=namespace)
+    try:
+        proj = sdk._get_proj()
+        _os.ensure_onboarding_state_node(proj, TEAM, fork=fork, compact=compact)
+        for step in steps:
+            _os.write_completed_step(proj, TEAM, step)
+        if status is not None:
+            _os.write_status(proj, TEAM, status)
+    finally:
+        sdk.close()
+
+
+def _read_onboarding(namespace: str) -> dict | None:
+    _os = _onboarding_state()
+    sdk = ha._make_sdk(graph_name=namespace)
+    try:
+        proj = sdk._get_proj()
+        node = _os.read_onboarding_node(proj, TEAM)
+        return None if node is None else {
+            **node, "completed_steps": _os.completed_steps(proj, TEAM)}
+    finally:
+        sdk.close()
+
+
+def test_the_promotion_carries_the_orgs_onboarding_record(sb):
+    """FAIL-ON (the P2 this pins): the record stays in the DEMOTED graph, so the
+    projection — which now opens the promoted default — serves `flow_defaults()`
+    and `onboarding_complete` falls back to the legacy jsonb flag, i.e. a
+    promotion silently re-opens onboarding for an org the gate documents as
+    MONOTONIC."""
+    tc, _, _ = sb
+    _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete",
+                     fork="build")
+    before = ha._get_onboarding_projection(TEAM)
+    assert before["onboarding_complete"] is True, before
+    assert before["fork"] == "build"
+
+    _as_session()
+    r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    carried = r.json()["onboarding_state"]
+    assert carried == {"migrated": True, "reason": "copied", "from": _OLD_NS,
+                       "to": _NEW_NS, "steps": len(_COMPLETE_STEPS),
+                       "status": "complete"}, carried
+
+    # The new default graph really holds the record ...
+    node = _read_onboarding(_NEW_NS)
+    assert node is not None
+    assert node["status"] == "complete"
+    assert node["fork"] == "build"
+    assert sorted(node["completed_steps"]) == sorted(_COMPLETE_STEPS)
+
+    # ... and the surface the agent/dashboard read follows it, unchanged.
+    after = ha._get_onboarding_projection(TEAM)
+    assert after["onboarding_complete"] is True, after
+    assert after["status"] == "complete"
+    assert after["fork"] == "build"
+    assert sorted(after["completed_steps"]) == sorted(_COMPLETE_STEPS)
+    # The old graph is untouched: the move copies, it does not steal.
+    assert _read_onboarding(_OLD_NS) is not None
+
+
+def test_the_carry_is_a_union_so_a_partial_record_never_regresses(sb):
+    """A target that already holds a node keeps the more-advanced state: status
+    is monotonic (`complete` never regresses) and steps only ever GAIN."""
+    tc, _, _ = sb
+    _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete")
+    _seed_onboarding(_NEW_NS, steps=("harness-connected",), fork="build")
+
+    _as_session()
+    r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    node = _read_onboarding(_NEW_NS)
+    assert node["status"] == "complete", node
+    assert set(node["completed_steps"]) >= set(_COMPLETE_STEPS)
+
+
+def test_the_promotion_of_an_org_that_never_onboarded_says_so(sb):
+    """No node in the previous default → nothing to carry, and the response says
+    `absent` rather than implying a migration that never happened."""
+    tc, _, _ = sb
+    _as_session()
+    r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding_state"] == {
+        "migrated": False, "reason": "absent", "from": _OLD_NS,
+        "to": _NEW_NS, "steps": 0, "status": None}
+    assert _read_onboarding(_NEW_NS) is None
+
+
+def test_re_promoting_the_current_default_repairs_a_stranded_record(
+        sb, monkeypatch):
+    """The pre-fix state, reproduced: a move whose carry did not run leaves the
+    record behind and the projection loses it (asserted FIRST — that is the
+    non-vacuity half). Re-promoting the CURRENT default is the repair lever: the
+    idempotent arm carries from the listed historical name."""
+    tc, _, _ = sb
+    _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete")
+    real_carry = ha._carry_onboarding_state
+    monkeypatch.setattr(ha, "_carry_onboarding_state", lambda *_a, **_k: {
+        "migrated": False, "reason": "carry_failed", "from": None,
+        "to": None, "steps": 0, "status": None})
+    _as_session()
+    r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding_state"]["reason"] == "carry_failed"
+    stranded = ha._get_onboarding_projection(TEAM)
+    assert stranded["completed_steps"] == [], stranded
+    assert stranded["onboarding_complete"] is False, stranded
+
+    monkeypatch.setattr(ha, "_carry_onboarding_state", real_carry)
+    r = tc.post("/v1/graphs/default/promote?org_id=" + TEAM)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["already_default"] is True
+    assert body["onboarding_state"]["migrated"] is True
+    assert body["onboarding_state"]["from"] == _OLD_NS
+    repaired = ha._get_onboarding_projection(TEAM)
+    assert repaired["onboarding_complete"] is True, repaired
+    assert sorted(repaired["completed_steps"]) == sorted(_COMPLETE_STEPS)
+
+    # Idempotent in the other direction: the node is now PRESENT, so a further
+    # promote writes nothing and says so.
+    r = tc.post("/v1/graphs/default/promote?org_id=" + TEAM)
+    assert r.json()["onboarding_state"]["reason"] == "already_present"
+    assert _read_onboarding(_NEW_NS)["status"] == "complete"
+
+
+def test_the_existence_gate_follows_a_promoted_default(monkeypatch):
+    """The projection's existence verdict is about the org's DEFAULT namespace,
+    not `org_{org_id}`: the demoted graph is an ordinary custom graph and can be
+    deleted, and keying on the historical name would then serve `flow_defaults`
+    over a present graph."""
+    _hosted(monkeypatch)
+    monkeypatch.setattr(ha, "_org_default_namespace", lambda _oid: _NEW_NS)
+    assert ha._graph_has_org_namespace(TEAM, listed={_NEW_NS}) is True
+    assert ha._graph_has_org_namespace(TEAM, listed={_OLD_NS}) is False
+    # An unpromoted org keeps the historical answer (both tenant prefixes).
+    monkeypatch.setattr(ha, "_org_default_namespace", lambda _oid: None)
+    assert ha._graph_has_org_namespace(TEAM, listed={_OLD_NS}) is True
+    assert ha._graph_has_org_namespace(TEAM, listed={f"team_{TEAM}"}) is True
+    assert ha._graph_has_org_namespace(TEAM, listed={_NEW_NS}) is False
