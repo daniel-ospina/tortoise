@@ -103,8 +103,15 @@
 -- default row's namespace (§3's invariant) and reports `namespace_repaired`, so
 -- the one call whose contract is "row and org pointer agree" cannot answer
 -- `ok` to an org where they do not. A refusal is reserved for a state the
--- caller must resolve: an unknown/foreign graph (404 at the endpoint) or a
--- tombstoned one (trash → restore first, 409 at the endpoint).
+-- caller must resolve: an unknown/foreign graph (404 at the endpoint), a
+-- tombstoned one (trash → restore first, 409 at the endpoint), a target whose
+-- namespace no org-wide resolver can FOLLOW (409 — the shapes are the two
+-- per-graph prefixes `supabase_control.per_graph_namespace_prefixes` names, plus
+-- the org's own bare namespace, which the historical open already resolves;
+-- without this the verb would succeed and then route every org-wide lane back
+-- to the graph it demoted), or an org that ALREADY holds more than one active
+-- default when the re-promote asks for a repair (409 — this arm returns before
+-- the demote, so it cannot be the call that converges that drift).
 CREATE OR REPLACE FUNCTION public.promote_default_graph(
     p_org_id text,
     p_graph_id text
@@ -183,6 +190,30 @@ BEGIN
     -- half-applied backfill) would otherwise be told `ok` by the one call whose
     -- whole contract is that the two agree. So converge the pointer and say so.
     IF v_kind = 'default' THEN
+        -- ⛔ THE POST-CONDITION IS CHECKED HERE TOO (review round 8, P2). This
+        -- arm RETURNs before the demote, so without this check the one call the
+        -- header calls the drift-repair lever would answer `ok, already_default:
+        -- true` over an org holding TWO active defaults — the state the
+        -- post-condition exists to refuse — while the converging demote never
+        -- ran. Both arms now enforce the SAME invariant, which is what the
+        -- header and the COMMENT claim.
+        --
+        -- Honest about reachability: while `uq_graphs_org_default_active`
+        -- stands, two ACTIVE defaults cannot exist, so this RAISE cannot fire on
+        -- a healthy database — it is a contract-parity guard, not a live race.
+        -- It fires for the one state the header names as pre-existing drift
+        -- (created while the index was absent, or after an ops drop of it), and
+        -- the doubled assertion is what stops a future edit from restoring the
+        -- asymmetry.
+        -- `count(*) <> 1` (not `> 1`) because the target IS one of them: it was
+        -- just read as `kind='default'` and passed the `status='active'` check
+        -- above, so a count below two is impossible here.
+        IF (SELECT count(*) FROM public.graphs g
+             WHERE g.org_id = p_org_id AND g.kind = 'default'
+               AND g.status = 'active') <> 1 THEN
+            RAISE EXCEPTION
+                'promote_default_graph: the org already holds more than one active default, so promoting the current default cannot repair it';
+        END IF;
         v_repaired := false;
         IF v_target_ns IS NOT NULL THEN
             SELECT o.graph_name INTO v_org_ns
@@ -203,6 +234,37 @@ BEGIN
             'previous_default_graph_id', p_graph_id,
             'namespace_repaired', v_repaired
         );
+    END IF;
+
+    -- 0. REFUSE a target the ORG-WIDE LANES CANNOT FOLLOW (review round 8, P1).
+    -- Every resolver of "the org's default graph" derives it from
+    -- `organizations.graph_name` through ONE shape test
+    -- (`supabase_control.moved_default_namespace`): a PER-GRAPH namespace of
+    -- this org — `org_{org_id}_` (minted by `insert_graph`/`_provision_graph`)
+    -- or the pre-#3543 `team_{org_id}_` that no data migration rewrites — or
+    -- else it takes the HISTORICAL open (`org_{org_id}`). Writing a namespace
+    -- of any OTHER shape here therefore SUCCEEDS and silently routes every
+    -- org-wide lane back to the graph this same transaction demotes: records
+    -- filed under the promoted graph, nodes written to the demoted one.
+    --
+    -- So the verb cannot mint that state. The accepted shapes are exactly the
+    -- prefixes in `supabase_control.per_graph_namespace_prefixes`, plus the
+    -- org's own bare `org_{org_id}`/`team_{org_id}`, which the historical open
+    -- already follows correctly (that is what un-promoting back to the original
+    -- graph looks like). Prefix comparison uses `left(...) = ...`, NOT `LIKE`:
+    -- `_` is a single-character WILDCARD in a LIKE pattern, so
+    -- `namespace LIKE 'org_' || p_org_id || '\_%'` would need an escape and the
+    -- unescaped form matches `orgX…` (PostgreSQL 18 §9.7.1).
+    IF v_target_ns IS NOT NULL
+       AND v_target_ns <> 'org_' || p_org_id
+       AND v_target_ns <> 'team_' || p_org_id
+       AND left(v_target_ns, length('org_' || p_org_id || '_'))
+           <> 'org_' || p_org_id || '_'
+       AND left(v_target_ns, length('team_' || p_org_id || '_'))
+           <> 'team_' || p_org_id || '_'
+    THEN
+        RAISE EXCEPTION
+            'promote_default_graph: the target namespace is not one the org-wide lanes can follow';
     END IF;
 
     -- 1. DEMOTE first. Demote-then-promote is the only order the unique index
@@ -290,6 +352,8 @@ COMMENT ON FUNCTION public.promote_default_graph(text, text) IS
     'default namespace, organizations.graph_name) to an existing active graph. '
     'One transaction, at most one live default always (the partial unique index '
     'uq_graphs_org_default_active) and never zero (checked as a post-condition '
-    'that rolls the move back). Idempotent on the current default, where it also '
-    'repairs a drifted org namespace. Raises on an unknown/foreign/trashed/'
-    'non-active target, naming which.';
+    'that rolls the move back, on BOTH the move and the idempotent arm). '
+    'Idempotent on the current default, where it also repairs a drifted org '
+    'namespace. Raises on an unknown/foreign/trashed/non-active target, a target '
+    'whose namespace no org-wide resolver can follow, and an org already holding '
+    'two active defaults, naming which.';

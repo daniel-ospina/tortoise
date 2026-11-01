@@ -1647,6 +1647,20 @@ class FakeControlPlane:
             # The one write this arm may make is the §3 repair of a drifted
             # `organizations.graph_name` — modelled here because the real
             # function does it and reports `namespace_repaired`.
+            #
+            # ⛔ The POST-CONDITION is checked on THIS arm too, exactly as the
+            # SQL does (#10452 review round 8, P2): the arm returns before the
+            # demote, so a double that answered `ok` here could green-light a
+            # verb that reports `already_default: true` over an org still
+            # holding two active defaults. `count != 1` (not `> 1`) because the
+            # target is read as an active default just above.
+            active = [r for r in self._live_default_rows(org_id)
+                      if (r.get("status") or "active") == "active"]
+            if len(active) != 1:
+                raise RuntimeError(
+                    "promote_default_graph: the org already holds more than "
+                    "one active default, so promoting the current default "
+                    "cannot repair it")
             repaired = False
             ns = target.get("namespace")
             if ns:
@@ -1659,6 +1673,23 @@ class FakeControlPlane:
                     "namespace": ns,
                     "previous_default_graph_id": graph_id,
                     "namespace_repaired": repaired}
+        # ⛔ A target the ORG-WIDE LANES CANNOT FOLLOW is refused, exactly as the
+        # SQL refuses it (#10452 review round 8, P1). The resolvers derive the
+        # default from `organizations.graph_name` through ONE shape test
+        # (`supabase_control.per_graph_namespace_prefixes`), so promoting a
+        # namespace of any other shape would succeed here and then send every
+        # org-wide lane to the graph this very call demotes. Mirror of the SQL's
+        # `left(...) = ...` prefix comparison (NOT `LIKE`: `_` is a wildcard).
+        ns = target.get("namespace")
+        if ns is not None:
+            followable = (
+                ns in (f"org_{org_id}", f"team_{org_id}")
+                or ns.startswith((f"org_{org_id}_", f"team_{org_id}_")))
+            if not followable:
+                raise RuntimeError(
+                    "promote_default_graph: the target namespace is not one "
+                    "the org-wide lanes can follow")
+
         # Demote-then-promote: the only order the unique index permits (a
         # UNIQUE INDEX is checked per row). Both rows change before the index
         # is re-checked, so the intermediate zero-default state is invisible —

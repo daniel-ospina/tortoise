@@ -227,7 +227,52 @@ EXCEPTION WHEN others THEN
   END IF;
 END $$;
 
--- After all four refusals the state is EXACTLY as the successful move left it:
+-- (e) a target whose NAMESPACE no org-wide resolver can follow (review round 8,
+-- P1). `promote_default_graph` writes the target's namespace into
+-- `organizations.graph_name`, and every resolver derives the default from that
+-- column through ONE shape test (`supabase_control.per_graph_namespace_prefixes`:
+-- `org_{org_id}_{gid}` or the pre-#3543 `team_{org_id}_{gid}`, plus the org's own
+-- bare namespace, which the historical open already resolves). A namespace
+-- outside those shapes would be accepted and then UNFOLLOWABLE — every org-wide
+-- lane would take the historical open onto the graph this call just demoted.
+DO $$
+BEGIN
+  INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
+  VALUES ('g_10180unfollow07', '10180-promote', 'nofollow', 'custom',
+          'team_10180_someone_else', 'active');
+  PERFORM public.promote_default_graph('10180-promote', 'g_10180unfollow07');
+  RAISE EXCEPTION 'ASSERTION FAILED: an unfollowable namespace was promoted';
+EXCEPTION WHEN others THEN
+  IF SQLERRM NOT LIKE
+     'promote_default_graph: the target namespace is not one the org-wide lanes%'
+  THEN
+    RAISE;
+  END IF;
+END $$;
+
+-- …and the LEGACY per-graph spelling IS followable, so a graph minted before the
+-- #3543 rename must still be promotable (the oldest orgs are the ones most
+-- likely to have outgrown their first graph). Accepted here; the Python gate
+-- that OPENS it is pinned in `tests/test_10180_promote_default_graph.py`.
+INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
+VALUES ('g_10180legacy0008', '10180-promote', 'legacy', 'custom',
+        'team_10180_promote_g_10180legacy0008', 'active');
+
+SELECT tests.assert(
+  (public.promote_default_graph('10180-promote', 'g_10180legacy0008')
+     ->> 'namespace')
+    = 'team_10180_promote_g_10180legacy0008',
+  '#10180: a pre-#3543 `team_` per-graph namespace is a promotable target');
+
+SELECT tests.assert(
+  (SELECT graph_name FROM public.organizations WHERE id = '10180-promote')
+    = 'team_10180_promote_g_10180legacy0008',
+  '#10180: …and the org pointer follows it, so the gate can open it');
+
+-- Put the org back on the current-spelling default for the sections below.
+SELECT public.promote_default_graph('10180-promote', 'g_10180promote0002');
+
+-- After all six refusals the state is EXACTLY as the successful move left it:
 -- still one live default, still the promoted graph, org pointer unchanged.
 SELECT tests.assert(
   (SELECT count(*) FROM public.graphs
@@ -246,41 +291,53 @@ SELECT tests.assert(
     = 'org_10180_promote_g_10180promote0002',
   '#10180: a refused promotion did not disturb the org namespace');
 
--- ── 5. Atomicity: a rollback mid-move cannot leave ZERO defaults ──────────
--- The one failure mode the "never two" assertion cannot see. Force it: perform
--- the SAME demote/promote the function performs, inside a subtransaction that
--- then raises, and prove the outer state is untouched. (The function itself is
--- one transaction, which is why its own refusals above are already safe — this
--- pins the MECHANISM the file's header claims, not just the outcome.)
-DO $$
-DECLARE
-  d_before text;
+-- ── 5. Atomicity: an abort MID-MOVE calls the FUNCTION and leaves it whole ─
+-- The one failure mode the "never two" assertion cannot see. Round 8 review: the
+-- previous drill hand-copied three UPDATEs in a DO block and never called the
+-- function, so it could not fail for ANY change to it — a tautology, not a pin.
+-- This one CALLS the function and forces the failure at step 3 (the org-pointer
+-- write) with a trigger, so the rollback it proves is the FUNCTION's own:
+-- the demote and the promote it already issued must be undone with it.
+CREATE OR REPLACE FUNCTION public._10180_refuse_pointer() RETURNS trigger
+LANGUAGE plpgsql AS $$
 BEGIN
-  BEGIN
-    UPDATE public.graphs SET kind = 'custom'
-     WHERE org_id = '10180-promote' AND kind = 'default'
-       AND status <> 'deleted';
-    UPDATE public.graphs SET kind = 'default'
-     WHERE id = 'g_10180default0001';
-    UPDATE public.organizations SET graph_name = 'org_10180_promote'
-     WHERE id = '10180-promote';
+  IF NEW.graph_name IS DISTINCT FROM OLD.graph_name THEN
     RAISE EXCEPTION 'drill: abort after the demote';
-  EXCEPTION WHEN others THEN
-    IF SQLERRM <> 'drill: abort after the demote' THEN RAISE; END IF;
-  END;
-  SELECT id INTO d_before FROM public.graphs
-   WHERE org_id = '10180-promote' AND kind = 'default' AND status <> 'deleted';
-  IF d_before IS NULL THEN
-    RAISE EXCEPTION
-      'ASSERTION FAILED: the aborted move left the org with ZERO default rows';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER _10180_refuse_pointer
+  BEFORE UPDATE ON public.organizations
+  FOR EACH ROW EXECUTE FUNCTION public._10180_refuse_pointer();
+
+DO $$
+BEGIN
+  PERFORM public.promote_default_graph('10180-promote', 'g_10180default0001');
+  RAISE EXCEPTION 'ASSERTION FAILED: the drill trigger did not fire';
+EXCEPTION WHEN others THEN
+  IF SQLERRM NOT LIKE '%drill: abort after the demote%' THEN
+    RAISE;
   END IF;
 END $$;
+
+DROP TRIGGER _10180_refuse_pointer ON public.organizations;
+DROP FUNCTION public._10180_refuse_pointer();
 
 SELECT tests.assert(
   (SELECT id FROM public.graphs
     WHERE org_id = '10180-promote' AND kind = 'default'
       AND status <> 'deleted') = 'g_10180promote0002',
-  '#10180: an aborted mid-move transaction rolled BOTH statements back');
+  '#10180: a mid-move abort rolled the function''s demote AND promote back');
+
+SELECT tests.assert(
+  (SELECT graph_name FROM public.organizations WHERE id = '10180-promote')
+    = 'org_10180_promote_g_10180promote0002',
+  '#10180: a mid-move abort left the org pointer untouched too');
+
+SELECT tests.assert(
+  (SELECT kind FROM public.graphs WHERE id = 'g_10180default0001') = 'custom',
+  '#10180: the aborted target did not keep the promotion it never completed');
 
 -- ── 6. The serialization point is in the function, not in the caller ──────
 -- Two callers must never read the same "current default" concurrently: the
@@ -315,4 +372,3 @@ SELECT tests.assert(
 -- ── 7. Cleanup (the harness is shared; this suite owns only its own rows) ──
 DELETE FROM public.graphs WHERE org_id LIKE '10180-%';
 DELETE FROM public.organizations WHERE id LIKE '10180-%';
-DROP TABLE IF EXISTS _10180_before;
