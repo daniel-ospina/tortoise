@@ -117,8 +117,8 @@ nicety: the log prints a `S3 WITNESS` line that **does not exist** in the probe 
 so its `head=` line names the commit the bars were read from, not the tool bytes that ran. The pin
 could not see the difference — it compared commits — which is why item 9 now refuses a dirty tree and
 the log carries the probe's own `sha256`. Review of this PR then found eight further hardening gaps
-in the probe. **All were fixed AFTER the
-run, and none of them changes a reported number** — the arithmetic (`created_counts`, `real_facts`,
+in the probe. **All were fixed AFTER the run, and none of them changes a reported number** — the
+arithmetic (`created_counts`, `real_facts`,
 `concentration`, `decide`'s bar comparisons) is unchanged, and the run's own log already printed
 each session's S3 state at the moment of that session's capture. What the hardening does is make
 one *observed* fact **machine-enforced**:
