@@ -6065,7 +6065,7 @@ def test_the_changes_job_carries_no_job_scope_env():
     assertions below fail on that tree.
 
     ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:866`
-    and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1673`)
+    and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1682`)
     both send an operator here by name, and both advertised
     `test_the_changes_job_carries_no_job_scope_env` while the function carried a
     longer, unrelated name — so `pytest -k test_the_changes_job_carries_no_job_scope_env`

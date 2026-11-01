@@ -1044,8 +1044,17 @@ def _pins_with_bars() -> dict:
 
 
 @pytest.mark.parametrize("key,value", [
+    # The two the measured log cannot hold, so the record is their ONLY copy — the sharp case.
     ("corroboration_min_sessions", 6),
     ("sessions_total", 8),
+    # The other five: the log holds them too, but the RECORD's copy is still a second copy a
+    # consumer reads, and the finding is about all seven being restated and compared nowhere. A
+    # movement that lands in the record alone must red here, not only in the log comparison.
+    ("primary_ratio_max", 0.90),
+    ("guard_ratio_min", 0.5),
+    ("arm_integrity_required", 13),
+    ("concentration_max", 0.7),
+    ("cost_ratio_max", 2.5),
 ])
 def test_a_record_hypothesis_bar_that_disagrees_with_the_pins_fails(tmp_path, key, value):
     """REGRESSION (#10468 review `f0b6842eb`, P2): the seven frozen bars were restated, unchecked.
