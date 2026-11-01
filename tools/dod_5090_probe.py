@@ -255,6 +255,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # The function's own text by LINE RANGE — `ast.get_source_segment`
             # re-splits the whole file per call, which cost 90 s on this tree.
             source = "\n".join(lines[node.lineno - 1:node.end_lineno])
+            kind: str | None = None
             if SEAM_CALL in called:
                 callee, kind = SEAM_CALL, "gated"
             elif set(UNGATED_CALLS) & called:
@@ -268,6 +269,18 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 if not _EMBED_WRITE.search(source):
                     kind = "producer"  # computes it; another function writes it
             else:
+                # No recognised producer call: if it still WRITES an embedding,
+                # the chain it uses is outside this vocabulary and the row would
+                # otherwise report `OUTSIDE the gate: 1` for a tree with three
+                # (review round 5, P2 — measured: 17 functions carry an
+                # embedding-write clause, 9 of them were absent from this map).
+                if kind is None and _EMBED_WRITE.search(source):
+                    writers[f"{path.stem}::{node.name}"] = {
+                        "callee": "unrecognised",
+                        "at": f"{path.relative_to(root)}:{node.lineno}",
+                        "kind": "unresolved_write",
+                        "label": "UNKNOWN(unresolved producer)",
+                    }
                 continue
             own = _strings(node)
             pairs = _NODE_LABEL.findall(own)
@@ -278,7 +291,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # Two labels in one writer's Cypher: picking one would report a
                 # stored label as covered while the other may be unserved.
                 label = "UNKNOWN(two labels: " + ",".join(sorted(labels)) + ")"
-                writers[node.name] = {
+                writers[f"{path.stem}::{node.name}"] = {
                     "callee": callee, "at": f"{path.relative_to(root)}:{node.lineno}",
                     "kind": kind, "label": label,
                 }
@@ -291,7 +304,20 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 label = hits.pop() if len(hits) == 1 else "UNKNOWN"
             if label == "UNKNOWN" and node.name in WRITER_LABEL_OVERRIDES:
                 label = WRITER_LABEL_OVERRIDES[node.name]
-            writers[node.name] = {
+            # ⛔ Keyed by `module::name`: a bare name merges two writers across
+            # modules (last-path-wins, no sentinel) and silently SHRINKS both
+            # rows — `main` is exactly such a name, and it is the only ungated
+            # entry today (review round 5, P2).
+            key = f"{path.stem}::{node.name}"
+            if key in writers:
+                writers[key] = {
+                    "callee": callee,
+                    "at": f"{path.relative_to(root)}:{node.lineno}",
+                    "kind": "duplicate",
+                    "label": "UNKNOWN(duplicate writer name)",
+                }
+                continue
+            writers[key] = {
                 "callee": callee,
                 "at": f"{path.relative_to(root)}:{node.lineno}",
                 "kind": kind,
@@ -388,6 +414,9 @@ def score_rule_bullet() -> Row:
     gated = {w: d for w, d in writers.items() if d["kind"] == "gated"}
     ungated = {w: d for w, d in writers.items() if d["kind"] == "ungated"}
     unparsed = [w for w, d in writers.items() if d["kind"] == "unparsed"]
+    unresolved_writes = {w: d for w, d in writers.items()
+                         if d["kind"] == "unresolved_write"}
+    duplicates = [w for w, d in writers.items() if d["kind"] == "duplicate"]
     # ⛔ Two different questions, both asked: the ambient env is what
     # `measure()` deliberately clears (so a lane's shell cannot fake it), and
     # the SHIPPED config is where a default actually lives.
@@ -407,16 +436,30 @@ def score_rule_bullet() -> Row:
            if ungated else ""),
         f"gate enabled by default: {on_by_default} (ambient "
         f"{embed_gate.ENV_FLAG}={os.environ.get(embed_gate.ENV_FLAG, '')!r}; "
-        f"shipped configs searched: {shipped['searched'] or 'none mention it'}"
+        f"shipped config surface walked: {len(shipped['surfaces'])} "
+        f"({', '.join(shipped['surfaces'])}); mentioning it: "
+        f"{shipped['searched'] or 'none'}"
         f"; set ON in: {shipped['files'] or 'none'})",
         # ⛔ A module that will not parse is a HOLE in the measurement, not a
         # zero: its writers — gated or bypassing — are invisible to every row
         # (this tool's own review, P2).
         f"unparseable modules (hold this row): {sorted(unparsed) or 'none'}",
+        # ⛔ A function that writes an embedding with NO recognised producer
+        # call is reported, not assumed clean: the session/Event chain calls
+        # the primitive through `self._session_embedding`, so a three-name
+        # callee vocabulary cannot see it (review round 5, P2).
+        f"functions writing an embedding with no recognised producer call: "
+        f"{len(unresolved_writes)} — deliberately OVER-INCLUSIVE (it also lists "
+        f"repair/backfill helpers and the clause builder itself, because a "
+        f"name-level enumeration cannot tell an exemption from a bypass; a "
+        f"bypass that reads as exempt is the failure this row exists to "
+        f"prevent): "
+        f"{', '.join(f'{w} @ {d["at"]}' for w, d in sorted(unresolved_writes.items())) or 'none'}",
+        f"duplicate writer names (hold this row): {sorted(duplicates) or 'none'}",
     ]
     if not stated or not shared or not gated:
         verdict = "NOT MET"
-    elif not on_by_default or ungated or unparsed:
+    elif not on_by_default or ungated or unparsed or unresolved_writes or duplicates:
         # EITHER condition alone means the rule is not the write path's
         # operative rule: the flag is the operator's, and an ungated writer is
         # a path the rule never sees. Turning the flag ON does not fix the
@@ -754,9 +797,17 @@ def _import_edges(root: Path, tree, path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom):
             spec = node.module or ""
             if node.level:  # relative: `from .` / `from ..pkg`
-                base: list[str] = []
+                # ⛔ Resolved against the IMPORTING FILE'S package, not always
+                # `tortoise/`: `from .rules import _P` inside
+                # `tortoise/gates/__init__.py` names `gates/rules.py`, and
+                # resolving it as `tortoise/rules.py` dropped a whole subtree
+                # (review round 5, P2).
+                pkg_dir = path.relative_to(root).parent
+                for _ in range(node.level - 1):
+                    pkg_dir = pkg_dir.parent
+                base = [x for x in pkg_dir.parts if x != "tortoise"]
                 parts = [x for x in spec.split(".") if x]
-                targets |= _resolve(root, parts) if parts else set()
+                targets |= _resolve(root, [*base, *parts]) if parts else set()
                 for alias in node.names:
                     targets |= _resolve(root, [*base, *parts, alias.name])
             elif spec == "tortoise" or spec.startswith("tortoise."):
@@ -832,13 +883,13 @@ def count_embed_predicates() -> dict:
         # helper imported by the gate also counts as an owner (a false DRIFT).
         # Over-reporting drift is the safe direction here; a false `MET` is the
         # failure this whole instrument exists to remove.
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Expr)) and any(
+        module_level = [n for n in tree.body]
+        for node in (m for top in module_level for m in ast.walk(top)
+                     if top is not None):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and any(
                 isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
                 and c.func.attr == "compile"
                 for c in ast.walk(node)
-                if isinstance(node, (ast.Assign, ast.AnnAssign))
-                or c is not None
             ):
                 owners.append(rel)
                 break
@@ -1221,7 +1272,11 @@ def cli(argv: list[str] | None = None) -> int:
     try:
         return main(argv)
     except SystemExit as e:  # `_connect` refuses an embedded engine this way
-        return int(e.code or 2) if e.code not in (0, None) else 0
+        if e.code in (0, None):
+            return 0
+        # `SystemExit("msg")` carries a STRING code — `int()` on it raised
+        # out of this very handler and exited 1 (review round 5, P3).
+        return e.code if isinstance(e.code, int) else 2
     except Exception as e:
         print(f"dod-5090-probe: UNMEASURED({type(e).__name__}: {e})",
               file=sys.stderr)

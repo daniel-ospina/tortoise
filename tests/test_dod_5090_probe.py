@@ -139,8 +139,9 @@ def test_a_second_pattern_list_in_the_embed_gate_reads_as_drift(tmp_path, monkey
 def test_every_embedding_write_path_reaches_the_gate_seam():
     """#5008's seam is reached by the entity writers — not by the raw primitive."""
     seams = probe._write_seams_that_embed()
-    for writer in ("_upsert_point_props", "_upsert_subject", "_upsert_object",
-                   "_upsert_document", "_upsert_event"):
+    for writer in ("entities::_upsert_point_props", "entities::_upsert_subject",
+                   "entities::_upsert_object", "entities::_upsert_document",
+                   "entities::_upsert_event"):
         assert writer in seams, (
             f"{writer} embeds a written row without reaching encode_for_row — "
             f"the ungated-primitive state #5008 closed. Measured seams: {sorted(seams)}"
@@ -299,7 +300,7 @@ def test_a_write_path_outside_the_gate_is_counted(tmp_path, monkeypatch):
         "    return emb\n", encoding="utf-8")
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
     writers = probe.embedding_writers()
-    assert writers["main"]["kind"] == "ungated", writers
+    assert writers["writer::main"]["kind"] == "ungated", writers
 
 
 def test_the_predicate_count_searches_the_embed_path_not_a_whitelist(
