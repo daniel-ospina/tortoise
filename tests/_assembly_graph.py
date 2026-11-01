@@ -430,3 +430,78 @@ def build_out_of_subgraph_gold(sdk: TortoiseSDK) -> dict:
             "question": ("which came first - buying the couch or the dog "
                          "bed getting chewed?"),
             "date": "2026-09-05"}
+
+
+#: #2653 N-ary ordering substrate — THREE named subjects, the issue's own
+#: example wording ("which came first, the couch, the dog bed, or the
+#: bookshelf?"). One dated gold row per subject, each aboutObject-linked, on
+#: three distinct days so a chain HAS an order to state.
+NARY_SUBJECTS = ("couch", "dog bed", "bookshelf")
+NARY_GOLD_ROWS = {
+    # subject -> (point id, statement, dated day, gold marker)
+    "couch": ("pNaryCouch", "bought the grey couch from ikea",
+              "2026-08-10", "grey couch from ikea"),
+    "dog bed": ("pNaryDogBed", "the dog bed arrived from the shop",
+                "2026-08-18", "dog bed arrived"),
+    "bookshelf": ("pNaryBookshelf", "we assembled the bookshelf",
+                  "2026-08-26", "assembled the bookshelf"),
+}
+
+
+def build_nary_ordering_substrate(sdk: TortoiseSDK,
+                                  crowd_rows: int = 60) -> dict:
+    """#2653 N-ary evaluation substrate: three named subjects, one dated
+    aboutObject GOLD row each, plus a crowd of rows that carry all three
+    question nouns and NO aboutObject edge.
+
+    The two halves of the geometry this substrate exists to measure:
+
+    * **B (assembled)** resolves each of the three terms and walks ITS OWN
+      subgraph, so the three golds are reachable by construction — the N-ary
+      chain decomposes into per-subject slices over the same dated spine.
+    * **A (legacy)** pools ONE fulltext result set for the whole question.
+      ``crowd_rows`` rows each carry all three nouns and therefore outrank
+      every gold (which carries ONE), so at the DEFAULT pool depth the
+      window fills with crowd rows and the golds do not reach the reader.
+      That binding is the measurement — not an accident of authoring order.
+
+    The crowd rows are deliberately NOT aboutObject-linked: they are ordinary
+    chatter, so they cannot enter any subject slice and cannot alter the
+    chain's anchors (each subject's earliest dated row stays its gold, and
+    every crowd row is dated after 2026-08-26).
+
+    Returns a handle dict of the gold ids/markers/dates, the question and the
+    crowd size. The caller does the measuring; this builder asserts nothing
+    about admission.
+    """
+    proj = sdk._get_proj()
+    qid = "q2653nary"
+    for name in NARY_SUBJECTS:
+        sdk.create_entity("object", name, objectKind="core:furniture",
+                          lme_question_id=qid, is_episodic=True)
+    golds: dict[str, dict] = {}
+    for subject, (pid, statement, day, marker) in NARY_GOLD_ROWS.items():
+        sdk.create_point(
+            "statement", statement, id=pid,
+            session_id=f"sess-nary-{subject.replace(' ', '-')}",
+            lme_question_id=qid, is_episodic=True, status="draft",
+            has_answer=True, quote=marker,
+            search_keys=f"{subject} {marker}",
+            createdAt=day, when=day, validFrom=day)
+        _link_point_about(proj, pid, [subject])
+        stamp_ep(proj, pid, 9.0, 1.0)
+        golds[subject] = {"id": pid, "marker": marker, "date": day}
+    for i in range(crowd_rows):
+        sdk.create_point(
+            "statement",
+            f"day {i}: we talked about the couch, the dog bed and the "
+            "bookshelf while rearranging the living room",
+            id=f"pNaryCrowd{i}", session_id=f"sess-nary-crowd-{i}",
+            lme_question_id=qid, is_episodic=True, status="draft",
+            search_keys="couch dog bed bookshelf rearranging living room",
+            createdAt=f"2026-09-{(i % 28) + 1:02d}")
+    return {"qid": qid, "subjects": NARY_SUBJECTS, "golds": golds,
+            "crowd_rows": crowd_rows,
+            "crowd_marker": "rearranging the living room",
+            "question": ("which came first, the couch, the dog bed, or the "
+                         "bookshelf?")}

@@ -355,3 +355,111 @@ def test_matched_control_superseded_rows_direction(sdk, monkeypatch):
     assert aa2.fired is True
     assert "successor unknown" in aa2.evidence
     assert aa2.retrieval_degraded is False
+
+
+# ── #2653 N-ary (3-named-subject) ordering: chain + gold admission ─────────
+def _nary_gold_admission(handle: dict, text: str) -> list[str]:
+    """Which of the substrate's three golds reached the reader-visible text.
+
+    Metric (a) is the ONLY metric measurable for the legacy A arm — a legacy
+    result carries evidence TEXT, no point ids — so both arms are measured in
+    the same currency here and the reported comparison is apples-to-apples."""
+    return [s for s, g in handle["golds"].items() if g["marker"] in text]
+
+
+def test_nary_ordering_chain_admits_every_gold_vs_legacy(sdk, monkeypatch):
+    """#2653 acceptance, end to end on a live graph: a question ordering THREE
+    named subjects routes to ORDERING with three terms, the resolver gates on
+    ALL THREE (R1's N-ary form), the renderer states the FULL chronological
+    chain over one dated spine, and every subject's gold reaches the reader —
+    at DEFAULT caps, i.e. with no widening asked of the caller.
+
+    The A arm is measured on the SAME graph and the SAME question, so the
+    comparison is not a strawman. MEASURED (this substrate, 60 crowd rows
+    carrying all three question nouns): BOTH arms admit all three golds —
+    legacy's entity-anchored leg already reaches them — so the acceptance
+    indicator "gold admission >= legacy A-arm" holds with EQUALITY, and what
+    the N-ary arm buys at DEFAULT caps is precision, not admission: 5 evidence
+    chunks (header + chain + three golds, ZERO crowd rows) against the legacy
+    window's 41 chunks, 37 of which are crowd rows. That is the measured claim
+    pinned below — admission parity, noise eliminated — NOT a manufactured
+    win: the substrate is not authored to starve legacy, and an arm that
+    improves on parity would keep passing.
+    """
+    from tortoise.assembly import AssemblyShape, classify_question, extract_subject_terms
+
+    d = ag.build_nary_ordering_substrate(sdk)
+    q = d["question"]
+    golds = d["golds"]
+    dates = [golds[s]["date"] for s in d["subjects"]]
+
+    # (1) ROUTING — the issue's own phrasing extracts THREE terms and rides
+    #     the ORDERING shape (the shape the two census rows ride).
+    assert classify_question(q) is AssemblyShape.ORDERING, q
+    terms = extract_subject_terms(q)
+    assert len(terms) == 3, f"expected 3 subject terms, got {terms}"
+    # …and a two-option phrasing on the SAME graph still extracts exactly 2:
+    # the N-ary extraction must not over-reach into the binary path.
+    two = "which came first, the couch or the dog bed?"
+    assert len(extract_subject_terms(two)) == 2, extract_subject_terms(two)
+
+    # (2) A arm — legacy, DEFAULT caps, same graph / same question.
+    a_def = _legacy(sdk, monkeypatch, q)
+    a_golds = _nary_gold_admission(d, a_def["evidence"])
+    a_chunks = ag.evidence_chunks(a_def["evidence"])
+    # non-vacuity: the legacy window really is a full pool (a starved window
+    # would make the precision comparison below meaningless).
+    assert d["crowd_marker"] in a_def["evidence"], (
+        "A-default must admit in-pool crowd rows")
+    assert len(a_chunks) >= 20, (
+        f"A-default admitted only {len(a_chunks)} chunks — the pool did not "
+        "fill, so the precision comparison below is vacuous")
+
+    # (3) B arm — the N-ary path, SAME default caps.
+    monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
+    aa = _b_arm(sdk, q)
+    assert aa.fired is True, f"the N-ary ordering question must fire: {q}"
+    b_golds = _nary_gold_admission(d, aa.evidence)
+    blind = sorted(set(d["subjects"]) - set(b_golds))
+    assert not blind, (
+        f"the N-ary chain must admit EVERY subject's gold; blind: {blind}")
+    ids = {h.get("id") for h in aa.post_cap_lines if h.get("id")}
+    missing = {g["id"] for g in golds.values()} - ids
+    assert not missing, (
+        f"assembled post-cap lines must carry all three gold ids; "
+        f"missing {sorted(missing)} of {sorted(ids)}")
+
+    # (4) THE ACCEPTANCE COMPARISON — gold admission >= legacy A-arm.
+    assert len(b_golds) >= len(a_golds), (
+        f"gold admission regressed against the A arm: B={b_golds} "
+        f"A={a_golds}")
+
+    # (5) THE CHAIN ITSELF — one line, earliest first, every subject named,
+    #     the three dates strictly ascending in the order stated.
+    chain = next((ln for ln in aa.evidence.splitlines()
+                  if "came first" in ln), "")
+    assert chain, f"no ordering chain line in evidence:\n{aa.evidence}"
+    for subject in d["subjects"]:
+        assert subject in chain, (subject, chain)
+    pos = [chain.find(day) for day in dates]
+    assert all(p >= 0 for p in pos), (dates, chain)
+    assert pos == sorted(pos), (
+        f"the chain must state the dates in chronological order, got {chain}")
+
+    # (6) PRECISION at DEFAULT caps: the pool is REPLACED, so the crowd noise
+    #     that fills the legacy window contributes nothing here, and the
+    #     assembled block is narrower than the legacy one it replaces.
+    assert d["crowd_marker"] not in aa.evidence, (
+        "the fired block must carry no crowd rows")
+    b_chunks = ag.evidence_chunks(aa.evidence)
+    assert len(b_chunks) < len(a_chunks), (len(b_chunks), len(a_chunks))
+
+    # metric (b) abstention (stub reader only) — unchanged by the N-ary arm.
+    assert aa.answer is None
+
+    # (7) A-WIDENED (R15 eval-control honesty): reported, never asserted as a
+    #     delta in B's favour — widening legacy adds chunks, it cannot remove
+    #     a gold it already admitted.
+    a_wid = _legacy(sdk, monkeypatch, q, widen=True)
+    a_wid_golds = _nary_gold_admission(d, a_wid["evidence"])
+    assert len(a_wid_golds) >= len(a_golds), (a_wid_golds, a_golds)
