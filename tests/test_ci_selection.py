@@ -2168,6 +2168,66 @@ def test_a_consent_token_only_diff_runs_the_bridge_guard():
     )
 
 
+def test_a_client_identity_only_diff_runs_the_consent_identity_guards():
+    """#8218 review (finding 3): the identity RULE's own diff must select the
+    guards that pin it.
+
+    `tortoise/client_identity.py` owns the decision (which name, if any, the
+    consent screen may print). Before it was a `SOURCE_PATTERNS["api"]` entry it
+    matched no pattern and fell to `core`, where neither consent suite is
+    registered — so a diff that touched ONLY the rule ran no test that pins it,
+    while a diff to the render site that merely CALLS it (`tortoise/oauth.py`)
+    ran two. That is the #2938/#3154/#4367 silent-drop class, on exactly the file
+    a follow-up (the CIMD brand-prefix residual, #10482) would change.
+
+    Asserts the SELECTION, not the registration, so it reds on the pre-fix
+    patterns.
+    """
+    r = _sel(["tortoise/client_identity.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"], (
+        f"a client_identity.py-only diff selects {r['surfaces']} — the identity "
+        "rule is an `api` SOURCE_PATTERNS entry (#8218 finding 3), and the "
+        "`core` fallback does not run tests/test_oauth_mcp.py, whose "
+        "renderer-contract assertions pin what the page prints"
+    )
+    assert "test_oauth_consent_client_identity_8218.py" in r["test_files"], (
+        "a client_identity.py-only diff does not run the count-based invariant "
+        "that owns this module (#8218)"
+    )
+    assert "test_oauth_mcp.py" in (set(r["test_files"])
+                                    | set(r.get("slow_selected") or ())), (
+        "a client_identity.py-only diff does not run tests/test_oauth_mcp.py, "
+        "whose renderer-contract assertions pin what the page prints (#8218). "
+        "It is a `slow_files` member, so it arrives through `slow_selected` — "
+        "checking `test_files` alone would call this covered when it is not"
+    )
+
+
+def test_an_already_classified_non_api_module_still_runs_the_identity_enumeration():
+    """#10472 review (F2): the enumeration half is NOT reachable through `api`.
+
+    `test_the_identity_sources_are_exactly_the_known_writers` and its
+    `client_name` sibling fail on ANY new function in the `tortoise/` package
+    that mentions the table or the column — a second identity source written in
+    an already-classified module that is not a "render path" file. `api`-only
+    registration cannot see that diff: `tortoise/render.py` matches no named
+    pattern and falls to `core`, so the guard was asleep on exactly the edit the
+    invariant exists to catch. Asserts the SELECTION, so it reds on the pre-fix
+    `api`-only registration.
+    """
+    r = _sel(["tortoise/render.py"])
+    assert r["full"] is False, (
+        "tortoise/render.py selected the whole matrix, so this assertion proves "
+        "nothing about the per-file registration")
+    assert "core" in r["surfaces"], r["surfaces"]
+    assert "test_oauth_consent_client_identity_8218.py" in r["test_files"], (
+        "an edit to an already-classified non-`api` module does not run the "
+        "identity enumeration, so a second render site introduced there ships "
+        "with the count invariant asleep (#8218)"
+    )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 
@@ -3599,6 +3659,40 @@ def test_the_capstone_evidence_bundle_selects_core_not_tier1():
         r = _sel([path])
         assert "core" in r["surfaces"], (path, r)
         assert "test_7950_capstone_probe.py" in r["test_files"], (path, r)
+        assert r["full"] is False, (path, r)
+
+
+def test_the_8607_evidence_bundle_selects_core_not_tier1():
+    # PR #10495 review P2 (#10484): the W1b bundle is
+    # `docs/evidence/8607-w1b/{README.md,seed.py,measure.py,verify-revert.py}`,
+    # and `tests/test_8607_legacy_id_normaliser.py::
+    # test_each_evidence_script_puts_THE_REPO_ROOT_on_sys_path` reads each
+    # SCRIPT BY PATH and executes its own `sys.path.insert` line — the defect it
+    # pins (`parents[2]` -> `docs/`, an inert bootstrap) is a one-line edit to
+    # exactly these files.
+    #
+    # `docs/` is a flat NON_PYTHON_PREFIXES entry, so a bundle-only diff came
+    # back with `changed == []`, took the docs-only early return and selected
+    # tier-1 smoke — where the pin is NOT registered. A SOURCE_PATTERNS row
+    # cannot fix it (`_selection_relevant()` skips `core`); the remedy is a
+    # CORE_ALSO entry, as for the three sibling bundles above.
+    #
+    # Measured before the entry (2026-11-01, head `30f9b85ec`, `select()`
+    # in-process): `_sel(["docs/evidence/8607-w1b/seed.py"])` ->
+    # surfaces=[], full=False, test_8607_legacy_id_normaliser.py ABSENT.
+    # Mutation check: deleting the `"docs/evidence/8607-w1b/"` CORE_ALSO entry,
+    # or narrowing it to a subdirectory that matches nothing, fails assert 1 and
+    # assert 2 on every parametrisation — the defect the pin guards is a whole
+    # bundle, so all four files are covered, not only the scripts.
+    for path in (
+        "docs/evidence/8607-w1b/seed.py",
+        "docs/evidence/8607-w1b/measure.py",
+        "docs/evidence/8607-w1b/verify-revert.py",
+        "docs/evidence/8607-w1b/README.md",
+    ):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_8607_legacy_id_normaliser.py" in r["test_files"], (path, r)
         assert r["full"] is False, (path, r)
 
 

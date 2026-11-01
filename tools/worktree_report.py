@@ -514,7 +514,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     save_state(wt, state)
     first_nonzero = 0
     for command in args.cmd:
-        number = len(state["suites"]) + 1
+        # ⛔ NEXT number from the MAXIMUM already used, never from the COUNT. A lane
+        # that loses a suite entry (an interrupted `run`, a state repaired by hand)
+        # leaves a GAP in `n` — this repo's own #10474 lane held 1,2,3,4,6,7 — and
+        # `len(suites) + 1` then re-mints an EXISTING n: the new command's output
+        # overwrites that suite's log (`{n:02d}-{slug}.log`), and `check`
+        # re-derives the earlier suite's hash against the overwritten file and
+        # reports `suite-log-hash-mismatch` on evidence it has just destroyed. That
+        # is a false INVALID on honest work, and the merge path refuses on it
+        # (agent-infra#2977) — a fault of the instrument, not of the lane.
+        number = max((suite["n"] for suite in state["suites"]), default=0) + 1
         slug = _slug(command)
         log_rel = f"{STATE_DIR}/{LOGS_DIR}/{number:02d}-{slug}.log"
         log_path = wt / log_rel

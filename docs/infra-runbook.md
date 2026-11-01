@@ -998,6 +998,42 @@ no request is made, so nothing fails and nothing pages; nothing watches for a
 MISSING pass. The backup driver (#596) covers that leg with a run stamp plus an
 out-of-band staleness check, and this one does not yet.
 
+### 4.3 Which build is serving — the `build` block on `/health` (#10447)
+
+**Symptom this answers.** "Is this deployed?" — asked of an endpoint that
+published `status`, `db`, `probe`, `loop_stale_ms`, `backup_watcher`,
+`change_feed` and `record` and named **no build**. A STALE build serves every
+one of those happily, so `status: ok` was true and uninformative at the same
+time. `/health` now carries one additive block, `build` (unauthenticated, like
+the rest of the payload, so no shell and no key are needed):
+
+```bash
+curl -s https://tortoise-y4mjjq.fly.dev/health | python3 -m json.tool | sed -n '/"build"/,/}/p'
+```
+
+| field | what it tells you |
+|---|---|
+| `version` | `tortoise.__version__` — the package version, mirrors `pyproject.toml`. Same value `/v1/version` publishes, from the same resolver |
+| `commit_sha` | the commit the **deploy** was told to build (`TORTOISE_GIT_SHA`, stamped by `deploy-hosted.yml` from `GITHUB_SHA`) — never a hand-edited constant. `null` = nothing stamped it (selfhost / local dev / a stripped deploy), which is an absence that says so, not a value that looks current. Identical to `/v1/version`'s `commit_sha`; the two surfaces cannot disagree |
+| `commit_dirty` | `true` / `false` / **`null`**. ⚠️ `null` means **NOT STAMPED** — nothing sets `TORTOISE_GIT_DIRTY` on this deployment today (declared in #10467's `## PARTIAL`: the stamp needs its own gated deploy change). Read it as "clean" and you have read a fact nobody published. `tortoise/env_truthy.py` is the vocabulary: `1`/`true`/`yes`/`on` → `true`, `0`/`false`/`no`/`off` → `false`, anything else (including unset and blank) → `null`, never `false` |
+| `build_identified` | `true` only for a well-formed 7-40 lowercase-hex `commit_sha` **that is not known-dirty**. `false` is the "cannot check" refusal — `unknown`, `main`, a literally unexpanded `${GITHUB_SHA}`, or a dirty tree. Key a staleness probe on THIS, not on `commit_sha != null` |
+| `started_at` | ISO-8601 UTC timestamp of process start — restart-loop detection (a value that keeps moving means the machine is being recycled, cf. §6) |
+| `migrations_head` | the highest numeric-prefixed `supabase/migrations/*.sql` file **this IMAGE CARRIES**, ordered numerically (`999_b` < `1000_a`), so a stray `seed.sql` cannot publish itself as the head. ⛔ **It is NOT "which migration has been APPLIED to the database".** This process applies no schema migrations (`entrypoint.sh` has no migration step; `supabase-deploy.yml` applies them) and the deploy gate classes index-only drift as WARN (exit 0, `.github/scripts/check-migration-drift:25-26`), so the image can carry a migration prod has not applied. The applied set is a database fact — read `supabase_migrations.schema_migrations`, not this endpoint. `null` has **two** causes and `migrations_source` names which: no migration-shaped file was found in the image (`null`), or the resolver RAISED (`error` — the image may carry everything and the reading is broken) |
+| `migrations_source` | which population `migrations_head` was read from: `checkout` = the schema tree was chosen (what the deployed image COPYs) or `package` = only the record lineage a wheel ships. The packaged answer is plausible and wrong for the inventory question, and without this field the two are indistinguishable. `error` = the resolver raised, so the head above is a failed reading and **not** an empty image. `null` = the two paths could not be compared. ⚠️ `checkout` means *the checkout tree was selected*, not *all 77 files were present in it* — neither answers "were they applied" |
+
+⚠️ **`build` deliberately does NOT fold into `status`.** A stale deploy is UP;
+degrading `status` over it would make Fly restart a healthy process forever
+(the #2850 restart-loop shape). Currency is a **COMPARISON the reader makes** —
+`check-deploy-staleness.sh` compares `commit_sha` against `origin/main` with
+`git merge-base --is-ancestor`. So `status: ok` on `/health` means "this process
+is liveness-healthy", **never** "this is the build I expected"; §4.1's client
+contract is unchanged and `deploy-health-gate.sh` still reads `db.ok` by value.
+
+⛔ **The operator misread this section exists to prevent:** a stale deploy with
+`build_identified: true` and `commit_dirty: null` is **stale and unstamped**,
+not clean. Read `commit_sha` against the expected commit, then read
+`commit_dirty` only as far as it goes (`null` ≠ clean).
+
 ## 4.5 Local Development — Local Stays Local
 
 **Best practice: a self-hosted/local instance is intentionally local.** Do not
@@ -1089,11 +1125,13 @@ enabled.
 | `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-flash` | Cheapest-tier default, and the analyzer's model too (`analyze._LLM_PROVIDERS`). NOT `deepseek-chat`: that id is retired and the provider answers 200 while silently serving `deepseek-flash`, so naming it made the configured model differ from the model used (#4129) |
 | `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` | |
 | `GEMINI_API_KEY` | Google Gemini | `gemini-2.0-flash` | Also used by MCP tooling — its presence here does NOT alone prove session capture is enabled |
+| `VENICE_API_KEY` | Venice.ai | `deepseek-v4-flash` | The #1549 rotation lane, OpenAI-compatible at `/v1`; serves the same documented flash model as the direct DeepSeek lane. ⚠️ **Last** in the SESSION-lane priority (`sdk._SESSION_LLM_PROVIDER_PRIORITY`, #8133), so there it never takes a capture over from a legacy key; a venice-ONLY deployment captures and extracts either way (it is a standalone primary in `model_adapters.resolve_extractor_provider`). The **hosted v2 lane does NOT walk that priority**: it resolves through `resolve_extractor_provider` → `build_extractor_model`, which rotates over the whole configured pool per the #1549 pilot (`model_adapters._build_routing_model`), so with three keys set (`venice 0.50 / openrouter 0.35 / deepseek-direct 0.15`) venice serves **~50%** of hosted extraction calls. Set the key expecting that share and that lane's cost/quality mix, not a fallback-only role |
 | `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set. **On the hosted deployment `deploy-hosted.yml` now sets this unconditionally** — from the GitHub secret if present, else the versioned default `openrouter:google/gemini-2.5-flash` — so hosted extraction requires `OPENROUTER_API_KEY` (or a GitHub secret overriding the model). It is deliberately NOT left optional: an absent GitHub secret used to leave the hand-set Fly value in place forever (#4126). Unset for self-hosters, where the per-provider default applies. |
 | `TORTOISE_SESSION_LLM_MOCK` | — | unset | **TEST-ONLY** seam (`1` = offline MockModel). **NEVER set on Fly** — it counts as *configured* for the extraction gate, so a deploy with it set passes the gate while captures silently write offline MockModel points (see Verification procedure step 1) |
 
 Provider priority when MULTIPLE keys are set (first configured wins):
-`openrouter → deepseek → openai → gemini` (`sdk._SESSION_LLM_PROVIDER_PRIORITY`).
+`openrouter → deepseek → openai → gemini → venice`
+(`sdk._SESSION_LLM_PROVIDER_PRIORITY`, #8133).
 A key is only ever sent to the provider that issued it (#329).
 `ANTHROPIC_API_KEY` is deliberately NOT consumed (#722) — its presence must
 never be assumed to enable capture. `tortoise doctor` reports the resolved

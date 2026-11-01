@@ -580,6 +580,15 @@ surfaces:
   # through a P0. DB-free (pepper env + a stubbed DB probe, no FalkorDB, no
   # Postgres, no network).
   - test_9548_record_arming_health.py
+  # #10447: `/health` published no build identity, so "is this deployed?" was
+  # unanswerable from the endpoint every watchdog and census probes — a stale
+  # build served `status: ok` and every other block happily. DUAL-REGISTERED
+  # (api + core) for the reason the /health guards above are: the file it pins is
+  # `tortoise/hosted_api.py`, which matches an `api` SOURCE_PATTERN, so an
+  # `api`-only registration in the `core` list would NEVER RUN on the very diff it
+  # exists for (the "guard for X does not run when X changes" class). The `core`
+  # arm covers the `record_projection.py` migration resolver the same pin reads.
+  - test_health_build_identity_10447.py
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match
@@ -1025,6 +1034,22 @@ surfaces:
   # refusals; an api-only entry would drop it from a record_writer.py-only PR, the
   # surface whose declaration the test pins.
   - test_10046_session_oauth_record_tenant.py
+  # #10046 (second module): TWO organizations live in one process — can org A's
+  # credential come back carrying org B's tenant? DUAL-REGISTERED (`api` +
+  # `core`) for EXACTLY the reason stated directly above for its sibling: it
+  # drives `hosted_api._session_user_org` and `oauth.resolve_oauth_access_token`
+  # (both `api` SOURCE_PATTERNS entries, along with `supabase_control`'s
+  # `default_graph_id_for_credential`) AND `record_writer.record_tenant_for` /
+  # `_resolve_record_tenant`, which match no SOURCE_PATTERNS row and fall
+  # through to `core`. ⛔ The two entries are NOT redundant: an exact-surface
+  # match REPLACES the `core` fallback, so an api-only entry would never run
+  # this module on a `record_writer.py`-only PR (the surface whose tenantless
+  # arm it pins), and a core-only entry would never run it on a
+  # `hosted_api.py`/`oauth.py`-only PR (the resolvers whose memoisation it
+  # pins). Registering it is also `manifest-integrity`'s requirement: a test
+  # file absent from every surface is `--integrity` drift, which is what this
+  # PR's first CI run failed on.
+  - test_10046_two_tenants_never_share_a_credential_tenant.py
   # #10047 (the #10025 residual): the five lambdas that build their OWN SDK —
   # the onboarding/starter seed runners and the three background index jobs —
   # install the org's DEFAULT-graph record tenant via
@@ -1223,6 +1248,21 @@ surfaces:
   - test_oauth_consent_bff_routes.py  # #3524 steps 1+3: the BFF mint + bounce routes and the TS<->Python token contract
   - test_oauth_consent_jti_store.py  # #3524 step 1: the control-plane jti STORE contract — first-claim vs replay mapping, the 401/503 split, the exp+leeway stamp, the prune. NOT atomicity and NOT the grants: atomicity is Postgres ON CONFLICT and the GRANT/RLS posture is executed by supabase/tests/20261030000001_oauth_consent_tickets.sql (pglite) — this file says so in its own header
   - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec + verifier guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5), and (since §9 step 2 landed) the `tortoise/consent_token.py` verifier's bind/`alg`/`jti`/strength contract. DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix. The verifier half is reachable through `api` only because `tortoise/consent_token.py` is a `SOURCE_PATTERNS["api"]` entry (tools/ci_selection.py; pinned by tests/test_ci_selection.py::test_a_consent_token_only_diff_runs_the_bridge_guard) — a named-surface match replaces the `core` fallback, and this file is not registered on `core`.
+  # #8218 (SCOPE §9 class 4(i)): the consent screen prints no client name it
+  # cannot back. Registered on `api` because every source it reads is `api`
+  # (`tortoise/oauth.py` — the render site, `tortoise/hosted_api.py::oauth_authorize`
+  # — the caller, and `tortoise/client_identity.py` — the decision, which is a
+  # SOURCE_PATTERNS["api"] entry as of this fix). It renders the REAL page
+  # through `GET /oauth/authorize` and executes the page's own inline script
+  # under node, then COUNTS unbacked rendered identities (must be 0), so the
+  # guard must run whenever the render path moves.
+  # DUAL-REGISTERED with `core` — see that entry. The earlier rationale here
+  # ("a core-only diff cannot change the identity decision") was false for the
+  # ENUMERATION half: `_functions_touching` fails on ANY new function in the
+  # package that mentions `oauth_clients` or `client_name`, and that is exactly
+  # the edit an already-classified non-`api` module (`tortoise/render.py`, say)
+  # would make without being a "render path" file (#10472 review F2).
+  - test_oauth_consent_client_identity_8218.py
   # #5331: the graph byte meter — tortoise/graph_storage.py plus the graph-storage
   # lane in tortoise/metering.py and tortoise/supabase_control.py. Registered on
   # `api` (metering/supabase seam) and `core` (the new module's default surface), so
@@ -1459,6 +1499,14 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
+  # #6388: the session-events DRAIN's CLI consumer (`tortoise session drain`) and
+  # its SessionStart hook live in `tortoise/__main__.py`, an EXACT `api`
+  # SOURCE_PATTERNS match. A match REPLACES the `core` fallback in `select()`, so
+  # a `__main__.py`-only diff selected `api` and NOT this guard — the #1349/#2938
+  # silent-drop class, in the direction where a PR reverting the hook wiring runs
+  # every surface except the one that drains. The `core` row is the other half
+  # (`session_events_drain.py` matches no named surface); BOTH are required.
+  - test_6388_session_events_drain.py
   # #4197: the saved-backlog CLI surface lives in `tortoise/__main__.py` — an
   # exact `api` SOURCE_PATTERN (it is NOT a SHARED_MODULE, so a `__main__.py`
   # change selects `api`, not the full matrix). The file's largest subject is
@@ -2788,6 +2836,19 @@ surfaces:
   # LIMITATIONS text, which claimed a failed call cannot be told apart in the
   # series because `_safe` swallows the exception.
   - test_mcp_safe_error_telemetry_8135.py
+  # #8218: the consent identity invariant's ENUMERATION half (with the `api` half
+  # — see there). `_functions_touching` walks the whole `tortoise/` package and
+  # fails on any NEW function that mentions `oauth_clients` or `client_name`,
+  # wherever it lives — so the second identity source this guard exists to catch
+  # is precisely the one an already-classified non-`api` module introduces (a
+  # page, an email, a notification built in `tortoise/render.py`), and an
+  # `api`-only registration cannot see that diff. `core` is the surface those
+  # modules select, so one surface leaves the guard asleep on the other half
+  # (#10472 review F2). The enumeration is stdlib-only — no DB, no network, no
+  # node: `_functions_touching` text-filters each module before parsing it, so
+  # the pass costs a read of the package rather than 260 parses. The RENDER half
+  # in the same file does spawn node, which is the price of the registration.
+  - test_oauth_consent_client_identity_8218.py
   # #9084: the tool-body refusal half of the same claim (with the `api` half —
   # see there). `tortoise/activation_scorecard.py`'s LIMITATIONS text named that
   # plain-dict class as still reading `ok`; this fix corrects it, so the pin has
@@ -3347,6 +3408,15 @@ surfaces:
   # `record_writer.py`-only diff (the `dsn_fingerprint` single definition this
   # file also pins) falls through to `core`.
   - test_9548_record_arming_health.py
+  # #10447: `/health` published no build identity, so "is this deployed?" was
+  # unanswerable from the endpoint every watchdog and census probes — a stale
+  # build served `status: ok` and every other block happily. DB-free; the
+  # `record_projection`-only half (where the schema head is resolved) falls
+  # through to `core`. This row is the SECOND half of a dual registration:
+  # `tortoise/hosted_api.py` is an exact `api` SOURCE_PATTERN that REPLACES the
+  # `core` fallback, so the file also has an `api` row above — without it this
+  # guard is dropped on every hosted_api.py-only diff.
+  - test_health_build_identity_10447.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
@@ -3397,6 +3467,7 @@ surfaces:
   - test_10000_turns_record_only.py  # #10000: record-vs-graph turn store + turn_max_index sweep; dual: api
   - test_10025_graph_identity.py  # #10025: graph id vs user-editable name; default-graph record tenant; dual: api
   - test_10046_session_oauth_record_tenant.py  # #10046: SESSION/JWT + OAuth `oat_` credential classes install the record tenant; dual: api
+  - test_10046_two_tenants_never_share_a_credential_tenant.py  # #10046: two orgs live in one process — no credential resolves into the OTHER tenant (and the tenantless arm never names one); dual: api
   - test_10047_record_every_lane.py  # #10047: the seed runners + background index jobs install the DEFAULT-graph tenant; dual: api (core is load-bearing for record_writer.py, which matches no SOURCE_PATTERN)
   - test_10017_backfill_census.py  # #10017: the pre-delete turn census is per-session — core ONLY (the census drives a raw falkordb client, never the hosted API, so unlike the 3551/10000 rows above it has no api leg)
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
@@ -3698,6 +3769,13 @@ surfaces:
   # that edits it. Registered on `core` (the fallback surface), not a named
   # one, because nothing under `tools/` maps to a named surface.
   - test_session_events_seal.py
+  # #6388: the session-events DRAIN — the consumer half of the substrate the seal
+  # tool above manages. `tortoise/session_events_drain.py` matches no named
+  # SOURCE_PATTERNS entry, so it falls through to `core`; that is the arm that
+  # runs the guard when the drain module itself changes. Dual-registered under
+  # `api` for the `__main__.py` callsite (see the `api` entry) — the same shape
+  # `test_capture_spool.py` carries one block up.
+  - test_6388_session_events_drain.py
   # #3516 §B: the capture-lane marker. `tortoise/capture_spool.py` (the spool
   # carry-forward), `tortoise/pi-hooks/` (the producer stamp) and
   # `tortoise/projection/entities.py` (the journal fold) match no named surface
@@ -4380,6 +4458,14 @@ surfaces:
   # implementation (extractor_v2.fold_allowed), so the file is registered
   # alongside test_consolidation_4way.py, which guards the same classifier.
   - test_never_across_fold_5080.py
+  # #5329: the vocabulary-gap census on the SAME seam as the two files below —
+  # `extractor_v2._boundary` is the one place every fold/supersede decision
+  # passes through, and the census counts the one-sided tokens a FOLD absorbed.
+  # Registered `core` for the same reason as its siblings: `extractor_v2.py` is
+  # not a SHARED_MODULE, so a diff touching only it selects `core` — and
+  # unregistered, this file is ALSO the `ci_selection.py --integrity` drift the
+  # `manifest-integrity` required check reds on (#10475).
+  - test_vocabulary_gap_census_5329.py
   # #5006: the attachments half of the same D12/O4 ruling — a fold that would
   # drop an entity only the candidate names is refused. Registered `core` beside
   # `test_never_across_fold_5080.py` (same classifier, same fold asymmetry):
@@ -5810,6 +5896,34 @@ surfaces:
   # attempt-key cross-half pin asleep exactly when the TS constant moves — the failure that
   # makes every mint answer `403 no_authorize_attempt` AFTER the visitor approved.
   - test_oauth_consent_page_step4.py
+  # `test_oauth_consent_client_identity_8218.py` has NO arm on THIS surface,
+  # deliberately, and the distinction matters because its three siblings above
+  # all need an `onboarding` arm.
+  # It is registered on `api` and `core` (both spelled out at those entries);
+  # what it must not have is this one.
+  # They need it because THEY read the dashboard tree. This file does not: its
+  # own reads are `tortoise/oauth.py`, `tortoise/hosted_api.py` and
+  # `tortoise/client_identity.py` (all `api`), its node driver and page are
+  # built in a tmpdir from the SERVED response, and it imports
+  # `tests.test_oauth_consent_page_step4` as a `pytest_plugins` entry only to
+  # reuse that module's fixtures.
+  # ⛔ Inheriting a FIXTURE is not inheriting a FILE READ. Verified: step 4 has
+  # no module-level file read (nothing under a `def`/`class` in its AST), and
+  # its `api_client` fixture binds the real `hosted_api` app in-process without
+  # touching `website/`. So an `onboarding` arm here would run this suite on a
+  # `functions/api/consent/*.ts` diff that cannot reach a single assertion it
+  # makes — the drift `tools/ci_selection.py --surface-audit` reports.
+  # (`tortoise/client_identity.py` is a `SOURCE_PATTERNS["api"]` entry — the
+  # half that makes this registration FIRE, pinned by
+  # tests/test_ci_selection.py::test_a_client_identity_only_diff_runs_the_
+  # consent_identity_guards.)
+  #
+  # ⛔ NOT registered on this surface. A previous revision carried the file here
+  # too, on the claim that importing step 4 as a `pytest_plugins` entry inherits
+  # its dashboard-tree reads. It does not — see the verification above — and a
+  # registration whose stated reason is false is worse than no registration: the
+  # next lane copies it as precedent and the `--surface-audit` mode keeps
+  # reporting `onboarding` membership it cannot justify.
   # #3524 task 3: the BEHAVIOURAL guard for the four session-flow properties.
   # It reads `website/apps/dashboard/functions/_shared/auth/{token,consent-flow}.ts`
   # and executes them under Node, so `website/apps/dashboard/functions/` — a
@@ -7641,6 +7755,7 @@ durations_captured_at: "2026-10-26T04:45:51Z"
 durations_held_equal:
   test_mcp_rename_table.py: test_bridge_table.py
 durations:
+  test_health_build_identity_10447.py: 2.0  # new in #10467 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`. ⚠️ Re-measured at #10467's head rather than assumed, and the coverage floor is NOT what the row buys here: `fast_pool()` is 1049 and `duration_coverage_issues()` is `[]` BOTH ways — 1021/1049 = 0.973308 without the row, 1022/1049 = 0.974261 with it. `tools/ci_selection.py --integrity` is the authority; the row is kept because a fast file added by a PR must carry a weight at all (the #3400/#4348 trap), not because its absence reds a gate. What the weight covers: DB-free, server-free, network-free and model-free — it imports `tortoise.hosted_api` and stubs `_probe_db`/the watcher/`_HEALTH_PROBE` through `monkeypatch`, so the only I/O is the `git init`/`git commit` pair it spawns in `tmp_path/history` to prove the identity is whatever the DEPLOY was told to build. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_reap_redislite_orphans.py: 2.0  # new in #3653 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: hermetic — it reads every workflow in `.github/workflows/` (both `.yml` and `.yaml`) and drives the stdlib reaper by path (one `sys.executable` subprocess for the CLI seam); no DB, no server, no network, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_ci_preview_isolation.py: 2.0  # new in #10283 — a file a PR ADDS can never carry a CI junit reading yet (same reasoning as the #3653 row above), so it takes the flat `DEFAULT_FAST_WEIGHT`; the row must EXIST because the `core` registration puts one more file in `fast_pool()` and `--integrity`'s coverage floor is measured against that pool. What the weight covers: hermetic — it reads `.github/workflows/*.yml` (text + YAML arms) and drives `.github/scripts/preview-server.sh` by path, spawning 3 short-lived `sleep`/`bash` process trees per run to prove `stop` is pid-scoped and a peer's decoy survives; no DB, no network, no browser, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_inbound_relay_sweep.py: 2.0  # carried forward (not a full-file CI measurement) — the inbound-relay CONVERGENCE fix (#2409/#2441): the 15-minute sweep that applies the relay's own policy when its event-time run never executes (measured 8/8 external triggers `startup_failure`, 0 executions in 800 runs). No CI sweep has collected it, so it carries the flat `DEFAULT_FAST_WEIGHT` for an unmeasured file (the #2818/#3419/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: DB-free, graph-free and network-free — it loads `tools/inbound_relay_sweep.py` by path, drives a recording fake GitHub client, and evaluates the REAL job-level `if:` of `.github/workflows/inbound-relay.yml` through `tests/test_inbound_relay_guard.py`'s expression parser; no `gh`, no docker, no FalkorDB, no model, and the only file reads are the two workflow YAMLs plus `.mergify.yml`. The row must EXIST, not merely default: the `core` registration puts one more fast file in the pool, and `--integrity`'s `duration_coverage_issues` measures the ratio against the pool's own size. ⚠️ The counterfactual this row was written with ("without the row: 925/1028 = 0.8998") is a SNAPSHOT OF A MOVING DENOMINATOR, not a current requirement, and it no longer reproduces — re-measured after the `origin/main` merge the pool is 1032 and `duration_coverage_issues()` is `[]` BOTH ways: 930/1032 = 0.901163 with the row, 929/1032 = 0.900194 without it. `tools/ci_selection.py --integrity` is the authority; the row is kept because a fast file added by a PR must carry a weight at all (the #3400/#4348 trap) and because one unweighted fast file is all the headroom this pool has. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.6s) is a LOWER bound; kept 2.0
@@ -7978,6 +8093,7 @@ durations:
   test_session_schema_3554.py: 5.2  # #3554: (48 hermetic tests, no graph lane — re-derived 2026-10-29 at the #10021 fix head with `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_session_schema_3554.py --collect-only -q` → "48 tests collected"; `grep -c 'def test_'` gives the same 48, and the file has no parametrize, so the count is static. ⛔ NO CHANGE IS ATTRIBUTED TO THIS PR: `git diff --name-only origin/main...HEAD -- tests/test_session_schema_3554.py` is empty — this PR touches `tortoise/session_schema.py` only. An earlier revision of this comment credited #10021's review-fix with a "tenant-abstention leg" that exists nowhere in the tree and stated "47 … stale at 46"; both numbers were wrong at the head they claimed, which is the failure this file's sibling rows argue against. The 5.2 duration is unchanged and unmeasured by this PR) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.9
   test_10025_graph_identity.py: 3.0  # unmeasured by CI — #10025: graph id vs user-editable name, default-graph record tenant (46 collected at THIS head: 39 `def test_` functions + 7 parametrised instances, re-derived with `--collect-only`, NOT the 18/21/25/29/32/45 counts this note carried while the review rounds added pins — every review cycle changes the count, so RE-DERIVE rather than trust this number; pure, a fake control plane, no graph writes, no server). Needed here rather than left to the sweep because `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time and the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Measured on this host 2026-10-26: `TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_10025_graph_identity.py -q` → "46 passed in 5.44s" (re-measured at THIS head, after the refusal-hint arm for `_describe_graph` landed; the 18/25/29/30/32/45-test readings in this note are superseded. The COUNT is the load-independent datum — a re-run on a busier host measured 4.38s at 45 tests — so trust the collected total and re-time before tightening the row) — and the original reading was "18 passed in 2.75s", "2.61s", "2.67s" (three consecutive runs). The row carried 18.5 before review: that reading was taken on a private `tools/test_lane.py` container and counted container lifecycle, not the pytest session — the same artefact the `test_7846_index_safe_restore_guard.py` and `test_8474_ontology_record.py` rows below call out, and the case for citing the session total rather than the wall clock. Refresh from the first post-merge push run that includes it.
   test_10046_session_oauth_record_tenant.py: 5.1  # unmeasured by CI — #10046: the SESSION/JWT and OAuth `oat_` credential classes install the record tenant (5 tests at THIS head: the session stamp, the OAuth stamp, the mint-on-miss heal, the refusal, and the `OFFLOAD_REFUSED` normalisation; pure — a fake control plane, no graph writes, no server). Needed here rather than left to the sweep for the SAME reason as the `test_10025_graph_identity.py` row above: `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time and the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Measured on this host 2026-10-26: `TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_10046_session_oauth_record_tenant.py -q` → "5 passed in 2.60s" ("4 passed in 5.12s" at the four-test revision, the difference being an earlier host-load reading, so trust the one already-registered 5.1 and re-time rather than reading the delta as a cost); the whole cost is interpreter/pytest startup plus `hosted_api`'s import graph (every test body is sub-millisecond), so the reading is a property of the file rather than of host load. Refresh from the first post-merge push run that includes it.
+  test_10046_two_tenants_never_share_a_credential_tenant.py: 2.0  # new in #10046's second module — and it is the #3400/#4348 trap verbatim: a file a PR ADDS can never carry a CI junit reading (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT the local reading below, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row has to EXIST, not merely default: the `api` + `core` registrations above put one more fast file in `fast_pool()`, and `--integrity`'s `duration_coverage_issues` floor is measured against that pool's own size. What the weight covers: 7 tests (`--collect-only -q` → "7 tests collected" at this head; the row was written at five and the review fixes ADDED two, so re-derive the count rather than trusting it), DB-free and network-free — a fake control plane seeded with TWO orgs, both credential resolvers (`hosted_api._session_user_org`, `oauth.resolve_oauth_access_token`) exercised in alternation A→B→A, the same alternation again with all three SESSION reads inside ONE `asyncio.run` so a `contextvars.ContextVar` leak has a shared context to ride, a CONTROL that injects exactly that leak and asserts the per-call reads stay green while the single-loop read reddens, `record_tenant_for`'s tenantless arm, and a negative control that breaks the resolver and asserts the checker goes red; no Postgres, no FalkorDB server, no model. ⚠️ The local reading is recorded only so nobody re-derives it, NOT as the weight: `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest tests/test_10046_two_tenants_never_share_a_credential_tenant.py -q -p no:cacheprovider` → "7 passed in 2.51s" cold (first run after `uv sync`), then "7 passed in 0.85s", on a host at load 4.08. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_battery_setup.py: 99.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 177.7
   test_graph_write_loop_responsiveness.py: 20.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 9.0
   test_read_routes_loop_responsiveness.py: 21.1  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.6
@@ -8219,6 +8335,7 @@ durations:
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 11.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.9
   test_oauth_mcp.py: 14.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.4 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (9.4s) is a LOWER bound; kept 14.9
+  test_oauth_consent_client_identity_8218.py: 2.0  # new in #8218 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348) — the same shape as the `test_oauth_consent_page_step4.py` row below, whose node-spawning harness this suite reuses. ONE row only: `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — per-surface reasoning belongs in `surfaces`, and this file is registered on `api` and `core` (see both entries; the `core` arm is the AST-enumeration half). What it covers: 20 cases — the reproduction and the count-based invariant both render the REAL page through `GET /oauth/authorize` and execute its inline script under node (~1-4 s per render, which is why the real reading will land above the default; measured 13.84 s for the whole file on this host 2026-11-01, recorded for the refresher, deliberately NOT used as the weight), plus two AST enumerations over the whole `tortoise/` package (every `oauth_clients` toucher, every `client_name` consumer) that red the suite when a new identity source is written. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_oauth_consent_page_step4.py: 2.0  # new in #3524 §9 step 4 (it REPLACES test_oauth_consent_pkce.py, deleted with the inline client it pinned) — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). ONE row only: this suite is DUAL-REGISTERED (`api` + `onboarding`), but `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — ordering and per-surface comments belong in `surfaces`. What it covers: 58 cases — the bounce, the scope the page DISPLAYS being the one the token CARRIES (measured end to end) + return-target recovery, the real allowlist executed under node, the page's inline script executed under node (a dozen-plus cases spawn node, ~1-4 s each, which is why the real reading will land well above the default), the #6001 placeholder set ×8, #3443's four navigation arms plus its guard-removed control, the org preview's two identity arms and the #1701 R1 chooser, and the token-bound AS round trips. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_mcp_server.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_dashboard_client_paths_resolve.py: 9.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.6
@@ -8901,6 +9018,7 @@ durations:
   test_session_attribution.py: 0.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 0.3
   test_session_import_codex.py: 23.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.0
   test_capture_spool.py: 4.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.9
+  test_6388_session_events_drain.py: 2.0  # new in #6388 (#3400/#4348 trap): a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row has to EXIST, not merely default: the `core` + `api` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: DB-free, graph-free, network-free and model-free — every case writes day files under `tmp_path` (`TORTOISE_SESSION_EVENTS_DIR`/`store=`) and drives `drain_session_events` with a recording `PostOutcome` transport; the only subprocess-free cost is gzip encode/decode on the sealed-day cases. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   # #3516 §B: the capture-lane marker. Measured as the CALL sum of an
   # embedded-lane run (23 tests, four of them HTTP round-trips); the docker
   # lane is expected to be faster, so this is a conservative over-weight. The

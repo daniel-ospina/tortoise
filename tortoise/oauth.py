@@ -51,6 +51,10 @@ from datetime import datetime, timedelta, timezone
 from typing import NoReturn
 from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit  # noqa: F401
 
+# #8218 — the client-identity decision (SCOPE §9 class 4(i)) is its own module so
+# the invariant has ONE enumerable home; the consent page only renders it.
+from .client_identity import consent_client_line, resolve_client_identity
+
 logger = logging.getLogger("tortoise.oauth")
 
 # ── Protocol constants ──────────────────────────────────────────────────────
@@ -2576,9 +2580,19 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       redirectBack({ error: "access_denied", state: PARAMS.state });
 
   // ── render, then run ─────────────────────────────────────────────────────
+  // ⛔ THE CLIENT IDENTITY IS A SERVER DECISION, not a page one (#8218).
+  // `PARAMS.client_line` is built by `client_identity.consent_client_line`
+  // from the REGISTRY row, so it says a name only when an allowlist entry or a
+  // CIMD origin backs it, and says "An unverified app (<client_id>)" otherwise.
+  // The fallback is deliberately name-free too: a page served without the field
+  // (version skew) must not reach for the raw client_name param — that value is
+  // what a DCR caller typed about itself, and reading it here is the defect. The
+  // server now sends "" in that field whenever nothing backs a name, so even a
+  // STALE page renders the id rather than the claim.
   byId("client-line").textContent =
-      (PARAMS.client_name || PARAMS.client_id || "This client") +
-      " wants to access your Tortoise MCP surface.";
+      PARAMS.client_line ||
+      ("An unverified app (" + (PARAMS.client_id || "unknown client") +
+       ") wants to access your Tortoise MCP surface.");
   // ⛔ THE SCOPE THAT WILL BE BOUND, not the one the request happened to send. When an
   // authorize URL omits `scope`, the code is minted with the CLIENT's registered scope
   // (`body.get("scope") or client.get("scope") or "mcp"`), so rendering `"mcp"` showed
@@ -2706,8 +2720,8 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
             + urlencode({"next": inner}))
 
 
-def consent_page_html(*, client_name: str, params: dict, raw_query: str,
-                      app_origin: str) -> tuple[str, str]:
+def consent_page_html(*, client_name: str, client_id: str, params: dict,
+                      raw_query: str, app_origin: str) -> tuple[str, str]:
     """Render the branded consent page (D2, rewritten by #3524 §9 step 4).
 
     The page holds NO credential and signs NOBODY in. ``params`` are the raw
@@ -2720,18 +2734,36 @@ def consent_page_html(*, client_name: str, params: dict, raw_query: str,
 
     Returns ``(html, csp_nonce)``. The nonce gates the single inline <script>,
     so the caller can serve a script-src CSP that still permits the consent
-    logic. Attacker-controlled values (state / scope / resource / client_name)
-    are JSON-escaped for the <script> context, so a ``</script>`` payload cannot
-    break out of the block (PR #1264 review P1). Placeholder substitution is a
+    logic. Request-controlled values (state / scope / resource) are JSON-escaped
+    for the <script> context, so a ``</script>`` payload in any of them cannot
+    break out of the block (PR #1264 review P1); ``client_name`` is no longer a
+    raw attacker value — it is passed through `resolve_client_identity` below and
+    only an allowlist/CIMD-backed display name reaches the page (#8218), escaped
+    by the same single path. Placeholder substitution is a
     SINGLE pass, so a param value that *contains* a placeholder token is
     inserted verbatim rather than re-expanded (#6001 — see the comment at the
     substitution site for the failure it prevents).
     """
+    # #8218: the identity is resolved HERE, from the registry row, and the page
+    # receives the resulting SENTENCE (`client_line`) plus a `client_name` that
+    # is empty whenever no allowlist entry / CIMD origin backs a name. Removing
+    # the page's own copy of the rule is the point: a page that read a raw
+    # `client_name` was a second identity source that could disagree.
+    # ⛔ `client_id` is REQUIRED and has no fallback to `params["client_id"]`
+    # (review finding 1). The request's `client_id` is attacker-supplied; deriving
+    # the identity from it would let a crafted query manufacture a "backed" CIMD
+    # identity. The caller passes the VALIDATED registry row's id.
+    identity = resolve_client_identity(
+        {"id": client_id, "client_name": client_name})
     safe_params = {
         k: (v if isinstance(v, str) else "")
         for k, v in params.items()
     }
-    safe_params["client_name"] = client_name
+    # The REGISTRY-derived display name only. `None` (unbacked) becomes "" —
+    # never the claim — so any stale consumer falls back to the client_id.
+    safe_params["client_name"] = identity.display_name or ""
+    safe_params["client_line"] = consent_client_line(identity)
+    safe_params["client_verified"] = "1" if identity.backed else ""
     nonce = secrets.token_urlsafe(16)
     # Substitution is a SINGLE pass (#6001). A chain of ``str.replace()`` calls
     # rescans what it has already inserted: injecting ``_json_for_script(params)``
@@ -2740,8 +2772,13 @@ def consent_page_html(*, client_name: str, params: dict, raw_query: str,
     # meant to hold it. The injected text is raw JSON, so its own quotes closed
     # that literal early and the whole inline block became a SyntaxError (no
     # PARAMS, no storage adapter, no handlers, an inert Authorize button). Both
-    # vectors are reachable without a crafted link: ``client_name`` is DCR/CIMD
-    # client-controlled and ``state`` is never shape-validated. ``re.sub`` with a
+    # vectors are reachable without a crafted link: ``state`` is copied from the
+    # request and never shape-validated, and ``client_line`` embeds
+    # ``client_id``, whose host is client-supplied for a CIMD client. ⚠️
+    # ``client_name`` is NOT one of them since #8218 — it is overwritten below
+    # with ``identity.display_name``, so the only name reaching the page is the
+    # allowlist-derived one (and an unbacked claim is withheld entirely).
+    # ``re.sub`` with a
     # FUNCTION replacement visits the template exactly once and never rescans
     # what it produced; the function form also keeps re's backslash processing
     # off the replacement text (an escaped value's literal ``\\u003c`` would
