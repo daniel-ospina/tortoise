@@ -272,13 +272,20 @@ def test_redislite_import_alone_installs_the_lifecycle_guards():
     construction that never reaches the guarded class is still instrumented.
 
     The flag list is also the install-SET completeness pin: a guard added to
-    `install_redislite_guards()` without its flag here has nothing asserting it
-    was ever installed (`_tortoise_boot_window_guard` was exactly that gap)."""
+    `install_redislite_guards()` without its flag here means THIS test cannot
+    notice that installer being dropped (`_tortoise_boot_window_guard` was
+    exactly that gap when the guard was added, and
+    `_tortoise_construct_lock_guard` stayed missing until #10467's review found
+    it). So the list must carry ALL SIX. For the construct lock this is not the
+    only witness — `test_installer_wraps_the_constructor_and_is_idempotent` in
+    `tests/test_4921_construct_lock.py` also reds when the call is dropped —
+    but a completeness pin should not depend on a second file's scope."""
     assert _run_in_subprocess(
         "import tortoise, redislite.client as c;"
         "print(getattr(c.RedisMixin, '_tortoise_owner_record_patch', False),"
         " getattr(c.RedisMixin, '_tortoise_partial_init_guard', False),"
         " getattr(c.RedisMixin, '_tortoise_dead_socket_guard', False),"
         " getattr(c.RedisMixin, '_tortoise_missing_dbdir_guard', False),"
+        " getattr(c.RedisMixin, '_tortoise_construct_lock_guard', False),"
         " getattr(c.RedisMixin, '_tortoise_boot_window_guard', False))"
-    ) == "True True True True True"
+    ) == "True True True True True True"
