@@ -99,8 +99,13 @@ BATTERY = (
     ("we saw 5k QPS", "we saw 5,000 QPS", False, "magnitude prefix vs scaled"),
     # ...and the tolerance is NARROW, which is what keeps it from being a waiver:
     # a bare-magnitude rewrite is still refused, because both sides agree the
-    # suffix is `k` and only the number moved. Delete the narrowness (widen the
-    # arm to `a[2] in _MAGNITUDE_PREFIXES or b[2] in ...`) and THIS row reds.
+    # suffix is `k` and only the number moved. ⛔ The mutation this row
+    # discriminates is NOT "widen the arm's condition" — the `_magnitude_agrees`
+    # gate still refuses this pair under any condition that keeps its gating
+    # (measured: `a[2] in _MAGNITUDE_PREFIXES or b[2] in ...` leaves this row
+    # green, because 5 x 1000 != 6). It reds when the SIGN/CORE comparison is
+    # deleted, or when `_magnitude_agrees` is replaced by the unit-mismatch test
+    # the previous revision shipped — which is exactly the regression it guards.
     ("the load was 5k QPS", "the load was 6k QPS", True, "magnitude rewritten"),
     # ⛔ THE TOLERANCE IS ABOUT THE UNIT WORD, NEVER ABOUT THE NUMBER OR THE SIGN
     # (#10513 review P2, MEASURED: an arm that fired on the unit mismatch ALONE
@@ -147,6 +152,11 @@ def test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit():
     assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5,000 QPS") == ()
     # Same unit on both sides: still judged, and a moved number is a rewrite.
     assert v2._value_slot_divergence("the load was 5k QPS", "the load was 6k QPS")
+    # ⛔ EVERY magnitude prefix needs a FACTOR, or `_magnitude_agrees` returns
+    # False for everything and the arm becomes a silent no-op — the two false
+    # refusals below would quietly come back with every test still green. One
+    # line, because the containment is the whole mechanism.
+    assert set(v2._MAGNITUDE_PREFIXES) <= set(v2._MAGNITUDE_FACTORS)
     # ⛔ The number and the sign are NOT the ambiguity, so they are still judged
     # even where the unit words disagree (this is the P2 the arm first shipped).
     assert v2._value_slot_divergence("we saw 5k QPS", "we saw 6,000 QPS")
@@ -192,6 +202,38 @@ def test_the_refusal_names_the_verbatim_value_it_would_have_lost():
     result = _write("the TTL is ten minutes", "the TTL is twenty minutes")
     joined = " ".join(result["warnings"])
     assert "'10min'" in joined and "'20min'" in joined, joined
+
+
+def test_the_refusal_judges_the_SAME_text_the_write_uses_on_a_falsy_content():
+    """#5060's trap, in the new gate (review P3 — it was a live bypass).
+
+    The call site passed ``str(p.get("content") or "")``, which turns a writable
+    falsy content (the integer ``0``) into ``""``. The judge then read an EMPTY
+    side, ``_value_slots`` bound nothing, no divergence was found, and the
+    rewritten value was WRITTEN with no warning — while ``content`` in the same
+    iteration was ``"0"``. The file warns about exactly this 80 lines above the
+    call (``#5060 made a falsy content WRITABLE as its coerced text``), so the
+    fix passes ``_raw_content``: the coerced string the write clamps from.
+
+    Measured at the pre-fix call site: ``str(0 or "")`` = ``""`` against the
+    quote ``"20 minutes"`` is ``()``, while ``"0"`` yields
+    ``(('', '0', '20min'),)``. The integration call below would have written the
+    point; the predicate assertions pin the half that actually changed.
+    """
+    assert v2._value_slot_divergence(str(0 or ""), "20 minutes") == (), (
+        "the pre-fix coercion is supposed to MISS this — if it no longer does, "
+        "this pin has stopped discriminating and the bypass is untestable")
+    assert v2._value_slot_divergence(str(0), "20 minutes"), (
+        "the judged text must be the text the write uses; a falsy writable "
+        "content must not be collapsed to an empty side")
+    # And the shape the write path receives: content=0 is a dict value here, so
+    # `or ""` is reached. It must be REFUSED, not written silently.
+    result = _write(0, "20 minutes")
+    assert result["payload"]["points"] == [], (
+        "a falsy content collapsed the judged side to '' and the rewrite was "
+        f"written anyway: {result['payload']['points']!r}")
+    assert any("REWRITES its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
 
 
 # ── 3. the invariant: a verbatim value is never dropped ─────────────────────

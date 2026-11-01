@@ -4107,7 +4107,11 @@ _UNIT_EQUIV = {
 #: must never take (review P2).
 _LEADING_DOT = re.compile(r"(?<![\d.])\.(\d)")
 
-#: The unit identities this module can compare — the VALUES of the table.
+#: The unit identities this module can compare — the VALUES of the table. A
+#: unit OUTSIDE this set is treated as "unit not stated" by
+#: `_value_identity_matches` (fail open), and `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)`
+#: is asserted by the test file so a unit the ENGINE can fuse can never be
+#: unknown here.
 _KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
 
 #: Units in the table above that are really a MAGNITUDE PREFIX, not a unit.
@@ -4129,12 +4133,11 @@ _MAGNITUDE_PREFIXES = frozenset({"k"})
 #: The factor each magnitude prefix denotes. Read ONLY by `_magnitude_agrees`,
 #: which is the whole of what the ambiguity arm is allowed to tolerate: the two
 #: sides must name the SAME number once the prefix is read as x1000.
+#: ⛔ EVERY name in `_MAGNITUDE_PREFIXES` needs a factor here, and the test file
+#: asserts the containment: a prefix with no factor makes `_magnitude_agrees`
+#: return False for everything, so the arm becomes a silent no-op and the false
+#: refusals it exists to remove quietly come back (review, measured).
 _MAGNITUDE_FACTORS = {"k": 1000}
-
-#: Every unit spelling this module can compare. A unit OUTSIDE this set is
-#: treated as "unit not stated" by `_value_identity_matches` (fail open), and
-#: `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` is asserted by the test file so a unit
-#: the ENGINE can fuse can never be unknown here.
 
 #: The longest side the #10360 rule will JUDGE, in characters. The quote a point
 #: STORES is clamped to ``_MAX_QUOTE`` (200) and its content to ``_MAX_CONTENT``
@@ -8310,7 +8313,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # supersede record is collected: a refusal that fired later left
         # `supersessions` naming a pid that is never written, which the commit
         # layer then reported as a failed supersede (review P2).
-        if _refuse_rewritten_value(str(p.get("content") or ""),
+        # ⛔ The judged text is `_raw_content` — the SAME coerced string the write
+        # clamps from — not `str(p.get("content") or "")`. The `or ""` form is the
+        # #5060 trap this loop warns about 80 lines above: a falsy content (`0`)
+        # becomes "", so the judge read an EMPTY string while `content` below is
+        # "0" and the rewritten value was written with no warning (review P3,
+        # measured: `content=0` against a `20 minutes` quote was written).
+        if _refuse_rewritten_value(_raw_content,
                                    str(p.get("quote") or ""),
                                    warnings=warnings):
             # ⚠️ BOTH keys are needed, and cycle 5's "only the clamped one"
@@ -8322,7 +8331,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # cannot produce it. With only the clamped key, a refused `4.0` was
             # re-minted as an endpoint Point from exactly such a shape.
             refused_value_contents.add(_norm(content))
-            refused_value_contents.add(_norm(str(p.get("content") or "")))
+            refused_value_contents.add(_norm(_raw_content))
             # The point's own `supersedes` ref is dropped WITH the point, and
             # #9906's rule is that none of the drop doors is silent — so the
             # reversal is reported through the same carry helper the other

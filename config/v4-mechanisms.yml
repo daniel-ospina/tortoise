@@ -584,15 +584,27 @@ mechanisms:
       and the false-refusal direction is the one this rule must never take).
       ⛔ WHAT THE TOLERANCE IS *NOT*: it is not a waiver on the value. The arm
       fires only where `_magnitude_agrees` proves the two sides name the SAME
-      NUMBER — equal cores (`20k`/`20km`) or the prefix reading closing the gap
-      (`5k`/`5,000`) — so a moved number (`5k`/`6,000`, `5k`/`6k`, `20k`/`21km`)
-      and a dropped sign (`-20k`/`20km`) are still judged and still refuse. An
-      earlier revision of this arm fired on the unit mismatch alone and WROTE
-      all four; that is why the gate exists and why those rows are pinned.
+      NUMBER — equal cores, or the prefix reading closing the gap
+      (`_MAGNITUDE_FACTORS`, `5 x 1000 == 5,000`) — so a moved number
+      (`5k`/`6,000`, `5k`/`6k`, `20k`/`21km`) and a dropped sign
+      (`-20k`/`20km`) are still judged and still refuse. An earlier revision of
+      this arm fired on the unit mismatch alone and WROTE three of those
+      (`5k`/`6,000`, `20k`/`21km`, `-20k`/`20km`; `5k`/`6k` was refused even then,
+      because both sides carry `k` so the arm never opened) — that is why the
+      gate exists and why those rows are pinned.
+      ⛔ THE CLASS THAT *IS* UNPROVEN, named as an example a reader can use: where
+      the cores are EQUAL, the arm cannot tell whether `k` was a PREFIX or the
+      unit — `20k`/`20 min` (20,000 against 20 minutes), `20k`/`20%`, and
+      `5k`/`5 mi` (5 km against 5 miles, a real unit rewrite) all fail OPEN. That
+      is the ambiguity itself, and failing open is the direction this rule must
+      take; it is stated here rather than buried, because it is the one shape
+      where a rewrite can pass. (`5k`/`5,000` is NOT in this class — the prefix
+      branch proves it arithmetically.)
       Still NOT caught, and named rather than implied: a `k`-suffixed value is
-      never multiplied into its core, so `5k`/`5,000` is TOLERATED rather than
-      proven equal; and `M`/`m` carries the same prefix-vs-unit collision one
-      letter over while `_value_core` lowercases the suffix, so an uppercase `M`
+      never multiplied into its core, so nowhere does the module assert
+      `5k == 5,000` as a VALUE — the arm merely tolerates the pair; and `M`/`m`
+      carries the same prefix-vs-unit collision one letter over while
+      `_value_core` lowercases the suffix, so an uppercase `M`
       (millions) is read as metres — widening the set to `m` would cost the real
       `20m`/`20km` rewrite detection, so it is a residual with a stated trade,
       not a silent gap. Pinned by
