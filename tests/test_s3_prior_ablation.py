@@ -248,3 +248,19 @@ def test_the_guard_floor_comes_from_the_bars(probe):
     on = _arm(14, [50] * 7, facts=40, operator_edges=5)
     assert probe.decide(BARS, FLOORS, off, on)["guard_facts"] is False
     assert probe.decide(loose, FLOORS, off, on)["guard_facts"] is True
+
+
+def test_the_off_stub_never_increments_the_real_call_counter():
+    """The exact cycle-2 regression: a stub-incremented counter makes OFF unprovable forever.
+
+    Pinned on the SOURCE text because the counters live inside `run_arm`'s closures, which need a
+    live graph to exercise. `off_stub` must not touch `real_session` — the OFF arm's proof is
+    "the REAL function was never called", so a stub call is evidence of nothing.
+    """
+    import re
+
+    source = PROBE.read_text()
+    body = re.search(r"def off_stub\(.*?\n(?=    ev\.search_graph)", source, re.S)
+    assert body, "off_stub not found — the OFF arm's behaviour moved"
+    assert "real_session" not in body.group(0)
+    assert 'calls["intercepted"] += 1' in body.group(0)

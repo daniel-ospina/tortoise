@@ -61,8 +61,8 @@ arm (identical code, fresh graphs) were available:
 * per session the two OFF replays differed by up to **±31 %** (wp07: 39 vs 27; wp02: 39 vs 51).
 
 The measured treatment effect (13 % at corpus level) sits **above** the corpus-level replication
-band (4 %) but **below** the pre-registered bar (25 %), and three individual sessions moved in the
-wrong direction. A per-session verdict at this n would be a coin flip; the corpus-total comparison is
+band (4 %) but **below** the pre-registered bar (25 %), and not every session moved the same way:
+one rose (`wp05`, +1), one was flat (`wp07`, 0), and a third moved by a single node (`wp04`, −1). A per-session verdict at this n would be a coin flip; the corpus-total comparison is
 the only stable one, and it is what the pre-registration made primary.
 
 ⚠️ **Disclosure — replay A is an aborted run, not a second measurement.** The first invocation of the
@@ -99,10 +99,13 @@ one *observed* fact **machine-enforced**:
    session that never reached the S3 call site could be "proven" from the previous session's dict;
    and the real-call count was an ARM total (7 calls over 7 sessions could be 7 in one session and 0
    in six). Now the witness is cleared **per session**, the count is read as a **per-session delta**,
-   and an empty witness is unprovable however healthy the blob reads. ⚠️ In the measured run every
-   session's own printed line read `s3=resolved` (ON) / `suppressed (OFF-ARM)` (OFF) immediately
-   after its capture, and ON made exactly 7 real calls for 7 sessions — the per-session fact held;
-   the hardening is what now prevents it from *silently* not holding in a future run.
+   and an empty witness is unprovable however healthy the blob reads. ⚠️ **What the measured run
+   does and does not establish about this:** every session's own printed line read `s3=resolved`
+   (ON) / `suppressed (OFF-ARM)` (OFF) immediately after its capture, and the ON arm made 7 real
+   calls across 7 sessions. That is *consistent with* one real call per session — it is **not proof
+   of it**, because the pre-fix instrument carried only an ARM total and could let a session with no
+   call inherit the previous session's witness. So the reported `14 of 14` is what the **pre-fix**
+   instrument recorded; the per-session proof is enforced only for future runs.
 2. **`denominator_floors.sessions` was never checked** — now it refuses.
 3. **Two pinned bars were parsed and never compared** — `guard_ratio_min` (the guards hardcoded
    `>=`) and `corroboration_min_sessions` (E2b's qualifier was computed into the payload and never

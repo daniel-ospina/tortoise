@@ -676,14 +676,21 @@ def main(argv: list[str] | None = None) -> int:
             f"{on_row['created']['extraction_nodes']:6d} "
             f"{on_row['created']['extraction_nodes'] - off_row['created']['extraction_nodes']:7d} "
             f"{off_row['s3']['state']:>10s} {on_row['s3']['state']:>10s}")
+    # ⚠️ NO RATIO FROM AN UNPROVEN OR REFUSED ARM (pre-registration rule 1). The range is a ratio
+    # statistic, so it is emitted only when the verdict produced one: an ARM-INVALID log used to
+    # print a per-session ratio range derived from sessions whose S3 state was never proven, which
+    # is exactly the number a reader would quote (review r3 P2).
     ratios = []
     for off_row, on_row in zip(arms["OFF"]["sessions"], arms["ON"]["sessions"]):
         off_n = off_row["created"]["extraction_nodes"]
         ratios.append((on_row["created"]["extraction_nodes"] / off_n) if off_n else None)
     defined = [value for value in ratios if value is not None]
-    if defined:
+    if result.get("ratio") is not None and defined:
         log(f"per-session ratio range: {min(defined):.3f} .. {max(defined):.3f} "
             f"(over {len(defined)} of {len(ratios)} sessions with a non-zero OFF denominator)")
+    elif result.get("ratio") is None:
+        log("per-session ratio range: NOT REPORTED — the verdict produced no ratio "
+            f"({result['verdict']}); a ratio from an unproven arm is not a measurement")
     if result.get("concentration"):
         conc = result["concentration"]
         log(f"concentration (largest session's share of the total reduction): "
