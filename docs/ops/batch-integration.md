@@ -634,9 +634,73 @@ table and the `UNPROVEN-FULL-SUITE(<lane>)` rule.
   MUST-PASS gate member reads as green. **After a drop, those two files hold the post-revert
   re-check** — the fence below CLEARS and rewrites both, so the diff can never be against the tree
   that still contained the culprit.
-- **A failure id that is in the baseline set is a `BASELINE(<ids>)` failure.** Not a PR's fault. Do not
-  drop a PR for it, and do not fix it inside the batch. One line on whether the batch makes it worse.
-- **A failure id that is NOT in the baseline set is NEW** and convicts a PR. Find which one:
+- **Build the ledger before you classify it.** The three bullets in this section classify on a diff
+  of failure ids, and until round 39 this document named the four reports and **never built the
+  sets** — no command extracted an id or diffed anything, so whether a PR was dropped turned on how
+  two operators happened to spell one. Everything else in the verdict path (lane, tree, COMPLETED
+  status, test count, skips by count and by reason) is a fence with a halt; this is the same shape,
+  including the halt: a report that says it failed while the rule extracts **no** id is
+  `UNPROVEN-FULL-SUITE(<lane>)`, never green. **Re-run it after a drop**: the post-revert re-check
+  CLEARS and rewrites both batch reports, so a ledger built before the revert describes the tree
+  that still contained the culprit.
+
+```bash
+# ⛔ ONE id RULE, BOTH SIDES OF THE DIFF. The classification below is a set difference, so the id
+# has to be DEFINED — and it is the report schema's definition, not this document's convenience:
+# pytest prints the xsd it targets, where `<testcase>` has `name` REQUIRED and `classname` optional
+# and its children are `<skipped>?`, `<error>*`, `<failure>*`, `<system-out>*`, `<system-err>*`
+# (<https://docs.pytest.org/en/stable/how-to/output.html#creating-junitxml-format-files>).
+#
+#     failure id = "<classname>::<name>" of every <testcase> that carries a <failure> or <error> CHILD
+#
+# The child ELEMENT is what makes a case failing — never the line it sits on and never the text next
+# to it. `classname` is also overridable per case with `record_xml_attribute` (same page), so the id
+# is READ OFF the report and never re-derived from a file path or a module name. It is parsed as XML
+# because pytest writes the WHOLE document on one line (measured: `<testcase …/><testcase …><failure
+# …></failure></testcase>` all on line 2 of a real 6-test report), so no grep/awk pairing of adjacent
+# lines can work at all — the first draft of this fence would have extracted nothing, forever.
+BATCH="${BATCH:?set BATCH to this batch's own name (e.g. 1 for integration/batch-1) — an empty one means another batch's ledger}"
+B="/tmp/batch-$BATCH"
+[ -d "$B" ] || { echo "no ledger directory $B — Phase 0 creates it, per batch; absent means BATCH is unset or names another batch"; exit 1; }
+[ -s "$B/batch-junit.xml" ] || { echo "no $B/batch-junit.xml — Phase 3 (or the post-revert re-check) writes it; an absent report means that half never ran here, and 'no ids' is not 'no failures'"; exit 1; }
+[ -s "$B/batch-trackb.xml" ] || { echo "no $B/batch-trackb.xml — Phase 3 (or the post-revert re-check) writes it; without it every track_b id sits in NEITHER side of the diff"; exit 1; }
+[ -s "$B/baseline-junit.xml" ] || { echo "no $B/baseline-junit.xml — Phase 1 writes it; without it every id in the batch reads as NEW"; exit 1; }
+[ -s "$B/baseline-trackb.xml" ] || { echo "no $B/baseline-trackb.xml — Phase 1 writes it; without it every track_b id in the batch reads as NEW"; exit 1; }
+for side in batch-junit batch-trackb baseline-junit baseline-trackb; do
+  uv run python - "$B/$side.xml" "$B/$side.failures" <<'PY' || exit 1
+import sys
+import xml.etree.ElementTree as ET
+report, ledger = sys.argv[1], sys.argv[2]
+failing = sorted(
+    f"{(case.get('classname') or '').strip()}::{(case.get('name') or '').strip()}"
+    for case in ET.parse(report).getroot().iter('testcase')
+    if case.find('failure') is not None or case.find('error') is not None
+)
+with open(ledger, 'w', encoding='utf-8') as handle:
+    handle.writelines(f"{one}\n" for one in failing)
+PY
+done
+cat "$B/batch-junit.failures" "$B/batch-trackb.failures" | sort -u > "$B/batch-failures"
+cat "$B/baseline-junit.failures" "$B/baseline-trackb.failures" | sort -u > "$B/baseline-failures"
+comm -13 "$B/baseline-failures" "$B/batch-failures" > "$B/new-failures"           # only in the batch — NEW, convicts a PR
+comm -12 "$B/baseline-failures" "$B/batch-failures" > "$B/baseline-still-failing"  # in BOTH — BASELINE(<ids>), exempt
+comm -23 "$B/baseline-failures" "$B/batch-failures" > "$B/cleared-failures"        # only on main — neither convicts nor exempts
+# ⛔ FAIL CLOSED on a ledger the rule could not READ. A report whose own `failures=`/`errors=`
+# attributes are non-zero while its extracted id set came out EMPTY means the rule and the producer
+# have drifted apart (a `junit_family` change, a rewritten `record_xml_attribute` classname, a
+# rewritten report) — and an EMPTY id set diffs empty in both directions, which the verdict table
+# would print as `BATCH-GREEN` over a red tree. An undefined id is never green.
+for side in batch-junit batch-trackb baseline-junit baseline-trackb; do
+  reported="$(grep -o -e 'failures="[0-9]*"' -e 'errors="[0-9]*"' "$B/$side.xml" | grep -o '[0-9]*' | awk '{s+=$1} END{print s+0}')"
+  [ "$reported" -eq 0 ] || [ -s "$B/$side.failures" ] || { echo "$B/$side.xml reports $reported failing/erroring cases but the id rule extracted NONE from it — the ledger is UNDEFINED, not empty: UNPROVEN-FULL-SUITE(<lane>), never green"; exit 1; }
+done
+```
+
+- **A failure id that is in the baseline set is a `BASELINE(<ids>)` failure** — read the ids from
+  `$B/baseline-still-failing`. Not a PR's fault. Do not drop a PR for it, and do not fix it inside the
+  batch. One line on whether the batch makes it worse.
+- **A failure id that is NOT in the baseline set is NEW** and convicts a PR — that is exactly
+  `$B/new-failures`. Find which one:
 
 ```bash
 # ⛔ THE LANE FIRST — Phase 4 is the LATEST shell of all. Phases 1 and 3 state it, Landing is "a

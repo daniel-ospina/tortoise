@@ -313,7 +313,13 @@ must sit in the *fence* they belong to, not merely somewhere in the prose, and
 the leg names (``test-d14-hosted-api``, ``test-record-postgres`` and the non-test
 ``packs-compile`` / ``manifest-integrity`` / ``workflow-lint`` / ``surface-guard`` /
 ``ci-introduced-failure``) whose omission
-would make the reproduced/not-reproduced list read as a complete partition, plus the lane
+would make the reproduced/not-reproduced list read as a complete partition — pinned in the SENTENCE
+that makes the claim, because every one of those names is mentioned a second time inside the same
+bullet and a document-wide needle certified a mention while the list lost all five (round 39) —,
+plus the FAILURE-ID LEDGER the verdict is a set difference over (the id rule — ``<classname>::<name>``
+of every ``<testcase>`` carrying a ``<failure>`` or ``<error>`` CHILD — the four junit reports, the
+three ``comm`` sets, and the fail-closed halt on an empty extraction from a report that says it
+failed), plus the HALT-MESSAGE rule (no markdown backtick in a fence command: bash EXECUTES it), plus the lane
 ASSERTION (``TORTOISE_DB_URI`` or an explicit carve-out, HALTING) in every fence that runs the suite
 — a SELECTION in Phase 0's fence is a different shell's environment, so it cannot substitute for one,
 plus the TREE every full-suite fence runs on (named, un-moved between the name and the run), the
@@ -334,10 +340,10 @@ PR body (``tested-tree: <sha>``, printed by both fences that run the suite on th
 because a branch records where it is LATER while the invariant is about what was MEASURED, and the PRODUCER of every carrier the doctrine reads back out of the batch PR body (``pinned-base:`` from Phase 1, ``tested-tree:`` from Phase 3 and the post-revert re-check — a ``printf`` in an EARLIER fence, from a variable that fence DERIVES, so a hand-copied value cannot silently replace a derived one), and the skip-REASON axis per RUN rather than per fence (each half owes its own reasons, its own diff against ITS baseline, and its own halt).
 
 Non-vacuity, **measured** at THIS head by pointing this module's ``DOC`` at each pre-fix
-revision rather than asserted — **39 checks**, **0 red**. The per-revision literals in the next
+revision rather than asserted — **41 checks**, **0 red**. The per-revision literals in the next
 two paragraphs are the ROUND-37 measurement (taken when the guard had 38 checks) and are left as
-that round's record; the standing matrix is RE-MEASURED at 39 in *Round 38* below, which
-supersedes every ``of 38`` here. The head the round-35 review was taken
+that round's record; the standing matrix is RE-MEASURED at 41 in *Round 39* below, which
+supersedes every ``of 38``/``of 39`` here. The head the round-35 review was taken
 at (``9f8e12192``) is **11 of 39**: the three findings of that review that red a CHECK there — the
 ``-m track_b`` half's missing SKIP axis, the two unhalted ``git fetch origin main`` lines the pin and
 the landing gate ride on (one check, enumerated over fences) — plus the ``batch_size`` value restated
@@ -733,6 +739,90 @@ revision already red on one of those gains nothing from it, so the observed delt
 review head ``0a9ee9050`` reds on exactly the FOUR defects this round fixed (lane predicate, blame
 probes, bound, live-run refusal) and on nothing else — which is the cleanest statement of the
 round's scope this file can make.
+
+**Round 39 — two P3s, one of them a defect in THIS GUARD, and the check count moved 39 → 41.** The
+review found no defect in a doctrine COMMAND this round. Both findings were about whether the guard
+and the doctrine hold the #10399 invariant they claim, and the second grew one more check from a
+defect the first fix introduced and executing the new fence exposed.
+
+*Finding 1 — the partition claim was pinned as a MENTION.* ``test_the_unreproduced_gate_legs_are_named``
+asserted ``needle in text`` over the whole doctrine, and every one of the five non-test members also
+appears a second time **inside the same bullet** (the paragraph about which of them declare
+``needs:``), so the reviewer replaced the entire enumeration with prose and measured **39 passed** —
+the list that exists to stop a gate member going unmentioned could lose all five silently. Measured
+here on the pre-fix check before fixing it, at ``97f413e53``: same mutant, **0 red**. The needles are
+now scoped by :func:`_sentence_with` (the sentence that carries ``non-test legs``) and
+:func:`_bullet` (the two TEST legs), and a bullet scope alone was rejected with a measurement — that
+paragraph is in the SAME bullet, so a bullet-scoped needle survives the same mutant.
+
+*Finding 2 — the verdict's one CONVICTING input was prose.* Phase 4 classified
+``BATCH-GREEN(BASELINE(<ids>))`` / ``BATCH-RED(<ids>)`` on a diff of failure ids, named the four
+junit reports, and built none of the sets: ``grep -n '<failure' docs/ops/batch-integration.md``
+returned nothing and the only ``comm`` lines in the section were the four skip-REASON diffs. So the
+step that decides whether a PR is DROPPED was a spelling. Phase 4 now builds the ledger — one stated
+rule, the four reports, three ``comm`` set operations into ``$B/new-failures`` /
+``$B/baseline-still-failing`` / ``$B/cleared-failures``, and a fail-closed halt when a report whose
+own ``failures=``/``errors=`` are non-zero yields NO id. The rule is the report SCHEMA's, not this
+document's convenience: pytest prints the xsd it targets, ``<testcase>`` with ``name`` required and
+``classname`` optional and children ``<skipped>?``/``<error>*``/``<failure>*``/``<system-out>*``/
+``<system-err>*`` (<https://docs.pytest.org/en/stable/how-to/output.html#creating-junitxml-format-files>),
+and ``classname`` is overridable per case with ``record_xml_attribute`` — so the child ELEMENT, never
+the adjacent text, makes a case failing, and the id is read off the report rather than re-derived. It
+is parsed as XML because the whole document lands on ONE line (measured: a real 6-test report has
+``<testcase …/>``, ``<testcase …><failure …></failure></testcase>`` and every other case on line 2),
+so the grep/awk pairing this could have been written as would have extracted NOTHING forever.
+**The fence was then EXECUTED**, which is how the round's third defect was found: its own halt
+messages carried markdown backticks, so ``echo "… every `track_b` id …"`` RAN ``track_b``
+(measured: ``run.sh: line 7: track_b: command not found``) — ``bash -n`` sees a perfect command
+substitution. That is now ``test_no_fence_command_executes_a_command_from_its_message``, a 41st check
+(``$(…)`` stays legal: the tree assertion's message interpolates it on purpose, and a trailing ``#``
+annotation is cut by ``_code`` so the honest re-spelling is green — measured).
+
+*Two existing checks were scoped by MENTION and made an honest fence inexpressible.*
+``test_the_baseline_report_is_cleared_and_its_status_checked`` and
+``test_a_skip_the_baseline_did_not_have_blocks_the_verdict`` selected their fence population with
+``any("baseline-junit" in c)`` / ``any("batch-junit" in c)``, so the new Phase-4 fence — which READS
+those reports and runs nothing — was required to carry the baseline's clear, status capture and
+0/1 predicate, and TWO suite runs of its own. Measured: the first cut of the ledger fence reddened
+them with *"no baseline suite command writes the report"*, about a fence that runs nothing. Both are
+now scoped by ROLE (a suite command that writes THAT report), which is the subject-vs-mention class
+this module already closed for ``_COUNT_SUBJECT``/``_MERGE_SUBJECT``/``_LANDED_TREE_DIFF``; both
+still kill their own mutants (see the ledger below).
+
+**Non-vacuity, measured at THIS head (41 checks, 0 red), each red on ONE check unless stated.** The
+reviewer's own mutant — the five-member enumeration replaced by prose — reds **1 of 41**
+(``test_the_unreproduced_gate_legs_are_named``), and so does dropping one member, dropping the two
+TEST legs, and dropping ``DEFERRABLE_LEGS``. On the ledger: deleting the ``comm -13`` line, flipping
+it to ``comm -23``, deleting an absent-report halt, deleting the fail-closed block, deleting the
+stated rule, rewriting its ``::`` separator, replacing the XML extraction with a ``grep``, and
+deleting the ``baseline-junit.xml`` source each red **1 of 41**
+(``test_the_failure_id_ledger_is_built_by_a_stated_rule``). Letting the post-revert re-check stop
+rewriting ``$B/batch-trackb.xml`` reds **3 of 41** (that check, the ``track_b`` completion check and
+the skip check — one run's instrument removed, seen from three sides). A backtick re-introduced into
+a halt message reds **1 of 41** (the new message check); a backtick in a trailing annotation stays
+GREEN, as does a reflowed enumeration.
+**One survivor, and it is the documented CLASS, not this round's**: ``[ … ] || : || { … exit 1; }``
+— defusing the fail-closed halt with an always-0 segment — leaves the text perfect and the halt
+bash-dead, exactly like the ``BASELINE_TOTAL=0`` witness above. That is #10434's class (execute the
+fences under a stubbed PATH), which no accumulation of spellings closes, and it is recorded rather
+than hidden.
+
+The fence's SEMANTICS were reproduced rather than asserted, on real pytest reports (the rule was run
+end to end with the four files in a scratch ``$B``): a disjoint baseline → the batch's three ids
+(``test_fail``, ``test_param[2]``, ``test_error``; the passing cases and the parametrized PASS are
+excluded) land in ``new-failures``, main's own red in ``cleared-failures``; an identical baseline →
+``new-failures`` EMPTY and all three in ``baseline-still-failing`` (the ``BASELINE(<ids>)`` row); a
+report with ``failures="1"`` and no ``<failure>`` child → the fail-closed halt fires with
+``UNPROVEN-FULL-SUITE(<lane>)``; a missing report → its own halt.
+
+**The revision axis, RE-MEASURED at 41** (every count is round 38's **+1**, the new ledger check, and
+nothing else — the scoped leg check and the message check are green on every pre-fix document, which
+is exactly why finding 1 needed a MUTANT and not a revision): ``97f413e53`` (this round's review
+head) **1 of 41** — the missing ledger alone; ``0a9ee9050`` **5**; ``9f8e12192`` **12**;
+``c6d4c8278`` **8**; ``c7a772628`` / ``657a544a4`` **14**; ``4dc214c02`` **17**; ``7fb722a9a`` **19**;
+``62c79b0b8`` **20**; ``a6a71c1e5`` / ``a4028e8d7`` **21**; ``a12792afe`` **23**; ``a17576c43`` **36**;
+``f3c6c803b`` **33**; ``a8be548762`` **31**; ``295d6d385`` **29**; ``32a2dc87d`` / ``ba7f83feb`` /
+``64ae70fc5`` **28**; ``ed1c03b82`` / ``c50628450`` **27**; ``a888c6980`` / ``aede4190f`` **26**.
 """
 
 from __future__ import annotations
@@ -1501,6 +1591,52 @@ _TARGET_FILE = re.compile(r"\b(tests/[\w./-]+\.py)\b")
 def _text() -> str:
     assert DOC.is_file(), f"{DOC.relative_to(ROOT)} is missing — re-point this guard"
     return DOC.read_text(encoding="utf-8")
+
+
+def _sentences_with(phrase: str) -> list[str]:
+    """Every whitespace-normalised document SENTENCE that carries ``phrase``.
+
+    Round 39, and the reason a *bullet* scope is not enough: the five non-test leg names appear
+    **twice inside the same bullet** — once in the enumeration a reader takes as the partition, and
+    once in the paragraph about which of them declare ``needs:``. Measured at ``97f413e53``:
+    replacing the whole enumeration with prose left a bullet-scoped needle green, because the second
+    mention is in the same bullet. The unit a partition claim is MADE in is the sentence, so that is
+    the unit the needle is scoped to.
+
+    Normalising whitespace first is what makes a reflow harmless (the clause spans eight source
+    lines); the split is on a period followed by whitespace, which is markdown's own prose
+    convention and does not fire inside a code span in this document (paths and versions carry no
+    ``'. '``).
+    """
+    normalised = re.sub(r"\s+", " ", _text())
+    return [
+        sentence
+        for sentence in re.split(r"(?<=\.)\s+", normalised)
+        if phrase.lower() in sentence.lower()
+    ]
+
+
+def _sentence_with(phrase: str) -> str:
+    """The FIRST sentence carrying ``phrase`` (see :func:`_sentences_with` for the scoping rule)."""
+    found = _sentences_with(phrase)
+    if not found:
+        raise AssertionError(
+            f"the doctrine no longer says {phrase!r} — re-point this guard (a scoped needle whose "
+            "subject is gone fails silently otherwise)"
+        )
+    return found[0]
+
+
+def _bullet(lead: str) -> str:
+    """The top-level markdown BULLET whose first line starts with ``lead`` — nothing after it."""
+    lines = _text().splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith(lead)), -1)
+    if start < 0:
+        raise AssertionError(f"the doctrine no longer carries the bullet {lead!r} — re-point this guard")
+    end = start + 1
+    while end < len(lines) and lines[end].strip() and not lines[end].startswith(("- ", "#")):
+        end += 1
+    return "\n".join(lines[start:end])
 
 
 def _fences() -> list[list[str]]:
@@ -2675,8 +2811,16 @@ def test_the_baseline_report_is_cleared_and_its_status_checked() -> None:
     both hides `main`'s own red and convicts an innocent PR — the two outcomes this phase exists to
     prevent.
     """
+    # ⛔ Scoped by ROLE, never by mention. A fence that merely NAMES the report — Phase 4's id ledger
+    # reads it, a sibling's `rm -f` lists it — neither runs the baseline nor owes the baseline's
+    # detectors. Mention-scoping is the subject-vs-mention class this module has already closed for
+    # `_COUNT_SUBJECT`, `_MERGE_SUBJECT` and `_LANDED_TREE_DIFF`, and here it made an honest fence
+    # INEXPRESSIBLE: adding Phase 4's failure-id ledger (round 39) reddened this check with "no
+    # baseline suite command writes the report", about a fence that runs nothing at all.
     fences = [
-        fence for fence in _fences() if any(_BASELINE_JUNIT in _code(c) for c in fence)
+        fence
+        for fence in _fences()
+        if any(_SUITE_CMD.match(_code(c)) and _BASELINE_JUNIT in _code(c) for c in fence)
     ]
     assert fences, "the baseline run no longer writes a junit report — re-point this guard"
     head = _status_head(_BASELINE_RC)
@@ -3601,15 +3745,19 @@ def test_the_unreproduced_gate_legs_are_named() -> None:
     reproduce that omits them reads as a complete partition while two gate test
     legs never execute — so ``BATCH-GREEN`` becomes achievable on a tree they never
     ran.
+
+    ⛔ **Scoped to the claim, not to the document.** This check was ``assert needle in text``
+    over the whole doctrine, and it was measured GREEN with every one of the five non-test members
+    deleted from the enumeration (#10400 round-39 review, Finding 1): each name also appears in the
+    paragraph two sentences later about which of them declare ``needs:``, so the needle certified a
+    MENTION while the partition claim lost its members. A bullet scope is not enough either — that
+    paragraph is inside the same bullet. The five members are therefore pinned in the SENTENCE that
+    carries the phrase ``non-test legs``, and the two test legs in the bullet that carries
+    ``Two test legs``; both scopes are measured against the mutant below.
     """
-    text = _text()
+    non_test_claim = _sentence_with("non-test legs")
     for needle in (
-        # the two TEST legs the batch's URI lane skips rather than runs
-        "test-d14-hosted-api",
-        "test-record-postgres",
-        "embedded_only",
-        "TEST_RECORD_DB_URI",
-        # …and the NON-TEST members, which no pytest run can reproduce at all.
+        # The NON-TEST members, which no pytest run can reproduce at all.
         # `ci-introduced-failure` is the #9984 predicate: the rail's own automated
         # version of Phase 1, and the one member this list dropped (#10400 P2-1).
         "packs-compile",
@@ -3617,22 +3765,46 @@ def test_the_unreproduced_gate_legs_are_named() -> None:
         "workflow-lint",
         "surface-guard",
         "ci-introduced-failure",
-        # `changes` is the diff SELECTOR: a non-deferrable row of the gate's own leg
-        # table (`.github/workflows/python-ci.yml:4484` — the row itself; `:4483` is the
-        # `cat > "$LEGS_FILE" <<'LEGS'` opener — not in `DEFERRABLE_LEGS`),
-        # and the one leg whose failure makes every other leg skip — the selection a
-        # batch's pytest run cannot exercise (#10400 P3).
+    ):
+        assert needle in non_test_claim, (
+            f"the NON-TEST partition claim must name {needle!r} in the sentence that makes it: "
+            "every one is a `needs:` of the required `python-ci-gate`, so omitting it makes the "
+            "list read as a complete partition while a gate member goes unmentioned. A mention "
+            "elsewhere in the section is not the claim — that is how all five went missing with "
+            "this check green"
+        )
+
+    # `changes` is the diff SELECTOR: a non-deferrable row of the gate's own leg
+    # table (`.github/workflows/python-ci.yml:4484` — the row itself; `:4483` is the
+    # `cat > "$LEGS_FILE" <<'LEGS'` opener — not in `DEFERRABLE_LEGS`), and the one leg
+    # whose failure makes every other leg skip — the selection a batch's pytest run cannot
+    # exercise (#10400 P3). It is argued in its own sentences, so it is pinned in the bullet.
+    non_test_bullet = _bullet("- **Non-test legs**")
+    for needle in (
         "`changes`",
         "DEFERRABLE_LEGS",
         # …and the authority for the SET is the leg table, never a count written here:
         # a hand-maintained ordinal is how the last two members went missing.
         "LEGS_FILE",
     ):
-        assert needle in text, (
-            f"the doctrine must name {needle!r} where it lists the legs a pytest run "
-            "does not reproduce: every one is a `needs:` of the required "
-            "`python-ci-gate`, so omitting it makes the list read as a complete "
-            "partition while a gate member goes unmentioned"
+        assert needle in non_test_bullet, (
+            f"the non-test-leg bullet must name {needle!r} where it argues the diff selector: "
+            "`changes` is a gate member with no pytest counterpart, and its set is read from the "
+            "leg table rather than counted here"
+        )
+
+    test_legs = _bullet("- **Two test legs")
+    for needle in (
+        # the two TEST legs the batch's URI lane skips rather than runs
+        "test-d14-hosted-api",
+        "test-record-postgres",
+        "embedded_only",
+        "TEST_RECORD_DB_URI",
+    ):
+        assert needle in test_legs, (
+            f"the reproduced/not-reproduced list must name {needle!r} in the bullet that lists the "
+            "TEST legs the batch's lane SKIPS rather than runs: omitting one makes "
+            "`BATCH-GREEN` achievable on a tree where a `python-ci-gate` test leg never ran"
         )
 
 
@@ -3905,7 +4077,16 @@ def test_a_skip_the_baseline_did_not_have_blocks_the_verdict() -> None:
         "live-FalkorDB skip traded for a collection skip), and only the reason multiset sees it"
     )
 
-    consumers = [fence for fence in _fences() if any("batch-junit" in _code(c) for c in fence)]
+    # ⛔ Scoped by ROLE (a suite run that writes THIS report), not by mention: Phase 4's id ledger
+    # READS `$B/batch-junit.xml` and issues no verdict on its skips, and mention-scoping made that
+    # honest fence inexpressible (round 39 — it demanded two suite runs of a fence that runs none).
+    consumers = [
+        fence
+        for fence in _fences()
+        if any(
+            _SUITE_CMD.match(_code(c)) and "batch-junit" in _code(c) for c in fence
+        )
+    ]
     assert consumers, "the gate fence no longer writes a junit report — re-point this guard"
     gated = False
     for fence in consumers:
@@ -3989,6 +4170,179 @@ def test_a_skip_the_baseline_did_not_have_blocks_the_verdict() -> None:
         "the verdict table's UNPROVEN-FULL-SUITE row must name the SKIPPED case: a verdict computed "
         f"from id sets cannot see a skip, so the row is where an operator learns it is not green "
         f"(row: {verdict_rows})"
+    )
+
+
+#: The four junit reports Phase 4's id ledger is built from, by BASENAME under the per-batch
+#: directory (each fence re-derives `$B`). Two are written by Phase 1 (the baseline) and two by Phase 3
+#: **and** by the post-revert re-check — which is why the ledger must be REBUILT after a drop.
+_JUNIT_REPORTS = ("batch-junit", "batch-trackb", "baseline-junit", "baseline-trackb")
+
+#: flag → carrier for the three set operations the verdict rows read. `comm`'s columns are 1 = unique
+#: to file1, 2 = unique to file2, 3 = common (GNU coreutils manual, `comm invocation`: "Column one
+#: contains lines unique to file1, column two lines unique to file2, and column three lines common to
+#: both files"), so `-13` = batch-only = NEW (convicts a PR), `-12` = common = `BASELINE(<ids>)`
+#: (exempts), `-23` = baseline-only = on `main` and gone here (neither convicts nor exempts).
+_COMM_SETS = (
+    ("-13", "new-failures"),
+    ("-12", "baseline-still-failing"),
+    ("-23", "cleared-failures"),
+)
+
+
+def _failure_ledger_fence() -> list[str] | None:
+    """The Phase-4 fence that builds the failure-id ledger (all four sources + the NEW set)."""
+    for fence in _fences():
+        codes = [_code(c) for c in fence]
+        if all(any(f"$B/{name}.xml" in c for c in codes) for name in _JUNIT_REPORTS) and any(
+            "comm -13" in c and "$B/new-failures" in c for c in codes
+        ):
+            return fence
+    return None
+
+
+def test_the_failure_id_ledger_is_built_by_a_stated_rule() -> None:
+    """#10400 round-39 review, Finding 2 (P3): the one convicting input was PROSE.
+
+    Phase 4 decided ``BATCH-GREEN`` / ``BATCH-GREEN(BASELINE(<ids>))`` / ``BATCH-RED(<ids>)`` on a
+    diff of failure **ids**, named the four junit reports those ids come from, and never built the
+    sets: `grep -n '<failure' docs/ops/batch-integration.md` found nothing, and the only `comm` lines
+    in the section were the four *skip-reason* diffs. So the single step that decides whether a PR is
+    dropped turned on how each operator spelled an id — two operators, two ledgers — while every
+    other axis in the verdict (lane, tree, COMPLETED status, test count, skips by count and by
+    reason) is a fence with a halt.
+
+    This pins the fence's four load-bearing pieces, each of which was measured as a surviving mutant
+    (see the module header's round-39 ledger): the RULE (a `<testcase>` that carries a `<failure>` or
+    `<error>` CHILD, identified by `classname` + `name` — the report schema's own definition, and
+    `classname` is overridable per case with `record_xml_attribute`), the four SOURCE paths with an
+    absent-report halt each, the three `comm` set operations with their carriers, and the fail-closed
+    halt that refuses an EMPTY extraction from a report that says it failed (an undefined id is never
+    green — an empty set diffs empty in both directions).
+    """
+    ledger = _failure_ledger_fence()
+    assert ledger is not None, (
+        "the doctrine builds no failure-id ledger: Phase 4's verdict is a set difference over failure "
+        "ids, so the sets have to be files under `$B` (the same shape as the baseline count, the "
+        "status and the tested tree) and not something each operator spells for themselves"
+    )
+    codes = [_code(c) for c in ledger]
+
+    # 1. THE RULE, stated where an operator reads it. Scoped to the sentence that DEFINES the id
+    #    (round 39's own finding 1, applied to this check): the four tokens also appear in the
+    #    surrounding prose, so a document-wide `in text` would certify a mention instead of the rule.
+    rule = [s for s in _sentences_with("failure id =") if "testcase" in s]
+    assert rule, (
+        "the doctrine must STATE the failure-id rule where the ledger is built (`failure id = "
+        "\"<classname>::<name>\" of every <testcase> that carries a <failure> or <error> CHILD`): "
+        "both sides of the diff have to spell an id the same way, and the junit id is not "
+        "self-evident — pytest identifies a case by `classname` + `name`, and `classname` is "
+        "overridable per case with `record_xml_attribute` "
+        "(<https://docs.pytest.org/en/stable/how-to/output.html#creating-junitxml-format-files>)"
+    )
+    assert any(
+        all(token in sentence for token in ("classname", "::", "<failure>", "<error>"))
+        for sentence in rule
+    ), f"the stated id rule must name the SEPARATOR and the two child elements: {rule}"
+
+    # 2. The extraction IMPLEMENTS that rule: a parser over the XML tree, keyed on the child ELEMENT.
+    body = "\n".join(codes)
+    for token in ("testcase", "classname", "'failure'", "'error'"):
+        assert token in body, (
+            f"the ledger's extraction never tests {token!r}: a case is failing because it CARRIES a "
+            "`<failure>`/`<error>` child, never because a line or the adjacent text said so. pytest "
+            "writes the whole document on ONE line (measured), so no grep/awk pairing of adjacent "
+            "lines can work at all"
+        )
+    assert any(c.startswith("uv run python - ") for c in codes), (
+        "the ids must be extracted by a parser, not by `grep`: the whole report is one line, so a "
+        "line-oriented rule extracts nothing and the diff is empty in both directions"
+    )
+
+    # 3. The four SOURCES, each with an absent-report HALT: an absent report means that half never
+    #    ran, and "no ids" must never read as "no failures".
+    for name in _JUNIT_REPORTS:
+        halts = [
+            c
+            for c in codes
+            if c.startswith(f'[ -s "$B/{name}.xml" ]') and "exit 1" in c
+        ]
+        assert halts, (
+            f"the ledger must READ `$B/{name}.xml` AND halt when it is absent: an empty id set diffs "
+            "empty in both directions, so a half that never ran reads as a half that passed"
+        )
+
+    # 4. The three set operations, each into its own carrier — the verdict rows read THESE files.
+    for flags, carrier in _COMM_SETS:
+        assert any(
+            f"comm {flags} " in c and f'"$B/{carrier}"' in c for c in codes
+        ), (
+            f"the ledger must write `$B/{carrier}` with `comm {flags}`: `comm`'s columns are 1 = "
+            "unique to the baseline, 2 = unique to the batch, 3 = common — so `-13` is the NEW set "
+            "that convicts a PR, `-12` is the `BASELINE(<ids>)` set that exempts it, and `-23` is "
+            "main's failings this batch does not have"
+        )
+
+    # 5. FAIL CLOSED: a report whose own `failures=`/`errors=` attributes are non-zero while the
+    #    extraction is empty means the rule and the producer drifted apart.
+    reported = [c for c in codes if "failures=" in c and "errors=" in c]
+    assert reported, (
+        "the extraction must be checked against the report's OWN counts (`failures=` + `errors=`): "
+        "an extraction that yields nothing from a report that says it failed would diff empty in "
+        "both directions and print `BATCH-GREEN` over a red tree"
+    )
+    assert any(
+        '[ -s "$B/$side.failures" ]' in c or "$side.failures" in c
+        for c in codes
+        if "exit 1" in c and "UNPROVEN-FULL-SUITE" in c
+    ), (
+        "the empty-extraction case must HALT as `UNPROVEN-FULL-SUITE(<lane>)`: an id the rule cannot "
+        "read is undefined, not absent"
+    )
+
+    # 6. The sources are the reports the run fences WRITE, and the two batch ones are written TWICE
+    #    (Phase 3 and the post-revert re-check) — the property that makes "rebuild the ledger after a
+    #    drop" true rather than advisory.
+    writes = {
+        name: [c for c in _fenced_commands() if f'--junitxml="$B/{name}.xml"' in c]
+        for name in _JUNIT_REPORTS
+    }
+    for name, found in writes.items():
+        assert found, (
+            f"no run writes `$B/{name}.xml`, so the ledger reads a report nothing produces: "
+            "`--junitxml` is what puts a run's ids in the diff at all"
+        )
+    for name in ("batch-junit", "batch-trackb"):
+        assert len(writes[name]) >= 2, (
+            f"`$B/{name}.xml` is written by {len(writes[name])} fence(s): Phase 3 and the post-revert "
+            "re-check must EACH write (and clear) it, or the diff after a drop compares the baseline "
+            "against the tree that still contained the culprit"
+        )
+
+
+def test_no_fence_command_executes_a_command_from_its_message() -> None:
+    """#10400 round-39: a halt MESSAGE must not run a command — measured, in this round's own fence.
+
+    The doctrine's failure path is ``{ echo "…"; exit 1; }``, so its messages are part of what an
+    operator reads when the process stops. Double quotes do not stop command substitution and a
+    markdown backtick pair inside the message does not either: the round-39 ledger's
+    ``echo "… without it every `track_b` id …"`` **ran ``track_b`` as a command** (measured by
+    executing the fence: ``run.sh: line 7: track_b: command not found``). ``bash -n`` cannot see it —
+    it is a syntactically perfect command substitution — and no other check in this module executes
+    a fence's text, so the defect shipped green and was caught only by running the document.
+
+    ``$(…)`` is deliberately allowed: the tree assertion's own message interpolates
+    ``$(git rev-parse --abbrev-ref HEAD)`` on purpose. A backtick never has a legitimate use inside
+    a fenced shell block here (the doctrine spells every substitution as ``$(…)``), so any occurrence
+    in a line's COMMAND portion — never in a ``#`` annotation, which ``_fences()`` drops when it is
+    the whole line and ``_code()`` cuts when it trails one — is the accident.
+    """
+    offenders = [c for c in _fenced_commands() if "`" in _code(c)]
+    assert not offenders, (
+        "a fence command carries a markdown backtick, which bash executes as a command substitution: "
+        "a message is part of the failure path this doctrine is read for, and a message that runs a "
+        "command is a halt that can do something other than halt (measured: `track_b: command not "
+        f"found` from a halt message). Spell substitutions as $(…) and drop the backticks: {offenders}"
     )
 
 
