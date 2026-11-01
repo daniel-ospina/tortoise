@@ -20,6 +20,27 @@ here ALTERNATES between the two tenants (A, B, A again) instead of resolving
 each once: a value that leaked out of A's resolution surfaces on the SECOND or
 THIRD read, which a single-shot assertion cannot see.
 
+⚠️ ALTERNATION IS ONLY HALF OF IT — THE CONTEXT THE READS SHARE IS THE OTHER
+HALF, and it differs per carrier. A module-level cache and a first-membership
+default are visible from ANY read, so the alternation alone catches them. A
+``contextvars.ContextVar`` is visible only WITHIN ONE ``contextvars.Context``,
+and ``asyncio.run`` — which the session lane needs, ``_session_user_org`` is a
+coroutine — creates a FRESH context per call: "runs the awaitable … The loop
+is closed at the end" (`https://docs.python.org/3/library/asyncio-runner.html`;
+sharing one context across top-level functions is what ``asyncio.Runner``
+exists FOR). So a tenant cached in a ContextVar and never reset is INVISIBLE to
+a test that gives each resolution its own ``asyncio.run``, and that — not the
+alternation — is why a second shape is pinned per lane:
+
+* the SESSION lane resolves all three reads in ONE ``asyncio.run``
+  (``test_two_credentials_resolved_in_one_event_loop_never_share_a_tenant``),
+  so the run's single context is the one the leak would ride. The test after
+  it MEASURES that this is the difference: under an injected leak of exactly
+  that shape the per-call tests stay green and the single-loop one reddens;
+* the ``oat_`` lane needs no such treatment: ``resolve_oauth_access_token`` is
+  a SYNCHRONOUS resolver, so its alternation test already runs every read in
+  the caller's one context.
+
 WHY NO MIGRATION IS PINNED HERE (the #10046 framing, measured). The record has
 no credential-side tenant column to backfill: `supabase/migrations/
 20261012000001_record_event_stream.sql:53-54` makes `org_id text NOT NULL` and
@@ -37,6 +58,7 @@ pinned HERE is that the same refusal, with two tenants live, is never resolved
 into the OTHER one.
 """
 import asyncio
+import contextvars
 
 import pytest
 
@@ -142,6 +164,27 @@ def _session_org(monkeypatch, cp, *, user: str = USER_BOTH,
     return asyncio.run(ha._session_user_org(_Request(pin), {"user_id": user}))
 
 
+def _session_orgs_in_one_run(monkeypatch, cp, pins) -> list[dict]:
+    """Resolve SEVERAL session credentials inside ONE ``asyncio.run``.
+
+    The whole point of this helper over ``_session_org``: ``asyncio.run`` gives
+    each call its own ``contextvars.Context``, so a ContextVar a resolver leaves
+    set is discarded before the next call. One run means ONE context, so a
+    tenant cached there without its ``reset()`` is still set when the next
+    credential resolves — the leak named in this module's docstring, made
+    observable.
+    """
+    from tortoise import hosted_api as ha
+
+    _wire(monkeypatch, cp)
+
+    async def _resolve_all() -> list[dict]:
+        return [await ha._session_user_org(_Request(pin), {"user_id": USER_BOTH})
+                for pin in pins]
+
+    return asyncio.run(_resolve_all())
+
+
 def _oauth_org(monkeypatch, cp, token: str, org_id: str) -> dict:
     from tortoise import oauth
 
@@ -152,6 +195,38 @@ def _oauth_org(monkeypatch, cp, token: str, org_id: str) -> dict:
     }])
     _wire(monkeypatch, cp)
     return oauth.resolve_oauth_access_token(cp, token)
+
+
+#: The ContextVar `_install_leaky_pin` caches the resolved org in, and never
+#: resets — the defect `test_a_contextvar_leak_outliving_one_resolution_reddens_
+#: only_the_single_loop_test` injects. Module level so the mutation is one object
+#: rather than a closure per call; its value does NOT outlive a test, because
+#: every value is set inside an `asyncio.run` context that is discarded at its
+#: end (which is exactly what makes the per-call path blind to it).
+_LEAKED_PIN: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "test_10046_leaked_pin", default=None)
+
+
+def _install_leaky_pin(monkeypatch) -> None:
+    """Mutate the session lane into a ContextVar that outlives its request.
+
+    First resolution: cache the org in `_LEAKED_PIN` and never `reset()` it.
+    Every later resolution in the SAME context then answers tenant A — the
+    cross-tenant direction this module exists to refuse.
+    """
+    from tortoise import hosted_api as ha
+
+    real = ha._session_pinned_org
+
+    def _leaky(pinned, *, memberships):
+        seen = _LEAKED_PIN.get()
+        if seen is not None:
+            return seen
+        resolved = real(pinned, memberships=memberships) or memberships[0]["org_id"]
+        _LEAKED_PIN.set(resolved)   # ⛔ no reset: this IS the leak
+        return resolved
+
+    monkeypatch.setattr(ha, "_session_pinned_org", _leaky)
 
 
 def _assert_names_its_own(resolved: dict, *, org_id: str, row_id: str,
@@ -202,6 +277,79 @@ def test_two_session_credentials_never_share_a_tenant(monkeypatch):
                           other_org=ORG_A, other_row=ROW_A, label="B")
     _assert_names_its_own(a2, org_id=ORG_A, row_id=ROW_A,
                           other_org=ORG_B, other_row=ROW_B, label="A again")
+
+
+def test_two_credentials_resolved_in_one_event_loop_never_share_a_tenant(
+        monkeypatch):
+    """The SESSION lane under the carrier a ContextVar leak would ride.
+
+    Same A → B → A alternation as the test above, but all three resolutions
+    share ONE ``asyncio.run`` and therefore one ``contextvars.Context``. That
+    is the only shape in which a tenant cached in a ContextVar and never reset
+    is observable (see this module's docstring): the per-call test above gives
+    each read a fresh context and is provably blind to it — measured by
+    ``test_a_contextvar_leak_outliving_one_resolution_reddens_only_the_single_
+    loop_test``.
+
+    Mutation this discriminates: a ContextVar holding the resolved org (or the
+    resolved default row) that is ``set()`` and never ``reset()`` → B's read
+    inherits A's tenant on the SECOND read and the checker reddens.
+    """
+    cp = _two_tenant_cp()
+
+    a1, b, a2 = _session_orgs_in_one_run(monkeypatch, cp, (ORG_A, ORG_B, ORG_A))
+
+    _assert_names_its_own(a1, org_id=ORG_A, row_id=ROW_A,
+                          other_org=ORG_B, other_row=ROW_B,
+                          label="A first, shared loop")
+    _assert_names_its_own(b, org_id=ORG_B, row_id=ROW_B,
+                          other_org=ORG_A, other_row=ROW_A,
+                          label="B, shared loop")
+    _assert_names_its_own(a2, org_id=ORG_A, row_id=ROW_A,
+                          other_org=ORG_B, other_row=ROW_B,
+                          label="A again, shared loop")
+
+
+def test_a_contextvar_leak_outliving_one_resolution_reddens_only_the_single_loop_test(
+        monkeypatch):
+    """The ContextVar clause in this module's docstring, MEASURED both ways.
+
+    ``_install_leaky_pin`` injects the exact defect the docstring names: the
+    session lane caches the resolved org in a ``contextvars.ContextVar`` and
+    never resets it — the shape `hosted_api._bind_record_tenant` calls "the
+    leak that files tenant A's rows under tenant B".
+
+    Under that leak:
+
+    * ONE ``asyncio.run`` PER RESOLUTION stays GREEN — each call gets a fresh
+      ``contextvars.Context``, so the third read never inherits anything. This
+      is the blindness review found: before the single-loop test existed, the
+      module claimed ContextVar coverage it did not have.
+    * ONE ``asyncio.run`` FOR ALL THREE READS goes RED — B inherits A's org.
+
+    Without the injected leak the same single-loop shape is green (the test
+    above), so what reddens here is the leak, not the harness.
+    """
+    cp = _two_tenant_cp()
+    _install_leaky_pin(monkeypatch)
+
+    # (1) Per-call runs: the leak cannot cross a fresh context — GREEN.
+    per_call = [_session_org(monkeypatch, cp, pin=pin)
+                for pin in (ORG_A, ORG_B, ORG_A)]
+    _assert_names_its_own(per_call[1], org_id=ORG_B, row_id=ROW_B,
+                          other_org=ORG_A, other_row=ROW_A,
+                          label="per-call B (blind to the leak)")
+
+    # (2) One shared loop: the leak crosses — B names A's tenant.
+    shared = _session_orgs_in_one_run(monkeypatch, cp, (ORG_A, ORG_B, ORG_A))
+    assert shared[1]["org_id"] == ORG_A, (
+        "the injected ContextVar leak did not take effect in the shared "
+        f"context (B resolved {shared[1]['org_id']!r}, expected the leaked "
+        f"{ORG_A!r}) — this control proves nothing until it does")
+    with pytest.raises(AssertionError):
+        _assert_names_its_own(shared[1], org_id=ORG_B, row_id=ROW_B,
+                              other_org=ORG_A, other_row=ROW_A,
+                              label="shared loop B (leaked)")
 
 
 def test_two_oauth_tokens_never_share_a_tenant(monkeypatch):
