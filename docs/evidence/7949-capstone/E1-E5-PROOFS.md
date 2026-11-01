@@ -177,9 +177,9 @@ The only entry point the capstone may drive WAS `TortoiseSDK.capture_session` �
 issue #4282** on 2026-10-27; `capstone_measure.py` / `capstone_run.py` now refuse by name, and the
 surviving in-process door is `sdk._extract_session_v2`, which the hosted handler still reaches. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:13441` is the meta fold — while the extractor builds
-`result["classify_later"]` (`tortoise/extractor_v2.py:8965`) and `result["vet"]`
-(`tortoise/extractor_v2.py:8975`) on the extractor's OWN return.
+`tortoise/sdk.py:13664` is the meta fold — while the extractor builds
+`result["classify_later"]` (`tortoise/extractor_v2.py:9217`) and `result["vet"]`
+(`tortoise/extractor_v2.py:9227`) on the extractor's OWN return.
 
 ⛔ **`#9116`'s seam has since LANDED, and this paragraph is the pre-seam state
 it was written in.** The fold no longer forwards `stats` alone — it calls

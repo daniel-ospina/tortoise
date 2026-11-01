@@ -412,6 +412,21 @@ SOURCE_PATTERNS = {
                    # config/ falls through to `core`, where the gate is also
                    # registered.
                    "tools/served_skills_parity.py",
+                   # #10423: the ARCHIVE WRITER, on the same reasoning as the
+                   # entry above and by the same silent-drop class. #10423 made
+                   # `build_skill_archives.py` load-bearing beyond its own CLI:
+                   # `served_skills_parity.sync()` now calls
+                   # `write_stale_archives()`, so this file decides the bytes of
+                   # a COMMITTED artifact (`website/skills/*.skill`). `tools/` is
+                   # in NON_PYTHON_PREFIXES, so an edit to this file ALONE —
+                   # widening or weakening what `sync()` re-cuts — selected no
+                   # surface and fell to the docs-only tier-1 early return. The
+                   # guards still ran there (they are in `tier1`), so coverage
+                   # held by accident; this entry makes the owning surface
+                   # select them by design and adds the `onboarding` file set.
+                   # Pinned by tests/test_ci_selection.py::
+                   # test_the_archive_writer_selects_the_surface_that_guards_it.
+                   "tools/build_skill_archives.py",
                    # #3517: the capture disclosure's single source of truth and
                    # the non-LLM renderer. Both own guards registered below
                    # (`test_capture_disclosure_template.py`,
@@ -2364,7 +2379,30 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # and config/ci-surfaces.yml's `core`-home row.
              # Pinned by tests/test_ci_selection.py::
              # test_substrate_map_guard_runs_on_the_diffs_it_guards.
-             "tools/substrate_map_check.py")
+             "tools/substrate_map_check.py",
+             # #10131 review P1: tools/ci_catch_history.py owns
+             # tests/test_ci_catch_history.py — registered `core` (the registration this
+             # PR adds) — but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY change filtered to
+             # `changed == []`, took the docs-only early return and fell to tier-1 smoke,
+             # where that file is NOT registered. The `core` row that registers the file is
+             # CLASSIFICATION only (#4348); it does not make a `tools/` path select `core`.
+             # MEASURED before this entry: `select(["tools/ci_catch_history.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], full=False, n=68, guard
+             # ABSENT. The most likely follow-up to this exact instrument IS a change to the
+             # instrument (every finding class on #10131's reviews so far has been in a read
+             # path — `NEVER` licensing, the cleared-red loop, the wall bound), so the diff
+             # that can break the whole pin set was the one diff that ran none of it:
+             # the #1349/#3332/#3616 silent-drop class. (No count is stated here on purpose:
+             # the pin set moves with the file, and a literal would rot exactly the way the
+             # `durations` note's count did — `tests/test_ci_catch_history.py::
+             # test_the_durations_note_counts_the_tests_this_file_actually_has` RUNS its own
+             # command so that one cannot.) CORE_ALSO (not TOOL_CARVEOUTS)
+             # because the suite is hermetic (an archived runs.json, job JSON and in-memory
+             # zips — no DB, no network) and `core` is where it is registered. Pinned by
+             # tests/test_ci_selection.py::
+             # test_ci_catch_history_tool_change_selects_core_not_tier1.
+             "tools/ci_catch_history.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

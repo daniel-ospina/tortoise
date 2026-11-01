@@ -4,7 +4,8 @@ version: 1
 # MIT repo named below; this tree holds the derived MIRROR. Do not edit
 # a served skill or this pin by hand — edit the skill upstream, then run
 #   uv run python tools/served_skills_parity.py --sync
-# and commit the mirrored skills together with this file.
+# and commit the mirrored skills, the re-cut `website/skills/*.skill`
+# archives that same command derives, and this file — all three together.
 #
 # `commit` is a real upstream commit and every sha256 is the CONTENT of
 # that commit — `--check-upstream` re-fetches by commit and re-hashes, so
@@ -18,13 +19,13 @@ version: 1
 upstream:
   repo: daniel-ospina/tortoise-skills-and-integrations
   branch: main
-  commit: 5a3035b7176586e01979cbbdcca3f49888339da4
+  commit: f7fe148e0788a2059fb8f300611c772cc78f257c
 skills:
   how-to-use-tortoise:
     upstream_path: skills/how-to-use-tortoise/SKILL.md
     served_path: website/apps/dashboard/public/skills/how-to-use-tortoise/SKILL.md
-    sha256: 77de8269d0576ef38233c23e58185c67777b58f998c815d731a108ca1ac738fd
-    bytes: 39744
+    sha256: 5c5e310661658a3049635a9492164c856979015950379f04118b5a8cf4f19c43
+    bytes: 39778
   tortoise-decide:
     upstream_path: skills/tortoise-decide/SKILL.md
     served_path: website/apps/dashboard/public/skills/tortoise-decide/SKILL.md

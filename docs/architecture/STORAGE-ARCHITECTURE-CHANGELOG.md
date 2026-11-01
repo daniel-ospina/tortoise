@@ -1832,3 +1832,112 @@ The pins for the statements above are the carrier's own:
 the store decision depends on — the capability arms in `tests/test_10000_turns_record_only.py`
 (a tenant CARRIED on the SDK arms the record-only lane; a tenant that cannot be named, and a scratch
 log, keep the turns in the graph).
+
+**2026-10-31 — `#10000` (with `#10403`, `#10394`, `#10017`).** The S1 narrative left the node, and
+§9.1(b) was rewritten to state the design instead of the delivery. This entry keeps what moved out,
+because the design document is not where the record of the change belongs (#8542).
+
+**What changed in the graph.** `hosted_api._execute_commit_writes` used to raw-Cypher `SET
+s.story_arc=$arc` on the transcript `:Source` **and** `e.story_arc=$arc` on the AgentSession
+`:Event` — the whole S1 narrative, twice per commit, in the store §2.1 says can never unload it —
+while **no production read path read it back**. Both SETs are deleted; the narrative's one writer is
+the SHAPE-KEYED projection `record_projection._narrative_statements` (any record naming its session and
+carrying `story_arc` lands in `public.session_narrative`), whose production producer for a commit is the
+`SessionNarrated` carrier (`#9555`), unchanged. MEASURED live on
+a FalkorDB, one commit with a 167-char narrative: `sum(size(n.story_arc))` = **334 bytes** before the
+removal (`:Source` 167 + `:Event` 167), **0 bytes** after it, with `public.session_narrative` holding
+the same 167 chars. `summary`/`title` deliberately stay on the node (§4.4 metadata, not the prose).
+
+**The re-entry routes, and where each one stood.** The key stays DECLARED in `_SOURCE_NODE_PROPS`
+so legacy nodes read back, and the declaration is what makes a route possible at all. The list is per
+ROUTE over the three labels the commit path could reach, and the first cut of this entry counted four
+because it was Source-shaped — the `:Event` anchor the same SET wrote was under the same declaration
+and under no deny set, which #10389's fifth review round measured (`#10428`):
+
+- The journal `SourceCreated` fold was **recorded** as the open fold door and it never was one —
+  `_upsert_source` passes `allow_keys=_SOURCE_EXTRA_PROPS`, a closed set excluding `story_arc`, so
+  the key is dropped and warned about (`#3998: denied …`).
+- The LIVE TENANT route was CLOSED in review cycle 1: `story_arc` in
+  `_SOURCE_SERVER_MANAGED_PROPS` refuses `update_entity(url, story_arc=…)` rather than journalling
+  an `EntityMutated` record that a rebuild would restore (`#5196` round 3).
+- Door 1 — the DOCUMENT fold's open passthrough — was CLOSED HERE by `b771ccd85` (`#10403`):
+  `_upsert_document` passes NO `allow_keys` deliberately (`#228` pins the document route as a caller
+  passthrough), so the deny had to be `story_arc` in `_DOC_PASSTHROUGH_HANDLED`. MEASURED through the
+  SDK door behind `tortoise_create_document`, one call, before: `MATCH (s:Source) RETURN s.url,
+  s.story_arc` = `[[…, 'NARRATIVE-DOOR1-PROSE']]` — the PROSE on the node; after:
+  `[[…, None, 'kept-228']]` — denied, and `#228`'s arbitrary prop still landed, so the entry is ONE
+  key and not a blanket refusal. The departure is marked ON `#228` with an `OVERRIDES:` line
+  (`#issuecomment-6540959107`).
+- Door 2 — the RECORD → CACHE restore — is still OPEN, filed as `#10394`. `source.story_arc` is
+  marked **PRIMARY** on `#7879`'s placement table, so `projected_columns("source")` keeps it and
+  `restore_from_record_view` / `rebuild_from_record` writes it back onto `:Source`; the SAME route
+  carries the `:Event` half — `public.event.story_arc` is PRIMARY on the same table (`:309`, open-set
+  passthrough), `projected_columns("event")` keeps it, and `NODE_TABLES` maps `Event → event`.
+  `tests/test_9555_narrative_cache_rebuild.py:187` measures that lane and asserts the prose IS on the
+  rebuilt node — the `:Source` half only, which is why the understatement was measured rather than
+  assumed (`#10389` review P2: the residual had described `#10394` as the `:Source` half alone, and no
+  test could red on it; both anchors are now named in §9.1(b) and their premise pinned by
+  `tests/test_9555_narrative_carrier.py::test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so`).
+  **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
+  restore re-rents the RAM. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
+  table, plus that test's premise), which is why it is filed rather than absorbed.
+- **The `:Event` fold — door 1's counterpart one label over, denied here (`#10428`).** `_upsert_event`
+  persists extras with `skip = _META_KEYS | _EVENT_HANDLED`, and `story_arc` was in neither while
+  `docs/ONTOLOGY.md` declares it on `:Source` only — an UNDECLARED key on the open passthrough, the
+  `#3998`/D30 shape, and DURABLE because the fold that writes it live is the fold a `rebuild_all`
+  replays. `story_arc` joins `_EVENT_HANDLED`. MEASURED through the SDK door behind
+  `tortoise_create_event`, one call, before: `e.story_arc` = `NARRATIVE-EVENT-DOOR-PROSE`; after:
+  `None`, with `e.project` = `kept-228` still landing — one key, not a blanket refusal (`#228`, marked
+  there with an `OVERRIDES:` line, `#issuecomment-6544613785` — the same marker governs the tenant
+  route below, which is `:Event`'s second mount, and `projection/entities.py` cites it at both).
+- **The `:Event` tenant route — a SECOND door the fold entry cannot reach (`#10428`).**
+  `_update_entity` writes caller props with a live `SET n += $props` and consults no label skip-set, so
+  `update_entity(<agentSession eventId>, story_arc=…)` was ACCEPTED, journalled into an
+  `EntityMutated` record and restored by a rebuild. `_EVENT_SERVER_MANAGED_PROPS` (new, the write-filter
+  counterpart of `_SOURCE_SERVER_MANAGED_PROPS`) refuses it, resolved with the same predicate the write
+  uses.
+- **The `:Point` passthrough — LIVE closed at the SDK door, REPLAY open (`#10429`).** ⚠️ **CORRECTED
+  (`#10389` review cycle 4/5):** this entry first stated the whole route as live-open and prescribed a
+  point deny set as the lever. At `#10389`'s head the two LIVE surfaces — `create_point` and
+  `update_point` (which `update()`/`create_or_update_point()` reach) — REFUSE the key through
+  `sdk._refuse_unpaired_narrative(..., label="Point")`; MEASURED, both raise and no node carries the
+  prose afterwards. `_upsert_point_props`, the replay fold, still materialises it from a journal that
+  carries it, and THAT is what `#10429` owns. ⛔ The lever named here is now replay-only and destructive:
+  a point deny set is consulted only by the fold while `update_point` writes raw `SET n += $props`, so
+  adding the key there would make a `rebuild_all` DELETE the property from every legacy `:Point` (live ≠
+  replay) and would justify itself with an `OVERRIDES:` line asserting a live hole that no longer exists.
+  §9.1(b) counts the route denied at its two write doors and names the replay half.
+
+**And the replay half of that route reclaims what a legacy journal carried.** Residual (a) said only that
+nodes already carrying the prose keep it, which is true of the copies this change stops writing and NOT
+of one that arrived through a journalled `EntityMutated`: `story_arc` is in
+`_SOURCE_SERVER_MANAGED_PROPS`, and the SAME set is read by the `EntityMutated` → `:Source` replay arm,
+which pops every member and warns (`tortoise/projection/__init__.py`). So a `rebuild_all` over such a
+journal reclaims the prose — deliberate, since it is the same deny the live route gets, and it must be
+stated because deleting it silently from the set re-enables the replay (that fail-open is what
+`tests/test_9555_narrative_carrier.py::test_the_journal_replay_drops_the_prose_and_the_residual_says_so`
+pins). This is the consequence `#10389`'s review P1 asked to be named rather than left implicit.
+
+**Why this entry exists at all.** The first draft of §9.1(b) wrote that history INTO the design
+document — `CLOSED HERE (#10403)`, `OPEN, filed as #10394`, *"three are CLOSED, one is filed and
+still OPEN"*, and the before/after measurement — and
+`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`
+reddened on it in CI (run 41183278512). That guard is the executable half of #8542's rule: the
+design document states the design, the changelog keeps the record of how it got there. §9.1(b) now
+states the four routes and their mechanisms in the present tense, with the measurement as evidence
+that the deny holds rather than as a before/after of the change; the delivery state and the
+before/after figure live here.
+
+**§9.1(b)'s citations are symbol-keyed, and both directions are guarded.** The section cited each
+route as a `file.py:NNNN` line. `#10389`'s review found those lines already ~40 stale within this PR
+(`_SOURCE_SERVER_MANAGED_PROPS` cited at `entities.py:6766-6773`), and merging `origin/main`'s
+`#10067` tenant work moved the same declaration to a set beginning at 6757 with `story_arc` at 6797
+— no code wrong, no symbol changed, just the line. That is the rot `#7948` retired from §13.8: a
+line in a design document reds every unrelated code move in a large file while being unable to tell
+a correct line from a wrong one. §9.1(b) now names a symbol per route
+(`projection/entities.py::_SOURCE_EXTRA_PROPS`, `projection/entities.py::_SOURCE_SERVER_MANAGED_PROPS`,
+`projection/entities.py::_upsert_document`, plus the door-2 test by name), and
+`tests/test_extractor_v4_citation_rot.py::test_section_9_1_cites_symbols_not_lines_and_its_symbols_resolve`
+pins both directions, each measured on the pre-fix text: a `file.py:NNNN` in the section reds (all
+four converted citations named), and a symbol that no longer resolves reds (measured by renaming
+`_upsert_document`).
