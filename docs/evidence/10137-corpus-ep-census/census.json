@@ -25,7 +25,9 @@
     "points_unmeasured": 24912,
     "points_unmeasured_unread": 0,
     "points_off_neutral": 185,
+    "points_off_neutral_unread": 0,
     "points_moved_off_neutral": 185,
+    "points_moved_off_neutral_unread": 0,
     "ep_ran": 24,
     "failed": 0
   },

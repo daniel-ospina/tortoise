@@ -48,6 +48,7 @@ score    = PARTIAL(24 of 500) — a complete sample of a sample, never presented
 | `points_unmeasured` | 24,912 |
 | `points_with_ep_unread` / `points_unmeasured_unread` | **0 / 0** (every question's census was read — the sum is complete, not partial) |
 | `points_off_neutral` = `points_moved_off_neutral` | 185 |
+| `points_off_neutral_unread` / `points_moved_off_neutral_unread` | **0 / 0** (same disclosure for the two contribution sums — a partial 185 is not read as a complete one) |
 
 ### Per question type
 
@@ -152,15 +153,23 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
 - `outcomes_to_report` now projects `belief_activation` **conditionally** — under the arm only,
   exactly like the checkpoint write and the `#2578` / `#2976` arms. An UNARMED outcome gains no
   key, so its published shape is unchanged (the golden projection in
-  `tests/test_longmem_runner.py` still matches key for key).
+  `tests/test_longmem_runner.py` still matches key for key — that pin proves the *absence* case
+  only). The **presence** case is pinned by
+  `tests/test_longmem_report_usage.py::test_projection_emits_belief_activation_conditionally`,
+  which is the pin this arm was missing until #10137 review: without it the whole change could be
+  reverted with every test still green.
 - `probes/census.py` **fails closed** on an input that carries no manifest at all: it emits
   `per_question: null` with `per_question_source` naming why, instead of one null row per
-  question. A *partial* population still publishes its rows, and `per_question_unread` says how
-  many questions inside them were never measured — the same disclosure the summed cells already
-  make with `<key>_unread`, and the `*_unread` companions of `points_with_ep` /
-  `points_unmeasured` now ride `cells` too.
+  question — including the empty-population boundary, where an input with *no* outcomes must not
+  claim a source it never read. A *partial* population still publishes its rows, and
+  `per_question_unread` says how many questions inside them were never measured — the same
+  disclosure the summed cells already make with `<key>_unread`, and the `*_unread` companions of
+  `points_with_ep` / `points_unmeasured` / `points_off_neutral` / `points_moved_off_neutral` now
+  ride `cells` too. These branches are pinned by
+  `tests/longmem_eval/test_ep_census_10137.py::test_census_probe_*`.
 
 `census.json` below was written by the *checkpoint* path, so it carries `per_question_source:
 "outcome.belief_activation"` and `per_question_unread: 0` — measured on every one of the 24
-questions, which is verifiable from the rows themselves (no `null` in any of the eight measured
-cells across the 24 questions).
+questions, which is verifiable from the rows themselves (no `null` in any of the seven COUNT cells
+across the 24 questions; the eighth cell, `no_op_reason`, is `null` in all 24 because no question
+no-op'd — that null is the measured value, not a missing one).

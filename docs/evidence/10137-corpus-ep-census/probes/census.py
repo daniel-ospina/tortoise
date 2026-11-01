@@ -66,8 +66,12 @@ def cells(path: str) -> dict:
         summary = mp.summarize_belief_activation(outcomes, requested=requested)
         source, n = "checkpoint", len(outcomes)
 
-    q = summary.get("questions") or 0
-    with_ep = summary.get("questions_with_ep") or 0
+    # NOT ``or 0``: an ABSENT cell is UNKNOWN, and coercing it would publish a
+    # fabricated "measured zero" — the rule ``measurement_posture`` states for
+    # the summed cells (:387-390) applies to the headline pair too, so a cell a
+    # different code version never emitted reads as unread, never as zero.
+    q = summary.get("questions")
+    with_ep = summary.get("questions_with_ep")
     covered = summary.get("points_with_ep")
     unmeasured = summary.get("points_unmeasured")
     claim_ratio = None
@@ -78,7 +82,12 @@ def cells(path: str) -> dict:
     rows = [o for o in outcomes if isinstance(o, dict)]
     manifests = [o for o in rows if isinstance(o.get("belief_activation"), dict)]
     per_question_unread = len(rows) - len(manifests)
-    if rows and not manifests:
+    if not manifests:
+        # ``not manifests``, NOT ``rows and not manifests`` (#10137 review, P3):
+        # an empty population has no manifest either, and the ``else`` branch
+        # would then claim ``per_question_source: "outcome.belief_activation"``
+        # — provenance from an input with no outcomes, one boundary over from
+        # the fabricated zero this guard exists to prevent.
         # See the note on ``per_question`` below: an input with no manifest
         # anywhere has NO per-question census, and 24 rows of nulls would
         # read as a measured-and-null question. Publish the absence.
@@ -108,7 +117,9 @@ def cells(path: str) -> dict:
         "questions_in_run": n,
         "questions": q,
         "questions_with_ep": with_ep,
-        "questions_with_ep_ratio": (with_ep / q) if q else None,
+        "questions_with_ep_ratio": (
+            (with_ep / q) if isinstance(with_ep, int) and isinstance(q, int)
+            and q else None),
         "claim_coverage": {
             "points_with_ep": covered,
             "points_unmeasured": unmeasured,
@@ -129,7 +140,14 @@ def cells(path: str) -> dict:
             # read exactly like a complete one.
             "points_with_ep_unread", "points_unmeasured",
             "points_unmeasured_unread",
-            "points_off_neutral", "points_moved_off_neutral",
+            # ...and the SAME rule for the two contribution sums (#10137
+            # review, P3): both are partial sums when their bucket census is
+            # UNKNOWN, and ``measurement_posture`` publishes one ``_unread``
+            # companion per key (:530-543). Without them a partial 185 is
+            # indistinguishable from a complete one — and 185 is the headline
+            # "0.67% moved" the artifact rests on.
+            "points_off_neutral", "points_off_neutral_unread",
+            "points_moved_off_neutral", "points_moved_off_neutral_unread",
             "ep_ran", "failed")},
         "inert_by_reason": summary.get("inert_by_reason"),
         "inert_questions": summary.get("inert_questions"),
