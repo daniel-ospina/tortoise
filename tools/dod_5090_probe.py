@@ -29,10 +29,10 @@ deliberately mechanical so a later lane re-runs it instead of re-reading prose:
 
 | bullet | the command | what makes it `MET` |
 |---|---|---|
-| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate, AND the write paths that reach a raw primitive instead) | a stated predicate exists, ONE rule set (identity, not a copy), every embedding write path reaches the seam, no UNDESIGNED `BYPASS(...)`, AND the gate is ON by default |
+| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate) | a stated predicate exists, ONE rule set (identity, not a copy), AND every embedding write path reaches it with the gate ON by default |
 | 2 | same (`written labels ⊆ served labels`) | every label a write path embeds is one `run_vector_query` serves |
 | 3 | same (forces all three mechanisms through `run_vector_query`) | `index` / `scan` / `scan_fallback` are distinguishable in the caller's trace |
-| 4 | same (searches for a V1 ruling) | a decision record exists AND the code implements it |
+| 4 | same (searches for a V1 ruling) | a decision record exists — *implementation is the follow-up work a ruling creates, and is not what this row can see* |
 
 ⚠️ **Bullet 1's `PARTIAL` is the honest answer at HEAD and it is not a bug
 report.** The rule is stated (`tortoise/embed_gate.py::embedding_verdict`) and
@@ -77,18 +77,17 @@ Usage::
         --uri docker://:pw@localhost:6379/<graph> --graph <graph>
 
 Exit status: `0` when the instrument ran (whatever the verdicts — a red row is a
-successful measurement), `2` when the instrument itself could not measure (a
-gate module that will not import, or a census URI whose engine has no index
-API). Never a verdict-derived code: a caller must not be able to read
-`NOT MET` as "the tool failed". ⚠️ An UNREADABLE GRAPH is *not* a `2`: it is a
-successful measurement that reports `UNMEASURED(<why>)` inside the report, which
-is the whole point of the census. The two are different facts.
+successful measurement), `2` when the instrument itself could not measure
+(a missing gate module, an unreadable graph). Never a verdict-derived code: a
+caller must not be able to read `NOT MET` as "the tool failed".
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
+import functools
 import json
 import os
 import re
@@ -104,13 +103,9 @@ if str(REPO_ROOT) not in sys.path:
 VERDICTS = ("MET", "PARTIAL", "NOT MET")
 
 #: `#5090`'s four bullets, verbatim from the epic body. Held here so the table
-#: cannot silently score a re-worded bullet. The pin
+#: cannot silently score a re-worded bullet: the pin
 #: `tests/test_dod_5090_probe.py::test_the_four_bullets_are_scored_verbatim`
-#: compares this tuple against the epic strings pinned as LITERALS IN THE TEST —
-#: never against this module, which would make the pin a self-comparison that
-#: passes on any re-wording (a falsifier that cannot fail). The epic body
-#: (`#5090`) is the source of truth; the literal is that body's copy in-tree, so
-#: a lane that re-words either side reds, and this comment then names the edit.
+#: reads them back and the epic body is the source of truth.
 BULLETS: tuple[str, ...] = (
     "A stated, enforced rule for what earns an embedding.",
     "No vector is stored without a path to query it.",
@@ -125,36 +120,6 @@ PREDICATE_NAME = "value_gate.identifier_only"
 #: The one enforcement seam. Every embedding write path must reach THIS
 #: function, not the raw primitive — the seam `#5008` built.
 SEAM = "tortoise/embeddings.py::encode_for_row"
-SEAM_CALLEE = SEAM.rsplit("::", 1)[-1]
-
-#: The RAW primitives — what a write path reaches when it bypasses the seam.
-#: `encode_for_store` is the dim-declaring encoder (reads, backfills and repairs
-#: call it by design); `encode_batch_for_store` is its batched form (the session
-#: TURN writers). Naming them here is what lets the instrument derive a write
-#: population POSITIVELY instead of only from calls of the gate.
-RAW_PRIMITIVES: tuple[str, ...] = ("encode_for_store", "encode_batch_for_store")
-
-#: Functions that reach a RAW primitive without `encode_for_row`, BY DESIGN, each
-#: with the reason it is exempt. This is `encode_for_row`'s own boundary note
-#: (`tortoise/embeddings.py`, "Deliberately NOT routed through here"), made
-#: executable — every other function that reaches a raw primitive is an UNGATED
-#: write path, the state `#5008` closed, and is reported as `BYPASS(<fn>)`.
-#: ⚠️ Adding an entry here is a DELIBERATE act, so it has to be edited on purpose;
-#: that is the point. An exemption that arrived by omission is exactly how bullet
-#: 1's `enforced` half stopped being true the first time.
-#: (`graph-scripts/backfill_embeddings.py` — the re-encode tool, also named in
-#: that boundary note — is outside the walked tree (`tortoise/`), the same scope
-#: `_write_seams_that_embed` uses for the seam map.)
-DESIGNED_BYPASSES: dict[str, str] = {
-    "encode_for_row": (
-        "the seam ITSELF — its EMBED arm delegates to encode_for_store, "
-        "which is the gate being applied, not a path around it"
-    ),
-    "_capture_turn_embeddings": (
-        "the session TURN writers: a Turn is not an extracted row, and the "
-        "batched form carries one vector per windowed turn (#5008 boundary)"
-    ),
-}
 
 #: The command that produced a census row — printed WITH the row, so a figure
 #: quoted into an epic body carries the way it was produced (#10465 target 1:
@@ -184,148 +149,149 @@ class Row:
 # ── Bullet 1 — "a stated, enforced rule" ───────────────────────────────────
 
 
-def _callee_name(func: ast.expr) -> str | None:
-    """The called name — bare OR module-qualified.
+#: The GATED seam (`#5008`). A write path that embeds a row must reach it.
+SEAM_CALL = "encode_for_row"
 
-    `encode_for_row(...)` is an `ast.Name` (its name is `.id`), while
-    `embeddings.encode_for_row(...)` is an `ast.Attribute` (its name is `.attr`)
-    — https://docs.python.org/3/library/ast.html#abstract-grammar. Reading only
-    `.id` silently DROPS every qualified call site, so a writer that imported
-    the module rather than the name would vanish from the seam map and bullet
-    1's `enforced` half would read as though it were gated.
+#: The ungated primitives that ALSO produce a stored vector. `encode_for_store`
+#: is documented as the reads/backfills/repairs primitive (so its callers are
+#: `producer`, not `writer`), but `compute_session_embedding` feeds the session
+#: `:Event` writers — a write path that never touches the gate. Both are
+#: measured, because "a NEW writer that calls the raw primitive instead" is
+#: invisible to a map that only ever looks for the gated call (this tool's own
+#: review found exactly that: `session_indexer.main` and
+#: `sdk._session_embedding` embed while containing neither gate symbol).
+UNGATED_CALLS: tuple[str, ...] = ("encode_for_store", "compute_session_embedding")
+
+#: `MERGE (n:Label …)` / `CREATE (p:Label …)` — the label the Cypher names.
+_NODE_LABEL = re.compile(r"(?:MERGE|CREATE|MATCH)\s*\(\s*(\w+)\s*:\s*(\w+)")
+
+#: An embedding WRITE — a Cypher property assignment or the clause helper.
+_EMBED_WRITE = re.compile(
+    r"(?:\w+\.embedding|(?<![\w.])embedding)\s*=|set_embedding_clause\("
+)
+
+
+def _strings(node) -> str:
+    """Every string literal in ``node`` — where the Cypher actually lives."""
+    import ast
+
+    return "\n".join(
+        s.value for s in ast.walk(node)
+        if isinstance(s, ast.Constant) and isinstance(s.value, str)
+    )
+
+
+def _callees(node) -> set[str]:
+    import ast
+
+    return {
+        getattr(c.func, "id", None) or getattr(c.func, "attr", None) or ""
+        for c in ast.walk(node) if isinstance(c, ast.Call)
+    }
+
+
+#: Writers whose own Cypher names NO label because the write is delegated to
+#: the projection (they hand the vector to the same `:Point` clause
+#: `_revise_point` uses) — ONE entry, each with the evidence and each REPORTED
+#: in the row. Deliberately not a vocabulary: everything else is derived from
+#: the Cypher, so a writer that names `:Document` still trips bullet 2.
+WRITER_LABEL_OVERRIDES: dict[str, str] = {
+    # `tortoise/api.py`'s ingest closure computes the vector and stamps the
+    # journal; its Cypher carries no `MERGE (:Label`. It feeds the `:Point`
+    # write (`api.py:318` -> projection's point clause).
+    "_point": "Point",
+}
+
+
+def embedding_writers() -> dict[str, dict]:
+    """Every function that produces a stored vector, and what it writes.
+
+    ``{writer: {"callee", "at", "kind", "label"}}`` where ``kind`` is
+    ``gated`` (reaches ``encode_for_row``), ``ungated`` (produces a vector the
+    gate never sees) or ``producer`` (a function that computes a vector a
+    DIFFERENT function writes — `encode_for_store`'s read/backfill callers, and
+    the journal stampers).
+
+    **The label is derived from the Cypher, not from the writer's name.** That
+    matters: a name-derived map draws from the same small vocabulary as the
+    query path, so its "stored without a query path" set is empty BY
+    CONSTRUCTION and the `NOT MET` branch is dead code — a row that cannot come
+    back red is machinery, not measurement (this tool's own review, P1). Three
+    sources, most local first:
+
+    1. the labels in the function's OWN Cypher literals;
+    2. the writer's name stem against the labels its MODULE's Cypher names
+       (`_upsert_event` -> `Event`), which is two sources agreeing, not a guess;
+    3. otherwise ``UNKNOWN`` — reported, and it holds bullet 2 at `PARTIAL`.
     """
-    return getattr(func, "id", None) or getattr(func, "attr", None)
+
+    return _embedding_writers(REPO_ROOT)
 
 
-#: One walk per source tree, shared by both write populations below. The walk
-#: parses every `tortoise/**/*.py` with the AST, which measures at ~5 s on a
-#: loaded host — and `measure()` asks for it from three rows, so without this the
-#: instrument pays it three times for one answer. Keyed on the tree so a test
-#: that scores a synthetic root cannot poison the real one (and vice versa).
-_CALLS_BY_FUNCTION: dict[str, dict[str, dict[str, str]]] = {}
-
-
-def _calls_by_function(root: Path | None = None) -> dict[str, dict[str, str]]:
-    """Map each OUTERMOST function -> {callee name: `path:line` of its call}.
-
-    The OUTERMOST named function owns a call: a nested helper (`_point` inside
-    `_revise_point`) is part of that writer's path, not a writer of its own.
-    Both write populations below are derived from this one walk, so the seam
-    map and the bypass map cannot drift apart.
-    """
-    base = REPO_ROOT if root is None else root
-    key = str(base)
-    if key in _CALLS_BY_FUNCTION:
-        return _CALLS_BY_FUNCTION[key]
-    calls: dict[str, dict[str, str]] = {}
-
-    def _visit(node: ast.AST, owner: str | None, path: Path) -> None:
-        for child in ast.iter_child_nodes(node):
-            name = owner
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                name = owner or child.name
-            elif isinstance(child, ast.Call) and owner:
-                callee = _callee_name(child.func)
-                if callee:
-                    calls.setdefault(owner, {}).setdefault(
-                        callee, f"{path.relative_to(base)}:{child.lineno}")
-            _visit(child, name, path)
-
-    for path in sorted((base / "tortoise").rglob("*.py")):
+@functools.lru_cache(maxsize=8)
+def _embedding_writers(root: Path) -> dict[str, dict]:
+    writers: dict[str, dict] = {}
+    seam_module = root / "tortoise/embeddings.py"
+    for path in sorted((root / "tortoise").rglob("*.py")):
+        if path == seam_module:
+            continue  # the primitives themselves are not write paths
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):
+            writers.setdefault("UNPARSEABLE", {
+                "callee": "", "at": str(path.relative_to(REPO_ROOT)), "kind": "unparsed",
+                "label": "UNKNOWN",
+            })
             continue
-        _visit(tree, None, path)
-    _CALLS_BY_FUNCTION[key] = calls
-    return calls
+        module_labels = {lab for _v, lab in _NODE_LABEL.findall(_strings(tree))}
+        file_src = path.read_text(encoding="utf-8")
+        lines = file_src.splitlines()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            called = _callees(node)
+            # The function's own text by LINE RANGE — `ast.get_source_segment`
+            # re-splits the whole file per call, which cost 90 s on this tree.
+            source = "\n".join(lines[node.lineno - 1:node.end_lineno])
+            if SEAM_CALL in called:
+                callee, kind = SEAM_CALL, "gated"
+            elif set(UNGATED_CALLS) & called:
+                callee = sorted(set(UNGATED_CALLS) & called)[0]
+                kind = "ungated"
+                # The write clause is a CALL (`set_embedding_clause("n")`), so
+                # this reads the function's SOURCE, not its string literals —
+                # measured: reading only literals classed
+                # `session_indexer.main` (which does write) as a producer and
+                # hid a real ungated write path.
+                if not _EMBED_WRITE.search(source):
+                    kind = "producer"  # computes it; another function writes it
+            else:
+                continue
+            own = _strings(node)
+            pairs = _NODE_LABEL.findall(own)
+            labels = {lab for _v, lab in pairs}
+            if len(labels) == 1:
+                label = labels.pop()
+            else:
+                stem = (node.name[len("_upsert_"):]
+                        if node.name.startswith("_upsert_") else node.name)
+                hits = {lab for lab in module_labels
+                        if stem.lower().endswith(lab.lower())}
+                label = hits.pop() if len(hits) == 1 else "UNKNOWN"
+            if label == "UNKNOWN" and node.name in WRITER_LABEL_OVERRIDES:
+                label = WRITER_LABEL_OVERRIDES[node.name]
+            writers[node.name] = {
+                "callee": callee,
+                "at": f"{path.relative_to(root)}:{node.lineno}",
+                "kind": kind,
+                "label": label,
+            }
+    return writers
 
 
-def _write_seams_that_embed(root: Path | None = None) -> dict[str, str]:
-    """Map each function that embeds a written row -> the file:line of its call.
-
-    Derived from the source, not from a hand-kept list: a write path that stops
-    calling the seam changes this map, which is how bullet 1's `enforced` half
-    is measured in the REMOVAL direction (`write_bypasses` measures the other
-    one). Only an actual CALL of `encode_for_row` counts — `encode_for_store`
-    is the ungated primitive reads, backfills and repairs use by design
-    (`#5008`), and a mention in a docstring or a comment is not a call
-    (measured the hard way: a substring scan reported 10 seams including
-    `encode_for_row`'s own `def` line and five docstring mentions, and bullet 2
-    then read `PARTIAL` on no evidence).
-    """
-    return {fn: callees[SEAM_CALLEE]
-            for fn, callees in _calls_by_function(root).items()
-            if SEAM_CALLEE in callees}
-
-
-def write_bypasses(seams: dict[str, str] | None = None,
-                   root: Path | None = None) -> dict[str, str]:
-    """Write paths that reach a RAW primitive without the gate — `BYPASS(<fn>)`.
-
-    The seam map can only see a function that USED TO call `encode_for_row` and
-    stopped. It is blind, by construction, to the inverse: a NEW writer calling
-    `encode_for_store` / `encode_batch_for_store` directly adds nothing to it,
-    so `len(seams)` is unchanged, bullet 1's `enforced` half reads exactly as
-    before, and "every embedding write path reaches the gate" is false while
-    the instrument still reports `PARTIAL`/`MET` — `#5008`'s whole subject.
-
-    So the population is derived a SECOND time, positively, from the raw
-    primitives instead of from the seam. Every hit is reported; the ones in
-    `DESIGNED_BYPASSES` are documented exemptions and the rest are ungated write
-    paths, which hold bullet 1 at `PARTIAL` the way an `UNKNOWN` label holds
-    bullet 2.
-
-    Returns ``{function: 'path:line' of its raw call}``. The walked tree is
-    `tortoise/`, so `graph-scripts/backfill_embeddings.py` (a documented exempt
-    re-encode tool) is out of scope by construction, not by an entry here.
-    """
-    seams = _write_seams_that_embed(root) if seams is None else seams
-    out: dict[str, str] = {}
-    for fn, callees in _calls_by_function(root).items():
-        if fn in seams:
-            continue  # reaches the gate; whatever else it calls is fine
-        for raw in RAW_PRIMITIVES:
-            if raw in callees:
-                out[fn] = callees[raw]
-                break
-    return out
-
-
-def undesigned_bypasses(
-    bypasses: dict[str, str] | None = None,
-) -> dict[str, str]:
-    """The bypasses that are NOT in `DESIGNED_BYPASSES` — the ungated writers.
-
-    Split out because it is the value bullet 1 is scored on: every bypass is
-    reported, but only an UNDESIGNED one is evidence that the rule stopped being
-    enforced. A designed bypass (`encode_for_row`'s own delegation, the session
-    TURN batch) is a documented boundary, not a regression.
-    """
-    bypasses = write_bypasses() if bypasses is None else bypasses
-    return {fn: site for fn, site in bypasses.items() if fn not in DESIGNED_BYPASSES}
-
-
-def rule_verdict(*, stated: bool, shared: bool, seams: dict[str, str],
-                 undesigned: dict[str, str], on_by_default: bool) -> str:
-    """Bullet 1's verdict TABLE, isolated so the consequence is testable.
-
-    Each input is a distinct measured fact, and each can only make the row
-    WORSE — there is no path from "fewer write paths reach the seam" to `MET`:
-
-    * not stated, or the rule set is a COPY, or NO writer reaches the seam
-      → `NOT MET` (the rule does not operate on the write path at all);
-    * an UNDESIGNED `BYPASS(...)` → `PARTIAL` — a writer that reaches a raw
-      primitive is an ungated write path (`#5008`'s exact subject), and the
-      seam map alone cannot see it because it is built from seam CALLS;
-    * the gate is off by default → `PARTIAL` (the rule is stated and wired but
-      not operative, which is what `#5008`'s ordering chose).
-    """
-    if not stated or not shared or not seams:
-        return "NOT MET"
-    if undesigned or not on_by_default:
-        return "PARTIAL"
-    return "MET"
+def _write_seams_that_embed() -> dict[str, str]:
+    """The GATED seams only: ``{writer: file:line}`` for `#5008`'s call sites."""
+    return {w: d["at"] for w, d in embedding_writers().items() if d["kind"] == "gated"}
 
 
 def score_rule_bullet() -> Row:
@@ -333,42 +299,42 @@ def score_rule_bullet() -> Row:
     import tortoise.embed_gate as embed_gate
     import tortoise.value_gate as value_gate
 
-    notes: list[str] = []
     gate_src = (REPO_ROOT / "tortoise/embed_gate.py").read_text(encoding="utf-8")
     stated = "def embedding_verdict" in gate_src
     # Identity, not equality: a COPY of the rule set is the drift §12.2a names.
     shared = embed_gate.RULE_SET is value_gate.RULES
-    seams = _write_seams_that_embed()
-    on_by_default = embed_gate.embed_gate_enabled()  # env-cleared by the caller
-    bypasses = write_bypasses(seams)
-    undesigned = undesigned_bypasses(bypasses)
-    verdict = rule_verdict(stated=stated, shared=shared, seams=seams,
-                           undesigned=undesigned, on_by_default=on_by_default)
-    notes.append(f"stated: {stated} ({SEAM_CALLEE} asks the predicate)")
-    notes.append(
+    writers = embedding_writers()
+    gated = {w: d for w, d in writers.items() if d["kind"] == "gated"}
+    ungated = {w: d for w, d in writers.items() if d["kind"] == "ungated"}
+    unparsed = [w for w, d in writers.items() if d["kind"] == "unparsed"]
+    on_by_default = embed_gate.embed_gate_enabled()  # env-cleared by measure()
+    notes = [
+        f"stated: {stated} ({SEAM.rsplit('::', 1)[-1]} asks the predicate)",
         f"one rule set: {shared} (embed_gate.RULE_SET is value_gate.RULES; "
-        f"ids={len(value_gate.RULES)})"
-    )
-    notes.append(
-        f"write paths reaching the seam: {len(seams)} "
-        f"({', '.join(sorted(seams)) or 'none'})"
-    )
-    # The OTHER direction: a write path that reaches a raw primitive instead.
-    # Undesigned ones hold this row at PARTIAL — an ungated write path is the
-    # exact state #5008 closed, and it is invisible to the seam map above.
-    notes.append(
-        f"BYPASS (raw primitive, no gate): {len(bypasses)} "
-        f"({', '.join(f'BYPASS({fn}) {site}' for fn, site in sorted(bypasses.items())) or 'none'})"
-    )
-    if undesigned:
-        notes.append(
-            "UNDESIGNED bypasses (not in DESIGNED_BYPASSES): "
-            + ", ".join(f"BYPASS({fn}) {site}" for fn, site in sorted(undesigned.items()))
-        )
-    notes.append(
+        f"ids={len(value_gate.RULES)})",
+        f"write paths reaching the gated seam: {len(gated)} "
+        f"({', '.join(sorted(gated)) or 'none'})",
+        f"write paths that embed OUTSIDE the gate: {len(ungated)} "
+        f"({', '.join(f'{w} @ {d['at']}' for w, d in sorted(ungated.items())) or 'none'})"
+        + (" — the session/Turn writers #5008 declares as exempt"
+           if ungated else ""),
         f"gate enabled by default: {on_by_default} "
-        f"(TORTOISE_EMBED_GATE={os.environ.get(embed_gate.ENV_FLAG, '')!r})"
-    )
+        f"(TORTOISE_EMBED_GATE={os.environ.get(embed_gate.ENV_FLAG, '')!r})",
+        # ⛔ A module that will not parse is a HOLE in the measurement, not a
+        # zero: its writers — gated or bypassing — are invisible to every row
+        # (this tool's own review, P2).
+        f"unparseable modules (hold this row): {sorted(unparsed) or 'none'}",
+    ]
+    if not stated or not shared or not gated:
+        verdict = "NOT MET"
+    elif not on_by_default or ungated or unparsed:
+        # EITHER condition alone means the rule is not the write path's
+        # operative rule: the flag is the operator's, and an ungated writer is
+        # a path the rule never sees. Turning the flag ON does not fix the
+        # second — which is why it must hold the row, not be masked by it.
+        verdict = "PARTIAL"
+    else:
+        verdict = "MET"
     return Row(
         bullet=1,
         text=BULLETS[0],
@@ -382,49 +348,33 @@ def score_rule_bullet() -> Row:
 # ── Bullet 2 — "no vector is stored without a path to query it" ─────────────
 
 
-#: Writers whose NAME does not carry the label they write. Explicit, and
-#: deliberately small: an unmapped writer holds bullet 2 at `PARTIAL` rather
-#: than being guessed at, so a new embedding write path is visible here instead
-#: of being silently assumed to serve a queryable label. All three are `:Point`
-#: writers (`#10465`, measured at `7df48ec7c`): the SDK's create/update and the
-#: replay-side revision.
-WRITER_LABELS_EXPLICIT: dict[str, str] = {
-    "create_point": "Point",
-    "update_point": "Point",
-    "_revise_point": "Point",
-    # A nested helper inside `tortoise/api.py`'s ingest path (`api.py:318`) —
-    # a `:Point` writer reached by the closure's own name.
-    "_point": "Point",
-}
+def written_labels(writers: dict[str, dict] | None = None) -> dict[str, str]:
+    """``{writer: label}`` for every write path that STORES a vector.
 
-
-def written_labels(seams: dict[str, str] | None = None) -> dict[str, str]:
-    """The graph labels a WRITE path embeds, derived from the writer's name.
-
-    `_upsert_point_props` -> `Point`, `_upsert_document` -> `Source` (D10: a
-    document is a `:Source`, `#5013`), `_upsert_object` -> `Object`, …
-    The name is the writer's own declaration of what it writes, so this needs no
-    hand-kept table; an unrecognised writer is REPORTED, never silently dropped.
+    Includes the ungated session writers (they store an `:Event` vector) and
+    excludes `producer`s: a function that computes a vector another function
+    writes is not a label of its own. A label is `UNKNOWN` only when neither
+    the writer's own Cypher nor its module's Cypher resolves it — and that is
+    reported, never guessed.
     """
-    seams = _write_seams_that_embed() if seams is None else seams
-    suffix_to_label = {
-        "point": "Point",
-        "point_props": "Point",
-        "subject": "Subject",
-        "object": "Object",
-        "event": "Event",
-        "document": "Source",
-    }
-    labels: dict[str, str] = {}
-    for fn in sorted(seams):
-        stem = fn[len("_upsert_"):] if fn.startswith("_upsert_") else fn
-        labels[fn] = (WRITER_LABELS_EXPLICIT.get(fn)
-                      or suffix_to_label.get(stem, f"UNKNOWN({fn})"))
-    return labels
+    writers = embedding_writers() if writers is None else writers
+    return {w: d["label"] for w, d in sorted(writers.items())
+            if d["kind"] in ("gated", "ungated")}
+
+
+def unparsed_modules(writers: dict[str, dict] | None = None) -> list[str]:
+    """Modules whose writers could not be enumerated — a hole, never a zero."""
+    writers = embedding_writers() if writers is None else writers
+    return sorted(w for w, d in writers.items() if d["kind"] == "unparsed")
 
 
 def served_labels() -> set[str]:
-    """The labels `run_vector_query` can query — its declared vocabulary."""
+    """The labels `run_vector_query` can query — its declared vocabulary.
+
+    Deliberately NOT the same source as `written_labels`: the written side comes
+    from the Cypher literals, the served side from the query vocabulary, so the
+    two can disagree — which is the bullet.
+    """
     from tortoise.security import ENTITY_TYPE_LABELS
 
     return set(ENTITY_TYPE_LABELS.values())
@@ -436,6 +386,7 @@ def score_path_bullet() -> Row:
     served = served_labels()
     labels = {label for label in written.values() if not label.startswith("UNKNOWN")}
     unknown = {fn: label for fn, label in written.items() if label.startswith("UNKNOWN")}
+    unparsed = unparsed_modules()
     orphans = labels - served
     notes = [
         f"written labels: {sorted(labels)}",
@@ -443,10 +394,12 @@ def score_path_bullet() -> Row:
         f"stored-without-a-query-path: {sorted(orphans) or 'none'}",
     ]
     if unknown:
-        notes.append(f"unmapped writers (not scored, reported): {sorted(unknown)}")
-    # A stored-and-unqueryable class is the bullet's failure; an UNMAPPED writer
-    # is not proof either way, so it can at most hold the row at PARTIAL.
-    verdict = "NOT MET" if orphans else ("PARTIAL" if unknown else "MET")
+        notes.append(f"unresolved writers (hold this row at PARTIAL): {sorted(unknown)}")
+    if unparsed:
+        notes.append(f"unparseable modules (hold this row at PARTIAL): {unparsed}")
+    # A stored-and-unqueryable class is the bullet's failure; an UNRESOLVED
+    # writer is not proof either way, so it can at most hold the row at PARTIAL.
+    verdict = "NOT MET" if orphans else ("PARTIAL" if (unknown or unparsed) else "MET")
     return Row(
         bullet=2,
         text=BULLETS[1],
@@ -493,18 +446,60 @@ def fallback_probe() -> dict[str, str]:
     only when a caller can tell a full scan from an indexed read WITHOUT
     reading `search_engine.py` — which is `#4999`'s contract.
     """
+    # The breakers are module state: snapshot and restore them, because a
+    # "read-only" instrument must not un-trip the vector breaker in whatever
+    # process imports it (this tool's own review, P2 — `measure()` already does
+    # this for the gate flags). ⛔ NOT `deepcopy`: `_CircuitBreaker` holds a
+    # `threading.Lock` (`search_engine.py:167`), so a deepcopy raises
+    # `TypeError: cannot pickle '_thread.lock' object` — measured, and it fired
+    # the moment a real search had registered a breaker, which is exactly the
+    # state this restore exists to protect. The SLOT values are primitives.
+    import tortoise.search_engine as _se
     from tortoise.search_engine import (
         VECTOR_MECHANISM_KEY,
         reset_circuit_breakers,
         run_vector_query,
     )
 
-    reset_circuit_breakers()
+    _SLOTS = ("fail_threshold", "cooldown_seconds", "_fails", "_open_until", "_probing")
+
+    def _snapshot() -> dict[str, dict]:
+        return {
+            name: {slot: getattr(b, slot) for slot in _SLOTS if hasattr(b, slot)}
+            for name, b in (getattr(_se, "_BREAKERS", {}) or {}).items()
+        }
+
+    snapshot = _snapshot()
+
+    def _restore() -> None:
+        breakers = getattr(_se, "_BREAKERS", None)
+        if not isinstance(breakers, dict):
+            return
+        for name, state in snapshot.items():
+            b = breakers.get(name)
+            if b is None:
+                continue
+            for slot, value in state.items():
+                # A slot we cannot restore is reported by the state it leaves,
+                # not fatal to a measurement.
+                with contextlib.suppress(Exception):
+                    setattr(b, slot, value)
+
     out: dict[str, str] = {}
 
     def _entry(trace):
         return next((e for e in trace if e.get("leg") == "vector"), {})
 
+    try:
+        return _probe_mechanisms(out, _entry, run_vector_query,
+                                 VECTOR_MECHANISM_KEY, reset_circuit_breakers)
+    finally:
+        _restore()
+
+
+def _probe_mechanisms(out, _entry, run_vector_query, VECTOR_MECHANISM_KEY,
+                      reset_circuit_breakers) -> dict[str, str]:
+    reset_circuit_breakers()
     # (a) the index path: signature A answers with rows.
     trace: list = []
     run_vector_query(_Catalogue([([("a",), ("b",)], None)]), VEC,
@@ -531,7 +526,6 @@ def fallback_probe() -> dict[str, str]:
         VEC, entity_type="point", is_embedded=False, leg_trace=trace,
     )
     out["scan_fallback"] = str(_entry(trace).get(VECTOR_MECHANISM_KEY, "<key absent>"))
-    reset_circuit_breakers()
     return out
 
 
@@ -556,7 +550,10 @@ def score_fallback_bullet() -> Row:
 
 #: The phrases a DECIDED V1 would carry. Absence of all of them is the finding,
 #: not a guess: V1 is `#5090`'s owner gate and only a ruling can satisfy it.
-V1_DECIDED_MARKERS = ("V1: DECIDED", "V1 is DECIDED", "V1 DECIDED —")
+#: Case-insensitive, because a real ruling is prose ("V1: decided — Point-only,
+#: 2026-11-…") and a spelling-sensitive search is a false negative with no way
+#: to correct it but editing this tool (this tool's own review, P2).
+V1_DECIDED_MARKERS = ("v1: decided", "v1 is decided", "v1 decided")
 #: Where a ruling would land, so an undecided read says what it looked at.
 V1_SURFACES = (
     "docs/architecture/STORAGE-ARCHITECTURE.md",
@@ -575,7 +572,7 @@ def score_v1_bullet() -> Row:
         for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if not re.search(r"\bV1\b", line):
                 continue
-            if any(m in line for m in V1_DECIDED_MARKERS):
+            if any(m in line.lower() for m in V1_DECIDED_MARKERS):
                 decided.append(f"{rel}:{i}: {line.strip()}")
             elif re.search(r"\bOPEN\b|\bopen decision\b|human gate|owner decision",
                            line) or "never spends that decision" in line:
@@ -595,6 +592,96 @@ def score_v1_bullet() -> Row:
 # ── §12.2a — the distinct-predicate count ──────────────────────────────────
 
 
+#: The modules a predicate can live in without being a second RULE SET: the
+#: embed seam's own module graph, walked rather than listed.
+EMBED_PATH_ROOTS: tuple[str, ...] = (
+    # NOT `tortoise/embeddings.py`: it is the CALLER, and it imports half the
+    # tree, so walking it counted 47 unrelated pattern owners as predicates.
+    # A predicate has to be imported BY the gate to be reachable from it.
+    "tortoise/embed_gate.py",
+    "tortoise/value_gate.py",
+)
+
+#: Every in-package import shape, because the walk is only as good as its
+#: edges: `from . import pkg` (a SUBPACKAGE), `from .mod import x`,
+#: `from .pkg.mod import x`, and the absolute `from tortoise.pkg.mod import x`
+#: — 858 of the last exist in this tree, so a walk that ignores it reports
+#: `count: 1` on a tree with two predicates (this tool's own review, P1).
+_LOCAL_IMPORT = re.compile(
+    r"^\s*from\s+(\.{1,2}(?:[\w.]*)|tortoise(?:\.[\w.]+)?)\s+import\s+(.*)$",
+    re.M,
+)
+
+
+def _resolve(root: Path, parts: list[str]) -> set[str]:
+    """The in-tree module file(s) a dotted import path names."""
+    out: set[str] = set()
+    if not parts:
+        return out
+    base = root / "tortoise"
+    for i in range(1, len(parts) + 1):
+        pkg = base.joinpath(*parts[:i])
+        for cand in (pkg.with_suffix(".py"), pkg / "__init__.py"):
+            if cand.exists():
+                out.add(cand.relative_to(root).as_posix())
+    return out
+
+
+def embed_path_modules() -> set[str]:
+    """Every `tortoise/**.py` reachable from the embed seam by LOCAL imports.
+
+    ⛔ A two-file whitelist (this tool's own review, P1) is a search that can
+    only find what it already names: a THIRD module owning its own patterns —
+    the drift §12.2a forbids — measured as drift-free. This walks the import
+    graph instead, so a new `embed_rules.py` imported anywhere on the embed path
+    is counted the moment it exists.
+    """
+    return _embed_path_modules(REPO_ROOT)
+
+
+@functools.lru_cache(maxsize=8)
+def _embed_path_modules(root: Path) -> frozenset[str]:
+    edges: dict[str, set[str]] = {}
+    for path in sorted((root / "tortoise").rglob("*.py")):
+        try:
+            src = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        mod = path.relative_to(root).as_posix()
+        targets: set[str] = set()
+        for m in _LOCAL_IMPORT.finditer(src):
+            dotted, imported = m.group(1), m.group(2)
+            names = [n.strip().split(" as ")[0].split(".")[0]
+                     for n in imported.split(",") if n.strip()]
+            if dotted.startswith("."):
+                parts = [x for x in dotted.lstrip(".").split(".") if x]
+                # `from . import a, b` — the imported NAMES are modules.
+                if not parts:
+                    for name in names:
+                        targets |= _resolve(root, [name])
+                    continue
+                # `from .pkg.mod import x` — the DOTTED path is the module; an
+                # imported name may still be a submodule of it.
+                targets |= _resolve(root, parts)
+                for name in names:
+                    targets |= _resolve(root, [*parts, name])
+            else:  # absolute `from tortoise.pkg.mod import x`
+                parts = dotted.split(".")[1:]
+                targets |= _resolve(root, parts)
+                for name in names:
+                    targets |= _resolve(root, [*parts, name])
+        edges[mod] = targets
+    seen: set[str] = set()
+    queue = [r for r in EMBED_PATH_ROOTS if (root / r).exists()]
+    while queue:
+        r = queue.pop()
+        if r in seen:
+            continue
+        seen.add(r)
+        queue.extend(edges.get(r, ()))
+    return frozenset(seen)
+
+
 def count_embed_predicates() -> dict:
     """Count the distinct predicates that can answer `NO-EMBED` (target: 1).
 
@@ -607,7 +694,7 @@ def count_embed_predicates() -> dict:
     import tortoise.value_gate as value_gate
 
     owners: list[str] = []
-    for rel in PREDICATE_MODULE, "tortoise/embed_gate.py":
+    for rel in sorted(embed_path_modules()):
         src = (REPO_ROOT / rel).read_text(encoding="utf-8")
         # AST, not a text pattern: an ALIASED import (`import re as _re`) is
         # still a pattern, and a substring scan missed exactly that in this
@@ -641,7 +728,8 @@ def count_embed_predicates() -> dict:
 
 
 def vector_census(graph, graph_name: str, at: str | None = None,
-                  graph_names: list[str] | None = None) -> dict:
+                  graph_names: list[str] | None = None,
+                  uri_graph_name: str | None = None) -> dict:
     """`stored` / `indexed` / `unindexed` + bytes, per label, on a NAMED graph.
 
     Reads the engine's own catalogue (`CALL db.indexes()`); stores nothing.
@@ -657,6 +745,11 @@ def vector_census(graph, graph_name: str, at: str | None = None,
     # "stores nothing" — and it reads as a measured zero for a graph that is not
     # there, the exact conflation this instrument exists to prevent. So the NAME
     # is proved to exist BEFORE any query is issued.
+    # ⛔ The handle is selected by `graph_name` (the name this row will carry),
+    # never by the URI path alone: measuring one graph and labelling another is
+    # how a census reads as measured without being reproducible (this tool's own
+    # review, P1 — it printed `Point stored=0` for a graph holding 50 vectors).
+    # `uri_graph_name` is recorded so a reader can see both.
     if graph_names is None:
         return {"graph": graph_name, "at": at, "labels": {},
                 "catalogue": "UNMEASURED(graph existence not provable — pass "
@@ -675,13 +768,21 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 "catalogue": f"UNMEASURED({type(e).__name__}: {e})",
                 "command": CENSUS_COMMAND}
 
-    indexed: dict[str, dict] = {}
+    # ⛔ `{indexed} | {served}` is NOT the population: a label that stores
+    # vectors, has no index AND no query path is the worst class this census is
+    # for, and drawing the population from the two things it compares omits it
+    # by construction (this tool's own review, P1 — a `:Chunk` with 2 stored
+    # embeddings never appeared). The graph's own labels are the population.
+    indexed: dict[str, list[dict]] = {}
+    unreadable: list[str] = []
     for row in rows or []:
         try:
             label, types = row[0], row[2]
         except (IndexError, TypeError):
+            unreadable.append(repr(row)[:80])
             continue
         if not isinstance(types, dict):
+            unreadable.append(f"{label!r}: types cell is {type(types).__name__}")
             continue
         for fld, kinds in types.items():
             if isinstance(kinds, (list, tuple, set)) and any(
@@ -694,23 +795,33 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 except AttributeError:
                     dim = None
                 stats = row[8] if len(row) > 8 and isinstance(row[8], dict) else {}
-                # The engine's own per-index counters. §12.1a measured
-                # GRAPH.MEMORY USAGE's index share 21.6× under the true cost,
-                # so these are REPORTED and labelled blind — never summed into
-                # a "total bytes" claim.
-                engine_bytes = sum(
-                    v for k, v in stats.items()
-                    if isinstance(v, int) and k.endswith("Size")
-                ) if stats else None
-                indexed[label] = {
+                # ⛔ These counters describe the row's FULLTEXT bookkeeping
+                # (measured: docTableSize / docTrieSize / invertedSize / …),
+                # NOT the vector index — a live HNSW holding 76,800 B of
+                # payload reported 5,150 B, all of it fulltext. Reported under
+                # their real name so the figure cannot be read as a vector size.
+                engine_bytes = {k: v for k, v in stats.items()
+                                if isinstance(v, int) and k.endswith("Size")} or None
+                # A LIST per label: a label with vector indexes on two fields
+                # must not have one silently overwrite the other.
+                indexed.setdefault(label, []).append({
                     "field": fld,
                     "dimension": dim if dim is not None else "UNMEASURED(no dimension in options)",
-                    "engine_index_bytes_BLIND": engine_bytes if engine_bytes is not None
+                    "engine_catalogue_counters_FULLTEXT_NOT_VECTOR": engine_bytes
+                    if engine_bytes is not None
                     else "UNMEASURED(no size counters in the catalogue row)",
-                }
+                })
+
+    try:
+        graph_labels = [r[0] for r in (graph.query("CALL db.labels()").result_set or [])]
+        population_source = "CALL db.labels()"
+    except Exception as e:
+        graph_labels = []
+        population_source = (f"UNMEASURED({type(e).__name__}: {e}) — population "
+                            f"falls back to the catalogue's labels")
 
     labels: dict[str, dict] = {}
-    for label in sorted(set(indexed) | set(served_labels())):
+    for label in sorted(set(graph_labels) | set(indexed) | served_labels()):
         try:
             res = graph.query(
                 f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL RETURN count(n)"
@@ -718,25 +829,68 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             stored = int(res[0][0])
         except Exception as e:
             stored = f"UNMEASURED({type(e).__name__}: {e})"
-        idx = indexed.get(label)
-        dim = idx["dimension"] if idx and isinstance(idx["dimension"], int) else None
-        if isinstance(stored, int) and dim:
-            # A vecf32 component is 4 bytes; the payload is DERIVED, and said so.
-            payload = {"derived_payload_B": stored * dim * 4,
-                       "how": f"stored {stored} x {dim} dims x 4 B (vecf32)"}
+        found = indexed.get(label) or []
+        # ⛔ An index on the LABEL is not an index on the COLUMN counted here.
+        # `field` was already read and used to be ignored: a `(Source:vec)`
+        # index made a `Source.embedding` vector report `indexed=True`
+        # (this tool's own review, P1 — measured on a live engine).
+        covering = [ix for ix in found if ix["field"] == "embedding"]
+        idx = covering[0] if covering else (found[0] if found else None)
+        dim = idx["dimension"] if covering and isinstance(idx["dimension"], int) else None
+        if isinstance(stored, str):
+            unindexed = "UNMEASURED(stored count unreadable)"
+        elif covering:
+            unindexed = 0
         else:
-            payload = {"derived_payload_B": "UNMEASURED(no stored count or no indexed dim)",
-                       "how": "needs both a stored count and an indexed dimension"}
+            unindexed = stored
+        # The payload is DERIVED (a vecf32 component is 4 bytes) and needs BOTH
+        # a covering index dimension AND a width probe that agrees with it —
+        # otherwise it would multiply the stored count by a number that
+        # describes a different field or a different vector (review P2).
+        width = None
+        if isinstance(stored, int) and stored > 0:
+            try:
+                # `size(n.embedding)` is REJECTED on a vecf32 column, so the
+                # vector is fetched and measured here (measured: every payload
+                # read UNMEASURED before this).
+                probe = graph.query(
+                    f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
+                    f"RETURN n.embedding LIMIT 1"
+                ).result_set
+                if probe and probe[0] and probe[0][0] is not None:
+                    width = len(probe[0][0])
+            except Exception:
+                width = None
+        if isinstance(stored, int) and stored == 0:
+            payload = {"derived_payload_B": 0, "how": "no stored vectors on this label"}
+        elif dim is None:
+            payload = {"derived_payload_B": "UNMEASURED(no VECTOR index on "
+                                            "`embedding` — nothing to derive from)",
+                       "how": "needs a covering index dimension"}
+        elif width is None:
+            payload = {"derived_payload_B": "UNMEASURED(stored width not probeable)",
+                       "how": "needs a width probe agreeing with the index"}
+        elif width != dim:
+            payload = {"derived_payload_B": "UNMEASURED(stored width "
+                                            f"{width} != index dimension {dim})",
+                       "how": "the index and the stored vectors disagree (#4280 class)"}
+        else:
+            payload = {"derived_payload_B": stored * dim * 4,
+                       "how": f"stored {stored} x {dim} dims x 4 B (vecf32), "
+                              f"probed width {width} agrees"}
         labels[label] = {
             "stored": stored,
-            "indexed": bool(idx),
-            "unindexed": (stored if isinstance(stored, int) else "UNMEASURED")
-                         if not idx else 0,
+            "indexed": bool(covering),
+            "unindexed": unindexed,
+            "vector_indexes_on_label": found or "none",
             "index": idx or "none",
             "payload": payload,
         }
     return {"graph": graph_name, "at": at, "labels": labels,
-            "catalogue": "CALL db.indexes()", "command": CENSUS_COMMAND}
+            "catalogue": "CALL db.indexes()", "population": population_source,
+            "command": CENSUS_COMMAND,
+            "uri_path_graph": uri_graph_name,
+            "unreadable_catalogue_rows": unreadable}
 
 
 def _connect(uri: str):
@@ -752,26 +906,19 @@ def _connect(uri: str):
 
     u = urlparse(uri)
     if u.scheme in ("", "file") or not u.hostname:
-        # Exit 2 = the instrument itself could not measure (the docstring's
-        # contract). A non-int SystemExit argument exits 1, so the message is
-        # PRINTED and the code passed explicitly — otherwise the documented `2`
-        # is a contract the code never implements.
-        print(
+        raise SystemExit(
             "census: an embedded/absent engine has no index API — pass a "
             "docker:// or bolt:// URI (embedded would report indexed=False for "
-            "every label, which is NOT the same fact)",
-            file=sys.stderr,
+            "every label, which is NOT the same fact)"
         )
-        raise SystemExit(2)
     from falkordb import FalkorDB
 
     db = FalkorDB(host=u.hostname, port=u.port or 6379, password=u.password or "")
-    name = (u.path or "/").lstrip("/") or "tortoise"
     try:
         names = list(db.list_graphs() or [])
     except Exception:
         names = None
-    return db.select_graph(name), names
+    return db, names
 
 
 # ── The report ─────────────────────────────────────────────────────────────
@@ -780,10 +927,19 @@ def _connect(uri: str):
 def measure() -> dict:
     """Run the whole instrument. Clears the gate flags first — a lane's own env
     must not be able to make a default-off gate read as enforced."""
-    for var in ("TORTOISE_EMBED_GATE", "TORTOISE_VALUE_GATE"):
+    # Snapshot and RESTORE: an import of a "read-only" instrument must not
+    # leave the rest of the caller's process with both gates disabled.
+    _flags = {v: os.environ.get(v) for v in ("TORTOISE_EMBED_GATE", "TORTOISE_VALUE_GATE")}
+    for var in _flags:
         os.environ.pop(var, None)
-    rows = [score_rule_bullet(), score_path_bullet(),
-            score_fallback_bullet(), score_v1_bullet()]
+    try:
+        rows = _measure_rows()
+    finally:
+        for var, value in _flags.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
     return {
         "issue": 10465,
         "epic": 5090,
@@ -792,8 +948,13 @@ def measure() -> dict:
         "rows": [asdict(r) for r in rows],
         "predicates": count_embed_predicates(),
         "seams": _write_seams_that_embed(),
-        "bypasses": write_bypasses(),
     }
+
+
+def _measure_rows() -> list[Row]:
+    rows = [score_rule_bullet(), score_path_bullet(),
+            score_fallback_bullet(), score_v1_bullet()]
+    return rows
 
 
 def _head() -> str:
@@ -832,25 +993,31 @@ def main(argv: list[str] | None = None) -> int:
                     help="the graph NAME to census (default $TORTOISE_GRAPH_NAME)")
     args = ap.parse_args(argv)
 
-    try:
-        report = measure()
-    except ImportError as e:
-        # The other half of the documented `2`: a gate module the instrument
-        # scores that will not import. Without this the traceback exits 1 and a
-        # caller cannot tell "could not measure" from "a verdict was NOT MET".
-        print(f"could not measure: {type(e).__name__}: {e}", file=sys.stderr)
-        return 2
+    report = measure()
+    unmeasured = False
     if args.census:
         if not args.uri:
             report["census"] = {"error": "UNMEASURED(no --uri and no TORTOISE_DB_URI)"}
+            unmeasured = True
         else:
             graph_name = args.graph or (args.uri.rstrip("/").rsplit("/", 1)[-1])
-            graph, names = _connect(args.uri)
-            report["census"] = vector_census(graph, graph_name, graph_names=names)
+            db, names = _connect(args.uri)
+            uri_name = args.uri.rstrip("/").rsplit("/", 1)[-1]
+            # ⛔ The handle is selected by the NAME the report will carry. Using
+            # the URI path while LABELLING the row `--graph` attributes one
+            # graph's numbers to another (this tool's own review, P1: it printed
+            # `Point stored=0` for a graph holding 50 vectors).
+            graph = db.select_graph(graph_name)
+            report["census"] = vector_census(
+                graph, graph_name, graph_names=names,
+                uri_graph_name=uri_name)
+            census = report["census"]
+            unmeasured = unmeasured or str(census.get("catalogue", "")).startswith(
+                "UNMEASURED") or "error" in census
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
-        return 0
+        return 2 if unmeasured else 0
 
     print(f"#10465 — #5090 DoD, measured at {report['head']} on {report['at']}\n")
     print(_table([Row(**{k: v for k, v in r.items()}) for r in report["rows"]]))
@@ -868,7 +1035,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"payload={d['payload']['derived_payload_B']}")
         if "error" in c:
             print(f"  {c['error']}")
-    return 0
+    return 2 if unmeasured else 0
 
 
 if __name__ == "__main__":

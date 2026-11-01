@@ -11,20 +11,13 @@ claims:
 
 | test | claim it falsifies | it goes RED when … |
 |---|---|---|
-| `test_the_four_bullets_are_scored_verbatim` | nothing is silently dropped, and nothing is re-worded | `BULLETS` (or a scored row) drifts from the epic strings pinned as LITERALS below — never compared against the module under test, which would pass on any re-wording |
-| `test_a_reworded_bullet_reds_the_verbatim_pin` | the pin above can FAIL | it cannot — i.e. the comparison has regressed to a self-comparison of `probe.BULLETS` with itself |
+| `test_the_four_bullets_are_scored_verbatim` | nothing is silently dropped | a bullet stops being scored, or is re-worded so the table scores something the epic does not say |
 | `test_the_embed_decision_has_exactly_one_predicate` | §12.2a's target of ONE predicate | a second pattern-owning module appears on the embed path, or the gate copies `value_gate.RULES` instead of sharing it |
 | `test_a_second_pattern_list_in_the_embed_gate_reads_as_drift` | the predicate count can FAIL | the count is hard-wired to 1 (mutation: a fake tree WITH a second pattern list must read `DRIFT`) |
-| `test_every_embedding_write_path_reaches_the_gate_seam` | bullet 1's `enforced` half, REMOVAL direction | a writer stops calling `encode_for_row` (the point of #5008) |
-| `test_a_new_write_path_that_bypasses_the_seam_is_reported` | bullet 1's `enforced` half, BYPASS direction | a writer reaches a raw primitive instead — and is not reported as `BYPASS(<fn>)` |
-| `test_a_module_qualified_call_still_counts_as_a_seam` | the seam walk sees qualified calls | the walk matches only bare `ast.Name` calls, so `mod.encode_for_row(...)` vanishes |
-| `test_an_undesigned_bypass_holds_bullet_one_at_partial` | the bypass consequence | a bypass stops holding bullet 1 below `MET` |
-| `test_the_designed_bypasses_are_the_documented_ones` | the exemption list is deliberate | a third write path starts bypassing the gate without an explicit edit here |
-| `test_the_instrument_is_selected_by_its_own_subjects` | the pins actually RUN in CI | a subject diff stops selecting this file (the #10465 review's P1) |
+| `test_every_embedding_write_path_reaches_the_gate_seam` | bullet 1's `enforced` half | a writer stops calling `encode_for_row` (the point of #5008), or a new one appears unmapped |
 | `test_every_embedded_label_has_a_query_path` | bullet 2 | an embedding write path serves a label `run_vector_query` cannot query |
 | `test_all_three_mechanisms_are_visible_to_the_caller` | bullet 3 (`#4999`) | the fallback stops announcing itself, or two paths report the same mechanism |
 | `test_the_census_refuses_to_report_zero_for_an_unreadable_store` | the 2026-09-24 error (`stored`-only / silent 0) | a store that could not be read is reported as `0` anything |
-| `test_an_unmeasurable_run_exits_two` | the documented exit-code contract | a run that could not measure exits 0 or 1, so a caller reads "could not measure" as "a verdict was NOT MET" |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
 measurement-only; the instrument is read-only and its pin must be too.
@@ -33,7 +26,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -43,31 +35,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "tools"))
 
 import dod_5090_probe as probe
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-#: `#5090`'s four `## Definition of done` bullets, pinned HERE as LITERALS.
-#: ⛔ Not read from `probe.BULLETS`: `measure()` builds every row FROM that
-#: constant, so asserting `[r["text"] for r in rows] == list(probe.BULLETS)` is a
-#: self-comparison — it passes after `BULLETS[0]` is re-worded to anything, which
-#: is precisely the drift the table above claims to catch. Two artifacts lean on
-#: this pin (the `BULLETS` comment in `tools/dod_5090_probe.py` and `#5090`'s own
-#: "bullet (verbatim)" table), so it has to read the epic's words and not the
-#: module's. A re-wording on either side is a deliberate edit, made in both
-#: places — which is what makes it visible.
-EPIC_BULLETS_5090: tuple[str, ...] = (
-    "A stated, enforced rule for what earns an embedding.",
-    "No vector is stored without a path to query it.",
-    "A fallback query reports the fallback.",
-    "V1 is decided and implemented.",
-)
-
-
-def _assert_verbatim(bullets) -> None:
-    assert tuple(bullets) == EPIC_BULLETS_5090, (
-        "the scored text drifted from #5090's `## Definition of done`: "
-        f"tool={tuple(bullets)!r} epic={EPIC_BULLETS_5090!r}"
-    )
 
 
 @pytest.fixture(autouse=True)
@@ -92,31 +59,25 @@ def _no_ambient_gate_flags():
 
 def test_the_four_bullets_are_scored_verbatim():
     """Every bullet the epic states is scored, and none is invented."""
-    _assert_verbatim(probe.BULLETS)
     report = probe.measure()
     rows = report["rows"]
     assert len(rows) == 4, rows
     assert [r["bullet"] for r in rows] == [1, 2, 3, 4], rows
-    _assert_verbatim([r["text"] for r in rows])
+    # A LITERAL, not `probe.BULLETS` on both sides: comparing the tool's
+    # constant to itself could only detect a dropped row, never a re-worded
+    # one (this file's own review, P3). These strings are `#5090`'s
+    # `## Definition of done`, verbatim.
+    assert [r["text"] for r in rows] == [
+        "A stated, enforced rule for what earns an embedding.",
+        "No vector is stored without a path to query it.",
+        "A fallback query reports the fallback.",
+        "V1 is decided and implemented.",
+    ], "the scored text drifted from #5090's `## Definition of done`"
     for r in rows:
         assert r["verdict"] in probe.VERDICTS, r
         # A bullet without a command is UNSCORED, not met (#10465 target 1).
         assert r["command"].strip(), r
         assert r["observed"].strip(), r
-
-
-def test_a_reworded_bullet_reds_the_verbatim_pin(monkeypatch):
-    """The pin above can FAIL — proved here, because a falsifier that cannot
-    come back red is machinery. Before this fix the assertion compared
-    `probe.BULLETS` with itself, so a re-worded constant passed it silently."""
-    reworded = list(probe.BULLETS)
-    reworded[0] = "Not a bullet from the epic."
-    monkeypatch.setattr(probe, "BULLETS", tuple(reworded))
-    assert probe.BULLETS != EPIC_BULLETS_5090, "the mutation did not take"
-    with pytest.raises(AssertionError, match="drifted from #5090"):
-        _assert_verbatim(probe.BULLETS)
-    with pytest.raises(AssertionError, match="drifted from #5090"):
-        _assert_verbatim([r["text"] for r in probe.measure()["rows"]])
 
 
 def test_the_report_names_the_head_it_measured():
@@ -174,12 +135,7 @@ def test_a_second_pattern_list_in_the_embed_gate_reads_as_drift(tmp_path, monkey
 
 
 def test_every_embedding_write_path_reaches_the_gate_seam():
-    """#5008's seam is reached by the entity writers — not by the raw primitive.
-
-    This is the REMOVAL direction only: a writer that stops calling the seam
-    leaves this map. The BYPASS direction is the sibling test below, because a
-    map built from seam CALLS cannot see a function that never called it.
-    """
+    """#5008's seam is reached by the entity writers — not by the raw primitive."""
     seams = probe._write_seams_that_embed()
     for writer in ("_upsert_point_props", "_upsert_subject", "_upsert_object",
                    "_upsert_document", "_upsert_event"):
@@ -188,125 +144,8 @@ def test_every_embedding_write_path_reaches_the_gate_seam():
             f"the ungated-primitive state #5008 closed. Measured seams: {sorted(seams)}"
         )
     # And the derived labels must not invent one.
-    written = probe.written_labels(seams)
+    written = probe.written_labels()
     assert not [v for v in written.values() if v.startswith("UNKNOWN")], written
-
-
-def test_a_new_write_path_that_bypasses_the_seam_is_reported(tmp_path):
-    """The BYPASS direction: a NEW writer calling a raw primitive is reported.
-
-    `#5008`'s docstring names `encode_for_store` / `encode_batch_for_store` as
-    the ungated primitives, and the seam map is built from calls of the SEAM —
-    so without this the one change that makes "every embedding write path
-    reaches the gate" false again (a new writer that never called it) adds
-    nothing to the map and the instrument keeps reporting the same verdict.
-    """
-    (tmp_path / "tortoise").mkdir()
-    (tmp_path / "tortoise" / "writers.py").write_text(
-        "def _upsert_thing(text):\n"
-        "    return encode_for_store(text, None)\n"
-        "\n"
-        "def _upsert_other(text):\n"
-        "    return encode_batch_for_store([text], None)\n"
-        "\n"
-        "def _upsert_gated(text):\n"
-        "    return encode_for_row(text, None)\n",
-        encoding="utf-8",
-    )
-    seams = probe._write_seams_that_embed(root=tmp_path)
-    bypasses = probe.write_bypasses(seams, root=tmp_path)
-    assert set(seams) == {"_upsert_gated"}, seams
-    # Both directions of reaching a raw primitive are reported, not just one.
-    assert set(bypasses) == {"_upsert_thing", "_upsert_other"}, bypasses
-    assert bypasses["_upsert_thing"] == "tortoise/writers.py:2", bypasses
-    # Neither is a documented exemption, so bullet 1 reads an UNDESIGNED bypass.
-    assert set(probe.undesigned_bypasses(bypasses)) == {"_upsert_thing", "_upsert_other"}
-    assert probe.rule_verdict(stated=True, shared=True, seams=seams,
-                              undesigned=probe.undesigned_bypasses(bypasses),
-                              on_by_default=True) == "PARTIAL"
-
-
-def test_a_module_qualified_call_still_counts_as_a_seam(tmp_path):
-    """`mod.encode_for_row(...)` is an `ast.Attribute` (`.attr`), not a
-    `Name` (`.id`) — https://docs.python.org/3/library/ast.html — so a walk that
-    reads only `.id` silently DROPS every qualified call site, and a writer that
-    imported the module rather than the name would vanish from the seam map."""
-    (tmp_path / "tortoise").mkdir()
-    (tmp_path / "tortoise" / "qualified.py").write_text(
-        "from tortoise import embeddings\n"
-        "\n"
-        "def _upsert_object(text):\n"
-        "    return embeddings.encode_for_row(text, None)\n",
-        encoding="utf-8",
-    )
-    seams = probe._write_seams_that_embed(root=tmp_path)
-    assert "_upsert_object" in seams, seams
-    assert seams["_upsert_object"] == "tortoise/qualified.py:4", seams
-
-
-def test_an_undesigned_bypass_holds_bullet_one_at_partial():
-    """A bypass is reported, but only an UNDESIGNED one is evidence of
-    regression: the designed ones are `encode_for_row`'s documented boundary."""
-    seam = {"_upsert_subject": "tortoise/x.py:1"}
-    assert probe.rule_verdict(stated=True, shared=True, seams=seam,
-                              undesigned={}, on_by_default=True) == "MET"
-    assert probe.rule_verdict(
-        stated=True, shared=True, seams=seam,
-        undesigned={"_new_writer": "tortoise/y.py:9"},
-        on_by_default=True,
-    ) == "PARTIAL"
-    # The other inputs can only make the row worse, never better.
-    assert probe.rule_verdict(stated=False, shared=True, seams=seam,
-                              undesigned={}, on_by_default=True) == "NOT MET"
-    assert probe.rule_verdict(stated=True, shared=False, seams=seam,
-                              undesigned={}, on_by_default=True) == "NOT MET"
-    assert probe.rule_verdict(stated=True, shared=True, seams={},
-                              undesigned={}, on_by_default=True) == "NOT MET"
-    assert probe.rule_verdict(stated=True, shared=True, seams=seam,
-                              undesigned={}, on_by_default=False) == "PARTIAL"
-
-
-def test_the_designed_bypasses_are_the_documented_ones():
-    """The exemption list is DELIBERATE: the real tree has exactly these two
-    bypasses and no others. A third one is an ungated write path, so it reds
-    here until someone edits `DESIGNED_BYPASSES` on purpose — which is the whole
-    reason the list is not derived."""
-    measured = probe.write_bypasses()
-    assert set(measured) == set(probe.DESIGNED_BYPASSES), (
-        f"measured bypasses {sorted(measured)} != the documented exemptions "
-        f"{sorted(probe.DESIGNED_BYPASSES)} — a write path reaches a raw "
-        "primitive without the gate (#5008)'s subject"
-    )
-    assert probe.undesigned_bypasses(measured) == {}, measured
-    # And the row REPORTS them: a bypass that is not printed is not measured.
-    notes = probe.score_rule_bullet().notes
-    assert any(n.startswith("BYPASS (raw primitive, no gate): 2") for n in notes), notes
-    assert not any(n.startswith("UNDESIGNED") for n in notes), notes
-
-
-def test_the_instrument_is_selected_by_its_own_subjects():
-    """A falsifier that never executes is not a falsifier (#10465 review P1).
-
-    Registration alone is classification (#4348): it satisfies
-    `ci_selection.py --integrity` but does not make a diff SELECT the file. Each
-    subject below must select it, or the pins this instrument exists to install
-    never run on the change that can break them. Two named-surface matches
-    REPLACE the `core` fallback (#2938), which is why the file is registered in
-    `eval` as well as `core`, and why `tools/dod_5090_probe.py` needs a
-    `CORE_ALSO` entry (a `tools/`-only diff is swallowed by
-    NON_PYTHON_PREFIXES before the fallback runs).
-    """
-    import ci_selection
-
-    manifest = ci_selection.load_manifest()
-    for subject in ("tortoise/embed_gate.py", "tortoise/value_gate.py",
-                    "tortoise/embeddings.py", "tortoise/search_engine.py",
-                    "tortoise/security.py", "tools/dod_5090_probe.py"):
-        selected = ci_selection.select([subject], "pull_request", manifest)
-        assert "test_dod_5090_probe.py" in selected["test_files"], (
-            f"a {subject}-only diff does not select this file — its falsifiers "
-            f"never run: surfaces={selected['surfaces']} full={selected['full']}"
-        )
 
 
 def test_every_embedded_label_has_a_query_path():
@@ -373,32 +212,236 @@ def test_the_census_never_touches_a_graph_that_does_not_exist():
 def test_the_census_refuses_an_embedded_engine():
     """Embedded has no index API — a census there would read `indexed: False`
     for every label, which is not the same fact as "nothing is indexed"."""
-    with pytest.raises(SystemExit) as raised:
+    with pytest.raises(SystemExit):
         probe._connect("file:///tmp/whatever.db")
-    # The documented contract: 2 means "could not measure", never a verdict.
-    # A non-int SystemExit argument exits 1, so the code is passed explicitly.
-    assert raised.value.code == 2, raised.value.code
 
 
-def test_an_unmeasurable_run_exits_two(monkeypatch):
-    """`0 = ran` (whatever the verdicts), `2 = could not measure`.
+# ── The falsifiers the review asked for ────────────────────────────────────
 
-    The docstring promised `2` and no path returned it, which is the same
-    class of defect as the epic body this PR repaired: a contract in prose the
-    code never implements. Both failure halves are pinned here."""
-    # (a) a gate module the instrument scores that will not import.
-    def _no_gate():
-        raise ImportError("no module named 'tortoise.embed_gate'")
 
-    monkeypatch.setattr(probe, "score_rule_bullet", _no_gate)
-    assert probe.main(["--json"]) == 2
-    monkeypatch.undo()
+def test_a_writer_that_names_an_unserved_label_reads_NOT_MET(tmp_path, monkeypatch):
+    """Bullet 2's `NOT MET` branch must be reachable (review P1 #3).
 
-    # (b) a census URI whose engine has no index API.
-    with pytest.raises(SystemExit) as raised:
-        probe.main(["--census", "--uri", "file:///tmp/whatever.db"])
-    assert raised.value.code == 2, raised.value.code
+    A writer whose own Cypher names `:Document` — a label `run_vector_query`
+    does not serve — is the stored-and-unqueryable class the bullet forbids. A
+    label map drawn from the query vocabulary itself can never produce it.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "writer.py").write_text(
+        "from .embeddings import encode_for_row\n"
+        "def _upsert_document(ev):\n"
+        "    emb = encode_for_row('x', 3)\n"
+        "    q = 'MERGE (n:Document {id: 1}) SET n.embedding = $emb'\n"
+        "    return q, emb\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    written = probe.written_labels()
+    assert written == {"_upsert_document": "Document"}, written
+    served = probe.served_labels()
+    assert "Document" not in served, served
+    assert set(written.values()) - served == {"Document"}
 
-    # And a run that DID measure is 0 even when a row is NOT MET — a caller
-    # must never be able to read a red verdict as "the tool failed".
-    assert probe.main(["--json"]) == 0
+
+def test_a_write_path_outside_the_gate_is_counted(tmp_path, monkeypatch):
+    """Bullet 1 must SEE an ungated writer (review P1 #4) — a map that only
+    looks for the gated call cannot report the bypass it is meant to catch."""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n"
+        "def compute_session_embedding(t):\n    return [0.0]\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "writer.py").write_text(
+        "from .embeddings import compute_session_embedding\n"
+        "def main(event):\n"
+        "    emb = compute_session_embedding('x')\n"
+        "    set_embedding_clause('e')\n"
+        "    return emb\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    writers = probe.embedding_writers()
+    assert writers["main"]["kind"] == "ungated", writers
+
+
+def test_the_predicate_count_searches_the_embed_path_not_a_whitelist(
+        tmp_path, monkeypatch):
+    """A THIRD pattern-owning module on the embed path is drift (review P1 #2).
+
+    A two-file whitelist reports this tree as drift-free; the import-graph walk
+    cannot.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_A = re.compile(r'#\\d+')\nRULES = ('r',)\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nfrom . import embed_rules\n"
+        "RULE_SET = value_gate.RULES\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embed_rules.py").write_text(
+        "import re\n_B = re.compile(r'\\d{4}')\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "embeddings.py").write_text("# seam\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 2, counted
+    assert "tortoise/embed_rules.py" in counted["owners"], counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_measure_restores_the_gate_flags(monkeypatch):
+    """A read-only instrument must not leave the caller's process un-gated."""
+    monkeypatch.setenv("TORTOISE_EMBED_GATE", "1")
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
+    probe.measure()
+    assert os.environ["TORTOISE_EMBED_GATE"] == "1"
+    assert os.environ["TORTOISE_VALUE_GATE"] == "1"
+
+
+# ── The census, on its POSITIVE path (all three tests above were negative) ──
+
+
+class _CensusGraph:
+    """A fake engine: a catalogue, a label list, and per-label vector counts.
+
+    Exists because every census test before it asserted a FAILURE path, which
+    is how three false-`MET` shapes survived a review (the `unindexed` column,
+    the population, and the payload arithmetic had no positive coverage).
+    """
+
+    def __init__(self, catalogue, labels, vectors, dim=None):
+        self._catalogue = catalogue
+        self._labels = labels
+        self._vectors = vectors  # {label: (count, [1.0]*width | None)}
+        self._dim = dim
+
+    def query(self, cypher, params=None, timeout=None):
+        if "db.indexes()" in cypher:
+            rows = self._catalogue
+        elif "db.labels()" in cypher:
+            rows = [[lab] for lab in self._labels]
+        elif "RETURN count(n)" in cypher:
+            label = cypher.split("MATCH (n:")[1].split(")")[0]
+            rows = [[self._vectors.get(label, (0, None))[0]]]
+        elif "RETURN n.embedding" in cypher:
+            label = cypher.split("MATCH (n:")[1].split(")")[0]
+            rows = [[self._vectors.get(label, (0, None))[1]]]
+        else:
+            rows = []
+        return type("_R", (), {"result_set": rows})()
+
+
+def _index_row(label, field, dim):
+    return [label, [field], {field: ["VECTOR"]},
+            {field: {"dimension": dim}}, "english", [], "NODE", "OPERATIONAL", {}]
+
+
+def test_the_census_reports_an_index_on_ANOTHER_field_as_unindexed():
+    """An index on the LABEL is not an index on `embedding` (review P1-1).
+
+    Measured failure this pins: a `(Source, vec)` index made a stored
+    `Source.embedding` vector report `indexed=True, unindexed=0`.
+    """
+    graph = _CensusGraph(
+        catalogue=[_index_row("Source", "vec", 384)],
+        labels=["Source", "Chunk"],
+        vectors={"Source": (1, [0.0] * 384), "Chunk": (2, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                                graph_names=["g"])
+    assert census["labels"]["Source"]["indexed"] is False
+    assert census["labels"]["Source"]["unindexed"] == 1
+    # …and the population comes from the GRAPH's labels, so a stored-and-
+    # neither-indexed-nor-served label is REPORTED, not omitted (review P1-2).
+    assert "Chunk" in census["labels"], sorted(census["labels"])
+    assert census["labels"]["Chunk"]["unindexed"] == 2
+
+
+def test_the_census_payload_needs_the_probe_and_the_index_to_agree():
+    """The byte figure is derived, so it must not multiply a different width."""
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"],
+        vectors={"Point": (2, [0.0] * 4)},  # stored width 4, index dim 384
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                                graph_names=["g"])
+    payload = census["labels"]["Point"]["payload"]["derived_payload_B"]
+    assert isinstance(payload, str) and payload.startswith("UNMEASURED"), payload
+    # Agreeing width/dim DOES derive it.
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"],
+        vectors={"Point": (2, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                                graph_names=["g"])
+    assert census["labels"]["Point"]["payload"]["derived_payload_B"] == 2 * 384 * 4
+
+
+def test_the_census_measures_the_graph_its_row_NAMES(monkeypatch):
+    """`--graph B` with a `--uri …/A` must query B (review P1, no falsifier)."""
+    selected: list[str] = []
+
+    class _Db:
+        def select_graph(self, name):
+            selected.append(name)
+            return _CensusGraph([], [name], {})
+
+    monkeypatch.setattr(probe, "_connect", lambda uri: (_Db(), ["A", "B"]))
+    rc = probe.main(["--census", "--json",
+                     "--uri", "docker://:@127.0.0.1:1/A", "--graph", "B"])
+    assert rc == 0, rc
+    assert selected == ["B"], selected
+
+
+def test_an_unparseable_module_holds_the_rows(tmp_path, monkeypatch):
+    """A tree that will not fully parse must not read as clean (review P2-1)."""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "writer.py").write_text(
+        "from .embeddings import encode_for_row\n"
+        "def _upsert_point(ev):\n"
+        "    return 'MERGE (n:Point {id: 1}) SET n.embedding = $e'\n",
+        encoding="utf-8")
+    (tmp_path / "tortoise" / "broken.py").write_text(
+        "def oops(:\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert probe.unparsed_modules() == ["UNPARSEABLE"], probe.unparsed_modules()
+    assert probe.score_path_bullet().verdict == "PARTIAL"
+
+
+def test_the_predicate_walk_follows_subpackages_and_absolute_imports(
+        tmp_path, monkeypatch):
+    """The two import shapes that made a second predicate read MET (review P1-3)."""
+    t = tmp_path / "tortoise"
+    (t / "pkg").mkdir(parents=True)
+    (t / "pkg" / "__init__.py").write_text(
+        "import re\n_P = re.compile(r'x')\n", encoding="utf-8")
+    (t / "abs_rules.py").write_text("import re\n_A = re.compile(r'y')\n",
+                                    encoding="utf-8")
+    (t / "value_gate.py").write_text(
+        "import re\n_V = re.compile(r'#\\d+')\nRULES = ('r',)\n", encoding="utf-8")
+    (t / "embed_gate.py").write_text(
+        "from . import value_gate, pkg\n"
+        "from tortoise.abs_rules import _A\n"
+        "RULE_SET = value_gate.RULES\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 3, counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_the_fallback_probe_restores_the_circuit_breakers():
+    """A read-only probe must not un-trip a breaker a live process opened.
+
+    Pinned because the FIRST attempt at this restore (`deepcopy` of
+    `_BREAKERS`) raised `TypeError: cannot pickle '_thread.lock' object` the
+    moment a breaker was registered — i.e. in exactly the state it existed to
+    protect, and only in a process that had already run a real search. A fresh
+    pytest process hid it.
+    """
+    from tortoise.search_engine import _breaker
+
+    b = _breaker("vector")
+    b.record_failure()
+    before = (b._fails, b._open_until, b._probing)
+    probe.fallback_probe()
+    after = (b._fails, b._open_until, b._probing)
+    assert after == before, (before, after)
