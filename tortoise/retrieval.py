@@ -59,7 +59,12 @@ from tortoise.coverage_loop import (
 )
 
 from .env_truthy import env_flag  # #4097: the declared truthy contract
-from .validity import END_UNKNOWN, PRECISION_UNKNOWN  # #2350: the 3-state end
+from .validity import (  # #2350: the 3-state end
+    _EPOCH_SECONDS_SANE_MAX,
+    _EPOCH_SECONDS_SANE_MIN,
+    END_UNKNOWN,
+    PRECISION_UNKNOWN,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -73,23 +78,32 @@ _log = logging.getLogger(__name__)
 BOUND_RENDER_OUTCOMES: dict[str, int] = {
     "unreadable_bound": 0,      # a bound present but of no readable shape
     "marker_failed": 0,         # the marker raised for one hit (backstop)
-    "epoch_read_as_millis": 0,  # a NUMBER at millis magnitude (see the floor)
 }
 
-#: #9741: the magnitude at which a stored NUMBER stops being an epoch SECONDS
-#: and is read as an epoch MILLIS (the classic 1000× bug). The split is chosen
-#: so the low side can only be seconds and the high side can only be millis:
-#: BELOW it, a millis reading would predate 1973 (see the floor's own value) and
-#: a seconds reading spans 1970..5138 — the whole authored range; ABOVE it, a
-#: seconds reading names year 5138+ (no authored window;
-#: ``validity._EPOCH_SECONDS_SANE_MAX`` puts the authored ceiling at 2100-01-01)
-#: while a millis reading names 1973+. Every reinterpretation is COUNTED
-#: (``BOUND_RENDER_OUTCOMES['epoch_read_as_millis']``), because this reading is
-#: the marker's alone — the ordering measure (``search_engine._created_sort_key``)
-#: and ``time_aware._as_date`` still read a NUMBER as seconds, the unit
-#: ``validity``'s write vocabulary names — and an uncounted divergence is how
-#: one surface silently becomes authoritative over another.
-_EPOCH_MILLIS_FLOOR = 100_000_000_000  # ms: 1973-03-03T09:46:40Z; s: year 5138
+#: #9741 review P2 — THE UNIT IS SECONDS, AND IT IS ``validity``'S SPAN.
+#: A stored NUMBER is read as an epoch in SECONDS and only inside the span an
+#: authored bound can occupy: ``validity._EPOCH_SECONDS_SANE_MIN`` ..
+#: ``_EPOCH_SECONDS_SANE_MAX`` (1900-01-01 .. 2100-01-01, in seconds), which is
+#: the exact span ``validity``'s ``pass the NUMBER <n>`` repair vocabulary
+#: prescribes. Reusing THAT constant, rather than inventing a renderer-local
+#: threshold, is the point: ``search_engine._created_sort_key`` — the measure
+#: every temporal query ORDERS by, and the one
+#: ``commit_schema.validate_validity_window`` accepts a window with — reads a
+#: NUMBER as seconds, and ``validity.effective_precision`` short-circuits
+#: numerics to ``"day"`` on that same reading. Any other unit rule here makes
+#: the reader state a date the query engine contradicts.
+#:
+#: This REPLACES an earlier round of this PR that read a NUMBER past 1e11 as
+#: epoch MILLIS: ``valid_from = 1719792000000`` then rendered
+#: ``[valid since 2024-07-01]`` while ``_created_sort_key`` read the same number
+#: as year 56468, so every temporal query treated the point as not-yet-valid
+#: while the reader was told it had been valid since 2024. That reading was
+#: justified by a citation that does not hold — ``capture_spool`` writes epoch
+#: MILLISECONDS for its own backoff deadline and never writes ``validFrom`` at
+#: all — so no writer produces a millis window bound. A number outside the
+#: authored span is SKIPPED and COUNTED like any other unreadable bound, never
+#: reinterpreted into a unit the rest of the system does not use.
+_EPOCH_AUTHORED_SECONDS_SPAN = (_EPOCH_SECONDS_SANE_MIN, _EPOCH_SECONDS_SANE_MAX)
 
 #: token-count estimator (matches the reader-context alignment invariant):
 #: rough LLM token ≈ whitespace tokens, plus a 10% markup allowance for
@@ -935,33 +949,32 @@ _ROLE_PREFIX = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s+",
 
 
 def _epoch_utc_day(value: float) -> str | None:
-    """The UTC calendar day of a numeric epoch (seconds or millis), or ``None``.
+    """The UTC calendar day of an epoch-SECONDS bound, or ``None``.
 
-    #9741's display half. A stored NUMBER is the classic 1000× hazard: epoch
-    seconds and epoch millis are both plausible stored shapes in this graph
-    (``search_engine._created_sort_key`` records the numeric-epoch form;
-    ``capture_spool`` writes epoch MILLISECONDS for exactly this class of
-    field, and warns that a seconds value read by the millis side lands in
-    "the year 57000"), and reading one as the other silently states a date off
-    by three orders of magnitude. The unit is therefore decided by MAGNITUDE at
-    ``_EPOCH_MILLIS_FLOOR`` — see its note for why that split cannot misread a
-    plausible bound.
+    #9741's display half. The unit is SECONDS, unconditionally — the one
+    ``search_engine._created_sort_key`` orders a NUMBER by and the one
+    ``validity``'s write vocabulary names (see
+    :data:`_EPOCH_AUTHORED_SECONDS_SPAN`). A number outside the authored span is
+    not reinterpreted as some other unit: doing so would state a date the
+    ordering measure contradicts, which is the divergence this replaced.
 
     The day is a UTC day on purpose: the same rule ``assembly._norm_date`` and
     every product day-stamp follow (a machine-local day would make the reader's
     stated date depend on the host). ``None`` (never a fabricated date) when the
-    value does not fit a calendar at all — including an integer too large for
-    ``float()`` (``10**400``, the same shape ``validity._names_an_instant``
-    short-circuits to avoid an ``OverflowError`` out of a read path) and
-    ``nan``/``inf`` — the caller counts that.
+    value does not name an authored instant — outside the span, not finite, or
+    too large for ``float()`` at all (``10**400``, the same shape
+    ``validity._names_an_instant`` short-circuits to avoid an ``OverflowError``
+    out of a read path). The caller counts every ``None``.
     """
     try:
         seconds = float(value)
     except (OverflowError, ValueError):
         return None
-    if abs(seconds) >= _EPOCH_MILLIS_FLOOR:
-        BOUND_RENDER_OUTCOMES["epoch_read_as_millis"] += 1
-        seconds /= 1000.0
+    if not math.isfinite(seconds):
+        return None
+    low, high = _EPOCH_AUTHORED_SECONDS_SPAN
+    if not low <= seconds <= high:
+        return None
     try:
         return datetime.fromtimestamp(seconds, tz=UTC).strftime("%Y-%m-%d")
     except (OverflowError, OSError, ValueError):
@@ -980,16 +993,19 @@ def _display_bound(value: object, field: str, hit: dict) -> str:
         what an open window renders as);
       * ISO text → trimmed, and a full timestamp truncated to ``YYYY-MM-DD``
         (the reader-context rule: no full timestamps in reader text);
-      * a NUMBER → the UTC calendar day of that epoch, seconds or millis.
+      * a NUMBER → the UTC calendar day of that epoch in SECONDS, and only
+        inside the authored span (:data:`_EPOCH_AUTHORED_SECONDS_SPAN`).
 
-    Anything else (a mapping, a list, a number outside the calendar) is a value
-    the marker cannot honestly date. It is SKIPPED — the hit loses that clause
-    and the read completes — with ``BOUND_RENDER_OUTCOMES`` counted and a
+    Anything else (a mapping, a list, a number outside the authored span) is a
+    value the marker cannot honestly date. It is SKIPPED — the hit loses that
+    clause and the read completes — with ``BOUND_RENDER_OUTCOMES`` counted and a
     ``warning`` naming the point id, the field and the value, because a skip the
     caller cannot observe is the silent-loss defect this file's annotation
     history is made of. It is deliberately NOT coerced to ``""`` and forgotten:
-    "unreadable" and "absent" must stay distinguishable (they do — absent never
-    increments the counter).
+    "unreadable" and "absent" must stay distinguishable — absent never
+    increments the counter, and :func:`_bound_present` is the per-hit predicate
+    that keeps them apart for THIS hit (a process counter cannot, see the #9741
+    review P2 note there).
 
     It never raises: a render path that raises on stored data is the poison pill
     this issue is about.
@@ -1010,6 +1026,38 @@ def _display_bound(value: object, field: str, hit: dict) -> str:
         field, hit.get("id"), value, type(value).__name__,
     )
     return ""
+
+
+def _bound_present(value: object) -> bool:
+    """True when the hit STORED a bound here — absent ≠ unreadable (#9741 P2).
+
+    ``_display_bound`` returns ``""`` for both an ABSENT bound and an
+    UNREADABLE one, which was fine while the only question asked of it was
+    "what day do I print?". The marker asked a second question — "does this hit
+    have a start at all?" — by testing the DISPLAY string for truthiness, so an
+    unreadable start took the no-start arm and silently discarded a READABLE
+    ``valid_to``/``expired_at`` beside it:
+
+        {"valid_from": nan, "valid_to": "2025-01-01"}  ->  ""   (nothing)
+        {"valid_from": "TBD", "valid_to": "2025-01-01"} ->  "[valid → 2025-01-01]"
+
+    Both stored a start that names no instant; the reader was told two
+    different things about the same data. This is the predicate that keeps
+    them one answer, and it is deliberately a SEPARATE question from the
+    display text: the marker's start clause, the ``vfd`` orderability gate and
+    the ``BOUND_RENDER_OUTCOMES`` counter each need a different one of the
+    three facts (present / readable / orderable), and collapsing them onto one
+    return value is what produced the asymmetry.
+
+    A blank STRING is absent (the ``""`` the write path stores for "no
+    bound"), not unreadable — matching ``_display_bound``, which also treats
+    it as absent and does not count it.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
 
 
 def _validity_marker(h: dict) -> str:
@@ -1036,6 +1084,14 @@ def _validity_marker(h: dict) -> str:
       - a PRESENT but UNORDERABLE start (``valid_from="TBD"`` /
         ``"not-a-date"``) → the start clause is OMITTED, never interpolated
         (#9730): ``[valid]`` / ``[valid; end unknown]`` / ``[valid → <to>]``.
+        #9741 review P2: a PRESENT but UNREADABLE start (a mapping, a list,
+        ``nan``, a number outside the authored span) renders the SAME forms,
+        because it is the same fact — a bound was stored and it names no
+        instant. It used to fall through the no-start arm and take a READABLE
+        ``valid_to``/``expired_at`` with it; the arm is now gated on
+        :func:`_bound_present` (was a bound stored?) rather than on the display
+        string (did it produce text?), so the two spellings of one stored fact
+        cannot state two different windows.
         Under the #6140 owner ruling such a bound names no instant, i.e. no
         start was recorded — which is exactly why
         ``validity.effective_precision`` reports no precision for it
@@ -1044,9 +1100,13 @@ def _validity_marker(h: dict) -> str:
     ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
     full timestamps in the reader context; timestamps stay on the graph
     properties. A stored NUMBER is a legal bound too (#9741) — it is read as an
-    epoch (seconds or millis, decided by magnitude) and rendered as its UTC
+    epoch in SECONDS within the authored span, and rendered as its UTC
     calendar day, through the same :func:`_display_bound` normaliser every bound
-    here goes through. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
+    here goes through. A number OUTSIDE that span is unreadable here (skipped
+    and counted), never re-read as another unit: the ordering measure every
+    temporal query uses reads a NUMBER as seconds, so a millis reading here
+    would state a date the query engine denies. The supersession markers
+    (SUPERSEDED BY / SUPERSEDES) are
     unchanged and render first."""
     marks: list[str] = []
     # #9741 review P2: the marker is ALSO called from ``_has_claim_text`` on the
@@ -1090,7 +1150,14 @@ def _validity_marker(h: dict) -> str:
     vf = _display_bound(raw_vf, "valid_from", h)
     vt = _display_bound(h.get("valid_to"), "valid_to", h)
     ex = _display_bound(h.get("expired_at"), "expired_at", h)
-    if vf:
+    # #9741 review P2: the arm is gated on whether a start was STORED, not on
+    # whether it produced display text. Gating on the display string made an
+    # unreadable start indistinguishable from an absent one, so it discarded a
+    # READABLE end beside it (``{valid_from: nan, valid_to: "2025-01-01"}``
+    # rendered NOTHING while ``valid_from: "TBD"`` on the same hit rendered
+    # ``[valid → 2025-01-01]``). Both name no instant, so both render the
+    # no-start forms below — one stored fact, one answer.
+    if _bound_present(raw_vf):
         # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
         # #9730: a START that names no instant renders NO start clause. The
         # gate is the read gate's OWN predicate (``_bounds_an_instant`` ⇒
@@ -1294,7 +1361,62 @@ def _distinct_session_ids(hits: list[dict]) -> list[str]:
     return out
 
 
-def _hit_prefix(h: dict) -> str:
+#: #9741 review P2: "the caller did not hand me a resolved marker" — distinct
+#: from a RESOLVED marker whose text is ``""`` (a hit with no window), which
+#: must never trigger a second resolution. A sentinel, not ``None``, for exactly
+#: that reason.
+_UNRESOLVED_MARKER: Any = object()
+
+
+def _marker_or_resolve(h: dict, marker: Any = _UNRESOLVED_MARKER) -> str:
+    """The hit's marker text — the CALLER's if it already resolved one.
+
+    #9741 review P2: ``BOUND_RENDER_OUTCOMES`` counted marker *calls*, and the
+    marker used to run up to three times for ONE hit — once for admission
+    (``_has_claim_text``), once for the budget's ``_render_block``, once for
+    ``render_context``'s. ``unreadable_bound`` therefore read as "N bad bounds"
+    when it meant "N marker invocations", which is a census that cannot answer
+    the question it exists for. The assemblers now resolve the marker ONCE per
+    hit (:func:`_SafeMarkerCache`) and pass it down; a caller that resolves
+    nothing keeps the old behaviour exactly.
+    """
+    return _safe_marker(h) if marker is _UNRESOLVED_MARKER else marker
+
+
+class _SafeMarkerCache:
+    """One assembly call's per-hit marker resolution — resolve once, read twice.
+
+    Keyed on ``id(hit)``, which is sound HERE and only here: every hit is held
+    by the caller's ``pool`` for the whole call, so no id can be recycled out
+    from under the cache, and the cache (and its strong references) dies with
+    the call. That is why it is a local rather than a module-level memo — a
+    process-lifetime memo keyed on ``id()`` would both leak the hits and admit
+    a recycled id.
+
+    The value stored is the RESOLVED text, including ``""``: a content-less
+    operator node with no window resolves to ``""`` once and is not re-resolved
+    on its second question.
+    """
+
+    __slots__ = ("_by_identity",)
+
+    def __init__(self) -> None:
+        self._by_identity: dict[int, str] = {}
+
+    def marker(self, h: dict) -> str:
+        key = id(h)
+        try:
+            return self._by_identity[key]
+        except KeyError:
+            resolved = _safe_marker(h)
+            self._by_identity[key] = resolved
+            return resolved
+
+    def claim_text(self, h: dict) -> bool:
+        return _has_claim_text(h, marker=self.marker(h))
+
+
+def _hit_prefix(h: dict, marker: Any = _UNRESOLVED_MARKER) -> str:
     """One hit's annotation prefix (the block text before the fenced body).
 
     Session tag precedence (D3 identity): a hit that HAS the
@@ -1344,7 +1466,7 @@ def _hit_prefix(h: dict) -> str:
     # Collapsed here rather than field by field inside _validity_marker — one
     # choke point covers every present and future free-text field the marker
     # interpolates.
-    marker = _safe_marker(h)
+    marker = _marker_or_resolve(h, marker)
     if marker:
         # _validity_marker returns self-bracketed groups
         # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
@@ -1377,7 +1499,7 @@ def _safe_marker(h: dict) -> str:
         return ""
 
 
-def _render_block(h: dict) -> str:
+def _render_block(h: dict, marker: Any = _UNRESOLVED_MARKER) -> str:
     """One hit's rendered context block — the SINGLE implementation shared
     by ``render_context`` and the token budget (factored out of
     ``render_context``, R1 #1540). ``question_date`` never appears here: it
@@ -1405,7 +1527,7 @@ def _render_block(h: dict) -> str:
     written not to raise for the shapes the graph can store (see its own notes);
     this catch is the backstop for the shapes nobody has seen yet.
     """
-    return f"{_hit_prefix(h)} {_fence_body(h.get('content', ''))}"
+    return f"{_hit_prefix(h, marker=marker)} {_fence_body(h.get('content', ''))}"
 
 
 def _one_line(value: object) -> str:
@@ -1510,7 +1632,7 @@ def _fence_body(content: object) -> str:
     )
 
 
-def _has_claim_text(h: dict) -> bool:
+def _has_claim_text(h: dict, marker: Any = _UNRESOLVED_MARKER) -> bool:
     """True when a hit renders reader-visible CLAIM text (#2978).
 
     ``_render_block`` contributes exactly TWO claim-text sources beyond the
@@ -1531,8 +1653,10 @@ def _has_claim_text(h: dict) -> bool:
     # #9741 review P2: the SAME containment as the render path. This predicate
     # gates admission on the ask lane (``assemble_context`` /
     # ``session_blocks``), where an unguarded raising marker denied the whole
-    # read — the door ``_safe_marker`` exists for.
-    return bool(_safe_marker(h))
+    # read — the door ``_safe_marker`` exists for. ``marker`` is the caller's
+    # already-resolved text when it has one (#9741 review P2: one resolution
+    # per hit, shared with the render that follows this admission decision).
+    return bool(_marker_or_resolve(h, marker))
 
 
 def assemble_context(
@@ -1584,7 +1708,8 @@ def assemble_context(
     ``stats`` (#4105): optional out-dict. When supplied it is updated with the
     admission census (``items_selected``, ``claim_bearing``, ``bytes_used``,
     ``words_used``, ``nonascii_token_surcharge``, ``dropped_by_token_cap``,
-    ``dropped_by_byte_cap``, ``byte_cap``, ``stopped_by``). It exists so a
+    ``dropped_by_byte_cap``, ``byte_cap``, ``stopped_by``, and #9741's
+    ``bound_render_outcomes``). It exists so a
     caller can tell WHICH bound is binding — in particular,
     ``dropped_by_byte_cap > 0`` means the byte ceiling alone kept
     admitted-by-token hits out, so a byte ceiling that cannot be raised
@@ -1595,6 +1720,15 @@ def assemble_context(
     when the pool simply ended, so a pool that ended exactly at the bound is
     ``None``, not ``item_cap``. The return value is unchanged
     (a list of hits), so pure-function callers are unaffected.
+
+    ``stats["bound_render_outcomes"]`` (#9741 review P2) is the delta the
+    module-level :data:`BOUND_RENDER_OUTCOMES` accumulated DURING THIS CALL —
+    ``unreadable_bound`` / ``marker_failed`` — so a caller can see that a hit's
+    annotation is missing and why. It is a DELTA, not the process-lifetime
+    total, and the marker is resolved ONCE PER HIT (:class:`_SafeMarkerCache`)
+    rather than once per question asked about it, so the numbers count HITS with
+    a defect — the quantity an operator acts on. Without this key the counters
+    were write-only: incremented in three places and readable from nowhere.
 
     Token accounting (the alignment invariant): raw whitespace words
     accumulate per block (question_date-independent) + the once-prepended
@@ -1666,6 +1800,11 @@ def assemble_context(
     # (over-counts the last block's absent trailing separator by 2 bytes).
     bytes_used = (len(f"Current Date: {question_date}".encode()) + 2) \
         if question_date else 0
+    # #9741 review P2: ONE marker resolution per hit for this call, shared by
+    # the admission question and the render that follows it, plus the census of
+    # what it measured — the counters were write-only and counted CALLS.
+    markers = _SafeMarkerCache()
+    outcomes_before = dict(BOUND_RENDER_OUTCOMES)
     for h in pool:
         if len(selected) >= item_bound:
             item_bound_cut = True
@@ -1678,10 +1817,10 @@ def assemble_context(
         # later real hits may additionally be ADMITTED up to the cap (the
         # admitted set can grow, not just shift). Same skip-not-starve
         # semantics as the oversized-hit path below.
-        if not _has_claim_text(h):
+        if not markers.claim_text(h):
             continue
         claim_bearing += 1
-        block = _render_block(h)
+        block = _render_block(h, marker=markers.marker(h))
         cost = len(block.split())
         sur_cost = _ask_token_surcharge(block) if nonascii_token_surcharge else 0
         if int((words + cost) * 1.1) + surcharge + sur_cost \
@@ -1725,6 +1864,11 @@ def assemble_context(
             "dropped_by_byte_cap": dropped_by_byte_cap,
             "byte_cap": byte_cap,
             "stopped_by": stopped_by,
+            # #9741 review P2: what THIS call measured, not the lifetime total
+            "bound_render_outcomes": {
+                key: value - outcomes_before.get(key, 0)
+                for key, value in BOUND_RENDER_OUTCOMES.items()
+            },
         })
     return selected
 
@@ -1910,6 +2054,12 @@ def assemble_session_context(
     words = header_words
     bytes_used = header_bytes
     block_sizes: list[int] = []
+    # #9741 review P2: ONE marker resolution per hit for this whole call — the
+    # breadth admission, ``session_blocks``' admission and BOTH render passes
+    # used to re-resolve it (four calls per hit), so ``BOUND_RENDER_OUTCOMES``
+    # reported invocations rather than defective hits.
+    markers = _SafeMarkerCache()
+    outcomes_before = dict(BOUND_RENDER_OUTCOMES)
 
     def _try_admit(h: dict, *, budget: int) -> str:
         """Admit one hit whole-or-not-at-all under the CURRENT bounds.
@@ -1921,9 +2071,10 @@ def assemble_session_context(
         prevent.
         """
         nonlocal words, bytes_used
-        if not _has_claim_text(h):
+        if not markers.claim_text(h):
             return "no_claim_text"
-        block = _render_block(h)
+        marker = markers.marker(h)
+        block = _render_block(h, marker=marker)
         cost = len(block.split())
         if int((words + cost) * 1.1) > budget:
             return "token_cap"
@@ -1983,7 +2134,7 @@ def assemble_session_context(
             _session_admission_key(h, session_key=session_key,
                                    index_key=index_key), i)
     blocks = session_blocks(pool, session_key=session_key,
-                            index_key=index_key, admit=_has_claim_text)
+                            index_key=index_key, admit=markers.claim_text)
     blocks.sort(key=lambda b: first_breadth_rank.get(
         _session_admission_key(b[0], session_key=session_key,
                                index_key=index_key), len(pool)))
@@ -2003,7 +2154,7 @@ def assemble_session_context(
         # whole-session-or-skip: a session's remaining material is admitted as
         # ONE block or not at all, so a completed session is never half
         # completed.
-        rendered = [_render_block(h) for h in extra]
+        rendered = [_render_block(h, marker=markers.marker(h)) for h in extra]
         cost = sum(len(b.split()) for b in rendered)
         block_bytes = sum(len(b.encode("utf-8")) + 2 for b in rendered)
         if item_cap is not None and len(selected) + len(extra) > item_cap:
@@ -2087,6 +2238,11 @@ def assemble_session_context(
             "dropped_sessions_by_byte_cap": depth_dropped_by_byte_cap,
             "byte_cap": byte_cap,
             "stopped_by": stopped_by,
+            # #9741 review P2: what THIS call measured, per HIT
+            "bound_render_outcomes": {
+                key: value - outcomes_before.get(key, 0)
+                for key, value in BOUND_RENDER_OUTCOMES.items()
+            },
         })
     return ordered
 

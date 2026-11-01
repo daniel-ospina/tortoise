@@ -951,36 +951,110 @@ def test_an_epoch_zero_start_renders_its_day():
 
 # ── #9741: a NUMBER is a legal bound; one bad point never denies the read ──
 
-def test_a_numeric_start_renders_its_utc_day_in_both_epoch_units():
+def test_a_numeric_start_renders_its_utc_day_in_epoch_seconds():
     """#9741: the reported defect — a NUMERIC ``validFrom``, which the write
     boundary accepts, raised ``AttributeError: 'int' object has no attribute
     'strip'`` at ``retrieval._validity_marker``'s bound extraction.
 
-    Both epoch units a stored graph can hold must render the SAME calendar day:
-    seconds (``1735689600``) and millis (``1735689600000``) both name
-    2025-01-01T00:00:00Z, and reading one as the other would state a date off
-    by a factor of 1000. The ISO sibling is the control: the marker text is
-    byte-identical, so the reader cannot tell which storage form it read.
+    THE UNIT IS SECONDS, and that is not this renderer's choice: it is the unit
+    ``validity``'s own ``_EPOCH_SECONDS_SANE_MIN/MAX`` span names ("in SECONDS
+    … is the unit the field reads a NUMBER as") and the unit
+    ``search_engine._created_sort_key`` ORDERS by — the measure every temporal
+    query and ``commit_schema.validate_validity_window`` use. The ISO sibling
+    is the control: the marker text is byte-identical, so the reader cannot
+    tell which storage form it read.
+
+    The END half goes through the same normaliser (one boundary, not one call
+    site).
     """
     from tortoise.retrieval import _validity_marker
 
     iso = _validity_marker({"id": "p", "valid_from": "2025-01-01",
                             "end_state": "open"})
-    from tortoise.retrieval import BOUND_RENDER_OUTCOMES
-    millis_before = BOUND_RENDER_OUTCOMES["epoch_read_as_millis"]
-    for epoch in (1735689600, 1735689600000, 1735689600.0, 1735689600000.0):
+    assert iso == "[valid since 2025-01-01]"
+    for epoch in (1735689600, 1735689600.0):
         assert _validity_marker({"id": "p", "valid_from": epoch,
                                  "end_state": "open"}) == iso, epoch
-    assert iso == "[valid since 2025-01-01]"
-    # the millis reinterpretation is OBSERVABLE (it is this marker's alone:
-    # ``_created_sort_key`` and ``time_aware._as_date`` read a NUMBER as seconds)
-    assert BOUND_RENDER_OUTCOMES["epoch_read_as_millis"] == millis_before + 2
-    # the END half goes through the same normaliser (one boundary, not one
-    # call site): a numeric validTo renders a date instead of raising.
     assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
-                             "valid_to": 1735689600000,
+                             "valid_to": 1735689600,
                              "end_state": "known"}) == \
         "[valid 2024-06-01 → 2025-01-01]"
+
+
+def test_a_millis_bound_is_skipped_rather_than_restating_the_unit():
+    """#9741 review P2 — the millis arm stated a date the ORDERING measure denies.
+
+    An earlier round of this fix read a NUMBER past ``1e11`` as an epoch in
+    MILLIS, so ``valid_from = 1719792000000`` rendered
+    ``[valid since 2024-07-01]`` while ``search_engine._created_sort_key``
+    read the same stored number as SECONDS (year 56468) — every temporal query
+    treated the point as not-yet-valid while the reader was told it had been
+    valid since 2024. Two surfaces, one stored value, two answers.
+
+    The renderer now reads a NUMBER only inside ``validity``'s authored span
+    and in seconds, the unit the rest of the system uses; anything outside it
+    is an UNREADABLE bound — skipped and counted, never reinterpreted. That is
+    the only reading under which the date the reader is shown cannot
+    contradict the date the query engine orders by.
+
+    Non-vacuous: the assertion that makes this test fail on the pre-fix code is
+    the ``[valid]`` (no start clause) one — the pre-fix marker printed
+    ``[valid since 2024-07-01]`` for the same stored value.
+    """
+    from tortoise.retrieval import BOUND_RENDER_OUTCOMES, _validity_marker
+    from tortoise.search_engine import _created_sort_key
+
+    millis = 1719792000000          # 2024-07-01 as MILLIS
+    seconds = 1719792000            # 2024-07-01 as SECONDS
+    # the ordering measure really does read it as seconds: not the same day.
+    assert _created_sort_key(millis)[1] != _created_sort_key(seconds)[1]
+    assert _validity_marker({"id": "p", "valid_from": seconds,
+                             "end_state": "open"}) == "[valid since 2024-07-01]"
+    before = BOUND_RENDER_OUTCOMES["unreadable_bound"]
+    assert _validity_marker({"id": "p", "valid_from": millis,
+                             "end_state": "open"}) == "[valid]"
+    assert BOUND_RENDER_OUTCOMES["unreadable_bound"] == before + 1
+    # an int too large for a calendar is the same class, not a crash
+    assert _validity_marker({"id": "p", "valid_from": 10 ** 20,
+                             "end_state": "open"}) == "[valid]"
+
+
+def test_an_unreadable_start_does_not_discard_a_readable_end():
+    """#9741 review P2 — "unreadable" and "absent" must not render the same.
+
+    The arm was gated on the DISPLAY string, so an unreadable start took the
+    no-start arm and silently threw away a READABLE ``valid_to``/``expired_at``
+    beside it:
+
+        {"valid_from": nan,         "valid_to": "2025-01-01"} -> ""
+        {"valid_from": "TBD",       "valid_to": "2025-01-01"} -> "[valid → 2025-01-01]"
+
+    same stored fact (a bound that names no instant), two different statements
+    about the same hit. Both now render the no-start forms.
+
+    Fails pre-fix: the first shape rendered ``""`` — no window, no end, and
+    nothing telling the reader a window exists at all.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    for unreadable in (float("nan"), float("inf"), {"nested": 1}, ["x"],
+                       10 ** 400, 1719792000000):
+        tbd = _validity_marker({"valid_from": "TBD",
+                                "valid_to": "2025-01-01",
+                                "end_state": "known"})
+        got = _validity_marker({"valid_from": unreadable,
+                                "valid_to": "2025-01-01",
+                                "end_state": "known"})
+        assert got == tbd == "[valid → 2025-01-01]", (unreadable, got)
+        # ... and an open end keeps its open-end reading, minus the start
+        assert _validity_marker({"valid_from": unreadable,
+                                 "end_state": "open"}) == \
+            _validity_marker({"valid_from": "TBD", "end_state": "open"}) == \
+            "[valid]", unreadable
+    # an ABSENT start is still no marker at all — the distinction this keeps
+    assert _validity_marker({"valid_from": ""}) == ""
+    assert _validity_marker({"valid_from": None}) == ""
+
 
 
 def test_a_numeric_start_through_the_public_write_renders_the_start(lane):
@@ -1025,13 +1099,61 @@ def test_an_unreadable_bound_is_skipped_with_an_observable_signal():
                                 "end_state": "open"})
     for junk in ({"nested": 1}, ["x"], float("nan"), float("inf"), 10 ** 400):
         before = BOUND_RENDER_OUTCOMES["unreadable_bound"]
+        # the START clause is skipped ...
         assert _validity_marker({"id": "p", "valid_from": junk,
-                                 "end_state": "open"}) == "", junk
-        # the skip is OBSERVABLE — a silent skip is the silent-loss defect
+                                 "end_state": "open"}) == "[valid]", junk
+        # ... the skip is OBSERVABLE — a silent skip is the silent-loss defect
         assert BOUND_RENDER_OUTCOMES["unreadable_bound"] == before + 1, junk
         # and the ISO control is untouched by the counter / the skip
         assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
                                  "end_state": "open"}) == control
+
+
+def test_the_bound_census_counts_hits_not_marker_calls():
+    """#9741 review P2: the census counted marker CALLS, and no caller could read it.
+
+    ``assemble_context`` asks ONE hit two separate questions — "does it carry
+    claim text?" (the #2978 admission skip) and "render it" (the token budget)
+    — and each resolved the marker, so a single defective hit incremented
+    ``unreadable_bound`` TWICE. The session-grain assembler asked three times
+    (breadth admission, its render, and ``session_blocks``' own admission pass).
+    A counter that measures invocations cannot answer the question it exists
+    for — "how many hits lost part of their annotation" — so the marker is now
+    resolved once per hit and the census is surfaced to the caller as
+    ``stats["bound_render_outcomes"]`` (it was previously write-only: incremented
+    in three places, readable from nowhere).
+
+    Fails pre-fix on both ``== 1`` assertions (they read 2 and 3), which is the
+    whole point: the same input, one defective hit, one count.
+    """
+    from tortoise.retrieval import assemble_context, assemble_session_context, render_context
+
+    # a CONTENT-LESS hit whose only claim text is its marker, so admission
+    # cannot short-circuit on content and must resolve the marker itself.
+    poisoned = {"id": "poison", "valid_from": {"nested": 1},
+                "superseded_by": {"content_snippet": "newer claim"}}
+    plain = {"id": "plain", "content": "the answer",
+             "valid_from": "2024-06-01"}
+
+    # PRIME the process-lifetime counter first: the stats figure must be this
+    # call's own delta, not the running total.
+    for _ in range(3):
+        render_context([{"id": "warm", "valid_from": {"nested": 1}}])
+
+    stats: dict = {}
+    selected = assemble_context([poisoned, plain], top_k=5,
+                                max_context_tokens=10_000, stats=stats)
+    assert [h["id"] for h in selected] == ["poison", "plain"]
+    assert "[SUPERSEDED BY: newer claim]" in render_context(selected)
+    # ONE hit had an unreadable bound — counted once, and only for this call
+    assert stats["bound_render_outcomes"]["unreadable_bound"] == 1
+    assert "bound_render_outcomes" in stats
+
+    sstats: dict = {}
+    session_selected = assemble_session_context(
+        [poisoned, plain], max_context_tokens=10_000, stats=sstats)
+    assert {h["id"] for h in session_selected} == {"poison", "plain"}
+    assert sstats["bound_render_outcomes"]["unreadable_bound"] == 1
 
 
 def test_one_unreadable_hit_does_not_deny_the_rendered_read(monkeypatch):
@@ -1045,8 +1167,7 @@ def test_one_unreadable_hit_does_not_deny_the_rendered_read(monkeypatch):
     renders its content — it loses the ANNOTATION, never the evidence — with
     ``marker_failed`` counted so the caller can tell.
     """
-    from tortoise.retrieval import (BOUND_RENDER_OUTCOMES, _render_block,
-                                    render_context)
+    from tortoise.retrieval import BOUND_RENDER_OUTCOMES, _render_block, render_context
 
     good = {"id": "good", "content": "the answer", "valid_from": "2024-06-01"}
     junk_bound = {"id": "junk-bound", "content": "poison",
