@@ -739,6 +739,201 @@ def test_the_refusal_stamp_is_READ_CROSS_LEG(tmp_path):
         "line rather than inventing an event")
 
 
+def _counting_scans(monkeypatch):
+    """Count every full meta scan the spool module performs (parses every meta)."""
+    from tortoise import capture_spool as sp
+
+    calls: list[bool] = []
+    real = sp.list_spool_metas
+
+    def counting(root, *, repair=True):
+        calls.append(repair)
+        return real(root, repair=repair)
+
+    monkeypatch.setattr(sp, "list_spool_metas", counting)
+    return calls
+
+
+def test_a_REFUSED_session_does_not_re_scan_the_spool_every_turn(tmp_path, monkeypatch):
+    """A refused session re-snapshots on EVERY `turn_end`, synchronously, and the
+    admission guard used to re-derive the SAME verdict from a full parse of every
+    meta each time — measured 1337-1730 ms at 20 000 entries, i.e. per-turn agent
+    latency, on exactly the box this PR is about.
+
+    A refusal writes nothing, so the spool state the verdict was measured against
+    is the state the next turn sees. The refusal stamp already records that
+    verdict's inputs; a repeat must be answered from it, not re-scanned.
+
+    MUTATION THAT REDS THIS: call `spool_saturated` from the write path
+    unconditionally (the pre-fix call site) -> five refused turns, five full
+    scans.
+    """
+    from tortoise import capture_spool as sp
+
+    bounds = sp.Bounds(max_entries=1, max_total_bytes=10_000_000, max_entry_bytes=10_000)
+    write_spool_entry(tmp_path, _snapshot("held", [{"role": "user", "content": "h"}]),
+                      bounds)
+    calls = _counting_scans(monkeypatch)
+
+    for size in (1, 2, 3, 4, 5):
+        refused = sp.write_spool_entry(
+            tmp_path, _snapshot("refused", [{"role": "user", "content": "r" * size}]),
+            bounds)
+        assert refused["written"] is False
+        assert refused["discards"][-1]["reason"] == "spool_saturated"
+
+    assert len(calls) == 1, (
+        "the FIRST refusal costs one scan; every repeat of the same refusal at the "
+        f"same spool state is answered from the stamp: {len(calls)} scans")
+
+
+def test_an_admitted_write_does_not_parse_the_spool_to_prove_it_fits(tmp_path, monkeypatch):
+    """The other half of the same cost: the guard ran a full parse on EVERY write,
+    on top of the parse `prune_spool` pays immediately after. A spool nowhere
+    near a ceiling must not parse a single meta to prove it.
+
+    MUTATION THAT REDS THIS: run the guard's `spool_saturated` unconditionally ->
+    two scans per admitted write (guard + prune) instead of one.
+    """
+    from tortoise import capture_spool as sp
+
+    calls = _counting_scans(monkeypatch)
+    out = sp.write_spool_entry(
+        tmp_path, _snapshot("live", [{"role": "user", "content": "hi"}]),
+        sp.Bounds())
+    assert out["written"] is True
+    assert len(calls) == 1, (
+        "one scan per admitted write (prune's), not two: the admission guard is "
+        f"answered from the directory listing: {len(calls)} scans")
+
+
+def test_the_fast_admission_answer_CANNOT_outlive_its_condition(tmp_path):
+    """The stamp short-circuit is a CACHED VERDICT, and a cached verdict that
+    cannot be invalidated is the exact defect this PR exists to remove (a refusal
+    that outlives the condition prune is entitled to clear). Two ways it could
+    go stale, both pinned here:
+
+    * the spool CHANGES — a reaping frees room, so the next write must be ADMITTED;
+    * the write SHRINKS below what was refused — saturation is monotone in the
+      projection, so a smaller one is re-derived rather than guessed.
+
+    MUTATION THAT REDS THIS: return the stamped verdict without comparing the
+    `entries_stamp` / `projected_bytes` -> the freed (or smaller) write is refused
+    forever.
+    """
+    from tortoise import capture_spool as sp
+
+    # --- (a) the state moves: a reaping makes room for the SAME session again.
+    count_bounds = sp.Bounds(max_entries=1, max_total_bytes=10_000_000,
+                             max_entry_bytes=10_000)
+    write_spool_entry(tmp_path, _snapshot("held", [{"role": "user", "content": "h"}]),
+                      count_bounds)
+    first = sp.write_spool_entry(
+        tmp_path, _snapshot("refused", [{"role": "user", "content": "r"}]), count_bounds)
+    assert first["written"] is False
+
+    sp._remove_entry_files(tmp_path, "held")  # room again: the spool state moved
+    second = sp.write_spool_entry(
+        tmp_path, _snapshot("refused", [{"role": "user", "content": "r"}]), count_bounds)
+    assert second["written"] is True, (
+        "the condition the refusal was measured against is gone; the write must land")
+
+    # --- (b) the projection shrinks. A 9 KB NEW session refuses on the BYTE
+    # ceiling (nothing is filed, nothing is evictable); the next turn of a
+    # COMPACTED transcript is 100 bytes and fits with room to spare.
+    shrink = tmp_path / "shrink"
+    byte_bounds = sp.Bounds(max_entries=100, max_total_bytes=6000,
+                            max_entry_bytes=100_000)
+    write_spool_entry(shrink, _snapshot("held", [{"role": "user", "content": "h"}]),
+                      byte_bounds)
+    big = sp.write_spool_entry(
+        shrink, _snapshot("grew", [{"role": "user", "content": "x" * 9000}]),
+        byte_bounds)
+    assert big["written"] is False
+    assert big["discards"][-1]["reason"] == "spool_saturated"
+    small = sp.write_spool_entry(
+        shrink, _snapshot("grew", [{"role": "user", "content": "x" * 100}]),
+        byte_bounds)
+    assert small["written"] is True, (
+        "a projection SMALLER than the refused one says nothing about this write; "
+        "it must be re-derived, not answered from the stamp")
+
+
+def test_the_fast_admission_answer_honours_the_CEILINGS_it_was_measured_against(tmp_path):
+    """A stamp is a verdict about ONE set of ceilings. Reusing it under a larger
+    `Bounds` would refuse a write that now has room — a refusal invented by the
+    optimisation rather than by the spool.
+
+    MUTATION THAT REDS THIS: drop the `bounds` term from the stamp comparison ->
+    the loose-bounds write is refused from the tight-bounds stamp.
+    """
+    from tortoise import capture_spool as sp
+
+    tight = sp.Bounds(max_entries=1, max_total_bytes=10_000_000, max_entry_bytes=10_000)
+    loose = sp.Bounds(max_entries=5, max_total_bytes=10_000_000, max_entry_bytes=10_000)
+    write_spool_entry(tmp_path, _snapshot("held", [{"role": "user", "content": "h"}]),
+                      tight)
+    refused = sp.write_spool_entry(
+        tmp_path, _snapshot("refused", [{"role": "user", "content": "r"}]), tight)
+    assert refused["written"] is False
+
+    admitted = sp.write_spool_entry(
+        tmp_path, _snapshot("refused", [{"role": "user", "content": "r"}]), loose)
+    assert admitted["written"] is True, (
+        "the refusal was measured against max_entries=1; the same spool admits this "
+        "write at max_entries=5")
+
+    # …and the stamp records the inputs the reuse depends on, as ONE string both
+    # legs can write identically (a key/value map would have to agree on a
+    # camelCase spelling across two languages).
+    stamps = json.loads(
+        (tmp_path / sp.CAPTURE_REFUSAL_STAMP_FILE).read_text(encoding="utf-8"))["refusals"]
+    refused_stamp = [s for s in stamps if s["reason"] == "spool_saturated"][0]
+    assert refused_stamp["bounds"] == sp._bounds_stamp(tight) == "1:10000000", refused_stamp
+    assert isinstance(refused_stamp["projected_bytes"], int), refused_stamp
+    assert refused_stamp["replaces_session_id"] is None, refused_stamp
+
+
+def test_the_cheap_admission_scan_NEVER_under_counts_a_symlinked_entry(tmp_path):
+    """The directory listing is an UPPER bound on the spool's real size, and the
+    one direction that could hurt is the other one: an UNDER-count would admit a
+    write the real predicate refuses. A symlinked entry is exactly that trap —
+    `_entry_bytes` follows the link and counts what `prune_spool` would free,
+    while the link's OWN size is the length of a path.
+
+    MUTATION THAT REDS THIS: sum `lstat` sizes for every dirent instead of
+    refusing a non-regular file -> the cheap answer says `fits`, the guard admits,
+    and the spool settles over its ceiling.
+    """
+    from tortoise import capture_spool as sp
+
+    assert sp._cheap_spool_scan(tmp_path) is None, "a spool with no entries/ at all"
+
+    entries = tmp_path / "entries"
+    entries.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "outside.jsonl"
+    target.write_text("x" * 50_000, encoding="utf-8")
+    key = sp.entry_key("linked")
+    (entries / f"{key}.turns.jsonl").symlink_to(target)
+    (entries / f"{key}.meta.json").write_text(
+        json.dumps({"version": 1, "session_id": "linked", "capture_key": "k",
+                    "attempts": 0, "next_attempt_at_ms": 0}),
+        encoding="utf-8")
+
+    assert sp._entry_bytes(tmp_path, "linked") >= 50_000, (
+        "`_entry_bytes` follows the link: what prune counts is the target")
+    assert sp._cheap_spool_scan(tmp_path) is None, (
+        "a non-regular dirent is not a shape this scan can bound")
+
+    # The real predicate still sees the 50 KB the link points at, so the write is
+    # refused — which is why the cheap scan must never answer this spool itself.
+    bounds = sp.Bounds(max_entries=100, max_total_bytes=20_000, max_entry_bytes=100_000)
+    refused = sp.write_spool_entry(
+        tmp_path, _snapshot("new", [{"role": "user", "content": "n"}]), bounds)
+    assert refused["written"] is False
+    assert refused["discards"][-1]["reason"] == "spool_saturated"
+
+
 def test_the_health_line_NAMES_saturation(tmp_path):
     """`spool_saturated`'s own docstring calls the state "first-class, reported",
     but none of the five health states could say it: a REFUSING box printed

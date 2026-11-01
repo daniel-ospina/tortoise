@@ -874,7 +874,121 @@ def _entries_dir_stamp(root: Path) -> str:
     return f"{digest}:{mtime}"
 
 
-def _record_refusal(root: Path, record: dict) -> dict:
+def _bounds_stamp(bounds: Bounds) -> str:
+    """The ceilings a refusal was measured against, as ONE string.
+
+    A refusal stamp is reused by the write path's fast path
+    (``_admission_saturated``), and that reuse is only sound for the SAME
+    ceilings: a refusal recorded under a tight ``Bounds`` says nothing about a
+    call that now offers a larger one. ``"<max_entries>:<max_total_bytes>"`` is
+    a single string (not a key/value map) so the Pi leg writes the identical
+    bytes without having to agree on a camelCase spelling across two languages.
+    """
+    return f"{int(bounds.max_entries)}:{int(bounds.max_total_bytes)}"
+
+
+def _cheap_spool_scan(root: Path) -> tuple[int, int] | None:
+    """``(meta-name count, bytes)`` from ONE ``scandir``, reading NO file.
+
+    The write path asks ``spool_saturated`` on EVERY turn — synchronously from
+    the Pi hook's ``turn_end`` — and the real predicate ``json.loads`` every
+    meta (measured 1.4 s at 20 000 entries, the ceiling this PR raises 20x).
+    That cost is only necessary once the spool is actually NEAR a ceiling, so
+    this answers the common case first: both numbers here are UPPER BOUNDS on
+    what ``_saturated_for_metas`` computes (the meta count is read from the
+    names alone, so it can only over-count a spool carrying corrupt metas, and
+    the byte total sums EVERY regular file in ``entries/``, so it can only
+    over-count the live entries plus orphans), which makes "under both ceilings
+    here" a proof of "not saturated there".
+
+    Returns ``None`` — never a guess — for anything this scan cannot bound: an
+    unreadable directory, a dirent whose stat fails, or a non-regular dirent
+    (a symlinked entry would make the byte total an UNDER-count, and an
+    under-count is the one direction that could admit a write the real
+    predicate refuses). ``None`` simply means "do the full scan".
+    """
+    try:
+        with os.scandir(_entries_dir(root)) as entries:
+            names = 0
+            total = 0
+            for entry in entries:
+                if not entry.is_file(follow_symlinks=False):
+                    return None
+                total += entry.stat(follow_symlinks=False).st_size
+                if entry.name.endswith(".meta.json"):
+                    names += 1
+    except OSError:
+        return None
+    return names, total
+
+
+def _refused_at_current_state(
+    root: Path,
+    session_id: str,
+    reason: str,
+    bounds: Bounds,
+    projected_bytes: int | None,
+    replaces_session_id: str | None,
+) -> bool:
+    """Did THIS session already get refused for THIS reason at THIS spool state?
+
+    A refusal writes nothing at all, so the state it was measured against is the
+    state the next turn sees again — and on a saturated box that state is
+    re-derived from a full parse of every meta on every single turn (measured
+    1.4 s per ``turn_end`` at 20 000 entries). The stamp ``_record_refusal``
+    already keeps for the ledger's dedupe answers the same question for free.
+
+    SOUND BY CONSTRUCTION, in both directions:
+
+    * The stamp is ``<meta-name digest>:<entries/ mtime_ns>``, and every way
+      saturation can change moves one of those: an admission or a reaping
+      changes the NAME SET, while a filed/teminal marker, an entry's growth and
+      a quarantine all rename a file INSIDE ``entries/`` and so move its mtime.
+      Same stamp therefore means the same metas, the same bytes, the same filed
+      set (and the same orphans, which live in ``entries/`` too).
+    * A SATURATED verdict is MONOTONE in the projection: the count term is
+      identical for the same ``replaces`` shape, and the byte term only grows
+      with ``projected_bytes``. So a refusal recorded at a SMALLER-OR-EQUAL
+      projection stays true for this one; a write that shrank below what was
+      refused is re-scanned rather than guessed.
+    * The ceilings must MATCH: a stamp written under a different ``Bounds`` (or
+      by a leg that did not record them) proves nothing about this call.
+
+    Anything else returns ``False`` — i.e. pay the real scan. Fails toward
+    WORKING, never toward a refusal that outlives its own condition.
+    """
+    stamp_now = _entries_dir_stamp(root)
+    bounds_now = _bounds_stamp(bounds)
+    for stamp in _read_refusal_stamps(root):
+        if stamp.get("session_id") != session_id:
+            continue
+        if stamp.get("reason") != reason:
+            continue
+        if stamp.get("entries_stamp") != stamp_now:
+            continue
+        if stamp.get("bounds") != bounds_now:
+            continue
+        if stamp.get("replaces_session_id") != replaces_session_id:
+            continue
+        recorded = stamp.get("projected_bytes")
+        if isinstance(recorded, bool) or not isinstance(recorded, int):
+            continue
+        if (projected_bytes or 0) < recorded:
+            # The write shrank: the projection this refusal proved says nothing
+            # about a smaller one. Re-derive it.
+            continue
+        return True
+    return False
+
+
+def _record_refusal(
+    root: Path,
+    record: dict,
+    *,
+    bounds: Bounds | None = None,
+    projected_bytes: int | None = None,
+    replaces_session_id: str | None = None,
+) -> dict:
     """Record a REFUSAL once per (session, reason, spool state).
 
     A refusal is not a one-off event: a refused session re-snapshots on EVERY
@@ -899,10 +1013,18 @@ def _record_refusal(root: Path, record: dict) -> dict:
     repeat — so a caller may report "the state" without inventing an event.
     """
     key = (record.get("session_id"), record.get("reason"))
-    fingerprint = {
+    fingerprint: dict = {
         "session_id": key[0],
         "reason": key[1],
         "entries_stamp": _entries_dir_stamp(root),
+        # The verdict's INPUTS, alongside its key. `_admission_saturated` reuses
+        # this stamp to answer "is this refusal still true?" without a scan, and
+        # that reuse is only sound for the same ceilings and a projection no
+        # smaller than the one that was refused. Absent (the single-record shape,
+        # an older leg) simply never short-circuits: fail toward the scan.
+        "bounds": _bounds_stamp(bounds) if bounds is not None else None,
+        "projected_bytes": projected_bytes,
+        "replaces_session_id": replaces_session_id,
     }
     history = _read_refusal_stamps(root)
     for stamp in history:
@@ -1673,8 +1795,9 @@ def write_spool_entry(
     # in both directions: a new entry could cross the byte ceiling on its own, and
     # an EXISTING entry could grow past it with no eviction path at all (measured
     # 3.07x the byte ceiling with an empty ledger — capture-loss residual 6).
-    if spool_saturated(
+    if _admission_saturated(
         root, bounds,
+        session_id=snapshot.session_id,
         projected_bytes=entry_bytes,
         replaces_session_id=(snapshot.session_id if prior else None),
     ):
@@ -1691,7 +1814,11 @@ def write_spool_entry(
                 " turns the spool already holds are kept, and any newer turn is"
                 " still in the harness session log"
             ),
-        }))
+            # The verdict's inputs, so the NEXT turn of a refused session can be
+            # answered from this stamp instead of re-parsing every meta
+            # (`_refused_at_current_state`).
+        }, bounds=bounds, projected_bytes=entry_bytes,
+            replaces_session_id=(snapshot.session_id if prior else None)))
         return {"written": False,
                 "bytes": (_entry_bytes(root, snapshot.session_id) if prior else 0),
                 "discards": discards}
@@ -1942,6 +2069,57 @@ def _saturated_for_metas(
     return not any(
         _entry_is_filed(m) and m.get("session_id") != replaces_session_id
         for m in metas)
+
+
+def _admission_saturated(
+    root: Path,
+    bounds: Bounds = DEFAULT_BOUNDS,
+    *,
+    session_id: str,
+    projected_bytes: int | None = None,
+    replaces_session_id: str | None = None,
+) -> bool:
+    """Is THIS write refused? The write path's entry point to ``spool_saturated``.
+
+    Same answer, up to two scans cheaper — which matters because this runs
+    synchronously on every ``turn_end`` (the Pi hook's write path, "synchronous
+    by design") against a population this PR raises 1000 -> 20 000. Measured at
+    20 000 entries before these two exits: **1.4 s per refused turn** on a
+    saturated box, every turn, for the session's whole life.
+
+    1. **The same refusal, again** — a refused session has no ``prior``, so it
+       re-snapshots into the identical spool state every turn and the same
+       verdict is re-derived from scratch each time. The refusal stamp already
+       records that verdict's own inputs; when they are unchanged the verdict is
+       returned without looking (`_refused_at_current_state`). This is asked
+       FIRST: it is one name-only directory listing plus a small read, and on the
+       box this PR is about — a saturated one — it is the answer every turn.
+    2. **Nowhere near a ceiling** — one ``scandir`` of ``entries/`` with no file
+       PARSED answers it (``_cheap_spool_scan``): the common case pays a directory
+       listing and a stat per dirent instead of ``json.loads`` for every meta.
+
+    Both exits can only answer the two HARD cases (provably still saturated,
+    definitely not saturated). Everything else — a spool genuinely at a ceiling,
+    a changed state, a shrunken projection, different ceilings — falls through
+    to the real scan, so neither exit can invent or outlive a refusal.
+
+    The Pi leg's ``admissionSaturated`` is the twin and answers identically.
+    """
+    if _refused_at_current_state(
+            root, session_id, DISCARD_SPOOL_SATURATED, bounds,
+            projected_bytes, replaces_session_id):
+        return True
+    cheap = _cheap_spool_scan(root)
+    if cheap is not None:
+        names, total = cheap
+        added = 0 if replaces_session_id is not None else 1
+        if (names + added <= bounds.max_entries
+                and total + (projected_bytes or 0) <= bounds.max_total_bytes):
+            return False
+    return spool_saturated(
+        root, bounds,
+        projected_bytes=projected_bytes,
+        replaces_session_id=replaces_session_id)
 
 
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:
