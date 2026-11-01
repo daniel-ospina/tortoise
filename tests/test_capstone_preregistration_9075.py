@@ -480,6 +480,49 @@ def test_an_unreadable_record_does_not_add_a_wrong_instruction(tmp_path, monkeyp
     assert not any("Disclose it under" in f for f in failures), failures
 
 
+def test_an_unreadable_record_does_not_crash_the_report_path(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-7 P1): a corrupt record made the tool UNRUNNABLE, not reported.
+
+    `record_unreadable` suppresses a second finding for a defect `check_machine_record` owns; it
+    must not manufacture a DECLARATION. `run()` always passes a real `atomic_detail` dict, so the
+    pre-fix arm fell through to `atomic[log.name]` on an EMPTY disclosure map and escaped as a bare
+    `KeyError` — no verdict, no `--json`, and the module's exit-2 contract bypassed, on exactly the
+    input this flag was added for. Measured pre-fix: `KeyError: 'e1-e2.log'` from `run()`.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    added: list[str] = []
+    detail: dict = {}
+    failures = check.check_ordering(prereg, [log], None, None, added, None, detail,
+                                    record_unreadable=True)
+    assert failures == [], failures
+    # The atomic STATE is known from git (identical sha) and stays recorded, so the anti-rot rule
+    # still sees it — but nothing was DECLARED, because there was no record to declare it in.
+    assert added == [] and detail == {}, (added, detail)
+
+
+def test_a_declared_atomic_add_on_an_unscored_log_reports_its_commits(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-7 P2): the ATOMIC-ADD block pointed at detail it never showed.
+
+    `main()` prints the header and then reads `ordering_atomic_add_commits`; `run()` only sets that
+    key when the detail dict is non-empty. The cycle-6 fix populated it in the exempt arm and left
+    the SIBLING unscored arm appending `atomic_added` with no detail, so a declared add on an
+    unscored log printed "the disclosure … is the record of it:" followed by ZERO commit lines — 
+    the one part a reader can go and check, shown as nothing. Measured pre-fix: `detail == {}`.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    added: list[str] = []
+    detail: dict = {}
+    assert check.check_ordering(prereg, [log], None, None, added, _atomic_pins(log.name),
+                                detail) == []
+    assert added == [log.name], added
+    assert detail == {log.name: {"squash_merge": "cfa3de857 measure: the merged commit",
+                                 "branch_commits": [
+                                     "a1075dfc2 prereg: amend definitions before any run"]}}, detail
+
+
 def test_a_report_never_claims_a_declaration_the_record_does_not_carry(tmp_path, monkeypatch):
     """An atomic + provably-unscored log with NO disclosure must not be reported as DECLARED."""
     repo = _repo(tmp_path, monkeypatch)
