@@ -119,8 +119,8 @@ could not see the difference — it compared commits — which is why item 9 now
 the log carries the probe's own `sha256`. Review of this PR then found further hardening gaps in the
 probe — **every one of them enumerated below, and no count is restated here**: a numeral written
 beside the list is a second copy of that list, and this section has already carried one that rotted
-(`eight` against ten items, before the eleventh was added). **All were fixed AFTER the run, and none
-of them changes a reported number** — the
+before the last item was added. **All were fixed AFTER the run, and none of them changes a reported
+number** — the
 arithmetic (`created_counts`, `real_facts`,
 `concentration`, `decide`'s bar comparisons) is unchanged, and the run's own log already printed
 each session's S3 state at the moment of that session's capture. What the hardening does is make
