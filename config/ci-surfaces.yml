@@ -618,6 +618,28 @@ surfaces:
   # run no guard for the field it emits. The `core` arm (below) is the primary
   # one — it pins tortoise/residency.py (no SOURCE_PATTERN) and tortoise/sdk.py.
   - test_residency_marker.py
+  # #8447: the TRUNCATION marker — the `truncated` / `total_available` fields
+  # on the shipped GET /v1/search response (a limit-capped read says so, and an
+  # exact total is published only when it is exact). Registered here for the
+  # same reason as the two rows above: the route that serves the fields lives
+  # in tortoise/hosted_api.py, an EXACT `api` SOURCE_PATTERN match, so without
+  # this arm a hosted_api.py-only change would run no guard for the fields it
+  # emits. The `core` arm (below) is the primary one — it pins
+  # tortoise/truncation.py (no SOURCE_PATTERN) and tortoise/sdk.py.
+  - test_8447_truncation_marker.py
+  # #8447 row #6: the PAGE BOUND on the same instrument's other seam — an
+  # out-of-domain `limit` is REFUSED by `event_store.read_after`, never
+  # silently clamped (`max(1, min(int(limit), 1000))` was the defect: a caller
+  # asking 5000 got 1000 rows with no field saying so, which reads as "the
+  # stream is drained"). Registered here because one half of the suite pins
+  # the REST surface's declared bound — `GET /v1/events`'s
+  # `Query(100, ge=1, le=MAX_PAGE)` must BE `event_store.MAX_PAGE`, not a
+  # second literal — and that route lives in `tortoise/hosted_api.py`, an
+  # EXACT `api` SOURCE_PATTERN match. Without this arm a hosted_api.py-only
+  # change could lower the seam's maximum and leave the route accepting a
+  # value the seam refuses. The `core` arm (below) is the primary one — it
+  # pins `tortoise/event_store.py` and `tortoise/sdk.py`'s `poll_events`.
+  - test_8447_read_after_page_bound.py
   - test_hosted_aboutobject_journal_4240.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous
   # FalkorDB I/O on the event loop. Same dual registration as the three guards
@@ -4925,6 +4947,28 @@ surfaces:
   # DUAL-REGISTERED with `api` (above) for the hosted /v1/search field.
   - test_residency_marker.py
   - test_reconciliation.py
+  # #8447: the TRUNCATION marker's ONE home. `core` is the primary arm:
+  # neither tortoise/truncation.py nor tortoise/sdk.py's marker seam matches an
+  # `api` SOURCE_PATTERN, so a change to `truncation.py` alone falls through to
+  # `core`. What it pins is the CONTRACT the marker turns on — a cut read is
+  # marked and a complete one is positively marked complete, a total is
+  # published only when it is exact, and an absent verdict is a refusal, never
+  # a defaulted `False` (that default IS the silent-subset bug). The fields' own
+  # surface is DUAL-REGISTERED with `api` (above) for the hosted /v1/search
+  # response.
+  - test_8447_truncation_marker.py
+  # #8447 row #6: the PAGE BOUND's primary arm. Its subjects are
+  # `tortoise/event_store.py` (`MAX_PAGE` and `read_after`'s refusal — that
+  # module matches no SOURCE_PATTERN, so an event_store.py-only change selects
+  # `core`) and `tortoise/sdk.py`'s `poll_events` (a SHARED_MODULE, so it can
+  # only ever select a superset). What it pins: an out-of-domain ask (over the
+  # cap, fractional, non-integral, zero/negative, non-numeric) REFUSES instead
+  # of being floored or clamped, while an in-domain ask still returns its rows
+  # — the refusal must not become over-broad. The webhook dispatcher's
+  # `more_pending` comparison against the clamped page it actually read is
+  # pinned in `test_webhook_delivery.py`, which is already registered here.
+  # DUAL-REGISTERED with `api` (above) for the hosted /v1/events bound.
+  - test_8447_read_after_page_bound.py
   # #9189 (§17.2): the reconciler's PRODUCTION TRIGGER. `tortoise/reconciliation.py`
   # had a comparison and no production caller (measured at `f96a18da1` and
   # re-derived for #9189), so "continuous reconciliation" had a mechanism and no
@@ -7756,6 +7800,7 @@ durations_captured_at: "2026-10-26T04:45:51Z"
 durations_held_equal:
   test_mcp_rename_table.py: test_bridge_table.py
 durations:
+  test_8447_read_after_page_bound.py: 2.0  # new in #8447 (row #6) — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` + `api` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: 9 cases — 7 take `sdk_factory` (a throwaway embedded FalkorDB each; the tier-2 PR legs are URI-empty BY DESIGN, so that is how it runs there), one reads `app.openapi()`, and one seeds nothing — with the seeding done as ONE Cypher `UNWIND` query per case, not 1001 `append_event` calls. No network, no model, no Postgres. Context for a human, NOT the weight: 14.78 s wall locally on a loaded box in the embedded carve-out lane. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_health_build_identity_10447.py: 2.0  # new in #10467 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`. ⚠️ Re-measured at #10467's head rather than assumed, and the coverage floor is NOT what the row buys here: `fast_pool()` is 1049 and `duration_coverage_issues()` is `[]` BOTH ways — 1021/1049 = 0.973308 without the row, 1022/1049 = 0.974261 with it. `tools/ci_selection.py --integrity` is the authority; the row is kept because a fast file added by a PR must carry a weight at all (the #3400/#4348 trap), not because its absence reds a gate. What the weight covers: DB-free, server-free, network-free and model-free — it imports `tortoise.hosted_api` and stubs `_probe_db`/the watcher/`_HEALTH_PROBE` through `monkeypatch`, so the only I/O is the `git init`/`git commit` pair it spawns in `tmp_path/history` to prove the identity is whatever the DEPLOY was told to build. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_reap_redislite_orphans.py: 2.0  # new in #3653 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: hermetic — it reads every workflow in `.github/workflows/` (both `.yml` and `.yaml`) and drives the stdlib reaper by path (one `sys.executable` subprocess for the CLI seam); no DB, no server, no network, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_ci_preview_isolation.py: 2.0  # new in #10283 — a file a PR ADDS can never carry a CI junit reading yet (same reasoning as the #3653 row above), so it takes the flat `DEFAULT_FAST_WEIGHT`; the row must EXIST because the `core` registration puts one more file in `fast_pool()` and `--integrity`'s coverage floor is measured against that pool. What the weight covers: hermetic — it reads `.github/workflows/*.yml` (text + YAML arms) and drives `.github/scripts/preview-server.sh` by path, spawning 3 short-lived `sleep`/`bash` process trees per run to prove `stop` is pid-scoped and a peer's decoy survives; no DB, no network, no browser, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.

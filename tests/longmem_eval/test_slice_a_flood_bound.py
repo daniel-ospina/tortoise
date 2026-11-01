@@ -27,8 +27,16 @@ Two independent jobs:
      * a provenance-free pool does NOT get that bound (the measured #8658
        scope limit — still the shape of a DEGRADED fallback read);
      * the duplicate-free control comes back byte-identical (no regression);
+     * the tier-boundary control (#9114) is asserted against the tier KEY, not
+       byte-identity, because under D3 a pool ranking a raw chunk above a
+       statement is REGROUPED by design — so its own scope is stated rather
+       than read as a duplicate-free guarantee it never made;
      * the receipt names NO reader and NO judge — it can never be quoted as
-       the old T's end-to-end measurement.
+       the old T's end-to-end measurement;
+     * every emitted ratio carries the LEG that produced it: `value_pairs[]`
+       emits content and quote separately, and `refused_pairs[]` names which
+       of `_same_fact`'s two call sites refused and measures both quantities
+       from the hits it compared (never one label over two, #8945/#10508).
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tools.longmem_eval import slice_a_flood_bound as instrument  # noqa: E402
+from tortoise import retrieval  # noqa: E402
 from tortoise.retrieval import DEFAULT_PACKAGE_MAX_VERBATIM  # noqa: E402
 
 RECEIPT = ROOT / "docs" / "runbook" / "8043-slice-a-t-gate-receipt.json"
@@ -137,9 +146,10 @@ def test_value_critical_claims_survive_the_collapse(receipt: dict) -> None:
     the window once the flood is bounded.
 
     On THIS fixture the refusal is structural, not the value guard: measured
-    normalised overlap is 0.80 and 0.60 against a 0.90 collapse threshold and
-    the four turns are distinct, so no value pair is a collapse candidate on
-    its own account. The guard IS still consulted, and this test pins that to
+    CONTENT overlap is 0.80 and 0.7778 against a 0.90 collapse threshold, the
+    measured QUOTE overlap is 0.80 and 0.60 against 0.75, and the four turns
+    are distinct — so no value pair is a collapse candidate on its own account.
+    The guard IS still consulted, and this test pins that to
     the COUNTERS the instrument records — not to words in a sentence. The
     difference is not academic: an earlier revision pinned the substring
     "not exercised here" and was false; its replacement pinned "still
@@ -157,23 +167,49 @@ def test_value_critical_claims_survive_the_collapse(receipt: dict) -> None:
     verdict = receipt["verdicts"]["value_safety"]
     assert "assembly=4/4" in verdict["measured"]
     # ── the leading clause is measured too, not written ─────────────────────
+    # #8945: TWO quantities, each beside the threshold it actually answers to.
+    # The old receipt published the QUOTE overlap under the label "normalised
+    # overlap" and compared it in prose to the CONTENT threshold (0.90), so
+    # the one number a reader could check answered a different question than
+    # the sentence asked. The 300/400 quote overlap is 0.80 — ABOVE the 0.75
+    # same-turn threshold — which the single mis-labelled figure concealed.
     pairs_v = verdict["value_pairs"]
     assert pairs_v == [
-        {"a": "v1", "b": "v2", "values": "300/400", "overlap": 0.8,
-         "turns": ["t1", "t2"], "distinct_turns": True},
-        {"a": "v3", "b": "v4", "values": "12/60", "overlap": 0.6,
-         "turns": ["t3", "t4"], "distinct_turns": True},
+        {"a": "v1", "b": "v2", "values": "300/400",
+         "content_overlap": 0.8, "content_below_threshold": True,
+         "content_leg_reachable": False,
+         "quote_overlap": 0.8, "quote_below_threshold": False,
+         "same_turn_leg_reachable": False,
+         "turns": ["t1", "t2"], "same_source_turn": False,
+         "distinct_turns": True},
+        {"a": "v3", "b": "v4", "values": "12/60",
+         "content_overlap": 0.7778, "content_below_threshold": True,
+         "content_leg_reachable": False,
+         "quote_overlap": 0.6, "quote_below_threshold": True,
+         "same_turn_leg_reachable": False,
+         "turns": ["t3", "t4"], "same_source_turn": False,
+         "distinct_turns": True},
     ], pairs_v
     assert verdict["collapse_threshold"] == 0.9
+    assert verdict["same_turn_threshold"] == 0.75
     for p in pairs_v:
-        assert p["overlap"] < verdict["collapse_threshold"], p
-        assert p["distinct_turns"] is True, p
-        assert f"normalised overlap {p['overlap']:.2f}" in verdict["why"], verdict["why"]
+        # each comparison is DERIVED from the number it names (#8945)
+        assert p["content_below_threshold"] is (
+            p["content_overlap"] < verdict["collapse_threshold"]), p
+        assert p["quote_below_threshold"] is (
+            p["quote_overlap"] < verdict["same_turn_threshold"]), p
+        assert p["content_leg_reachable"] is not p["content_below_threshold"], p
+        assert p["same_turn_leg_reachable"] is (
+            not p["quote_below_threshold"] and p["same_source_turn"]), p
+        assert p["distinct_turns"] is not p["same_source_turn"], p
+        assert f"content overlap {p['content_overlap']:.2f}" in verdict["why"], verdict["why"]
+        assert f"quote overlap {p['quote_overlap']:.2f}" in verdict["why"], verdict["why"]
         assert f"turns {p['turns'][0]}/{p['turns'][1]}" in verdict["why"], verdict["why"]
-    assert f"{verdict['collapse_threshold']:.2f} collapse threshold" in verdict["why"]
+    assert f"{verdict['collapse_threshold']:.2f} near-verbatim threshold" in verdict["why"]
+    assert f"{verdict['same_turn_threshold']:.2f} same-turn threshold" in verdict["why"]
     # the tail is conditional on the measurement, never fixed prose
     assert all(p["distinct_turns"] for p in pairs_v)
-    assert "carry distinct turns" in verdict["why"], verdict["why"]
+    assert "carries distinct turns" in verdict["why"], verdict["why"]
     assert "NOT all on distinct turns" not in verdict["why"], verdict["why"]
 
     # ── the guard is CONSULTED: measured, per arm, in the receipt ────────────
@@ -216,6 +252,431 @@ def test_value_critical_claims_survive_the_collapse(receipt: dict) -> None:
     assert f"{verdict['guard_total_calls']} calls" in verdict["why"], verdict["why"]
     assert f"{verdict['guard_total_refusals']} of them refusals" in verdict["why"], verdict["why"]
     assert "leaves this arm's ids/order unchanged" in verdict["why"], verdict["why"]
+
+
+def test_value_pairs_sentence_is_composed_not_fixed() -> None:
+    """#8945 acceptance: a pair FORCED above a threshold must not produce the
+    "clear both collapse legs" wording, and the field the sentence names must
+    be the field the comparison used.
+
+    This feeds the composer directly with synthetic pairs, so it fails even if
+    the fixture that ``measure()`` builds never happens to produce an
+    above-threshold pair again. That is the whole defect: the old generator
+    emitted the "sit below 0.90" clause UNCONDITIONALLY, so no fixture could
+    ever have falsified it.
+    """
+    def _pair(**over: object) -> dict:
+        base = {
+            "a": "x1", "b": "x2", "values": "300/400",
+            "content_overlap": 0.5, "content_below_threshold": True,
+            "content_leg_reachable": False,
+            "quote_overlap": 0.5, "quote_below_threshold": True,
+            "same_turn_leg_reachable": False,
+            "turns": ["t1", "t2"], "same_source_turn": False,
+            "distinct_turns": True,
+        }
+        base.update(over)
+        return base
+
+    below = instrument._value_pairs_sentence([_pair()])
+    assert "clear both collapse legs on their own terms" in below, below
+    assert "no value pair is a collapse candidate" in below, below
+
+    # (1) content overlap forced ABOVE the near-verbatim threshold
+    above_content = instrument._value_pairs_sentence(
+        [_pair(content_overlap=0.99, content_below_threshold=False,
+               content_leg_reachable=True)]
+    )
+    assert "clear both collapse legs on their own terms" not in above_content, above_content
+    assert "do not clear both collapse legs" in above_content, above_content
+    assert "reaches at least one leg's ratio" in above_content, above_content
+    assert "300/400" in above_content, above_content
+    # and the number it names is the number it was given
+    assert "content overlap 0.99" in above_content, above_content
+
+    # (2) quote overlap above the same-turn threshold but on DISTINCT turns is
+    # NOT a reachable leg — the precondition is checked, not just the ratio
+    above_quote_unreachable = instrument._value_pairs_sentence(
+        [_pair(quote_overlap=0.99, quote_below_threshold=False)]
+    )
+    assert "no value pair is a collapse candidate" in above_quote_unreachable
+    assert "unreachable" in above_quote_unreachable, above_quote_unreachable
+
+    # (3) same pair, now sharing a turn — the leg IS reachable and the
+    # sentence must say so rather than repeating (2)
+    above_quote_reachable = instrument._value_pairs_sentence(
+        [_pair(quote_overlap=0.99, quote_below_threshold=False,
+               same_turn_leg_reachable=True, same_source_turn=True,
+               distinct_turns=False)]
+    )
+    assert "no value pair is a collapse candidate" not in above_quote_reachable
+    assert "reaches at least one leg's ratio" in above_quote_reachable
+    assert "SAME TURN" in above_quote_reachable, above_quote_reachable
+
+
+def _pair(**over: object) -> dict:
+    """One synthetic ``value_pairs`` entry, overridable field by field."""
+    base = {
+        "a": "x1", "b": "x2", "values": "300/400",
+        "content_overlap": 0.5, "content_below_threshold": True,
+        "content_leg_reachable": False,
+        "quote_overlap": 0.5, "quote_below_threshold": True,
+        "same_turn_leg_reachable": False,
+        "turns": ["t1", "t2"], "same_source_turn": False,
+        "distinct_turns": True,
+    }
+    base.update(over)
+    return base
+
+
+def test_sentence_from_an_empty_measurement_is_not_a_safety_verdict() -> None:
+    """#8945, one level down: a UNIVERSAL over zero pairs is vacuously true.
+
+    With no pairs measured, "every content overlap is below the threshold" and
+    "no value pair is a collapse candidate" are both true statements about an
+    empty set — i.e. a safety verdict from a comparison nothing ran, which is
+    precisely the defect this composer replaced. The comparable default
+    aggravates it (dbt's data-test rule is "zero failing rows -> pass"), so the
+    composer must say the population was empty instead of inheriting a pass.
+
+    Pre-fix this reds: the else-branch emitted "clear both collapse legs on
+    their own terms" and "no value pair is a collapse candidate" for `[]`.
+    """
+    sentence = instrument._value_pairs_sentence([])
+    assert "clear both collapse legs on their own terms" not in sentence, sentence
+    assert "no value pair is a collapse candidate" not in sentence, sentence
+    assert "empty measurement is not a safety" in sentence, sentence
+    assert "no value pair was measured" in sentence, sentence
+
+
+def test_sentence_counts_above_threshold_pairs_instead_of_claiming_the_only_one(
+) -> None:
+    """#8945: a COUNT must not be asserted from an ``any()``.
+
+    Two pairs whose quote overlaps are at or above the same-turn threshold, on
+    DISTINCT turns, both satisfy the old branch's ``any(...)`` condition — and
+    the sentence then said "the only quote overlap at or above" threshold,
+    which is false on a measured fact. That is the same shape as the defect
+    this composer removed: prose outrunning the measurement. The wording must
+    follow the COUNT (one -> "the only", more -> "every ... belongs to").
+
+    Pre-fix this reds on the plural case: it emitted the singular clause.
+    """
+    one = instrument._value_pairs_sentence(
+        [_pair(values="300/400", quote_overlap=0.8, quote_below_threshold=False)]
+    )
+    assert "the only quote overlap at or above the same-turn threshold" in one, one
+
+    two = instrument._value_pairs_sentence([
+        _pair(values="300/400", quote_overlap=0.8, quote_below_threshold=False,
+              turns=["t1", "t2"]),
+        _pair(values="12/60", quote_overlap=0.9, quote_below_threshold=False,
+              turns=["t3", "t4"]),
+    ])
+    assert "the only quote overlap" not in two, two
+    assert (
+        "every quote overlap at or above the same-turn threshold belongs to a "
+        "pair on DISTINCT turns" in two
+    ), two
+    # both values still named, and the conclusion unchanged
+    assert "300/400" in two and "12/60" in two, two
+    assert "no value pair is a collapse candidate" in two, two
+
+
+def test_refused_pair_overlap_is_measured_not_silently_null(receipt: dict) -> None:
+    """#8945 item 3: the ``hasattr`` guard degraded a rename to a plausible
+    ``null``. The field is now a direct call, so it is always a number — and
+    the source carries no guard that could hide a rename."""
+    pairs = receipt["verdicts"]["value_safety"]["refused_pairs"]
+    assert pairs, "precondition: the arms refuse at least one pair"
+    for p in pairs:
+        assert isinstance(p["quote_overlap"], float), p
+        assert p["quote_overlap"] is not None, p
+    source = (ROOT / "tools" / "longmem_eval" / "slice_a_flood_bound.py").read_text()
+    assert 'hasattr(retrieval, "_pkg_overlap")' not in source, (
+        "the hasattr guard is back — it turns a rename into a plausible null "
+        "instead of an error (#8945)"
+    )
+
+
+def test_a_content_leg_refusal_is_published_as_the_content_quantity() -> None:
+    """#10508 review round 3, Finding 2 (P3): ``refused_pairs`` published ONE
+    label over TWO quantities — #8945 item 2, surviving one field lower.
+
+    ``_pkg_differ_value_critical`` has two call sites in ``_same_fact`` and
+    they pass different KINDS of string: normalized CONTENT for the
+    near-verbatim leg (0.90), verbatim QUOTE spans for the same-source-turn leg
+    (0.75). A counter that recorded only the arguments published a CONTENT
+    ratio under the key ``quote_overlap`` whenever the content leg fired — the
+    defect one field lower in the very verdict #8945 exists to fix.
+
+    This drives the REAL product guard with a pair that can only be refused by
+    the CONTENT leg (content overlap 0.90 with a differing number, quote spans
+    disjoint), so the branch is exercised rather than assumed. The fixture
+    receipt cannot see it: its only refusal comes from the quote leg.
+
+    Pre-fix this reds: there is no ``leg``, no ``content_overlap``, and the
+    number published as ``quote_overlap`` was ``_pkg_overlap(a, b)`` over the
+    two CONTENT strings — 0.9 under the 0.75 same-turn label.
+    """
+    content_a = "the tea set from the antique shop on elm street cost 300 dollars total"
+    content_b = "the tea set from the antique shop on elm street cost 400 dollars total"
+    quote_a = "she mentioned the antique shop purchase"
+    quote_b = "it had already been paid for"
+    a = instrument._point(
+        "cl1", content_a, session="s1", index=0, quote=quote_a, source_turn="c1",
+        fact=instrument.FACT_OTHER,
+    )
+    b = instrument._point(
+        "cl2", content_b, session="s1", index=1, quote=quote_b, source_turn="c1",
+        fact=instrument.FACT_OTHER,
+    )
+
+    from_content = round(
+        retrieval._pkg_overlap(
+            retrieval._pkg_norm(content_a), retrieval._pkg_norm(content_b)
+        ),
+        4,
+    )
+    from_quote = round(retrieval._pkg_overlap(quote_a, quote_b), 4)
+    # the precondition that makes this pair CONTENT-leg-only
+    assert from_content >= retrieval.DEFAULT_PACKAGE_VERBATIM_OVERLAP, from_content
+    assert from_quote < retrieval.DEFAULT_PACKAGE_SAME_TURN_OVERLAP, from_quote
+    assert from_content != from_quote
+
+    with instrument._probe_value_guard() as guard:
+        assert retrieval._same_fact(a, b) is False, (
+            "precondition: the CONTENT leg refuses this pair"
+        )
+    assert guard["refusals"] == 1, guard
+    record = instrument._refused_pair_record("synthetic", guard["refused_pairs"][0])
+
+    assert record["leg"] == "content", record
+    assert record["a_id"] == "cl1" and record["b_id"] == "cl2", record
+    # each quantity under its own name, measured from its own leg's strings
+    assert record["content_overlap"] == from_content, record
+    assert record["quote_overlap"] == from_quote, record
+    # the refusal is NOT labelled with the quote ratio — the #8945 defect
+    assert record["content_overlap"] != record["quote_overlap"], record
+
+
+def test_refused_pairs_name_the_leg_and_its_own_quantity(receipt: dict) -> None:
+    """#10508 review round 3, Finding 2: every published refusal names WHICH
+    leg refused and which two HITS were compared, and each ratio is measured
+    from its own leg's strings.
+
+    The previous block resolved the hits with a **quote-keyed** pool index:
+    a CONTENT argument is not a quote so it yielded ``null``, and where the
+    argument *is* a quote every hit sharing it answered the lookup, so it
+    returned an arbitrary member instead of the hit the guard compared.
+    """
+    pairs = receipt["verdicts"]["value_safety"]["refused_pairs"]
+    assert pairs, "precondition: the arms refuse at least one pair"
+    pool, _census = instrument.build_c2_pool()
+    hits = {h.get("id"): h for h in pool}
+    for p in pairs:
+        assert p["leg"] in ("content", "quote"), p
+        ha, hb = hits[p["a_id"]], hits[p["b_id"]]
+        from_content = round(
+            retrieval._pkg_overlap(
+                retrieval._pkg_norm(str(ha.get("content") or "")),
+                retrieval._pkg_norm(str(hb.get("content") or "")),
+            ),
+            4,
+        )
+        from_quote = round(
+            retrieval._pkg_overlap(
+                str(ha.get("quote") or ""), str(hb.get("quote") or "")
+            ),
+            4,
+        )
+        assert p["content_overlap"] == from_content, (p, from_content)
+        assert p["quote_overlap"] == from_quote, (p, from_quote)
+        # the strings the guard received are the ones the named leg passes
+        leg_strings = (ha, hb) if p["leg"] == "content" else None
+        if leg_strings is not None:  # content leg
+            assert p["a"] == retrieval._pkg_norm(str(ha.get("content") or "")), p
+            assert p["b"] == retrieval._pkg_norm(str(hb.get("content") or "")), p
+        else:  # quote leg
+            assert p["a"] == str(ha.get("quote") or ""), p
+            assert p["b"] == str(hb.get("quote") or ""), p
+
+    # This fixture trips ONLY the quote leg (v1's content is its quote and the
+    # other side is a quote span), which is exactly why the content-leg branch
+    # is pinned executably above instead of from the receipt.
+    assert {p["leg"] for p in pairs} == {"quote"}, pairs
+
+    source = (ROOT / "tools" / "longmem_eval" / "slice_a_flood_bound.py").read_text()
+    assert "_pool_by_quote" not in source, (
+        "a quote-keyed pool index is back — it cannot resolve a CONTENT argument "
+        "and picks an arbitrary member among shared quotes (#10508 Finding 2)"
+    )
+    assert '"quote_overlap": round(retrieval._pkg_overlap(rp["a"], rp["b"]), 4)' not in source, (
+        "one label over two quantities is back: the refusal is published as "
+        "the overlap of the strings the guard received, whichever leg sent them"
+    )
+
+
+def test_content_and_quote_overlaps_are_measured_from_different_strings(
+    receipt: dict,
+) -> None:
+    """#10508 Finding 1: the two emitted quantities must be able to DIFFER.
+
+    `measure()` emits both ratios because `_same_fact` has two legs reading
+    different strings. That is only true of the receipt if the FIXTURE gives
+    them different strings: with `content == quote` on every statement both
+    calls at the `value_pairs` site receive the same arguments, the two numbers
+    are identical by construction, and reverting the content leg to the quote
+    formula — #8945's defect exactly, labelling a quote ratio as the 0.90
+    content threshold — leaves every assertion AND the receipt unchanged. A
+    green suite over a vacuous measurement is the failure this file exists to
+    remove, so the fixture must be able to falsify the swap.
+
+    Pre-fix this reds: v3/v4 read 0.6 / 0.6, both derived from the quote spans.
+    """
+    statements = {
+        pid: (content, quote)
+        for pid, content, quote, _turn in instrument._VALUE_STATEMENTS
+    }
+    paraphrased = [pid for pid, (c, q) in statements.items() if c != q]
+    assert paraphrased, (
+        "every fixture statement has content == quote, so the CONTENT and the "
+        "QUOTE call at the value_pairs site receive identical arguments: the "
+        "two emitted numbers cannot disagree and the #8945 swap would be "
+        "invisible"
+    )
+    discriminating = 0
+    for p in receipt["verdicts"]["value_safety"]["value_pairs"]:
+        ca, qa = statements[p["a"]]
+        cb, qb = statements[p["b"]]
+        from_content = round(retrieval._pkg_overlap(ca, cb), 4)
+        from_quote = round(retrieval._pkg_overlap(qa, qb), 4)
+        # the CONTENT field carries the content-derived number…
+        assert p["content_overlap"] == from_content, (p, from_content)
+        # …and the QUOTE field the quote-derived one
+        assert p["quote_overlap"] == from_quote, (p, from_quote)
+        if from_content != from_quote:
+            discriminating += 1
+            assert p["content_overlap"] != p["quote_overlap"], (
+                f"the {p['values']} pair reports the same number for both "
+                "quantities, so neither is measured (#10508 Finding 1)"
+            )
+    assert discriminating >= 1, (
+        "no measured pair separates the two quantities — the split is "
+        "decorative on this fixture"
+    )
+
+
+def test_same_turn_leg_precondition_is_the_products_predicate() -> None:
+    """#10508 Finding 2: reachability must be judged by the predicate the leg
+    USES, not by raw equality on the raw field.
+
+    ``_same_fact`` gates the same-source-turn leg on ``_pkg_turn_key``
+    PRESENCE and equality. Two divergences are reachable, and both are asserted
+    against the product function itself so this pin cannot drift from it:
+
+    * **both absent** — raw `None == None` reads "same turn"; the product leg
+      is inert. A receipt built on that would claim the leg refuses a merge the
+      product never consults — the shape of the `provenance_free_assembly` arm.
+    * **``0`` vs ``"0"``** — raw reads "distinct"; the 0-based turn index makes
+      them the SAME turn, so "that leg is unreachable" would be a false safety
+      claim (the #8945 shape, one level down).
+
+    Pre-fix this reds on both: the helper did not exist, and raw equality
+    answers True/False respectively — the exact inverse of the product.
+    """
+    quote = "the mugs cost 12 dollars each"
+    a_content = "the mugs cost 12 dollars each per the user"
+    b_content = "the mugs were priced per the user at 12 dollars each"
+
+    def hit(content: str, turn: object) -> dict:
+        return {"content": content, "quote": quote, "source_turn_id": turn}
+
+    # both ABSENT — the leg is inert in the product, "same turn" only to a raw
+    # comparison. (Content overlap 0.857 clears neither the 0.90 content leg
+    # nor equality, so the turn gate alone decides `_same_fact` here.)
+    absent = (hit(a_content, None), hit(b_content, None))
+    assert retrieval._same_fact(*absent) is False, "precondition: the leg is inert"
+    assert instrument._shares_source_turn(*absent) is False
+
+    # the 0-based turn index — same turn, reachable leg
+    zero = (hit(a_content, 0), hit(b_content, "0"))
+    assert retrieval._same_fact(*zero) is True, "precondition: the leg is reachable"
+    assert instrument._shares_source_turn(*zero) is True
+
+    same = (hit(a_content, "t1"), hit(b_content, "t1"))
+    assert retrieval._same_fact(*same) is True, "precondition"
+    assert instrument._shares_source_turn(*same) is True
+    assert instrument._shares_source_turn(
+        hit(a_content, "t1"), hit(b_content, "t2")
+    ) is False
+    # the empty-string turn FalkorDB's ``coalesce`` yields is ABSENT, not a
+    # shared turn — both sides map to "" and the product leg stays inert
+    assert instrument._shares_source_turn(
+        hit(a_content, ""), hit(b_content, "")
+    ) is False
+
+    # The instrument routes BOTH call sites through the helper, so a raw
+    # comparison cannot creep back into one of them (Finding 2's latent half).
+    source = (ROOT / "tools" / "longmem_eval" / "slice_a_flood_bound.py").read_text()
+    assert 'ha.get("source_turn_id") == hb.get("source_turn_id")' not in source, (
+        "a raw turn comparison is back — it disagrees with `_pkg_turn_key` on "
+        "both absent turns and on the 0-based index (#10508 Finding 2)"
+    )
+    assert 'ta, tb = ha.get("source_turn_id"), hb.get("source_turn_id")' not in source
+    assert source.count("_shares_source_turn(") >= 3, (
+        "expected the helper definition plus both call sites"
+    )
+
+
+def test_no_dupe_control_observes_the_tier_boundary(receipt: dict) -> None:
+    """#9114: the single-tier control cannot see the D3 regroup, so the receipt
+    carries a second control that CAN — a raw chunk ranked above the
+    statements, which under D3 is demoted behind every statement by design."""
+    single = receipt["controls"]["no_dupe_no_regression"]
+    assert single["ids_identical"] is True
+    assert "SINGLE-TIER" in single["scope"], single["scope"]
+
+    boundary = receipt["controls"]["no_dupe_tier_boundary"]
+    assert boundary["collapsed_duplicates"] == 0
+    assert boundary["package_items"] == boundary["pool_items"]
+    # the fixture really does rank the chunk above the statements
+    assert boundary["pool_order"][0] == "mc0", boundary["pool_order"]
+    assert boundary["pool_tiers"][0] == 2, boundary["pool_tiers"]
+    assert set(boundary["pool_tiers"][1:]) == {0}, boundary["pool_tiers"]
+    # …and the arm demotes it: byte-identity is FALSE by design here
+    assert boundary["ids_identical"] is False, boundary
+    assert boundary["package_order"][-1] == "mc0", boundary["package_order"]
+    assert boundary["package_tiers"] == sorted(boundary["package_tiers"]), boundary
+    # the tier-scoped assertions, which the pool CAN falsify
+    assert boundary["tier_key_order"] == boundary["package_order"], boundary
+    assert boundary["tier_regroup_matches_key"] is True, boundary
+    assert boundary["ids_identical_within_tier"] is True, boundary
+
+def test_tier_control_fails_when_the_tier_key_leaves_the_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#9114 acceptance, EXECUTED: remove ``_package_type_tier`` from the SORT
+    KEY and the control goes False.
+
+    Patched at ``_package_tier`` (the sort key), NOT at
+    ``_package_type_tier`` (the tier function). Breaking the function would
+    degenerate BOTH sides — the expected projection and the observed order
+    would each collapse to rank order — and the control would pass while the
+    mechanism was broken. Breaking only the key is what the criterion means,
+    and it is the regression that could actually ship.
+    """
+    before = instrument.measure()["controls"]["no_dupe_tier_boundary"]
+    assert before["tier_regroup_matches_key"] is True, before
+
+    def _rank_only(h: dict, mark_for: object = None) -> tuple[int, int, int]:
+        return (0, 0, h.get("_pkg_rank", 0))
+
+    monkeypatch.setattr(instrument.retrieval, "_package_tier", _rank_only)
+    after = instrument.measure()["controls"]["no_dupe_tier_boundary"]
+    assert after["tier_regroup_matches_key"] is False, after
+    # the chunk stayed at rank 0, so the pool came back untouched
+    assert after["ids_identical"] is True, after
 
 
 def test_marked_arm_carries_the_value_class_census(receipt: dict) -> None:
