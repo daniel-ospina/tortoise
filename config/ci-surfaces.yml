@@ -4200,6 +4200,13 @@ surfaces:
   # (`core` + `tier1`) for the same docs-only reason as the doc guards above: a
   # `docs/`-only diff takes `select()`'s early return, so `tier1` is where it must live.
   - test_capstone_1976_report_claims.py
+  # #10554 review: the S3 RE-MEASUREMENT record's arithmetic — the drift/effect multiplier it
+  # states, the decimal resolution it attributes to the ratio, and the per-session deltas it
+  # compares against — re-derived from the two committed ablation logs. Dual-registered
+  # (`core` + `tier1`) for the same docs-only reason as the doc guards above: the guarded file
+  # is `docs/evidence/5087-hypothesis/REMEASUREMENT-a83c23a8.md`, so a `docs/`-only diff runs
+  # `tier1` only, and that is exactly the change class that can restate a measured number.
+  - test_10554_remeasurement_claims.py
   # #1992 review: the epic-1976 TEST DESIGN surface map's own claims guard — the
   # `Verified at` column is a verbatim COPY of each surface's Test Layer, a capability
   # row cites every surface its own rationale names, E2E-6 cites every surface that
@@ -6927,6 +6934,7 @@ tier1:
 - test_9664_premise_census.py  # #9664 review P2: the capstone census measures the clause it prints (two-clause premises, all three completion gates, the corrected tool names) — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_s2_decision_record_5087.py  # #10072 review round 17 P2: S2-DECISION-SEAM.md §8's tables must be tables (GFM ends a table at a blank line and markdownlint cannot see it) and must cite siblings by name, not ordinal — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_s3_prior_ablation.py  # #10463: the S3 prior-injection ablation's pre-registered bars and measured log live under `docs/evidence/5087-hypothesis/`, so a docs-only diff (which runs `tier1` only) is exactly the change that can move a threshold after the numbers landed — dual-registered with `core`
+- test_10554_remeasurement_claims.py  # #10554 review: the S3 re-measurement record's arithmetic (drift-vs-effect multiplier, ratio resolution, per-session deltas) re-derived from the two committed logs; the guarded document is under `docs/evidence/`, so a docs-only diff runs `tier1` only — dual-registered with `core`
 - test_7818_ontology_record.py  # #7818: docs/ONTOLOGY.md §4.7 coverage-boundary record vs `_covers` (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_8474_ontology_record.py  # #8474: docs/ONTOLOGY.md §4.6 rawState/rawStateAt availability record vs the declared write surface (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_7818_plan_record_5362.py  # #7818/#5362: the #5362 plan's RES-1 / out-of-scope read-path record vs the shipped reply contract (hermetic doc pin; a docs-only plan edit runs only tier1) — dual-registered with `core`
@@ -7265,6 +7273,10 @@ tier1:
 # and section scans plus three source-file reads, no DB, so a docs-only PR must run it
 # here.
 - test_capstone_1976_report_claims.py
+# #10554 review: the S3 re-measurement record's claim guard (`core` above) — two log parses
+# (the COUNTS/RATIO line and the per-session table of each ablation log) plus doc-text reads,
+# no DB, so a docs-only PR must run it here too.
+- test_10554_remeasurement_claims.py
 # #1992 review: the epic-1976 test-design surface map's claim guard (`core` above) —
 # doc-text table/row scans plus two file reads, no DB, so a docs-only PR must run it
 # here.
@@ -8782,6 +8794,7 @@ durations:
   test_extractor_v4_redaction_reconciliation.py: 0.1  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.3
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
   test_capstone_1976_report_claims.py: 0.8  # #2008 review: four doc-text/section reads + three source-file reads, plus one `tests/**` def/class index for the citation resolver (now covering module/path/glob citations, not only bare symbols) and one batch-table parse; no DB — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 1.0
+  test_10554_remeasurement_claims.py: 0.3  # #10554 review: two `docs/evidence/**` log parses (COUNTS/RATIO line + per-session table each) and one doc read; hermetic — no DB, graph, network or source import. Estimated from the sibling `test_capstone_1976_report_claims.py` weight (0.8 for 7 file reads + a `tests/**` index), scaled down to 3 reads and no index; not junit-measured, so re-weigh it from the first ci-timing census that includes it.
   test_test_design_1992_traceability.py: 0.2  # #1992: review: doc-text table/row scans + two file reads; no DB — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1
   test_doc_affiliation_frontmatter.py: 0.1  # #8738 review P2: six frontmatter-block reads + one directory glob; same no-DB shape as the doc guards above
   test_9664_premise_census.py: 2.0  # carried forward (not a full-file CI measurement) — new in #9664 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the header's flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading — the #2818/#3419 convention, and the LEADING marker is what lets `tools/ci_timing.py::render_refreshed_manifest` clear this note once a sweep measures it. What the weight covers: one `importlib` load of the census probe PER TEST (the `probe` fixture is function-scoped) plus one in-process section call per test, with `monkeypatch` over `_GATE_SELF` / `_GATE_BUILD` / `_GATE_COMPACT` / `_NON_AGENT_STEPS` / `onboarding_node_init_fragment` / `restart_pending`. The imports the probe pulls in (`tortoise.tool_registry`, `tortoise.onboarding.state`, and — for the onboarding section — `tortoise.hosted_api` and `tortoise.oauth`) dominate the cost and are shared with the interpreter; `hosted_api` is the largest of them. No DB, no network, no graph fixture, no file read of its own. Per-test counts are deliberately NOT restated: they re-stale with every added test, and the packer only reads the weight. Required on BOTH halves: the `core` surface row alone is manifest CLASSIFICATION, not a durations weight (#4348). Refresh from the first post-merge run that includes it. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.9s) is a LOWER bound; kept 2.0

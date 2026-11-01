@@ -25,8 +25,8 @@ untreated arm and `1.2 %` of this run's, each against its own untreated-arm deno
 about 11 % between runs, so the defensible sentence is *"no measurable effect at ~0.99, well inside the ~11 %
 between-run drift this instrument shows on its untreated arm"* — **not** *"priors cut creates by 1 %"*. If you
 need one number, quote the pair (`253 / 250`) beside the drift, or quote `0.870` and `0.988` together as the
-range this corpus supports. The six-decimal ratio is an arithmetic artefact of a 3-node difference, not a
-measurement that fine.
+range this corpus supports. The four-decimal ratio `0.9881` is an arithmetic artefact of a 3-node difference
+(`250 / 253`), not a measurement that fine.
 
 ## 1. Why a second run exists at all
 
@@ -112,7 +112,8 @@ supports *"priors do not measurably change creates at all"*. The second is the o
 **only at the resolution in the warning at the top of this file**: the 31-node between-run drift on the untreated
 arm is larger than every per-session change **in nodes** in both runs, and about ten times the 3-node difference
 between the two arms here. (Per-session changes measured in *percent* are larger than 11 % — `wp06` `+30.0 %`,
-`wp03` `−24.4 %` — which is the same point from the other side: percentages are noisy at these counts.)
+`wp03` `−24.4 %` — which is the same point from the other side: percentages are noisy at these counts.) The
+drift bounds the **between-run** comparison of two totals; it does not bound a single session's own swing.
 
 ## 5. Method differences, disclosed — and the one thing that did NOT move
 
