@@ -226,8 +226,8 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT at "
         "tortoise/consistency.py:859 quoting what the view cannot produce "
-        "(the function reads `embedding` at :826/:856 and names it in a field "
-        "list at :873/:877/:881 — reads, not writes)"),
+        "(the function reads `\"embedding\"` at :826/:827 and names it in a "
+        "field list at :862/:873/:877/:881 — reads and appends, never a write)"),
     "tortoise.hosted_backup::restore_graph": (
         CENSUS_RECOGNISED,
         "tortoise/hosted_backup.py:1026 writes through the canonical clause "
@@ -845,9 +845,12 @@ def score_path_bullet() -> Row:
     # ── #10541: the census turns "cannot resolve" into a SCORED answer ───────
     # A function the vocabulary could not resolve is only a hole in the
     # measurement if NOTHING says which of the three honest classes it is in.
-    # Once it carries one, the row is a complete measurement over it — which is
-    # the whole of #10541, and why this does not move a threshold: the writer
-    # set is unchanged, each member merely stops being unclassified.
+    # Once it carries one, the row has a RECORDED ANSWER for every unresolved
+    # writer — which is the whole of #10541. It is NOT a licence to move the
+    # verdict: the writer set is unchanged and `unknown` still holds the row at
+    # PARTIAL below, because re-classing a writer does not make the vocabulary
+    # resolve it. (An earlier draft read this as "a complete measurement" and
+    # flipped the row to MET, breaking bullet 2's own falsifier; reverted.)
     unclassified = sorted(fn for fn in unknown if _census_class(fn) is None)
     by_class: dict[str, list[str]] = {}
     for fn in unknown:
