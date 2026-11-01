@@ -10106,11 +10106,6 @@ class TortoiseSDK:
         'cursor expired — replay from tail'); malformed → ValueError('invalid cursor').
         Types are validated against the EventCodec registry (unknown → ValueError).
         Events live in THIS SDK's graph namespace (the org partition).
-        ``limit`` must be an integer in ``1 .. event_store.MAX_PAGE`` — the same
-        domain ``GET /v1/events`` declares. An ask OUTSIDE it raises ValueError
-        rather than being clamped: a silently clamped page cannot be told from
-        a complete one, so ``len(events) < limit`` would read as "drained"
-        while events were still undelivered (#8447).
 
         #9208: when a change-feed write for THIS graph has been REFUSED or lost,
         this REFUSES (``event_store.ChangeFeedDegraded``) instead of returning a

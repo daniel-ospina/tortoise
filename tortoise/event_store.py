@@ -886,7 +886,7 @@ def _event_row_exists(proj, event_id: str) -> bool | None:
 
 #: The page bound `read_after` enforces. It is the SAME domain `GET /v1/events`
 #: already declares — `Query(100, ge=1, le=MAX_PAGE)` (`hosted_api.events_poll`)
-#: — and the bound is stated in `poll_events`' own docstring. It was declared in
+#: — and the one `read_after`'s own docstring states. It was declared in
 #: two places (#8447 row #6) and silently clamped in two others: this seam
 #: (`max(1, min(int(limit), 1000))`, the defect) and the `webhook_delivery`
 #: page read, which carried its own copy of the literal.
