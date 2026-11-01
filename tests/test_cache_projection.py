@@ -1363,8 +1363,8 @@ def test_the_restatus_fold_cannot_cross_the_label_on_a_shared_id():
     # labels the same id — with distinct ids the `by_id` lookup is already empty
     # for the Subject and deleting the label filter would leave this green.
     assert "status" not in by_label["Subject"].props, (
-        "the restatus leaked onto the :Subject of the same name — the fold "
-        "matched on name or ignored the label"
+        "the restatus leaked onto the :Subject that shares the id — the fold "
+        "ignored `target_label`"
     )
     # A restatus naming an id the view does not hold touches nothing.
     absent = cp.apply_event_stream_folds(
@@ -2041,9 +2041,11 @@ def test_a_carried_supersession_beats_an_earlier_restatus():
 def test_a_subject_restatus_is_folded_too():
     """#9974 names `Object` AND `Subject`; `Subject.status` is the same cache.
 
-    The issue's own reproduction was `update_entity(subject,
-    status='superseded')`, so a fold that stopped at `:Object` would close the
-    issue on the one label its example did not use.
+    #9974's Subject evidence is the `mutations_for({… "label": "Subject",
+    "state": {"status": "archived"}})` measurement on the issue (its headline
+    reproduction is the Object), and `ONTOLOGY.md:421` carries the Subject twin
+    of the cache — so a fold that stopped at `:Object` would close the issue on
+    one of the two labels that rule on the field.
     """
     row = {"id": "s-1", "name": "platform-team", "subject_kind": "team"}
     assert cp.node_from_row("Subject", row).props.get("status") is None
@@ -2116,20 +2118,23 @@ def test_the_connector_fold_never_writes_a_subject_status():
     )
 
 
-def test_read_node_folds_a_nameless_object():
+def test_read_node_folds_an_object_whose_name_is_the_empty_string():
     """The read door must not gate the fold on a NAME (#9881 shape).
 
-    Since #9881 an Object's record key is `id`, and a row may legally carry no
-    `name`. Gating the fold on the name answered nothing for such a node while
-    `rebuild_from_record` folded it by id — the two-door split, on the shape the
-    gate was removed for. Pinned, because reverting the gate otherwise leaves the
-    suite green: every other `read_node` fixture in the repo gives its node a
-    name.
+    Since #9881 an Object's record key is the `id` (`node_key = id`), so `name` is
+    not the coordinate the fold needs. ⚠️ A row with NO name is NOT legal
+    (`chk_object_node_key_is_contract_key: name IS NOT NULL`), so the reachable
+    shape is an EMPTY-STRING name — which the old truthiness gate (`and target`)
+    treated exactly like absent. For such a node the door answered nothing while
+    `rebuild_from_record` folded it by id. Pinned, because reverting the gate
+    otherwise leaves the suite green: every other `read_node` fixture in the repo
+    gives its node a non-empty name.
     """
     from tortoise import record_serve as rs
 
     conn = _FakeConn({
-        "object": [{"id": "o-6", "object_kind": "issue", "props": {}}],
+        "object": [{"id": "o-6", "name": "", "object_kind": "issue",
+                    "props": {}}],
         "journal_event": [
             {"seq": 1, "payload": {"type": "EntityMutated", "op": "restatus",
                                    "label": "Object", "id": "o-6",
@@ -2139,8 +2144,8 @@ def test_read_node_folds_a_nameless_object():
     props = rs.read_node(conn, org_id="o", graph_id="g", label="Object",
                          key="o-6")
     assert props is not None and props.get("status") == "archived", (
-        "a nameless Object was answered without the status the rebuild writes "
-        "— the fold is still gated on `name`"
+        "an Object with an empty name was answered without the status the "
+        "rebuild writes — the fold is still gated on `name`"
     )
 
 

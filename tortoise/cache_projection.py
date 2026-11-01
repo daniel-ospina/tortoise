@@ -593,7 +593,10 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #: `{label: (property, ...)}` — spelled as a table so the suite can pin its
 #: scope, exactly as the other two exceptions are pinned.
 EVENT_STREAM_FOLDS: dict[str, tuple[str, ...]] = {
-    # BOTH families. `status` is a projection-owned cache on each (§2.6), and an
+    # BOTH families. `status` is a projection-owned cache on each — §2.6 rules on
+    # `Object.status` explicitly; the Subject twin is `ONTOLOGY.md:421`
+    # ("Projection-owned since #1423") and `03-schema.md:95` ("Deliberately
+    # absent: `status` on both (a projection-owned cache)"). And an
     # explicit state-op write reaches `:Subject` through the same `_ENTITY_MUTATION_
     # STATE_OPS` arm as `:Object` — leaving Subject out would close #9974 for one
     # of the two labels §2.6 rules on. #9974's own Subject evidence is the
@@ -663,8 +666,12 @@ class LifecycleEvent:
     object_name: str | None = None
     about_names: tuple[str, ...] = ()
     #: `restatus` only — the value the caller wrote, from the record's own
-    #: `state` map. `None` means "this record carries no restatus", never
-    #: "the caller cleared it" (a clear is `status='live'`, a value).
+    #: `state` map. `None` means "this record carries no status write". ⚠️ It does
+    #: NOT mean the caller cleared the field: `update_entity(obj, status=None)` is
+    #: a real clear (`sdk.py`: "a null REMOVES the property … a clear is CALLER
+    #: intent") and that shape is R4's declared bound, not a representable state
+    #: here. A caller who wants a live value writes `status='live'`, which IS
+    #: carried.
     restatus_status: str | None = None
     #: `restatus` only — the `(label, id)` the live fold matches on. The label is
     #: carried so a state op cannot fold onto the other family's node of the same

@@ -734,11 +734,14 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     # after the scope scan (see `read_lifecycle_events`).
     target = node.props.get("name")
     # ⛔ The gate is the FOLD's membership, not a NAME. Since #9881 an Object's
-    # record key is `id`, and a row with no `name` is legal — gating on the name
-    # left such a node unfolded by this door while `rebuild_from_record` folded
-    # its `restatus` by id, which is the two-answer split this half exists to
-    # remove. `key` is required non-empty above, so the fold always has one
-    # coordinate.
+    # record key is the `id` (`chk_object_node_key_is_contract_key`: `node_key =
+    # id`), so `name` is not the coordinate the fold needs — and it can be the
+    # EMPTY STRING (`name IS NOT NULL` does not exclude `''`), which made the old
+    # truthiness gate skip the fold for a node `rebuild_from_record` folded by id.
+    # That is the two-answer split this half exists to remove. A row with NO name
+    # is not a legal shape (`name IS NOT NULL`), so this is not defence against a
+    # nameless row — only against the empty one. `key` is required non-empty
+    # above, so the fold always has a coordinate.
     if label in EVENT_STREAM_FOLDS:
         node = apply_event_stream_folds(
             (node,),
