@@ -18837,10 +18837,10 @@ class TortoiseSDK:
                 # and ``direction_flows`` tests membership in a frozenset — so
                 # handing it over aborts the supersede with a ``TypeError`` the
                 # guard is not about. ⚠️ The three cases below are DIFFERENT,
-                # and each is read the way the CREATION DOOR reads it
-                # (``create_direct_edge``) — NOT the way the load side does: a
-                # *string*
-                # token passes through verbatim (one outside the vocabulary is
+                # and each is judged on the token's READER leg set — the
+                # CREATION DOOR's canonicalization decides only where no reader
+                # verdict exists. A *string* token passes through verbatim (one
+                # outside the vocabulary is
                 # read by ``direction_flows`` as both ways — the leg set the EP
                 # backstop sees, so a door reading it more narrowly would keep
                 # a factor the load side drops); an ABSENT token takes the

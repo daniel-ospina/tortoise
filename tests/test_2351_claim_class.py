@@ -1306,8 +1306,8 @@ def test_supersede_repoint_survives_a_unhashable_stored_direction(lane):
     ``live.direction_flows`` (an UNHASHABLE one raises ``TypeError`` there, so
     both ways is the fail-closed stand-in), i.e. a present junk value is a
     two-leg wiring, and judging NAND's ``unidirectional`` would judge one leg of
-    it (see
-    ``test_supersede_repoint_reads_a_junk_direction_as_both_ways``). This test
+    it (see ``test_supersede_repoint_reads_a_junk_direction_as_both_ways``). This
+    test
     pins only the no-``TypeError`` half, on a same-class fixture.
     """
     old = lane.create_point("statement", "computed v1",
@@ -1520,8 +1520,8 @@ def test_supersede_repoint_reads_a_junk_direction_as_both_ways(lane):
     ``True``) is read as both ways by ``live.direction_flows`` and ``ep.py``;
     an UNHASHABLE one (this fixture's list) makes ``direction_flows`` raise
     ``TypeError``, so both ways is the fail-closed stand-in there — either way
-    judging
-    NAND's ``unidirectional`` here would judge ONE leg of a two-leg wiring and
+    judging NAND's ``unidirectional`` here would judge ONE leg of a two-leg
+    wiring and
     let a supersede write ``asserted -[NAND {junk}]-> derived``, whose backward
     leg is the override ``create_direct_edge(NAND, …, 'bidirectional')``
     refuses (measured: the pre-fix door transferred exactly that). The
