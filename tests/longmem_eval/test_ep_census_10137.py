@@ -34,7 +34,10 @@ either way).
 """
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -323,3 +326,168 @@ def test_the_census_agrees_with_the_canonical_read(sdk):
     assert manifest["points_off_neutral"] == len(off) == 3
     # `b` was already off-neutral before the pass; only `a`/`c` are its doing.
     assert manifest["points_moved_off_neutral"] == 2
+
+
+# ── the census PROBE (#10137 review, P1) ────────────────────────────────────
+#
+# ``probes/census.py`` is the instrument that reads the cells out of a run's
+# report OR checkpoint, and until this section it had ZERO coverage: the report
+# path, the checkpoint arm-refusal, the ``per_question: null`` fail-closed
+# branch and the ``*_unread`` companions were all unexercised, so deleting any
+# of them left the whole suite green. The probe lives under a hyphenated,
+# digit-leading evidence directory (not importable as a module), so it is
+# loaded by PATH — the same file the README's reproduce recipe runs.
+
+_PROBE = (pathlib.Path(__file__).resolve().parents[2]
+          / "docs/evidence/10137-corpus-ep-census/probes/census.py")
+_ARTIFACT = (pathlib.Path(__file__).resolve().parents[2]
+             / "docs/evidence/10137-corpus-ep-census/census.json")
+
+
+def _probe():
+    spec = importlib.util.spec_from_file_location("census_probe_10137", _PROBE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _manifest(**over) -> dict:
+    """The manifest ``ep_activation.activate_beliefs`` returns per question —
+    and the exact shape ``census.py`` reads its eight cells off."""
+    m = {"ep_ran": True, "ep_engine": "ep", "operators": 171,
+         "factor_edges": 0, "points_with_ep": 121, "points_unmeasured": 1038,
+         "points_off_neutral": 8, "points_moved_off_neutral": 8,
+         "no_op_reason": None}
+    m.update(over)
+    return m
+
+
+def _outcomes(n: int = 2, **over) -> list[dict]:
+    return [{"question_id": f"q{i}", "question_type": "single-session-user",
+             "belief_activation": _manifest(**over)} for i in range(n)]
+
+
+def _report_doc(outcomes, *, n=None, activation=None) -> dict:
+    """A REPORT shape: ``outcomes`` + ``methodology`` (that pair is what routes
+    the probe to the report branch). The aggregate is the runner's own, so the
+    per-question rows are summed from the same manifests a real report carries."""
+    summary = activation if activation is not None else \
+        mp.summarize_belief_activation(outcomes, requested=True)
+    return {"n_questions": len(outcomes) if n is None else n,
+            "outcomes": outcomes,
+            "methodology": {"measurement_posture": {"activation": summary}}}
+
+
+def _write(tmp_path, doc) -> str:
+    p = pathlib.Path(tmp_path)
+    p.mkdir(parents=True, exist_ok=True)
+    f = p / "input.json"
+    f.write_text(json.dumps(doc))
+    return str(f)
+
+
+def test_census_probe_reads_per_question_cells_off_a_report(tmp_path):
+    """The report branch is the ORDINARY path — a run that finalises writes a
+    report, not a checkpoint — and it is the path that used to lose the column."""
+    outcomes = _outcomes(2)
+    out = _probe().cells(_write(tmp_path, _report_doc(outcomes)))
+
+    assert out["source"] == "report"
+    assert out["questions_in_run"] == 2
+    assert out["questions"] == 2 and out["questions_with_ep"] == 2
+    assert out["questions_with_ep_ratio"] == 1.0
+    assert out["belief_layer"] == mp.BELIEF_LAYER_ACTIVATED
+
+    # The per-question block is the artifact's auditability: non-null, one row
+    # per outcome, and none of them unread.
+    assert out["per_question_source"] == "outcome.belief_activation"
+    assert out["per_question_unread"] == 0
+    assert [r["question_id"] for r in out["per_question"]] == ["q0", "q1"]
+    for row in out["per_question"]:
+        assert row["ep_ran"] is True
+        assert row["operators"] == 171
+
+    # The two contribution sums ship WITH their ``_unread`` companions — the
+    # disclosure that says whether 185 is complete or partial.
+    assert out["cells"]["points_off_neutral_unread"] == 0
+    assert out["cells"]["points_moved_off_neutral_unread"] == 0
+
+
+def test_census_probe_refuses_a_report_with_no_posture(tmp_path):
+    """No posture recorded is a STATE, not a zero — never a traceback and never
+    a census of ``0``."""
+    doc = {"n_questions": 1, "outcomes": [], "methodology": {}}
+    with pytest.raises(SystemExit, match="NO measurement posture"):
+        _probe().cells(_write(tmp_path, doc))
+
+
+def test_census_probe_refuses_a_checkpoint_with_no_arm(tmp_path):
+    """A checkpoint written under another arm must not read as armed: the arm is
+    UNKNOWN, not True."""
+    doc = {"format": "lme-checkpoint", "outcomes": [{"question_id": "q1"}],
+           "failures": []}
+    with pytest.raises(SystemExit, match="UNKNOWN, not True"):
+        _probe().cells(_write(tmp_path, doc))
+
+
+def test_census_probe_reads_the_arm_from_a_checkpoint_fingerprint(tmp_path):
+    probe = _probe()
+    armed = {"fingerprint": {"activate_beliefs": True}, "outcomes": _outcomes()}
+    disarmed = {"fingerprint": {"activate_beliefs": False}, "outcomes": _outcomes()}
+
+    assert probe.cells(_write(tmp_path / "a", armed))["belief_layer"] == \
+        mp.BELIEF_LAYER_ACTIVATED
+    # A disarmed checkpoint carries manifests from elsewhere; it must NOT read
+    # as an armed run.
+    assert probe.cells(_write(tmp_path / "b", disarmed))["belief_layer"] == \
+        mp.BELIEF_LAYER_INERT
+    assert probe.cells(_write(tmp_path / "a", armed))["source"] == "checkpoint"
+
+
+def test_census_probe_publishes_absence_when_no_outcome_has_a_manifest(tmp_path):
+    """24 rows of nulls would read as a measured-and-null question; publish the
+    absence and where it comes from instead."""
+    outcomes = [{"question_id": f"q{i}", "question_type": "single-session-user"}
+                for i in range(3)]
+    out = _probe().cells(_write(tmp_path, _report_doc(outcomes)))
+
+    assert out["per_question"] is None
+    assert out["per_question_source"].startswith("absent")
+    assert out["per_question_unread"] == 3
+
+
+def test_census_probe_calls_an_empty_population_absence_not_provenance(tmp_path):
+    """#10137 review (P3): the guard was ``if rows and not manifests``, so an
+    input with NO outcomes fell to the ``else`` branch and published
+    ``per_question_source: "outcome.belief_activation"`` — provenance claimed
+    from an input that has no outcomes at all. Non-vacuous: on the pre-fix
+    guard this assertion sees that source string."""
+    out = _probe().cells(_write(tmp_path, _report_doc([])))
+
+    assert out["per_question"] is None
+    assert out["per_question_source"] != "outcome.belief_activation"
+    assert out["per_question_unread"] == 0
+
+
+def test_census_probe_does_not_fabricate_a_zero_for_an_absent_cell(tmp_path):
+    """An ABSENT cell is UNKNOWN, not ``0`` — the rule the module applies to the
+    summed cells applies to the headline pair too (``summary.get(...) or 0``
+    published a measured zero for a cell this input never had)."""
+    activation = {"requested": True, "questions": 2}
+    out = _probe().cells(_write(tmp_path, _report_doc(
+        _outcomes(2), activation=activation)))
+
+    assert out["questions_with_ep"] is None
+    assert out["questions_with_ep_ratio"] is None
+
+
+def test_census_probe_cells_match_the_committed_artifact_key_set(tmp_path):
+    """The committed ``census.json`` is this probe's own output, so their
+    ``cells`` blocks must carry the SAME keys in the SAME order — the pin that
+    keeps an added disclosure (e.g. the ``*_unread`` companions) from riding
+    only one of the two."""
+    out = _probe().cells(_write(tmp_path, _report_doc(_outcomes(1))))
+    committed = json.loads(_ARTIFACT.read_text())
+
+    assert list(out["cells"]) == list(committed["cells"])
+    assert list(out) == list(committed)

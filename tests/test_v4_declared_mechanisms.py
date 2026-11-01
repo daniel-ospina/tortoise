@@ -1698,36 +1698,64 @@ def test_the_near_dup_three_sites_are_separately_registered() -> None:
     # actually broke.
 
 
-def test_the_failure_policy_absence_is_pinned_to_the_inverted_render() -> None:
+def test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render() -> None:
     """The `failure_policy` row's absence claim is a CALL, not a grep of its note.
 
-    §4.4 declares the policy and says the code implements the INVERTED one. If a
-    later change gives S3 the `HOLD` path, the renderer must stop telling the
-    model to assume everything is new — and the row must flip to `implemented`.
-    Rendering the degraded search result is the probe: while it still instructs
-    `new`, the declared mechanism is genuinely absent.
+    §4.4 declares the policy and said the code implemented the INVERTED one.
+    `#5095` landed the **record** half — the renderer stopped inviting `new`, the
+    caller-visible `link_before_create` stopped claiming *"no match"* for a
+    lookup that never ran, and the run reports an `identity` block — while **I1's
+    enforcement is still absent**: nothing suppresses a create, so duplicates are
+    still minted.
+
+    ⇒ The probe MOVED, and it had to: a render-only probe can no longer see the
+    remaining absence, because the render is fixed. What this pins now is the
+    pair that makes the row honest in BOTH directions —
+
+    * the two CALLS that prove the record half exists (so a revert of either goes
+      red here, not only in the behaviour suite); and
+    * the ROW still saying `not-implemented`, because the mint gate and §4.4's
+      carry-forward store genuinely do not exist. Flipping the row without
+      building them would publish the exact "a declared mechanism reads like a
+      shipped one" this registry exists to stop — and only a state assertion can
+      see that, because the probes above stay green.
     """
     from tortoise import extractor_v2 as v2
 
     rendered = v2._render_search_results({"degraded": True, "reason": "S3 degraded"})
-    assert "assume everything is new" in rendered, (
-        "the degraded S3 render no longer invites the model to assume everything "
-        "is new — either the HOLD path landed (flip `failure_policy` to "
-        "`implemented` and delete this assertion) or the probe target moved "
-        f"(rendered: {rendered!r})"
+    assert "assume everything is new" not in rendered, (
+        "the degraded S3 render invites the model to treat every candidate as "
+        "new again — that is the defect #5095 removed (§4.4 I1), and the doc's "
+        f"state-of-code paragraph must follow it (rendered: {rendered!r})"
     )
-    assert "DEGRADED" in rendered, (
-        "the render no longer marks the result DEGRADED, so the assertion above "
-        "is not reading the degraded branch"
+    assert "UNRESOLVED" in rendered, (
+        "the degraded render no longer says the identity is UNRESOLVED, so the "
+        "assertion above is not reading the state-of-code clause"
     )
-    # The ROW is checked, not only the code: the probe above proves the policy is
-    # INVERTED, so a row flipped to `implemented` beside it would publish the very
-    # "declared mechanism reads like a shipped one" this registry exists to stop —
-    # and only a state assertion can see that, because the probe itself stays green
-    # (MEASURED BEFORE THIS ASSERTION EXISTED: flipping only the row left the
-    # suite at 86 passed, so the flip was invisible).
+    # The second call: the RECORD a caller keeps — driven through the REAL write
+    # path, not the helper in isolation. A pin that only called
+    # `fp.created_record(...)` stayed green when the three create sites in
+    # `execute_embed` were reverted to their inline `found: False` dict, so it
+    # could not see the wiring it claimed to pin (#5095 review A3).
+    written = v2.execute_embed(
+        {"entities": [], "events": [], "operators": [], "chain_notes": [],
+         "points": [{"content": "a claim", "pointKind": "statement"}]},
+        {}, session_id="s1")
+    records = [r for r in written["link_before_create"]
+               if str(r.get("searched_for", "")).startswith("point ")]
+    assert records, "the write path emitted no record for the created Point"
+    assert all(r["found"] is None for r in records), (
+        "the created-candidate record asserts `found: false` for a lookup that "
+        f"never ran — the caller keeps that claim (#5095): {records!r}"
+    )
+    # …and the row. NOT `implemented`: I1's "never mint it" needs a create gate
+    # inside S5, and §4.4's carry-forward store does not exist either.
     row = {r["id"]: r for r in load_registry()["mechanisms"]}["failure_policy"]
-    assert row["state"] == NOT_IMPLEMENTED, row
+    assert row["state"] == NOT_IMPLEMENTED, (
+        "`failure_policy` was flipped to `implemented`, but nothing suppresses a "
+        "create and no carry-forward store exists — see the row's note and "
+        "#5095's remaining-slices list"
+    )
     assert row.get("tracking_issue") == 5087, row
 
 

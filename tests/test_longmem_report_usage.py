@@ -12,6 +12,10 @@ Pins the conditional report contract (A7 / Am 21):
 - coverage marker when 0 < n_with_usage < n_evidence_bearing;
 - unpriced lane → ``priced: false`` in the block (loud, never silent);
 - pricing does NOT mutate outcome ``llm_usage`` (deep-copy equality).
+- the SAME conditional contract for ``belief_activation`` (#10137): the
+  projection emits the per-question belief manifest ONLY when the armed outcome
+  carries it, so an unarmed report's shape stays byte-compatible while an
+  armed report can be audited question by question.
 """
 from __future__ import annotations
 
@@ -58,7 +62,8 @@ def _env(*, reader_tokens=(1000, 200), judge_tokens=(500, 50),
 
 
 def _outcome(qid: str, *, label: bool = True, evidence_written: int = 2,
-             llm_usage: dict | None = None) -> dict:
+             llm_usage: dict | None = None,
+             belief_activation: dict | None = None) -> dict:
     return {
         "question_id": qid,
         "question_type": "single-session-user",
@@ -85,6 +90,8 @@ def _outcome(qid: str, *, label: bool = True, evidence_written: int = 2,
         "evidence_retrieved@k": {"5": 1, "10": 2, "20": 2},
         "ingest_latency_ms": 12.5,
         **({"llm_usage": llm_usage} if llm_usage is not None else {}),
+        **({"belief_activation": belief_activation}
+           if belief_activation is not None else {}),
     }
 
 
@@ -224,6 +231,48 @@ def test_projection_emits_llm_usage_conditionally():
     by_qid = {o["question_id"]: o for o in report["outcomes"]}
     assert by_qid["q-usage-1"]["llm_usage"] == env
     assert "llm_usage" not in by_qid["q-plain"]
+
+
+def test_projection_emits_belief_activation_conditionally():
+    """#10137: the per-question census rides the report — under the arm ONLY.
+
+    The report's outcome projection is an explicit whitelist, and it did not
+    carry ``belief_activation``: a finalised report published a correct
+    ``methodology.measurement_posture.activation`` aggregate above 192 of 192
+    NULL per-question cells, so no reader could audit the census question by
+    question — a null ``ep_ran`` being indistinguishable from a measured one.
+
+    Both directions are asserted (#10137 review, P1): the golden projection pin
+    in ``tests/test_longmem_runner.py`` covers the ABSENCE case only, so before
+    this pair the whole fix could be reverted with every test still green.
+
+    The manifest is the shape ``probes/census.py`` reads each cell off, so this
+    pin also fixes what the probe can recover from a report.
+    """
+    manifest = {
+        "ep_ran": True,
+        "ep_engine": "ep",
+        "operators": 171,
+        "factor_edges": 0,
+        "points_with_ep": 121,
+        "points_unmeasured": 1_038,
+        "points_off_neutral": 8,
+        "points_moved_off_neutral": 8,
+        "no_op_reason": None,
+    }
+    report = _report([_outcome("q-armed", belief_activation=manifest),
+                      _outcome("q-unarmed")])
+    by_qid = {o["question_id"]: o for o in report["outcomes"]}
+
+    # PRESENCE: the armed outcome carries the manifest through unchanged, so the
+    # census probe's cells are recoverable from the published report.
+    assert by_qid["q-armed"]["belief_activation"] == manifest
+    assert by_qid["q-armed"]["belief_activation"]["ep_ran"] is True
+    assert by_qid["q-armed"]["belief_activation"]["operators"] == 171
+
+    # ABSENCE: an unarmed outcome gains NO key — never a null one — so the
+    # published shape stays byte-compatible for existing consumers.
+    assert "belief_activation" not in by_qid["q-unarmed"]
 
 
 # ── coverage / data-point cost ──────────────────────────────────────────────

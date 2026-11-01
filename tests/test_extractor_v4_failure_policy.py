@@ -6,9 +6,11 @@ THE DEFECT THIS PINS
 two of the eight steps (S2.2 *"fail-open — keep"*, S2.3 *"never raises"*) said
 what they do when they fail. The unstated default is not neutral — for S3 the
 natural fail-open marks every candidate `new`, which **manufactures duplicates**,
-the exact failure S3 exists to prevent. The shipped renderer still invites it:
-`_render_search_results` tells the model *"no existing items available; assume
-everything is new"* (`extractor_v2.py:2353`).
+the exact failure S3 exists to prevent. ⚠️ **The renderer used to invite it**
+(`_render_search_results` told the model *"no existing items available; assume
+everything is new"*); `#5095` removed that and the caller-visible record's
+`found: false` for a lookup that never ran, and the guard below now pins the pair
+in the other polarity.
 
 The repair DECLARES the policy per step, with three invariants (I1: an
 unresolved identity is never asserted `new`; I2: a failure holds or records, it
@@ -27,9 +29,12 @@ WHAT THIS PINS
 4. `HOLD` is declared a run-level disposition and NOT a new `vet_gate.OUTCOMES`
    member — cross-checked against the shipped module, so adding one without
    updating the doc reds.
-5. The spec-change warning stays TRUE: while `extractor_v2.py` still says
-   "assume everything is new", the doc must keep saying the code implements the
-   inverted policy. Fix the code and this reds, forcing the doc to follow.
+5. The state-of-code claim tracks the CODE, in whichever polarity is true:
+   while `extractor_v2.py` said "assume everything is new", §4.4 had to say the
+   code implemented the inverted policy; `#5095` fixed the render and the record,
+   so the guard now asserts the instruction is GONE from the code, that the doc
+   no longer claims the inverted policy, and that the doc still names what is
+   absent (the mint gate). Reverting either half reds it.
 6. Every `file.py:NNNN` citation in §4.4 names its revision pin. The header
    pins every `file.py:NNNN` to `c79ba1cf2` *except where a passage names a later
    pin*; `extractor_v2.py:2353` is a `7d348d351` line (2042 at the default pin),
@@ -300,21 +305,50 @@ def test_hold_is_not_a_new_vet_outcome_and_the_doc_says_so():
     )
 
 
-def test_the_shipped_code_still_matches_the_documented_warning():
-    """The spec-change warning must not outlive the inverted behaviour.
+def test_the_state_of_code_paragraph_tracks_what_runs():
+    """The spec-change warning must not outlive the behaviour it describes.
 
-    §4.4 says the shipped renderer invites *"assume everything is new"*. If the
-    code is fixed, this reds and the doc must stop claiming the inverted policy
-    runs.
+    This guard was written to red the day the renderer was fixed: while
+    `extractor_v2.py` still said *"assume everything is new"*, §4.4 had to keep
+    saying the code implemented the inverted policy. **`#5095` fixed the render
+    and the record**, so the pair is now asserted in the other polarity — the
+    instruction is gone from the code, the document says so, and the document
+    names what is STILL absent (the mint gate and the carry-forward store) so a
+    reader does not mistake the record half for the whole mechanism.
     """
     section = _policy_section()
-    assert "assume everything is new" in section, (
-        "§4.4 no longer quotes the shipped renderer's inverted instruction (#8495)."
+    code = EXTRACTOR.read_text(encoding="utf-8")
+    assert "assume everything is new" not in code, (
+        "`tortoise/extractor_v2.py` invites the model to treat every candidate "
+        "as new again — §4.4 I1 forbids it, and this change's record half "
+        "(#5095) removed it. If that was deliberate, this pin and the doc's "
+        "state-of-code paragraph both have to change with it."
     )
-    assert "assume everything is new" in EXTRACTOR.read_text(encoding="utf-8"), (
-        "`tortoise/extractor_v2.py` no longer says 'assume everything is new' — "
-        "the §4.4 state-of-code warning is now stale; update it to describe what "
-        "the code does instead (#8495)."
+    assert "the INVERTED policy" not in section, (
+        "§4.4 still claims the code implements the inverted policy, but the "
+        "renderer no longer invites `new` (#5095) — the paragraph is stale in "
+        "the direction that makes a fixed defect read as open."
+    )
+    assert "NEVER asserted" in section or "never mint it" in section, (
+        "§4.4 lost the invariant the state-of-code paragraph is about"
+    )
+    # What runs now, and what remains: BOTH halves must be stated, or the
+    # paragraph over-claims in one direction or the other. ⛔ These assert the
+    # NEW paragraph's own wording, not words the section already contained: I1's
+    # row reads "An unresolved IDENTITY is NEVER asserted new" and "HOLD the
+    # candidate — never mint it" on the BASE document, so assertions on those
+    # alone stayed green with the whole #5095 paragraph deleted (#5095 review A3).
+    assert "What runs now" in section, (
+        "§4.4's state-of-code paragraph no longer has its 'What runs now' half — "
+        "the record half #5095 landed would read as if nothing had landed."
+    )
+    assert "`identity` block" in section, (
+        "§4.4's 'What runs now' paragraph does not name the `identity` block — a "
+        "reader would read the remaining absence as if nothing had landed."
+    )
+    assert "still not enforced" in section, (
+        "§4.4 does not say the MINT half is still not enforced — the record half "
+        "would then read as the whole of I1 (#5095)."
     )
 
 
