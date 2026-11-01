@@ -19,6 +19,11 @@ on the frozen `tests/eval/write_path` corpus.
 graph cut created nodes by **13 %**, not the pre-registered **≥ 25 %**; and it did so while recovering
 **fewer** real facts and wiring **fewer** operator edges, so the cut was not a saving at all.
 
+⚠️ The parenthetical is what pre-registration rule 5 **freezes**, and it is the same measurement the
+rest of this page reports — but the shipped log's `VERDICT:` line was written before the probe emitted
+that text and carries only the bare token. No number moves (the log's own `RATIO:` and `WHY:` lines
+carry it); the deviation is disclosed, not paraphrased away — see the post-run hardening list below.
+
 | | S3-**OFF** (no priors injected) | S3-**ON** (real `search_graph`) |
 |---|---|---|
 | `created_new_nodes` (extraction claims + minted Object/Event) | **284** | **247** |
@@ -116,11 +121,11 @@ nicety: the log prints a `S3 WITNESS` line that **does not exist** in the probe 
 (`git show a1075dfc2:tools/s3_prior_ablation.py | grep -c "S3 WITNESS"` → `0`, `325f2a1a5` → `1`),
 so its `head=` line names the commit the bars were read from, not the tool bytes that ran. The pin
 could not see the difference — it compared commits — which is why item 9 now refuses a dirty tree and
-the log carries the probe's own `sha256`. Review of this PR then found further hardening gaps in the
-probe — **every one of them enumerated below, and no count is restated here**: a numeral written
-beside the list is a second copy of that list, and this section has already carried one that rotted
-before the last item was added. **All were fixed AFTER the run, and none of them changes a reported
-number** — the
+the log carries the probe's own `sha256`. Review of this PR then found further gaps in the probe,
+listed below — **the ones a reader of these numbers needs to know about, not an exhaustive audit of
+the PR's diff**: a list that promises completeness is a claim about process with no artefact to check
+it against, and this section has already carried a count that rotted before its last item was added.
+**All were fixed AFTER the run, and none of them changes a reported number** — the
 arithmetic (`created_counts`, `real_facts`,
 `concentration`, `decide`'s bar comparisons) is unchanged, and the run's own log already printed
 each session's S3 state at the moment of that session's capture. What the hardening does is make
@@ -218,15 +223,38 @@ never printed the baseline and this log therefore contains no `graph baseline` l
 guard is enforced for future runs only. **No number moves** — the assertion can only REFUSE a run;
 it touches no count, no denominator and no bar.
 
+12. **Rule 5's verdict TEXT never reached the log, and that is a deviation rather than a formatting
+    nit.** The frozen rule fixes `HYPOTHESIS-FALSIFIED (ratio X)` (`PRE-REGISTRATION.md` §3, rule 5),
+    but only the rule-4 (guard-violated) branch set the text, so the branch that actually fired here
+    logged the bare token: the shipped log's `VERDICT:` line is `HYPOTHESIS-FALSIFIED`, with no number
+    and no rule label. ⚠️ **No number moves, and it is disclosed anyway** — §4 registers that *any*
+    deviation is reported, never only the ones that changed a figure, and the verdict above is that
+    same measurement: the log's `RATIO: 0.8697` and `WHY: E1 not met: ratio 0.870 > 0.75 …` lines carry
+    exactly the number the fixed text interpolates. The log cannot be corrected — a measured log is
+    never rewritten — so the gap is reported here, and the code now sets the frozen text on every
+    falsification branch.
+13. **The per-session table silently truncated unequal arms.** It paired the arms with `zip`, which
+    stops at the shorter one, so a 7-session OFF arm beside a 6-session ON arm printed a table that
+    looked complete while the seventh session was simply absent from it. A length mismatch is now a
+    refusal at `exit 3` — an unmeasurable run, never a shorter table.
+14. **The arm-integrity log line hardcoded its denominator as `/7`** — a denominator no arm produced,
+    and a second copy of the corpus size inside a file that must not carry one. It now counts over the
+    sessions the arm actually replayed (`OFF 7/7 proven … ON 7/7 resolved`).
+15. **A per-session ratio RANGE was printed for arms whose S3 was never proven.** The range is a ratio
+    statistic, so an `ARM-INVALID` run used to print one derived from sessions with no proven S3 state
+    — the number a reader would quote out of a log that also said the arm was invalid. It is now
+    emitted only when the verdict produced a ratio; otherwise the log says `NOT REPORTED — the verdict
+    produced no ratio`.
+
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
 repeated to get a friendlier number. The one-log rule is enforced from the FILE, not from the flag
 honour system: an existing `--out` is refused, and `--overwrite` — which exists for an aborted,
 unmeasured run such as replay A — is itself refused when the existing log carries a `RATIO:` or
 `VERDICT:` line, because only a run that reached a verdict can have written one.
 
-⚠️ **Two emissions therefore post-date the measured log**, which the log cannot carry because it was
-written before they existed — both are computed from the numbers that ARE in it, and both are printed
-here with their pre-registered bar so a reader does not have to take them on trust:
+⚠️ **Emissions therefore post-date the measured log**, which the log cannot carry because it was
+written before they existed — each is computed from the numbers that ARE in it, and each is printed
+here with its pre-registered bar so a reader does not have to take it on trust:
 **E2b** `SESSIONS WHOSE CREATES FELL: 5 of 7` (bar `>= 4`, **met** — so no
 `not-majority-of-sessions` qualifier); **E5** `model calls 27 vs 21 = 1.286 ×` (bar `<= 2.00 ×`,
 **met**). A cycle-2 review also found that the per-session integrity counter was incremented by the

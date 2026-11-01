@@ -1356,3 +1356,61 @@ def test_the_bundle_discloses_the_fresh_graph_refusal_and_what_the_log_cannot_sh
         "has to be re-measured, and the measured run is not this probe's output")
     assert "fresh graph s3ablate_" in log_text, (
         "the disclosure quotes the arm headers as the consistency evidence; they are not there")
+
+
+# ── the disclosure list's completeness claim, and the deviation it was hiding (review r8 P2) ─────
+#
+# The list is the bundle's disclosure. Two defects lived at head `f46ba5198`, and both are the same
+# one: the section promised more than it delivered. (a) It stated that the review-found probe gaps
+# were "every one of them enumerated below" — a claim about process with no artefact behind it, and
+# four further review-found probe fixes falsified it. (b) The omission that is NOT cosmetic is rule
+# 5's verdict TEXT: `PRE-REGISTRATION.md` §3 freezes `HYPOTHESIS-FALSIFIED (ratio X)`, the shipped
+# log's `VERDICT:` line carries the bare token, and §4 registers that *any* deviation is reported —
+# so this was a live deviation reported nowhere while the bundle's headline printed the fixed form.
+# External discipline (Center for Open Science, preregistration guidance): "transparently disclose
+# **any** changes from the proposed plan" — not only the changes that moved a number. The fix follows
+# the repo's own rule for a self-referential process claim: stop promising, do not re-word the promise.
+
+
+def test_the_hardening_list_promises_no_completeness_and_carries_the_late_findings(probe):
+    """Both halves fail on the pre-fix README, and are measured against the shipped artefacts."""
+    import re
+
+    readme = (probe.EVIDENCE_DIR / "README.md").read_text()
+    section, _numbers = _hardening_list(readme)
+
+    # (a) the universal. A list that claims exhaustiveness is a claim nothing can check, and it
+    # re-stales on the next addition — which is exactly what happened to it here.
+    universal = re.search(r"every one of them|all of them are listed|complete list of", section, re.I)
+    assert not universal, (
+        f"the disclosure list promises completeness ({universal.group(0)}) that four further "
+        "review-found probe fixes falsify: describe the list as what it is, do not re-word the "
+        "promise")
+
+    # (b) the material omission — the frozen verdict TEXT the shipped log does not carry.
+    assert "rule 5" in section and "bare token" in section, (
+        "the list must carry rule 5's verdict-text deviation: the frozen rule fixes "
+        "`HYPOTHESIS-FALSIFIED (ratio X)` and the shipped log prints the bare token")
+    assert "RATIO: 0.8697" in section, (
+        "and it must say where the number actually is — the log's own RATIO/WHY lines — so the "
+        "disclosure is checkable instead of a reassurance")
+    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    assert "VERDICT: HYPOTHESIS-FALSIFIED\n" in log_text, (
+        "MEASURED, not asserted: the shipped log's VERDICT line is the bare token. If this fails, a "
+        "measured log was rewritten or replaced and the deviation disclosure must be re-derived")
+
+    # The three probe fixes that were documented only in a test docstring or a source comment.
+    assert "zip" in section and "truncat" in section, (
+        "the list must carry the per-session table's silent truncation of unequal arms")
+    # A bare `/7` is not the assertion: the section already contains `probes/7949-…`, so that
+    # substring is true of the PRE-fix list too and would pin nothing (measured, not assumed).
+    assert "hardcoded its denominator" in section and "no arm produced" in section, (
+        "the list must carry the arm-integrity line's hardcoded `7`-session denominator")
+    assert "ratio range" in section.lower() and "NOT REPORTED" in section, (
+        "the list must carry the per-session ratio range printed for arms whose S3 was never proven")
+
+    # The deviation is named where the headline makes the claim, not only in a list further down —
+    # a reader who stops after the verdict must not read it as the log's own text.
+    headline = readme.split(_HARDENING_HEADING, 1)[0]
+    assert "bare token" in headline, (
+        "the verdict headline must name the verdict-text deviation beside the verdict itself")
