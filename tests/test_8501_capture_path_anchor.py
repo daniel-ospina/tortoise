@@ -27,6 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests._provider_env import pin_provider_routing_env
 from tortoise.sdk import TortoiseSDK
 
 CONV = [
@@ -60,6 +61,29 @@ def prov(tmp_path, monkeypatch):
     sdk = TortoiseSDK(str(db), event_log_path=str(events / "events.jsonl"))
     yield sdk, events
     sdk.close()
+
+
+def _keyless(monkeypatch) -> None:
+    """Make the capture keyless — no LLM extraction runs (no network, no mock).
+
+    The turns are still written by the mechanical loop under test; clearing the
+    mock seam AND every provider key makes any extraction attempt fail loudly
+    instead of quietly serving a mock.
+
+    ⚠️ The provider set is DERIVED (``pin_provider_routing_env``), never a
+    literal list — the #3695 / #5477 class. The hand-list this replaces omitted
+    ``GEMINI_API_KEY`` (already red on a gemini-configured box) and, once #8133
+    registered ``venice`` in ``ingest._PROVIDERS``, ``VENICE_API_KEY`` too — an
+    ambient one built a real ``OpenAICompatModel`` against
+    ``https://api.venice.ai/api/v1`` and issued a BILLED request inside tests
+    whose docstring promises the keyless lane, while staying green in CI, which
+    has no such key. The assertion makes the docstring true.
+    """
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    pin_provider_routing_env(monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from tortoise.sdk import _build_session_llm_extractor
+    assert _build_session_llm_extractor() is None, "keys leaked into the test"
 
 
 def _capture_links(sdk):
@@ -289,10 +313,7 @@ def test_a_keyless_capture_stamps_its_stub_with_the_capture_instant(prov, monkey
     capture's own `now`: the live node would then carry a later stamp than the
     replay folds in — a live≠replay divergence on a path that previously had
     none."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
-              "OPENAI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    _keyless(monkeypatch)
     sdk, _events = prov
 
     res = sdk.capture_session(CONV)
@@ -363,10 +384,7 @@ def test_a_keyless_capture_lands_the_full_stub_shape(prov, monkeypatch):
     call reds it with exactly those four keys missing), and FAILS IF the keyless
     lane starts minting a SECOND ``:Source`` instead of the node its capture
     materializes."""
-    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
-              "OPENAI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    _keyless(monkeypatch)
     sdk, _events = prov
 
     res = sdk.capture_session(CONV)

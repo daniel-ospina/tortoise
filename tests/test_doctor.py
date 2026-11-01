@@ -919,6 +919,41 @@ class TestDoctorImportHygiene:
         assert "OK" in p.stdout
 
 
+#: Env names that decide doctor's session-extraction verdict but are NOT
+#: provider-routing inputs: the offline mock seam (#3892's keyless path) and the
+#: hosted-mode flag that escalates the line from ⚠️ to ❌. The provider KEYS are
+#: DERIVED — see `_keyless_llm_env`.
+_DOCTOR_ENV_EXTRAS = ("TORTOISE_SESSION_LLM_MOCK", "FLY_APP_NAME")
+
+
+def _keyless_llm_env(monkeypatch) -> tuple[str, ...]:
+    """Scrub every env name that decides doctor's session-extraction verdict.
+
+    ⚠️ The provider KEYS are DERIVED from the registries the capture gate itself
+    reads (`tests/_provider_env.pin_provider_routing_env`), never a literal list
+    — the #3695 / #5477 class. The four-key hand-list this replaces never gained
+    `VENICE_API_KEY`, and that omission was inert until #8133 registered `venice`
+    in `ingest._PROVIDERS` and appended it to `sdk._SESSION_LLM_PROVIDER_PRIORITY`
+    — after which an ambient `VENICE_API_KEY` made `_llm_provider_available()`
+    true and `_session_llm_provider()` resolve `"venice"`, so doctor printed
+    `✅ Session extraction: LLM provider configured (venice, model
+    deepseek-v4-flash)` where these tests assert the keyless ⚠️ / ❌ line. Green
+    in CI (the runner has no such key), red on any box carrying the eval/managed
+    key set. Deriving is what makes it durable: a fifth provider registration
+    cannot re-open it.
+
+    Callable as a module-level helper on purpose — it is registered in
+    `tests/test_session_extraction_modes.py::_KEYLESS_CAPTURE_HELPERS`, so the
+    scrub is proven observable from outside the fixture.
+    """
+    from tests._provider_env import provider_routing_env_names
+
+    names = (*provider_routing_env_names(), *_DOCTOR_ENV_EXTRAS)
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    return names
+
+
 class TestDoctorSessionExtraction:
     """#1197: doctor surfaces the /v1/sessions LLM-provider state (#822).
 
@@ -929,16 +964,9 @@ class TestDoctorSessionExtraction:
     left on, so ops catch it before testers do.
     """
 
-    _LLM_ENV = (
-        "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-        "GEMINI_API_KEY", "TORTOISE_SESSION_LLM_MOCK",
-        "TORTOISE_SESSION_LLM_MODEL", "FLY_APP_NAME",
-    )
-
     @pytest.fixture
     def clean_llm_env(self, monkeypatch, clear_db_env, tmp_path):
-        for k in self._LLM_ENV:
-            monkeypatch.delenv(k, raising=False)
+        _keyless_llm_env(monkeypatch)
         db_path = os.path.join(str(tmp_path), "doctor_llm.db")
         return monkeypatch, db_path
 

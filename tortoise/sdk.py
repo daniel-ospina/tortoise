@@ -799,27 +799,27 @@ INGEST_PROMOTION_POLICIES = ("gated", "auto")
 
 # Provider priority when MULTIPLE keys are set (first configured wins — the
 # deploy-time decision is which key is present; a key is only ever sent to the
-# provider that issued it, #329). Order mirrors tortoise.ingest._PROVIDERS.
-_SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini")
+# provider that issued it, #329). Mirrors ingest._PROVIDERS; venice is LAST (#8133).
+_SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini", "venice")
 
-# Default model per provider when TORTOISE_SESSION_LLM_MODEL is unset. The
-# provider/model choice is a product decision (deploy-time) — these are
-# cheap-tier defaults matching the analyzer's model choices (analyze.py
-# _LLM_PROVIDERS) and session_indexer's whitelist family.
+# Default model per provider when TORTOISE_SESSION_LLM_MODEL is unset — a
+# deploy-time product decision; cheap-tier defaults matching analyze.py
+# _LLM_PROVIDERS and session_indexer's whitelist family. ``venice`` serves
+# deepseek-v4-flash (the id its adapter's docstring documents, sent verbatim).
 #
 # #4129: every id here must be one the provider actually SERVES, because a
 # provider answers 200 to a retired id and silently serves a different model.
 # api.deepseek.com still accepts "deepseek-chat" and serves "deepseek-flash",
 # so naming the retired id did not fail — it silently ran a model nobody
-# configured. Verified against GET /models on 2026-10-05, which serves exactly
-# ["deepseek-flash", "deepseek-v4-pro"]. Re-check with that endpoint before
-# changing an id; models.OpenAICompatModel also warns at call time when the
-# served id diverges from the requested one.
+# configured. Verified against GET /models on 2026-10-05: ["deepseek-flash",
+# "deepseek-v4-pro"]. Re-check there before changing an id; OpenAICompatModel
+# also warns at call time when the served id diverges from the one requested.
 _SESSION_LLM_DEFAULT_MODELS = {
     "openrouter": "deepseek/deepseek-chat",
     "deepseek": "deepseek-flash",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.0-flash",
+    "venice": "deepseek-v4-flash",
 }
 
 #: #3892 (owner ruling 2026-09-18): the additive warning a KEYLESS capture
@@ -16819,6 +16819,42 @@ class TortoiseSDK:
             return False  # pragma: no cover — every other outcome of the
             # diagnostic raises, so only the flip above reaches here.
 
+        # ── #10473 — DID THE CONDITIONAL WRITE LAND? ────────────────────────
+        # "Was the target present?" is answered by `has_object` ABOVE, i.e. by
+        # a READ that the write does not share a lock with, so its answer can
+        # be stale by the time the write runs. The statements below are each a
+        # CONDITIONAL write in the one form this store offers: a single
+        # `MATCH (n:Point {id:$id}) … SET … RETURN count(n)` re-reads presence
+        # and mutates under the same statement, so a zero count is POSITIVE
+        # evidence the precondition failed AT WRITE TIME — not a stale answer
+        # from a second read. That evidence used to be discarded on the
+        # non-abort path: `_graph_write_with_retry`'s ``witness`` is consulted
+        # only after a GRAPH-REPLACED abort latches (its own docstring), so a
+        # plain zero-row match was swallowed and the door fell through to
+        # ``_mark_dirty``. Measured on a target deleted between the guard read
+        # and the write (a proxy that removes the node on the first matching
+        # write statement): reply ``{}``, ``:EpMeta.ep_version`` 1 -> 2, and
+        # the vanished id left in ``_dirty_roots`` where no sweep can ever
+        # converge it (``_prune_nonexistent_dirty_roots`` runs only inside a
+        # dream, and the stranded root keeps ``_auto_dream_mode`` on 'local') —
+        # the #2422/#7505/#9269 pinning harm, one race window away from
+        # #10119's absent-at-entry arm.
+        #
+        # ⛔ A RE-READ WOULD NOT CLOSE IT. Re-checking presence just before the
+        # write narrows the window to a narrower one; the delete can land in
+        # the gap again. Only the statement that would MUTATE can answer
+        # "did I mutate", because its read and its write are one operation.
+        #
+        # ⛔ THE JOURNAL ROW IS DELIBERATELY NOT SUPPRESSED. The append above is
+        # the commit point (§17.1), and the SAME zero-row shape covers two
+        # different realities this door cannot tell apart without the journal
+        # read #10473 reserves as its own decision: a target DELETED
+        # concurrently (whose revision row is inert — a replay's
+        # `_revise_point` re-matches nothing) and a target not yet REPLAYED
+        # mid-rebuild, where that row is the only copy of the caller's revision
+        # and #7405's window exists precisely to preserve it. Dropping the
+        # append here would trade a stranded EP root for a LOST revision.
+        _target_landed = True
         if has_object:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2:
@@ -16863,23 +16899,27 @@ class TortoiseSDK:
                 # below can strand it (#7951 2b — see `_record_promote`).
                 _record_promote()
             else:
-                self._graph_write_with_retry(
-                    lambda: proj.g.query(
-                        "MATCH (n:Point:Object {id:$id}) " + _embed_clear
-                        + "SET n += $props, "
-                        "n.version = coalesce(n.version, 0) + 1, "
-                        "n.updatedAt = $now" + _embed_set
-                        # #8854 review P1: a row to testify with. A bare SET
-                        # returns nothing, so a re-issue that matched nothing
-                        # (rebuild still replaying) was indistinguishable from
-                        # a landed write.
-                        + " RETURN count(n)",
-                        params={"id": id, "props": _props_param, "now": now,
-                                **_embed_params},
-                    ),
-                    what="update_point SET (Object)",
-                    witness=_landed_at_least_one,
-                )
+                # #10473: the returned ``RETURN count(n)`` IS the conditional
+                # write's answer, so it is consumed instead of dropped — the
+                # ``witness`` above only ever sees it after an abort.
+                _target_landed = _landed_at_least_one(
+                    self._graph_write_with_retry(
+                        lambda: proj.g.query(
+                            "MATCH (n:Point:Object {id:$id}) " + _embed_clear
+                            + "SET n += $props, "
+                            "n.version = coalesce(n.version, 0) + 1, "
+                            "n.updatedAt = $now" + _embed_set
+                            # #8854 review P1: a row to testify with. A bare SET
+                            # returns nothing, so a re-issue that matched nothing
+                            # (rebuild still replaying) was indistinguishable from
+                            # a landed write.
+                            + " RETURN count(n)",
+                            params={"id": id, "props": _props_param, "now": now,
+                                    **_embed_params},
+                        ),
+                        what="update_point SET (Object)",
+                        witness=_landed_at_least_one,
+                    ))
         else:
             if 'status' in props:
                 # Promote guard folded INTO the WHERE clause (plan-review P2).
@@ -16953,20 +16993,28 @@ class TortoiseSDK:
                             applied = False
                     return applied
 
-                self._graph_write_with_retry(
+                # #10473: ``_write_props`` already returns the per-key loop's
+                # matched outcome, so the conditional write's answer is
+                # CONSUMED here rather than dropped on the non-abort path.
+                _target_landed = bool(self._graph_write_with_retry(
                     _write_props, what="update_point SET (per-key)",
                     # EVERY key must match. A sum would let one key matched
                     # by duplicate ids mask a sibling key that matched none
                     # (#8854 review P2: ids are not unique — the duplicate
                     # fan-out is a tested shape).
-                    witness=bool)
+                    witness=bool))
                 if _derived_embedding:
                     # The clear and the set are ONE atomic query, so a crash
                     # between them cannot leave the node vectorless. This arm
                     # is already per-key (not one statement), so the added
                     # embedding write introduces no new non-atomicity.
                     # #7405: absolute clear+set, converged by a re-issue.
-                    self._graph_write_with_retry(
+                    # #10473: its `RETURN count(n)` is consumed for the same
+                    # reason as the per-key loop's — a target that vanished
+                    # between the property write and this one must not fall
+                    # through to the EP side effects below.
+                    _embed_landed = _landed_at_least_one(
+                        self._graph_write_with_retry(
                         lambda: proj.g.query(
                             "MATCH (n:Point {id:$id}) " + _embed_clear
                             + "SET " + set_embedding_clause(
@@ -16974,9 +17022,69 @@ class TortoiseSDK:
                             + " RETURN count(n)",
                             params={"id": id, **_embed_params},
                         ),
-                        what="update_point SET (embedding)",
-                        witness=_landed_at_least_one,
-                    )
+                            what="update_point SET (embedding)",
+                            witness=_landed_at_least_one,
+                        ))
+                    if not _embed_landed:
+                        _target_landed = False
+
+        if not _target_landed:
+            # ── #10473: THE CONDITIONAL WRITE PROVED THE TARGET GONE ────────
+            # Zero rows matched and nothing raised: the node the guard read saw
+            # is not there any more (a concurrent delete, or a rebuild whose
+            # replay has not reached it). Both of this door's remaining effects
+            # would be spent on a target that cannot receive them:
+            #   * `_mark_dirty` advances the graph-wide `:EpMeta.ep_version` and
+            #     "persists" a dirty flag that matches nothing, then classifies
+            #     the id as a delete zombie and KEEPS it in `_dirty_roots` —
+            #     where `_sweep_dirty_roots` can never converge it and
+            #     `_prune_nonexistent_dirty_roots` only runs inside a dream, so
+            #     `_auto_dream_mode` stays 'local' (#2422/#7505/#9269) while the
+            #     point it names does not exist;
+            #   * the tag sync would issue one `MATCH (p:Point {id}) MERGE
+            #     (t:Tag) …` statement per tag against a Point that is not
+            #     there. MEASURED: it mints nothing (the MERGE is anchored on
+            #     the MATCH, so a missing Point creates no orphan `:Tag`), so
+            #     skipping it is spent work avoided, not a leak closed.
+            # The reply is whatever `get_point` answers, and — #10079 — with
+            # NO end receipt: `{}` when the id no longer resolves at all, and
+            # the STORED (un-revised) point when a duplicate-id twin still
+            # carries it (`MATCH (n:Point {id})` fans out over every node with
+            # that id — a tested shape, #8854 P2). On the fan-out the caller
+            # gets a truthy dict whose props were NOT written, which is the same
+            # answer the pre-fix door gave; the fix does not invent a refusal
+            # for it, because the vanishing twin is not the caller's target.
+            #
+            # ⛔ NOT A REFUSAL. A legitimately-absent mid-rebuild target must not
+            # be turned away (#7405's window exists for it), and the journal row
+            # already appended above is what carries its revision to the replay.
+            #
+            # ⚠️ TWO RESIDUALS, stated rather than implied:
+            #  * a call that issues NO property statement has no conditional
+            #    write to consult — `_write_props` returns True early for an
+            #    empty `_props_param`, so `update_point(<absent id>)` (and the
+            #    `content=None` / `is_episodic=None` shapes that normalise to
+            #    nothing) still reaches `_mark_dirty` and still strands a root.
+            #    That shape has no write to prove anything with; it belongs to
+            #    the absent-at-entry arm (#10119 / PR #10470), not to this one.
+            #  * `_target_landed` is AND over the per-key loop, so a loop that
+            #    landed keys 1..k and then lost the node reports False and the
+            #    landed keys do not dirty EP. That can only matter if the node
+            #    still exists (the marking would have matched), i.e. a replay
+            #    landing mid-loop, and the alternative — marking dirty on a
+            #    target that is gone — is the strand this closes.
+            #  * the derived-embedding consumer below is the same rule applied to
+            #    the door's second statement; the per-key arm's pin covers the
+            #    mechanism, and the embedding arm is not separately pinned.
+            # Pinned by `tests/test_7405_update_point_writes.py`'s #10473
+            # section: `test_a_target_that_vanishes_at_the_write_strands_no_
+            # dirty_root` (both arms), `test_the_vanish_shape_keeps_the_JOURNAL_
+            # record_that_carries_the_revision`,
+            # `test_a_vanished_tagged_target_issues_no_tag_sync` and the
+            # negative control `test_a_LANDED_update_still_runs_the_ep_side_
+            # effects`.
+            return self.get_point(id)
+
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
         # stale, so query_points_by_tag missed updated points. Falsy tag

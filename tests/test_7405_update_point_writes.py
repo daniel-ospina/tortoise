@@ -57,6 +57,7 @@ and on embedded FalkorDBLite otherwise — the same dual-lane convention as
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import types
 import uuid
@@ -2925,6 +2926,300 @@ def test_a_landed_promote_is_journaled_before_a_later_arm_can_abort(
             "record lane applies `status` from this payload (`PointRevised` is "
             "a flat NodePatch onto `point.status`), so a record without it "
             f"would close nothing — record: {record!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── #10473 — the target VANISHES between the guard read and the write ──────
+#
+# The #10119 arm (an id ABSENT at the guard read) is a different defect, and it
+# is NOT on this tree: the fix for it lives in PR #10470, where the door answers
+# at ENTRY from the guard's own read — a re-read is the right tool there because
+# the caller's id is a typo. This arm cannot be answered that way.
+# a second read would only move the window — and the statement that would mutate
+# is the only thing that can answer "did I mutate", because in it the presence
+# check and the mutation are ONE operation.
+#
+# The interleaving below is FORCED, not timed: the proxy removes the node on the
+# first matching WRITE statement and then issues that statement for real, so the
+# guard read has already returned "present" when the vanish happens. Nothing here
+# depends on scheduling, and the assertions are on the OBSERVABLE EFFECTS (the
+# `:EpMeta` epoch, `_dirty_roots`, orphan `:Tag` nodes) — never on a message.
+
+_VANISH_ARMS = (
+    (_POINT_PROP_SET_NEEDLE, False),    # the :Point per-key SET
+    (_OBJECT_PROP_SET_NEEDLE, True),    # the :Point:Object single SET
+)
+
+
+class _VanishOnFirstWrite:
+    """Delete the target on the first matching write, then issue it for real.
+
+    ``rows_matched`` is the sum of the ``RETURN count(n)`` values the real
+    statements answered with, so "the conditional write proved the target gone"
+    is MEASURED rather than assumed — it is the premise every assertion in this
+    section rests on (a proxy that let the write land would prove nothing).
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+        self.rows_matched = 0
+        self.tag_statements = 0
+        self.vanished: list[str] = []
+
+    def query(self, cypher, params=None, timeout=None):
+        if "MERGE (t:Tag" in cypher:
+            self.tag_statements += 1
+        if self._needle in cypher:
+            self.matching += 1
+            pid = (params or {}).get("id")
+            if pid is not None and not self.vanished:
+                # THE RACE: present at the guard read, deleted before the write.
+                self._real.query(
+                    "MATCH (n:Point {id:$id}) DETACH DELETE n",
+                    params={"id": pid})
+                self.vanished.append(pid)
+            res = self._real.query(cypher, params=params, timeout=timeout)
+            rows = res.result_set[0][0] if res.result_set else 0
+            with contextlib.suppress(TypeError, ValueError):
+                self.rows_matched += int(rows or 0)
+            return res
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _ep_version(sdk) -> int:
+    rows = sdk._get_proj().g.query(
+        "MATCH (m:EpMeta) RETURN m.ep_version").result_set
+    return int(rows[0][0]) if rows else 0
+
+
+def _sdk_journaled(tmp_path, tag: str):
+    """A real SDK on the configured lane, with the JSONL journal wired."""
+    uri = os.environ.get("TORTOISE_DB_URI")
+    journal = str(tmp_path / f"{tag}.jsonl")
+    sdk = TortoiseSDK(
+        None if uri else str(tmp_path / f"{tag}.db"),
+        namespace=f"test_7405_up_{tag}_{uuid.uuid4().hex[:8]}",
+        event_log_path=journal,
+    )
+    return sdk, journal
+
+
+def _journalled(journal: str, *, type_: str, pid: str) -> list[dict]:
+    """The records of ``type_`` for ``pid`` in the JSONL journal."""
+    out: list[dict] = []
+    try:
+        with open(journal, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("type") == type_ and ev.get("id") == pid:
+                    out.append(ev)
+    except FileNotFoundError:
+        return []
+    return out
+
+
+@pytest.mark.parametrize("needle,as_object", _VANISH_ARMS)
+def test_a_target_that_vanishes_at_the_write_strands_no_dirty_root(
+        tmp_path, needle, as_object):
+    """A zero-row CONDITIONAL write must take no EP side effects (#10473).
+
+    Measured on the pre-fix tree with this exact interleaving: the reply was
+    ``{}`` (correct), the journal row was appended (correct — see the sibling
+    test), and then the door fell through to ``_mark_dirty``, which advanced
+    ``:EpMeta.ep_version`` and classified the vanished id as a delete zombie,
+    KEEPING it in ``_dirty_roots``. No *sweep* can converge it (the persist SET
+    matches no node, and ``_prune_nonexistent_dirty_roots`` runs only inside a
+    dream), so ``_auto_dream_mode`` stays 'local' until a dream pass runs —
+    while the point it names does not exist — the #2422/#7505/#9269 pinning harm.
+
+    The write statements are conditional by construction
+    (``MATCH … SET … RETURN count(n)``), so the fix consumes their answer
+    instead of discarding it on the non-abort path.
+    """
+    sdk = _sdk(tmp_path, f"vanishroot{as_object}")
+    try:
+        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+                               dedup=False, status="live")["id"]
+        proj = sdk._get_proj()
+        if as_object:
+            proj.g.query("MATCH (n:Point {id:$id}) SET n:Object",
+                         params={"id": pid})
+        # Model a converged sweep: the create's own root is not the subject.
+        sdk._dirty_roots.clear()
+        before_ep = _ep_version(sdk)
+        before_roots = set(sdk._dirty_roots)
+
+        proxy = _VanishOnFirstWrite(proj.g, needle)
+        proj.g = proxy
+        reply = sdk.update_point(pid, confidence=0.5)
+        proj.g = proxy._real
+
+        assert proxy.vanished == [pid], (
+            "fixture precondition: the target must have been deleted by the "
+            f"proxy — vanished {proxy.vanished!r}")
+        assert proxy.rows_matched == 0, (
+            "fixture precondition: the conditional write must have matched "
+            f"NOTHING — rows matched {proxy.rows_matched}")
+        assert not proj.g.query("MATCH (n:Point {id:$id}) RETURN count(n)",
+                                params={"id": pid}).result_set[0][0], (
+            "fixture precondition: the node must be gone")
+
+        # The reply is the door's documented absent-id contract (#10079: with
+        # no end receipt — the shaped-but-unstored window cannot report an end).
+        assert reply == {}, f"a vanished target answers the absent contract, saw {reply!r}"
+
+        assert _ep_version(sdk) == before_ep, (
+            "the vanished shape advanced the graph-wide EP epoch: "
+            f"{before_ep} -> {_ep_version(sdk)} — the epoch's ordering stamp is "
+            "spent on a target that cannot carry the dirty flag it stamps")
+        assert pid not in sdk._dirty_roots, (
+            "the vanished id was retained as a dirty root, where no sweep can "
+            f"converge it — roots {sorted(sdk._dirty_roots)} (before "
+            f"{sorted(before_roots)})")
+        # The PIN itself, not a restatement of the root set: this fixture holds
+        # one point and no operators, so `_auto_dream_mode` answers 'full' —
+        # unless a write-context root (the stranded vanished id) holds it in the
+        # local window. Measured pre-fix: 'local'.
+        assert sdk._auto_dream_mode() == "full", (
+            "a vanished target alone must not hold the instance in the local "
+            f"dream window — mode {sdk._auto_dream_mode()!r}, roots "
+            f"{sorted(sdk._dirty_roots)}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_vanish_shape_keeps_the_JOURNAL_record_that_carries_the_revision(
+        tmp_path):
+    """The fix must NOT suppress the append: it is the rebuild-window record.
+
+    The SAME zero-row shape covers a target DELETED concurrently and a target
+    NOT YET REPLAYED mid-rebuild (#7405). In the second, this ``PointRevised``
+    is the only copy of the caller's revision — the replay applies it as soon as
+    the node is back. A "conditional append" would trade a stranded EP root for
+    a LOST revision, so the append is journal-first by decision (§17.1) and is
+    untouched here. This is the over-reject control for the fix above.
+    """
+    sdk, journal = _sdk_journaled(tmp_path, "vanishjournal")
+    try:
+        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+                               dedup=False, status="live")["id"]
+        proj = sdk._get_proj()
+        # Model a converged sweep: the CREATE's own root is not the subject, so
+        # what remains in `_dirty_roots` below is this call's doing alone.
+        sdk._dirty_roots.clear()
+        before_ep = _ep_version(sdk)
+        proxy = _VanishOnFirstWrite(proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+
+        reply = sdk.update_point(pid, confidence=0.5)  # must NOT raise
+        proj.g = proxy._real
+
+        assert reply == {}
+        assert proxy.rows_matched == 0, "fixture precondition"
+        records = _journalled(journal, type_="PointRevised", pid=pid)
+        assert len(records) == 1, (
+            "the vanished target's revision must STILL be journaled — it is the "
+            "record a rebuild replays onto the node when it comes back "
+            f"(#7405): saw {len(records)} record(s)")
+        assert records[0].get("confidence") == 0.5, (
+            "the record must carry the caller's revision — a rebuild applies "
+            f"what the payload says: saw {records[0]!r}")
+        assert pid not in sdk._dirty_roots, (
+            "the journal record must not come at the price of a stranded root: "
+            f"{sorted(sdk._dirty_roots)}")
+        assert _ep_version(sdk) == before_ep, (
+            "the same call advanced the EP epoch for a target that cannot carry "
+            f"the stamp: {before_ep} -> {_ep_version(sdk)}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_vanished_tagged_target_issues_no_tag_sync(tmp_path):
+    """The tag sync is the door's OTHER post-write statement group (#10473).
+
+    MEASURED, and the reason this asserts on STATEMENTS rather than on orphan
+    ``:Tag`` nodes: ``_sync_tags`` issues ``MATCH (p:Point {id:$pid}) MERGE
+    (t:Tag {name:$tag}) MERGE (p)-[:TAGGED]->(t)`` — the MERGE is ANCHORED on
+    the Point match, so a vanished target creates no ``:Tag`` (verified on the
+    pre-fix tree: the orphan count is 0 either way). What the vanish shape does
+    produce, pre-fix, is one futile statement per tag against a Point that is not
+    there; after the fix the door returns at the conditional write's answer and
+    issues none.
+    """
+    sdk = _sdk(tmp_path, "vanishtags")
+    try:
+        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+                               dedup=False, status="live")["id"]
+        tag = f"10473-{uuid.uuid4().hex[:8]}"
+        proj = sdk._get_proj()
+        proxy = _VanishOnFirstWrite(proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+        sdk.update_point(pid, tags=[tag])
+        proj.g = proxy._real
+
+        assert proxy.rows_matched == 0, "fixture precondition"
+        assert proxy.tag_statements == 0, (
+            "a tag sync ran against a Point that does not exist — the door "
+            f"issued {proxy.tag_statements} `MERGE (t:Tag …)` statement(s) for "
+            "a target the conditional write proved gone")
+        orphans = proj.g.query(
+            "MATCH (t:Tag {name:$tag}) RETURN count(t)",
+            params={"tag": tag}).result_set[0][0]
+        assert not orphans, (
+            "PREMISE, not the fix — the MERGE is anchored on the Point match, "
+            "so it mints nothing on this shape either way; the discriminating "
+            f"assertion in this test is the statement count above ({tag!r})")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_LANDED_update_still_runs_the_ep_side_effects(tmp_path):
+    """The negative control: the gate must not disarm a real revision.
+
+    Without this, "no epoch advance, no dirty root" would also pass on a fix
+    that simply deleted the tail — which would strand EVERY revision's
+    confidence recompute.
+    """
+    sdk = _sdk(tmp_path, "vanishcontrol")
+    try:
+        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+                               dedup=False, status="live")["id"]
+        sdk._dirty_roots.clear()
+        before_ep = _ep_version(sdk)
+
+        out = sdk.update_point(pid, confidence=0.42)
+
+        assert out.get("confidence") == 0.42, (
+            f"the write must land on a present target, saw {out.get('confidence')!r}")
+        assert _ep_version(sdk) == before_ep + 1, (
+            "a LANDED revision must advance the EP epoch — otherwise the fix "
+            "disarmed the write path instead of the vanish shape: "
+            f"{before_ep} -> {_ep_version(sdk)}")
+        assert pid in sdk._dirty_roots, (
+            "a LANDED revision must leave its point a dirty root, or its "
+            "confidence is never re-derived (#1240/DE2E-4): roots "
+            f"{sorted(sdk._dirty_roots)}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
