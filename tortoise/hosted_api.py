@@ -22304,7 +22304,7 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
 
 def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
                                prior_org_ids: list[str] | None = None,
-                               prior_moved: str | None | _NamespaceNotResolved
+                               prior_moved: str | _NamespaceNotResolved | None
                                = _NAMESPACE_NOT_RESOLVED) -> str:
     """Effect the eager default-graph TeamMeta + OnboardingState init for an
     org that is about to be provisioned; return its graph name.
