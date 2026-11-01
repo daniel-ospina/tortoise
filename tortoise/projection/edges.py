@@ -2860,7 +2860,8 @@ class _EdgeHandlers:
         """Repair-link a LEGACY ``Event`` to its ``Source``, anchoring the version
         **the Event records it was read from** — never the Source's current hash.
 
-        Why this cannot be :meth:`link_source_to_event`: ``backfill_sources`` moves the
+        Why this cannot be :meth:`link_source_to_event`: `backfill_sources` (the
+        SDK method, deleted by #4282) moved the
         Source to the file's **CURRENT** hash while the legacy Event keeps the
         ``file_hash`` it was captured with (W2, "file edited since capture"). The
         Source's hash there is therefore NOT the version this Event was built from, and

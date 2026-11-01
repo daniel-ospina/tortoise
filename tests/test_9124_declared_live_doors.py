@@ -254,7 +254,6 @@ _APPLY_FIRST_DOORS = {
     "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
     "mitigate_operator",     # CREATE the mitigation, then its records
     "promote_point",         # CAS SET status='live', then PointPromoted
-    "record_calibration",    # write the calibration row, then its record
     "set_point_baseline",    # SET the baseline, then its record
 }
 
@@ -309,14 +308,24 @@ _NO_JOURNAL = {
     # `apply-first-declared`) and the door now reaches no mutating handle call
     # at all — so a row here would be a STALE census entry, which
     # `test_the_inventories_hold_no_stale_entry` reds on. A door that issues no
-    # handle write has no lane to name; the two successors carry the stamps'
-    # declaration, and
-    # `test_the_capture_door_delegates_its_writes_to_declared_doors` pins that
-    # split so the stamps cannot slip back into an undeclared body.
-    #   The five doors those writes MOVED to are named by that pin —
-    #   `_write_session_and_turns`, `_materialize_session_source` and
-    #   `_stamp_capture_provenance` included — so a successor that drops off
-    #   the census surface reds there instead of being absorbed here.
+    # handle write has no lane to name, and the two successors carry the stamps'
+    # declaration.
+    #   The pin that used to be cited HERE
+    #   (`test_the_capture_door_delegates_its_writes_to_declared_doors`) was
+    #   deleted by #4282 together with the door it inspected — keeping the
+    #   citation would advertise a guard that no longer runs. What holds now is
+    #   the census itself: the two stamp doors are declared members of the
+    #   apply-first lane, and a successor that drops off this surface reds
+    #   below.
+    #   The five doors those writes MOVED to are pinned as declared doors by
+    #   `test_every_mutating_sdk_entry_point_is_declared_or_inventoried` below,
+    #   so a successor that drops off the census surface reds there instead of
+    #   being absorbed here. ⚠️ Do NOT cite the apply-first pin for the whole
+    #   set: of the three named above only `_materialize_session_source` is an
+    #   apply-first member — `_stamp_capture_provenance` and
+    #   `_write_session_and_turns` declare the LIVE (journal-first) lane, which
+    #   is the stronger claim, and adding them here would be rejected by that
+    #   pin by design.
 
     "_clear_reliability_cache",
     "_connect_issue_objects",
@@ -334,9 +343,7 @@ _NO_JOURNAL = {
     "_write_props",
     "_write_reliability_cache",
     "backfill_v25",
-    "complete_source",
     "ingest",
-    "migrate_orgs_to_registry",
     "set_source_tier",
 }
 
@@ -506,14 +513,12 @@ _UNRESOLVED = {
     "_state_related_objects",
     "_state_related_points",
     "_unsweepable_dirty_roots",
-    "backfill_about_entities",
     "list_batch",
     "paginated_query",
     "query",
     "search_sessions",
     "suggest_entry_points",
     "tortoise_fts_query",
-    "traverse",
     # ⛔ NO SECOND ROW FOR `calibrate_summary` / `_uncalibrated_ep_participants`.
     # They are declared ONCE, above (the #9063 entry). Both PRs that landed on
     # 2026-10-20 declared them at different offsets, so the merge kept both
@@ -5106,83 +5111,6 @@ def test_the_append_exclusions_append_nothing():
     assert not offenders, "\n  " + "\n  ".join(offenders)
 
 
-def test_the_capture_door_delegates_its_writes_to_declared_doors():
-    """`capture_session` reaches NO mutating handle call of its own any more.
-
-    ⛔ This test used to assert the opposite (`…inventoried_as_appending_no_record`,
-    a `_NO_JOURNAL` row), and it was TRUE when #9206 landed: the door still held
-    its four provenance stamps (`eventId`/`source_session`/`source_harness`/
-    `ingested_at`) and the only append-shaped name in its body was
-    `_journal_write_failure_warning`, a receipt-warning STRING BUILDER that must
-    never be counted as a commit point. #9349 then moved the stamps to their own
-    declared doors — `_stamp_capture_attempt_state` / `_stamp_entity_link_counters`,
-    both `apply-first-declared` — so the door now delegates every write and the
-    census has NOTHING to classify in it. A `_NO_JOURNAL` row is therefore a
-    STALE ENTRY (it is what redded `test_the_inventories_hold_no_stale_entry` on
-    `origin/main`), and the honest statement is the split itself: the parent
-    issues no handle write, its two successors carry the declaration.
-
-    The set of append-pattern names in the body is asserted too, so a FUTURE
-    append added here (the real fix, #9350) FAILS instead of slipping under an
-    exclusion that no longer has anything to exclude.
-    """
-    surface = enumerate_handle_surface(SDK_PY.read_text(), str(SDK_PY))
-
-    assert "TortoiseSDK.capture_session" not in surface, (
-        "the capture door reaches a mutating handle call again — it must be "
-        "inventoried (and declared), not left as a delegating parent whose "
-        "writes are invisible to the census"
-    )
-    assert "capture_session" not in _NO_JOURNAL, (
-        "`capture_session` is back in `_NO_JOURNAL`, but it issues no handle "
-        "write of its own — a `no-journal` row for a door with nothing to "
-        "journal is a stale census entry (see `_NO_JOURNAL`'s comment)"
-    )
-
-    assert "capture_session" not in _APPLY_FIRST_DOORS
-    assert "capture_session" not in _all_inventoried(), (
-        "a stale inventory row names a function the census no longer emits — "
-        "`test_the_inventories_hold_no_stale_entry` is the gate that refuses it")
-
-    # …and the writes did not vanish: they moved to doors the census DOES key.
-    delegated = {"_stamp_capture_attempt_state", "_stamp_entity_link_counters",
-                 "_write_session_and_turns", "_materialize_session_source",
-                 "_stamp_capture_provenance"}
-    missing = sorted(name for name in delegated
-                     if not any(key.split(".")[-1] == name for key in surface))
-    assert not missing, (
-        f"{missing} are no longer on the census surface, so the capture door "
-        "has no write-like reach AND no proven home for the ones it lost")
-
-    # The stamps did not become orphans: both successors ARE in the census and
-    # both DECLARE, which is the whole point of the split.
-    for door in ("TortoiseSDK._stamp_capture_attempt_state",
-                 "TortoiseSDK._stamp_entity_link_counters"):
-        assert door in surface, (
-            f"{door} reaches no mutating handle call — the provenance stamps "
-            "have no declared home any more (#9350)"
-        )
-        assert _kind(surface[door]) == "apply-first-declared", (
-            f"{door} is not declared: {_kind(surface[door])} — the stamps' "
-            "write lane is what keeps them off the undeclared set"
-        )
-
-    tree = ast.parse(SDK_PY.read_text())
-    door = next(
-        node for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "capture_session")
-    matched = sorted({
-        name for name in (
-            getattr(call.func, "id", None) or getattr(call.func, "attr", None)
-            for call in ast.walk(door) if isinstance(call, ast.Call))
-        if name and _APPEND_CALL_RE.match(name)})
-    assert set(matched) <= _APPEND_NOT_A_RECORD, (
-        "the capture door calls something append-shaped that is NOT a proven "
-        f"non-record ({sorted(set(matched) - _APPEND_NOT_A_RECORD)}) — if it "
-        "now appends a record of its own it needs a real inventory row and this "
-        "delegation test must move with it"
-    )
 
 
 def test_the_append_exclusions_cannot_buy_a_door_a_lane():

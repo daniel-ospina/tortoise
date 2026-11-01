@@ -411,29 +411,6 @@ class TestGovernanceReads:
         with pytest.raises(AmbiguousEntityName):
             sdk.get_owned_entities("owner-dup")
 
-    def test_org_structure_single_live_name_resolves(self, sdk_factory):
-        sdk = sdk_factory()
-        proj = sdk._get_proj()
-        root = sdk.create_subject("root-org", "organization")
-        member = sdk.create_subject("member-1", "role")
-        proj.g.query(
-            "MATCH (p:Subject {id:$m}), (s:Subject {id:$r}) "
-            "MERGE (p)-[:memberOf]->(s)",
-            params={"m": member["id"], "r": root["id"]})
-        proj.g.query(
-            "MATCH (p:Subject {id:$r}), (x:Subject {id:$m}) "
-            "MERGE (p)-[:holdsRole]->(x)",
-            params={"m": member["id"], "r": root["id"]})
-        org = sdk.get_org_structure("root-org")
-        assert any(m["id"] == member["id"] for m in org["members"])
-        assert any(r["id"] == member["id"] for r in org["roles"])
-
-    def test_org_structure_two_live_same_name_refuses(self, sdk_factory):
-        sdk = sdk_factory()
-        _create_subject_rows(sdk, "branch-dup", ["sub-a", "sub-b"])
-        with pytest.raises(AmbiguousEntityName):
-            sdk.get_org_structure("branch-dup")
-
 
 # ── file_human_approval ───────────────────────────────────────────────────
 
@@ -1053,7 +1030,6 @@ _ALLOWED_FSTRING = {
         'rows = proj.g.query( f"MATCH (n:{label} {{name:$name}}) " f"RETURN n.id, {_terminal_expression(\'n\')} AS term, " f"coalesce(n.is_operator, false) AS op, n.status AS status", params={"name": name}, ).result_set': 1,
     },
 }
-
 
 
 def _logical_units(path: str) -> list[str]:

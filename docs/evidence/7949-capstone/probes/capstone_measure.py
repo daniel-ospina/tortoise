@@ -2,7 +2,7 @@
 """The extractor-v4 capstone MEASUREMENT run (#9080 / epic #7949).
 
 ``capstone_run.py`` (same directory) is the instrument that ships with PR #9089. It
-drives ``TortoiseSDK.capture_session`` — the real entry point — and then reads four
+drove ``TortoiseSDK.capture_session`` — the real entry point — and then read four
 step witnesses off the RECEIPT that the receipt does not carry (#9116), so it
 refuses at G5 for every input and its table is five ``BLOCKED`` rows with
 ``numerator=None`` (#9737: *"a COMPLETED run still yields 0/5 BLOCKED"*). It
@@ -59,7 +59,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:9475-9481`` and
 ``result["vet"]`` at ``:9485-9489``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:15195``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:13911``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -214,7 +214,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:15476`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:14197`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -257,7 +257,7 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2408`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2410`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -790,6 +790,20 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
     from tortoise.sdk import TortoiseSDK
 
     sdk = TortoiseSDK(graph_name=graph)
+    # ⛔ #4282 deleted the public entry point this probe drives. Check BEFORE the
+    # loop: without it the call below raises `AttributeError` on the first session,
+    # AFTER "running N sessions ..." has been printed, so a dead instrument reads as a
+    # started run. A named refusal is the honest verdict.
+    if not hasattr(sdk, "capture_session"):
+        raise SystemExit(
+            "capstone-measure: REFUSED — #4282 deleted "
+            "`TortoiseSDK.capture_session`, the entry point this probe drives. No pass "
+            "can be driven through a deleted door, so no row may be re-measured: the "
+            "scores in the bundle stand as the last MEASURED reading at `e0fc940b5`, not "
+            "as a reproducible one. #9116's seam (`stats[\"step_witness\"]`) survives "
+            "inside `_extract_session_v2` — the surviving in-process door, which the "
+            "hosted POST /v1/sessions handler still reaches — but a measurement against "
+            "THAT door needs its own instrument and its own pre-registration.")
     results = []
     for sid in sessions:
         fixture = load_fixture(sid)

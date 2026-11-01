@@ -212,13 +212,14 @@ response_fields:
   unchanged_when_off: n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)
 - response: tortoise_session_capture
   field: stats.step_witness
-  emitted_when: always on the v2 capture path — the eight per-stage witness blocks (#9116), copied from the extractor's
+  emitted_when: "always on the v2 capture path — the eight per-stage witness blocks (#9116), copied from the extractor's
     own return (reader/story/map/vet/classify_later/search/merge/commit), each carrying that stage's counts. Recorded
-    because this receipt is caller-facing on all three served surfaces, and the witness cannot drift between
-    them — all three read the SAME `meta['stats']` that `_extract_session_v2`'s meta fold produces. The MCP tool and
-    the hosted `POST /v1/sessions` body share `_capture_session_impl`'s receipt literal, and
-    `TortoiseSDK.capture_session` assembles its own `resp` (sdk.py) from that same `meta` — so this key is identical
-    on all three, while a field added to `_capture_session_impl`'s literal alone would NOT reach the SDK receipt
+    because this receipt is caller-facing on both served surfaces, and the witness cannot drift between
+    them — they all read the SAME `meta['stats']` that `_extract_session_v2`'s meta fold produces. The MCP tool and
+    the hosted `POST /v1/sessions` body share `_capture_session_impl`'s receipt literal, so this key is identical on
+    both. `TortoiseSDK.capture_session` was the third binding — it assembled its own `resp` from that same `meta` —
+    and #4282 DELETED it on 2026-10-27 (body recoverable at the tag `archive/4282-surplus-sdk-methods`), so there is
+    no SDK receipt left for a field added to `_capture_session_impl`'s literal alone to miss"
   unchanged_when_off: yes — a flag-gated stage still emits its block with `enabled` false, so the shape never moves
     with a flag; the seam forwards COUNTS only (the VET gate's per-candidate `decisions` text stays on the extractor's
     return), and the replay/M2 lanes never reach this fold, so their receipt is unchanged
@@ -228,12 +229,6 @@ response_fields:
     raw_state, raw_state_at, available, permanent, retryable, label, message'
   unchanged_when_off: n/a — not flag-gated; the key is absent when the point has no source, so a sourceless response
     is byte-identical
-- response: sdk:get_provenance_chain
-  field: raw
-  emitted_when: always, on every returned item — the same index entry (the chain is the Source link, which exists
-    whether or not the raw does)
-  unchanged_when_off: n/a — not flag-gated; a source with no :references edge still returns the SOURCE itself as
-    the terminal entity/labels (both keys always emitted), so the chain is never dropped
 - response: sdk:get_historical_knowledge
   field: malformed
   emitted_when: only in the honest-absence branch, and only when a chain window is inverted (validTo before validFrom,
@@ -290,31 +285,24 @@ response_fields:
   emitted_when: 'the same condition as end_state_unknown, always alongside it — the ids of the covering candidates
     whose end is un-datable (#2350, #9202)'
   unchanged_when_off: yes — absent when no covering candidate has an unknown end
-- response: sdk:capture_session
-  field: graph_ops
-  emitted_when: always on the SDK path — the capture's measured graph-operation count as {total, by_phase}, added
-    by the counts_capture_ops decorator (#3561)
-  unchanged_when_off: n/a — not gated by a flag; an additive key on the returned dict, absent from the MCP tortoise_session_capture
-    response, which calls the underlying impl directly
-- response: sdk:capture_session
-  field: stats.step_witness
-  emitted_when: always on the v2 capture path — the eight per-stage witness blocks (#9116) under the already-present
-    `stats` key, one per extractor stage (reader/story/map/vet/classify_later/search/merge/commit), each carrying
-    that stage's own counts and, for the two flag-gated passes, the `enabled` flag beside them. A block witnesses
-    its step only when the stage reports that it did work; the seam copies COUNTS, never the VET gate's per-candidate
-    `decisions` text
-  unchanged_when_off: yes — a flag-gated stage still emits its block with `enabled` false, so the shape does not move
-    with a flag; the replay/M2 lanes never reach this fold and carry an empty `stats` (or none), byte-identical to
-    before
-- response: sdk:traverse
-  field: idx
-  emitted_when: always, on every returned point — the matched edge's idx (0 names the operator's SOURCE, >= 1 a
-    TARGET; null on an edge written without the property), so an operator and its reverse read distinctly (#6101)
-  unchanged_when_off: n/a — not flag-gated; the key is present (null where the edge carries no idx) on every returned
-    point, and every pre-existing key keeps its value
+# ⛔ THREE rows stood here until #4282 deleted their carriers (2026-10-27), and they are recorded
+# here rather than dropped silently, because each named a REAL emitted field:
+#   • `sdk:capture_session` / `graph_ops` (#3561) — the capture's measured graph-operation count.
+#   • `sdk:capture_session` / `stats.step_witness` (#9116, landed by #10214) — the eight per-stage
+#     witness blocks under `stats`, one per extractor stage, each carrying that stage's own counts
+#     and (for the two flag-gated passes) the `enabled` flag beside them; a block witnesses its
+#     step only when the stage reports it did work, and the seam copies COUNTS, never the VET
+#     gate's per-candidate `decisions` text.
+#   • `sdk:traverse` / `idx` (#6101) — now recorded on `tortoise_traverse` below, its surviving carrier.
+# The SEAM SURVIVES: it is `_capture_stats_with_step_witness` at the `_extract_session_v2` meta fold
+# (`tortoise/sdk.py`), a privatised method, and the whole extractor-v2 pipeline still reaches it. What
+# went with the surface is the public CARRIER, so `stats.step_witness` is now observable in-process
+# (and by the capstone probes) rather than through a declared SDK response. `graph_ops` had exactly
+# one carrier — the `counts_capture_ops` decorator on the deleted method — and is gone with it.
+# Restoring either as a declared surface is a SURFACE CHANGE and needs owner approval (#4282).
 - response: tortoise_traverse
   field: idx
-  emitted_when: always, on every hop in nodes[] — the traversed edge's idx, same value sdk:traverse returns (#6101)
+  emitted_when: "always, on every hop in nodes[] — the traversed edge's idx (the same value the #4282-deleted `sdk:traverse` returned) (#6101)"
   unchanged_when_off: n/a — not flag-gated; additive key on each nodes[] entry, present (null where the edge carries
     no idx), and node/relationship/depth are unchanged
 - response: tortoise_entity_profile
@@ -628,9 +616,16 @@ approval_status: approved
 approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
+# ⚠️ `counts` is DERIVED by `render`, and `cut_at_commit` above is the provenance of
+# the ORIGINAL cut — the two no longer describe the same snapshot: #4282 deleted 26
+# dead public SDK methods at `45eefb26c`, so `sdk_public_methods` is 124 here while
+# `d05370918` held 150. Re-cutting is the durable fix and is deliberately NOT done
+# here: `cut` is owner-gated per this tool's own docstring ("ask Daniel FIRST, before
+# the re-cut") because it re-derives every row from the declaration. Until then, read
+# the count as "at this head" and the sha as "when the rows were cut".
 counts:
   tools: 81
-  sdk_public_methods: 150
+  sdk_public_methods: 124
   retired: 18
   keyword_distribution:
     fetch: 14
@@ -3019,29 +3014,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:apikey_list
-  method: apikey_list
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.apikey_list.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:apikey_revoke
   method: apikey_revoke
   approved: false
@@ -3157,52 +3129,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:backfill_about_entities
-  method: backfill_about_entities
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.backfill_about_entities.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:backfill_sources
-  method: backfill_sources
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.backfill_sources.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:backfill_v25
   method: backfill_v25
   approved: false
@@ -3226,29 +3152,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:batch_create_points
-  method: batch_create_points
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.batch_create_points.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:belief_timeline
   method: belief_timeline
   approved: false
@@ -3318,29 +3221,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:capture_session
-  method: capture_session
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.capture_session.
-  dependency: 'reached by no registered MCP tool; caller categories: documentation, other-tooling'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: documentation, other-tooling'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
 - name: sdk:check_structure
   method: check_structure
   approved: false
@@ -3387,29 +3267,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:cleanup_expired_invitations
-  method: cleanup_expired_invitations
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.cleanup_expired_invitations.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:close
   method: close
   approved: true
@@ -3434,52 +3291,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:commit_session
-  method: commit_session
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.commit_session.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:complete_source
-  method: complete_source
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.complete_source.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:compute_confidence
   method: compute_confidence
   approved: false
@@ -3710,29 +3521,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:create_or_update_point
-  method: create_or_update_point
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.create_or_update_point.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:create_point
   method: create_point
   approved: false
@@ -4216,29 +4004,6 @@ rows:
   exemption: false
   approval: null
   class: no-caller-found
-- name: sdk:get_org_structure
-  method: get_org_structure
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.get_org_structure.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:get_owned_entities
   method: get_owned_entities
   approved: false
@@ -4286,29 +4051,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:get_provenance_chain
-  method: get_provenance_chain
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.get_provenance_chain.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:get_session
   method: get_session
   approved: false
@@ -4447,29 +4189,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:index_file
-  method: index_file
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.index_file.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:index_sessions
   method: index_sessions
   approved: false
@@ -4562,52 +4281,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:invitation_accept
-  method: invitation_accept
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.invitation_accept.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:invitation_create
-  method: invitation_create
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.invitation_create.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:invitation_get_by_id
   method: invitation_get_by_id
   approved: false
@@ -4631,29 +4304,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:invitation_get_by_token
-  method: invitation_get_by_token
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.invitation_get_by_token.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:invitation_list
   method: invitation_list
   approved: false
@@ -4838,29 +4488,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:list_drafts
-  method: list_drafts
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.list_drafts.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:list_graphs
   method: list_graphs
   approved: false
@@ -5068,29 +4695,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:membership_delete
-  method: membership_delete
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.membership_delete.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:membership_get
   method: membership_get
   approved: false
@@ -5104,80 +4708,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.membership_get.
-  dependency: 'reached by no registered MCP tool; caller categories: engine'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: internal
-- name: sdk:membership_list
-  method: membership_list
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.membership_list.
   dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:membership_update_role
-  method: membership_update_role
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.membership_update_role.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:migrate_orgs_to_registry
-  method: migrate_orgs_to_registry
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.migrate_orgs_to_registry.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: none outside tests'
   recommended_family: null
   proposed: false
   exemption: false
@@ -5229,29 +4764,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:operator_action
-  method: operator_action
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.operator_action.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:org_create
   method: org_create
   approved: false
@@ -5275,29 +4787,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:org_delete
-  method: org_delete
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.org_delete.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:org_get
   method: org_get
   approved: false
@@ -5321,29 +4810,6 @@ rows:
   exemption: false
   approval: null
   class: internal
-- name: sdk:org_update
-  method: org_update
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.org_update.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:paginated_query
   method: paginated_query
   approved: false
@@ -5597,29 +5063,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:record_calibration
-  method: record_calibration
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.record_calibration.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:resolve_id
   method: resolve_id
   approved: false
@@ -5689,29 +5132,6 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-- name: sdk:retrieval_legs
-  method: retrieval_legs
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.retrieval_legs.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
 - name: sdk:review_connections
   method: review_connections
   approved: false
@@ -6190,29 +5610,6 @@ rows:
   used_by: tooling, docs
   recommendation: review
   reason: 'no MCP tool binds it; callers: tenant-rest'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: no-caller-found
-- name: sdk:traverse
-  method: traverse
-  approved: false
-  family: null
-  family_rank: null
-  served: sdk
-  sdk_method: null
-  group_source: null
-  keyword: null
-  keyword_rank: null
-  cluster: null
-  canonical: null
-  job: Public SDK method TortoiseSDK.traverse.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
-  lifecycle: active
-  used_by: eval-harness, tooling, docs
-  recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
   proposed: false
   exemption: false

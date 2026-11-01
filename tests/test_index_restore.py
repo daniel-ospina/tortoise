@@ -351,39 +351,6 @@ def test_s15_restore_drill_end_to_end(tmp_path):
 # Backfill → rebuild leg (T12 cycle-19): actual wipe semantics
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_t12_backfill_rebuild_wipe_semantics(tmp_path):
-    """T12 cycle-19 backfill→rebuild leg: legacy DocumentCreated Event nodes
-    are ABSENT post-rebuild (wipe + replay — unjournaled legacy nodes), the
-    backfill Sources are present (journaled via create_source), and a re-run
-    of backfill on the surviving corpus converges."""
-    import hashlib  # noqa: F401, I001
-    from tortoise.file_indexer import compute_file_hash
-    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
-    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
-    (corpus / "docA.md").write_text(DOC_FIXTURE.format(title="DocA"))
-    stored = compute_file_hash(str(corpus / "docA.md"))
-    sdk = _sdk(tmp_path, events=str(events_dir / "events.jsonl"))
-    try:
-        g = sdk._get_proj().g
-        # legacy DocumentCreated Event (unjournaled — created via raw Cypher)
-        g.query(
-            "CREATE (e:Event) SET e.eventId='docA.md', e.eventKind='DocumentCreated', "
-            "e.file_hash=$h, e.title='DocA'", params={"h": stored})
-        r = sdk.backfill_sources(str(corpus))
-        assert r["created"] == 1 and r["linked"] == 1
-        assert g.query("MATCH (e:Event {eventId:'docA.md'}) RETURN count(e)"
-                       ).result_set[0][0] == 1
-        proj = sdk._get_proj()
-        proj.rebuild_all(str(events_dir), confirm_destructive=True)
-        # the UNJOURNALED legacy DocumentCreated Event node is DROPPED
-        assert g.query("MATCH (e:Event {eventId:'docA.md'}) RETURN count(e)"
-                       ).result_set[0][0] == 0
-        # the backfill Source survives (journaled via create_source)
-        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 1
-        assert _required_sweep(g) == 0
-    finally:
-        sdk.close()
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # Forward-only release commitment: an unknown record type is FAIL-CLOSED (R8)

@@ -157,15 +157,6 @@ class TestKeyIsAnIdentity:
         assert a["id"] != b["id"]
         assert len(_points_with_key(sdk, k, "hypothesis")) == 2
 
-    def test_create_or_update_point_inherits_key_identity(self, sdk):
-        """`create_or_update_point` delegates with dedup=True, so it inherits
-        the key identity rather than minting a sibling under one key."""
-        k = "#6110 create_or_update"
-        a = sdk.create_or_update_point("hypothesis", "X", key=k)
-        b = sdk.create_or_update_point("hypothesis", "Y", key=k)
-        assert a["id"] == b["id"]
-        assert len(_points_with_key(sdk, k, "hypothesis")) == 1
-
 
 class TestKeyIsNeverSilentlyReassigned:
     """The same-seam sibling defect measured while fixing #6110: a

@@ -578,7 +578,12 @@ class TestTortoiseHealthTruth:
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
         team = reg.org_create("health-truth-team")
-        reg.org_update(team["id"], max_points=1000)
+        # ⚠️ No cap is written here, deliberately. Review round 15 found the write
+        # was aimed at `_get_proj().g` (a silent no-op — Team lives in the
+        # REGISTRY graph), and re-aiming it does not make it honest: nothing in
+        # this test consumes `max_points`, and the free tier's `max_graph_nodes` is
+        # 10,000, so `= 1000` could only TIGHTEN. A setup write no assertion
+        # consumes is dropped, not re-aimed (#4282 review 18, F4).
         key = reg.apikey_create(team["id"], "h")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
@@ -2017,8 +2022,102 @@ class TestQuotaEnforcement:
         with tc:
             yield tc, reg, key, tid
 
+
     def _set_max_points(self, reg_sdk, org_id, value):
-        reg_sdk.org_update(org_id, max_points=value)
+        """#4282 deleted `org_update`; set the cap on the node directly.
+
+        ⚠️ `_get_registry()`, NOT `_get_proj().g` — `Team` lives in the registry
+        graph; a projection write is a silent no-op (review round 15 measured it).
+        """
+        reg_sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_points = $v",
+            params={"id": org_id, "v": value})
+
+    def test_create_point_below_cap_succeeds(self, quota_client):
+        """Below cap: the write succeeds (no quota error)."""
+        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_create_point",
+                       "arguments": {"kind": "statement", "content": "fine below cap"}},
+        }
+        r, body = _mcp_post(tc, payload)  # noqa: RUF059
+        result = body.get("result", {})
+        text = "".join(c.get("text", "") for c in result.get("content", []))
+        assert "limit reached" not in text, f"unexpected quota error: {text}"
+        assert "error" not in text, f"unexpected error: {text}"
+
+
+    def test_dream_removed_from_http(self, quota_client):
+        """tortoise_dream must not be discoverable or callable over HTTP."""
+        tc, *_ = quota_client
+        r, body = _mcp_post(tc, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+        })
+        tools = body.get("result", {}).get("tools", [])
+        names = {t.get("name") for t in tools}
+        assert "tortoise_dream" not in names
+        r, body = _mcp_post(tc, {  # noqa: RUF059
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "tortoise_dream", "arguments": {}},
+        })
+        # excluded → _http_excluded_error nested in the tool result (code -32004)
+        text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
+        assert "-32004" in text or "not available over HTTP" in text, f"expected excluded error: {body}"
+
+
+    def test_file_human_approval_below_cap_succeeds(self, quota_client):
+        """#684: tortoise_file_human_approval works below the cap."""
+        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_file_human_approval",
+                       "arguments": {"approver_id": "subj-1",
+                                     "artifact_id": "doc-1",
+                                     "point_ids": ["p-1"],
+                                     "decision_content": "approved"}},
+        }
+        r, body = _mcp_post(tc, payload)  # noqa: RUF059
+        result = body.get("result", {})
+        text = "".join(c.get("text", "") for c in result.get("content", []))
+        assert "limit reached" not in text, f"unexpected quota error: {text}"
+
+    def test_assess_source_below_cap_succeeds(self, quota_client):
+        """#684: tortoise_assess_source below cap succeeds (no quota error)."""
+        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
+        payload = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_assess_source",
+                       "arguments": {"url": "https://example.com",
+                                     "assessor": "test-agent",
+                                     "score": 0.5,
+                                     "rationale": "below cap test"}},
+        }
+        r, body = _mcp_post(tc, payload)  # noqa: RUF059
+        result = body.get("result", {})
+        text = "".join(c.get("text", "") for c in result.get("content", []))
+        assert "limit reached" not in text, f"unexpected quota error: {text}"
+
+    def test_list_graphs_scoped_to_team(self, quota_client):
+        """HTTP list_graphs returns only the calling team's own graph."""
+        tc, *_ = quota_client
+        r, body = _mcp_post(tc, {  # noqa: RUF059
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "tortoise_list_graphs", "arguments": {}},
+        })
+        result = body.get("result", {})
+        text = "".join(c.get("text", "") for c in result.get("content", []))
+        import json as _j
+        try:
+            graphs = _j.loads(text)
+        except Exception:
+            graphs = []
+        # A non-empty answer first: `all(...)` and `not in` are both vacuously
+        # true on [], so a JSON-RPC error or a parse failure used to satisfy
+        # this test (review round 16). The team owns its default `org_…` graph.
+        assert graphs, f"no graphs returned at all: {text!r}"
+        assert all(g.startswith("org_") for g in graphs), f"foreign graphs leaked: {graphs}"
+        assert "registry" not in graphs
 
     def test_create_point_blocked_at_cap(self, quota_client):
         """A team at its points cap gets ERR_QUOTA on create_point (HTTP)."""
@@ -2034,20 +2133,6 @@ class TestQuotaEnforcement:
         content = result.get("content", [])
         text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
         assert "limit reached" in text, f"expected quota error, got: {body}"
-
-    def test_create_point_below_cap_succeeds(self, quota_client):
-        """Below cap: the write succeeds (no quota error)."""
-        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        payload = {
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_create_point",
-                       "arguments": {"kind": "statement", "content": "fine below cap"}},
-        }
-        r, body = _mcp_post(tc, payload)  # noqa: RUF059
-        result = body.get("result", {})
-        text = "".join(c.get("text", "") for c in result.get("content", []))
-        assert "limit reached" not in text, f"unexpected quota error: {text}"
-        assert "error" not in text, f"unexpected error: {text}"
 
     def test_quota_holds_with_rate_limit_disabled(self, quota_client, monkeypatch):
         """The quota gate HOLDS when the rate limiter is disabled."""
@@ -2099,23 +2184,6 @@ class TestQuotaEnforcement:
             assert "limit reached" not in text_b, f"team B should not be blocked: {text_b}"
             assert "error" not in text_b, f"team B unexpected error: {text_b}"
 
-    def test_dream_removed_from_http(self, quota_client):
-        """tortoise_dream must not be discoverable or callable over HTTP."""
-        tc, *_ = quota_client
-        r, body = _mcp_post(tc, {
-            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
-        })
-        tools = body.get("result", {}).get("tools", [])
-        names = {t.get("name") for t in tools}
-        assert "tortoise_dream" not in names
-        r, body = _mcp_post(tc, {  # noqa: RUF059
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "tortoise_dream", "arguments": {}},
-        })
-        # excluded → _http_excluded_error nested in the tool result (code -32004)
-        text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
-        assert "-32004" in text or "not available over HTTP" in text, f"expected excluded error: {body}"
-
     def test_assess_source_blocked_at_cap(self, quota_client):
         """#684: tortoise_assess_source is quota-gated — blocked at cap."""
         tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
@@ -2151,55 +2219,6 @@ class TestQuotaEnforcement:
         content = result.get("content", [])
         text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
         assert "limit reached" in text, f"expected quota error, got: {body}"
-
-    def test_file_human_approval_below_cap_succeeds(self, quota_client):
-        """#684: tortoise_file_human_approval works below the cap."""
-        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        payload = {
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_file_human_approval",
-                       "arguments": {"approver_id": "subj-1",
-                                     "artifact_id": "doc-1",
-                                     "point_ids": ["p-1"],
-                                     "decision_content": "approved"}},
-        }
-        r, body = _mcp_post(tc, payload)  # noqa: RUF059
-        result = body.get("result", {})
-        text = "".join(c.get("text", "") for c in result.get("content", []))
-        assert "limit reached" not in text, f"unexpected quota error: {text}"
-
-    def test_assess_source_below_cap_succeeds(self, quota_client):
-        """#684: tortoise_assess_source below cap succeeds (no quota error)."""
-        tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        payload = {
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_assess_source",
-                       "arguments": {"url": "https://example.com",
-                                     "assessor": "test-agent",
-                                     "score": 0.5,
-                                     "rationale": "below cap test"}},
-        }
-        r, body = _mcp_post(tc, payload)  # noqa: RUF059
-        result = body.get("result", {})
-        text = "".join(c.get("text", "") for c in result.get("content", []))
-        assert "limit reached" not in text, f"unexpected quota error: {text}"
-
-    def test_list_graphs_scoped_to_team(self, quota_client):
-        """HTTP list_graphs returns only the calling team's own graph."""
-        tc, *_ = quota_client
-        r, body = _mcp_post(tc, {  # noqa: RUF059
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_list_graphs", "arguments": {}},
-        })
-        result = body.get("result", {})
-        text = "".join(c.get("text", "") for c in result.get("content", []))
-        import json as _j
-        try:
-            graphs = _j.loads(text)
-        except Exception:
-            graphs = []
-        assert all(g.startswith("org_") for g in graphs), f"foreign graphs leaked: {graphs}"
-        assert "registry" not in graphs
 
 
 class TestIntrospectiveQuotaCompleteness:

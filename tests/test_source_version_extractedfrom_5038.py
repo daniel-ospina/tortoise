@@ -292,25 +292,6 @@ def test_variant_ref_after_an_unjournaled_stub_keeps_the_anchor(prov):
     assert result["ok"], result
 
 
-def test_dedup_recommit_does_not_raise_or_diverge(prov):
-    """Input: ``create_or_update_point(..., extractedFrom=DOC)`` twice.
-
-    FAILS IF the new resolver/reject runs BEFORE the dedup early-return — an
-    idempotent re-commit would then raise (or re-anchor) where it must be a
-    no-op. Pins the anchor is unchanged and the graph stays faithful to the
-    journal.
-    """
-    from tortoise.consistency import check_consistency
-
-    sdk, _events, log_path = prov
-    sdk.create_source(DOC, "document", contentHash="h1")
-    first = sdk.create_or_update_point("statement", "idem", extractedFrom=DOC)
-    second = sdk.create_or_update_point("statement", "idem", extractedFrom=DOC)
-    assert second["id"] == first["id"], "guard: this must be a dedup hit"
-    assert _edge_version(_proj(sdk), first["id"], DOC) == "h1"
-    assert check_consistency(str(log_path), _proj(sdk))["ok"]
-
-
 # ── honest absent ──────────────────────────────────────────────────────────
 
 

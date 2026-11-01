@@ -31,6 +31,18 @@ import pytest
 from tortoise.sdk import TortoiseSDK
 
 
+def _corrects_into(sdk, point_id: str) -> list:
+    """CORRECTS edges pointing FROM `point_id`, read directly.
+
+    `sdk.traverse(...)` was deleted by #4282 and these pins only ever used it as
+    a READER, so the same query is inlined rather than the coverage dropped.
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id})-[r:CORRECTS]->(m:Point) RETURN m.id",
+        params={"id": point_id},
+    ).result_set
+    return [{"id": r[0]} for r in rows]
+
 @pytest.fixture
 def sdk():
     """SDK with temp embedded DB. Closed after test."""
@@ -231,31 +243,6 @@ class TestSupersede:
         new = _make_point(sdk, content=text_new)
         return old, new
 
-    def test_transfer_true_transfers_edges(self, sdk):
-        old, new = self._old_new(sdk)
-        obj = sdk.create_entity("object", "Sup Target", objectKind="product")["node"]
-        sdk.create_edge("aboutObject", old["id"], obj["id"])
-        r = sdk.supersede(old["id"], new["id"], transfer_edges=True)
-        assert r["invalidated"] is True
-        assert r["edges_transferred"] >= 1
-        assert _about_targets(sdk, old["id"], "aboutObject") == []  # moved off
-        assert _about_targets(sdk, new["id"], "aboutObject") == [obj["id"]]
-        assert sdk.get_point(old["id"])["status"] == "superseded"
-        assert len(sdk.traverse(new["id"], "CORRECTS", direction="outgoing")) == 1
-
-    def test_transfer_false_matches_invalidate(self, sdk):
-        """transfer_edges=False = invalidate behavior: CORRECTS + outdated,
-        NO edge transfer."""
-        old, new = self._old_new(sdk)
-        obj = sdk.create_entity("object", "Inv Target", objectKind="product")["node"]
-        sdk.create_edge("aboutObject", old["id"], obj["id"])
-        r = sdk.supersede(old["id"], new["id"], transfer_edges=False)
-        assert r["invalidated"] is True
-        assert "edges_transferred" not in r
-        assert _about_targets(sdk, old["id"], "aboutObject") == [obj["id"]]  # stays
-        assert _about_targets(sdk, new["id"], "aboutObject") == []  # not moved
-        assert sdk.get_point(old["id"]).get("outdated") is True
-        assert len(sdk.traverse(new["id"], "CORRECTS", direction="outgoing")) == 1
 
     def test_default_is_full_supersede(self, sdk):
         old, new = self._old_new(sdk)
@@ -283,51 +270,34 @@ class TestSupersede:
         with pytest.raises(ValueError, match="cannot be the point itself"):
             sdk.supersede(p["id"], p["id"], transfer_edges=False)
 
+    def test_transfer_true_transfers_edges(self, sdk):
+        old, new = self._old_new(sdk)
+        obj = sdk.create_entity("object", "Sup Target", objectKind="product")["node"]
+        sdk.create_edge("aboutObject", old["id"], obj["id"])
+        r = sdk.supersede(old["id"], new["id"], transfer_edges=True)
+        assert r["invalidated"] is True
+        assert r["edges_transferred"] >= 1
+        assert _about_targets(sdk, old["id"], "aboutObject") == []  # moved off
+        assert _about_targets(sdk, new["id"], "aboutObject") == [obj["id"]]
+        assert sdk.get_point(old["id"])["status"] == "superseded"
+        assert len(_corrects_into(sdk, new["id"])) == 1
+
+    def test_transfer_false_matches_invalidate(self, sdk):
+        """transfer_edges=False = invalidate behavior: CORRECTS + outdated,
+        NO edge transfer."""
+        old, new = self._old_new(sdk)
+        obj = sdk.create_entity("object", "Inv Target", objectKind="product")["node"]
+        sdk.create_edge("aboutObject", old["id"], obj["id"])
+        r = sdk.supersede(old["id"], new["id"], transfer_edges=False)
+        assert r["invalidated"] is True
+        assert "edges_transferred" not in r
+        assert _about_targets(sdk, old["id"], "aboutObject") == [obj["id"]]  # stays
+        assert _about_targets(sdk, new["id"], "aboutObject") == []  # not moved
+        assert sdk.get_point(old["id"]).get("outdated") is True
+        assert len(_corrects_into(sdk, new["id"])) == 1
+
 
 # ── operator_action ─────────────────────────────────────────────────
-
-class TestOperatorAction:
-    def _operator(self, sdk):
-        a = _make_point(sdk, content="claim a")
-        b = _make_point(sdk, content="claim b")
-        return sdk.create_operator("IMPL", a["id"], [b["id"]])
-
-    def test_mitigate_routes(self, sdk):
-        op = self._operator(sdk)
-        r = sdk.operator_action("mitigate", id=op["id"], reason="small sample",
-                                strength=0.3)
-        assert r.get("mitigation_strength") == 0.3
-        assert r.get("pointKind") == "statement"
-        # mitigation Point linked to the operator
-        rows = sdk._get_proj().g.query(
-            "MATCH (op:Point {id:$id})-[:mitigated_by]->(m:Point) RETURN m.id",
-            params={"id": op["id"]},
-        ).result_set
-        assert len(rows) == 1
-
-    def test_annotate_routes(self, sdk):
-        op = self._operator(sdk)
-        r = sdk.operator_action("annotate", id=op["id"], bias=0.1, precision=0.8,
-                                consistency=0.7, directness=0.9)
-        assert r.get("annotator_bias") == 0.1
-        assert r.get("annotator_precision") == 0.8
-        assert r.get("annotator_consistency") == 0.7
-        assert r.get("annotator_directness") == 0.9
-
-    def test_unknown_action_raises(self, sdk):
-        op = self._operator(sdk)
-        with pytest.raises(ValueError, match="unknown action"):
-            sdk.operator_action("dream", id=op["id"])
-
-    def test_legacy_alias_parity(self, sdk):
-        op = self._operator(sdk)
-        r1 = sdk.mitigate_operator(op["id"], "legacy reason", 0.4)
-        op2 = self._operator(sdk)
-        r2 = sdk.operator_action("mitigate", id=op2["id"], reason="new reason",
-                                 strength=0.4)
-        assert r1.get("mitigation_strength") == r2.get("mitigation_strength") == 0.4
-
-
 # ── create_edge ─────────────────────────────────────────────────────
 
 class TestCreateEdge:

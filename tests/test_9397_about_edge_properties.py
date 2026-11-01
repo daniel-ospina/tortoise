@@ -3421,27 +3421,81 @@ def test_the_default_ingestion_path_reaches_the_binder():
     # extractor selection. `m2` is the opt-out and v2 is the fall-through, so
     # flipping the default would falsify the corrected sentence while the call
     # above stayed in place — an unpinned half of a claim this leg advertises.
-    tree = ast.parse(sdk)
-    selected = [
+    #
+    # ⚠️ The selection is read in `hosted_api._capture_lane()` and nowhere in `sdk.py`
+    # any more (`TORTOISE_SESSION_EXTRACTOR` has no `ast.If`/`ast.IfExp` there at all), so
+    # this pin resolves it in `hosted_api`. It is a PRESENCE assertion: pointed at
+    # `sdk.py` it would RED loudly, which is exactly why it was re-derived to the module
+    # that carries the code rather than left behind.
+    #
+    # ⚠️ NOT single-sourced: `_capture_lane()`'s own docstring says "single source of
+    # truth", and `hosted_api.py` spells the same `== "m2"` selection THREE times — in
+    # `_capture_lane()`, in the `elif` that decides which extractor RUNS inside
+    # `_capture_session_impl`, and again where the capture's extractor record is built
+    # (`_capture_extractor_record`). A default flipped in one copy and not the others would
+    # leave the RECORDED lane disagreeing with the EXECUTED one; the duplication is filed
+    # rather than fixed here (this lane deletes surface, it does not re-plumb hosted
+    # capture) — tortoise#10485.
+    hosted = (PKG / "hosted_api.py").read_text(encoding="utf-8")
+    htree = ast.parse(hosted)
+    lanes = [
         node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If)
+        for node in ast.walk(htree)
+        if isinstance(node, ast.IfExp)
         and "TORTOISE_SESSION_EXTRACTOR" in ast.unparse(node.test)
         and "m2" in ast.unparse(node.test)
     ]
-    assert selected, (
+    assert lanes, (
         "the `TORTOISE_SESSION_EXTRACTOR == 'm2'` selection is gone from "
-        "`sdk.py` — re-derive the corrected reach claim before deleting the "
-        "opt-out it describes"
+        "`hosted_api.py` too — re-derive the corrected reach claim before "
+        "deleting the opt-out it describes"
     )
-    node = selected[0]
-    assert "_extract_session_llm(" in ast.unparse(node.body), (
-        "the `m2` branch no longer selects `_extract_session_llm`, so 'm2 is "
-        "the opt-out' is stale"
+    lane = lanes[0]
+    assert "m2" in ast.unparse(lane.body) and "v2" in ast.unparse(lane.orelse), (
+        "`hosted_api`'s lane selection no longer answers m2/v2, so 'm2 is the "
+        "opt-out and v2 the fall-through' is stale"
     )
-    assert "_extract_session_v2(" in ast.unparse(node.orelse), (
-        "`_extract_session_v2` is no longer the FALL-THROUGH extractor — the "
-        "corrected evidence's 'default-ON, ingestion path' sentence is false"
+    # The DISPATCH must be pinned positionally — which callee sits in WHICH
+    # branch — not by substring. A `"sdk._extract_session_llm" in hosted` test
+    # is satisfied by the historical comment at the `_capture_session_impl`
+    # call site in `hosted_api.py` (named by SYMBOL — a bare line number is
+    # what this file's citation-qualification leg,
+    # `test_the_correction_changelog_qualifies_its_line_citations`, refuses in the documents)
+    # (`# sdk._extract_session_llm/_extract_session_v2 (#822).`), so it passed
+    # on a swapped dispatch and on both sites removed — how that was measured is
+    # in the PR body. This is the #8601 regression the original `sdk.py` arm
+    # existed to catch, so it is re-derived here rather than dropped.
+    # The callee is passed, not invoked — `_run_capture_bounded(slot,
+    # sdk._extract_session_llm, …)` — so the reference is an `ast.Attribute`, not
+    # an `ast.Call`. Matching the reference is still positional (branch body vs
+    # branch orelse), which is what makes a swap visible.
+    def _mentions(node, callee: str) -> bool:
+        items = node if isinstance(node, list) else [node]
+        return any(
+            (isinstance(c, ast.Attribute) and c.attr == callee)
+            or (isinstance(c, ast.Name) and c.id == callee)
+            for root in items
+            for c in ast.walk(root)
+        )
+
+    dispatch = [
+        node
+        for node in ast.walk(htree)
+        if isinstance(node, ast.If)
+        and "TORTOISE_SESSION_EXTRACTOR" in ast.unparse(node.test)
+        and "m2" in ast.unparse(node.test)
+        and _mentions(node.body, "_extract_session_llm")
+    ]
+    assert dispatch, (
+        "the `m2` branch of the capture dispatch no longer calls "
+        "`_extract_session_llm` in `hosted_api.py` — the lane's own callee is "
+        "not pinned, which is exactly what a callee swap survives"
+    )
+    node = dispatch[0]
+    assert _mentions(node.orelse, "_extract_session_v2"), (
+        "`_extract_session_v2` is no longer the FALL-THROUGH extractor of the "
+        "capture dispatch — the corrected evidence's 'default-ON, ingestion "
+        "path' sentence is false"
     )
 
 

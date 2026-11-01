@@ -3310,10 +3310,23 @@ def test_every_customer_callable_row_reaches_a_declared_door():
 
     # A predicate that silently stops resolving its entries turns this arm green
     # on an assertion it never made — so the floor is asserted, not assumed.
-    assert attributed >= 31, (
-        f"only {attributed} door attributions were attempted, and §13's "
-        "customer-callable cells name 31 door OCCURRENCES — a lower floor let a dead "
-        "door KIND parser (all six SDK doors, say) pass this arm silently"
+    #
+    # The floor is DERIVED from the table rather than typed: a typed numeral is a second
+    # hand-count of the thing the table already says, and it reds the moment a row is
+    # added or removed for a reason that has nothing to do with this arm (the #7948
+    # table lost its SDK traversal row when that SDK method was deleted, 31 -> 30).
+    # DERIVED and EQUALITY, not `>=`: an arm that over-counts is as broken as one that
+    # silently stops resolving, and `>=` cannot see the over-count.
+    expected = sum(
+        len(_doors(str(row["reach"])))
+        for row in _rows()
+        if _reach(row) == "customer-callable"
+    )
+    assert expected, "no customer-callable row names a door — the arm is vacuous"
+    assert attributed == expected, (
+        f"{attributed} door attributions were attempted and §13's "
+        f"customer-callable cells name {expected} door OCCURRENCES — any gap lets a "
+        f"dead door KIND parser (every SDK door, say) pass this arm silently"
     )
     assert not broken, (
         "§13 classes these rows customer-callable without naming a door that "
@@ -3628,8 +3641,11 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
 _13_8_ENUMERATION = (
     "sites are customer-callable",
     # ⚠️ the marker follows the sentence that ACTUALLY starts the tail — it was re-worded to
-    # "Outside this nineteen, ..." to stop a re-verifier counting those five inside the nineteen
-    "Outside this nineteen, two are default-ON on the ingestion path",
+    # "Outside this eighteen, ..." to stop a re-verifier counting those five inside the
+    # enumeration. The numeral in it is a LOCATOR, not the figure under test: the figure is
+    # asserted in (a) from every "N ... customer-callable" statement, so this marker moving
+    # with it cannot make a wrong count pass.
+    "Outside this eighteen, two are default-ON on the ingestion path",
 )
 
 #: `` `token` `` — the unit §13.8 names a reader (or a door) with.

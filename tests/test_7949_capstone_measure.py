@@ -2120,24 +2120,34 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
     Both numbers are DERIVED from the tree (the bundle's own convention: the
     symbol is authoritative, the line is a convenience), so this leg never carries
     a typed number that an insertion above `_extract_session_v2` would silently
-    invalidate. The pair must sit on ONE line, because that is what makes a bare
-    continuation attributable at all: with no file in front of it, the only thing
-    that says WHICH tree the number counts is its sentence.
+    invalidate. The pair must sit on ONE line, and since #4282 the call half is
+    FILE-QUALIFIED (`hosted_api.py:N`) rather than a bare `:N`: the in-`sdk.py` call
+    was `capture_session`'s own body, so the surviving call site is in another file,
+    and a bare continuation cannot name the tree it counts. The bare-continuation
+    sweep stays in place so a re-introduced `:N` reds rather than passing unchecked.
 
     Non-vacuity: the anchors must each match exactly one line (two calls would make
     "the" call site a guess, and the message says so), and re-staling the doc's
     continuation to any other number reds here.
     """
     sdk_lines = (_REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
-    call_anchor = "extracted, meta = self._extract_session_v2("
+    # ⚠️ #4282 DELETED `TortoiseSDK.capture_session`, and with it the ONLY in-`sdk.py`
+    # call — `extracted, meta = self._extract_session_v2(` was that method's own body.
+    # Same re-pointing the bundle's `(def, call)` pair already carries in
+    # `test_7949_capstone_verdict_check.py`: the surviving production caller is the
+    # hosted capture lane, which passes the method as a CALLABLE, so the call site is
+    # derived from `hosted_api.py`. Both numbers stay derived from the tree; what
+    # changes is which tree a call site can be derived FROM at all.
+    call_anchor = "sdk._extract_session_v2,"
     def_anchor = "def _extract_session_v2("
-    calls = [i + 1 for i, ln in enumerate(sdk_lines) if call_anchor in ln]
+    hosted_lines = (_REPO / "tortoise/hosted_api.py").read_text(encoding="utf-8").splitlines()
+    calls = [i + 1 for i, ln in enumerate(hosted_lines) if ln.strip() == f"slot, {call_anchor}"]
     defs = [i + 1 for i, ln in enumerate(sdk_lines)
             if ln.lstrip().startswith(def_anchor)]
     assert len(calls) == 1, (
-        f"{len(calls)} lines carry {call_anchor!r} ({calls}) — the call site this "
-        "leg pins is no longer unique, so derive the one the entry-point paragraph "
-        "means before trusting a number here")
+        f"{len(calls)} lines in tortoise/hosted_api.py call {call_anchor!r} ({calls}) — "
+        "the call site this leg pins is no longer unique, so derive the one the "
+        "entry-point paragraph means before trusting a number here")
     assert len(defs) == 1, (
         f"{len(defs)} lines define `_extract_session_v2` ({defs}) — the bundle "
         "trumpets ONE entry point; re-derive which def it means")
@@ -2151,15 +2161,20 @@ def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
             f"{name} cites the entry point `sdk.py:{def_line}` on {len(citing)} "
             f"lines — this leg attributes the bare continuation by its LINE, so "
             "exactly one line may carry the pair")
+        assert f"hosted_api.py:{call_line}" in citing[0], (
+            f"{name} names the entry point at `sdk.py:{def_line}` but does not carry "
+            f"the surviving call site `hosted_api.py:{call_line}` (`{call_anchor}`; "
+            "the in-`sdk.py` call died with `capture_session`, #4282). Re-derive the "
+            "number from the tree; do not delete the cite.")
         bare = [m.group(1) for m in _BARE_CONTINUATION.finditer(citing[0])]
         bare = [b for b in bare if b != f":{def_line}"]
-        assert bare == [f":{call_line}"], (
-            f"{name} names the entry point at `sdk.py:{def_line}` but its "
-            f"continuation cites {bare or 'nothing'}; the CALL is at "
-            f"sdk.py:{call_line} (`{call_anchor}`) and the `def` is at "
-            f"sdk.py:{def_line}. A bare `:N` names no file, so `_BUNDLE_CITE` — and "
-            "every rule in `_BUNDLE_RULES` — cannot check it; this is the leg that "
-            "can. Re-derive the number from the tree; do not delete the cite.")
+        assert bare == [], (
+            f"{name} names the entry point at `sdk.py:{def_line}` and still carries a "
+            f"bare continuation {bare}; a bare `:N` names no file, so `_BUNDLE_CITE` — "
+            "and every rule in `_BUNDLE_RULES` — cannot check it, and a bare number "
+            "cannot say WHICH tree it counts once the survivor lives in another file. "
+            "The dead in-`sdk.py` call that this continuation used to name is gone "
+            "(#4282); cite `hosted_api.py:{call_line}` instead.")
 
 
 # ── E2's blocker names the LIVE half, not the closed render issue ─────────

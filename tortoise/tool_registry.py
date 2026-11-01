@@ -1983,7 +1983,8 @@ def tool_groups() -> dict[str, list[str]]:
 # TestModuleNoteInventory reds on any missed note).
 #
 # Mapping evidence (2026-09-02, repo-wide class search): session recording =
-# TortoiseSDK.capture_session + the hosted POST /v1/sessions capture; session
+# the hosted POST /v1/sessions capture (the SDK's `capture_session` was deleted
+# by #4282); session
 # extraction = extractor.py (Extractor/LLMExtractor) + extractor_v2.py (5-stage
 # pipeline) + session_indexer.py (session-file metadata); document indexing =
 # ingest.py (corpus) + file_indexer.py (file identity) + session_indexer.py

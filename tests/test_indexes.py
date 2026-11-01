@@ -390,22 +390,6 @@ def test_navigation_bfs_uses_index_scan():
 
 # ── Task 6: org queries parity ───────────────────────────────────────────
 
-def test_org_queries_parity(sdk):
-    sdk.create_subject("root-org", "organization")
-    sdk.create_subject("member-1", "role")
-    proj = sdk._get_proj()
-    root = proj.g.query("MATCH (s:Subject {name:'root-org'}) RETURN s.id").result_set[0][0]
-    m1 = proj.g.query("MATCH (s:Subject {name:'member-1'}) RETURN s.id").result_set[0][0]
-    proj.g.query("MATCH (p:Subject {id:$m}), (s:Subject {id:$r}) MERGE (p)-[:memberOf]->(s)",
-                 params={"m": m1, "r": root})
-    org = sdk.get_org_structure(root)
-    assert any(m["id"] == m1 for m in org["members"])
-    org2 = sdk.get_org_structure("root-org")
-    assert org2["members"] == org["members"]
-    proj.create_owned_by(m1, root)  # (entity, subject): m1 owned by root
-    owned = sdk.get_owned_entities(root)
-    assert any(e["id"] == m1 for e in owned)
-
 
 # ── Task 7: plan-shape battery ───────────────────────────────────────────
 
