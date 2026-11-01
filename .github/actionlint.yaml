@@ -1,0 +1,42 @@
+# actionlint configuration — the pool's CUSTOM runner labels, declared.
+#
+# WHY THIS FILE EXISTS (#10237). The REQUIRED `workflow-lint` leg runs
+# `rhysd/actionlint:1.7.12` over every workflow, and actionlint verdicts a
+# `runs-on:` label against a BAKED-IN list of GitHub-hosted labels. A custom
+# label carried by a self-hosted runner is a hard error, so the first workflow
+# that pins the pool's own label reddens `python-ci-gate` for a diff that is
+# correct — MEASURED on this repo, not hypothetical:
+#
+#   .github/workflows/ci.yml:1534:28: label "self-hosted-x64" is unknown.
+#   … if it is a custom label for self-hosted runner, set list of labels in
+#   actionlint.yaml config file [runner-label]
+#   1534 |     runs-on: [self-hosted, self-hosted-x64]
+#
+# That is the message from the #10237 canary job's first run. actionlint's own
+# error text names the remedy applied here, and the file's location and schema
+# are the documented ones: https://github.com/rhysd/actionlint/blob/main/docs/config.md
+# (`actionlint.yaml` in `.github/`; `self-hosted-runner.labels` accepts glob
+# patterns, and this file deliberately spells the names in full so that a typo
+# in `runs-on:` still reds instead of being swallowed by a `self-hosted-*`).
+#
+# WHAT IS DECLARED. The two arch pool markers the runners are REGISTERED with:
+# `self-hosted-x64` on the x64 boxes and `self-hosted-arm64` on the ARM64 VMs
+# (`tools/install-ci-runner-x64.sh`, `ARCH_LABEL` / `ARM_POOL_LABEL`;
+# `docs/ops/ci-runner-x64.md`, "the label contract"). Both are CUSTOM — GitHub
+# returns them, so no hosted runner carries either.
+#
+# ⛔ WHAT THIS DOES *NOT* DO. Declaring a label makes the LINTER accept the
+# name; it does not make a job schedule. A label no runner carries leaves the
+# job queued (GitHub holds it to the 24h limit) with NO red, which is exactly
+# why pinning a REQUIRED leg to the pool is refused at
+# `.github/workflows/python-ci.yml:1891` and `docs/ops/ci-runner-x64.md:62`.
+# Re-measure the live label set before pinning anything to a label named here:
+#
+#   gh api repos/<owner>/<repo>/actions/runners
+#
+# Adding a name below is a claim that a runner really carries it — never a way
+# to silence the lint.
+self-hosted-runner:
+  labels:
+    - self-hosted-x64
+    - self-hosted-arm64

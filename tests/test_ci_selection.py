@@ -8976,6 +8976,120 @@ def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
     )
 
 
+# actionlint 1.7.12's OWN list of known `runs-on:` labels, copied VERBATIM from
+# its `[runner-label]` message (the message prints the whole set when it
+# rejects one). Pinned rather than derived, because the pin IS the point: a
+# label that is neither here nor in `.github/actionlint.yaml` reddens the
+# REQUIRED `workflow-lint` leg. An actionlint upgrade that adds hosted labels
+# can only make this list STALE, and the resulting failure says exactly what to
+# do — the safe direction of drift.
+_ACTIONLINT_KNOWN_LABELS = frozenset({
+    "windows-latest", "windows-latest-8-cores", "windows-2025",
+    "windows-2025-vs2026", "windows-2022", "windows-11-arm", "ubuntu-slim",
+    "ubuntu-latest", "ubuntu-latest-4-cores", "ubuntu-latest-8-cores",
+    "ubuntu-latest-16-cores", "ubuntu-24.04", "ubuntu-24.04-arm",
+    "ubuntu-22.04", "ubuntu-22.04-arm", "macos-latest", "macos-latest-xlarge",
+    "macos-latest-large", "macos-26-intel", "macos-26-xlarge", "macos-26-large",
+    "macos-26", "macos-15-intel", "macos-15-xlarge", "macos-15-large",
+    "macos-15", "macos-14-xlarge", "macos-14-large", "macos-14",
+    "self-hosted", "x64", "arm", "arm64", "linux", "macos", "windows",
+})
+
+
+# The Actions-expression opener. A `runs-on:` member containing it is not a
+# label NAME at lint time (actionlint declines to verdict such a value).
+_EXPR_OPEN = "$" + "{{"
+
+
+def _runs_on_labels(workflow: dict) -> list[str]:
+    """Every STATIC label a workflow's jobs name in `runs-on:`.
+
+    Static means literal. A member carrying `${{ … }}` is not a label NAME at
+    lint time (actionlint declines to verdict such a value), so it is skipped
+    rather than guessed at; the mapping form is read for its `labels` half, and
+    only when that half is literal too. Both spellings are how a job escapes
+    this check, which is why both are handled instead of assuming a list.
+    """
+    labels: list[str] = []
+    jobs = workflow.get("jobs") if isinstance(workflow, dict) else None
+    for job in (jobs or {}).values():
+        runs_on = job.get("runs-on") if isinstance(job, dict) else None
+        if isinstance(runs_on, str):
+            candidates: list = [runs_on]
+        elif isinstance(runs_on, list):
+            candidates = runs_on
+        elif isinstance(runs_on, dict):
+            inner = runs_on.get("labels")
+            candidates = [inner] if isinstance(inner, str) else (
+                inner if isinstance(inner, list) else [])
+        else:
+            continue
+        labels.extend(c for c in candidates
+                      if isinstance(c, str) and _EXPR_OPEN not in c)
+    return labels
+
+
+def test_every_custom_runs_on_label_is_declared_to_actionlint():
+    """A custom self-hosted label must be DECLARED, or `workflow-lint` reds the gate.
+
+    actionlint verdicts `runs-on:` labels against a BAKED-IN GitHub-hosted list,
+    so a pool label is a hard error — `label "self-hosted-x64" is unknown … set
+    list of labels in actionlint.yaml config file`. That is MEASURED on this
+    repo, not hypothetical: `.github/workflows/ci.yml`'s #10237 canary job
+    (`runs-on: [self-hosted, self-hosted-x64]`, ci.yml:1534) redded the REQUIRED
+    `python-ci-gate` through `workflow-lint` on its own first run, for a diff
+    that was correct. The remedy actionlint names is `.github/actionlint.yaml`.
+
+    WHY PIN IT OFFLINE. The declaration is otherwise checked in exactly one
+    place — inside the required CI leg, on a push, behind a ~16-minute hosted
+    wait. This test reads the same two files locally, so the next literal custom
+    label reds at test time instead of on the gate.
+
+    Mutation: delete `.github/actionlint.yaml` (or a label from it) -> RED on the
+    label ci.yml still uses. Mutation: a scan that stops SEEING `runs-on:` ->
+    RED on the positive control below, which requires the canary's custom label
+    to be found. Mutation: a declared glob (`self-hosted-*`) -> RED, because a
+    glob would silently accept the typo (`self-hosted-x65`) that this whole
+    check exists to catch.
+    """
+    wf_dir = REPO / ".github" / "workflows"
+    workflows = _workflow_files(wf_dir)
+    assert workflows, "no workflow files found — the scan would pass vacuously"
+    used = {label for path in workflows
+            for label in _runs_on_labels(yaml.safe_load(path.read_text()) or {})}
+
+    # POSITIVE CONTROL: the #10237 canary pins the pool's own marker, so a
+    # scanner that silently found no custom label must not read as "nothing to
+    # declare" — that is the vacuous pass this leg would otherwise hide in.
+    custom = used - _ACTIONLINT_KNOWN_LABELS
+    assert custom, (
+        "no custom `runs-on:` label found in any workflow, though ci.yml's "
+        "#10237 canary pins [self-hosted, self-hosted-x64] — the scan is "
+        "vacuous, not clean"
+    )
+
+    config_path = REPO / ".github" / "actionlint.yaml"
+    assert config_path.is_file(), (
+        f"{config_path.relative_to(REPO)} is missing: `workflow-lint` will reject "
+        "every custom runner label it reads in `runs-on:` and red the REQUIRED "
+        "python-ci-gate (actionlint names this file as the fix)"
+    )
+    config = yaml.safe_load(config_path.read_text()) or {}
+    declared = set(((config.get("self-hosted-runner") or {}).get("labels")) or [])
+    globs = sorted(d for d in declared if set(d) & set("*?["))
+    assert not globs, (
+        "actionlint.yaml declares a GLOB runner label " + repr(globs) + ": it "
+        "covers label names nobody checked, including a typo in `runs-on:` — "
+        "spell every label in full, as that file's own header states"
+    )
+    undeclared = sorted(custom - declared)
+    assert not undeclared, (
+        "these custom runner labels are used in a workflow `runs-on:` but are "
+        "not declared in .github/actionlint.yaml, so `workflow-lint` reds the "
+        "REQUIRED python-ci-gate on that head: " + ", ".join(undeclared)
+    )
+
+
 def _extract_pytest_marker(run_script: str) -> str:
     """Pull the `-m <marker>` filter from a job's GATING pytest run. The
     docker lanes quote it (`-m 'not track_b and not live'`); the track-b
