@@ -20295,9 +20295,10 @@ class TortoiseSDK:
         # #1914: invalid pagination params fail cleanly instead of looping
         # (limit=0 → hasMore = skip + 0 < total always True on non-empty
         # graphs → infinite pagination loop) or passing raw negatives into
-        # Cypher. Mirrors the guard in tortoise_query (mcp_server.py) and
-        # the other paginator (belief_timeline); `list_drafts`, which had the same
-        # shape, was DELETED by #4282.
+        # Cypher. Mirrors the guard in tortoise_query (mcp_server.py) and the same
+        # `limit` guard on several other reads (e.g. belief_timeline,
+        # list_dedup_candidates, suggest_entry_points). This is the only SDK read with
+        # a `skip`, so the `skip < 0` half has no peer.
         if skip < 0:
             raise ValueError(f"skip must be >= 0, got {skip}")
         if limit < 1:
