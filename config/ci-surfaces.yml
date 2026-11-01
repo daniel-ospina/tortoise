@@ -2024,6 +2024,17 @@ surfaces:
   # `created` / team key could land green; this is a fast, no-DB file scan.
   # Dual-registered in `tier1` because a docs-only diff runs `tier1` only.
   - test_doc_affiliation_frontmatter.py
+  # #10399 review P1-2/P1-4/P1-5/P2-1/P2-3: the batch-integration doctrine's
+  # EXECUTABLE claims — every full-suite command carries the CI marker filter,
+  # the lane is exported before the first suite run (the suite is URI-required
+  # and fails the session closed without it), a batch merge is reverted with
+  # `-m 1` (a bare `git revert` on a merge exits 128), landing asserts
+  # `origin/main == $PINNED`, and the live `.mergify.yml` queue + the
+  # `carve_out:` registry are named rather than paraphrased. Hermetic, one doc
+  # read. `tier1` below is the LOAD-BEARING row: the guarded artifact is under
+  # `docs/`, and a docs-only diff runs `tier1` only (the
+  # `test_doc_affiliation_frontmatter.py` precedent).
+  - test_batch_integration_doctrine.py
   # #9664 review P2 (fail-open-instrument): the capstone's premise census must
   # measure exactly the clause each row prints — the two-clause premises it used
   # to read from one condition (the `team-named` org-create half, and
@@ -6738,6 +6749,7 @@ tier1:
 - test_5142_ontology_record.py  # #5142: docs/ONTOLOGY.md §4.4/§4.6 record vs the code (format/`_SOURCE_HANDLED`, the deferred node collapse + its `OVERRIDES:`, the document `:Source` scoping) — dual-registered with `core`
 - test_evidence_8503_claims.py  # #8503 round 9 (P1): the bundle's `docs/00_index.md` row and verdict-banner bound — a docs-only diff runs `tier1` only, and these two pins lived in a `slow_files` module that tier1 subtracts; dual-registered with `core`
 - test_doc_affiliation_frontmatter.py  # #8738 review P2: the changelog companions' required doc-affiliation frontmatter — a docs-only diff runs `tier1` only; dual-registered with `core`
+- test_batch_integration_doctrine.py  # #10399 review: the batch-integration doctrine's commands must RUN (marker filter, lane-before-suite, `git revert -m 1`, the landing-time `origin/main == $PINNED` assertion) — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_9664_premise_census.py  # #9664 review P2: the capstone census measures the clause it prints (two-clause premises, all three completion gates, the corrected tool names) — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_s2_decision_record_5087.py  # #10072 review round 17 P2: S2-DECISION-SEAM.md §8's tables must be tables (GFM ends a table at a blank line and markdownlint cannot see it) and must cite siblings by name, not ordinal — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_7818_ontology_record.py  # #7818: docs/ONTOLOGY.md §4.7 coverage-boundary record vs `_covers` (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
