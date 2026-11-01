@@ -491,3 +491,74 @@ def test_census_probe_cells_match_the_committed_artifact_key_set(tmp_path):
 
     assert list(out["cells"]) == list(committed["cells"])
     assert list(out) == list(committed)
+
+
+def test_census_probe_names_the_ratio_a_point_coverage_floor(tmp_path):
+    """The key is ``point_coverage``, NEVER ``claim_coverage`` (#10137 review,
+    P2). The denominator counts every non-operator ``Point``, and the v2 ingest
+    writes episodic turn points and transcript chunks that can never carry EP
+    state, so a key named ``claim_coverage`` asserts a denominator the bundle's
+    own README denies ("a floor, not a claim-coverage figure").
+
+    Non-vacuous: the pre-fix probe published ``claim_coverage``, so the second
+    assertion fails on it."""
+    out = _probe().cells(_write(tmp_path, _report_doc(_outcomes(2))))
+
+    assert "point_coverage" in out
+    assert "claim_coverage" not in out
+    assert out["point_coverage"]["points_with_ep"] == 242
+
+
+def test_census_probe_counts_a_fail_open_manifest_as_unread(tmp_path):
+    """A manifest PRESENT is not a census READ (#10137 review, P2).
+
+    The producer's fail-open shape — ``{"ep_ran": False, "error": ...}``, the
+    one ``measurement_posture`` documents — carries a manifest and NO census
+    cells. Counting manifests published ``per_question_unread: 0`` over rows
+    whose cells are all ``null`` while the SAME input's summed cells published
+    ``points_with_ep_unread: 1``: two disclosures of one fact, disagreeing.
+    """
+    outcomes = [*_outcomes(1), {"question_id": "q-boom",
+                              "question_type": "single-session-user",
+                              "belief_activation": {"ep_ran": False,
+                                                    "error": "boom"}}]
+    out = _probe().cells(_write(tmp_path, _report_doc(outcomes)))
+
+    # The two disclosures now agree instead of contradicting each other.
+    assert out["per_question_unread"] == 1
+    assert out["cells"]["points_with_ep_unread"] == 1
+    assert out["cells"]["operators_unread"] == 1
+    # ...and the row says WHY it is unread, instead of a bare row of nulls.
+    by_qid = {r["question_id"]: r for r in out["per_question"]}
+    assert by_qid["q-boom"]["error"] == "boom"
+    assert by_qid["q-boom"]["points_with_ep"] is None
+    assert by_qid["q0"]["error"] is None
+
+
+def test_census_probe_discloses_failed_questions_behind_the_ratio(tmp_path):
+    """A crashed run's checkpoint must not read as ``N/N`` over its survivors
+    (#10137 review, P2). ``summarize_belief_activation`` only ever sees
+    ``outcomes``, so the failure population is read from the input itself
+    (``run.py:2797`` writes ``failures``; a report carries ``n_failed``) and
+    published beside it.
+
+    Non-vacuous: the pre-fix probe reported ``questions_in_run: 2`` for this
+    input and no ``questions_failed`` at all — the ablation was invisible."""
+    failed = [{"question_id": "q-failed", "error": "reader timeout"},
+              {"question_id": "q-failed-2", "error": "ingest died"}]
+    ckpt = {"fingerprint": {"activate_beliefs": True},
+            "outcomes": _outcomes(2), "failures": failed}
+    out = _probe().cells(_write(tmp_path / "ckpt", ckpt))
+
+    assert out["questions_in_run"] == 4         # every question the run covered
+    assert out["questions_failed"] == 2
+    assert out["questions"] == 2                # the ratio's denominator
+    # The disclosure, not a silent 1.00 over survivors: the two counts differ
+    # by exactly the failures, so a reader cannot mistake one for the other.
+    assert out["questions_in_run"] - out["questions"] == out["questions_failed"]
+
+    # The report arm reads the same population off ``n_failed``.
+    rep = _report_doc(_outcomes(2))
+    rep["n_failed"] = 3
+    out_rep = _probe().cells(_write(tmp_path / "rep", rep))
+    assert out_rep["questions_failed"] == 3
