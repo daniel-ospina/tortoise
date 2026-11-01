@@ -81,6 +81,7 @@ import os
 from collections.abc import Callable
 
 from .env_truthy import is_truthy
+
 #: The repo's ONE untrusted-region seam (#10311). Imported deliberately rather
 #: than re-implemented: a second framing renderer is exactly the drift this
 #: module must not become a third copy of (`extractor_v2.py:1511` records the
