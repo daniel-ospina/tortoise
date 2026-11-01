@@ -712,10 +712,14 @@ def check_step_partition(pins: dict, record: dict) -> list[str]:
     """
     failures: list[str] = []
     record_steps = _mapping(record, "steps", MACHINE_RECORD)
-    try:
-        pins_steps = _pins_mapping(pins, "steps")
-    except CheckError as exc:
-        return [f"pins.steps is unreadable: {exc}"]
+    # ⛔ BOTH halves route through the module's own readers, so a wrong-typed field is a PARSE
+    # error on either side — the contract this docstring states. The pins half used to catch
+    # `_pins_mapping`'s CheckError and downgrade it to a finding (exit 1) while
+    # `pins.steps.unconditional` (via `_list`, below) raised (exit 2), so the SAME malformation
+    # got two different answers depending on which sub-key it landed in. Letting it raise here is
+    # what makes the docstring true; the EMPTY declaration stays a finding below, deliberately —
+    # an absent block is a document defect, not unparseable input.
+    pins_steps = _pins_mapping(pins, "steps")
     if not pins_steps:
         return [
             "pins.steps is empty — the capstone's step gate reads this split out of the frozen "
@@ -724,7 +728,7 @@ def check_step_partition(pins: dict, record: dict) -> list[str]:
         ]
 
     unconditional = _list(pins_steps, "unconditional", "pins.steps")
-    conditional = pins_steps.get("conditional") or []
+    conditional = _list(pins_steps, "conditional", "pins.steps")
 
     def _cmp_steps(label: str, want, got) -> None:
         if got != want:
@@ -732,9 +736,6 @@ def check_step_partition(pins: dict, record: dict) -> list[str]:
                 f"{MACHINE_RECORD} {label} is {got!r} but the pins block says {want!r} — two "
                 "copies of the required step set that can disagree"
             )
-
-    if not isinstance(conditional, list):
-        return [f"pins.steps.conditional is {type(conditional).__name__}, expected a list"]
 
     declared = [str(s) for s in unconditional]
     entries: dict[str, dict] = {}
@@ -799,6 +800,16 @@ def check_step_partition(pins: dict, record: dict) -> list[str]:
     for entry in _list(record_steps, "conditional", MACHINE_RECORD):
         if isinstance(entry, dict) and str(entry.get("step") or ""):
             record_conditional[str(entry["step"])] = entry
+        else:
+            # ⛔ Mirror the pins arm above: the record's producer is another lane, so a malformed
+            # entry is untrusted input that must be REPORTED, not skipped. Dropping it made the
+            # record-side rule strictly weaker than the document-side one — a record that kept its
+            # valid entry and added a junk one compared clean, while the same document written one
+            # file over was refused.
+            failures.append(
+                f"{MACHINE_RECORD} steps.conditional carries an entry that is not a "
+                f"{{step: \u2026}} mapping ({entry!r}) — it declares nothing"
+            )
     if sorted(record_conditional) != sorted(entries):
         _cmp_steps("steps.conditional (step ids)", sorted(entries),
                    sorted(record_conditional))
@@ -815,9 +826,21 @@ def check_step_partition(pins: dict, record: dict) -> list[str]:
 
 
 def _issue_number(value) -> object:
-    """``#10215`` / ``10215`` / ``"10215"`` as the same integer."""
+    """``#10215`` / ``10215`` / ``"10215"`` as the same integer, and ANYTHING else unchanged.
+
+    ⛔ TOTAL by construction. An earlier cut tested ``str.isdigit()`` and then called ``int()`` — but
+    ``isdigit()`` is True for characters ``int()`` REJECTS (``'\u00b2'.isdigit()`` is True while
+    ``int('\u00b2')`` raises ``ValueError``), so an ``evidence_issue`` holding a Unicode
+    digit-like character escaped as an uncaught ``ValueError``: through ``run()`` (catches nothing)
+    to ``main()`` (catches only ``CheckError``) as a traceback with exit **1** — the code this tool
+    reserves for FINDINGS, which is the exact escape class this function's caller documents.
+    ``try/except`` makes every non-numeric value a plain comparison mismatch instead.
+    """
     text = str(value).strip().lstrip("#")
-    return int(text) if text.isdigit() else value
+    try:
+        return int(text)
+    except ValueError:
+        return value
 
 
 def _record_for_steps(directory: Path) -> dict:
@@ -851,21 +874,26 @@ def check_step_partition_applies(directory: Path, pins: dict, record: dict) -> b
       * any bundle that DECLARES a step set on either side — if you declare one, it must be a
         partition of the epic's eight and the document and record must agree.
 
-    A bundle that declares none is not asked to invent one. Nothing is weakened by skipping it:
-    V5/G5 read the split from ``RECORD_ARTIFACT`` alone and REFUSE when it is absent, so a capstone
-    bundle that loses the block fails closed at the gate itself rather than at this pre-check.
+    A bundle that declares none is not asked to invent one, and nothing is weakened by skipping
+    it — absence is STRICTER at both gates, never a waiver:
+
+      * V5 (``tools/capstone_verdict_check.py::_step_accounting``) requires all eight observed
+        unless the log's own ``steps_conditional`` claims conditionality, and it refuses a claim
+        the frozen record does not declare (``_record_conditional``, which reads
+        ``RECORD_ARTIFACT`` and nothing else);
+      * G5 (``probes/capstone_run.py::declared_conditional``) documents absence explicitly as the
+        pre-``#10215`` shape — *"the block is absent → ``({}, "")`` … all eight are required (a
+        refusal here would red every run made against an older record)"* — and its artifact comes
+        from the operator-selectable ``--prereg-artifact``, not from V5's pinned ``RECORD_ARTIFACT``.
+
+    So a capstone bundle that loses the block does not slip through either gate: it gets the
+    OLD all-eight-required rule back, which is the stricter one. This pre-check is what makes that
+    loss visible as a document defect instead of silently narrowing the epic's gate.
     """
     if record.get("steps"):
         return True
-    try:
-        # ⛔ Guarded: `_pins_mapping` RAISES on a present-but-wrong-typed `steps` pin, and
-        # `check_step_partition` reports that as a FINDING (exit 1), not a parse error. Letting it
-        # escape here would turn a malformed `steps` block into exit 2 and change an exit code this
-        # PR has a test for.
-        if _pins_mapping(pins, "steps"):
-            return True
-    except CheckError:
-        return True          # unreadable is not "absent" — `check_step_partition` reports it
+    if isinstance(pins, dict) and pins.get("steps"):
+        return True          # declared (even if malformed) — `check_step_partition` owns the shape
     try:
         relative = directory.resolve().relative_to(REPO_ROOT)
     except (ValueError, OSError):

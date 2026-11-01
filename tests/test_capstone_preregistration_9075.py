@@ -3018,3 +3018,75 @@ def test_the_CI_multi_bundle_invocation_is_green_on_the_second_bundle(capsys):
     assert code == 0, payload
     assert payload["ok"] is True
     assert [r["ok"] for r in payload["reports"]] == [True, True], payload["reports"]
+
+
+# ── #10509 review round: the step rule's own contract, made true ─────────────────────────────
+
+
+def test_a_unicode_digit_issue_number_is_a_mismatch_not_a_traceback():
+    """REGRESSION (#10509 review P2): `isdigit()` is True for characters `int()` REJECTS.
+
+    `_issue_number` tested `str.isdigit()` and then called `int()`, so an `evidence_issue` holding
+    `²` raised an uncaught `ValueError` — past `run()` (catches nothing) to `main()` (catches only
+    `CheckError`) — escaping as a traceback with exit 1, the code this tool reserves for FINDINGS.
+    The conversion must be TOTAL: a non-numeric value becomes a plain comparison mismatch.
+    """
+    assert "²".isdigit() and not int_succeeds("²")
+    assert check._issue_number("²") == "²"
+    assert check._issue_number("#10215") == 10215
+    assert check._issue_number(10215) == 10215
+
+
+def int_succeeds(text: str) -> bool:
+    try:
+        int(text)
+    except ValueError:
+        return False
+    return True
+
+
+def test_a_unicode_digit_in_a_real_record_is_a_finding_not_an_exit_1_traceback():
+    """End to end: the escape above never reaches the CLI as a traceback."""
+    rec = _record_with_steps()
+    rec["steps"]["conditional"][0]["evidence_issue"] = "10²15"
+    # no raise, and the value simply does not match the document's `10215`
+    failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert any("evidence_issue" in f for f in failures), failures
+
+
+def test_a_wrong_typed_pins_step_field_is_a_PARSE_error_on_EVERY_sub_key():
+    """The docstring's contract, on the half that used to contradict it (#10509 review P2).
+
+    `pins.steps = 5` was caught and downgraded to a finding (exit 1) while
+    `pins.steps.unconditional = 5` raised (exit 2) — the SAME malformation, two different answers
+    depending on which sub-key it landed in. All three are parse errors now.
+    """
+    for pins in ({"steps": 5}, {"steps": {"unconditional": 5}},
+                 {"steps": {"conditional": 5}},
+                 {"steps": {"unconditional": ["S0"], "conditional": 5}}):
+        with pytest.raises(check.CheckError) as excinfo:
+            check.check_step_partition(pins, {})
+        assert "steps" in str(excinfo.value), (pins, excinfo.value)
+
+
+def test_an_EMPTY_pins_step_block_stays_a_FINDING_not_a_parse_error():
+    """The deliberate asymmetry: an absent block is a document defect, not unparseable input.
+
+    Keeping this at exit 1 is what lets the capstone bundle's "we deleted the split" shape be
+    reported as a weakened gate rather than as "the tool could not read its subject".
+    """
+    failures = check.check_step_partition({"steps": {}}, {})
+    assert any("pins.steps is empty" in f for f in failures), failures
+
+
+def test_a_malformed_record_conditional_entry_is_REPORTED_not_skipped():
+    """REGRESSION (#10509 review P2): the record arm was weaker than the document arm.
+
+    The pins loop reports `{step: …}`-less entries; the record loop silently dropped them. So a
+    record that KEPT its valid entry and added a junk one compared clean, while the same document
+    written one file over was refused.
+    """
+    rec = _record_with_steps()
+    rec["steps"]["conditional"] = [*rec["steps"]["conditional"], {"condition": "no step key"}]
+    failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert any("steps.conditional carries an entry that is not a" in f for f in failures), failures
