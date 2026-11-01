@@ -75,8 +75,13 @@ _log = logging.getLogger(__name__)
 #: the same silent-loss defect as a silent drop: the caller must be able to tell
 #: that a hit's annotation is missing and why. Process-local; the ``warning``
 #: line beside each increment carries the offending value for anything durable.
+#: ⛔ BOTH keys count HITS, and ``unreadable_bound`` counts the hits the
+#: marker was BUILT for — see the long note at its increment site (#9741 review
+#: P3-3): a hit the item/token/byte cap then drops is still counted, because the
+#: defect is in the STORED bound and the build already happened. That is what
+#: the name says; it is not a count of clauses missing from the returned text.
 BOUND_RENDER_OUTCOMES: dict[str, int] = {
-    "unreadable_bound": 0,      # a hit with >=1 bound present but unreadable
+    "unreadable_bound": 0,      # a hit with >=1 STORED bound it could not read
     "marker_failed": 0,         # the marker raised for one hit (backstop)
 }
 
@@ -1149,9 +1154,13 @@ def _validity_marker(h: dict) -> str:
     # for exactly that reason, and ``create_point`` accepts it), and
     # ``'int' object has no attribute 'strip'`` aborted rendering for EVERY hit
     # in the result set. ``_display_bound`` accepts ISO text and a numeric
-    # epoch (seconds or millis) and returns the calendar day the reader states;
-    # anything it cannot read is SKIPPED and the value named in a ``warning`` —
-    # never raised, never rendered as an absent bound's silence.
+    # epoch in SECONDS within the authored span, and returns the calendar day
+    # the reader states; anything it cannot read — including a number OUTSIDE
+    # that span, which is never re-read as millis — is SKIPPED and the value
+    # named in a ``warning``: never raised, never rendered as an absent bound's
+    # silence. (#9741 review P3-2: this comment said "seconds or millis", the
+    # behaviour of a superseded round the same PR removed, standing above the
+    # code that removes it.)
     raw_vf = h.get("valid_from")
     vf = _display_bound(raw_vf, "valid_from", h)
     raw_vt = h.get("valid_to")
@@ -1166,6 +1175,16 @@ def _validity_marker(h: dict) -> str:
     # under one census is a number that means neither (Prometheus' naming rule:
     # a metric MUST refer to a single quantity). The per-FIELD detail survives
     # in ``_display_bound``'s ``warning``; this is the operator's count.
+    #
+    # #9741 review P3-3 — WHICH hits. The increment sits at the marker BUILD,
+    # so it counts the hits the admission scan examined far enough to annotate
+    # (one build per hit, cached), NOT the hits that survived the item/token/
+    # byte caps. A hit whose block is priced out and dropped is therefore still
+    # counted — that is the unit, and it is a DATA census: the bound in the
+    # graph is unreadable whether or not this call had room for the hit.
+    # ``assemble_context``'s ``stats`` docstring names the same quantity, and
+    # ``items_selected`` / ``dropped_by_*`` are what say which hits reached the
+    # reader.
     if any(_bound_present(raw) and not shown for raw, shown
            in ((raw_vf, vf), (raw_vt, vt), (raw_ex, ex))):
         BOUND_RENDER_OUTCOMES["unreadable_bound"] += 1
@@ -1528,7 +1547,15 @@ def _hit_prefix(h: dict, marker: Any = _UNRESOLVED_MARKER) -> str:
     # Collapsed here rather than field by field inside _validity_marker — one
     # choke point covers every present and future free-text field the marker
     # interpolates.
-    marker = _marker_or_resolve(h, marker)
+    # #9741 review P2-1: the collapse must cover the CALLER-SUPPLIED path too.
+    # ``_marker_or_resolve`` returns a caller's ``marker`` VERBATIM (that is
+    # its contract — see its docstring), and ``_safe_marker`` collapses only
+    # what IT resolves, so leaving this line as the bare resolve made the
+    # sentence above true only for the internal path — at the exact zone
+    # #3844/#6252 exist to protect. ``_one_line`` is idempotent
+    # (``" ".join(str(v).split())``), so a marker that is already collapsed
+    # passes through byte-identically.
+    marker = _one_line(_marker_or_resolve(h, marker))
     if marker:
         # _validity_marker returns self-bracketed groups
         # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
@@ -1796,6 +1823,17 @@ def assemble_context(
     :func:`_display_bound` logs), so ``n`` always means ``n`` hits. Without this
     key the counters were write-only: incremented in three places and readable
     from nowhere.
+
+    ⛔ WHICH hits ``unreadable_bound`` counts (#9741 review P3-3), stated rather
+    than implied: the hits this call EXAMINED FAR ENOUGH TO ANNOTATE. The
+    marker is built once per hit by the admission scan below — before any cap
+    can refuse the hit — so a hit the token or byte cap then drops is INCLUDED
+    (its block is built to price it, and that build already found the
+    unreadable bound). It is a census of the STORED data this call touched, not
+    of clauses missing from the returned text: ``items_selected``,
+    ``dropped_by_token_cap`` and ``dropped_by_byte_cap`` are the keys that say
+    what reached the reader. A hit the ITEM bound never examined is not counted
+    at all — no marker was built for it.
 
     Token accounting (the alignment invariant): raw whitespace words
     accumulate per block (question_date-independent) + the once-prepended
