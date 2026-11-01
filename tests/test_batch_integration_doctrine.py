@@ -789,8 +789,10 @@ now scoped by ROLE (a suite command that writes THAT report), which is the subje
 this module already closed for ``_COUNT_SUBJECT``/``_MERGE_SUBJECT``/``_LANDED_TREE_DIFF``; both
 still kill their own mutants (see the ledger below).
 
-**Non-vacuity, measured at THIS head (41 checks, 0 red).** **19 document mutants applied, 16 killed,
-1 survivor, 2 controls.** Killed — 15 on exactly ONE check: the reviewer's own mutant (the five-member
+**Non-vacuity, measured at THIS head (41 checks, 0 red).** **26 document mutants applied, 23 killed,
+0 survivors, 3 controls.** Round 39 measured 19 of them (16 killed, 1 survivor, 2 controls); round 40
+adds 6 kills and 1 control, and re-measures round 39's survivor as KILLED — see its retraction
+below. Killed — 15 on exactly ONE check: the reviewer's own mutant (the five-member
 enumeration replaced by prose) reds ``test_the_unreproduced_gate_legs_are_named``, and so does dropping
 one member, dropping the two TEST legs, and dropping ``DEFERRABLE_LEGS``; on the ledger, deleting the
 ``comm -13`` line, flipping it to ``comm -23``, deleting an absent-report halt, deleting the
@@ -804,11 +806,36 @@ check, the ``track_b`` completion check and the skip check — one run's instrum
 sides). **2 controls stayed GREEN as they must**: a backtick in a trailing ``#`` annotation (``_code``
 cut) and the enumeration REFLOWED onto one line (whitespace normalisation) — so the scoped checks
 grade the claim rather than the spelling.
-**One survivor, and it is the documented CLASS, not this round's**: ``[ … ] || : || { … exit 1; }``
-— defusing the fail-closed halt with an always-0 segment — leaves the text perfect and the halt
-bash-dead, exactly like the ``BASELINE_TOTAL=0`` witness above. That is #10434's class (execute the
-fences under a stubbed PATH), which no accumulation of spellings closes, and it is recorded rather
-than hidden.
+
+**Round 40 (6 new mutants, + round 39's survivor re-measured, + 1 control — measured against the
+honest document).** The fresh-context review at ``158baed83`` reported the Phase-4 fail-closed halt
+as pinned by SUBSTRING, and every defusing it measured reproduced here — **41 of 41 GREEN before the
+fix**, each red on exactly ONE check afterwards
+(``test_the_failure_id_ledger_is_built_by_a_stated_rule``): the extraction's ``|| exit 1`` turned
+into ``|| true``; that ``|| exit 1`` deleted outright; ``[ "$reported" -eq 0 ]`` flipped to ``-gt 0``
+(halts on every CLEAN report and never on a drifted one); the predicate reduced to
+``[ -s "$B/$side.failures" ]`` alone (never reads the report's own count — the exact fail-open the
+halt exists for); and ``|| : ||`` inserted before the halt's brace, which is **round 39's survivor,
+now killed**, because this fence is finally routed through ``_halts`` (that helper had 35 references
+in this file and none in this fence). The remaining two kills pin the doctrine's live-source
+citation, both redding ``test_every_verdict_artifact_lives_in_a_per_batch_directory``: swapping run
+``40808264676`` for ``40238275534`` — a REAL, measured run a few hundred lines up in the same
+workflow, which is why an id-presence-only pin measured GREEN and the pin binds to the workflow's
+comment BLOCK instead — and swapping it for a fabricated ``40999999999``. **1 control stayed GREEN as
+it must**: the honest predicate REFLOWED and respelled
+(``[   "${reported}"   -eq   "0"   ]   ||   [  -s  "$B/$side.failures"  ]``), so the subject grades
+the pair rather than the spelling. Five of round 39's kills were re-run against this head (the
+``comm -13`` flip, the deleted absent-report halt and the deleted extraction loop, the deleted
+fail-closed block, and the deleted ``comm -13`` line) and every one still dies.
+
+**No survivor remains in THIS fence, and round 39's was a ROUTING defect rather than #10434's class.**
+Round 39 recorded ``[ … ] || : || { … exit 1; }`` — an always-0 segment defusing the fail-closed halt —
+as an instance of #10434's "execute the fences under a stubbed PATH" class. It was not: ``_halts``
+refuses an always-0 segment by construction (``|| : ||`` and ``|| /bin/true ||`` are named in its own
+docstring), and this fence was simply never routed through it. Measured at this head, that exact
+shape is KILLED. #10434's class itself is unchanged and still open — an edit that changes a
+predicate's INPUTS rather than its wording (the ``BASELINE_TOTAL=0`` witness above) leaves the text
+perfect and the halt bash-dead, and no accumulation of spellings closes it.
 
 The fence's SEMANTICS were reproduced rather than asserted, on real pytest reports (the rule was run
 end to end with the four files in a scratch ``$B``): a disjoint baseline → the batch's three ids
@@ -826,6 +853,10 @@ head) **1 of 41** — the missing ledger alone; ``0a9ee9050`` **5**; ``9f8e12192
 ``62c79b0b8`` **20**; ``a6a71c1e5`` / ``a4028e8d7`` **21**; ``a12792afe`` **23**; ``a17576c43`` **36**;
 ``f3c6c803b`` **33**; ``a8be548762`` **31**; ``295d6d385`` **29**; ``32a2dc87d`` / ``ba7f83feb`` /
 ``64ae70fc5`` **28**; ``ed1c03b82`` / ``c50628450`` **27**; ``a888c6980`` / ``aede4190f`` **26**.
+Round 40 RE-MEASURED the whole axis a third time after the halt and citation pins, and **every count
+is unchanged** — the new assertions red no revision that was already green (each revision that
+carries the sentence carries the cited run in the same workflow block, and each that carries the
+fail-closed halt carries its mechanism and a live halt).
 """
 
 from __future__ import annotations
@@ -4284,13 +4315,16 @@ def test_the_failure_id_ledger_is_built_by_a_stated_rule() -> None:
     other axis in the verdict (lane, tree, COMPLETED status, test count, skips by count and by
     reason) is a fence with a halt.
 
-    This pins the fence's four load-bearing pieces, each of which was measured as a surviving mutant
-    (see the module header's round-39 ledger): the RULE (a `<testcase>` that carries a `<failure>` or
-    `<error>` CHILD, identified by `classname` + `name` — the report schema's own definition, and
-    `classname` is overridable per case with `record_xml_attribute`), the four SOURCE paths with an
-    absent-report halt each, the three `comm` set operations with their carriers, and the fail-closed
-    halt that refuses an EMPTY extraction from a report that says it failed (an undefined id is never
-    green — an empty set diffs empty in both directions).
+    This pins the fence's load-bearing pieces, each of which was measured as a surviving mutant (see
+    the module header's round-39 and round-40 ledgers): the RULE (a `<testcase>` that carries a
+    `<failure>` or `<error>` CHILD, identified by `classname` + `name` — the report schema's own
+    definition, and `classname` is overridable per case with `record_xml_attribute`), the four SOURCE
+    paths with an absent-report halt each, the three `comm` set operations with their carriers, the
+    fail-closed halt's MECHANISM (`_LEDGER_FAILCLOSED_SUBJECT`, not a substring — round 40: four
+    defusings of that one line, including `-eq` inverted to `-gt` and the predicate reduced to
+    `[ -s … ]` alone, each left 41 checks green), and — the property that covers all of them — that
+    the extraction and the fail-closed halt actually HALT (`_halts`), which is what closes `|| true`
+    and the always-0-segment survivor round 39 had recorded as unclosable.
     """
     ledger = _failure_ledger_fence()
     assert ledger is not None, (
