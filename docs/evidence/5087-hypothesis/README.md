@@ -189,7 +189,8 @@ one *observed* fact **machine-enforced**:
    this probe was admitted silently while the log still read as a clean-tree assertion (item 7's
    `S3 WITNESS` line that its own `head=` commit does not contain is that hole, observed). The tree
    is now asserted clean over `tortoise tests/eval/write_path docs/evidence/7949-capstone/probes
-   tools/s3_prior_ablation.py` (`git status --porcelain -- …` must be empty, refused at `exit 3`
+   tools/s3_prior_ablation.py` (item 16 adds this bundle's `preregistration.json`; `git status
+   --porcelain -- …` must be empty, refused at `exit 3`
    before any model call), and the log prints `tree=<git describe --dirty>` beside the changed-file
    line so it can never read as a clean-tree assertion it did not make. **No number moves** — the
    measured run predates the guard and both arms ran in one process from one working copy.
@@ -245,6 +246,24 @@ it touches no count, no denominator and no bar.
     — the number a reader would quote out of a log that also said the arm was invalid. It is now
     emitted only when the verdict produced a ratio; otherwise the log says `NOT REPORTED — the verdict
     produced no ratio`.
+16. **The pin bound the DOCUMENT but not its IDENTITY.** Two files in this bundle are not the same
+    kind of thing, and the guard treated them as one. `PRE-REGISTRATION.md` really is frozen by its
+    commit — the bars are read with `git show <sha>:<rel>` — so an uncommitted copy of it cannot move
+    a bar and correctly does not refuse a run. `preregistration.json` is read from the **working
+    tree**, and its `document_sha256` is what decides *which* document the bars may come from; it sat
+    outside the dirty-tree guard. And `--prereg` was bound to nothing at all: `git show` reads a
+    document out of any commit the repository can resolve. Together that admitted the whole tuning
+    path — edit the record in the working tree, point `--prereg` at any commit carrying the friendlier
+    document (an unreferenced `git commit-tree` object is enough), and every guard passes while the
+    committed bundle never moves. CI could not see it either: the gate compares the **worktree**
+    document's add-epoch and reads a log's `prereg=` only to spot `UNPREREGISTERED`. Now the record is
+    inside `WORKTREE_GUARDED_PATHS` (a clean record is the committed record is the committed
+    document) and `assert_prereg_binding` refuses a `--prereg` commit that no ref contains or that is
+    not an ancestor of `HEAD` — the plan must *precede* the run it arbitrates. ⚠️ **What this does
+    not establish about the measured run:** it was taken *before* either guard existed, so the only
+    evidence that its bars came from a document that preceded it is the one it already carried — its
+    `prereg=` line and the ordering the gate checks. **No number moves**; the guards can only refuse a
+    run.
 
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
 repeated to get a friendlier number. The one-log rule is enforced from the FILE, not from the flag
@@ -292,12 +311,15 @@ git diff --name-only 718ee3b497539540ea10269e7ccfe9b0867d010f HEAD \
 ```
 
 The working copy must be clean too — over `tortoise`, `tests/eval/write_path`,
-`docs/evidence/7949-capstone/probes` and `tools/s3_prior_ablation.py` — because a commit id cannot
-certify a dirty tree, and a probe edited in place is not the probe the bars were read for:
+`docs/evidence/7949-capstone/probes`, `tools/s3_prior_ablation.py` and this bundle's
+`preregistration.json` — because a commit id cannot certify a dirty tree, a probe edited in place is
+not the probe the bars were read for, and the record is read from the **working tree**: an
+uncommitted edit to it re-points which document the bars come from (item 16).
 
 ```bash
 git status --porcelain -- tortoise tests/eval/write_path \
-    docs/evidence/7949-capstone/probes tools/s3_prior_ablation.py   # must print nothing
+    docs/evidence/7949-capstone/probes tools/s3_prior_ablation.py \
+    docs/evidence/5087-hypothesis/preregistration.json                  # must print nothing
 ```
 
 Then, at an admitted head, with a private FalkorDB lane. `tools/test_lane.py run` is the entry point
@@ -320,7 +342,10 @@ The log is written **incrementally** (every line flushed as it is logged), so a 
 mid-way still leaves the sessions it already measured on disk — the gap that lost replay A's output.
 
 `tools/s3_prior_ablation.py` reads its bars out of the **pre-registration commit**
-(`git show <sha>:docs/evidence/5087-hypothesis/PRE-REGISTRATION.md`), re-derives the corpus
+(`git show <sha>:docs/evidence/5087-hypothesis/PRE-REGISTRATION.md`), and refuses an `--prereg` commit
+that no ref contains **or** that is not an ancestor of `HEAD` — the plan must precede the run it
+arbitrates, and a dangling object is the cheapest way to make a hostile document exist. It re-derives
+the corpus
 `fixtures_hash`, refuses an `--out` that escapes this bundle (or one that already carries a
 `RATIO:`/`VERDICT:`, even under `--overwrite`), and refuses a `source_sha` whose
 non-production files differ from `HEAD` **or whose metric-definition code differs at all**
@@ -331,9 +356,9 @@ checked until it became this refusal — and logs `tree=` (`git describe --dirty
 so a run names both the commit and the bytes it executed. **The refusals that precede the log's
 creation**
 — an `--out` that escapes this bundle or already carries a `RATIO:`/`VERDICT:`, an unreadable
-`--prereg`, a malformed pins block, a document↔record digest mismatch, a moved production or
-metric-definition file, a dirty tree, a corpus-hash drift, and the two prerequisites — leave **no
-file** behind. **Four refusals are raised AFTER the log exists**, because they can only be known once
+`--prereg` or one that no ref contains or that does not precede `HEAD`, a malformed pins block, a
+document↔record digest mismatch, a moved production or metric-definition file, a dirty tree (the
+record included), a corpus-hash drift, and the two prerequisites — leave **no file** behind. **Four refusals are raised AFTER the log exists**, because they can only be known once
 the run has begun: an **arm graph that is not fresh** (a non-zero baseline census, refused *before*
 the first session is captured — a reused `--graph-prefix` would otherwise score the E2a guard over a
 previous run's Points), a fixture carrying no conversation, two arms of unequal length, and an

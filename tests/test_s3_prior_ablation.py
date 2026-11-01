@@ -932,6 +932,142 @@ def test_an_uncommitted_edit_refuses_the_run(probe, monkeypatch, tmp_path):
     assert probe.assert_clean_tree()
 
 
+# ── the record is guarded, and `--prereg` is bound to this tree's history (review P2) ────────
+#
+# Two files sit in the same bundle and are NOT the same kind of thing. `PRE-REGISTRATION.md` is read
+# out of a COMMIT (`git show <sha>:<rel>`), so an uncommitted copy of it cannot move a bar and must
+# not refuse a run. `preregistration.json` is read out of the WORKING TREE, and its
+# `document_sha256` is what decides WHICH document the bars may come from — so an uncommitted edit to
+# it re-points the whole chain at a friendlier argument. That was the residual tuning path the pin
+# could not see: edit the record (uncommitted), point `--prereg` at any commit carrying the friendlier
+# document (an unreferenced `git commit-tree` object is enough), and every guard passes while the
+# committed bundle never moves — invisible to CI, which compares the WORKTREE document's add-epoch
+# and reads a log's `prereg=` only to spot `UNPREREGISTERED`.
+
+
+def test_an_uncommitted_record_repoints_the_bars_and_is_refused(probe, monkeypatch, tmp_path):
+    """The record is guarded; the document beside it deliberately is not.
+
+    One temp repo, one variable: the same uncommitted edit to the DOCUMENT is admitted (the bars come
+    from the commit, so it cannot move a number) while the edit to the RECORD refuses. Both halves
+    are asserted, so the fix is not "guard the whole bundle" — which would refuse the run for a docs
+    edit the pin provably cannot see.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "probe-test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "probe-test@example.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "probe-test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "probe-test@example.invalid")
+
+    repo = tmp_path / "record"
+    (repo / "docs/evidence/5087-hypothesis").mkdir(parents=True)
+    (repo / "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md").write_text("# prereg\n")
+    (repo / "docs/evidence/5087-hypothesis/preregistration.json").write_text('{"a": 1}\n')
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "baseline")
+    monkeypatch.setattr(probe, "ROOT", repo)
+
+    assert probe.dirty_paths() == [], "a committed bundle must satisfy the guard"
+
+    # The DOCUMENT is read out of a commit, so a dirty working copy of it cannot move a bar.
+    (repo / "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md").write_text("# friendlier bars\n")
+    assert probe.dirty_paths() == [], (
+        "the pre-registration is read via `git show <sha>:…`, so an uncommitted copy cannot change "
+        "the bars and must not refuse the run")
+    assert probe.assert_clean_tree()
+
+    # The RECORD is read out of the WORKING TREE and arbitrates which document is admissible.
+    (repo / "docs/evidence/5087-hypothesis/preregistration.json").write_text(
+        '{"document_sha256": "sha256:' + "f" * 64 + '"}\n')
+    assert "preregistration.json" in "\n".join(probe.dirty_paths()), (
+        "the record is read from the working tree, so it must be inside WORKTREE_GUARDED_PATHS")
+    with pytest.raises(SystemExit) as refusal:
+        probe.assert_clean_tree()
+    assert refusal.value.code == 3, (
+        "an uncommitted record re-points which document the bars come from — an unmeasurable run, "
+        "never a crash, and never admitted")
+
+
+def test_the_prereg_commit_must_belong_to_this_trees_history(probe, monkeypatch, tmp_path):
+    """`--prereg` was bound to nothing; now a ref must contain it AND it must precede `head`.
+
+    One temp repo: `base` (the document), `head` (on top of it) and a later commit on top of that
+    (a DESCENDANT). Plus a dangling object minted with `git commit-tree` that no ref points at. The
+    admitted case and every refusal are measured, so the binding is not refusing everything.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "probe-test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "probe-test@example.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "probe-test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "probe-test@example.invalid")
+
+    repo = tmp_path / "binding"
+    (repo / "docs/evidence/5087-hypothesis").mkdir(parents=True)
+    doc = repo / "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md"
+    doc.write_text("# prereg\n")
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "the pre-registration")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "tools").mkdir()
+    (repo / "tools/note.txt").write_text("head\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "the head being measured")
+    head = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.setattr(probe, "ROOT", repo)
+
+    # 1. A commit that precedes `head` and that a ref carries — the documented reproduce shape.
+    assert probe.assert_prereg_binding(base, head) == base, (
+        "the recorded reproduce command passes the pre-registration's own commit; it must be "
+        "admitted, and resolved to a full sha")
+
+    # 2. A DESCENDANT of `head`: the plan would post-date the run it arbitrates.
+    doc.write_text("# a friendlier document, cut later\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "after the numbers were in")
+    later = _git(repo, "rev-parse", "HEAD")
+    with pytest.raises(SystemExit) as refusal:
+        probe.assert_prereg_binding(later, head)
+    assert refusal.value.code == 3
+
+    # 3. A DANGLING commit — the cheapest way to make a hostile document exist. It carries the
+    #    document, `git show` reads it happily, and no branch, tag or remote ever carried it.
+    tree = _git(repo, "rev-parse", f"{later}^{{tree}}")
+    dangling = _git(repo, "commit-tree", tree, "-m", "unreferenced")
+    assert _git(repo, "for-each-ref", "--contains", dangling) == "", (
+        "the dangling object must really be unreachable, or this case proves nothing")
+    with pytest.raises(SystemExit) as refusal:
+        probe.assert_prereg_binding(dangling, head)
+    assert refusal.value.code == 3, (
+        "a commit no ref contains holds a document that never preceded this run; `git show` would "
+        "read it happily, which is why the binding has to refuse it")
+
+    # 4. …and an unresolvable `--prereg` is the module's own refusal (exit 3), never a traceback.
+    with pytest.raises(SystemExit) as refusal:
+        probe.assert_prereg_binding("deadbeef" * 5, head)
+    assert refusal.value.code == 3, "an unreadable `--prereg` is a refusal, not a traceback"
+
+    assert "assert_prereg_binding(" in PROBE.read_text().split("def main(", 1)[1], (
+        "the binding has to be wired into main — `git show` reads any commit the repository can "
+        "resolve, so an available function beside it binds nothing")
+
+
+def test_the_bundle_discloses_the_identity_binding_it_now_enforces(probe):
+    """§4 registers that deviations are reported; this one must not live only in the code.
+
+    The record's guard and the `--prereg` binding are the guarantee this bundle's anti-tuning
+    argument rests on, so a reader has to be able to find them stated — and stated as what they do
+    NOT establish about the measured run, which predates both.
+    """
+    flat = " ".join((probe.EVIDENCE_DIR / "README.md").read_text().split())
+    assert "read from the **working tree**" in flat, (
+        "the bundle must say WHY the record is guarded and the document beside it is not — they "
+        "are not the same kind of file")
+    assert "`assert_prereg_binding` refuses a `--prereg` commit that no ref contains" in flat, (
+        "the binding must be described where a reader looks for the probe's refusals")
+    assert "it was taken *before* either guard existed" in flat, (
+        "and it must say what that does NOT establish about the run already on record")
+
+
 def test_the_log_names_the_probe_bytes_not_only_a_commit(probe):
     """`head=` names a commit and a commit cannot name a working copy; `probe_sha256` can."""
     import hashlib
@@ -1201,9 +1337,16 @@ def _copy_bundle(tmp_path: Path, *, with_record: bool = True,
 
 
 def _stub_below_the_refusals(probe, monkeypatch, bundle: Path, doc: str) -> None:
-    """Everything `main` reaches AFTER the prerequisite refusals: git, corpus, the census."""
+    """Everything `main` reaches AFTER the prerequisite refusals: git, corpus, the census.
+
+    `assert_prereg_binding` is stubbed here because `head_sha` is: the binding asserts `--prereg` is
+    an ancestor of `HEAD`, and `HEAD` is faked to `"0" * 40` in these tests. It has its own
+    behavioural test against a real temp repository (`test_the_prereg_commit_must_belong_to_this_
+    trees_history`), which is where the refusal is measured.
+    """
     monkeypatch.setattr(probe, "EVIDENCE_DIR", bundle)
     monkeypatch.setattr(probe, "head_sha", lambda: "0" * 40)
+    monkeypatch.setattr(probe, "assert_prereg_binding", lambda prereg, head: prereg)
     monkeypatch.setattr(probe, "show", lambda sha, rel: doc)
     monkeypatch.setattr(probe, "assert_source_sha", lambda source_sha, head: [])
     monkeypatch.setattr(probe, "assert_clean_tree", lambda: "a1075dfc2")

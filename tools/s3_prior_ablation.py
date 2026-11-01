@@ -34,6 +34,14 @@ THE BARS ARE NOT TYPED HERE. They are parsed out of the pre-registration COMMIT
 METRIC-DEFINITION file differing at all (``METRIC_ARTIFACT_PREFIXES``). The prefix allowlist alone
 was too wide: the three artifacts that compute every reported number live under it.
 
+⚠️ ``--prereg`` ITSELF USED TO BE BOUND TO NOTHING. ``git show`` reads a document out of any commit
+the repository can resolve, including an unreferenced one minted with ``git commit-tree``, and the
+machine record that says WHICH document is admissible was read from the WORKING TREE — so a
+friendlier document could be served from a commit no branch ever carried, beside a record edited in
+place. ``assert_prereg_binding`` now refuses a ``--prereg`` commit that no ref contains or that is
+not an ancestor of ``HEAD``, and ``preregistration.json`` is inside ``WORKTREE_GUARDED_PATHS``:
+a clean record is the committed record is the committed document.
+
 ⚠️ A COMMIT DIFF CANNOT SEE THE WORKING TREE. ``assert_source_sha`` compares two commits, so an
 UNCOMMITTED edit to production code, to a metric artifact or to this file was admitted silently
 while the log still asserted that the tree it ran was the pinned one — and the bundle's own measured
@@ -154,6 +162,56 @@ def parse_pins(text: str) -> dict:
     return pins
 
 
+def assert_prereg_binding(prereg: str, head: str) -> str:
+    """The commit the bars are read from must be part of THIS repository's history.
+
+    ``--prereg`` was bound to nothing. Its only uses were the ``git show`` that read the document,
+    the digest comparison against the record and the log line, so ``git show`` would happily read a
+    document out of a commit no branch, tag or remote ever carried — an unreferenced object minted
+    with ``git commit-tree`` is enough. Beside a ``preregistration.json`` read from the WORKING TREE
+    (that half is ``WORKTREE_GUARDED_PATHS``), that was the whole residual tuning path: the frozen
+    §0 property — *"This document is frozen by its commit … so a threshold edited after the numbers
+    are in cannot be served"* — held for the document's bytes and not for its identity.
+
+    The CI gate cannot see it either: ``tools/capstone_preregistration_check.py`` orders the WORKTREE
+    document's add-epoch against the log's and reads a log's ``prereg=`` only to test for
+    ``UNPREREGISTERED``, so it never compares a SCORED log's ``prereg=`` against history.
+
+    Two mechanical conditions, both checked before any model call:
+
+    1. **a ref contains it** — the cheapest way to make a hostile document exist is a dangling
+       commit, which no reviewer of this repository would ever have been shown;
+    2. **it is an ancestor of ``head``** — the plan must PRECEDE the run it arbitrates, which is what
+       "committed before the first model call" actually means.
+
+    Returns the RESOLVED commit id, so the log names a full sha rather than whatever the caller
+    typed. Every failure is ``refuse()`` — exit 3, like the pin it belongs to.
+    """
+    proc = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{prereg}^{{commit}}"],
+                          cwd=str(ROOT), capture_output=True, text=True, check=False)
+    commit = proc.stdout.strip()
+    if proc.returncode != 0 or not commit:
+        refuse(f"s3-ablation: REFUSED — --prereg {prereg} is not a commit in this repository; the "
+               "bars are read out of a commit, so the commit has to exist")
+    containing = subprocess.run(
+        ["git", "for-each-ref", f"--contains={commit}", "--count=5", "--format=%(refname)"],
+        cwd=str(ROOT), capture_output=True, text=True, check=False)
+    if containing.returncode != 0:
+        refuse(f"s3-ablation: REFUSED — cannot ask which refs contain --prereg {commit}: "
+               f"{containing.stderr.strip()[:300]}")
+    if not [line for line in containing.stdout.splitlines() if line.strip()]:
+        refuse(f"s3-ablation: REFUSED — --prereg {commit} is reachable from NO ref in {ROOT}; a "
+               "commit no branch, tag or remote carries can hold a pre-registration that never "
+               "preceded this run, so the bars would be read from a document the history that "
+               "produced these numbers does not contain")
+    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", commit, head],
+                              cwd=str(ROOT), capture_output=True, text=True, check=False)
+    if ancestor.returncode != 0:
+        refuse(f"s3-ablation: REFUSED — --prereg {commit} is not an ancestor of HEAD {head}; the "
+               "pre-registration must PRECEDE the run it arbitrates, and this one does not")
+    return commit
+
+
 def changed_files(source_sha: str, head: str) -> list[str]:
     """Files differing between the pinned source and the head being measured."""
     proc = subprocess.run(["git", "diff", "--name-only", source_sha, head],
@@ -253,11 +311,21 @@ def assert_source_sha(source_sha: str, head: str) -> list[str]:
 #: probe itself, which computes every reported number (the ``extraction_nodes`` numerator and
 #: denominator, ``real_facts``, the concentration share and the whole verdict mapping). A working
 #: copy carrying an edit to any of them is refused: a later commit id cannot certify a dirty tree.
+#:
+#: ⚠️ THE MACHINE RECORD BELONGS HERE, and it is not the same kind of file as the document beside it
+#: even though both live in this bundle. ``PRE-REGISTRATION.md`` really IS frozen by its commit — the
+#: bars are read with ``git show <sha>:<rel>``, so an uncommitted copy of it cannot move a bar and
+#: must not refuse a run. ``preregistration.json`` is the opposite: it is read FROM THE WORKING TREE
+#: (``main``) and its ``document_sha256`` is what decides WHICH document the bars may come from, so an
+#: uncommitted edit to it re-points the whole chain at a friendlier argument — the one file deletion
+#: or edit of which the pin could not see (review P2). Guarding it means a clean record is the
+#: committed record is the committed document, which closes the chain on its own.
 WORKTREE_GUARDED_PATHS = (
     "tortoise",
     "tests/eval/write_path",
     "docs/evidence/7949-capstone/probes",
     "tools/s3_prior_ablation.py",
+    "docs/evidence/5087-hypothesis/preregistration.json",
 )
 
 
@@ -880,7 +948,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     head = head_sha()
-    prereg_text = show(args.prereg, PREREG_REL)
+    # The COMMIT the bars come from must belong to this tree's history — refused before the document
+    # is even read (review P2; see `assert_prereg_binding`). `prereg=`, not `args.prereg`, from here
+    # on: the log names the resolved sha, not whatever the caller typed.
+    prereg = assert_prereg_binding(args.prereg, head)
+    prereg_text = show(prereg, PREREG_REL)
     pins = parse_pins(prereg_text)
     # The machine record pins the argument it describes; if the two disagree, the bars this run
     # parses are not the bars the bundle's record froze — the residual tuning path review r1 P2
@@ -916,7 +988,7 @@ def main(argv: list[str] | None = None) -> int:
         refuse(f"{record_label} carries no document_sha256 — a record that does not pin the "
                "argument cannot refuse a re-cut one")
     if want != got:
-        refuse(f"the pre-registration at {args.prereg} hashes to {got}, but "
+        refuse(f"the pre-registration at {prereg} hashes to {got}, but "
                f"{record_label} pins {want} — the record does not describe the "
                "document this run is about to obey")
     # One bundle carries ONE measured log. Overwriting it silently is how a superseded run becomes
@@ -958,7 +1030,8 @@ def main(argv: list[str] | None = None) -> int:
         write_line(message)
 
     log("=== s3-ablation (#10463) — does telling extraction what exists reduce what it creates? ===\n")
-    log(f"prereg={args.prereg} (bars read from the COMMIT, not the worktree)")
+    log(f"prereg={prereg} (bars read from the COMMIT, not the worktree; a ref contains it and it "
+        "is an ancestor of head=, asserted before any model call)")
     log(f"source_sha={pins['source_sha']} head={head}")
     log(f"source_sha..head changed files ({len(changed)}, all evidence/tooling): {changed or '(none)'}")
     log(f"tree={tree} — the working copy the run executed, `git describe --dirty`; the guarded "
