@@ -4510,6 +4510,35 @@ def _value_core_str(identity: tuple) -> str:
     return f"{sign}{core}{unit or ''}"
 
 
+def _write_span(text: object, cap: int) -> str:
+    """The part of ``text`` the WRITE keeps, cut at a TOKEN boundary.
+
+    #10513 review cycle-13 P2, measured: the rule was fed the UNCLAMPED pair, to
+    keep a value that straddles the cap from being read short (a cut ``1200``
+    reads as ``1``). That also judged text the write DISCARDS — measured,
+    ``content = "the " * 300 + "p95 hit 4.0 seconds"`` (1219 chars) was REFUSED
+    while its stored ``content[:_MAX_CONTENT]`` binds no value at all, so a
+    durable memory was withheld over a rewrite in a tail that never reaches the
+    graph. Cutting at a token boundary keeps the straddle protection (an
+    incomplete trailing token is dropped WHOLE, so no value is ever read short)
+    and removes the discarded-tail refusal: what is judged is exactly what the
+    write can keep.
+
+    ⛔ Only a SPLIT token is dropped. When the cut lands on a token boundary the
+    span is ``text[:cap]`` unchanged, so ordinary (under-cap) pairs are judged
+    byte-identically to before this helper existed.
+    """
+    s = str(text or "")
+    if len(s) <= cap:
+        return s
+    cut = s[:cap]
+    if cut and not cut[-1].isspace() and not s[cap].isspace():
+        # the cap landed INSIDE a token: drop that token whole
+        while cut and not cut[-1].isspace():
+            cut = cut[:-1]
+    return cut
+
+
 def _refuse_rewritten_value(content: object, quote: object, *,
                             warnings: list[str]) -> bool:
     """#10360: True when this point must NOT be written — its value was rewritten.
@@ -8487,22 +8516,29 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # graph — refuse the POINT (never just the offsets: withholding the
         # address leaves the value wrong and the address one `find` away).
         #
-        # ⛔ Judged on the UNCLAMPED texts. A value that straddles
-        # `_MAX_QUOTE`/`_MAX_CONTENT` reads as a DIFFERENT value once cut, and
-        # refusing a truthful point over this module's own truncation is the
-        # false-accusation direction this rule must never take (review P1).
+        # ⛔ Judged on the pair the WRITE KEEPS, cut at a TOKEN boundary
+        # (`_write_span`). A value that straddles `_MAX_QUOTE`/`_MAX_CONTENT`
+        # would read as a DIFFERENT value once hard-cut, and refusing a truthful
+        # point over this module's own truncation is the false-accusation
+        # direction this rule must never take (review P1) — so the cut is
+        # token-safe. Judging the UNCLAMPED pair instead ALSO refused a point
+        # over a divergence in text the write discards (measured: a 1219-char
+        # content whose stored `content[:_MAX_CONTENT]` binds no value at all),
+        # withholding a durable memory over a tail that never reaches the graph
+        # (review cycle-13 P2). What is judged is now exactly what is written.
         # ⛔ And it runs HERE, before `classify_consolidation` and before any
         # supersede record is collected: a refusal that fired later left
         # `supersessions` naming a pid that is never written, which the commit
         # layer then reported as a failed supersede (review P2).
-        # ⛔ The judged text is `_raw_content` — the SAME coerced string the write
-        # clamps from — not `str(p.get("content") or "")`. The `or ""` form is the
-        # #5060 trap this loop warns about 80 lines above: a falsy content (`0`)
-        # becomes "", so the judge read an EMPTY string while `content` below is
-        # "0" and the rewritten value was written with no warning (review P3,
-        # measured: `content=0` against a `20 minutes` quote was written).
-        if _refuse_rewritten_value(_raw_content,
-                                   str(p.get("quote") or ""),
+        # ⛔ The judged text is built from `_raw_content` — the SAME coerced
+        # string the write clamps from — not `str(p.get("content") or "")`. The
+        # `or ""` form is the #5060 trap this loop warns about 80 lines above:
+        # a falsy content (`0`) becomes "", so the judge read an EMPTY string
+        # while `content` below is "0" and the rewritten value was written with
+        # no warning (review P3, measured: `content=0` against a `20 minutes`
+        # quote was written).
+        if _refuse_rewritten_value(_write_span(_raw_content, _MAX_CONTENT),
+                                   _write_span(p.get("quote"), _MAX_QUOTE),
                                    warnings=warnings):
             # ⚠️ BOTH keys are needed, and cycle 5's "only the clamped one"
             # reading was WRONG (cycle 6 measured it): the clamped key matches a

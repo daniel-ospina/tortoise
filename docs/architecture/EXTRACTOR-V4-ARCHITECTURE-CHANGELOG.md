@@ -1488,8 +1488,15 @@ DIFFERENT value in the SAME slot is not written. Three properties are load-beari
 review finding before it was code: the refusal is on the POINT, never on the offsets (withholding the
 span leaves the rounded value in the graph one `find` away); it runs BEFORE `classify_consolidation`
 and before any supersede record is collected (a later refusal left `supersessions` naming a pid never
-written); and it judges the UNCLAMPED texts (a value straddling `_MAX_QUOTE` reads as a different
-value once cut — the false-accusation direction). The refused point's `supersedes` ref leaves through
+written); and it judges the pair the WRITE KEEPS, each side cut at a TOKEN boundary (`_write_span`),
+so a value straddling `_MAX_QUOTE`/`_MAX_CONTENT` is never read short — the false-accusation
+direction. ⛔ Judging the UNCLAMPED pair, which the first revision did, ALSO refused a point over a
+divergence in text the write DISCARDS (review cycle 13: a 1219-char content whose stored
+`content[:_MAX_CONTENT]` binds no value at all was refused, withholding a durable memory over a tail
+that never reaches the graph), and an over-long quote used to FAIL OPEN at the write to save work the
+bounded judge no longer spends — i.e. it recorded the rewritten value the prefix carries. Both are
+corrected above rather than disclosed: what is judged is exactly what is written, and the token cut is
+what keeps the straddle direction closed. The refused point's `supersedes` ref leaves through
 the shared drop report (`_carry_fold_supersede` with no survivor), so it is named, not lost — `#9906`'s
 no-silent-drop rule. `_mint_endpoint` (`#2552`'s mint-before-wire path) reads the recorded refusals and
 will not re-mint one, because building the endpoint Point from the model's text undid the refusal one
@@ -1504,9 +1511,15 @@ survival short of target (`UNMEASURED(<an E2 LLM arm run>)`); clock/ISO form exc
 SEPARATOR-BEARING numeral excluded by design (below); the
 engine's unit VOCABULARY limit; the S5 minted-endpoint site deliberately not wired (there `quote` is
 `content[:200]`, the point's own text, so a rewrite is impossible by construction); REFUSE rather than
-REPAIR; a leading currency symbol read as FORM; an over-long side failing open; the `k` prefix-vs-unit
+REPAIR; a leading currency symbol read as FORM; the `k` prefix-vs-unit
 collision; a version's trailing zero as FORM; and the mint guard's coarse slot key, which suppresses a
-DISTINCT endpoint that shares an anchor word and a value with a refused point.
+DISTINCT endpoint that shares an anchor word and a value with a refused point. Two more were added by
+review cycle 13, each measured and pinned: a SCALE WORD (`12 million` against `12 billion`) is not
+fused by the engine, so that rewrite is unjudged (residual (m), a different class from the unit-word
+vocabulary limit), and the mint guard's key is EXACT-tuple, so a SUBSET/SUPERSET/REORDERED operator
+variant still re-mints the rewritten value (residual (1b-ii)) — disclosed rather than narrowed, because
+a containment rule does not cover the reordered shape and would expand (1b-i)'s over-suppression to
+every endpoint mentioning the same number. That follow-up is `#10542`.
 
 **The recorded decision this departs from.** `tortoise/value_normalizer.py`'s `#2817` ruling ships no
 magnitude table (`k`/`M`/`MM`/`mil`/`milhão` dropped as a class). This seam reads `k` as ×1000, and the

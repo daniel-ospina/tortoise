@@ -57,10 +57,14 @@ def _write(content: str, quote: str) -> dict:
 
 # ── 1. the rule + its tolerance bound ───────────────────────────────────────
 
-#: ``(content, quote, must_flag, label)``. The four ``False`` rows that carry a
-#: FORM difference and the three that carry a dropped/reordered value are the
-#: measured false-positive classes; the ``True`` rows are the class the carve-out
-#: exists for ("never round, paraphrase, or label them").
+#: ``(content, quote, must_flag, label)``. The ``False`` rows carry one of three
+#: measured false-positive classes — a model-independent FORM difference, a
+#: separator/locale-ambiguous numeral, or a quote that drops/reorders a value —
+#: and the ``True`` rows are the class the carve-out exists for ("never round,
+#: paraphrase, or label them"). ⛔ The rows are NOT counted here: a hand-written
+#: total re-staled twice on #10513 (`four` FORM rows and `three` dropped/reordered
+#: ones against a 33-row battery, review cycle 13 P2). The battery is the count;
+#: a reader who needs one reads it from `len(BATTERY)`.
 BATTERY = (
     ("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds", True, "rounding"),
     ("the invoice was $12", "the invoice was $60", True, "leading symbol"),
@@ -131,6 +135,16 @@ BATTERY = (
     ("we saw 5k QPS", "we saw 6000 QPS", True, "magnitude number moved"),
     ("we ran 20k", "we ran 21km", True, "magnitude number moved 2"),
     ("the delta is -20k", "the delta is 20km", True, "magnitude sign dropped"),
+    # ⛔ A MAGNITUDE **WORD** IS NEITHER FUSED NOR JUDGED (#10513 review cycle-13
+    # P2, measured). `_value_bindings` fuses no scale word, so `million` /
+    # `billion` / `thousand` are ignored and both sides bind the SAME core — a
+    # 10^3..10^9 scale rewrite is written as verbatim. It is residual (m) in the
+    # registry row, NOT a tolerance this rule applies on purpose: closing it means
+    # fusing scale words into the core in `_value_bindings`, which is a change to
+    # the production engine, not to this seam. Pinned so closing it must move the
+    # row.
+    ("we have 12 million events", "we have 12 billion events", False,
+     "scale word, unjudged"),
 )
 
 
@@ -196,6 +210,28 @@ def test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit():
     # not buy the detection by re-introducing the false refusals.
     assert v2._value_slot_divergence("the drive is 20k", "the drive is 20kg") == ()
     assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5000 QPS") == ()
+
+
+def test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none():
+    """Residual (m), PINNED so closing it has to move the registry row.
+
+    #10513 review cycle-13 P2, measured: `_value_bindings` fuses no scale word,
+    so `million`/`billion`/`thousand` are IGNORED and both sides bind the same
+    core — a 10^3..10^9 rewrite is written as verbatim. This is a different class
+    from residual (d) (a unit word outside `_UNIT_WORDS`): it is not a spelling
+    the table lacks, it is a MAGNITUDE the engine never multiplies, so the fix
+    belongs in `_value_bindings` and would be its own change — a second scale
+    reading here is the parallel-classifier shape that killed the previous
+    attempt at this issue.
+    """
+    for a, b in (("we have 12 million events", "we have 12 billion events"),
+                 ("5 million requests", "5 thousand requests"),
+                 ("we have 12 million events", "we have 12 events")):
+        assert v2._value_slot_divergence(a, b) == (), (a, b)
+    # positive control: the NUMBER in the same slot is still judged, so this is a
+    # scale-word gap and not a broken pair
+    assert v2._value_slot_divergence("we have 12 million events",
+                                     "we have 13 million events")
 
 
 def test_a_separator_bearing_number_is_outside_the_judged_set():
@@ -585,6 +621,38 @@ def test_a_value_that_straddles_the_quote_clamp_is_not_a_rewrite():
     assert len(result["payload"]["points"]) == 1, result["warnings"]
 
 
+def test_a_divergence_in_the_text_the_write_DISCARDS_is_not_a_rewrite():
+    """Review cycle-13 P2: judge what is WRITTEN, not what is thrown away.
+
+    Judging the UNCLAMPED pair (the straddle fix above) also judged text the
+    write DISCARDS. Measured before this pin: a 1219-char content whose value
+    sits past `_MAX_CONTENT` was REFUSED, while the stored
+    `content[:_MAX_CONTENT]` binds no value at all — so a durable memory was
+    withheld over a rewrite in a tail that never reaches the graph, which is the
+    over-refusal direction this rule must never take.
+
+    The cut is at a TOKEN boundary, so the straddle protection is kept: an
+    incomplete trailing token is dropped whole and can never be read short.
+    """
+    content = "the " * 300 + "p95 hit 4.0 seconds"          # value past the cap
+    quote = "the p95 hit 4.2 seconds"
+    assert len(content) > v2._MAX_CONTENT
+    assert v2._value_slots(content[:v2._MAX_CONTENT]) == (), (
+        "the kept span must bind no value, or this pin proves nothing")
+    # …while the unclamped pair DOES diverge, which is what used to refuse it
+    assert v2._value_slot_divergence(content, quote)
+    result = _write(content, quote)
+    assert len(result["payload"]["points"]) == 1, result["warnings"]
+    # ⛔ positive control: the SAME divergence inside the kept span still refuses,
+    # so this cannot pass by the rule having gone blind to long content
+    kept_content = "the p95 hit 4.0 seconds" + " the" * 300
+    assert v2._value_slot_divergence(
+        v2._write_span(kept_content, v2._MAX_CONTENT), quote)
+    result = _write(kept_content, quote)
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim" in w for w in result["warnings"])
+
+
 def test_a_refused_point_leaves_no_supersession_naming_it():
     """Review P2: the refusal must run BEFORE any supersede record is collected.
 
@@ -665,6 +733,43 @@ def test_a_refused_value_cannot_re_enter_the_graph_under_a_VARIANT_name(variant)
     result = v2.execute_embed(embed, {}, session_id="s_10360")
     contents = [p["content"] for p in result["payload"]["points"]]
     assert "the nightly rebuild window" in contents, contents
+
+
+def test_the_mint_guard_matches_the_SLOT_TUPLE_exactly_so_a_WIDER_variant_mints():
+    """Residual (1b-ii), PINNED so closing it has to move the registry row.
+
+    #10513 review cycle-13 P2, measured: the mint guard's second key is
+    ``_value_slots(content)`` compared for EQUALITY against the refused point's
+    own slot tuple, so a variant that states the same value in a SUBSET, a
+    SUPERSET, or a REORDERED slot layout is NOT matched and re-mints the
+    rewritten value as an endpoint Point — the resurrection 1(b) exists to stop,
+    one notch wider than the byte-exact and slot-exact variants above.
+
+    ⛔ Why this is disclosed rather than "narrowed": a containment rule (match
+    when any refused slot appears in the endpoint) does NOT close it either —
+    measured, the reordered endpoint ``we saw 4.0 seconds on the p95 this time``
+    binds ``(saw, 4)``/``(on, 95)``, so it matches NO refused slot — while it
+    WOULD suppress every unrelated endpoint that merely mentions the same number
+    in the same anchor slot, i.e. it buys the subset/superset shapes with a large
+    expansion of residual (1b-i)'s over-suppression. Closing it properly means
+    identifying the CLAIM, which is the parallel-classifier shape the review P2
+    already rejected. The shape needs the model to emit an operator naming a
+    WIDER variant of an already-refused ref, and the committed census produces 0
+    refusals at all.
+    """
+    WIDER_VARIANTS = {
+        "subset": "hit 4.0 seconds",
+        "superset": "the p95 hit 4.0 seconds and the p99 is 9 seconds",
+        "reordered": "we saw 4.0 seconds on the p95 this time",
+    }
+    for name, variant in WIDER_VARIANTS.items():
+        embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+        embed["operators"] = [{
+            "src": variant,
+            "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+        result = v2.execute_embed(embed, {}, session_id="s_10360")
+        contents = [p["content"] for p in result["payload"]["points"]]
+        assert variant in contents, (name, contents)
 
 
 def test_a_DIFFERENT_claim_sharing_an_anchor_and_value_is_suppressed_too():
@@ -794,18 +899,20 @@ def test_a_whitespace_collapsed_over_cap_refusal_still_blocks_the_mint():
 # ── 8. the rule's own BOUND, and the residual it still carries ─────────────
 
 def test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded():
-    """UNVERIFIED item 2, settled: the unclamped judge must be BOUNDED.
+    """UNVERIFIED item 2, settled: the judge must be BOUNDED.
 
-    `_refuse_rewritten_value` is fed the UNCLAMPED texts (a value straddling the
-    clamp must not read as a rewrite), so a model-authored over-long side used to
-    be tokenised in full on EVERY point of the single Point write path. Measured
-    linear on this box: 0.45 ms at 67 chars, 2.5 ms at 1 KB, 23 ms at 10 KB,
-    227 ms at 100 KB, 2.4 s at 1 MB — one hallucinated mega-quote costs the
-    write path minutes. An over-long side now FAILS OPEN (never clamped: a cut
-    value reads as a different value, the false-accusation direction).
-
-    ⛔ Pinned by the WRITE, not by the return value: `()` is the answer both
-    before and after the fix — the defect was the WORK, not the verdict.
+    The pure function answers `()` for a side longer than `_MAX_JUDGED_TEXT`
+    (2 x `_MAX_CONTENT`), because it is LINEAR in the text it is given —
+    measured on this box: 0.45 ms at 67 chars, 2.5 ms at 1 KB, 23 ms at 10 KB,
+    227 ms at 100 KB, 2.4 s at 1 MB. That bound is now a DEFENSIVE one for
+    direct callers: the write path never reaches it, because it hands the rule
+    the span the write KEEPS (`_write_span`, <= `_MAX_CONTENT`/`_MAX_QUOTE`).
+    ⛔ That is also why an over-long quote no longer FAILS OPEN at the write
+    (review cycle-13 P2): the stored quote keeps its first `_MAX_QUOTE` chars,
+    and for this pair those chars DO carry `4.2` against a point saying `4.0` —
+    failing open there recorded a rewritten value as verbatim to save work the
+    write path no longer spends. Bounded AND judging the written pair, instead
+    of bounded at the price of the guarantee.
     """
     content = "the p95 hit 4.0 seconds"
     quote = "the p95 hit 4.2 seconds " + ("padding z " * (v2._MAX_JUDGED_TEXT))
@@ -814,9 +921,19 @@ def test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded():
     # length — the bound cannot pass by the rule being broken (positive control)
     assert v2._value_slot_divergence(content, "the p95 hit 4.2 seconds")
     assert v2._value_slot_divergence(content, quote) == ()
+    # ⛔ the WRITE is judged on the span it keeps, so the kept prefix's rewrite
+    # is refused rather than failed open on the discarded tail. The cut lands
+    # INSIDE `paddin|g`, so the incomplete token is dropped whole.
+    kept = v2._write_span(quote, v2._MAX_QUOTE)
+    assert quote.startswith(kept) and 0 < len(kept) < v2._MAX_QUOTE, kept
+    assert v2._value_slot_divergence(content, kept), kept
     result = _write(content, quote)
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim" in w for w in result["warnings"])
+    # …and the bound still holds at the write for a side that is over-long AND
+    # whose kept prefix carries no value: nothing to judge, so nothing is spent
+    result = _write("the p95 hit 4.0 seconds", "padding z " * (v2._MAX_JUDGED_TEXT))
     assert len(result["payload"]["points"]) == 1, result["warnings"]
-    assert not any("REWRITES its own verbatim" in w for w in result["warnings"])
 
 
 def test_an_over_long_side_is_not_tokenised_at_all(monkeypatch):

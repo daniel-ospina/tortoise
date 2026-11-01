@@ -500,11 +500,19 @@ mechanisms:
       `find` away — and it is REPORTED with both values, so the rewrite is
       recoverable from the run. It also runs BEFORE `classify_consolidation`
       and before any supersede record is collected (a later refusal left
-      supersessions naming a pid never written), on the UNCLAMPED texts (a value
-      straddling `_MAX_QUOTE` reads as a different value once cut), and it
-      carries the refused point's `supersedes` ref into the same drop report the
-      other doors use (#9906: no silent drop door).
-      (1b) THE REFUSAL CANNOT BE UNDONE BY THE OPERATOR PATH. `_mint_endpoint`
+      supersessions naming a pid never written), on the pair the WRITE KEEPS —
+      each side cut at a TOKEN boundary by `_write_span` (an incomplete trailing
+      token is dropped whole, so a value straddling `_MAX_QUOTE`/`_MAX_CONTENT`
+      is never read short), and it carries the refused point's `supersedes` ref
+      into the same drop report the other doors use (#9906: no silent drop door).
+      ⚠️ Judging the UNCLAMPED pair instead — the previous reading — also refused
+      a point over a divergence in text the write DISCARDS: measured, a 1219-char
+      content whose stored `content[:_MAX_CONTENT]` binds no value at all was
+      REFUSED, withholding a durable memory over a tail that never reaches the
+      graph (#10513 review cycle-13 P2). What is judged is now exactly what is
+      written, and the token cut is what keeps the straddle direction closed.
+      (1b) THE OPERATOR PATH IS GUARDED, AND ITS TWO RESIDUALS ARE STATED RATHER
+      THAN IMPLIED. `_mint_endpoint`
       (mint-before-wire, #2552) builds a Point from the MODEL's text, so it reads
       `refused_value_contents` and refuses to mint a refused ref — measured: an
       operator naming a refused point used to re-materialise the rewritten value
@@ -514,6 +522,9 @@ mechanisms:
       guard therefore also matches the refused point's own `_value_slots` — a
       variant stating the SAME value in the SAME slot is the same resurrection.
       An endpoint carrying no value has no slots and is unaffected.
+      ⛔ That key is EXACT-tuple, so the guard stops the byte-exact case and the
+      slot-exact variant, and NOT a wider one — residual (1b-ii) below says which
+      and why it is disclosed instead of narrowed.
       ⚠️ (1b-i) THAT KEY IS COARSE, AND THE COST IS STATED RATHER THAN ABSORBED
       (#10513 review cycle-11 P3, measured): it keys the VALUE —
       `(anchor, sign, core, unit)` per slot — and carries NO identity for the
@@ -530,6 +541,23 @@ mechanisms:
       contains a refusal (0 refusals on the committed census). Pinned by
       `test_a_DIFFERENT_claim_sharing_an_anchor_and_value_is_suppressed_too`, so
       a future lane that narrows the key has to move this row.
+      ⚠️ (1b-ii) AND THE KEY IS EXACT-TUPLE, SO A **WIDER** VARIANT STILL MINTS
+      (#10513 review cycle-13 P2, measured): a variant stating the same value in a
+      SUBSET, a SUPERSET or a REORDERED slot layout does not equal the refused
+      point's slot tuple and re-mints the rewritten value as an endpoint Point —
+      `hit 4.0 seconds`, `the p95 hit 4.0 seconds and the p99 is 9 seconds` and
+      `we saw 4.0 seconds on the p95 this time` all reached
+      `payload["points"]` while the point itself was refused. ⛔ Not narrowed by a
+      CONTAINMENT rule, because that buys nothing on the reordered shape (its
+      slots are `(saw, 4)`/`(on, 95)`, which match no refused slot) and pays for
+      the other two by expanding (1b-i)'s over-suppression to EVERY endpoint that
+      merely mentions the same number in the same anchor slot. Closing it means
+      identifying the CLAIM — the second-classifier shape the review P2 already
+      rejected. It needs the model to emit an operator naming a WIDER variant of
+      an already-refused ref, and the committed census produces no refusals at
+      all. Pinned by
+      `test_the_mint_guard_matches_the_SLOT_TUPLE_exactly_so_a_WIDER_variant_mints`,
+      filed as a follow-up (#10542), so a lane that closes it has to move this row.
       ⚠️ That is not RETENTION: a refused point loses its value entirely, so what
       is enforced is "the graph never records a rewritten value as verbatim",
       not "every value survives".
@@ -619,14 +647,17 @@ mechanisms:
       a symbol-as-unit-identity rule would re-introduce it (the behaviour is
       pinned by `test_a_leading_currency_symbol_is_FORM_today_and_that_is_stated`,
       so tightening it has to move this row); (h) a side LONGER than
-      `_MAX_JUDGED_TEXT` (2 × `_MAX_CONTENT`) is not judged at all, deliberately:
-      the rule is fed the UNCLAMPED texts and the judge is LINEAR — measured 0.45
-      ms at 67 chars, 2.5 ms at 1 KB, 23 ms at 10 KB, 227 ms at 100 KB, 2.4 s at
-      1 MB — once per point in the single Point write path, so an over-long
-      model-authored side FAILS OPEN rather than spending minutes there. ⛔ Not
-      clamped: a cut value reads as a DIFFERENT value, the false-accusation
-      direction this rule must never take (pinned by
-      `test_an_over_long_side_is_not_tokenised_at_all`).
+      `_MAX_JUDGED_TEXT` (2 x `_MAX_CONTENT`) is not judged by the PURE function,
+      deliberately: it is LINEAR — measured 0.45 ms at 67 chars, 2.5 ms at 1 KB,
+      23 ms at 10 KB, 227 ms at 100 KB, 2.4 s at 1 MB — so an over-long side is
+      REFUSED the work rather than spending it. ⛔ The WRITE PATH no longer
+      reaches that arm: it judges `_write_span(...)` at `_MAX_CONTENT`/
+      `_MAX_QUOTE`, so the cost is bounded by construction and an over-long quote
+      cannot buy a fail-open over the prefix the graph actually keeps (review
+      cycle-13 P2 — it used to, and a rewritten value was recorded as verbatim to
+      avoid work the write path no longer spends). The bound remains as the
+      defence for DIRECT callers (pinned by
+      `test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded`).
       (i) A `k` SUFFIX IS NOT JUDGED AS A UNIT WORD, AND IS NOT SCALED. `k` is
       SI's x1000 prefix (`5k` IS `5000`) and it is also a unit identity in
       `_UNIT_EQUIV`, because it is a unit `_value_bindings` fuses; the single
@@ -641,13 +672,19 @@ mechanisms:
       ⛔ WHAT THE TOLERANCE IS *NOT*: it is not a waiver on the value. The arm
       fires only where `_magnitude_agrees` proves the two sides name the SAME
       NUMBER — equal cores, or the prefix reading closing the gap
-      (`_MAGNITUDE_FACTORS`, `5 x 1000 == 5,000`) — so a moved number
-      (`5k`/`6,000`, `5k`/`6k`, `20k`/`21km`) and a dropped sign (ASCII `-` or
-      U+2212 `\u2212`: `-20k`/`20km`) are still judged and still refuse. An
-      earlier revision of this arm fired on the unit mismatch alone and WROTE
-      three of those (`5k`/`6,000`, `20k`/`21km`, `-20k`/`20km`; `5k`/`6k` was
-      refused even then, because both sides carry `k` so the arm never opened) —
-      that is why the gate exists and why those rows are pinned.
+      (`_MAGNITUDE_FACTORS`, `5 x 1000 == 5000` — spelled UNGROUPED on purpose:
+      a `5,000` operand is itself outside the judged set, see (l)) — so a moved
+      number and a dropped sign (ASCII `-` or U+2212 `\u2212`: `-20k`/`20km`) are
+      still judged and still refuse: `5k`/`6k`, `20k`/`21km`, `6000`/`5k`.
+      ⛔ A GROUPED operand is NOT one of those cases (review cycle-13 P2,
+      measured): `5k`/`6,000` returns NO divergence, because `6,000` is a
+      separator-bearing numeral and (ii-bis)/(l) put it outside the judged set —
+      so a rewrite spelled with a thousands separator is unjudged on the OTHER
+      side too, and this paragraph used to claim the opposite. An earlier revision
+      of this arm fired on the unit mismatch alone and WROTE
+      `20k`/`21km`, `-20k`/`20km` and `5k`/`6,000`; `5k`/`6k` was refused even
+      then, because both sides carry `k` so the arm never opened. That is why the
+      gate exists and why those rows are pinned.
       ⛔ AND BOTH BRANCHES ARE GATED ON THE OTHER SIDE'S UNIT (`_K_ABBREVIATES`,
       review cycle 8 P1): "the cores are equal" is "the same number" only while
       `k` is standing for that unit word, so `20k`/`20km` and `20k`/`20kg` are
@@ -723,7 +760,11 @@ mechanisms:
       reading needs a LOCALE, so a REAL thousands rewrite is unjudged too:
       `we saw 5,000 QPS` against `we saw 6,000 QPS` returns no divergence
       (pinned by `test_a_separator_bearing_number_is_outside_the_judged_set`, so
-      a future lane that adds a separator rung has to move this row). The trade
+      a future lane that adds a separator rung has to move this row). ⛔ THAT CUTS
+      BOTH WAYS AND COSTS THE (i) MAGNITUDE CASE TOO (review cycle-13 P2,
+      measured): `5k` against `6,000` is unjudged as well, because only one side
+      needs the separator to be read — so "a magnitude rewrite is always judged"
+      is true only for an UNGROUPED spelling (`5k`/`6000`). The trade
       is deliberate and is the one #2817 point 1 already made: a separator rung
       has to GUESS the locale, and the guess the previous revision made refused
       truthful points written the other way round — withholding a durable memory
@@ -732,6 +773,18 @@ mechanisms:
       not fixed: closing it means parsing with a declared locale, which is
       `value_normalizer`'s OWN territory and needs the owner's decision reopened
       there, never a rung bolted onto this seam.
+      (m) A **SCALE WORD** IS NOT JUDGED (#10513 review cycle-13 P2, measured).
+      `_value_bindings` fuses no magnitude word — `million`/`billion`/`thousand`
+      are ignored — so both sides bind the SAME core and a 10^3..10^9 rewrite is
+      written as verbatim: `we have 12 million events` against
+      `we have 12 billion events` returns NO divergence, likewise `5 million`
+      against `5 thousand` and `12 million` against `12` (pinned by
+      `test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none`).
+      ⛔ A DIFFERENT CLASS from (d): (d) is a unit SPELLING the tables lack, this
+      is a MAGNITUDE the engine never multiplies, so closing it belongs in
+      `_value_bindings` and would be its own change; a second scale reading inside
+      this seam is the parallel-classifier shape the review P2 rejected. Stated
+      rather than absorbed, and pinned so closing it has to move this row.
       THE RENDER HALF is unchanged and stays pinned where #9775 left it.
       `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered into S1
       (`_granularity_text`), S2/S4 (`_render_master_core_only`,
