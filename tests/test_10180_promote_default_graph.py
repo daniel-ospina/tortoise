@@ -2802,12 +2802,60 @@ def test_a_pre_3543_prior_org_is_opened_through_its_legacy_graph(sb):
         f"`team_` graph was not opened: {node}")
 
 
+def test_the_checkout_replay_arm_still_gates_the_legacy_spelling(sb):
+    """`prior_moved`/`prior_listed` both default to their sentinels for the
+    checkout-replay lane, which is sync and already issues its control-plane
+    calls inline, so the helper resolves and probes IN PLACE. That arm must
+    behave exactly as it did at `50f0a9c53`: probe, resolve, and — for a
+    pre-#3543 prior org — open the `team_` graph.
+
+    It is the one prior-org caller with no worker to thread a listing down, so
+    nothing else in this file exercises it: the two cases above both pass
+    `prior_moved`/`prior_listed` explicitly.
+
+    FAIL-ON: make the sentinel arm resolve the name and open it with
+    `_org_sdk_from_name` (the P2 shape this PR started with) and the legacy
+    prior org is opened on the re-derived `org_{TEAM}` — fork lost, absent
+    graph minted — on the lane nobody is looking at."""
+    _, fake, _ = sb
+    legacy = f"team_{TEAM}"
+    fake.tables["organizations"][0]["graph_name"] = legacy
+    _seed_onboarding(legacy, steps=_COMPLETE_STEPS, status="complete",
+                     fork="build")
+    assert ha._org_default_namespace(TEAM) is None
+    assert f"org_{TEAM}" not in _store_graphs()
+
+    new_org = "team-10180-replay-heir"
+    # NO `prior_moved` / `prior_listed`: exactly how the replay lane calls it.
+    ha._eager_provision_org_graph(fake, new_org, "Replay Heir", OWNER,
+                                  prior_org_ids=[TEAM])
+
+    assert f"org_{TEAM}" not in _store_graphs(), (
+        f"the sentinel arm minted the absent canonical graph org_{TEAM} — it "
+        "must probe, then open the listed legacy graph (pin 4)")
+    sdk = ha._make_sdk(namespace=new_org)
+    try:
+        node = _onboarding_state().read_onboarding_node(sdk._get_proj(), new_org)
+    finally:
+        sdk.close()
+    assert node is not None, "the eager init wrote no OnboardingState"
+    assert node["fork"] == "build", (
+        "the sentinel arm lost the legacy `team_` fork — the checkout-replay "
+        f"lane opened the wrong graph: {node}")
+
+
 def test_an_unlisted_prior_org_skips_the_fork_read_instead_of_minting(sb, monkeypatch):
     """Neither tenant name is listed (or the probe failed → `None`): the fork
     read must be SKIPPED, not attempted through a `namespace=` guess.
 
     FAIL-ON: the pre-fix unguarded open reads `org_{prior}` anyway — the read
-    runs, and it mints that absent graph (pin 4). Both assertions below red."""
+    runs, and it mints that absent graph (pin 4). Both assertions below red.
+
+    ⚠️ One mutation this test does NOT catch, measured so the FAIL-ON is not
+    read as wider than it is: removing the `if prior_sdk is not None:` guard
+    alone leaves it green, because `None._get_proj()` raises `AttributeError`
+    and the surrounding `except Exception` swallows it. The GATE is what
+    prevents the mint; the guard is the readable statement of the skip."""
     tc, fake, _ = sb
     _os = _onboarding_state()
     reads: list[str] = []
