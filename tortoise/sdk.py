@@ -6392,8 +6392,8 @@ _POINT_ITEM_FLATTEN_DEPTH = 2
 #: write_door_folds`` (which also asserts depth 2 DOES report ``retracted``, so
 #: the divergence is deliberate rather than a narrow read) and its kind sibling.
 #: A later review proposed raising this to 2 on the model that one fold surfaces
-#: ``item["props"]["props"]``; that model omits the ``**props`` wrapping, and
-#: raising it re-opens the #9819 round-5 over-reject.
+#: ``item["props"]["props"]``; that model omits the ``**props`` wrapping, and raising
+#: it re-opens the round-5 over-reject (both reproducers pinned on the INGEST surface).
 _POINT_ITEM_MINT_STATUS_DEPTH = 1
 
 
