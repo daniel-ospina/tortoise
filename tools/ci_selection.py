@@ -418,6 +418,21 @@ SOURCE_PATTERNS = {
                    # config/ falls through to `core`, where the gate is also
                    # registered.
                    "tools/served_skills_parity.py",
+                   # #10423: the ARCHIVE WRITER, on the same reasoning as the
+                   # entry above and by the same silent-drop class. #10423 made
+                   # `build_skill_archives.py` load-bearing beyond its own CLI:
+                   # `served_skills_parity.sync()` now calls
+                   # `write_stale_archives()`, so this file decides the bytes of
+                   # a COMMITTED artifact (`website/skills/*.skill`). `tools/` is
+                   # in NON_PYTHON_PREFIXES, so an edit to this file ALONE —
+                   # widening or weakening what `sync()` re-cuts — selected no
+                   # surface and fell to the docs-only tier-1 early return. The
+                   # guards still ran there (they are in `tier1`), so coverage
+                   # held by accident; this entry makes the owning surface
+                   # select them by design and adds the `onboarding` file set.
+                   # Pinned by tests/test_ci_selection.py::
+                   # test_the_archive_writer_selects_the_surface_that_guards_it.
+                   "tools/build_skill_archives.py",
                    # #3517: the capture disclosure's single source of truth and
                    # the non-LLM renderer. Both own guards registered below
                    # (`test_capture_disclosure_template.py`,
