@@ -187,8 +187,10 @@ than left for a reader to find:
 7. **Filename.** The probe wrote this log to the path given to `--out`, which was a working filename
    (`s3-ablation-88b4e19d9.log` — a run-time token, not a commit: it resolves to no object here); it is committed as
    `s3-ablation-a83c23a8.log`, named for the run head as the bundle's reproduce command names it. **No filename for
-   this log appears inside it** — the only paths it names are the seven in its `source_sha..head changed files` line
-   (line 5), none of which is this log — so nothing in it is inconsistent with the name it is committed under.
+   this log appears inside it**: it names only the seven changed files of its `source_sha..head changed files` line
+   (line 5) and the corpus path `tests/eval/write_path` (line 6), none of which is this log — and
+   `grep -c 's3-ablation-a83c23a8'` = 0 and `grep -c '88b4e19d9'` = 0, so neither this log's committed name nor its
+   pre-rename name appears anywhere in it. Nothing in the log is inconsistent with the name it is committed under.
    **But the pre-rename bytes were not recorded, so the rename is disclosed, not verifiable.** The committed blob's
    sha256 is `796c1a49c0d2ff22266377ca58713c0e3ff14febab2a9a62aca9a27689a06174`.
 
