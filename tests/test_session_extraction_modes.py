@@ -270,11 +270,19 @@ def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
 # scrub must be observable from outside the helper (the ambient key really is
 # gone), not just asserted inside its own docstring.
 
-#: ``(module, helper)`` for every module that declares a keyless capture.
-#: The helper name differs per module, so it is named rather than guessed.
+#: ``(module, helper)`` for every module that declares a keyless capture as a
+#: callable helper. The helper name differs per module, so it is named rather
+#: than guessed. ``tests/test_capture_backlog_4197.py`` scrubs inside its
+#: ``places`` fixture (it needs ``tmp_path``) and is covered by its own
+#: behaviour test instead —
+#: ``test_backlog_process_notes_a_missing_key_only_for_a_self_hosted_target``,
+#: which is red on a venice-configured box with the hand-list and green with the
+#: derived set.
 _KEYLESS_CAPTURE_HELPERS = (
     ("tests.test_turn_embedding_write_path_4194", "_keyless"),
     ("tests.test_capture_secret_redaction_4911", "_keyless"),
+    ("tests.test_capture_redaction_sinks_5445", "_keyless"),
+    ("tests.test_session_semantic_retrieval", "_keyless"),
     ("tests.test_4199_dense_scope_coverage", "_offline_llm"),
 )
 
