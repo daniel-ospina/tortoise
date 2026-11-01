@@ -2779,3 +2779,31 @@ def test_the_base_ref_refusal_names_the_cause_that_actually_fired(tmp_path, monk
         check.check_ordering(prereg, [log], base_ref="origin/nope")
     assert "origin/nope" in str(exc.value), str(exc.value)
     assert "no --base-ref" not in str(exc.value), str(exc.value)
+
+
+def test_the_measured_base_is_printed_for_a_human_not_only_for_json(capsys):
+    """REGRESSION (#10463 review cycle 4/5): the reporting field must reach the line a human reads.
+
+    `ordering_base` was added so a green line could not read the same whether it measured the
+    published base or this branch's own `HEAD` fallback — which IS the PR-internal rule #10463
+    removes. It lived only in `--json`, so the CI log still could not tell them apart. Deleting the
+    print, or the `setdefault`, restored that silent-green with the whole suite green (measured by a
+    reviewer: two mutants, no test moved). This is the test that makes both deletions red.
+    """
+    assert check.main(["--dir", str(PREREG_DIR), "--no-corpus"]) == 0
+    out = capsys.readouterr().out
+    assert f"ordering measured against: {check.resolve_base_ref()}" in out, out
+
+
+def test_a_skipped_git_half_says_the_base_was_never_measured(capsys):
+    """`--no-git` skips the ordering, so the base is `(not measured)` — never an implied one.
+
+    The `setdefault` is what carries this: without it the key is simply ABSENT, and a consumer (or a
+    human) reads "no base" as "the default base", which is the same silent-green one field over. The
+    field is asserted through `--json` here so the machine surface is pinned too.
+    """
+    assert check.main(["--dir", str(PREREG_DIR), "--no-corpus", "--no-git"]) == 0
+    out = capsys.readouterr().out
+    assert "ordering measured against: (not measured)" in out, out
+    report = check.run(PREREG_DIR, use_git=False, use_corpus=False)
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]

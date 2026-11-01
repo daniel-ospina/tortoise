@@ -40,8 +40,10 @@ It verifies five things, and it fails on each of them for a specific reason:
    **The refusal this buys, at PR time rather than after the merge.** A change that adds a
    registration *and* a log has nothing on the base to appeal to, so it is **REFUSED**: the
    registration must land first, in its own PR. That is the arm that stops a contribution instead
-   of reddening `main` afterwards, and it is tested (`test_a_registration_added_by_the_same_change
-   _is_refused`).
+   of reddening `main` afterwards, and it is tested by
+   `test_a_registration_added_by_the_same_change_is_refused` (the identifier is kept on ONE line so
+   it can be grepped — a name split across a line break reads as coverage while resolving to
+   nothing).
 
    **Two different failures, two different codes — and the distinction is load-bearing.** A
    SHALLOW clone is the documented third outcome (`UNPROVABLE`, exit 0): CI test jobs are shallow by
