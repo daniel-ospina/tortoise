@@ -53,6 +53,17 @@ What this module deliberately does NOT decide:
   (``_capture_turn_texts_with_redactions``'s output) — a whole session is not
   what the callers pass, and `session_indexer`'s session-grain text is not
   involved.
+
+  ⚠️ **And the trade the approved shape makes, so a later lane does not “fix” it
+  back:** every call now sends the WHOLE window, so per-capture prompt tokens
+  grow as N² before the discount (Anthropic's contextual-retrieval post puts
+  prompt caching at up to 90% off — a ~0.1× cache-hit rate). That is cheaper than
+  the old uncached three-turn prompt up to roughly twenty turns and more
+  expensive past it — deliberately, because the shape #8932 §2 approved *is* the
+  window-as-cached-prefix one. A long capture is the expensive arm by design,
+  which is precisely why the gate ships OFF until #8486 measures it. Reverting to
+  per-turn windows to “save tokens” would restore the uncached-rate cost the
+  ruling priced at ~$9.20/M.
 * **Whether the flag is on.** :func:`enrich_enabled` reads
   ``TORTOISE_CONTEXT_ENRICH`` and the write path only calls enrichment when
   it is explicitly enabled. The rewrite is an ingest-time LLM pass (owner-approved
