@@ -6058,8 +6058,6 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
         if not ta or not tb:
             # Nothing to compare: refuse the fold rather than assume agreement.
             return "unreadable", _UNREADABLE
-        absorbed: list[str] = []
-        absorbed: list[str] = []
         identity = _identity_differences(a, b, absorbed=absorbed)
         dimension: str | None = None
         # The identity dimensions come first, because they are the ones that
