@@ -513,7 +513,7 @@ class TestProjectionFold:
             # (`live._terminal_excluded`), so the assertion is on the CONTRACT
             # (not terminal, no carrier) rather than on a literal the projection
             # has no derivation for.
-            assert rows[0][0] in (None, "live"), (
+            assert rows[0][0] is None, (
                 "an Object the journal never superseded came back "
                 f"`superseded` from replay: {rows!r}")
             assert rows[0][1] is None, rows
@@ -911,7 +911,7 @@ class TestReadSide:
             hits = sdk.tortoise_fts_query("the strategy", kind="core:strategy",
                                           entity_type="object", limit=5)
             assert hits, "seeded object must be retrievable (kind-scoped)"
-            assert hits[0].get("status") in (None, "live"), hits[0]
+            assert hits[0].get("status") is None, hits[0]
 
             sdk.create_entity("object", "the tactic", objectKind="core:strategy",
                               status="draft")
@@ -1360,12 +1360,13 @@ class TestLifecycleCarrierCoherence:
             oid = _make_carrier_entity(sdk, "Object", "epsilon")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
                 sdk.update_entity(oid, supersededBy="v2")
-            assert _carrier_row(sdk, "Object", "epsilon")[1] in (None, "live"), (
+            assert _carrier_row(sdk, "Object", "epsilon")[1] is None, (
                 "the graph's reading of the refused node must stay LIVE "
-                "(#9974 R1: an absent status IS live)")
+                "(#9974 R1: an absent status IS live, and a stored 'live' "
+                "would mean something DID fabricate one)")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
                 sdk.update_entity(oid, superseded_by="v2")
-            assert _carrier_row(sdk, "Object", "epsilon")[1] in (None, "live"), (
+            assert _carrier_row(sdk, "Object", "epsilon")[1] is None, (
                 "a snake-spelled carrier was ACCEPTED on a live node — the "
                 "guard is inert against it (review P1)")
         finally:

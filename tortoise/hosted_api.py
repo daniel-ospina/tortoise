@@ -9852,8 +9852,9 @@ class CreateObjectRequest(BaseModel):
     # stored ``capability`` to ``other`` on a re-create. The ``'other'`` default
     # is the fold's ON CREATE arm.
     objectKind: str | None = Field(default=None)
-    # lifecycle status rides props (create_entity splats **props over the
-    # 'live' default) — the onboarding STATE seed passes in_progress.
+    # lifecycle status rides props (``create_entity`` carries only what the
+    # caller NAMES — there is no 'live' default to splat over since #9974 R1)
+    # — the onboarding STATE seed passes in_progress.
     status: str | None = None
 
 
