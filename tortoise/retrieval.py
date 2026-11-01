@@ -986,6 +986,48 @@ def _epoch_utc_day(value: float) -> str | None:
         return None
 
 
+_DASHED_DAY_PREFIX = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _stated_iso_day(text: str) -> str | None:
+    """The calendar day an ISO text STATES, or ``None`` when it names none.
+
+    #9741 review P3-1. ``_display_bound`` cut every stored string at position
+    10, which is a day-truncation only for the DASHED profile: the write
+    boundary accepts any caller ``validFrom`` (``create_point`` — narrowing it
+    is #9244's owner decision) and the ordering measure reads ISO 8601 BASIC
+    form too (``search_engine._created_sort_key`` → ``datetime.fromisoformat``,
+    which since 3.11 accepts ``20191204`` as well as ``2019-12-04``). So
+    ``"20240101T1200"`` is a legal, ORDERABLE bound that the slice turned into
+    ``"20240101T1"`` — a truncated fragment the reader would take for a
+    calendar day. RFC 3339 §5.6 makes the separators MANDATORY, but only for
+    its own profile: it is a subset of ISO 8601 *extended* form, while the
+    measure this repo ORDERS by accepts more than it. The day is therefore read
+    from the string, never sliced out of it by position.
+
+    The rule for a value that carries an OFFSET is :func:`_epoch_utc_day`'s and
+    ``assembly._norm_date``'s — truncate in UTC, NEVER the machine-local zone
+    (a host-dependent day-boundary would make the reader's date depend on which
+    box rendered it). A NAIVE value keeps the day it itself states, which is
+    the same helper's rule for a zone-less input, and needs no zone at all:
+    ``20240101T1200`` states the first of January wherever it is read.
+
+    Never raises — a read path must not acquire a failure mode from stored
+    data: unparseable text, a non-``str`` shape and an unrepresentable value
+    all return ``None`` (the caller then keeps the stored text).
+    """
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        try:
+            parsed = parsed.astimezone(UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return parsed.strftime("%Y-%m-%d")
+
+
 def _display_bound(value: object, field: str, hit: dict) -> str:
     """ONE stored window bound → the calendar day the reader states, or ``""``.
 
@@ -996,8 +1038,15 @@ def _display_bound(value: object, field: str, hit: dict) -> str:
 
       * ``None`` / blank → ``""`` (an absent bound; the marker's own arms decide
         what an open window renders as);
-      * ISO text → trimmed, and a full timestamp truncated to ``YYYY-MM-DD``
-        (the reader-context rule: no full timestamps in reader text);
+      * ISO text → trimmed and stated as a CALENDAR DAY (the reader-context
+        rule: no full timestamps in reader text). The day is read from the
+        string's own spelling, never sliced out of it by POSITION: a dashed
+        ``YYYY-MM-DD…`` prefix is cut to that day, and a bound that spells its
+        day in ISO 8601 BASIC form (``20240101T1200``) is parsed for it
+        (:func:`_stated_iso_day`). The blind ten-character slice this replaced
+        produced ``20240101T1`` for that bound — a truncated fragment presented
+        as a calendar day (#9741 review P3-1). Text that names no day is
+        returned as stored;
       * a NUMBER → the UTC calendar day of that epoch in SECONDS, and only
         inside the authored span (:data:`_EPOCH_AUTHORED_SECONDS_SPAN`).
 
@@ -1027,7 +1076,19 @@ def _display_bound(value: object, field: str, hit: dict) -> str:
         return ""
     if isinstance(value, str):
         text = value.strip()
-        return text[:10] if len(text) > 10 else text
+        if len(text) <= 10:
+            return text
+        if _DASHED_DAY_PREFIX.match(text):
+            # The RFC 3339 extended profile: the separators are MANDATORY
+            # there, so the first ten characters ARE the day
+            # (``2026-06-10T09:30:00Z`` → ``2026-06-10``) — byte-identical to
+            # every dashed bound the pre-#9741 slice rendered.
+            return text[:10]
+        # Any other spelling of a day (ISO basic) is read, not cut (#9741
+        # review P3-1); text that names no day survives whole rather than as
+        # a fragment.
+        day = _stated_iso_day(text)
+        return day if day is not None else text
     if isinstance(value, (int, float)):
         day = _epoch_utc_day(value)
         if day is not None:

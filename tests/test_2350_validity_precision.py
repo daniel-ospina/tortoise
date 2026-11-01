@@ -1084,6 +1084,71 @@ def test_a_millis_bound_is_skipped_rather_than_restating_the_unit():
                              "end_state": "open"}) == "[valid]"
 
 
+def test_a_basic_format_bound_states_its_own_day_not_a_sliced_fragment():
+    """#9741 review P3-1: the reader-context rule truncates a TIMESTAMP to a
+    calendar day; it must not slice ten arbitrary CHARACTERS off a bound.
+
+    ``_display_bound`` cut every stored string at position 10, which is a
+    day-truncation only for the DASHED profile. The write boundary accepts any
+    caller ``validFrom``, and the ordering measure reads ISO 8601 BASIC form
+    too (``search_engine._created_sort_key`` → ``datetime.fromisoformat``), so
+    ``"20240101T1200"`` is a legal, ORDERABLE bound — ``_bounds_an_instant`` is
+    True, so the start clause IS rendered — that came out as
+    ``[valid since 20240101T1]``: a truncated fragment presented as a calendar
+    day, in the evidence-lane text #3844/#6252 exist to keep trustworthy.
+
+    Discriminating: the pre-fix tree renders the first ten characters, so the
+    ``_display_bound`` and marker equalities below are red there (the comment
+    records the pre-fix shape rather than asserting a slice as the contract).
+    """
+    from tortoise.retrieval import (
+        _bounds_an_instant,
+        _display_bound,
+        _validity_marker,
+    )
+
+    # non-vacuous: this bound IS an instant for the gate beside it, so this is
+    # not the out-of-span / millis arm (which renders no start clause at all).
+    assert _bounds_an_instant("20240101T1200") is True
+    # ... and it is longer than the cut, which is what made the slice a lie.
+    assert len("20240101T1200") > 10
+
+    assert _display_bound("20240101T1200", "valid_from", {"id": "p"}) == \
+        "2024-01-01"
+    assert _display_bound("20240101T120000", "valid_to", {"id": "p"}) == \
+        "2024-01-01"
+    # the START arm states it — the clause the slice corrupted ...
+    assert _validity_marker({"valid_from": "20240101T1200",
+                             "end_state": "open"}) == \
+        "[valid since 2024-01-01]"
+    # ... and the END columns go through the same normaliser by design.
+    assert _validity_marker({"valid_from": "2024-06-01",
+                             "valid_to": "20240101T1200"}) == \
+        "[valid 2024-06-01 → 2024-01-01]"
+
+    # A bound that carries an OFFSET truncates in UTC — ``assembly._norm_date``'s
+    # rule, never the machine-local zone — so the day can be the one BEFORE the
+    # wall clock it spells.
+    assert _display_bound("20240101T020000+0500", "valid_from", {}) == \
+        "2023-12-31"
+
+    # The rule the slice was MEANT to implement still holds, byte-identically
+    # for the dashed profile (RFC 3339 §5.6 makes those separators mandatory).
+    for stored, day in [
+        ("2024-06-01", "2024-06-01"),
+        ("2024-06-01T12:00:00Z", "2024-06-01"),
+        ("2024-06-01 12:00", "2024-06-01"),
+        ("  2024-06-01T09:30:00  ", "2024-06-01"),
+    ]:
+        assert _display_bound(stored, "valid_from", {}) == day, stored
+
+    # Text that names NO day is returned as stored instead of being cut: a
+    # fragment of prose is not a calendar day either.
+    assert _display_bound("not a date, sorry", "valid_from", {}) == \
+        "not a date, sorry"
+    assert _display_bound("1719792000", "valid_from", {}) == "1719792000"
+
+
 def test_an_unreadable_start_does_not_discard_a_readable_end():
     """#9741 review P2 — "unreadable" and "absent" must not render the same.
 
