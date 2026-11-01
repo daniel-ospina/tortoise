@@ -22,16 +22,20 @@ import {
   rmSync,
   symlinkSync,
   statSync,
+  truncateSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   CAPTURE_LANES,
   COHORT_COST_CAP_CODE,
   DISCARD_COUNT_EXCEEDED,
+  DISCARD_ENTRY_GROWTH_REFUSED,
   DISCARD_HTTP_REJECTED,
+  DISCARD_SPOOL_SATURATED,
   HARNESS,
   MAX_ATTEMPTS,
   MAX_TURNS,
@@ -78,8 +82,10 @@ import {
   readSpoolEntry,
   readSpoolTurns,
   resolveConfig,
+  scanSpool,
   sourceName,
   spoolEntryBytes,
+  spoolSaturated,
   truncationMarker,
   warnIfCredentialStoreIsReadable,
   writeSpoolEntry,
@@ -2099,9 +2105,14 @@ test("#8531: a quarantined orphan is COUNTED under the byte ceiling, not invisib
     reaped.some((d) => d.reason === "spool_total_bytes_exceeded"),
     "the eviction must be recorded",
   );
-  // #6388: the orphan record names its class too. It goes FIRST among the three
-  // classes (unreachable to every surface — a corrupt meta moved it out of every
-  // scan), so an operator must not have to infer that from the order.
+  // #6388: the orphan record names its class too. It goes LAST among the
+  // evictable classes — after the filed pass (a filed entry is a CERTAIN
+  // zero-cost reclaim; an orphan's delivered-ness is unknowable) and before any
+  // UNFILED live entry, which is never evicted at all — so an operator must not
+  // have to infer that from the order. The ordering itself is pinned by
+  // "a FILED entry is reclaimed BEFORE a quarantined log": this test calls
+  // `pruneSpool` directly on a spool with NO filed entry, so it is green under
+  // either order and cannot see a revert.
   assert.ok(
     reaped[0].detail.includes("UNREACHABLE"),
     `the ledger must say which class of loss a quarantined log is: ${reaped[0].detail}`,
@@ -4118,4 +4129,331 @@ test("#9599: a not-yet-created transcript under a symlink still keys like Python
     "the not-yet-existent leaf was anchored differently from its real path");
   // A wholly non-existent path is still anchored (lexically) rather than throwing.
   assert.match(localSessionId(join(root, "a", "b", "c.jsonl"))!, /^c-[0-9a-f]{12}$/);
+});
+
+// ── capture-loss (#10479): the Pi leg's half of the new rule ───────────────
+//
+// Both legs write ONE spool directory (`~/.tortoise/capture-spool`) and this
+// hook is the writer on every Pi box in the fleet, so a rule that only exists on
+// the Python leg is not the rule. Each row below names the mutation that reds it
+// against the PRE-FIX source.
+
+/** Make one entry's turn log SPARSE and larger than the byte ceiling.
+ *
+ * The shipped ceilings are 20 000 entries / 256 MiB, so a genuinely saturated
+ * spool cannot be BUILT in a test by writing entries — but it can be reached the
+ * way a real box reaches it: one entry whose bytes alone cross the byte ceiling.
+ * `truncate` allocates nothing, and both legs size an entry with `stat`, so this
+ * is the real spool state, not a stub. */
+function inflatePastByteCeiling(spool: string, sessionId: string): void {
+  truncateSync(join(spool, "entries", `${entryKey(sessionId)}.turns.jsonl`),
+    SPOOL_MAX_TOTAL_BYTES + (1 << 20));
+}
+
+test("a GROWTH that would cross the entry bound is REFUSED, and the entry stays FIFILABLE", () => {
+  // The over-bound branch asked the bound about THIS WRITE and answered about
+  // DELIVERY: `entryBytes` is what the write would put on disk, while what the
+  // drain later POSTs is what is ALREADY there. A stored, legal, fileable prefix
+  // was marked `terminal_failure` when one more turn crossed the bound — so the
+  // drain skipped it forever, `countPendingEntries` excluded it, and the health
+  // line reported `OK` over a capture that would never be filed.
+  //
+  // MUTATION THAT REDS THIS: mark the entry terminal whenever the WRITE crosses
+  // the bound (the pre-fix branch) -> `terminal_failure` is set, the pending
+  // count drops to 0, and the drain files nothing.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-grow"));
+  const stored = spoolEntryBytes(spool, "sess-grow");
+  const bounds = { maxEntries: 100, maxTotalBytes: 10_000_000, maxEntryBytes: stored + 200 };
+
+  const result = writeSpoolEntry(
+    spool,
+    snapshot("sess-grow", [...SPOOL_TURNS, { role: "user", content: "z".repeat(400) }]),
+    bounds,
+  );
+
+  assert.equal(result.written, false);
+  const record = result.discards[result.discards.length - 1];
+  assert.equal(record.reason, DISCARD_ENTRY_GROWTH_REFUSED);
+  assert.equal(record.retained, true, "the record must say the capture survived");
+
+  const meta = readSpoolEntry(spool, "sess-grow");
+  assert.ok(meta, "a legal entry is never removed");
+  assert.equal(meta.terminal_failure, undefined,
+    "marking a fileable transcript terminal IS the abandonment");
+  assert.deepEqual(readSpoolTurns(spool, "sess-grow"), SPOOL_TURNS, "content untouched");
+  assert.equal(countPendingEntries(spool), 1, "the drain still sees it");
+});
+
+test("a REFUSAL is recorded once per (session, reason, spool state), not once per turn", () => {
+  // A refused session re-snapshots on EVERY `turn_end` and has no entry to hang a
+  // dedupe marker on, so an unconditional `recordDiscard` appended one line per
+  // turn for as long as the box stayed saturated — into `discarded.jsonl`, which
+  // lives in the spool ROOT and is counted against no ceiling.
+  //
+  // MUTATION THAT REDS THIS: record the refusal unconditionally (pre-fix) ->
+  // five `spool_saturated` lines for one refusal.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 2, maxTotalBytes: 10_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(spool, snapshot("d1"), bounds);
+  writeSpoolEntry(spool, snapshot("d2"), bounds);
+
+  for (let i = 0; i < 5; i += 1) writeSpoolEntry(spool, snapshot("refused"), bounds);
+  const refusals = () =>
+    readDiscards(spool).filter((d) => d.reason === DISCARD_SPOOL_SATURATED);
+  assert.equal(refusals().length, 1,
+    `one refusal of one session, spool unmoved, is ONE event: ${refusals().length}`);
+
+  // A DIFFERENT session is a different event.
+  writeSpoolEntry(spool, snapshot("refused-other"), bounds);
+  assert.equal(refusals().length, 2);
+  assert.deepEqual(refusals().map((d) => d.session_id).sort(),
+    ["refused", "refused-other"]);
+
+  // …and any change in the ENTRY SET re-arms the stamp: the next refusal is a
+  // new fact about a changed spool.
+  utimesSync(join(spool, "entries"), new Date(), new Date(Date.now() + 5000));
+  writeSpoolEntry(spool, snapshot("refused"), bounds);
+  assert.equal(refusals().length, 3);
+});
+
+test("spoolSaturated CREDITS reclaimable orphan bytes, so a refusal cannot outlive its condition", () => {
+  // The predicate folds orphan bytes into `total` and `pruneSpool` may reap an
+  // orphan under the byte ceiling — but the evictability question was answered
+  // from FILED entries only. A spool pushed over its byte ceiling by a
+  // reclaimable orphan therefore reported SATURATED, refused the write, and
+  // never reached the only call site that prunes (the write it just refused): the
+  // refusal outlived the condition forever.
+  //
+  // MUTATION THAT REDS THIS: drop the orphan credit from the byte test (pre-fix)
+  // -> `spoolSaturated` reports true for a spool whose LIVE entries are under the
+  // ceiling.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-live"));
+  // A 4 KB orphan, exactly as `quarantineLog` leaves one behind.
+  const log = join(spool, "entries", `${entryKey("sess-gone")}.turns.jsonl`);
+  writeFileSync(log, "z".repeat(4096));
+  const meta = join(spool, "entries", `${entryKey("sess-gone")}.meta.json`);
+  writeFileSync(meta, "{not json");
+  listSpoolEntries(spool); // quarantines the corrupt meta -> `*.orphan`
+  assert.ok(existsSync(`${log}.orphan`), "the orphan exists");
+
+  const liveBytes = spoolEntryBytes(spool, "sess-live");
+  // The ceiling is crossed by the ORPHAN, not by the live entry.
+  const bounds = { maxEntries: 1000, maxTotalBytes: liveBytes + 1024, maxEntryBytes: 1 << 20 };
+  assert.equal(spoolSaturated(spool, bounds), false,
+    "bytes prune may reclaim are room, not a refusal");
+
+  // …and the credit cannot hide a spool whose LIVE entries are over the ceiling.
+  const tight = { maxEntries: 1000, maxTotalBytes: liveBytes - 1, maxEntryBytes: 1 << 20 };
+  assert.equal(spoolSaturated(spool, tight), true,
+    "a live entry that is itself past the ceiling is still saturated");
+});
+
+test("the health line SAYS SATURATED when the ceiling is full of TERMINAL entries", () => {
+  // `terminal_failure` entries are never retried and never counted, so a ceiling
+  // filled by them made the box refuse EVERY new capture while the one-line
+  // answer read `capture: OK (0 queued)` — byte-identical to a healthy box.
+  //
+  // MUTATION THAT REDS THIS: drop the SATURATED branch (pre-fix) -> `OK` /
+  // `DRAINING` while every write is refused.
+  const spool = tmpSpool();
+  for (const sid of ["t1", "t2"]) {
+    writeSpoolEntry(spool, snapshot(sid));
+    const meta = readSpoolEntry(spool, sid)!;
+    meta.terminal_failure = { reason: "http_rejected", detail: "422 bad lane", at: "2026-11-01T00:00:00Z" };
+    writeFileSync(
+      join(spool, "entries", `${entryKey(sid)}.meta.json`),
+      `${JSON.stringify(meta, null, 2)}\n`,
+    );
+  }
+  inflatePastByteCeiling(spool, "t2");
+
+  assert.equal(countPendingEntries(spool), 0, "terminal entries are not pending");
+  assert.equal(writeSpoolEntry(spool, snapshot("t3")).written, false, "new work is refused");
+
+  const keyed = captureHealthLine(spool, { apiKey: "k" });
+  assert.equal(keyed.state, "saturated");
+  assert.equal(keyed.line, "capture: SATURATED (0 queued, refusing new captures)");
+  const keyless = captureHealthLine(spool, { apiKey: "" });
+  assert.equal(keyless.state, "saturated");
+  assert.equal(keyless.line,
+    "capture: SATURATED (no TORTOISE_API_KEY, 0 queued, refusing new captures)");
+});
+
+test("the health line reads the spool WITHOUT repairing it", () => {
+  // The line is printed at session start and end on every box, so it must
+  // DESCRIBE the spool: `listSpoolEntries` is the drain's repairing scanner
+  // (ledger lines + quarantine + unlink). Pre-fix the Pi health line called it
+  // unguarded, so a read quarantined corrupt metas — the contract
+  // `countPendingEntries` states for itself and the Python leg implements as
+  // `repair=False`.
+  //
+  // MUTATION THAT REDS THIS: drop `{ repair: false }` from the health line's
+  // `spoolSaturated` call -> the corrupt meta is recorded and its log moved.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("r1"));
+  inflatePastByteCeiling(spool, "r1");
+  const corruptMeta = join(spool, "entries", "hand-edited.meta.json");
+  writeFileSync(corruptMeta, "{not json");
+  const corruptLog = join(spool, "entries", "hand-edited.turns.jsonl");
+  writeFileSync(corruptLog, "User: the only copy\n");
+
+  const before = readdirSync(join(spool, "entries")).sort();
+  const ledgerBefore = readDiscards(spool).length;
+
+  const health = captureHealthLine(spool, { apiKey: "k" });
+
+  assert.equal(health.state, "saturated", health.line);
+  assert.deepEqual(readdirSync(join(spool, "entries")).sort(), before,
+    "a health read must not quarantine or unlink what it describes");
+  assert.equal(readDiscards(spool).length, ledgerBefore,
+    "a health read must not append ledger lines");
+});
+
+test("a FILED entry is reclaimed BEFORE a quarantined log", async () => {
+  // The orphan pass runs AFTER the filed-entry pass: a FILED entry's content is
+  // already on the wire (a CERTAIN zero-cost reclaim) while an orphan's
+  // delivered-ness is unknowable — the certain option is spent first. The
+  // sibling orphan test has NO filed entry, so it reaps the orphan under either
+  // order and cannot see a revert; this is the discriminating case.
+  //
+  // MUTATION THAT REDS THIS: move the orphan loop above the filed loop ->
+  // the possibly-undelivered transcript is destroyed, the filed entry survives.
+  const spool = tmpSpool();
+  const corruptSid = "orderlist-orphan";
+  writeSpoolEntry(spool, snapshot(corruptSid));
+  const log = join(spool, "entries", `${entryKey(corruptSid)}.turns.jsonl`);
+  writeFileSync(log, "z".repeat(4096));
+  writeFileSync(join(spool, "entries", `${entryKey(corruptSid)}.meta.json`), "{not json");
+  listSpoolEntries(spool);
+  assert.ok(existsSync(`${log}.orphan`), "the orphan exists");
+
+  writeSpoolEntry(spool, snapshot("orderlist-filed"));
+  // Mark it filed through the public surface: a 2xx on flush.
+  const server = recordingServer();
+  const filed = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(filed.filed, 1, "the entry is on the wire");
+  writeSpoolEntry(spool, snapshot("orderlist-keep"));
+
+  const ceiling = spoolEntryBytes(spool, "orderlist-keep") + 4096 + 100;
+  const out = pruneSpool(spool, undefined, {
+    maxEntries: 1000,
+    maxTotalBytes: ceiling,
+    maxEntryBytes: 1 << 20,
+  });
+
+  assert.equal(readSpoolEntry(spool, "orderlist-filed"), undefined,
+    "the FILED entry is the certain reclaim and must be spent first");
+  assert.ok(existsSync(`${log}.orphan`),
+    "an orphan's delivered-ness is unknowable — not while a certain reclaim exists");
+  assert.equal(readSpoolEntry(spool, "orderlist-keep") !== undefined, true,
+    "an UNFILED entry is never evicted at all");
+  assert.deepEqual(out.map((d) => d.session_id), ["orderlist-filed"]);
+  assert.ok(out[0].detail?.includes("already filed"), out[0].detail);
+});
+
+test("a keyless box with a RECORDED refusal says BLOCKED, not INACTIVE", () => {
+  // The health line's precedence is `UNREADABLE > BLOCKED > SATURATED >
+  // INACTIVE > DRAINING > OK`, and the branches ARE that order. The keyless
+  // branch ran first, so a box that had recorded a 402 printed INACTIVE and
+  // never named the cause an operator can act on.
+  //
+  // MUTATION THAT REDS THIS: move the `apiKey === ""` branch above the BLOCKED
+  // branch -> the line reads INACTIVE while a recorded refusal exists.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("blocked-keyless"));
+  writeFileSync(
+    join(spool, SPOOL_STATUS_FILE),
+    `${JSON.stringify({
+      version: 1,
+      state: "blocked",
+      status: 402,
+      reason: "quota_exceeded",
+      updated_at: "2026-01-01T00:00:00Z",
+    }, null, 2)}\n`,
+  );
+
+  const line = captureHealthLine(spool, { apiKey: "" });
+  assert.equal(line.state, "blocked");
+  assert.equal(line.line, "capture: BLOCKED (1 queued, 402 quota)");
+});
+
+test("scanSpool answers BOTH health questions in one pass and agrees with the two readers it replaces", () => {
+  // The health line asks two things about one directory — "how many are pending"
+  // and "is anything evictable" — and asked them with two independent full scans
+  // (each reading and parsing EVERY meta), over a population `SPOOL_MAX_ENTRIES`
+  // raises to 20 000, printed at session start AND end. `scanSpool` is that one
+  // pass; `countPendingEntries` and the health line's `spoolSaturated` call now
+  // both derive from it (the Python leg pins the one-walk property itself with
+  // `test_the_health_line_scans_the_spool_ONCE`, which counts the syscalls).
+  //
+  // What THAT introduces is a new risk: an injected scan could disagree with the
+  // scan `spoolSaturated` would have made itself. This row pins the agreement on
+  // every class at once — unfiled, filed, terminal, unparseable, and an orphan's
+  // bytes.
+  //
+  // MUTATIONS THAT RED THIS: count an unparseable meta as absent (not pending);
+  // drop the orphan bytes (or count an orphan as zero because the listing is
+  // filtered to `.meta.json`); make `entryFiled`/`terminalMarker` filtering
+  // differ between the scan and the predicate.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-live"));
+  writeSpoolEntry(spool, snapshot("sess-filed"));
+  const server = recordingServer();
+  return (async () => {
+    await flushSpool(TEST_CFG, {
+      dir: spool,
+      fetchImpl: server.fetchImpl,
+      now: 1,
+      onlySessionId: "sess-filed",
+    });
+    writeSpoolEntry(spool, snapshot("sess-terminal"));
+    const terminal = readSpoolEntry(spool, "sess-terminal")!;
+    terminal.terminal_failure = { reason: "http_rejected", detail: "422", at: "2026-11-01T00:00:00Z" };
+    writeFileSync(
+      join(spool, "entries", `${entryKey("sess-terminal")}.meta.json`),
+      `${JSON.stringify(terminal, null, 2)}\n`,
+    );
+    // A quarantined turn log: bytes that prune may reclaim.
+    const orphanLog = join(spool, "entries", `${entryKey("sess-orphan")}.turns.jsonl`);
+    writeFileSync(orphanLog, "z".repeat(4096));
+    writeFileSync(join(spool, "entries", `${entryKey("sess-orphan")}.meta.json`), "{not json");
+    listSpoolEntries(spool);
+    assert.ok(existsSync(`${orphanLog}.orphan`), "the orphan exists");
+    // AFTER the repair pass, so this meta is still on disk when the scan reads
+    // it: an unparseable meta is UNKNOWABLE — it counts as pending, and it
+    // cannot answer the saturation question.
+    writeFileSync(join(spool, "entries", "junk.meta.json"), "{not json");
+
+    const scan = scanSpool(spool);
+
+    assert.equal(scan.pending, 2, "sess-live + the unparseable meta are pending");
+    assert.equal(scan.pending, countPendingEntries(spool),
+      "the count reader and the scan must agree about 'pending'");
+    assert.equal(scan.metas.length, 3, "the three parseable metas");
+    assert.equal(scan.orphanBytes, 4096, "the orphan's bytes are counted");
+    assert.equal(scan.bytesBySession.get("sess-live"), spoolEntryBytes(spool, "sess-live"));
+
+    // The injected scan must answer EXACTLY as `spoolSaturated`'s own scan does.
+    const boundsList = [
+      { maxEntries: 2, maxTotalBytes: 1 << 30, maxEntryBytes: 1 << 20 },
+      { maxEntries: 1000, maxTotalBytes: 4096 + 1, maxEntryBytes: 1 << 20 },
+      { maxEntries: 1000, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 },
+    ];
+    for (const bounds of boundsList) {
+      assert.equal(
+        spoolSaturated(spool, bounds, {}, { scan }),
+        spoolSaturated(spool, bounds),
+        `an injected scan must agree with a fresh one: ${JSON.stringify(bounds)}`,
+      );
+    }
+    // `sess-filed` is evictable, so no bound here is a REFUSAL — the point of
+    // these three is the scan agreement above, and that agreement is what makes
+    // handing a scan to the predicate safe.
+    for (const bounds of boundsList) {
+      assert.equal(spoolSaturated(spool, bounds), false,
+        `a filed entry can always make room: ${JSON.stringify(bounds)}`);
+    }
+  })();
 });

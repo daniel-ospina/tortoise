@@ -2393,6 +2393,235 @@ def test_the_entry_too_large_branch_records_before_marking_terminal(tmp_path):
     assert result["discards"][-1]["reason"] == "entry_too_large"
 
 
+# ── capture-loss (#10479): a GROWTH that would cross the per-entry bound ───
+
+
+def test_a_GROWTH_that_would_cross_the_entry_bound_is_REFUSED_not_abandoned(tmp_path):
+    """The per-entry bound was asked about THIS WRITE and answered about
+    DELIVERY. `entry_bytes` is what the write would put on disk; what the drain
+    would later POST is what is ALREADY there. So a session whose stored content
+    is a legal, fileable prefix (the reviewer's reproduction: 1032 bytes) was
+    marked `terminal_failure` when one more turn crossed the bound — the drain
+    skipped it forever (`_flush_one`), `count_pending_captures` excluded it, and
+    the health line printed `OK (0 queued)` over a capture that would never be
+    filed. That traded one loss (a silent abandonment) for another.
+
+    MUTATION THAT REDS THIS: mark the entry terminal (or return before the
+    refusal record) whenever the write crosses the bound -> the retained entry
+    carries `terminal_failure`, `count_pending_captures` drops to 0, and the
+    drain files nothing.
+    """
+    from tortoise import capture_spool as sp
+
+    write_spool_entry(tmp_path, _snapshot("grows"))
+    stored = sp._entry_bytes(tmp_path, "grows")
+    # The stored entry is UNDER the bound — legal and fileable. Only the APPEND
+    # would cross it.
+    bounds = sp.Bounds(max_entries=100, max_total_bytes=10_000_000,
+                       max_entry_bytes=stored + 200)
+
+    result = sp.write_spool_entry(
+        tmp_path,
+        _snapshot("grows", turns=[*TURNS, {"role": "user", "content": "z" * 400}]),
+        bounds=bounds)
+
+    assert result["written"] is False
+    record = result["discards"][-1]
+    assert record["reason"] == "entry_growth_refused"
+    assert record["retained"] is True, (
+        "the record itself must say the capture survived: `entry_too_large`'s "
+        "other arm retains everything and a fresh oversized snapshot does not, "
+        "so the reason alone cannot classify the case")
+    assert sp.is_lost_discard(record) is False
+
+    meta = read_spool_meta(tmp_path, "grows")
+    assert meta is not None, "a legal entry is never removed"
+    assert sp._terminal_marker(meta) is None, (
+        "a fileable transcript is never marked terminal — that IS the abandonment")
+    assert read_spool_turns(tmp_path, "grows") == TURNS, "the content is untouched"
+    assert sp.count_pending_captures(tmp_path) == 1, "the drain still sees it"
+
+    # …and the refusal was a DELAY: the next drain files it.
+    summary = flush_spool(tmp_path, _Server().post, now=1000.0)
+    assert summary.filed == 1, "a refused growth is a delay, not a loss"
+    assert flush_spool(tmp_path, _Server().post, now=2000.0).lost == []
+
+
+def test_a_REFUSAL_is_recorded_once_per_session_and_spool_state(tmp_path):
+    """A refused session re-snapshots on EVERY turn, and it has no `prior` to
+    hang a dedupe marker on (nothing was ever written for it), so an
+    unconditional `record_discard` appended one ledger line per turn for as long
+    as the box stayed saturated. `discarded.jsonl` lives in the spool ROOT and is
+    counted against no ceiling, so that is unbounded growth in the very directory
+    the "bounded disk" claim is about — the same amplification class the
+    `entry_too_large` branch already guards (#4714).
+
+    MUTATION THAT REDS THIS: drop the stamp check in `_record_refusal` -> five
+    ledger lines for one refusal.
+    """
+    from tortoise import capture_spool as sp
+
+    bounds = Bounds(max_entries=2, max_total_bytes=10_000_000, max_entry_bytes=10_000)
+    for sid in ("d1", "d2"):
+        write_spool_entry(tmp_path, _snapshot(sid), bounds)
+
+    for _ in range(5):
+        write_spool_entry(tmp_path, _snapshot("refused"), bounds)
+    refusals = [d for d in read_discards(tmp_path)
+                if d["reason"] == "spool_saturated"]
+    assert len(refusals) == 1, (
+        f"one refusal of one session while the spool did not move is ONE event: "
+        f"{len(refusals)} lines")
+
+    # A DIFFERENT session is a different event.
+    write_spool_entry(tmp_path, _snapshot("refused-other"), bounds)
+    refusals = [d for d in read_discards(tmp_path)
+                if d["reason"] == "spool_saturated"]
+    assert len(refusals) == 2
+    assert {d["session_id"] for d in refusals} == {"refused", "refused-other"}
+
+    # …and any change in the ENTRY SET (a drain, an eviction, a new arrival)
+    # re-arms the stamp: the next refusal is a new fact about a changed spool.
+    entries = sp._entries_dir(tmp_path)
+    stamp = entries.stat().st_mtime_ns
+    os.utime(entries, ns=(stamp + 1_000_000, stamp + 1_000_000))
+    write_spool_entry(tmp_path, _snapshot("refused"), bounds)
+    assert len([d for d in read_discards(tmp_path)
+                if d["reason"] == "spool_saturated"]) == 3
+
+
+# ── capture-loss (#10479): the sixth health state ────────────────────────────
+
+
+def _inflate_past_the_byte_ceiling(root, session_id):
+    """Make one entry's turn log SPARSE and larger than `max_total_bytes`.
+
+    The shipped ceilings are 20 000 entries / 256 MiB, so a genuinely saturated
+    spool cannot be BUILT in a unit test by writing entries — but it can be
+    reached the way a real box reaches it: one entry whose bytes alone cross the
+    byte ceiling. `truncate` allocates nothing (a sparse file), and every leg
+    sizes an entry with `stat`, so this is the real spool state, not a stub:
+    nothing about `spool_saturated`, the health line or the CLI is patched.
+    """
+    from tortoise import capture_spool as sp
+
+    with sp._log_path(root, session_id).open("ab") as fh:
+        fh.truncate(sp.SPOOL_MAX_TOTAL_BYTES + (1 << 20))
+
+
+def test_the_health_line_SAYS_SATURATED_when_the_ceiling_is_full_of_TERMINAL_entries(tmp_path):
+    """`terminal_failure` entries are never retried (`_flush_one` skips them) and
+    never counted (`count_pending_captures` skips both classes), so a ceiling
+    filled by them made the box refuse EVERY new capture while the one-line
+    answer read `capture: OK (0 queued)` — byte-identical to a healthy box. That
+    is the silent-failure class this spool's rules exist to remove, and the
+    original defect was found by reading a banner.
+
+    MUTATION THAT REDS THIS: drop the SATURATED branch from the health line ->
+    `capture: OK (0 queued)` while `write_spool_entry` refuses everything.
+    """
+    from tortoise import capture_spool as sp
+
+    for sid in ("t1", "t2"):
+        write_spool_entry(tmp_path, _snapshot(sid))
+        meta = read_spool_meta(tmp_path, sid)
+        meta["terminal_failure"] = {
+            "reason": "http_rejected", "detail": "422 bad lane",
+            "at": "2026-11-01T00:00:00.000000Z"}
+        sp._write_meta(tmp_path, meta)
+    # The BYTE ceiling binds, filled by an entry that can never be retried.
+    _inflate_past_the_byte_ceiling(tmp_path, "t2")
+
+    assert sp.count_pending_captures(tmp_path) == 0, (
+        "terminal entries are not 'pending' — which is exactly why the line lied")
+    refused = sp.write_spool_entry(tmp_path, _snapshot("t3"))
+    assert refused["written"] is False, "new work is refused"
+    assert refused["discards"][-1]["reason"] == "spool_saturated"
+
+    line = sp.capture_health_line(tmp_path, api_key="k")
+    assert line.state == "saturated"
+    assert line.line == "capture: SATURATED (0 queued, refusing new captures)", line.line
+    # A keyless box is precisely the one that saturates: the keyless FACT is kept
+    # in the SATURATED line rather than replacing it (INACTIVE would hide the
+    # refusal, which is the bug).
+    keyless = sp.capture_health_line(tmp_path, api_key="")
+    assert keyless.state == "saturated"
+    assert keyless.line == (
+        "capture: SATURATED (no TORTOISE_API_KEY, 0 queued, refusing new captures)"
+    ), keyless.line
+    # And the refusal is not a loss: nothing was destroyed to admit anything.
+    assert sp.is_lost_discard(refused["discards"][-1]) is False
+
+
+def test_the_health_line_reads_SATURATED_without_MUTATING_the_spool(tmp_path):
+    """The health line is printed at session start and end on every box, so it
+    must DESCRIBE the spool and not repair it — the rule `count_pending_captures`
+    states for itself and `list_spool_metas(repair=False)` implements. Without the
+    flag the line quarantined corrupt metas (recording `corrupt_entry`, moving
+    turn logs aside) and could unlink what it was reporting on.
+
+    MUTATION THAT REDS THIS: call `spool_saturated(root)` without `repair=False`
+    -> the corrupt meta is recorded and its turn log quarantined by a health read.
+    """
+    from tortoise import capture_spool as sp
+
+    write_spool_entry(tmp_path, _snapshot("r1"))
+    write_spool_entry(tmp_path, _snapshot("r2"))
+    _inflate_past_the_byte_ceiling(tmp_path, "r2")
+
+    entries = sp._entries_dir(tmp_path)
+    corrupt = entries / "hand-edited.meta.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    log = entries / "hand-edited.turns.jsonl"
+    log.write_text("User: the only copy\n", encoding="utf-8")
+
+    before = sorted(p.name for p in entries.iterdir())
+    ledger_before = read_discards(tmp_path)
+
+    line = sp.capture_health_line(tmp_path, api_key="k")
+
+    assert line.state == "saturated", line.line
+    assert sorted(p.name for p in entries.iterdir()) == before, (
+        "a health read must not quarantine or unlink the spool it describes")
+    assert read_discards(tmp_path) == ledger_before, (
+        "a health read must not append ledger lines")
+    assert log.read_text(encoding="utf-8") == "User: the only copy\n"
+
+
+def test_cli_capture_exits_0_when_the_write_is_REFUSED_for_saturation(
+        tmp_path, monkeypatch, capsys):
+    """`session capture` reported the new refusal as "the entry exceeded the
+    per-entry bound" and exited 1. Nothing was oversized and nothing was lost —
+    the box refused to admit new work in order to KEEP an undelivered backlog —
+    so the operator-facing surface named the wrong cause and reported failure
+    for a refusal that destroyed nothing.
+
+    MUTATION THAT REDS THIS: return 1 for every zero-byte refusal -> the
+    saturation case exits 1 and prints the per-entry-bound diagnosis.
+    """
+    import tortoise.__main__ as cli
+
+    _isolate(monkeypatch, tmp_path)
+    root = tmp_path / "spool"
+    write_spool_entry(root, _snapshot("held-1"))
+    _inflate_past_the_byte_ceiling(root, "held-1")
+
+    transcript = tmp_path / "t.claude.jsonl"
+    transcript.write_text("User: the only copy\nAssistant: yes\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_session_post",
+                        lambda k, u: (lambda payload: PostOutcome(
+                            ok=False, status=503, detail="unavailable")))
+
+    rc = cli.main(["session", "capture", "--file", str(transcript),
+                   "--session-id", "held-2", "--harness", "claude"])
+    err = capsys.readouterr().err
+
+    assert rc == 0, f"a saturation refusal lost nothing: {rc}\n{err}"
+    assert "REFUSED" in err, err
+    assert "per-entry bound" not in err, (
+        f"the diagnosis must name the real cause: {err}")
+
+
 def test_the_turn_hook_exposes_stderr_instead_of_swallowing_it(tmp_path):
     """Execution, not grep: the per-turn hook keeps stdout EMPTY (it is injected
     into the user's prompt) but must NOT swallow stderr — a silently failing
@@ -3216,9 +3445,14 @@ def test_a_quarantined_orphan_is_counted_and_reaped_under_the_byte_ceiling(tmp_p
     assert not orphan.exists(), "the orphan must be reaped under the byte ceiling"
     reaped = [d for d in out if d["session_id"].startswith("orphan:")]
     assert reaped and reaped[0]["reason"] == "spool_total_bytes_exceeded", out
-    # #6388: the orphan record names its class too. It goes FIRST among the
-    # three classes (unreachable to every surface — a corrupt meta moved it out
-    # of every scan), so an operator must not have to infer that from the order.
+    # #6388: the orphan record names its class too. It goes LAST among the
+    # evictable classes — after the filed pass (a filed entry is a CERTAIN
+    # zero-cost reclaim; an orphan's delivered-ness is unknowable) and before any
+    # UNFILED live entry, which is never evicted at all — so an operator must not
+    # have to infer that from the order. The ordering itself is pinned by
+    # `test_a_FILED_entry_is_reclaimed_BEFORE_a_quarantined_log`: this test calls
+    # `prune_spool` directly on a spool with NO filed entry, so it is green under
+    # either order and cannot see a revert.
     assert "UNREACHABLE" in reaped[0]["detail"], (
         "the ledger must say which class of loss a quarantined log is"
     )
@@ -3228,6 +3462,63 @@ def test_a_quarantined_orphan_is_counted_and_reaped_under_the_byte_ceiling(tmp_p
     # reading the field.
     assert "never filed" not in reaped[0]["detail"], reaped[0]["detail"]
     assert "unknown" in reaped[0]["detail"], reaped[0]["detail"]
+
+
+def test_a_FILED_entry_is_reclaimed_BEFORE_a_quarantined_log(tmp_path):
+    """The orphan pass runs AFTER the filed-entry pass, and that order is the
+    whole point of the ranking: a FILED entry's content is already on the wire,
+    so reclaiming it is a CERTAIN zero-cost choice, while an orphan's
+    delivered-ness is unknowable (`_quarantine_log` removed the meta, the only
+    copy of `filed_key`) — the certain option must be spent before the possible
+    loss. The sibling orphan test has NO filed entry, so it reaps the orphan
+    under either order and cannot see a revert; this is the discriminating case.
+
+    MUTATION THAT REDS THIS: move the orphan pass above the filed pass in
+    `prune_spool` -> the orphan (a possibly-undelivered transcript) is destroyed
+    while the already-filed entry survives.
+    """
+    from tortoise.capture_spool import (
+        _entry_bytes,
+        _log_path,
+        _meta_path,
+        list_spool_metas,
+        prune_spool,
+    )
+
+    # 1. A corrupt meta becomes a 4096-byte orphan, exactly as in production.
+    corrupt_sid = "orderlist-orphan"
+    write_spool_entry(tmp_path, _snapshot(corrupt_sid))
+    log = _log_path(tmp_path, corrupt_sid)
+    log.write_bytes(b"z" * 4096)
+    _meta_path(tmp_path, corrupt_sid).write_text("{not json", encoding="utf-8")
+    list_spool_metas(tmp_path)
+    orphan = log.with_name(log.name + ".orphan")
+    assert orphan.exists()
+
+    # 2. Two more entries: one DELIVERED, one undelivered (never evictable).
+    filed_sid = "orderlist-filed"
+    keep_sid = "orderlist-keep"
+    write_spool_entry(tmp_path, _snapshot(filed_sid))
+    server = _Server()
+    assert flush_spool(tmp_path, server.post, now=1000.0).filed == 1
+    write_spool_entry(tmp_path, _snapshot(keep_sid))
+
+    # 3. A ceiling that ONE reclaim must pay for, and that either class could
+    #    cover on its own: clearing the filed entry lands the spool back under
+    #    it, so a second eviction would be over-eager, not required.
+    ceiling = _entry_bytes(tmp_path, keep_sid) + 4096 + 100
+    out = prune_spool(tmp_path, None, Bounds(
+        max_entries=1000, max_total_bytes=ceiling, max_entry_bytes=1 << 20))
+
+    assert read_spool_meta(tmp_path, filed_sid) is None, (
+        "the FILED entry is the certain, zero-cost reclaim and must be spent first")
+    assert orphan.exists(), (
+        "an orphan's delivered-ness is unknowable — it must not be spent while a "
+        "certain reclaim is available")
+    assert read_spool_meta(tmp_path, keep_sid) is not None, (
+        "an UNFILED entry is never evicted at all")
+    assert [d["session_id"] for d in out] == [filed_sid], out
+    assert "already filed" in out[0]["detail"], out[0]["detail"]
 
 
 def test_a_non_dict_terminal_marker_does_not_strand_the_entry(tmp_path):
@@ -3681,6 +3972,31 @@ def test_an_UNREADABLE_meta_is_counted_as_pending_never_as_absent(tmp_path):
     assert capture_health_line(root).line == "capture: DRAINING (1 queued)"
 
 
+def test_a_keyless_box_with_a_RECORDED_refusal_says_BLOCKED_not_INACTIVE(tmp_path):
+    """The health line's docstring states a precedence — `UNREADABLE` >
+    `BLOCKED` > `SATURATED` > `INACTIVE` > `DRAINING` > `OK` — and the code ran
+    `INACTIVE` FIRST, so a keyless box that had recorded a 402 printed
+    `INACTIVE` and never named the cause an operator can act on. The branch
+    ORDER is the precedence; a docstring that states an order the code does not
+    implement is worse than none, because the next lane reasons from it.
+
+    MUTATION THAT REDS THIS: move the `api_key == ""` branch back above the
+    BLOCKED branch -> the line reads INACTIVE while a recorded refusal exists.
+    """
+    from tortoise.capture_spool import capture_health_line, write_capture_status
+
+    root = tmp_path / "spool"
+    write_spool_entry(root, _snapshot("blocked-keyless"))
+    write_capture_status(root, {"version": 1, "state": "blocked", "status": 402,
+                                "reason": "quota_exceeded",
+                                "updated_at": "2026-01-01T00:00:00.000000Z"})
+
+    line = capture_health_line(root, api_key="")
+
+    assert line.state == "blocked", line.line
+    assert line.line == "capture: BLOCKED (1 queued, 402 quota)", line.line
+
+
 def test_a_KEYLESS_box_reports_INACTIVE_with_its_backlog(tmp_path):
     """A box with no credential can never file anything, so its backlog grows
     forever — the state the issue was measured in (`capture` silently doing
@@ -3797,6 +4113,12 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
     for i in range(2):
         write_spool_entry(inactive, _snapshot(f"inactive-{i}"))
 
+    # An entry whose bytes alone cross the 256 MiB byte ceiling: the spool is at
+    # a ceiling with NOTHING evictable, on both legs, with no stub.
+    saturated = tmp_path / "saturated"
+    write_spool_entry(saturated, _snapshot("sat-1"))
+    _inflate_past_the_byte_ceiling(saturated, "sat-1")
+
     unreadable = tmp_path / "unreadable"
     (unreadable / "entries").mkdir(parents=True)
 
@@ -3825,6 +4147,13 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
              ("ok", filed, None),
              ("inactive", inactive, ""),
              ("unreadable", unreadable, None),
+             # The SIXTH state, in both of ITS shapes. It is not decoration: this
+             # row is the one test that would have caught the Pi leg having no
+             # SATURATED branch at all, while a fixture set named "every state"
+             # stayed green (capture-loss review, #10479). A saturated spool is
+             # reached through the BYTE ceiling so neither leg needs a stub.
+             ("saturated", saturated, None),
+             ("saturated, keyless", saturated, ""),
              ("sibling dead letters + failed sweep", sibling_spool, None)]
     unreadable.chmod(0o755)
     (unreadable / "entries").chmod(0o000)
@@ -3853,6 +4182,9 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
             "capture: OK (0 queued)",
             "capture: INACTIVE (no TORTOISE_API_KEY, 2 queued)",
             f"capture: UNREADABLE (cannot list {unreadable / 'entries'})",
+            "capture: SATURATED (1 queued, refusing new captures)",
+            "capture: SATURATED (no TORTOISE_API_KEY, 1 queued, "
+            "refusing new captures)",
             "capture: OK (0 queued), 2 store-sync dead-lettered, "
             "store-sync FAILED (node_unavailable)",
         ], py_lines
@@ -4060,3 +4392,45 @@ def test_the_spool_ceilings_are_finite_and_identical_on_both_legs(tmp_path):
     assert json.loads(proc.stdout.strip().splitlines()[-1]) == [
         capture_spool.SPOOL_MAX_ENTRIES, capture_spool.SPOOL_MAX_TOTAL_BYTES,
     ]
+
+
+def test_the_health_line_scans_the_spool_ONCE(tmp_path, monkeypatch):
+    """The health line asks TWO questions about the SAME directory — "how many
+    are pending" and "is anything evictable" — and it asked them with two
+    independent full scans of `entries/`, each reading and parsing EVERY meta.
+    `max_entries` is raised 1000 -> 20000 in this PR, so that doubling lands on
+    the population it multiplies.
+
+    It is also printed at session start AND end on every box (twice per session
+    on the Pi leg), so the cost is paid twice per session for a one-line answer.
+    One scan now answers both (`_scan_spool`).
+
+    MUTATION THAT REDS THIS: call `count_pending_captures` and then
+    `spool_saturated` (the pre-fix pair) -> entries/ is walked twice.
+    """
+    from tortoise.capture_spool import capture_health_line
+
+    write_spool_entry(tmp_path, _snapshot("scan-1"))
+    write_spool_entry(tmp_path, _snapshot("scan-2"))
+
+    walks: list[str] = []
+    real_listdir, real_scandir = os.listdir, os.scandir
+
+    def counting_listdir(path=".", *a, **kw):
+        if "entries" in str(path):
+            walks.append("listdir")
+        return real_listdir(path, *a, **kw)
+
+    def counting_scandir(path=".", *a, **kw):
+        if "entries" in str(path):
+            walks.append("scandir")
+        return real_scandir(path, *a, **kw)
+
+    monkeypatch.setattr(os, "listdir", counting_listdir)
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+
+    line = capture_health_line(tmp_path, api_key="k")
+
+    assert line.line == "capture: DRAINING (2 queued)", line.line
+    assert walks == ["listdir"], (
+        f"the health line must read entries/ ONCE, not {len(walks)} times: {walks}")

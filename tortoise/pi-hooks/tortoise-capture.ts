@@ -2217,19 +2217,28 @@ export function spoolSaturated(
   dir: string,
   bounds: SpoolBounds = DEFAULT_BOUNDS,
   projection: { projectedBytes?: number; replacesSessionId?: string } = {},
-  opts: { repair?: boolean } = {},
+  opts: {
+    repair?: boolean;
+    /** A scan the caller already paid for (`scanSpool`) — the health line asks
+     *  two questions about one directory and must read it once. */
+    scan?: SpoolScan;
+  } = {},
 ): boolean {
   // `repair: false` keeps the meta scan from MUTATING the spool (no ledger line,
   // no quarantine, no unlink): the health line must describe the spool it reads
   // (`listSpoolEntries` is the drain's repairing scanner — the same rule
   // `countPendingEntries` follows). The write path keeps the repairing scan.
-  const { metas } = listSpoolEntries(dir, opts);
+  const { metas } = opts.scan
+    ? { metas: opts.scan.metas }
+    : listSpoolEntries(dir, opts);
+  const sizeOf = (sessionId: string) =>
+    opts.scan ? (opts.scan.bytesBySession.get(sessionId) ?? 0) : spoolEntryBytes(dir, sessionId);
   // Bytes `pruneSpool` may reclaim WITHOUT spending an undelivered entry: the
   // orphan class is byte-evictable only (see below).
-  const reclaimableOrphanBytes = orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
-  let total =
-    metas.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) +
-    reclaimableOrphanBytes;
+  const reclaimableOrphanBytes = opts.scan
+    ? opts.scan.orphanBytes
+    : orphanPaths(dir).reduce((sum, path) => sum + fileSize(path), 0);
+  let total = metas.reduce((sum, m) => sum + sizeOf(m.session_id), 0) + reclaimableOrphanBytes;
   const { projectedBytes, replacesSessionId } = projection;
   if (projectedBytes === undefined && replacesSessionId === undefined) {
     // STRICT: the question is whether ADDING an entry would cross the ceiling, so
@@ -2241,7 +2250,7 @@ export function spoolSaturated(
     if (replacesSessionId !== undefined) {
       // A GROWTH replaces this entry's bytes instead of adding a second copy of
       // them, and adds no count.
-      total -= spoolEntryBytes(dir, replacesSessionId);
+      total -= sizeOf(replacesSessionId);
     }
     total += projectedBytes ?? 0;
     if (count <= bounds.maxEntries && total - reclaimableOrphanBytes <= bounds.maxTotalBytes)
@@ -2754,16 +2763,43 @@ function statusPathFor(dir: string): string {
  *   "nothing pending" would both print `OK` and let the self-heal OVERWRITE the
  *   durable block marker with `ok` (found in review cycle 2).
  */
-export function countPendingEntries(dir: string): number | undefined {
+export interface SpoolScan {
+  /** Pending captures, or `undefined` when `entries/` cannot be listed. */
+  pending: number | undefined;
+  metas: SpoolMeta[];
+  bytesBySession: Map<string, number>;
+  orphanBytes: number;
+}
+
+/**
+ * ONE read-only pass over the spool, answering every reader's question.
+ *
+ * The health line asks TWO things about the SAME directory — "how many are
+ * pending" and "is anything evictable" — and it asked them with two independent
+ * full scans, each reading and parsing EVERY meta. `SPOOL_MAX_ENTRIES` is
+ * 20 000 and the line is printed at session start AND end, so the doubling is
+ * paid twice per session for a one-line answer. One pass, both answers.
+ *
+ * `pending === undefined` means the directory could not be LISTED (never
+ * "empty"). A meta that cannot be parsed is UNKNOWABLE and counted
+ * conservatively; a meta with no usable `session_id` cannot answer the
+ * saturation question but is still counted; a TERMINAL or FILED entry is
+ * neither pending nor absent. Mirrors `capture_spool._scan_spool`.
+ */
+export function scanSpool(dir: string, opts: { sizes?: boolean } = {}): SpoolScan {
+  const sizes = opts.sizes !== false;
+  const empty: SpoolScan = { pending: 0, metas: [], bytesBySession: new Map(), orphanBytes: 0 };
   let names: string[];
   try {
     names = readdirSync(entriesDir(dir));
   } catch (err) {
     // ENOENT is an absent spool: nothing has been captured, which IS empty.
-    if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return 0;
-    return undefined; // unreadable is not empty
+    if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return empty;
+    return { ...empty, pending: undefined }; // unreadable is not empty
   }
   let pending = 0;
+  const metas: SpoolMeta[] = [];
+  const bytesBySession = new Map<string, number>();
   for (const name of names) {
     if (!name.endsWith(".meta.json")) continue;
     let meta: SpoolMeta | undefined;
@@ -2778,11 +2814,40 @@ export function countPendingEntries(dir: string): number | undefined {
       pending += 1;
       continue;
     }
+    if (typeof meta.session_id === "string" && meta.session_id) {
+      metas.push(meta);
+      if (sizes) bytesBySession.set(meta.session_id, spoolEntryBytes(dir, meta.session_id));
+    }
     if (terminalMarker(meta) !== undefined) continue;
     if (entryFiled(meta)) continue;
     pending += 1;
   }
-  return pending;
+  let orphanBytes = 0;
+  if (sizes) {
+    // Quarantined logs are counted from the SAME listing: `orphanPaths` walks
+    // `entries/` again, and this scan exists because one reader must not pay for
+    // two passes.
+    for (const name of names) {
+      if (!name.includes(".turns.jsonl.orphan")) continue;
+      const path = join(entriesDir(dir), name);
+      try {
+        if (statSync(path).isFile()) orphanBytes += fileSize(path);
+      } catch {
+        // an orphan that vanished between listing and stat contributes 0
+      }
+    }
+  }
+  return { pending, metas, bytesBySession, orphanBytes };
+}
+
+/**
+ * Pending captures: what a drain would still attempt, or `undefined` when the
+ * spool cannot be listed. `scanSpool` with the per-entry sizing turned off, so
+ * the count pays no `stat` calls it does not need — the health line asks for
+ * both answers from ONE scan.
+ */
+export function countPendingEntries(dir: string): number | undefined {
+  return scanSpool(dir, { sizes: false }).pending;
 }
 
 /** Read the recorded per-box status. Absent/corrupt reads as `undefined` (the
@@ -2951,7 +3016,10 @@ export function captureHealthLine(
 }
 
 function spoolHealthLine(dir: string, opts: { apiKey?: string } = {}): CaptureHealth {
-  const pending = countPendingEntries(dir);
+  // ONE read-only pass answers both questions (`countPendingEntries` then
+  // `spoolSaturated` walked `entries/` twice for one printed line).
+  const scan = scanSpool(dir);
+  const pending = scan.pending;
   if (pending === undefined) {
     // A spool we cannot list is UNKNOWN, not empty. Reporting `OK` here would be
     // a false pass on the acceptance's own surface, and it would also let the
@@ -2972,8 +3040,9 @@ function spoolHealthLine(dir: string, opts: { apiKey?: string } = {}): CaptureHe
     writeCaptureStatus(dir, recorded);
   }
   // A READ-ONLY question (`repair: false`): a health line must not quarantine,
-  // record or unlink the spool it is describing.
-  const saturated = spoolSaturated(dir, DEFAULT_BOUNDS, {}, { repair: false });
+  // record or unlink the spool it is describing — and it reuses the scan it
+  // already paid for.
+  const saturated = spoolSaturated(dir, DEFAULT_BOUNDS, {}, { repair: false, scan });
   // A marker we cannot UNDERSTAND is not a marker — the same rule this file
   // applies to `terminal_failure` and to a corrupt backoff window. A hand-edited
   // or foreign `status.json` carrying `{"state": "blocked"}` (or a status that
