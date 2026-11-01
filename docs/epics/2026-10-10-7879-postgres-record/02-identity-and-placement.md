@@ -151,7 +151,8 @@ A rebuilt structural edge must find its sibling by **stable name**, never by a g
 |---|---|
 | `test_ulid_shape_and_sortability` | `ulid()` drifting from `^[0-9a-f]+-[0-9a-f]{12}$`, or losing time-sortability |
 | `test_ulid_and_crockford_accepted_junk_rejected` | `_is_ulid` accepting/rejecting the wrong spellings |
-| `test_the_legacy_entity_handle_is_recognised_but_never_minted` | `_derived_legacy_handle` drifting from `label[:3]-<hex26>`, or becoming non-deterministic (idempotent-MERGE guarantee) |
+| `test_the_target_is_the_existing_canonical_minter` | `_derived_legacy_handle` drifting off `poi-0eab7bc5fcd2b21f5afc10a7a9` for `("Point", "p-0000438")`, or losing its label scope (`Point` folding onto `Object`) |
+| `test_the_legacy_entity_handle_is_recognised_but_never_minted` | the retired `label[:3]-<hex26>` spelling staying RECOGNISED by `_is_canonical_entity_id`, and never being the shape a mint produces |
 | `test_structural_rel_labels_is_the_pinned_map` | a rel added to `DERIVABLE_STRUCTURAL_RELS` without a label, or the label map changing silently |
 | `test_stub_key_resolves_by_stable_name_never_id` | `stub_key` returning `target['id']` instead of `name`/`url` — **the exact regression `#2489`/`#5086` exist to prevent** |
 | `test_about_document_key_is_url_not_coalesce_title` | a revert to the pre-D10 `coalesce(title, name)` key, which would resolve to nothing on a `:Source` |

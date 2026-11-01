@@ -23,7 +23,7 @@ the tool's behaviour over an exactly-enumerable population built from the shapes
 | `<timehex>-<hex12>` | `:Point` | 8,700 | already canonical — untouched |
 | `p-NNNNNNN` | `:Point` | 1,000 | **re-keyed** |
 | `EV-*` | `:Event` (`eventId`, `id` mirrors it) | 30 | out — journal-keyed identity, #7951 owns it |
-| `name`/`id` | `:Subject` 60 · `:Object` 60 | 120 | out by the 2026-10-10 scope ruling |
+| `id` (with `name` as the mutable lookup) | `:Subject` 60 · `:Object` 60 | 120 | out by the 2026-10-10 scope ruling |
 | `url` | `:Source` | 20 | out (§1.2 clause 2 — content key) |
 | uncontracted | `Meta` | 1 | out of contract, counted |
 
@@ -51,8 +51,12 @@ uv run python tools/legacy_id_normalise.py --dump dump.json --report dryrun-1.js
 * renames: **1,000** (`{dump_id, label, key_property, old, new}` each)
 * **two dry runs byte-identical**: `sha256 69ace6f570df60ec13548397f788227f380a48340d4e91c81856357f4a285fa2`
   for both files, `cmp` clean. A plan that differs run to run cannot be reviewed.
-* input fingerprint `dump_sha256 = 13a67208…`, which the plan is bound to: applying it to a
-  refreshed snapshot of the same size is refused.
+* input fingerprint `dump_sha256 = 13a67208…`, which the plan is bound to. **This fired live while
+  measuring**: a plan built before the population was re-seeded was handed to `--apply` and the tool
+  refused it — *"…is the plan for a DIFFERENT snapshot … and holds 1000 rename(s) — overwriting it
+  would leave that pass unrevertible; pass a different --report"* — exit `2`, nothing written. The
+  guard is not theoretical: a snapshot whose node count and shape mix are unchanged still has a
+  different fingerprint, which is the whole reason a plan cannot be carried across a re-dump.
 
 ## 4. Injectivity — the collision question
 
@@ -75,6 +79,15 @@ labels cannot fold together. It is 104 bits, so collision resistance is a birthd
 proof; the plan refuses on a target collision anyway (invariant 3), which is the real guard.
 
 ## 5. Idempotence — a second run changes nothing
+
+```
+uv run python tools/legacy_id_normalise.py --dump dump.json --apply \
+    --out normalised.json --report plan.json          # apply 1
+uv run python tools/legacy_id_normalise.py --dump normalised.json --report plan-2nd.json
+uv run python tools/legacy_id_normalise.py --dump normalised.json --apply \
+    --out normalised-2nd.json --report plan-2nd.json  # apply 2
+cmp normalised.json normalised-2nd.json               # byte-identical
+```
 
 ```
 apply 1: nodes 9871 in · 9871 out · renamed 1000 · canonical 8700 → 9700 · legacy 1000 → 0
@@ -101,6 +114,9 @@ id that already matches a minted shape is never in a plan.
 `node_count` and the edge list are bound: `dump_id` is preserved for every node, so edges (which
 reference it) are re-linked, not re-pointed.
 
+⚠️ **This population carries 0 edges** (§9.2), so edge preservation is *unit-covered and not
+measured here* — the binding is a property of the code, not a result of this run.
+
 ## 7. Identity resolves after the pass
 
 For **20** migrated nodes, resolving the NEW `(label, key)` returns exactly one node, and it is the
@@ -118,7 +134,7 @@ uv run python tools/legacy_id_normalise.py --dump normalised.json --revert \
 
 `revert` restores 1,000 keys and reports `canonical 9700 → 8700 · legacy 0 → 1000`. The restored
 artifact is **exactly** the original: the node signature over every `(dump_id, labels, props)` —
-`sha256 7e8d1d278b8841b23ac382fa590f2140b778259d83a9b1c698e959de81e2defb` — is identical to the
+`sha256 addf0e81bb1712775fd8b9a2294f3956e596a9fa1f24025481639366baf92e42` — is identical to the
 input's, and the node count returns to 9,871.
 
 **The recovery path is the plan itself** (the `old`/`new` pairs plus `dump_sha256`), which is why the
@@ -136,7 +152,12 @@ via `restore_graph`, so an intact pre-pass snapshot is a second, independent way
    `::test_an_edited_edge_list_is_refused_on_revert`), but a production-shaped dump — with real
    `IMPL`/`NAND` edges between legacy points — is the population they must fire on before the live
    pass.
-3. **The live, journaled pass is not this tool.** §1.4 rule 2 requires the rewrite to be a journal
+3. **Multi-label nodes.** Every seeded node carries exactly ONE label, so `_node_label`'s
+   label-set rules — scope decided over the label set rather than array order, and the refusal of a
+   node whose labels carry different contract keys — never fire on this population. A real
+   `dump_graph` artifact carries `:Point`+`:Session` nodes. Those branches are unit-covered; **no
+   number above depends on them**.
+4. **The live, journaled pass is not this tool.** §1.4 rule 2 requires the rewrite to be a journal
    event so `replay(journal)` reproduces it; #7951 owns that door. This is the offline half: the
    plan here *is* the payload that pass would journal.
 

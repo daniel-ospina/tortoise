@@ -248,7 +248,8 @@ DECLARED_OUT_OF_SCOPE: dict[str, str] = {
     # the pre-#3590 key and carries a CORRECTION (2026-10-24, #9881): #3590 made
     # `name` a MUTABLE natural key two live entities may share, and #9881 moved the
     # record with it — `public.subject.node_key` / `public.object.node_key` ARE the
-    # `id` (`CHECK (id IS NOT NULL AND node_key = id)`), and
+    # `id` (the `node_key = id` conjunct of
+    # `CHECK (name IS NOT NULL AND id IS NOT NULL AND node_key = id)`), and
     # ``cache_projection.KEY_PROPERTY`` reads `id` for both labels. So they are
     # re-keyable BY THE CONTRACT and are excluded by the SCOPE RULING alone —
     # quoting the retired ground would leave a reader unable to tell whether the

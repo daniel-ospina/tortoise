@@ -40,8 +40,10 @@ for i in range(0, len(evs), 500):
             "n.content = r.c, n.createdAt = r.t, n.label = 'Event'", {"rows": evs})
 
 # name/url-keyed out-of-scope labels
-batch("Subject", "name", [{"k": f"subject-{i}", "c": "", "t": "2026-01-01T00:00:00Z"} for i in range(60)])
-batch("Object",  "name", [{"k": f"object-{i}",  "c": "", "t": "2026-01-01T00:00:00Z"} for i in range(60)])
+# :Subject/:Object are keyed on `id` since #9881 — `name` is the mutable lookup
+import hashlib as _h
+batch("Subject", "id", [{"k": "sub-" + _h.sha256(f"subject-{i}".encode()).hexdigest()[:26], "c": "", "t": "2026-01-01T00:00:00Z"} for i in range(60)])
+batch("Object",  "id", [{"k": "obj-" + _h.sha256(f"object-{i}".encode()).hexdigest()[:26], "c": "", "t": "2026-01-01T00:00:00Z"} for i in range(60)])
 batch("Source",  "url",  [{"k": f"https://example.test/{i}", "c": "", "t": "2026-01-01T00:00:00Z"} for i in range(20)])
 # a label the contract does not key at all
 g.query("CREATE (n:Meta) SET n.key = 'calibration_milestone', n.value = 'gated-b'")

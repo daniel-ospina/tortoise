@@ -252,7 +252,7 @@ def test_the_target_is_the_existing_canonical_minter():
 def test_a_normalised_point_key_is_an_entity_handle_not_a_minted_ulid():
     """⚠️ The DECISION this pass makes, pinned where it can be seen.
 
-    The target is ``entity_name_id``'s handle — ``poi-<sha256[:26]>`` — which is
+    The target is ``legacy_ids._derived_legacy_handle``'s — ``poi-<sha256[:26]>`` — which is
     NOT the ``<ts-hex>-<uuid12>`` shape ``create_point`` mints (and warns about
     when it is handed anything else). A normalised ``:Point`` key space is
     therefore the entity-handle spelling, and the label carries BOTH canonical
@@ -1122,7 +1122,7 @@ def test_a_report_with_no_renames_cannot_pose_as_an_undo(tmp_path):
 
     Run documented step 2 twice: the second pass renames nothing and rewrites
     the report with `renames: []`. Step 3 then "restores" the normalised dump,
-    exits 0, and the original ids survive in NO artifact — `entity_name_id` is a
+    exits 0, and the original ids survive in NO artifact — `_derived_legacy_handle` is a
     sha256, so they are not re-derivable.
     """
     from tools.legacy_id_normalise import main
@@ -1316,7 +1316,7 @@ def test_a_second_pass_over_a_different_dump_cannot_overwrite_the_first_plan(tmp
     Measured before the guard: pass 1 over dump A writes plan.json; `rm` the dump
     (the documented workflow — the plan IS the way back); pass 2 over dump B with
     the same `--report` overwrites it, exits 0, and A's original ids then survive
-    in no file. `entity_name_id` is a sha256, so they are not re-derivable.
+    in no file. `_derived_legacy_handle` hashes the OLD key, so they are not re-derivable.
     """
     from tools.legacy_id_normalise import main
 

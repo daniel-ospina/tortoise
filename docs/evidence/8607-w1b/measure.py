@@ -3,12 +3,12 @@ import json, sys, hashlib
 from pathlib import Path
 from collections import Counter
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from tortoise.legacy_ids import census, is_canonical, shape
+from tortoise.legacy_ids import LEGACY, census, is_canonical, shape
 from tortoise.cache_projection import KEY_PROPERTY
 
 before = json.load(open("dump.json"))
 after  = json.load(open("normalised.json"))
-plan   = json.load(open("plan-A.json"))
+plan   = json.load(open("plan.json"))
 
 # ── 1. per-label node counts, before/after ────────────────────────────────
 def per_label(d):
@@ -78,6 +78,7 @@ print("\n=== legacy shapes remaining AFTER ===")
 res = Counter()
 for n in after["nodes"]:
     s = shape(n["props"].get("id") or n["props"].get("eventId") or "")
-    if s != "canonical":
+    if s == LEGACY:          # shape() never returns "canonical" — that filter was dead
         res[(n["labels"][0], s)] += 1
-print(f"  {dict(res)}")
+print(f"  legacy-shaped (label, shape): {dict(res)}")
+print(f"  legacy remaining IN SCOPE (Point): {res.get(('Point', LEGACY), 0)}")
