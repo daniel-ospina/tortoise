@@ -51,10 +51,22 @@ USER_A_ONLY = "22222222-2222-2222-2222-222222222222"
 TOKEN_A = "oat_" + "a" * 40
 TOKEN_B = "oat_" + "b" * 40
 
+#: BOTH orgs share one `graph_name`. That is the REAL shape, not an accident:
+#: `graph_name` is a user-editable label (`supabase_control.set_graph_name`), so
+#: two organizations can carry the same one. Deriving it per org ("org_" +
+#: org_id) would make a `graph_name`-keyed memo of the resolved default row
+#: UNABLE to collide, i.e. it would make the very mutation this module claims to
+#: catch ship green (measured: a `graph_name`-keyed cache in
+#: `_session_user_org` left both alternation tests green until this was shared).
+#: The two tenants are distinguished by `org_id` and by their DISTINCT
+#: `graphs.id` (`ROW_A`/`ROW_B`) — which is what the record's FK actually keys
+#: on, so a name collision must not be able to select the wrong tenant.
+SHARED_GRAPH_NAME = "org_shared_label"
+
 
 def _org_row(org_id: str) -> dict:
     return {
-        "id": org_id, "tier": "team", "graph_name": "org_" + org_id,
+        "id": org_id, "tier": "team", "graph_name": SHARED_GRAPH_NAME,
         "max_users": 5, "max_graphs": 3, "graph_size_cap": 1000,
         "max_points": 1000, "suspended_at": None, "flagged_at": None,
         "email": "owner@example.test", "dashboard_key_login": True,
@@ -162,11 +174,12 @@ def _assert_names_its_own(resolved: dict, *, org_id: str, row_id: str,
 def test_two_session_credentials_never_share_a_tenant(monkeypatch):
     """A, then B, then A again — each session names its OWN default graph.
 
-    Mutation this discriminates: caching the resolved default row on the org
-    dict's shape, on `graph_name`, or in a module global keyed by anything
-    other than `org_id` → the third read (A again, after B) returns B's row and
-    the checker reddens. Single-shot resolution cannot catch it, which is why
-    the alternation is the test.
+    Mutation this discriminates: a memo of the resolved default row keyed on
+    anything that is NOT `org_id` — the org's `graph_name` included, which BOTH
+    tenants share in this fixture because it is a user-editable label that two
+    orgs really can share — or a module global → the third read (A again, after
+    B) returns B's row and the checker reddens. Single-shot resolution cannot
+    catch it, which is why the alternation is the test.
     """
     cp = _two_tenant_cp()
 
