@@ -1255,8 +1255,13 @@ def test_the_bundle_withdraws_the_frozen_documents_unverifiable_first_commit_cla
     assert "only add-commit" in errata, (
         "it must say WHY: the amendment commit is the document's only add-commit")
     assert "changes nothing" in errata and "00:12:17Z" in errata, (
-        "and what still holds — the add-commit epoch strictly precedes the log's, which is what "
-        "the ordering half reads")
+        "and what it names: the add-commit epoch on the CONTRIBUTION branch — the history, not an "
+        "assurance. The ordering it once reached for is not readable from merged history and is "
+        "withdrawn (#10463), so the erratum must say so rather than restore the claim")
+    assert "not readable from merged history" in errata and "withdrawn" in errata, (
+        "the erratum must not promise an ordering `capstone_preregistration_check.py` can no "
+        "longer read: the squash collapsed both add-commits, so the provenance is withdrawn "
+        "(`withdrawn/WITHDRAWN.md`) — a lane that 'restores' the assurance reds here on purpose")
     assert "a1075dfc2" in errata and "325f2a1a5" in errata, (
         "the erratum must name the same two commits the log and the record do (the amendment "
         "add-commit and the measured log's add-commit), so it cannot drift onto another")

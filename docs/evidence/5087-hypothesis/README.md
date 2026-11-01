@@ -387,9 +387,13 @@ survive because they are parsed out of the **commit**, never this file.
    changes only definitions and floors". There is no pre-amendment version in the history: the
    amendment commit `a1075dfc2` is also the document's only add-commit
    (`git log --diff-filter=A -- docs/evidence/5087-hypothesis/PRE-REGISTRATION.md`), so it *adds* all
-   236 lines and changes nothing. The anti-tuning property the sentence reaches for still holds, by
-   a different mechanism: the add-commit (`00:12:17Z`) strictly precedes the measured log's
-   add-commit (`325f2a1a5`, `00:26:01Z`) — which is what `capstone_preregistration_check.py`'s
-   ordering half reads — and the bars are read out of that commit rather than the worktree. **No
+   236 lines and changes nothing. The anti-tuning property the sentence reaches for held **on the contribution
+   branch**: there the add-commit (`00:12:17Z`) strictly precedes the measured log's
+   add-commit (`325f2a1a5`, `00:26:01Z`), and the bars are read out of that commit rather than the
+   worktree. ⛔ That ordering is **not readable from merged history** — the squash merge collapsed
+   both add-commits into one commit, so `capstone_preregistration_check.py`'s ordering half now
+   reads the *same* epoch for the two paths. The provenance is therefore **withdrawn** (see
+   `withdrawn/WITHDRAWN.md`; #10463 records the ordering claim as PROVISIONAL). This sentence keeps
+   the history, not the assurance. **No
    bar, floor, denominator or number moves**; the defect is a process claim, and it is withdrawn
    here.
