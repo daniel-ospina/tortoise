@@ -1839,12 +1839,19 @@ def _reset_hosted_registry_probe() -> None:
 # ``test_run_with_eval_keys.py::test_managed_keys_match_the_code_registries``,
 # pins the same union to tools/run-with-eval-keys.sh.)
 def provider_key_envs() -> tuple[str, ...]:
-    """Every provider API-key env var the routing/tests gates consult."""
-    from tortoise.hosted_api import _llm_provider_keys
-    from tortoise.model_adapters import _PROVIDER_KEY_ENV
+    """Every provider API-key env var the routing/tests gates consult.
 
-    return tuple(sorted(
-        set(_llm_provider_keys()) | set(_PROVIDER_KEY_ENV.values())))
+    Delegates to ``tests/_provider_env.py`` — the ONE copy of the
+    ``_llm_provider_keys() | _PROVIDER_KEY_ENV.values()`` derivation. Imported
+    lazily on purpose: a module-level ``from tests._provider_env import …`` in
+    this file would be a second conftest shared-module edge to register
+    (``test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared``),
+    and the helper is stdlib-only with its own lazy tortoise imports, so there
+    is nothing to gain by hoisting it.
+    """
+    from tests._provider_env import provider_key_envs as _derived
+
+    return _derived()
 
 
 #: Selector/override env vars that re-shape the resolved route WITHOUT a key:

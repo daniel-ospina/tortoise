@@ -53,8 +53,12 @@ from .render import render
 # missing default model once the provider is also in the priority tuple, and
 # (b) leaves a HOSTED deployment without the secret, so it still reports
 # no-provider and skips extraction — the #8133 defect again, in the deploy lane.
-# The #1197 guard catches (a)'s first half and (b); the default-model omission and
-# the venice-only behaviour are caught by tests/test_session_extraction_modes.py.
+# The #1197 guard catches (a)'s first half and (b); the DEFAULT-MODEL half of
+# (a) is caught by ``test_every_priority_provider_has_a_default_model`` and the
+# venice-only behaviour by ``test_a_venice_only_deployment_extracts`` (both in
+# tests/test_session_extraction_modes.py — the first because
+# ``_build_session_llm_extractor`` indexes ``_SESSION_LLM_DEFAULT_MODELS``
+# directly, so a missing entry is an uncaught KeyError, not a fallback).
 # Before #8133 ``model_adapters.resolve_extractor_provider`` (the v2 extractor's
 # registry) carried ``venice`` and this mapping did not, so a venice-only
 # deployment reported ``('venice', ['venice'])`` there while every lane gate said
