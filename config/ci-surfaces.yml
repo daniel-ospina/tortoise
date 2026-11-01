@@ -3336,6 +3336,15 @@ surfaces:
   # `record_writer.py`-only diff (the `dsn_fingerprint` single definition this
   # file also pins) falls through to `core`.
   - test_9548_record_arming_health.py
+  # #10447: `/health` published no build identity, so "is this deployed?" was
+  # unanswerable from the endpoint every watchdog and census probes — a stale
+  # build served `status: ok` and every other block happily. The pin holds the
+  # commit the DEPLOY was told to build (not a constant, not the checkout), that
+  # `/health` and `/v1/version` cannot disagree (one resolver), that a stale
+  # stamp is reported VERBATIM rather than coerced to HEAD, and that an unstamped
+  # or unrecognised stamp reads as such instead of as current. DB-free. The `api`
+  # surface is the one `tortoise/hosted_api.py` selects, so it travels with it.
+  - test_health_build_identity_10447.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)

@@ -5883,6 +5883,19 @@ async def health():
     durability seam whose "off" state must be distinguishable from "on"). See
     ``_record_health``; it collects no I/O, and only a REFUSED DSN, an unread
     counter snapshot, or an unread tenancy resolution degrades ``status``.
+
+    Build check (#10447): ``build`` names the build that is SERVING — commit,
+    package version, whether the tree was dirty at build time, process start
+    time, and the highest schema migration this image carries. It is the same
+    VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
+    "is this deployed?" was previously unanswerable from this endpoint: a stale
+    build served ``status: ok`` and every other block happily. Like
+    ``change_feed`` and ``record`` it does NOT fold into ``status`` — a stale
+    deploy is up, and calling it degraded would make Fly restart a healthy
+    process forever. Currency is a COMPARISON (``check-deploy-staleness.sh``
+    against ``origin/main``); this block publishes the datum that comparison
+    needs, plus ``build_identified`` so an unstamped deployment is readable as
+    unstamped rather than as current.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -5902,7 +5915,7 @@ async def health():
             else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
             "backup_watcher": watcher, "change_feed": _change_feed_health(),
-            "record": record}
+            "record": record, "build": _build_identity()}
 
 
 @app.get("/health/ready")
@@ -6003,6 +6016,107 @@ async def health_security():
     }
 
 
+#: #10447: when THIS PROCESS started serving. Constant per process, so a reader
+#: can see a restart (a deploy that landed) without a log grep — and can see that
+#: a build is OLD by comparing it to the deploy it was supposed to pick up.
+_PROCESS_STARTED_AT: str = datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _migrations_head() -> str | None:
+    """Highest schema migration THIS IMAGE carries (#10447).
+
+    Answers "has migration 7 landed in prod" from OUTSIDE the process, which
+    previously required reading the database. It is the highest-numbered `.sql`
+    filename in the migrations directory the image ships — resolved through
+    ``record_projection._migrations_dir()``, the ONE existing resolver (checkout
+    first, wheel second), so there is no second opinion about where the schema
+    lives. No database query: the issue's anti-goal is explicit that ``/health``
+    must not grow database work.
+
+    ORDERING IS NUMERIC, NOT LEXICOGRAPHIC (review P2). The names are
+    ``<YYYYMMDDnnnnnn>_<slug>.sql``, and ``sorted()`` puts any file whose stem
+    starts with ``_`` or a letter AFTER every date-prefixed one (``_seed`` >
+    ``9…``), so a stray ``seed.sql`` would have published itself as the schema
+    head. Only a ``<digits>_`` prefix counts as a migration, and the maximum is
+    taken over the parsed integer.
+
+    ``None`` when no migration-shaped file is present (a stripped install) — the
+    same "absent, and it says so" contract as ``commit_sha``, never a plausible
+    fake. A WHEEL install ships only the record migrations, so it reports the
+    highest of THOSE; that is the honest answer to "what does this image carry",
+    and comparing it against the checkout's head is what says the difference.
+    """
+    try:
+        from tortoise import record_projection  # noqa: PLC0415 - local: keeps import cost off /health
+        base = record_projection._migrations_dir()
+        heads = [
+            (int(m.group(1)), p.stem)
+            for p in base.glob("*.sql")
+            if (m := re.match(r"(\d+)_", p.name)) is not None
+        ]
+    except Exception:  # noqa: BLE001 - a build identity is never worth a 500
+        return None
+    return max(heads)[1] if heads else None
+
+
+#: #10447: resolved ONCE per process, at import — never per request. The value
+#: cannot change while the image runs, and `/health`'s contract is that the
+#: handler "collects NO I/O" (a distribution gate,
+#: `.github/scripts/deploy-health-gate.sh`, states the same: "phase 1 hits
+#: /health — an in-memory snapshot, no I/O"). `_migrations_dir()` alone does 13
+#: `Path.exists()` stats before the glob, which is exactly the kind of work the
+#: #2850 fix removed from the request path (review P2).
+_MIGRATIONS_HEAD: str | None = _migrations_head()
+
+
+def _build_identity() -> dict:
+    """The ONE resolver for "which build is serving" (#10447).
+
+    ``/health`` and ``/v1/version`` both call this, so the two public surfaces
+    cannot disagree about the deployed commit — a divergence between them would
+    be a second opinion about identity, and the reader would have no way to pick.
+
+    THE FAILURE THIS CLOSES (#10447). ``/health`` answered ``status: ok`` plus its
+    checks and named NO build, so "is this deployed?" could not be answered from
+    the endpoint every watchdog and every census actually probes: measured
+    against production, the keys were ``status``, ``db``, ``probe``,
+    ``loop_stale_ms``, ``backup_watcher``, ``change_feed``, ``record`` — and a
+    stale build serves every one of them happily. The reading existed on
+    ``/v1/version`` (#2208) but a reader who probed ``/health`` concluded nothing
+    was published, which is the same class as a version that was never published.
+
+    ``commit_sha`` comes from the DEPLOY (``TORTOISE_GIT_SHA``, stamped by
+    ``deploy-hosted.yml`` from ``GITHUB_SHA``) — never from a constant an agent
+    can edit, because a version string a human can change is not a version. When
+    nothing stamped it (selfhost, local dev, a stripped deploy) the field is
+    ``None`` and ``build_identified`` is ``False``: an ABSENCE that says so,
+    which a probe can refuse on, instead of a value that looks current.
+
+    ``stale`` cannot be decided here — it is a comparison against the commit the
+    reader EXPECTS (``check-deploy-staleness.sh`` compares against
+    ``origin/main`` with ``git merge-base --is-ancestor``), and an endpoint that
+    guessed would be exactly the false-PASS this issue is about. What this
+    publishes is the datum that comparison needs, on every surface that answers
+    "is it up".
+    """
+    sha = (os.environ.get("TORTOISE_GIT_SHA") or "").strip() or None
+    dirty = (os.environ.get("TORTOISE_GIT_DIRTY") or "").strip()
+    return {
+        "version": tortoise.__version__,
+        "commit_sha": sha,
+        # AN UNRECOGNISED STAMP IS null, NEVER False (review P2). Coercing it
+        # with `== "1"` reported every other value — including the workflow's
+        # own "unknown" — as `False`, i.e. "the tree was clean, this sha IS the
+        # commit", which is the false PASS this field exists to prevent. The
+        # polarity allow-list is the same rule the fleet's check-run reader
+        # uses: an unnamed value must never fall through a gap.
+        "commit_dirty": {"1": True, "0": False}.get(dirty),
+        "build_identified": sha is not None,
+        "started_at": _PROCESS_STARTED_AT,
+        "migrations_head": _MIGRATIONS_HEAD,
+    }
+
+
 @app.get("/v1/version")
 async def version_info() -> dict:
     """Deployed build surface — clients detect an outdated server (#2208).
@@ -6016,11 +6130,15 @@ async def version_info() -> dict:
     deploy time by deploy-hosted.yml
     (TORTOISE_GIT_SHA=${GITHUB_SHA} staged into the release env). Null when
     no deploy pipeline set it (selfhost / local dev). Never touches the DB.
+
+    #10447: the VALUES come from ``_build_identity()`` — the same resolver
+    ``/health`` now uses — while this endpoint's two contract keys stay exactly
+    as clients already read them. ``/health`` carries the same block under
+    ``build``, so one curl answers "what is running" and the two surfaces cannot
+    drift apart.
     """
-    return {
-        "version": tortoise.__version__,
-        "commit_sha": os.environ.get("TORTOISE_GIT_SHA") or None,
-    }
+    ident = _build_identity()
+    return {"version": ident["version"], "commit_sha": ident["commit_sha"]}
 
 
 # ── Phase 1a: Core Endpoints ──────────────────────────────────────
