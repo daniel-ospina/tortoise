@@ -426,9 +426,9 @@ raw absolute             0.4800    (bar >= 0.80 — FAILS)
 two: the ratio alone reads GREEN here while the narrative arm keeps half the qualifiers the raw
 arm loses. The re-score grades the 2026-10-18 arm receipts against **this** commit's gold (the
 gold is inside `fixtures_hash`); the receipts themselves are older, which is disclosed in the
-row's note. #9738 is the row's blocker and carries the rest: §10's prior measurement was visible
-when the record said none was, and the 25-bound (this instrument) vs 29-marker-sentence (the
-record) populations must be reconciled before either number is called final.
+row's note. #9738 is the row's blocker and carries the rest: `EXTRACTOR-V4-ARCHITECTURE.md` §10's
+prior measurement was visible when the record said none was, and the 25-bound (this instrument) vs
+29-marker-sentence (the record) populations must be reconciled before either number is called final.
 
 ## E1 / E2 — why the two rows are BLOCKED, not RED
 
