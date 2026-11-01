@@ -1,3 +1,15 @@
+---
+title: "#10463 — does telling extraction what already exists reduce what it creates? MEASURED: no"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-11-01
+updated: 2026-11-01
+subjects.team: epistemic-team
+aboutSubjects: extraction prior-injection (S3), write-path corpus, pre-registered two-arm ablation
+aboutObjects: "#10463, #5087, tools/s3_prior_ablation.py, tests/eval/write_path, docs/evidence/7949-capstone/probes/capstone_measure.py"
+---
+
 # #10463 — does telling extraction what already exists reduce what it creates? **MEASURED: no**
 
 The extractor epic's (`#5087`) central hypothesis, measured as a **pre-registered two-arm ablation**
@@ -58,7 +70,9 @@ recovered real content by about 15 % — it is a smaller extraction, not a leane
 arm (identical code, fresh graphs) were available:
 
 * total created nodes: **273** (replay A) vs **284** (replay B) — a **4 %** corpus-level difference;
-* per session the two OFF replays differed by up to **±31 %** (wp07: 39 vs 27; wp02: 39 vs 51).
+* per session, the two OFF replays differed by up to **±31 %** (`wp07`: 39 vs 27; `wp02`: 39 vs 51)
+  — those are the only two sessions whose per-replay counts were written down (see the disclosure
+  below), so read that as *at least* ±31 %, not as the corpus-wide maximum.
 
 The measured treatment effect (13 % at corpus level) sits **above** the corpus-level replication
 band (4 %) but **below** the pre-registered bar (25 %), and not every session moved the same way:
@@ -70,8 +84,15 @@ probe aborted after its OFF arm on a probe defect (the summary loop indexed a st
 an `str`), and its S3 witness was also wrong for the ON arm (see the receipt finding below). It
 produced **no ratio and no verdict** — no bar was compared to any number. Its OFF-arm counts are used
 here for exactly one purpose, as a **noise estimate**, after the defect was fixed and the bars were
-already frozen. Its full output is preserved in the PR description, not in this bundle: one bundle
-carries one measured log.
+already frozen. ⚠️ **What replay A leaves behind, exactly:** its corpus total (**273** created
+nodes — replay B, the measured OFF arm, is **284**) and the two per-session pairs quoted above. Its
+full output was **never captured
+to a file** and is **not preserved anywhere** — not in this bundle, and not in the PR description,
+which carries only those summary figures (an earlier revision of this README said otherwise; it was
+wrong, and the pointer did not resolve). One bundle carries one measured log, so replay A stays
+unscored: the 4 % corpus-level band and the two quoted session swings are checkable against this
+bundle's numbers, and the wider per-session noise distribution is **not reproducible** and is claimed
+nowhere.
 
 ## Instrument findings (for `#5087`, not fixed in this PR)
 
@@ -120,7 +141,19 @@ one *observed* fact **machine-enforced**:
 6. **The source-sha allowlist was `docs/evidence/` + `tools/`**, which made this probe's own
    documented reproduce command REFUSE at this PR's head (the PR also touches `docs/architecture/`
    and `tests/`). It is now `docs/`, `tools/`, `tests/` — production code under `tortoise/` is still
-   refused, and the corpus is guarded by its `fixtures_hash` instead of by path.
+   refused, and the corpus is guarded by its `fixtures_hash` instead of by path. ⚠️ A bare prefix
+   allowlist was too wide in the other direction too: the artifacts that **compute** the reported
+   metrics all live under those prefixes — the census
+   (`docs/evidence/7949-capstone/probes/capstone_measure.py::census` → `created_new_nodes` and
+   `operator_edges`), `tests/eval/write_path/grading.py::macro_survival_counts` → `real_facts`, and
+   `tests/eval/write_path/corpus.py::compute_fixtures_hash` → the corpus guard itself — so they could
+   have differed between the pinned `source_sha` and `HEAD` without a refusal, which is the tuning
+   path the pin exists to close. They are now pinned **explicitly** (`METRIC_ARTIFACT_PREFIXES`): a
+   run whose metric-definition code differs from `source_sha` is **REFUSED**, so the pinned sha is the
+   code that computed the numbers and not merely the code that ran. **No number moves** — the measured
+   run's own changed-file line lists three files
+   (`PRE-REGISTRATION.md`, `preregistration.json`, `tools/s3_prior_ablation.py`) and none of them is a
+   metric artifact, so this run would still be admitted.
 7. **The log did not say which probe revision produced it** — the log's `head=a1075dfc` names the
    commit the bars were read from, not the tool revision; this README now states it (`325f2a1a5`).
 
@@ -152,6 +185,7 @@ uv run python tools/capstone_preregistration_check.py --dir docs/evidence/5087-h
 `tools/s3_prior_ablation.py` reads its bars out of the **pre-registration commit**
 (`git show <sha>:docs/evidence/5087-hypothesis/PRE-REGISTRATION.md`), re-derives the corpus
 `fixtures_hash`, refuses an `--out` that escapes this bundle, and refuses a `source_sha` whose
-non-evidence files differ from `HEAD`. The node census is
+non-production files differ from `HEAD` **or whose metric-definition code differs at all**
+(`METRIC_ARTIFACT_PREFIXES`). The node census is
 `docs/evidence/7949-capstone/probes/capstone_measure.py::census`, imported read-only — there is no
 second census.

@@ -27,7 +27,9 @@ rather than implying the receipt carries a key it does not.
 THE BARS ARE NOT TYPED HERE. They are parsed out of the pre-registration COMMIT
 (``git show <sha>:<prereg>``), so a threshold edited after the numbers are in cannot be served:
 ``--prereg`` names the commit, and the record's ``source_sha`` is asserted to be an ancestor of
-``HEAD`` with no non-evidence file differing between them.
+``HEAD`` with no non-production file differing between them — and, stricter than that, with no
+METRIC-DEFINITION file differing at all (``METRIC_ARTIFACT_PREFIXES``). The prefix allowlist alone
+was too wide: the three artifacts that compute every reported number live under it.
 
 The node census is ``docs/evidence/7949-capstone/probes/capstone_measure.py::census``, imported
 READ-ONLY and reused; this module does not implement a second census (#10463 forbids one).
@@ -132,8 +134,38 @@ def is_evidence_or_tool(path: str) -> bool:
     separately and more strictly: ``corpus_state`` re-derives ``fixtures_hash`` from the tree at run
     time and REFUSES a corpus that moved. A path allowlist cannot express "same corpus" — a hash
     can, and does.
+
+    ⚠️ This allowlist answers "is this production code?". It does NOT answer "is this the code that
+    computed the number?" — see ``METRIC_ARTIFACT_PREFIXES``, which ``assert_source_sha`` applies
+    ON TOP of this one (review r3 P2a).
     """
     return path.startswith(("docs/", "tools/", "tests/"))
+
+
+#: The artifacts that COMPUTE the reported metrics — pinned exactly, not by the allowlist above.
+#:
+#: Every number in the bundle comes out of these three, and all three live under a prefix
+#: ``is_evidence_or_tool`` admits, so a prefix alone let the metric DEFINITION drift between the
+#: pinned ``source_sha`` and ``HEAD`` without a refusal — i.e. the tuning path the pin exists to
+#: close (a re-defined denominator beside an unchanged log reads as an unchanged measurement).
+#: Directories, not files, on purpose: a transitive helper moving beside ``grading.py`` would move
+#: the number just as surely.
+METRIC_ARTIFACT_PREFIXES = (
+    # census -> created_new_nodes (the primary bar) and operator_edges
+    "docs/evidence/7949-capstone/probes/",
+    # grading.macro_survival_counts -> real_facts; corpus.compute_fixtures_hash -> the corpus guard
+    "tests/eval/write_path/",
+)
+
+
+def is_metric_artifact(path: str) -> bool:
+    """True when ``path`` defines how a reported number is computed.
+
+    ``assert_source_sha`` refuses ANY change to these between the pinned ``source_sha`` and ``HEAD``,
+    however harmless the change looks: the pinned sha must be the code that computed the numbers,
+    not merely the code that ran.
+    """
+    return path.startswith(METRIC_ARTIFACT_PREFIXES)
 
 
 def assert_source_sha(source_sha: str, head: str) -> list[str]:
@@ -153,6 +185,12 @@ def assert_source_sha(source_sha: str, head: str) -> list[str]:
         refuse(f"s3-ablation: REFUSED — {len(production)} production file(s) differ between the "
             f"pinned source_sha {source_sha} and HEAD {head}: {production[:5]} — the pinned sha "
             "must be the tree the run executes"
+        )
+    metrics = [path for path in changed if is_metric_artifact(path)]
+    if metrics:
+        refuse(f"s3-ablation: REFUSED — {len(metrics)} metric-definition file(s) differ between "
+            f"the pinned source_sha {source_sha} and HEAD {head}: {metrics[:5]} — the pinned sha "
+            "must be the code that COMPUTED the reported numbers, not only the code that ran"
         )
     return changed
 

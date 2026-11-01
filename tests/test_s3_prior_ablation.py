@@ -11,6 +11,7 @@ keyless in CI, and a test that needed the key would be a test that never runs.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -279,3 +280,84 @@ def test_the_off_stub_never_increments_the_real_call_counter():
     assert body, "off_stub not found — the OFF arm's behaviour moved"
     assert "real_session" not in body.group(0)
     assert 'calls["intercepted"] += 1' in body.group(0)
+
+
+# ── the metric-definition pin (review r3 P2a) ──────────────────────────────
+#
+# The path allowlist answers "is this production code?". It does not answer "is this the code that
+# COMPUTED the number?", and the three artifacts that do are all under an allowed prefix: the census
+# (`created_new_nodes`, `operator_edges`), `grading.macro_survival_counts` (`real_facts`) and
+# `corpus.compute_fixtures_hash` (the corpus guard itself). A prefix allowlist alone lets those
+# differ between the pinned `source_sha` and `HEAD` without a refusal — a re-defined metric beside an
+# unchanged log, which reads as an unchanged measurement.
+
+
+def test_the_code_that_computes_the_numbers_is_pinned_too(probe):
+    """The allowlist admits them; the metric pin must still refuse them."""
+    for rel in (
+        "docs/evidence/7949-capstone/probes/capstone_measure.py",
+        "tests/eval/write_path/grading.py",
+        "tests/eval/write_path/corpus.py",
+    ):
+        assert probe.is_evidence_or_tool(rel), f"{rel}: the allowlist alone would admit this"
+        assert probe.is_metric_artifact(rel), f"{rel}: the metric pin must refuse this"
+    # …and it must not refuse everything: the probe, the log and the docs are not metrics.
+    for rel in (
+        "tools/s3_prior_ablation.py",
+        "docs/evidence/5087-hypothesis/README.md",
+        "docs/evidence/5087-hypothesis/s3-ablation-a1075dfc.log",
+        "tests/test_s3_prior_ablation.py",
+        "tortoise/extractor_v2.py",
+    ):
+        assert not probe.is_metric_artifact(rel), rel
+
+
+def _git(repo, *args):
+    proc = subprocess.run(["git", *args], cwd=str(repo), capture_output=True, text=True,
+                          check=False)
+    assert proc.returncode == 0, f"git {args} failed: {proc.stderr}"
+    return proc.stdout.strip()
+
+
+def test_a_changed_metric_artifact_refuses_the_run(probe, monkeypatch, tmp_path):
+    """Behavioural, not a source poke: a moved metric definition must exit 3 (REFUSED).
+
+    Two temp repos, same shape, one variable: the second commit touches a metric artifact in the
+    first and an ordinary non-production file in the second. The first must refuse — that is the
+    guarantee the README states — and the second must be admitted, so the guard is not refusing
+    everything that is merely under an allowed prefix.
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "probe-test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "probe-test@example.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "probe-test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "probe-test@example.invalid")
+
+    def build(name: str, touched: str) -> tuple[Path, str, str]:
+        repo = tmp_path / name
+        for rel in ("tools", "tests/eval/write_path", "docs/evidence/7949-capstone/probes"):
+            (repo / rel).mkdir(parents=True, exist_ok=True)
+        (repo / "tools/s3_prior_ablation.py").write_text("# probe\n")
+        (repo / "tests/eval/write_path/grading.py").write_text("REAL = 1\n")
+        (repo / "tests/eval/write_path/corpus.py").write_text("HASH = 1\n")
+        (repo / "docs/evidence/7949-capstone/probes/capstone_measure.py").write_text("C = 1\n")
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "baseline")
+        source_sha = _git(repo, "rev-parse", "HEAD")
+        target = repo / touched
+        target.parent.mkdir(parents=True, exist_ok=True)
+        prior = target.read_text() if target.exists() else ""
+        target.write_text(prior + "\n# moved after the pin\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "move one file")
+        return repo, source_sha, _git(repo, "rev-parse", "HEAD")
+
+    metric_repo, source_sha, head = build("metric", "tests/eval/write_path/grading.py")
+    monkeypatch.setattr(probe, "ROOT", metric_repo)
+    with pytest.raises(SystemExit) as refusal:
+        probe.assert_source_sha(source_sha, head)
+    assert refusal.value.code == 3, "a moved metric artifact is an unmeasurable run, never a crash"
+
+    other_repo, source_sha, head = build("other", "tools/another_probe.py")
+    monkeypatch.setattr(probe, "ROOT", other_repo)
+    assert probe.assert_source_sha(source_sha, head) == ["tools/another_probe.py"]
