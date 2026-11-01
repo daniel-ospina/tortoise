@@ -38,9 +38,12 @@ Host routing lives in `website/functions/_middleware.ts`:
   a 400 with a named error page, on BOTH hosts, and **ahead of the company-host consolidation 301s**
   — the one refusal-shaped branch that supersedes the general "consolidate to the canonical host"
   rule, because a `Location` would carry the credential to a second URL. The **exception** is the
-  surface that can actually redeem a code — `/auth`, `/auth/*` (the BFF's `/auth/callback`),
-  `/admin`, and the `APP_ONLY` pages the company host 301s to the app origin — which returns its
-  redirect above the guard
+  surfaces whose redirects are pinned decisions — `/auth`, `/auth/*` (where `/auth/callback` is the
+  one shape that actually redeems a code; its wrong-origin allow-list entry is the OPEN audit
+  #8680), `/admin`, and the `APP_ONLY` pages the company host 301s to the app origin — which **skip**
+  the guard and return their pinned 30x **below** it. The reason is the pinned decision, NOT
+  redemption: only `/auth/callback` exchanges a code, and refusing one on the others would replace a
+  decided redirect with a 400 (the signup funnel, the operator console, a stale bookmark — #4328)
 - **auth surfaces redirect to the app origin — and WHICH layer does it depends on the host:**
   - the middleware's `APP_ONLY` branch (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`),
