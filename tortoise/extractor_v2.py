@@ -4519,23 +4519,43 @@ def _write_span(text: object, cap: int) -> str:
     ``content = "the " * 300 + "p95 hit 4.0 seconds"`` (1219 chars) was REFUSED
     while its stored ``content[:_MAX_CONTENT]`` binds no value at all, so a
     durable memory was withheld over a rewrite in a tail that never reaches the
-    graph. Cutting at a token boundary keeps the straddle protection (an
-    incomplete trailing token is dropped WHOLE, so no value is ever read short)
-    and removes the discarded-tail refusal: what is judged is exactly what the
-    write can keep.
+    graph. This cuts at a token boundary instead, and the SAME span is what the
+    write stores, so the judged pair and the written pair are one string.
 
-    ⛔ Only a SPLIT token is dropped. When the cut lands on a token boundary the
-    span is ``text[:cap]`` unchanged, so ordinary (under-cap) pairs are judged
-    byte-identically to before this helper existed.
+    ⛔ A value can only be read SHORT by losing ALPHANUMERIC characters (review
+    cycle-14 P2, measured): a numeral cut to ``12`` out of ``1200`` is the
+    false-accusation shape. So when the cut splits a token, the token is dropped
+    WHOLE only if the discarded remainder carries an alphanumeric character.
+    When the remainder is PUNCTUATION only (``p95.`` cut to ``p95``) the token is
+    kept: the value is intact, and dropping it would take a judgeable point out
+    of the covered set over a full stop (measured: the committed census loses
+    one — ``wp04_aurora_perf/raw``, a 201-char quote ending ``blew up the p95.``).
+
+    When the cut lands on a token boundary the span is ``text[:cap]`` unchanged,
+    so ordinary (under-cap) pairs are byte-identical to before this helper.
     """
     s = str(text or "")
     if len(s) <= cap:
         return s
     cut = s[:cap]
     if cut and not cut[-1].isspace() and not s[cap].isspace():
-        # the cap landed INSIDE a token: drop that token whole
-        while cut and not cut[-1].isspace():
-            cut = cut[:-1]
+        # the cap landed INSIDE a token: keep it only if what we would lose is
+        # punctuation, i.e. carries nothing a value could be made of
+        rest = s[cap:]
+        while rest and not rest[0].isspace():
+            if rest[0].isalnum():
+                # a real truncation: drop the split token whole
+                while cut and not cut[-1].isspace():
+                    cut = cut[:-1]
+                break
+            rest = rest[1:]
+    if not cut:
+        # ⛔ The text is ONE token longer than the cap (a 250-char run with no
+        # whitespace). Dropping it whole would leave the point with NO quote at
+        # all — the verbatim anchor is the thing a value-bearing point exists to
+        # carry — so fall back to the cap itself, which is the pre-existing
+        # behaviour for this shape (`test_quote_capped_at_200`).
+        return s[:cap]
     return cut
 
 
@@ -8447,7 +8467,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # below DROP the item silently — which reverses that contract and reds
         # the #5060 battery. `_raw_content` exists for the verdict key only.
         _raw_content = str(p.get("content", "")).strip()
-        content = _raw_content[:_MAX_CONTENT]
+        # ⛔ `_write_span`, not `[:_MAX_CONTENT]` (review cycle-14 P2, measured):
+        # a HARD cut stores the truncated prefix of a split token (`… hit 4.`),
+        # which is a value the model never wrote — and it made the judged pair a
+        # DIFFERENT string from the written one, so a split value was stored
+        # unjudged (`content` ending `4.` against a `5.5` quote carries a real
+        # divergence with no warning). Cutting at the token boundary keeps the
+        # stored text free of module-fabricated values and makes the judged pair
+        # and the written pair the same string.
+        # ⚠️ From `_raw_content` (which is `str(...)`, NOT `str(... or "")`):
+        # #5060 made a falsy content WRITABLE as its coerced text (a `None`
+        # content is the claim "None"), and collapsing a falsy value to "" here
+        # would DROP the item silently — reversing that contract. `_raw_content`
+        # also stays the UNCLAMPED key in `refused_value_contents` below.
+        content = _write_span(_raw_content, _MAX_CONTENT)
         if not content:
             # #9906: an empty-content point is dropped whole (pre-existing, and
             # NOT this fix's subject) — but if it carried a ``supersedes`` ref,
@@ -8509,7 +8542,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if len(sents) > 1:
             warnings.append(f"point '{content[:60]}' has {len(sents)} sentences — "
                             "E3 atomicity expects ONE claim per point")
-        quote = str(p.get("quote") or "").strip()[:_MAX_QUOTE]
+        # `_MAX_QUOTE` cut, and STRIPPED before it: the stored quote is
+        # `str(...).strip()[:_MAX_QUOTE]`, so judging an unstripped or
+        # hard-clamped copy shifts the span by the leading whitespace and can drop
+        # a value the STORED quote states (review cycle-14 P2, measured: two
+        # leading spaces moved the cut enough to lose `5.5` from judgment while
+        # the stored pair diverged — always fail-open in that direction).
+        quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)
         # #10360: the carve-out's ENFORCEMENT half. A value-bearing point whose
         # own verbatim quote holds a DIFFERENT value in the same slot is a
         # rewritten value, and writing it puts a non-verbatim value in the
@@ -8521,25 +8560,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # would read as a DIFFERENT value once hard-cut, and refusing a truthful
         # point over this module's own truncation is the false-accusation
         # direction this rule must never take (review P1) — so the cut is
-        # token-safe. Judging the UNCLAMPED pair instead ALSO refused a point
-        # over a divergence in text the write discards (measured: a 1219-char
-        # content whose stored `content[:_MAX_CONTENT]` binds no value at all),
-        # withholding a durable memory over a tail that never reaches the graph
-        # (review cycle-13 P2). What is judged is now exactly what is written.
+        # token-safe, and it judges EXACTLY the two strings the point is built
+        # from (`content` / `quote` above), so a divergence is never read from
+        # text the write discards and never missed in text it keeps.
         # ⛔ And it runs HERE, before `classify_consolidation` and before any
         # supersede record is collected: a refusal that fired later left
         # `supersessions` naming a pid that is never written, which the commit
         # layer then reported as a failed supersede (review P2).
-        # ⛔ The judged text is built from `_raw_content` — the SAME coerced
-        # string the write clamps from — not `str(p.get("content") or "")`. The
-        # `or ""` form is the #5060 trap this loop warns about 80 lines above:
-        # a falsy content (`0`) becomes "", so the judge read an EMPTY string
-        # while `content` below is "0" and the rewritten value was written with
-        # no warning (review P3, measured: `content=0` against a `20 minutes`
-        # quote was written).
-        if _refuse_rewritten_value(_write_span(_raw_content, _MAX_CONTENT),
-                                   _write_span(p.get("quote"), _MAX_QUOTE),
-                                   warnings=warnings):
+        if _refuse_rewritten_value(content, quote, warnings=warnings):
             # ⚠️ BOTH keys are needed, and cycle 5's "only the clamped one"
             # reading was WRONG (cycle 6 measured it): the clamped key matches a
             # ref `_mint_endpoint` truncates, while the unclamped key is what it
@@ -8550,9 +8578,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # re-minted as an endpoint Point from exactly such a shape.
             refused_value_contents.add(_norm(content))
             refused_value_contents.add(_norm(_raw_content))
-            _refused_slots = _value_slots(_raw_content)
-            if _refused_slots:
-                refused_value_slots.add(_refused_slots)
+            # ⛔ TWO slot keys, because the two sides are clamped differently
+            # (review cycle-14 P2, measured): `_mint_endpoint` computes an
+            # endpoint's slots from its CLAMPED text, so a key built only from
+            # the UNCLAMPED refused text never describes the same string — a
+            # refused over-cap point recorded a 4-slot key while every candidate
+            # endpoint produced 2, and a byte-variant endpoint re-minted the
+            # rewritten value. The clamped key is the one the comparison needs;
+            # the raw key stays for the whitespace-collapse shape cycle 6 pinned.
+            for _key_text in (_raw_content, content):
+                _refused_slots = _value_slots(_key_text)
+                if _refused_slots:
+                    refused_value_slots.add(_refused_slots)
             # The point's own `supersedes` ref is dropped WITH the point, and
             # #9906's rule is that none of the drop doors is silent — so the
             # reversal is reported through the same carry helper the other

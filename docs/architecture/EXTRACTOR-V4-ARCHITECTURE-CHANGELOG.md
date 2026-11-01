@@ -1493,10 +1493,13 @@ so a value straddling `_MAX_QUOTE`/`_MAX_CONTENT` is never read short — the fa
 direction. ⛔ Judging the UNCLAMPED pair, which the first revision did, ALSO refused a point over a
 divergence in text the write DISCARDS (review cycle 13: a 1219-char content whose stored
 `content[:_MAX_CONTENT]` binds no value at all was refused, withholding a durable memory over a tail
-that never reaches the graph), and an over-long quote used to FAIL OPEN at the write to save work the
-bounded judge no longer spends — i.e. it recorded the rewritten value the prefix carries. Both are
-corrected above rather than disclosed: what is judged is exactly what is written, and the token cut is
-what keeps the straddle direction closed. The refused point's `supersedes` ref leaves through
+that never reaches the graph). ⛔ And judging one span while the write HARD-cut a different one was
+the mirror hole (review cycle 14: the value split at the cap was STORED as its truncated prefix
+`… hit 4.` with no warning, so the graph held a number the model never wrote). Both are corrected
+rather than disclosed: `_write_span` is now BOTH the cut the judge sees and the cut the point is
+built from, the quote is stripped before that cut, and a split token is dropped whole only when what
+would be lost carries an alphanumeric character (a punctuation-only tail keeps the token, so the
+census does not lose a judgeable point to a full stop). The refused point's `supersedes` ref leaves through
 the shared drop report (`_carry_fold_supersede` with no survivor), so it is named, not lost — `#9906`'s
 no-silent-drop rule. `_mint_endpoint` (`#2552`'s mint-before-wire path) reads the recorded refusals and
 will not re-mint one, because building the endpoint Point from the model's text undid the refusal one

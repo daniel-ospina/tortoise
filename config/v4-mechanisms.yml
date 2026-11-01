@@ -652,11 +652,11 @@ mechanisms:
       23 ms at 10 KB, 227 ms at 100 KB, 2.4 s at 1 MB — so an over-long side is
       REFUSED the work rather than spending it. ⛔ The WRITE PATH no longer
       reaches that arm: it judges `_write_span(...)` at `_MAX_CONTENT`/
-      `_MAX_QUOTE`, so the cost is bounded by construction and an over-long quote
-      cannot buy a fail-open over the prefix the graph actually keeps (review
-      cycle-13 P2 — it used to, and a rewritten value was recorded as verbatim to
-      avoid work the write path no longer spends). The bound remains as the
-      defence for DIRECT callers (pinned by
+      `_MAX_QUOTE` — the same span it STORES — so the cost is bounded by
+      construction AND an over-long side can neither buy a fail-open over the
+      prefix the graph keeps nor be stored with a truncated value (#10513 review
+      cycles 13-14 P2). The bound remains as the defence for DIRECT callers
+      (pinned by
       `test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded`).
       (i) A `k` SUFFIX IS NOT JUDGED AS A UNIT WORD, AND IS NOT SCALED. `k` is
       SI's x1000 prefix (`5k` IS `5000`) and it is also a unit identity in

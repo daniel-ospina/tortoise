@@ -537,13 +537,12 @@ def test_the_residual_is_measured_on_the_committed_census_corpus():
     change to the rule's reach moves this test, and the row cannot cite a
     measurement nothing can reproduce.
 
-    ⚠️ The inputs here are the CLAMPED pair (the caps production truncates the
-    STORED point with), while the write path now judges the UNCLAMPED pair — a
-    deliberate difference, since a value straddling the clamp must not read as a
-    rewrite. Both readings give the same `(62, 0)` on this corpus (asserted
-    below), so the pin is not sensitive to which one it feeds; if they ever
-    diverge, the clamp is cutting a value and the write-path reading is the
-    correct one.
+    ⚠️ The first pair here is the HARD-clamped one (the caps production used to
+    truncate the STORED point with) and the second the UNCLAMPED pair; the third
+    reading — `_write_span`, the token-boundary cut the write now stores AND
+    judges — is pinned below, because it is the shipped one. All three give the
+    same `(62, 0)` on this corpus, which is what makes the numbers in the
+    registry row safe to state once.
     """
     unclamped_judged = unclamped_refused = 0
     for session in SESSIONS:
@@ -595,6 +594,32 @@ def test_the_residual_is_measured_on_the_committed_census_corpus():
     assert (judged, refused) == (62, 0), (judged, refused)
     assert (unclamped_judged, unclamped_refused) == (62, 0), (
         unclamped_judged, unclamped_refused)
+    # ⛔ AND THE READING THE WRITE PATH ACTUALLY USES (review cycle-14 P2): the
+    # three arms above compared a HARD-clamped and an UNCLAMPED pair, and the
+    # shipped judge is neither — it is `_write_span(...)`, the token-boundary cut
+    # the write also STORES. Pinning only the two older readings let the shipped
+    # one drift out of the covered set with every gate green (measured on the
+    # cycle-13 cut: 61 judged / 51 fail open, while this file still asserted 62).
+    span_judged = span_refused = 0
+    for session in SESSIONS:
+        blob = json.loads((RECEIPTS / f"{session}.arms.json").read_text())
+        for arm in ARMS:
+            for point in blob["embed_list"][arm]["points"]:
+                c = v2._write_span(str(point.get("content") or "").strip(),
+                                   v2._MAX_CONTENT)
+                q = v2._write_span(str(point.get("quote") or "").strip(),
+                                   v2._MAX_QUOTE)
+                if not v2._carries_value(c, q):
+                    continue
+                content_slots = v2._value_slots(c)
+                quote_slots = v2._value_slots(q)
+                if (content_slots and quote_slots
+                        and tuple(a for a, _ in content_slots)
+                        == tuple(a for a, _ in quote_slots)):
+                    span_judged += 1
+                if v2._value_slot_divergence(c, q):
+                    span_refused += 1
+    assert (span_judged, span_refused) == (62, 0), (span_judged, span_refused)
 
 
 # ── 6. the two review findings this rule must never repeat ─────────────────
@@ -602,10 +627,10 @@ def test_the_residual_is_measured_on_the_committed_census_corpus():
 def test_a_value_that_straddles_the_quote_clamp_is_not_a_rewrite():
     """Review P1: the module's own truncation must not accuse the model.
 
-    `quote` is clamped to `_MAX_QUOTE` before the point is built, so a value
-    sitting across the cut reads as a SHORTER value ("1200" -> "1"). The rule is
-    therefore fed the UNCLAMPED texts; a truthful point over a long quote is
-    written.
+    The quote is cut to `_MAX_QUOTE` before the point is built, so a HARD cut of
+    a value sitting across it reads as a SHORTER value ("1200" -> "1"). The cut
+    is therefore made at a TOKEN boundary (`_write_span`), which drops the split
+    token whole; a truthful point over a long quote is written.
     """
     # The cut must land INSIDE the digits: "1200" -> "12" with the anchor
     # ("ttl") surviving, so a clamped read is a DIVERGENT read. Putting the
@@ -619,6 +644,52 @@ def test_a_value_that_straddles_the_quote_clamp_is_not_a_rewrite():
     assert not v2._value_slot_divergence(content, quote)
     result = _write(content, quote)
     assert len(result["payload"]["points"]) == 1, result["warnings"]
+
+
+def test_the_judged_pair_IS_the_stored_pair():
+    """Review cycle-14 P2: a judged pair that differs from the stored one is a hole.
+
+    Two measured holes, both closed here and both pinned by the STORED text:
+
+    * the write HARD-cut content/quote while the judge saw a token-cut span, so a
+      value split at the cap was stored as its truncated prefix (`… hit 4.`) and
+      was never judged — the graph then held a value the model never wrote, with
+      no warning;
+    * the judge saw the UNSTRIPPED quote while the write stores the stripped one,
+      so two leading spaces shifted the cut far enough to drop a value the stored
+      quote states (fail-open, always in that direction).
+
+    ⛔ Pinned on `payload`, not on the helper: the defect was which STRING the two
+    halves used, so a helper-only assertion cannot see it.
+    """
+    # (1) the value's token straddles `_MAX_CONTENT`, and the quote states a
+    # DIFFERENT value in the same slot. Whatever is stored must therefore be
+    # judged: either the point is refused, or the stored pair does not diverge.
+    content = "the " * 247 + "a " + "p95 hit 4.0 seconds"
+    quote = "the p95 hit 5.5 seconds"
+    assert len(content) > v2._MAX_CONTENT
+    span = v2._write_span(content, v2._MAX_CONTENT)
+    assert content.startswith(span) and span.endswith(" "), span[-12:]
+    assert not span.rstrip().endswith("4."), span[-12:]
+    result = _write(content, quote)
+    stored = result["payload"]["points"]
+    if stored:  # written ⇒ the STORED pair must not diverge and must not be cut
+        c = stored[0]["content"]
+        q = stored[0].get("quote") or ""
+        assert not v2._value_slot_divergence(c, q), (c, q)
+        assert not c.endswith("4."), c
+    # (2) leading whitespace on the quote must not move the judged span: the
+    # stored quote states 5.5 against a point saying 4.0, so it is refused.
+    quote_padded = "  " + ("the " * 47) + "p95 hit 5.5 seconds"
+    span_stripped = v2._write_span(quote_padded.strip(), v2._MAX_QUOTE)
+    # the padding must actually MOVE the cut, or this pin proves nothing: the
+    # unstripped span loses `5.5` (whose token the shifted cut splits), while the
+    # stripped span — the one the write stores — keeps it
+    assert span_stripped != v2._write_span(quote_padded, v2._MAX_QUOTE)[2:]
+    assert "5.5" in span_stripped, span_stripped[-20:]
+    result = _write("the p95 hit 4.0 seconds", quote_padded)
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim" in w for w in result["warnings"])
 
 
 def test_a_divergence_in_the_text_the_write_DISCARDS_is_not_a_rewrite():
