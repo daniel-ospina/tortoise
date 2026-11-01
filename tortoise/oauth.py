@@ -2772,8 +2772,13 @@ def consent_page_html(*, client_name: str, client_id: str, params: dict,
     # meant to hold it. The injected text is raw JSON, so its own quotes closed
     # that literal early and the whole inline block became a SyntaxError (no
     # PARAMS, no storage adapter, no handlers, an inert Authorize button). Both
-    # vectors are reachable without a crafted link: ``client_name`` is DCR/CIMD
-    # client-controlled and ``state`` is never shape-validated. ``re.sub`` with a
+    # vectors are reachable without a crafted link: ``state`` is copied from the
+    # request and never shape-validated, and ``client_line`` embeds
+    # ``client_id``, whose host is client-supplied for a CIMD client. ⚠️
+    # ``client_name`` is NOT one of them since #8218 — it is overwritten below
+    # with ``identity.display_name``, so the only name reaching the page is the
+    # allowlist-derived one (and an unbacked claim is withheld entirely).
+    # ``re.sub`` with a
     # FUNCTION replacement visits the template exactly once and never rescans
     # what it produced; the function form also keeps re's backslash processing
     # off the replacement text (an escaped value's literal ``\\u003c`` would

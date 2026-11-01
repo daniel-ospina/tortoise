@@ -5792,15 +5792,32 @@ surfaces:
   # attempt-key cross-half pin asleep exactly when the TS constant moves — the failure that
   # makes every mint answer `403 no_authorize_attempt` AFTER the visitor approved.
   - test_oauth_consent_page_step4.py
-  # `test_oauth_consent_client_identity_8218.py` is DUAL-REGISTERED (#8218) for the same
-  # reason: it imports `tests.test_oauth_consent_page_step4` as a `pytest_plugins`
-  # entry and renders through that module's fixtures, so a change to the dashboard tree
-  # step 4 pins (`functions/api/consent/{token,start}.ts`, `_shared/auth/consent-bridge.ts`,
-  # `public/signup.html`) — an `onboarding` SOURCE_PATTERN that does NOT select `api` —
-  # must run the suite that rides on it. The file's OWN reads are all `api` side
-  # (`tortoise/oauth.py`, `hosted_api.py`, `client_identity.py`); this arm covers the
-  # inherited half, exactly as the step-4 entry above it covers step 4's own.
-  - test_oauth_consent_client_identity_8218.py
+  # `test_oauth_consent_client_identity_8218.py` is registered on `api` ONLY,
+  # deliberately, and the distinction matters because its three siblings above
+  # all need an `onboarding` arm.
+  # They need it because THEY read the dashboard tree. This file does not: its
+  # own reads are `tortoise/oauth.py`, `tortoise/hosted_api.py` and
+  # `tortoise/client_identity.py` (all `api`), its node driver and page are
+  # built in a tmpdir from the SERVED response, and it imports
+  # `tests.test_oauth_consent_page_step4` as a `pytest_plugins` entry only to
+  # reuse that module's fixtures.
+  # ⛔ Inheriting a FIXTURE is not inheriting a FILE READ. Verified: step 4 has
+  # no module-level file read (nothing under a `def`/`class` in its AST), and
+  # its `api_client` fixture binds the real `hosted_api` app in-process without
+  # touching `website/`. So an `onboarding` arm here would run this suite on a
+  # `functions/api/consent/*.ts` diff that cannot reach a single assertion it
+  # makes — the drift `tools/ci_selection.py --surface-audit` reports.
+  # (`tortoise/client_identity.py` is a `SOURCE_PATTERNS["api"]` entry — the
+  # half that makes this registration FIRE, pinned by
+  # tests/test_ci_selection.py::test_a_client_identity_only_diff_runs_the_
+  # consent_identity_guards.)
+  #
+  # ⛔ NOT registered on this surface. A previous revision carried the file here
+  # too, on the claim that importing step 4 as a `pytest_plugins` entry inherits
+  # its dashboard-tree reads. It does not — see the verification above — and a
+  # registration whose stated reason is false is worse than no registration: the
+  # next lane copies it as precedent and the `--surface-audit` mode keeps
+  # reporting `onboarding` membership it cannot justify.
   # #3524 task 3: the BEHAVIOURAL guard for the four session-flow properties.
   # It reads `website/apps/dashboard/functions/_shared/auth/{token,consent-flow}.ts`
   # and executes them under Node, so `website/apps/dashboard/functions/` — a
@@ -8205,7 +8222,7 @@ durations:
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 11.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.9
   test_oauth_mcp.py: 14.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.4 — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (9.4s) is a LOWER bound; kept 14.9
-  test_oauth_consent_client_identity_8218.py: 2.0  # new in #8218 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348) — the same shape as the `test_oauth_consent_page_step4.py` row below, whose node-spawning harness this suite reuses. ONE row only: the suite is DUAL-REGISTERED (`api` + `onboarding`), and `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — ordering and per-surface comments belong in `surfaces`. What it covers: 20 cases — the reproduction and the count-based invariant both render the REAL page through `GET /oauth/authorize` and execute its inline script under node (~1-4 s per render, which is why the real reading will land above the default; measured 13.84 s for the whole file on this host 2026-11-01, recorded for the refresher, deliberately NOT used as the weight), plus two AST enumerations over the whole `tortoise/` package (every `oauth_clients` toucher, every `client_name` consumer) that red the suite when a new identity source is written. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
+  test_oauth_consent_client_identity_8218.py: 2.0  # new in #8218 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348) — the same shape as the `test_oauth_consent_page_step4.py` row below, whose node-spawning harness this suite reuses. ONE row only: `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — per-surface reasoning belongs in `surfaces`, and this file is registered on `api` ALONE. What it covers: 20 cases — the reproduction and the count-based invariant both render the REAL page through `GET /oauth/authorize` and execute its inline script under node (~1-4 s per render, which is why the real reading will land above the default; measured 13.84 s for the whole file on this host 2026-11-01, recorded for the refresher, deliberately NOT used as the weight), plus two AST enumerations over the whole `tortoise/` package (every `oauth_clients` toucher, every `client_name` consumer) that red the suite when a new identity source is written. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_oauth_consent_page_step4.py: 2.0  # new in #3524 §9 step 4 (it REPLACES test_oauth_consent_pkce.py, deleted with the inline client it pinned) — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). ONE row only: this suite is DUAL-REGISTERED (`api` + `onboarding`), but `durations` is a single global map keyed by file, so a second row would be a duplicate key a YAML loader silently collapses — ordering and per-surface comments belong in `surfaces`. What it covers: 58 cases — the bounce, the scope the page DISPLAYS being the one the token CARRIES (measured end to end) + return-target recovery, the real allowlist executed under node, the page's inline script executed under node (a dozen-plus cases spawn node, ~1-4 s each, which is why the real reading will land well above the default), the #6001 placeholder set ×8, #3443's four navigation arms plus its guard-removed control, the org preview's two identity arms and the #1701 R1 chooser, and the token-bound AS round trips. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_mcp_server.py: 4.3  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.9
   test_dashboard_client_paths_resolve.py: 9.5  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 3.6
