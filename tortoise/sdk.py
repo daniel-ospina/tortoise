@@ -9370,9 +9370,11 @@ class TortoiseSDK:
                 #
                 # The latch is load-bearing in BOTH directions: the
                 # write-slot and MISCONF arms are retried too and say nothing
-                # about node existence, so they must not ARM the witness
-                # (`update_point(<missing id>)` keeps returning `{}`), and a
-                # later one must not DISARM it either.
+                # about node existence, so they must not ARM the witness (a
+                # target that VANISHED between the guard read and the write
+                # keeps returning `{}` — an id absent at entry never reaches
+                # this code at all, #10119), and a later one must not DISARM
+                # it either.
                 raise _WriteNotLanded(armed_abort)
             return result
 

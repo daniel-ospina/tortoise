@@ -992,14 +992,12 @@ class _TargetVanishesBeforeTheWrite:
     point that existed at that read and was removed (rebuild / replay) before
     the write ran.
 
-    Two other zero-row shapes are NOT this one, and the difference is the
-    outcome: a promote on an ABSENT id matches nothing and RAISES `No point`
-    (``_raise_update_point_status_error``), so it is not benign; and a promote
-    whose node goes LIVE between the #1088 probe and the guarded ``SET``
-    matches nothing and returns the POINT as the #1088 idempotent success
-    (``_promote_witness`` returns True for a status-only promote, and the
-    post-check completes it) — benign, but on the promote arm, and its reply is
-    the point rather than ``{}``.
+    Other zero-row shapes are NOT this one, and the difference is the outcome:
+    on the promote arm a zero-row statement either RAISES (an absent id gets
+    `No point`; a terminal one gets the #432 Illegal-status error) or returns
+    the POINT as the #1088 idempotent success once the node has gone live
+    between the #1088 probe and the guarded ``SET``. None of them returns the
+    empty ``{}`` this arm's vanished-target case does.
 
     Two polarities, and the difference is the whole point:
 
@@ -1148,8 +1146,7 @@ def test_an_absent_id_issues_no_statement_for_the_write(tmp_path):
     This is where the #8854 witness question used to be tested, and it can no
     longer be: the door reads the target's existence from the lifecycle guard
     BEFORE the journal append and BEFORE any write, so an absent id issues NO
-    WRITE statement — ``proxy.matching == 0`` (its only statement is the
-    guard's own read) — and there is no first attempt
+    WRITE statement — ``proxy.matching == 0`` — and there is no first attempt
     to abort and retry. The witness gate itself is now pinned on the shape that
     still issues a statement,
     ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``.
