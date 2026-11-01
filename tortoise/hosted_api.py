@@ -5885,7 +5885,8 @@ async def health():
     counter snapshot, or an unread tenancy resolution degrades ``status``.
 
     Build check (#10447): ``build`` names the build that is SERVING — commit,
-    package version, whether the tree was dirty at build time, process start
+    package version, whether the tree was dirty at build time (`null` until the
+    deploy stamps `TORTOISE_GIT_DIRTY`; see `_build_identity`), process start
     time, and the highest schema migration this image carries. It is the same
     VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
     "is this deployed?" was previously unanswerable from this endpoint: a stale
@@ -6019,6 +6020,14 @@ async def health_security():
 #: #10447: when THIS PROCESS started serving. Constant per process, so a reader
 #: can see a restart (a deploy that landed) without a log grep — and can see that
 #: a build is OLD by comparing it to the deploy it was supposed to pick up.
+#:
+#: `commit_dirty` is published but is NULL on every real deployment today:
+#: nothing stamps `TORTOISE_GIT_DIRTY`. The deploy workflow's propagation block is
+#: pinned by `tests/test_fly_secret_drift.py` (whose harness stubs PATH to
+#: fly/flyctl only) and a new stamp would also need a declaration in
+#: `.github/scripts/fly-managed-secrets.txt` or the drift check blocks every later
+#: deploy — a deploy-surface change, filed separately rather than smuggled in here.
+#: A `null` here is the honest reading; it must not be read as "clean".
 _PROCESS_STARTED_AT: str = datetime.now(UTC).isoformat(timespec="seconds")
 
 
@@ -6122,6 +6131,14 @@ def _build_identity() -> dict:
     """
     sha = (os.environ.get("TORTOISE_GIT_SHA") or "").strip() or None
     dirty = (os.environ.get("TORTOISE_GIT_DIRTY") or "").strip()
+    # `build_identified` is a POLARITY ALLOW-LIST, not `sha is not None` (review
+    # P2). Any non-empty stamp used to claim an identified build — `unknown`,
+    # `main`, `dev`, or a literally unexpanded `${GITHUB_SHA}` — and a reader keyed
+    # on it was told "we know which commit" about a value that cannot be compared
+    # to `origin/main`. A commit is 7-40 lowercase hex; anything else is a stamp we
+    # cannot reason with, and it says so. `commit_sha` stays RAW so `/v1/version`'s
+    # two-key contract carries exactly what the deploy staged.
+    identified = bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
     return {
         "version": tortoise.__version__,
         "commit_sha": sha,
@@ -6132,7 +6149,7 @@ def _build_identity() -> dict:
         # polarity allow-list is the same rule the fleet's check-run reader
         # uses: an unnamed value must never fall through a gap.
         "commit_dirty": {"1": True, "0": False}.get(dirty),
-        "build_identified": sha is not None,
+        "build_identified": identified,
         "started_at": _PROCESS_STARTED_AT,
         "migrations_head": _MIGRATIONS_HEAD,
         # WHICH population `migrations_head` was read from (review P2): the

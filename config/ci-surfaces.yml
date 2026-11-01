@@ -580,6 +580,15 @@ surfaces:
   # through a P0. DB-free (pepper env + a stubbed DB probe, no FalkorDB, no
   # Postgres, no network).
   - test_9548_record_arming_health.py
+  # #10447: `/health` published no build identity, so "is this deployed?" was
+  # unanswerable from the endpoint every watchdog and census probes — a stale
+  # build served `status: ok` and every other block happily. DUAL-REGISTERED
+  # (api + core) for the reason the /health guards above are: the file it pins is
+  # `tortoise/hosted_api.py`, which matches an `api` SOURCE_PATTERN, so an
+  # `api`-only registration in the `core` list would NEVER RUN on the very diff it
+  # exists for (the "guard for X does not run when X changes" class). The `core`
+  # arm covers the `record_projection.py` migration resolver the same pin reads.
+  - test_health_build_identity_10447.py
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match

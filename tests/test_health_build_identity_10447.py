@@ -80,7 +80,14 @@ def _scratch_repo_with_two_commits(tmp_path: Path) -> tuple[str, str]:
 
 @pytest.fixture
 def sha_env(monkeypatch):
-    """Set the deploy-stamped identity the way `deploy-hosted.yml` stages it."""
+    """Set the build identity the way the DEPLOY would.
+
+    `TORTOISE_GIT_SHA` IS staged by `deploy-hosted.yml`
+    (`ARGS+=(TORTOISE_GIT_SHA="${GITHUB_SHA}")`). `TORTOISE_GIT_DIRTY` is NOT
+    staged by anything yet — see the note beside `_PROCESS_STARTED_AT` in
+    `tortoise/hosted_api.py` — so the dirty cases below pin what the payload does
+    with a stamp the deploy HANDS it, not a claim that a stamp exists.
+    """
     def _set(sha: str | None, dirty: str | None = None) -> None:
         if sha is None:
             monkeypatch.delenv("TORTOISE_GIT_SHA", raising=False)
@@ -169,12 +176,34 @@ def test_a_dirty_build_says_so_and_is_not_the_commit_it_names(sha_env):
     assert _health()["build"]["commit_dirty"] is None, "an unnamed value must not read as clean"
 
 
+def test_an_unnamed_commit_stamp_is_not_an_identified_build(sha_env):
+    """`build_identified` is a POLARITY ALLOW-LIST, not `sha is not None`.
+
+    `unknown`, `main`, `dev` and a literally unexpanded `${GITHUB_SHA}` are all
+    non-empty, and a reader keyed on the old rule was told "we know which commit"
+    about a value that cannot be compared to `origin/main`. `commit_sha` stays RAW
+    so the reader can see what the deploy actually staged.
+    """
+    for bad in ("unknown", "main", "dev", "${GITHUB_SHA}", "abc", "XYZ" * 8):
+        sha_env(bad)
+        build = _health()["build"]
+        assert build["build_identified"] is False, (bad, build)
+        assert build["commit_sha"] == bad, "the raw stamp must survive for the reader"
+
+
+def test_a_full_sha_and_a_short_sha_are_both_identified(sha_env):
+    for good in ("a" * 40, "b" * 7, "1234567890abcdef1234567890abcdef12345678"):
+        sha_env(good)
+        assert _health()["build"]["build_identified"] is True, good
+
+
 # ── the migration head: "has step 7 landed in prod", from a curl ─────────────
 
 def test_migrations_head_is_the_highest_migration_the_image_carries(sha_env):
-    """NUMERIC order, not lexicographic: a `seed.sql`/`_seed.sql` sorts AFTER
-    every date-prefixed name and would otherwise be published as the schema head
-    (review P2)."""
+    r"""The REAL-TREE pin: a resolved head exists and is the highest migration the
+    checkout carries. The NUMERIC-ORDERING claim is owned by
+    `test_a_non_migration_sql_file_is_not_the_head` — every real name matches
+    `^(\d+)_`, so this test alone cannot discriminate ordering (review P2)."""
     sha_env("c" * 40)
     numbered = []
     for p in (REPO / "supabase" / "migrations").glob("*.sql"):
