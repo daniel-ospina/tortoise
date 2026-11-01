@@ -1299,7 +1299,17 @@ def test_the_destructive_gate_refuses_a_malformed_census_entry(
     """The mirror, so the two arms cannot disagree about the same artefact:
     one question, asked by both (the rule `_armed_evidence_gap` and
     `_restore_proof_problem` were shared for). `(1)["session"]` was already a
-    named refusal here; a `problems` list of strings was a traceback."""
+    named refusal here; a `problems` list of strings was a traceback.
+
+    ⛔ AND ONE OF THEM WAS WORSE THAN A TRACEBACK. Measured on the pre-fix
+    code, a report whose `anomalies` block is a list returned **no refusal at
+    all** from this arm — "every precondition asserted; the approved set is the
+    live set" — because `classify_sessions` never touches that block and the
+    only reader was `build_plan`'s `.items()`. `anomalies` is the census's own
+    statement of the nodes it could NOT place, so a report that cannot state it
+    is not a census report; the shape gate now refuses it before the digest is
+    even compared.
+    """
     plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
     code, message = _gate(plan, live=_malformed_census(mutate))
     assert code == purge.REFUSE_CENSUS_UNREADABLE, message
