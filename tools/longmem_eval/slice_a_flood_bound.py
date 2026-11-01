@@ -118,6 +118,7 @@ import tortoise.retrieval as retrieval
 from tortoise.retrieval import (
     DEFAULT_CONTEXT_ITEM_CAP,
     DEFAULT_PACKAGE_MAX_VERBATIM,
+    DEFAULT_PACKAGE_SAME_TURN_OVERLAP,
     DEFAULT_PACKAGE_VERBATIM_OVERLAP,
     assemble_context,
     package_evidence_pool,
@@ -246,11 +247,34 @@ _OWN_SOURCE_TURNS = 3
 
 #: The value-critical pairs: same frame, DIFFERENT value. These must never
 #: collapse (`_pkg_differ_value_critical`) and must survive into the window.
+#:
+#: ⛔ The (content, quote) pair must NOT be byte-identical for every statement.
+#: #8945 emits TWO measured quantities because `_same_fact` has two ratio legs
+#: reading DIFFERENT strings — the near-verbatim leg reads normalized CONTENT,
+#: the same-source-turn leg reads the verbatim QUOTE. With `content == quote`
+#: everywhere, both calls at the `value_pairs` site receive the same arguments,
+#: the two numbers are numerically identical by construction, and reverting the
+#: content leg to the quote formula (#8945's defect: labelling a quote ratio as
+#: the content threshold) would leave every assertion — and the receipt —
+#: unchanged. So v3/v4 carry a paraphrase WRAPPER the quote lacks, which is the
+#: real production shape the runbook argues for ("whole-quote similarity carries
+#: provenance text the values do not") and the only thing that can discriminate
+#: the two fields.
 _VALUE_STATEMENTS = (
     ("v1", "the tea set cost 300 dollars", "the tea set cost 300 dollars", "t1"),
     ("v2", "the tea set cost 400 dollars", "the tea set cost 400 dollars", "t2"),
-    ("v3", "the mugs cost 12 dollars each", "the mugs cost 12 dollars each", "t3"),
-    ("v4", "the mugs cost 60 dollars total", "the mugs cost 60 dollars total", "t4"),
+    (
+        "v3",
+        "the mugs cost 12 dollars each, per the user, for the kitchen set",
+        "the mugs cost 12 dollars each",
+        "t3",
+    ),
+    (
+        "v4",
+        "the mugs cost 60 dollars total, per the user, for the kitchen set",
+        "the mugs cost 60 dollars total",
+        "t4",
+    ),
 )
 
 _OTHER_STATEMENTS = (
@@ -526,6 +550,133 @@ def _slot_census(admitted: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _shares_source_turn(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """The same-source-turn leg's PRECONDITION, computed the way the leg does.
+
+    ``_same_fact`` (``tortoise/retrieval.py``) gates that leg on
+    ``_pkg_turn_key`` **presence and equality**:
+
+        at = _pkg_turn_key(a); bt = _pkg_turn_key(b)
+        if not (at and at == bt):
+            return False
+
+    ⛔ Raw ``a.get("source_turn_id") == b.get("source_turn_id")`` is NOT that
+    predicate, and it diverges in two reachable ways (#10508 review, Finding 2):
+
+    * **both absent** — raw ``None == None`` reads "same turn" and, with a quote
+      overlap over the threshold, a receipt would claim the leg is what refuses
+      a merge the product never even consults. This is exactly the state the
+      ``provenance_free_assembly`` arm documents ("its same-turn leg is inert").
+    * **``0`` vs ``"0"``** — raw reads "distinct turns", while the product's
+      ``_pkg_turn_key`` maps the 0-based turn index to a string and the leg is
+      REACHABLE. A false "unreachable" is the #8945 shape one level down: prose
+      from a precondition the leg does not use.
+
+    Shared by the ``value_pairs`` reachability fields and the ``refused_pairs``
+    metadata so the two cannot drift apart.
+    """
+    ta, tb = retrieval._pkg_turn_key(a), retrieval._pkg_turn_key(b)
+    return bool(ta) and ta == tb
+
+
+def _refused_leg(
+    a: str, b: str, hits: tuple[dict[str, Any], dict[str, Any]] | None
+) -> str:
+    """WHICH of ``_same_fact``'s two value-guard call sites refused ``a``/``b``.
+
+    ``_pkg_differ_value_critical`` has two call sites in the product and they
+    receive DIFFERENT KINDS of string (#10508 review round 3, Finding 2):
+
+      * the near-verbatim leg passes the pair's normalized **CONTENT**
+        (``tortoise/retrieval.py``: ``_pkg_differ_value_critical(ca, cb)``);
+      * the same-source-turn leg passes the verbatim **QUOTE** spans
+        (``_pkg_differ_value_critical(qa, qb)``).
+
+    A counter that records only the arguments therefore cannot say which
+    quantity a refusal PUBLISHED — and publishing a content ratio under the
+    key ``quote_overlap`` is #8945 item 2 ("two quantities under one label")
+    one field lower in the same verdict. So the leg is named here, from the
+    strings each site passes, and the two quantities are emitted separately.
+
+    The identity of the refusing site is read off the HITS the product
+    compared (registered by :func:`_probe_value_guard`'s ``_same_fact``
+    wrapper), never guessed from a pool-wide lookup: a quote-keyed pool index
+    cannot resolve a CONTENT argument at all, and where the argument IS a quote
+    every shared-quote hit answers the lookup, so it returns an arbitrary
+    member instead of the hit actually compared.
+
+    ⛔ When the pair's content and its quote are byte-identical (a statement
+    extracted verbatim), BOTH sites would pass these same strings. The
+    product's branch order decides: the content leg RETURNS at its own branch,
+    so the quote leg is only ever reached with a content overlap BELOW the
+    near-verbatim threshold. No case is resolved by a plausible default — an
+    unrecognised pair is a loud error, because a guessed label is exactly the
+    defect this function exists to remove.
+    """
+    if hits is None:
+        raise RuntimeError(
+            "the value guard was called outside `_same_fact`, so which leg "
+            "refused is unknown — the receipt cannot label a ratio it did not "
+            "disambiguate (#8945)"
+        )
+    ha, hb = hits
+    ca = retrieval._pkg_norm(str(ha.get("content") or ""))
+    cb = retrieval._pkg_norm(str(hb.get("content") or ""))
+    qa = str(ha.get("quote") or "")
+    qb = str(hb.get("quote") or "")
+    content_match = (a, b) == (ca, cb)
+    quote_match = bool(qa and qb) and (a, b) == (qa, qb)
+    if content_match and quote_match:
+        below = retrieval._pkg_overlap(ca, cb) < DEFAULT_PACKAGE_VERBATIM_OVERLAP
+        return "quote" if below else "content"
+    if content_match:
+        return "content"
+    if quote_match:
+        return "quote"
+    raise RuntimeError(
+        "the refused pair's arguments match neither the compared hits' "
+        f"normalized CONTENT nor their QUOTE spans (a={a!r}, b={b!r}) — the "
+        "product's guard call sites no longer pass the strings this receipt "
+        "labelled, so the label would be a guess (#10508 review, Finding 2)"
+    )
+
+
+def _refused_pair_record(arm: str, rp: dict[str, Any]) -> dict[str, Any]:
+    """One ``refused_pairs`` record — each quantity measured from ITS strings.
+
+    ``content_overlap`` is the ratio of the CONTENT leg (0.90 near-verbatim);
+    ``quote_overlap`` the ratio of the same-source-turn leg (0.75), and
+    ``leg`` names the one that actually refused. Both are computed from the
+    hits the product compared, which the probe registers, so nothing here has
+    to look a hit up by a string — a quote-keyed lookup cannot resolve a
+    content argument at all and picks an arbitrary member among shared quotes.
+    """
+    ha, hb = rp["hits"]
+    ca = retrieval._pkg_norm(str(ha.get("content") or ""))
+    cb = retrieval._pkg_norm(str(hb.get("content") or ""))
+    qa = str(ha.get("quote") or "")
+    qb = str(hb.get("quote") or "")
+    return {
+        "arm": arm,
+        "a": rp["a"],
+        "b": rp["b"],
+        # WHICH of the two hits the guard compared (ids, not a string lookup)
+        "a_id": ha.get("id"),
+        "b_id": hb.get("id"),
+        # WHICH leg refused, so a content ratio is never published under a
+        # quote label (the surviving #8945 item 2, one field lower).
+        "leg": rp["leg"],
+        # The same predicate the value-pairs block uses, and the one
+        # `_same_fact` gates on (#10508 Finding 2) — not raw equality, and
+        # resolved from the COMPARED hits rather than a quote-keyed index.
+        "same_source_turn": _shares_source_turn(ha, hb),
+        # Each quantity from its own leg's strings, so the label is true of the
+        # number beside it.
+        "content_overlap": round(retrieval._pkg_overlap(ca, cb), 4),
+        "quote_overlap": round(retrieval._pkg_overlap(qa, qb), 4),
+    }
+
+
 @contextmanager
 def _probe_value_guard() -> Iterator[dict[str, Any]]:
     """Count `_pkg_differ_value_critical` calls/refusals for the duration.
@@ -536,30 +687,185 @@ def _probe_value_guard() -> Iterator[dict[str, Any]]:
     receipt asserting it while every gate stayed green. So the counters are
     recorded in the receipt and asserted by the test — the sentence is
     composed FROM them, and a change in the mechanism moves them.
+
+    It also records WHICH LEG refused and the two HITS the product compared
+    (#10508 review round 3, Finding 2). The guard is called with strings, and
+    two different call sites pass two different kinds of string — so the args
+    alone cannot say which quantity a refusal published. ``_same_fact`` is
+    wrapped to register the pair being compared, which is what makes the leg
+    (and the pair's own turn relationship) a fact rather than an inference.
     """
     original = retrieval._pkg_differ_value_critical
+    original_same_fact = retrieval._same_fact
     counts: dict[str, Any] = {"calls": 0, "refusals": 0, "refused_pairs": []}
+    comparing: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    def _registering_same_fact(
+        a: dict[str, Any], b: dict[str, Any]
+    ) -> bool:
+        comparing.append((a, b))
+        try:
+            return original_same_fact(a, b)
+        finally:
+            comparing.pop()
 
     def _counting(a: str, b: str) -> bool:
         counts["calls"] += 1
         out = original(a, b)
         if out:
             counts["refusals"] += 1
-            counts["refused_pairs"].append({"a": a, "b": b})
+            hits = comparing[-1] if comparing else None
+            counts["refused_pairs"].append(
+                {
+                    "a": a,
+                    "b": b,
+                    "hits": hits,
+                    "leg": _refused_leg(a, b, hits),
+                }
+            )
         return out
 
     retrieval._pkg_differ_value_critical = _counting
+    retrieval._same_fact = _registering_same_fact
     try:
         yield counts
     finally:
         retrieval._pkg_differ_value_critical = original
+        retrieval._same_fact = original_same_fact
+
+
+def _value_pairs_sentence(value_pairs: list[dict[str, Any]]) -> str:
+    """The value-safety verdict's leading clause, COMPOSED from the measured
+    pairs (#8945).
+
+    Every number and every comparative word in the result is read from
+    ``value_pairs``, so the receipt cannot state "below the threshold" for a
+    pair whose measured overlap is at or above it — the failure #8945 names,
+    where the generator emitted the clause unconditionally and a run with
+    overlap 0.99 would still have printed "sit below 0.90".
+
+    Two quantities, two thresholds, never one label over both:
+      * ``content_overlap`` vs ``DEFAULT_PACKAGE_VERBATIM_OVERLAP`` — the
+        near-verbatim ratio leg of ``_same_fact``, which reads the hits'
+        normalized CONTENT;
+      * ``quote_overlap`` vs ``DEFAULT_PACKAGE_SAME_TURN_OVERLAP`` — the
+        same-source-turn leg, which reads the verbatim QUOTE spans.
+
+    Exposed at module level so the guard test can feed a FORCED pair whose
+    overlaps sit above a threshold and assert the wording flips.
+    """
+
+    # AN EMPTY MEASUREMENT IS NOT A PASS (#8945, one level down). "Every
+    # content overlap is below the threshold" is a UNIVERSAL, and over zero
+    # pairs it is vacuously true; the sentence would then read as a safety
+    # verdict drawn from a comparison nothing ran — the exact defect this
+    # function exists to remove, re-created one level down. The shape is not
+    # hypothetical: the comparable default CONFLATES it, since dbt's data-test
+    # rule is "zero failing rows → pass" and an empty population therefore
+    # reads as a pass. So an empty population is stated as unmeasured.
+    if not value_pairs:
+        return (
+            "no value pair was measured, so this verdict states nothing about "
+            "either collapse threshold — an empty measurement is not a safety "
+            "result."
+        )
+
+    def _comparator(below: bool) -> str:
+        return "<" if below else ">="
+
+    def _pair_clause(p: dict[str, Any]) -> str:
+        return (
+            f"{p['values']} (content overlap {p['content_overlap']:.2f} "
+            f"{_comparator(p['content_below_threshold'])} the "
+            f"{DEFAULT_PACKAGE_VERBATIM_OVERLAP:.2f} near-verbatim threshold; "
+            f"quote overlap {p['quote_overlap']:.2f} "
+            f"{_comparator(p['quote_below_threshold'])} the "
+            f"{DEFAULT_PACKAGE_SAME_TURN_OVERLAP:.2f} same-turn threshold; "
+            f"turns {p['turns'][0]}/{p['turns'][1]}"
+            + (" — SAME TURN" if p["same_source_turn"] else "")
+            + ")"
+        )
+
+    # REACHABILITY, not threshold position alone: a leg merges a pair only if
+    # its ratio passes AND its own precondition holds. The near-verbatim leg
+    # reads content and has no turn precondition; the same-turn leg additionally
+    # requires a shared ``source_turn_id``, so a quote overlap over its
+    # threshold on DISTINCT turns is a number that merges nothing. Asserting
+    # "a leg can bite" from the ratio alone would repeat #8945's error one
+    # level down — a comparison that runs, against a precondition nothing
+    # checked.
+    #
+    # The precondition is READ from ``same_source_turn``, which ``measure()``
+    # computes with the product's own ``_pkg_turn_key`` presence test (#10508
+    # Finding 2). It is not re-derived from ``turns`` here: absent-vs-absent is
+    # not a shared turn (the product leg is inert), and re-deriving it is how
+    # this file would grow a second, divergent definition of the leg.
+    reached = [
+        p
+        for p in value_pairs
+        if p["content_leg_reachable"] or p["same_turn_leg_reachable"]
+    ]
+    out = "the " + " and ".join(_pair_clause(p) for p in value_pairs) + " pairs "
+    if reached:
+        out += (
+            "do not clear both collapse legs — "
+            + " and ".join(p["values"] for p in reached)
+            + " reaches at least one leg's ratio on a pair its precondition "
+            "allows, so the guard leg below is what refuses that merge"
+        )
+    else:
+        out += (
+            "clear both collapse legs on their own terms: every content overlap "
+            "is below the near-verbatim threshold"
+        )
+        # COUNT the above-threshold quote pairs; never claim "the only" from an
+        # ``any()``. With two such pairs the singular sentence was false on a
+        # measured fact — a count asserted from a boolean, which is #8945's
+        # shape again (prose outrunning the measurement).
+        above_turn = [p for p in value_pairs if not p["quote_below_threshold"]]
+        if not above_turn:
+            out += " and every quote overlap is below the same-turn threshold"
+        elif len(above_turn) == 1:
+            out += (
+                ", and the only quote overlap at or above the same-turn "
+                "threshold belongs to a pair on DISTINCT turns, where that leg "
+                "is unreachable"
+            )
+        else:
+            out += (
+                ", and every quote overlap at or above the same-turn threshold "
+                "belongs to a pair on DISTINCT turns, where that leg is "
+                "unreachable"
+            )
+        out += ", so no value pair is a collapse candidate on its own account"
+
+    if all(p["distinct_turns"] for p in value_pairs):
+        out += ", and every pair carries distinct turns"
+    else:
+        same = [p["values"] for p in value_pairs if not p["distinct_turns"]]
+        out += (
+            ". "
+            + " and ".join(same)
+            + (
+                " sits on a single turn, so THAT pair is a same-turn candidate "
+                "and the guard leg below is what this arm exercises"
+                if len(same) == 1
+                else " sit on a single turn, so THOSE pairs are same-turn "
+                "candidates and the guard leg below is what this arm exercises"
+            )
+        )
+    return out + "."
 
 
 def measure() -> dict[str, Any]:
     """Run the three primary arms + two variant arms + the duplicate-free
-    control over the C2-shaped pool. The provenance-free pool is recorded as
+    controls over the C2-shaped pool. The provenance-free pool is recorded as
     the ``provenance_free_assembly`` ARM — it measures a scope limit, not a
-    no-regression control — so ``controls`` holds exactly one entry."""
+    no-regression control. ``controls`` holds the two no-regression legs:
+    ``no_dupe_no_regression`` (a single-tier pool, which must come back
+    byte-identical) and ``no_dupe_tier_boundary`` (a pool ranking a raw chunk
+    above a statement, which under D3 is REGROUPED by design — so it is
+    asserted against the tier key, not against byte-identity; #9114)."""
     pool, pool_census = build_c2_pool()
 
     with _pre_2978_predicate():
@@ -599,19 +905,13 @@ def measure() -> dict[str, Any]:
         question_date=QUESTION_DATE,
     )
 
-    # The control — the only entry under ``controls`` — is the OFF-parity /
-    # no-regression leg: a duplicate-free, provenance-bearing pool must come
-    # back BYTE-IDENTICAL (same ids, same order) from the arm, so flipping it
-    # ON cannot regress a single-evidence question.
+    # The no-regression controls. There are TWO, because one pool cannot
+    # exercise both clauses (#9114).
     #
-    # ⚠️ SCOPE LIMIT (D3 #9092): this pool is built from ``_point`` only, so
-    # every hit is a STATEMENT and ``ids_identical`` is trivially true — the
-    # control cannot observe the hit-type REGROUP (which under D3 reorders a
-    # pool that ranks a raw chunk above a statement, by design). It therefore
-    # measures "statement-only pools are untouched", not the tier-scoped
-    # no-regression clause. Widening it needs a chunk ranked ABOVE a
-    # statement, which turns ``ids_identical`` False by design and requires
-    # re-cutting the frozen receipt — tracked in #9114.
+    # (a) ``no_dupe_no_regression`` — a duplicate-free, provenance-bearing,
+    #     SINGLE-TIER pool (every hit a statement) must come back
+    #     BYTE-IDENTICAL (same ids, same order) from the arm, so flipping it
+    #     ON cannot regress a single-evidence question.
     clean = [
         _point(
             f"c{i}",
@@ -625,6 +925,51 @@ def measure() -> dict[str, Any]:
         for i, (_pid, content, _s) in enumerate(_OTHER_STATEMENTS)
     ]
     clean_packaged, clean_stats = package_evidence_pool(clean)
+
+    # (b) ``no_dupe_tier_boundary`` — the same duplicate-free pool with a raw
+    #     CHUNK ranked ABOVE the statements. Under D3 (#9092) the ordering key
+    #     is (hit-type tier, value-mark tiebreak, pool rank), and a chunk is
+    #     tier 2 against the statements' tier 0 — so this pool IS reordered,
+    #     BY DESIGN. Blanket byte-identity is therefore the wrong assertion
+    #     here (it would pass only by the sort key being absent), and the
+    #     single-tier control above cannot observe the boundary at all because
+    #     every hit shares one tier. The tier-scoped pair below is the
+    #     assertion that CAN fail: delete ``_package_type_tier`` from the sort
+    #     key and ``tier_regroup_matches_key`` goes False.
+    clean_mixed = [
+        _chunk(
+            "mc0",
+            ["user: the rent is due on the first of the month"],
+            session="s10",
+            index=0,
+            fact=FACT_OTHER,
+        ),
+        *clean,
+    ]
+    clean_mixed_packaged, clean_mixed_stats = package_evidence_pool(clean_mixed)
+    _mixed_pool_ids = [h["id"] for h in clean_mixed]
+    _mixed_pkg_ids = [h["id"] for h in clean_mixed_packaged]
+    _mixed_pool_tiers = [retrieval._package_type_tier(h) for h in clean_mixed]
+    _mixed_pkg_tiers = [retrieval._package_type_tier(h) for h in clean_mixed_packaged]
+    # The projection the ordering key requires: a STABLE sort of the pool by
+    # hit-type tier alone (no value marks on this pool, and pool rank is the
+    # pool's own order, so tier is the only key that can move anything).
+    _tier_key_order = [
+        h["id"]
+        for _tier, h in sorted(
+            zip(_mixed_pool_tiers, clean_mixed, strict=True), key=lambda p: p[0]
+        )
+    ]
+
+    def _ids_by_tier(ids: list[str], tiers: list[int]) -> dict[int, list[str]]:
+        out: dict[int, list[str]] = {}
+        for i, t in zip(ids, tiers, strict=True):
+            out.setdefault(t, []).append(i)
+        return out
+
+    _within_tier_preserved = _ids_by_tier(
+        _mixed_pool_ids, _mixed_pool_tiers
+    ) == _ids_by_tier(_mixed_pkg_ids, _mixed_pkg_tiers)
 
     # The provenance-free pool (the PRE-#8658 product ask-lane shape, and the
     # shape a DEGRADED fallback read still has) —
@@ -667,25 +1012,67 @@ def measure() -> dict[str, Any]:
 
     disabling_guard_changes_output = _proj(assembly_unguarded) != _proj(assembly)
 
-    # The value PAIRS the verdict's leading clause talks about, measured: the
-    # overlap that decides whether the collapse threshold can even bite, and the
-    # turns (a pair on the same turn is a same-turn candidate; these are not).
+    # The value PAIRS the verdict's leading clause talks about — measured with
+    # the quantity EACH threshold actually governs (#8945). `_same_fact` has
+    # two ratio legs and they read DIFFERENT strings:
+    #   * the near-verbatim leg compares the hits' normalized CONTENT against
+    #     DEFAULT_PACKAGE_VERBATIM_OVERLAP (0.90);
+    #   * the same-source-turn leg compares the verbatim QUOTE spans against
+    #     DEFAULT_PACKAGE_SAME_TURN_OVERLAP (0.75).
+    # Reporting one number labelled as "the threshold" stated a comparison
+    # nothing performed, and labelled a quote ratio as the content threshold.
+    # So both are emitted, each beside its OWN threshold, and `below_threshold`
+    # is a COMPUTED fact rather than prose the generator always emits.
     _by_id = {h.get("id"): h for h in pool}
     value_pairs = []
     for a, b in (("v1", "v2"), ("v3", "v4")):
-        qa = str(_by_id.get(a, {}).get("quote") or "")
-        qb = str(_by_id.get(b, {}).get("quote") or "")
-        ta = _by_id.get(a, {}).get("source_turn_id")
-        tb = _by_id.get(b, {}).get("source_turn_id")
+        ha, hb = _by_id.get(a, {}), _by_id.get(b, {})
+        qa = str(ha.get("quote") or "")
+        qb = str(hb.get("quote") or "")
+        ca = str(ha.get("content") or "")
+        cb = str(hb.get("content") or "")
+        # The leg's OWN precondition, by the leg's own predicate (#10508
+        # Finding 2): `_pkg_turn_key` presence+equality, never raw equality on
+        # the raw field. Two hits with no `source_turn_id` at all share NO turn
+        # — the leg is inert — and `0` vs `"0"` is the SAME turn.
+        same_source_turn = _shares_source_turn(ha, hb)
+        ta = retrieval._pkg_turn_key(ha)
+        tb = retrieval._pkg_turn_key(hb)
         _num = lambda q: next((t for t in q.replace("/", " ").split() if t.isdigit()), "?")  # noqa: E731
+        content_overlap = round(retrieval._pkg_overlap(ca, cb), 4)
+        quote_overlap = round(retrieval._pkg_overlap(qa, qb), 4)
         value_pairs.append(
             {
                 "a": a,
                 "b": b,
                 "values": f"{_num(qa)}/{_num(qb)}",
-                "overlap": round(retrieval._pkg_overlap(qa, qb), 4),
+                # the near-verbatim leg's own quantity, vs its own threshold
+                "content_overlap": content_overlap,
+                "content_below_threshold": (
+                    content_overlap < DEFAULT_PACKAGE_VERBATIM_OVERLAP
+                ),
+                # could the near-verbatim leg merge this pair, absent the guard?
+                "content_leg_reachable": (
+                    content_overlap >= DEFAULT_PACKAGE_VERBATIM_OVERLAP
+                ),
+                # the same-source-turn leg's own quantity, vs its own threshold
+                "quote_overlap": quote_overlap,
+                "quote_below_threshold": (
+                    quote_overlap < DEFAULT_PACKAGE_SAME_TURN_OVERLAP
+                ),
+                # …and its OWN precondition: that leg is only reachable when the
+                # pair actually shares a source turn, so a quote overlap over
+                # the threshold on DISTINCT turns merges nothing.
+                "same_turn_leg_reachable": (
+                    quote_overlap >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
+                    and same_source_turn
+                ),
                 "turns": [ta, tb],
-                "distinct_turns": ta != tb,
+                # The leg's precondition, stated rather than inferred from
+                # `turns`: absent-vs-absent is NOT "same turn" (the product leg
+                # is inert), so `distinct_turns` is its negation, not `ta != tb`.
+                "same_source_turn": same_source_turn,
+                "distinct_turns": not same_source_turn,
             }
         )
 
@@ -701,7 +1088,6 @@ def measure() -> dict[str, Any]:
     }
     total_calls = sum(guard_calls.values())
     total_refusals = sum(guard_refusals.values())
-    _pool_by_quote = {h.get("quote"): h for h in pool if h.get("quote")}
     refused_pairs = []
     for arm_name, g in (
         ("post_2978_assembly", assembly_guard),
@@ -709,24 +1095,7 @@ def measure() -> dict[str, Any]:
         ("provenance_free_assembly", bare_guard),
     ):
         for rp in g["refused_pairs"]:
-            ha, hb = _pool_by_quote.get(rp["a"]), _pool_by_quote.get(rp["b"])
-            refused_pairs.append(
-                {
-                    "arm": arm_name,
-                    "a": rp["a"],
-                    "b": rp["b"],
-                    "same_source_turn": (
-                        ha.get("source_turn_id") == hb.get("source_turn_id")
-                        if ha and hb
-                        else None
-                    ),
-                    "quote_overlap": (
-                        round(retrieval._pkg_overlap(rp["a"], rp["b"]), 4)
-                        if hasattr(retrieval, "_pkg_overlap")
-                        else None
-                    ),
-                }
-            )
+            refused_pairs.append(_refused_pair_record(arm_name, rp))
 
     receipt: dict[str, Any] = {
         "issue": 8043,
@@ -804,6 +1173,39 @@ def measure() -> dict[str, Any]:
                 "package_items": len(clean_packaged),
                 "collapsed_duplicates": clean_stats["collapsed_duplicates"],
                 "ids_identical": [h["id"] for h in clean_packaged] == [h["id"] for h in clean],
+                "scope": (
+                    "SINGLE-TIER pool (statements only) — byte-identity is the "
+                    "right assertion HERE, and it cannot observe the D3 tier "
+                    "regroup (see no_dupe_tier_boundary)"
+                ),
+            },
+            "no_dupe_tier_boundary": {
+                "pool_items": len(clean_mixed),
+                "package_items": len(clean_mixed_packaged),
+                "collapsed_duplicates": clean_mixed_stats["collapsed_duplicates"],
+                "shape": "a raw chunk ranked ABOVE the statements, no duplicates",
+                "pool_order": _mixed_pool_ids,
+                "package_order": _mixed_pkg_ids,
+                "pool_tiers": _mixed_pool_tiers,
+                "package_tiers": _mixed_pkg_tiers,
+                "ids_identical": _mixed_pool_ids == _mixed_pkg_ids,
+                "tier_key_order": _tier_key_order,
+                "tier_regroup_matches_key": _mixed_pkg_ids == _tier_key_order,
+                "ids_identical_within_tier": _within_tier_preserved,
+                "why": (
+                    "the chunk starts at pool rank 0 and is packaged BEHIND every "
+                    "statement (tier "
+                    f"{retrieval._package_type_tier(clean_mixed[0])} vs "
+                    f"{retrieval._package_type_tier(clean[0])}), so ids_identical "
+                    "is FALSE by design and blanket byte-identity would assert "
+                    "the wrong clause. The two tier-scoped assertions are what "
+                    "this pool can actually falsify: tier_regroup_matches_key "
+                    "fails if _package_type_tier leaves the sort key, and "
+                    "ids_identical_within_tier fails if the regroup also disturbs "
+                    "the peers it is not allowed to touch. Hermetic pin of the "
+                    "same clause: tests/test_evidence_assembly.py::"
+                    "test_unmarked_mixed_type_pool_regroups_by_hit_type"
+                ),
             },
         },
         "verdicts": {},
@@ -865,38 +1267,10 @@ def measure() -> dict[str, Any]:
             "refused_pairs": refused_pairs,
             "value_pairs": value_pairs,
             "collapse_threshold": DEFAULT_PACKAGE_VERBATIM_OVERLAP,
+            "same_turn_threshold": DEFAULT_PACKAGE_SAME_TURN_OVERLAP,
             "why": (
-                "the "
-                + " and ".join(
-                    f"{p['values']} (normalised overlap {p['overlap']:.2f}, "
-                    f"turns {p['turns'][0]}/{p['turns'][1]}"
-                    + ("" if p["distinct_turns"] else " — SAME TURN")
-                    + ")"
-                    for p in value_pairs
-                )
-                + f" pairs sit below the {DEFAULT_PACKAGE_VERBATIM_OVERLAP:.2f} "
-                "collapse threshold and "
-                + (
-                    "carry distinct turns"
-                    if all(p["distinct_turns"] for p in value_pairs)
-                    else "are NOT all on distinct turns"
-                )
-                + (
-                    ", so no value pair is a collapse candidate on its own account"
-                    if all(p["distinct_turns"] for p in value_pairs)
-                    else ". "
-                    + " and ".join(
-                        p["values"] for p in value_pairs if not p["distinct_turns"]
-                    )
-                    + (
-                        " sits on a single turn, so THAT pair is a same-turn "
-                        "candidate and the guard leg below is what this arm exercises"
-                        if sum(1 for p in value_pairs if not p["distinct_turns"]) == 1
-                        else " sit on a single turn, so THOSE pairs are same-turn "
-                        "candidates and the guard leg below is what this arm exercises"
-                    )
-                )
-                + f". The guard is still consulted — {total_calls} calls "
+                _value_pairs_sentence(value_pairs)
+                + f" The guard is still consulted — {total_calls} calls "
                 "across the three packaging arms ("
                 + ", ".join(f"{k}={v}" for k, v in guard_calls.items())
                 + f"), {total_refusals} of them refusals ("
