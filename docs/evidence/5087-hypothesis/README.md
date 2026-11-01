@@ -293,13 +293,18 @@ mid-way still leaves the sessions it already measured on disk — the gap that l
 `RATIO:`/`VERDICT:`, even under `--overwrite`), and refuses a `source_sha` whose
 non-production files differ from `HEAD` **or whose metric-definition code differs at all**
 (`METRIC_ARTIFACT_PREFIXES`). It also refuses a **dirty working copy** over the trees that can move a
-number (`assert_clean_tree`), and logs `tree=` (`git describe --dirty`) and `probe_sha256=` so a run
-names both the commit and the bytes it executed. **The refusals that precede the log's creation**
+number (`assert_clean_tree`), and an **arm whose graph is not fresh** — every count in the baseline
+census must be 0, the pre-registration's §0 "FRESH disposable graph", which was a premise no code
+checked until it became this refusal — and logs `tree=` (`git describe --dirty`) and `probe_sha256=`
+so a run names both the commit and the bytes it executed. **The refusals that precede the log's
+creation**
 — an `--out` that escapes this bundle or already carries a `RATIO:`/`VERDICT:`, an unreadable
 `--prereg`, a malformed pins block, a document↔record digest mismatch, a moved production or
 metric-definition file, a dirty tree, a corpus-hash drift, and the two prerequisites — leave **no
-file** behind. **Three refusals are raised AFTER the log exists**, because they can only be known
-once the arms have run: a fixture carrying no conversation, two arms of unequal length, and an
+file** behind. **Four refusals are raised AFTER the log exists**, because they can only be known once
+the run has begun: an **arm graph that is not fresh** (a non-zero baseline census, refused *before*
+the first session is captured — a reused `--graph-prefix` would otherwise score the E2a guard over a
+previous run's Points), a fixture carrying no conversation, two arms of unequal length, and an
 `--arm-order` naming a single arm. Those exit 3 **leaving the sessions already measured on disk**
 — which is the incremental writer doing its job, not a lost run — and because such a log carries no
 `RATIO:`/`VERDICT:`, `--overwrite` replaces it. The document is cross-checked against
