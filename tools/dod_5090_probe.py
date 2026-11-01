@@ -77,9 +77,11 @@ Usage::
         --uri docker://:pw@localhost:6379/<graph> --graph <graph>
 
 Exit status: `0` when the instrument ran (whatever the verdicts — a red row is a
-successful measurement), `2` when the instrument itself could not measure
-(a missing gate module, an unreadable graph). Never a verdict-derived code: a
-caller must not be able to read `NOT MET` as "the tool failed".
+successful measurement), `2` when the instrument itself could not measure:
+a gate module it scores will not import, a `--census` URI whose engine has no
+index API, or a census whose catalogue read came back `UNMEASURED`. Never a
+verdict-derived code: a caller must not be able to read `NOT MET` as "the tool
+failed".
 """
 
 from __future__ import annotations
@@ -1023,11 +1025,18 @@ def _connect(uri: str):
 
     u = urlparse(uri)
     if u.scheme in ("", "file") or not u.hostname:
-        raise SystemExit(
+        # Exit 2 = "the instrument could not measure" (the docstring's
+        # contract). ⛔ A NON-INT SystemExit argument exits **1**, so the message
+        # is printed and the code passed explicitly — passing the string made
+        # the documented `2` a contract the code never implemented, and a
+        # caller could not tell "could not measure" from "a row is NOT MET".
+        print(
             "census: an embedded/absent engine has no index API — pass a "
             "docker:// or bolt:// URI (embedded would report indexed=False for "
-            "every label, which is NOT the same fact)"
+            "every label, which is NOT the same fact)",
+            file=sys.stderr,
         )
+        raise SystemExit(2)
     from falkordb import FalkorDB
 
     db = FalkorDB(host=u.hostname, port=u.port or 6379, password=u.password or "")
@@ -1110,7 +1119,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="the graph NAME to census (default $TORTOISE_GRAPH_NAME)")
     args = ap.parse_args(argv)
 
-    report = measure()
+    try:
+        report = measure()
+    except ImportError as e:
+        # The other route to the documented `2`: a gate module the instrument
+        # SCORES that will not import. Without this the traceback exits 1, which
+        # is indistinguishable from a verdict failure.
+        print(f"could not measure: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
     unmeasured = False
     if args.census:
         if not args.uri:

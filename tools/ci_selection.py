@@ -1399,6 +1399,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # core pool is the lowest-cost leg it can run in. Pinned by
              # tests/test_ci_selection.py::test_batch_review_tool_change_selects_core_not_tier1.
              "tools/batch_review.py",
+             # #10465 review P1: tools/dod_5090_probe.py owns
+             # tests/test_dod_5090_probe.py (registered `core` + `eval`), but
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry and NO SOURCE_PATTERNS
+             # row matches the instrument — so a probe-only change filtered to
+             # `changed == []`, took the docs-only early return and ran 70
+             # unrelated files. Measured before this entry:
+             # `select(["tools/dod_5090_probe.py"])` -> surfaces=[], full=False,
+             # 70 files, test_dod_5090_probe.py ABSENT. That matters more than the
+             # usual silent drop: the instrument's whole deliverable is a count a
+             # reader QUOTES into an epic body, so the diff that hard-wires
+             # `count_embed_predicates` to 1 (turning the falsifier into
+             # machinery) would merge with every pin that catches it green-by-
+             # omission. Same #1349/#3332/#3616/#4309 class as the entries
+             # around it. Pinned by
+             # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
+             "tools/dod_5090_probe.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches

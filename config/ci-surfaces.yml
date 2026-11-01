@@ -618,6 +618,15 @@ surfaces:
   # run no guard for the field it emits. The `core` arm (below) is the primary
   # one — it pins tortoise/residency.py (no SOURCE_PATTERN) and tortoise/sdk.py.
   - test_residency_marker.py
+  # #8447: the TRUNCATION marker — the `truncated` / `total_available` fields
+  # on the shipped GET /v1/search response (a limit-capped read says so, and an
+  # exact total is published only when it is exact). Registered here for the
+  # same reason as the two rows above: the route that serves the fields lives
+  # in tortoise/hosted_api.py, an EXACT `api` SOURCE_PATTERN match, so without
+  # this arm a hosted_api.py-only change would run no guard for the fields it
+  # emits. The `core` arm (below) is the primary one — it pins
+  # tortoise/truncation.py (no SOURCE_PATTERN) and tortoise/sdk.py.
+  - test_8447_truncation_marker.py
   - test_hosted_aboutobject_journal_4240.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous
   # FalkorDB I/O on the event loop. Same dual registration as the three guards
@@ -1889,6 +1898,19 @@ surfaces:
   - test_9572_discriminator_not_clobbered.py
   - test_9555_session_narrative.py
   - test_9287_invisible_kind_write_door.py
+  # #10465 (review P1): the read-only instrument that scores `#5090`'s four DoD
+  # bullets, and its falsifiers. `core` is where its subjects live —
+  # `tortoise/embed_gate.py`, `tortoise/value_gate.py` and
+  # `tortoise/search_engine.py` all select `core`, so the §12.2a predicate counts,
+  # the drift-red path and the three-mechanism probe run on the diffs that could
+  # break them. ⚠️ NOT the whole fix on its own: `tortoise/embeddings.py` (the
+  # `encode_for_row` seam) selects `eval`, and a named-surface match REPLACES the
+  # `core` fallback (#2938) — so the file is DUAL-REGISTERED in `eval` below, and
+  # `tools/dod_5090_probe.py` itself is a `CORE_ALSO` entry in
+  # `tools/ci_selection.py` (a `tools/`-only diff is swallowed by
+  # NON_PYTHON_PREFIXES before the `core` fallback runs). Pinned by
+  # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
+  - test_dod_5090_probe.py
   # #9964: the kind↔layer partition — `tortoise/kind_layers.py` is the ONE
   # authority (a new module: no SOURCE_PATTERNS entry, so a diff touching only it
   # falls through to `core`), `tortoise/sdk.py` is a SHARED_MODULE (full matrix,
@@ -4925,6 +4947,16 @@ surfaces:
   # DUAL-REGISTERED with `api` (above) for the hosted /v1/search field.
   - test_residency_marker.py
   - test_reconciliation.py
+  # #8447: the TRUNCATION marker's ONE home. `core` is the primary arm:
+  # neither tortoise/truncation.py nor tortoise/sdk.py's marker seam matches an
+  # `api` SOURCE_PATTERN, so a change to `truncation.py` alone falls through to
+  # `core`. What it pins is the CONTRACT the marker turns on — a cut read is
+  # marked and a complete one is positively marked complete, a total is
+  # published only when it is exact, and an absent verdict is a refusal, never
+  # a defaulted `False` (that default IS the silent-subset bug). The fields' own
+  # surface is DUAL-REGISTERED with `api` (above) for the hosted /v1/search
+  # response.
+  - test_8447_truncation_marker.py
   # #9189 (§17.2): the reconciler's PRODUCTION TRIGGER. `tortoise/reconciliation.py`
   # had a comparison and no production caller (measured at `f96a18da1` and
   # re-derived for #9189), so "continuous reconciliation" had a mechanism and no
@@ -6587,6 +6619,15 @@ surfaces:
   - test_vocab_gating_callers_5163.py
   - test_kind_eval_set.py
   eval:
+  # #10465 (review P1): the `eval` arm of the #5090 DoD instrument. Its §12.2a
+  # predicate pin and its `encode_for_row` seam enumeration guard
+  # `tortoise/embeddings.py`, which selects `eval` — and a named-surface match
+  # REPLACES the `core` fallback (#2938/#7951 idiom, stated at the two entries
+  # below), so the `core` arm above does NOT cover an `embeddings.py`-only diff.
+  # Without this entry the pins this PR exists to install never run on the seam
+  # they guard. Pinned by
+  # tests/test_dod_5090_probe.py::test_the_instrument_is_selected_by_its_own_subjects.
+  - test_dod_5090_probe.py
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
   # `tortoise/**`, and `tortoise/cross_lens.py` / `embeddings.py` select `eval`,
@@ -7756,6 +7797,7 @@ durations_captured_at: "2026-10-26T04:45:51Z"
 durations_held_equal:
   test_mcp_rename_table.py: test_bridge_table.py
 durations:
+  test_dod_5090_probe.py: 2.0  # new in #10465 (review P1) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input. The row must EXIST, not merely default: the `core` + `eval` registrations put one more file in `fast_pool()`. ⚠️ Re-measured at this head rather than assumed, and the coverage floor is NOT what the row buys here: `fast_pool()` is 1056 and `duration_coverage_issues()` is `[]` BOTH ways — 1025/1056 = 0.970644 without the row, so there are 74 unweighted rows of headroom under the inclusive 0.90 floor and `tools/ci_selection.py --integrity` is the authority. The row is kept because a fast file added by a PR must carry a weight at all, not because its absence reds a gate. What the weight covers: DB-free, graph-free, network-free and model-free — 17 cases that (a) AST-parse `tortoise/**/*.py` in process, (b) import `tortoise.embed_gate`/`value_gate`/`search_engine` and drive `run_vector_query` through a SCRIPTED fake catalogue handle (no FalkorDB, no URI), (c) read `#5090`-facing `docs/` files, and (d) spawn ONE `git rev-parse` for the reported head — no server, no model call, no browser. ⚠️ The local reading is stated as a LOWER bound and is deliberately NOT this row's value: whole-file `--durations` measured **17 cases, 12.38 s** on this host after the walk was memoised, and **239.70 s / 321.32 s** for the SAME file under fleet contention (load spreads the AST walk, which dominates); the spread is host load, not a property of the file, and baking either number in would mis-allocate the shards. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_health_build_identity_10447.py: 2.0  # new in #10467 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`. ⚠️ Re-measured at #10467's head rather than assumed, and the coverage floor is NOT what the row buys here: `fast_pool()` is 1049 and `duration_coverage_issues()` is `[]` BOTH ways — 1021/1049 = 0.973308 without the row, 1022/1049 = 0.974261 with it. `tools/ci_selection.py --integrity` is the authority; the row is kept because a fast file added by a PR must carry a weight at all (the #3400/#4348 trap), not because its absence reds a gate. What the weight covers: DB-free, server-free, network-free and model-free — it imports `tortoise.hosted_api` and stubs `_probe_db`/the watcher/`_HEALTH_PROBE` through `monkeypatch`, so the only I/O is the `git init`/`git commit` pair it spawns in `tmp_path/history` to prove the identity is whatever the DEPLOY was told to build. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_reap_redislite_orphans.py: 2.0  # new in #3653 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: hermetic — it reads every workflow in `.github/workflows/` (both `.yml` and `.yaml`) and drives the stdlib reaper by path (one `sys.executable` subprocess for the CLI seam); no DB, no server, no network, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_ci_preview_isolation.py: 2.0  # new in #10283 — a file a PR ADDS can never carry a CI junit reading yet (same reasoning as the #3653 row above), so it takes the flat `DEFAULT_FAST_WEIGHT`; the row must EXIST because the `core` registration puts one more file in `fast_pool()` and `--integrity`'s coverage floor is measured against that pool. What the weight covers: hermetic — it reads `.github/workflows/*.yml` (text + YAML arms) and drives `.github/scripts/preview-server.sh` by path, spawning 3 short-lived `sleep`/`bash` process trees per run to prove `stop` is pid-scoped and a peer's decoy survives; no DB, no network, no browser, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
