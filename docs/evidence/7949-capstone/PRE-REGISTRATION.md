@@ -711,3 +711,25 @@ which is the fail-open shape a gate may not have. The failure is visible: the ex
 and does not make the epic closeable: a run still has to produce five measured rows. It removes one
 **impossible** requirement from the step gate so that the gate can answer the question it was built
 to answer.
+
+---
+
+## Deviations
+
+§8 reserves this section for a change made **after the first scored evidence log**, and §10's step
+restatement is one — the honest reading of §8's own criterion (*"the point at which that stops being
+true is visible as a log that does not carry `UNPREREGISTERED`"*): `capstone-measured-e0fc940b.log`
+(generated 2026-10-23T23:16:55Z, `head: e0fc940b5…`, `pre-registration: e0fc940b5… (read from the
+COMMIT)`) carries measured verdicts, not `UNPREREGISTERED`, so the pre-scored era ended at that log
+and §10 was written after it. (`e1-e2.log` remains `UNPREREGISTERED`; it is a different log.)
+
+| date | what changed | original | new | reason |
+|---|---|---|---|---|
+| 2026-11-01 | the step gate's PASS condition — V5 in `tools/capstone_verdict_check.py`, G5 in `probes/capstone_run.py` | all eight §4.1 steps **observed** in one pass | the seven unconditional steps observed, and the one this record declares conditional (S2.3) **accounted** — observed, or witnessed idle with a basis | `#10215`: the original condition was false by construction (S2.3 has no work when the S2 map types every candidate), so the gate could not return a verdict on any legitimate run. Measured and argued in §10. |
+
+**What this deviation does NOT do.** No criterion's metric, denominator or threshold changes; no §1.1
+pin moves (`fixtures_hash`, 90 units, 53/37 split, 15 operator edges, 29 marker sentences, salience
+25/15/9/6); no E-row verdict changes. The shipped refusal record's census is unchanged
+(`GREEN=0 RED=0 BLOCKED=3 UNPREREGISTERED=2`), so no criterion row is struck through above — §10 is
+the amended argument and this table is its provenance. The five measured rows still have to exist
+before the epic can close.

@@ -810,8 +810,8 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
     pedantry: the moment #9116 copies the sibling key at the meta fold — exactly
     what this bundle instructs — both steps become WITNESSED on EVERY run,
     including one measured with the flags OFF, which is the "OFF population under
-    an ON label" failure one layer up. And `V5` ("ALL eight steps observed in one
-    pass") is the epic's only closing gate for the step count.
+    an ON label" failure one layer up. And `V5` ("all eight steps ACCOUNTED in one
+    pass" since `#10215`) is the epic's only closing gate for the step count.
 
     Measured from the reviewer's reproduction: with
     `surfaces={"vet": {"enabled": False, …}, "classify_later": {"enabled": False, …}}`
@@ -884,8 +884,8 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
 
     Accepting that block as a witness made S2.2/S2.3 WITNESSED (6/8 -> 8/8) from
     ONE such session, because `_witness_block` returns the first positive anywhere
-    on the run. `V5` (all eight steps observed) is the epic's only closing gate
-    for the step count, so that would pass on a step nobody observed.
+    on the run. `V5` (all eight steps ACCOUNTED since `#10215`) is the epic's only
+    closing gate for the step count, so that would pass on a step nobody observed.
 
     Measured from the reviewer's reproduction before the fix: with
     `surfaces={"vet": {"enabled": True, "s2": {}, "union": {}}, …}` both steps

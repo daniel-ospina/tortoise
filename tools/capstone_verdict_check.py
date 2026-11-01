@@ -332,18 +332,22 @@ RECORD_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 
 
 def _record_conditional(repo: Path, prereg_sha: str | None,
-                        artifact: str) -> tuple[set[str] | None, str]:
-    """The conditional steps the FROZEN record declares, or ``(None, why not)``.
+                        artifact: str) -> tuple[set[str] | None, str, bool]:
+    """The conditional steps the FROZEN record declares, or ``(None, why not, unreachable)``.
 
-    Read out of the pre-registration COMMIT (``git show <sha>:<artifact>``) for
-    the same reason the run probe reads it that way: a record edited after the
-    numbers are in is not a pre-registration, and a worktree read would serve
-    that edit.
+    Read out of the pre-registration COMMIT (``git show <sha>:<artifact>``) for the
+    same reason the run probe reads it that way: a record edited after the numbers
+    are in is not a pre-registration, and a worktree read would serve that edit.
+
+    ``unreachable`` separates the two failures a caller must treat DIFFERENTLY: a
+    pointer this checkout cannot SEE (the V11 provenance class — reported, and
+    corroborated against a readable copy) from a record that resolves and says
+    something else (a claim contradicting the recorded decision — always fatal).
     """
     if not prereg_sha or not isinstance(prereg_sha, str):
-        return None, "the log names no pre-registration sha"
+        return None, "the log names no pre-registration sha", False
     if not artifact or not isinstance(artifact, str):
-        return None, "the log names no pre-registration artifact"
+        return None, "the log names no pre-registration artifact", False
     # The path is PINNED, never taken from the log (#10215 review P1): a log that
     # can name any committed JSON can mint its own conditional set.
     normalised = posixpath.normpath(artifact.strip().replace("\\", "/"))
@@ -351,33 +355,46 @@ def _record_conditional(repo: Path, prereg_sha: str | None,
         return None, (f"the log's pre-registration artifact is {artifact!r}, but the "
                       f"step declaration lives only in {RECORD_ARTIFACT!r} — a "
                       "conditional set read from any other file is not the frozen "
-                      "record, whatever it contains")
-    blob = _git(repo, "show", f"{prereg_sha}:{normalised}")
+                      "record, whatever it contains"), False
+    return _record_at(repo, prereg_sha, normalised)
+
+
+def _record_at(repo: Path, ref: str, artifact: str) -> tuple[set[str] | None, str, bool]:
+    """The conditional set ``artifact`` declares at ``ref`` — ONE reader, two callers.
+
+    The frozen read and the corroborating read (:func:`_step_accounting`'s V11
+    fallback) both come through here, so "what the record declares" cannot be parsed
+    two ways and drift (#10215 review r3 P1).
+    """
+    blob = _git(repo, "show", f"{ref}:{artifact}")
     if blob.returncode != 0:
-        return None, f"{prereg_sha}:{artifact} does not resolve in this checkout"
+        return None, f"{ref}:{artifact} does not resolve in this checkout", True
     try:
         record = json.loads(blob.stdout)
     except json.JSONDecodeError as exc:
-        return None, f"{artifact} at {prereg_sha} is not JSON: {exc}"
+        return None, f"{artifact} at {ref} is not JSON: {exc}", False
     if not isinstance(record, dict):
-        return None, f"{artifact} at {prereg_sha} is a {type(record).__name__}, not an object"
+        return None, f"{artifact} at {ref} is a {type(record).__name__}, not an object", False
     block = record.get(RECORD_STEPS_KEY)
     if not isinstance(block, dict):
-        return None, (f"{artifact} at {prereg_sha} carries no {RECORD_STEPS_KEY!r} "
-                      "block, so no step is declared conditional")
+        return None, (f"{artifact} at {ref} carries no {RECORD_STEPS_KEY!r} "
+                      "block, so no step is declared conditional"), False
     entries = block.get("conditional")
     if not isinstance(entries, list):
-        return None, (f"{RECORD_STEPS_KEY}.conditional in {artifact} at {prereg_sha} "
-                      f"is {type(entries).__name__}, expected a list")
+        return None, (f"{RECORD_STEPS_KEY}.conditional in {artifact} at {ref} "
+                      f"is {type(entries).__name__}, expected a list"), False
     steps: set[str] = set()
     for entry in entries:
         if isinstance(entry, dict) and isinstance(entry.get("step"), str):
             steps.add(entry["step"])
-    return steps, ""
+    return steps, "", False
 
 
 def _step_accounting(repo: Path, run: dict, observed: tuple,
-                     prereg_sha: str | None, artifact: str) -> list[tuple[str, str]]:
+                     prereg_sha: str | None, artifact: str,
+                     sha: str | None = None,
+                     unresolved: list[tuple[str, str, str]] | None = None,
+                     ) -> list[tuple[str, str]]:
     """V5's step half: every one of the eight ACCOUNTED FOR, never dropped (#10215).
 
     Four rules, all of them conservative:
@@ -456,7 +473,33 @@ def _step_accounting(repo: Path, run: dict, observed: tuple,
     # the observation rules so a fabricated conditionality is reported as exactly
     # that rather than as a missing step.
     if conditional:
-        declared, why = _record_conditional(repo, prereg_sha, artifact)
+        declared, why, unreachable = _record_conditional(repo, prereg_sha, artifact)
+        if declared is None and unreachable and unresolved is not None:
+            # ── V11's rule, applied to the OTHER provenance pointer (#10215 review
+            # r3 P1). The frozen sha is a POINTER, and the log that ships this
+            # bundle stamps a branch commit: `capstone-measured-e0fc940b.log`
+            # records `pre-registration: e0fc940b5… (read from the COMMIT)`, and a
+            # squash-merge never puts that commit on main. Making that fatal would
+            # refuse the first legitimate GREEN row in every fresh clone AND red
+            # this bundle's own shipped-log test on every PR after merge — the
+            # "durable main-red made by the instrument" V11's comment names.
+            # The CLAIM is still checked, not waived: it must match the record at a
+            # copy this checkout DOES carry (the row's own measured sha, then HEAD)
+            # at the SAME pinned path, so a log cannot self-declare conditionality by
+            # pointing at a dead sha. A disagreement, or no readable copy at all,
+            # stays FATAL below, and `--require-resolvable` upgrades this report to
+            # a finding for the lane that still holds the commit.
+            for ref in [r for r in (sha, "HEAD") if r]:
+                got, _why, _unreach = _record_at(repo, ref, RECORD_ARTIFACT)
+                if got is None:
+                    continue
+                if got == conditional:
+                    unresolved.append(
+                        ("prereg", prereg_sha,
+                         f"not in this object DB ({why}); the conditional set is "
+                         f"corroborated by {RECORD_ARTIFACT} at {ref}"))
+                    declared = conditional
+                break
         if declared is None:
             out.append(("V5", "GREEN with steps declared conditional "
                                f"({', '.join(sorted(conditional))}) while the frozen "
@@ -712,7 +755,8 @@ def check(record: dict, *, repo: Path,
             # carry the run's own basis (its flag ON, no activity, no fail-open
             # error — a crashed pass leaves the SAME empty counters).
             for code, msg in _step_accounting(repo, run, observed,
-                                             prereg_sha, prereg.get("artifact")):
+                                             prereg_sha, prereg.get("artifact"),
+                                             sha=sha, unresolved=f.unresolved):
                 f.add(code, where, msg)
             if sha and isinstance(sha, str) and _SHA_RE.match(sha):
                 # The FROZEN-THRESHOLD check needs no git at all, so it must not

@@ -1540,6 +1540,19 @@ def test_a_zero_candidate_g5_refusal_names_the_candidate_count_not_a_marker(
     assert "failure marker" not in reason, reason
 
 
+def test_the_idle_cause_covers_every_exclusion_observe_idle_makes():
+    """One cause per exclusion, none of them a false fact about the receipt."""
+    empty = {"enabled": True, "s2": {}, "union": {}}
+    receipt = _seam_receipt(classify_later=empty)
+    assert "enabled` reads False" in probe._idle_cause(
+        receipt, "classify_later", {"enabled": False, "s2": {}, "union": {}})
+    assert "no usable candidate count" in probe._idle_cause(
+        receipt, "classify_later", empty)
+    failed = dict(receipt, errors=["classify(S2) failed: RuntimeError: boom"])
+    assert "failure marker for it IS present" in probe._idle_cause(
+        failed, "classify_later", empty)
+
+
 def test_a_degraded_search_refuses_the_completed_table(tmp_path, monkeypatch):
     """END TO END (#10214 review, P1): a degraded search cannot emit a table.
 
@@ -3071,8 +3084,9 @@ def _idle_green(rec: dict, *, artifact: str = REAL_RECORD,
 
 def test_the_frozen_record_really_declares_s2_3_conditional():
     """The fixture the rest of this section leans on — pinned, so a record edit reds HERE."""
-    declared, why = cvc._record_conditional(_REPO, HEAD, REAL_RECORD)
+    declared, why, unreachable = cvc._record_conditional(_REPO, HEAD, REAL_RECORD)
     assert declared == {"S2.3"}, (declared, why)
+    assert unreachable is False, "the frozen commit IS in this checkout"
 
 
 def test_a_conditional_step_witnessed_idle_does_not_red_the_gate():
@@ -3107,9 +3121,10 @@ def test_a_log_may_not_read_the_conditional_set_out_of_a_file_of_its_CHOOSING():
     refusal must be about the PATH even when the file it names would satisfy the
     comparison.
     """
-    declared, why = cvc._record_conditional(
+    declared, why, unreachable = cvc._record_conditional(
         _REPO, HEAD, "docs/evidence/7949-capstone/e5-rescore.json")
     assert declared is None, "a non-record artifact must not be readable as the record"
+    assert unreachable is False, "a wrong PATH is a refusal, never a V11 pointer"
     assert "preregistration.json" in why and "any other file" in why, why
 
 
@@ -3357,6 +3372,58 @@ def test_a_conditional_step_g5_can_witness_idle_passes_the_gate(tmp_path, monkey
     codes = [code for code, _w, _m in
              cvc.check(rec, repo=_REPO, require_green=False).items]
     assert "V5" not in codes, codes
+    # ...and the rows this COMPLETED run emitted must not claim the retired fact
+    # (#10215 review r3 P2): with S2.3 only witnessed IDLE, "the run completed all
+    # eight steps" is FALSE in the artifact's own note — the same log says seven
+    # observed plus one conditional. The note says "accounted" instead.
+    for row in rec["rows"]:
+        assert "completed all eight steps" not in row["note"], row["note"]
+        assert "accounted for all eight steps" in row["note"], row["note"]
+
+
+def test_an_unresolvable_prereg_pointer_is_corroborated_and_reported_not_fatal():
+    """V11 applied to the OTHER pointer (#10215 review r3 P1).
+
+    The shipped measured log stamps a BRANCH commit as its `prereg` sha, and a
+    squash-merge never puts that commit on main — so a fresh clone cannot resolve it.
+    Making that fatal refused the first legitimate GREEN row in every fresh clone and
+    would red the bundle's own shipped-log test on every PR after merge (the "durable
+    main-red made by the instrument" V11's comment names). The claim is still checked:
+    the record at a copy this checkout DOES carry must declare the same conditional
+    set, and `--require-resolvable` still fails it for the lane holding the commit.
+    """
+    rec = _idle_green(_record())
+    rec["prereg"] = dict(rec["prereg"], sha="d" * 40, status="OK",
+                         artifact=REAL_RECORD)
+    findings = cvc.check(rec, repo=_REPO, require_green=False)
+    assert "V5" not in [c for c, _w, _m in findings.items], findings.render()
+    assert any(kind == "prereg" and "corroborated" in why
+               for kind, _p, why in findings.unresolved), findings.unresolved
+    assert "V11" in _codes(rec, require_resolvable=True)
+
+
+def test_corroboration_is_not_self_declaration_a_DISAGREEING_record_is_fatal():
+    """The other half: a dead pointer may not license a claim the record denies."""
+    rec = _idle_green(_record())
+    rec["prereg"] = dict(rec["prereg"], sha="d" * 40, status="OK",
+                         artifact=REAL_RECORD)
+    rec["run"]["steps_required"] = [s for s in cvc.STEPS if s != "S2.2"]
+    rec["run"]["steps_conditional"] = [{"step": "S2.2", "state": "idle",
+                                       "basis": "flag ON, no activity"}]
+    codes = _codes(rec)
+    assert "V5" in codes, codes
+    assert any("cannot confirm it" in m for m in _messages(rec)), _messages(rec)
+
+
+def test_an_idle_cause_names_a_pass_that_DID_work():
+    """`observe_idle`'s fourth exclusion (#10215 review r3 P2): a block carrying
+    counters is a pass that RAN, so the refusal must say so instead of reporting a
+    missing candidate count."""
+    block = {"enabled": True, "s2": {"assigned": 3}, "union": {}}
+    cause = probe._idle_cause(
+        _seam_receipt(classify_later=block), "classify_later", block)
+    assert "DID work" in cause, cause
+    assert "candidate count" not in cause, cause
 
 
 def test_g5_refuses_when_the_conditional_pass_FAILED_instead_of_idling(

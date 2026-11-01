@@ -242,7 +242,8 @@ metric's own precision.
 ## What this does NOT settle
 
 1. **No row goes GREEN.** `tools/capstone_verdict_check.py` requires all eight
-   steps witnessed for a `GREEN` row, and this run witnessed **6 of 8** (S2.2 and
+   steps ACCOUNTED for a `GREEN` row (seven observed, plus the one the frozen
+   pre-registration declares conditional — `#10215`), and this run witnessed **6 of 8** (S2.2 and
    S2.3 are unobservable through `capture_session`'s receipt — `#9116`).
 2. **The ON/OFF difference is not attributable to the flags alone, and n=1 is not
    enough to pretend otherwise.** The arms are separate LLM realizations of the

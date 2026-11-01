@@ -482,6 +482,13 @@ def _idle_cause(result: dict, key: str, block: dict) -> str:
     if block.get("enabled") is not True:
         return ("its own `enabled` reads False — the pass was not enabled, so it "
                 "was never idled")
+    if block.get("s2") or block.get("union"):
+        # The FOURTH exclusion in `observe_idle` order, and the one this helper was
+        # still missing (#10215 review r3 P2): a block that carries counters is a
+        # pass that DID work. Falling through to the candidate-count arm would print
+        # "no usable candidate count" while quoting a positive one.
+        return (f"the pass DID work — its block reads {_summary_block(block)} — so "
+                "it is not an idle pass at all; a pass that ran is OBSERVED")
     markers = _IDLE_FAILURE_MARKERS.get(key)
     if not markers:
         return (f"there is no idle witness for {key!r}, so an idle claim for this "
@@ -761,7 +768,7 @@ def completed_rows(*, head: str, corpus_sha: str,
             "denominator": receipt["denominator"] if cid == "E4" else None,
             "corpus_sha256": corpus_sha,
             "sibling": None, "blocked_by": owner,
-            "note": "the run completed all eight steps; this criterion's "
+            "note": "the run accounted for all eight steps; this criterion's "
                     "evidence artifact is still owned by " + owner,
         })
         if cid in ALSO_BLOCKED_BY:
