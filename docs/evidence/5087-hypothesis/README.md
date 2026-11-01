@@ -398,11 +398,8 @@ survive because they are parsed out of the **commit**, never this file.
    branch**: there the add-commit (`00:12:17Z`) strictly precedes the measured log's
    add-commit (`325f2a1a5`, `00:26:01Z`), and the bars are read out of that commit rather than the
    worktree. ⛔ That ordering is **not readable from merged history** — the squash merge collapsed
-   both add-commits into one commit, so *at the squash* `capstone_preregistration_check.py`'s
-   ordering half read the *same* epoch for the two paths, and at this head it reads **no** log of
-   the recorded run at all (that log is under `withdrawn/`, outside the non-recursive glob; the
-   re-measurement's own `s3-ablation-a83c23a8.log` at the top level is read, and its add-commit is
-   strictly later). The provenance is therefore **withdrawn** (see
+   both add-commits into one commit, so `capstone_preregistration_check.py`'s ordering half now
+   reads the *same* epoch for the two paths. The provenance is therefore **withdrawn** (see
    `withdrawn/WITHDRAWN.md`; #10463 records the ordering claim as PROVISIONAL). This sentence keeps
    the history, not the assurance. **No
    bar, floor, denominator or number moves**; the defect is a process claim, and it is withdrawn
