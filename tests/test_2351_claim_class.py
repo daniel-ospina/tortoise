@@ -1109,6 +1109,211 @@ def test_supersede_repoint_survives_a_non_string_stored_direction(lane):
     assert _props(lane, new).get("status") == "live"
 
 
+# ── 3b. the 2a-DIRECT re-point door (#9727) ────────────
+
+def _direct_rows(lane, pid):
+    """Every operator-less ``IMPL|NAND`` edge incident to ``pid``."""
+    return lane._get_proj().g.query(
+        "MATCH (a)-[r:IMPL|NAND]->(b) WHERE a.id=$id OR b.id=$id "
+        "RETURN a.id, type(r), coalesce(r.direction, ''), b.id "
+        "ORDER BY a.id, b.id",
+        params={"id": pid}).result_set
+
+
+def test_supersede_repoint_refuses_a_derived_over_asserted_direct_edge(lane):
+    """#9727 — the OPERATOR-LESS re-point arm, reached with NO raw write.
+
+    Both acts are individually LEGAL, and composing them mints the edge the
+    creation door refuses:
+
+      1. ``create_direct_edge(IMPL, old, t)`` with ``old`` and ``t`` both
+         derived — a same-class edge, so #2351 has nothing to refuse.
+      2. ``supersede_point(old, new)`` with an AUTHORED ``new`` — legal, because
+         the #2351 supersede guard only refuses a DERIVED successor replacing
+         an ASSERTED predecessor, and this is the reverse.
+      3. 2a-DIRECT then re-points (1)'s edge onto ``new``: the graph now holds
+         ``new``(asserted) -[IMPL {bidirectional}]-> ``t``(derived), whose
+         flows-back leg is the ``derived -> asserted`` override (#2351).
+
+    The class of the endpoints was judged ONCE, at creation, on the
+    PRE-SUPERSEDE pair — and the supersede replaced one of them. So the wiring
+    is judged here, on the pair the graph holds AFTER the write. MEASURED on
+    the pre-fix code: the supersede returned ``edges_transferred=1`` and
+    ``create_direct_edge(IMPL, new, t)`` refuses that exact pair, i.e. the
+    write-path invariant the module states was false for a reachable door.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "authored v2")["id"]  # asserted
+    t = lane.create_point("statement", "computed peer",
+                          claim_class="derived")["id"]
+    lane.create_direct_edge("IMPL", old, t)
+    before = _direct_rows(lane, old)
+    assert before and before[0][0] == old and before[0][3] == t, before
+
+    with pytest.raises(ValueError, match="DERIVED") as _exc:
+        lane.supersede_point(old, new)
+    _msg = str(_exc.value)
+    # It names the SURFACE it refused on, so the caller is not sent looking at
+    # ``create_direct_edge`` for a call they never made.
+    assert "re-pointing the IMPL edge" in _msg, _msg
+
+    # Refused BEFORE any mutation (#329/#4021): both points still live, the
+    # edge still on the predecessor, nothing on the successor.
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _direct_rows(lane, old) == before
+    assert _direct_rows(lane, new) == []
+    assert _direct_rows(lane, t) == before
+
+    # And the wiring the re-point would have minted is one the creation door
+    # refuses — the invariant this arm was breaking.
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.create_direct_edge("IMPL", new, t)
+
+
+def test_supersede_repoint_refuses_the_filed_shape_over_a_pre_guard_edge(lane):
+    """#9727's literal reachable shape: the far endpoint is ASSERTED.
+
+    ``old`` derived, ``new`` derived (so the existing supersede guard passes —
+    it only compares new vs old), and ``old -[IMPL]-> t`` with ``t`` an
+    unmarked claim — the population the module's own EP backstop describes as
+    "edges that predate the guard or were bulk-written", written here through
+    the raw helper because the write path refuses to create it TODAY. The
+    re-point must not launder that pre-guard edge into a fresh successor.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+    t = lane.create_point("statement", "authored target")["id"]  # asserted
+    _raw_direct_edge(lane, old, t, direction="bidirectional")
+
+    with pytest.raises(ValueError, match="DERIVED") as _exc:
+        lane.supersede_point(old, new)
+    assert "re-pointing the IMPL edge" in str(_exc.value)
+
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _direct_rows(lane, new) == []
+
+
+def test_supersede_repoint_still_carries_the_legal_class_transfers(lane):
+    """The door must not over-refuse: same-class and CORROBORATION transfers.
+
+    Three shapes, all of which the load side keeps and the re-point must still
+    perform: (A) derived -> derived, (B) an asserted successor over an asserted
+    far endpoint, (C) a ``<-`` edge whose only flowing leg is
+    asserted -> derived, i.e. the corroboration direction #2351 deliberately
+    leaves open.
+    """
+    # (A) derived successor, derived far endpoint — same class.
+    a_old = lane.create_point("statement", "a v1", claim_class="derived")["id"]
+    a_new = lane.create_point("statement", "a v2", claim_class="derived")["id"]
+    a_t = lane.create_point("statement", "a peer", claim_class="derived")["id"]
+    lane.create_direct_edge("IMPL", a_old, a_t)
+    lane.supersede_point(a_old, a_new)
+    assert _direct_rows(lane, a_old) == []
+    assert _direct_rows(lane, a_new)[0][0] == a_new
+
+    # (B) authored successor over an AUTHORED far endpoint.
+    b_old = lane.create_point("statement", "b v1", claim_class="derived")["id"]
+    b_new = lane.create_point("statement", "b v2")["id"]
+    b_t = lane.create_point("statement", "b target")["id"]  # asserted
+    _raw_direct_edge(lane, b_old, b_t, direction="bidirectional")
+    lane.supersede_point(b_old, b_new)
+    assert _direct_rows(lane, b_new)[0][0] == b_new
+
+    # (C) ``<-`` from a derived predecessor onto an ASSERTED target: the only
+    # leg that flows is target -> source (asserted -> derived), so the
+    # successor legitimately inherits it.
+    c_old = lane.create_point("statement", "c v1", claim_class="derived")["id"]
+    c_new = lane.create_point("statement", "c v2")["id"]
+    c_t = lane.create_point("statement", "c corroborator")["id"]
+    lane.create_direct_edge("IMPL", c_old, c_t, direction="<-")
+    lane.supersede_point(c_old, c_new)
+    _rows = _direct_rows(lane, c_new)
+    assert _rows and _rows[0][0] == c_new and _rows[0][2] == "<-", _rows
+
+
+def test_supersede_repoint_refuses_the_INCOMING_edge(lane):
+    """The ``in`` arm: the judged wiring is ``tid -> new``, not ``new -> tid``.
+
+    Reachable with no raw write: ``t``(derived) -[IMPL]-> ``old``(derived) is a
+    legal same-class edge, and an AUTHORED successor may replace a derived
+    predecessor — so the composition mints ``t``(derived) -> ``new``(asserted),
+    the override on the forward leg. The re-point's ``in`` branch swaps which
+    endpoint is judged as the SOURCE; a swap that inverted would be silently
+    fail-open for every incoming edge, so this pins it.
+    """
+    t = lane.create_point("statement", "computed corroborator",
+                          claim_class="derived")["id"]
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "authored v2")["id"]  # asserted
+    lane.create_direct_edge("IMPL", t, old)
+    assert _direct_rows(lane, old)[0][0] == t
+
+    with pytest.raises(ValueError, match="DERIVED") as _exc:
+        lane.supersede_point(old, new)
+    _msg = str(_exc.value)
+    # The message names the wiring it judged (``t -> new``), not the edge's
+    # pre-supersede orientation.
+    assert f"{t!r}->{new!r}" in _msg, _msg
+
+    assert _props(lane, old).get("status") == "live"
+    assert _props(lane, new).get("status") == "live"
+    assert _direct_rows(lane, new) == []
+
+
+def test_supersede_repoint_survives_a_far_endpoint_with_no_id(lane):
+    """A far endpoint carrying NO ``id`` must not abort the supersede.
+
+    The 2a-DIRECT traversal is unlabelled, so a raw/legacy node without an
+    ``id`` property reaches the door (``ep.py``'s Batch-3 NULL guard exists for
+    that shape). Pre-fix such a row simply failed the MERGE and was deleted; the
+    guard must not turn it into a ``TypeError`` on a sorted set of mixed types
+    — a traceback aborting a supersede the guard is not about (#10195 review
+    P3's lesson, one arm over).
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+    lane._get_proj().g.query(
+        "MATCH (old:Point {id:$old}) "
+        "CREATE (x:Point {content: 'no id'})-"
+        "[:IMPL {direction: 'bidirectional'}]->(old)",
+        params={"old": old})
+
+    lane.supersede_point(old, new)  # must not raise
+
+    assert _props(lane, new).get("status") == "live"
+    assert _direct_rows(lane, old) == []
+
+
+def test_supersede_repoint_refuses_the_backward_leg_too(lane):
+    """The mirror: a legal ``->`` edge flips into the override on re-point.
+
+    ``old``(derived) -[IMPL {->}]-> ``t``(asserted) — at CREATE time only the
+    source->target leg flows, i.e. derived -> asserted, which the door refuses.
+    So the guard's own verdict on the FLOWING leg is what is pinned here, on an
+    edge whose far endpoint is asserted and whose successor is derived: the
+    successor would stand at the source position the predecessor occupied, and
+    the flowing leg would be exactly ``derived -> asserted``.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "computed v2",
+                            claim_class="derived")["id"]
+    t = lane.create_point("statement", "authored target")["id"]
+    _raw_direct_edge(lane, old, t, direction="unidirectional")
+
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(old, new)
+    assert _direct_rows(lane, new) == []
+
+
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
 
 def _raw_direct_edge(lane, src, tgt, *, direction):
