@@ -1186,6 +1186,32 @@ def test_the_scoring_probe_emits_the_split_v5_reads_and_the_old_shape_is_what_re
         ("V5", "GREEN with steps not observed in the run: S2.3")]
 
 
+def test_the_log_prints_the_split_it_emitted_and_the_gap_when_it_could_not():
+    """The rendering arm, not just the record: a reader sees the same claim V5 reads.
+
+    A log that prints only "6 of 8" hands its reader the pre-#10215 reading of the
+    same numbers. An unaccounted conditional step must print the FALLBACK it
+    actually emitted, or the log and the machine block disagree about the table.
+    """
+    conditional = measure.read_conditional(_prereg())
+    required, accounts, gap = measure.step_accounting(
+        conditional, [_idle_run()], _seven_observed())
+    lines = measure.step_accounting_lines(required, accounts, gap)
+    assert lines[0].startswith("steps required: S0 S1 S2.1 S2.2 S3 S5 S6"), lines
+    assert lines[0].endswith("|  conditional: S2.3=idle"), lines
+    assert lines[1].startswith("conditional S2.3: idle — every one of the 1 "), lines
+    assert len(lines) == 2, lines
+    # the refusal side: all eight required, the step named with its own cause
+    required, accounts, gap = measure.step_accounting(
+        conditional, [_idle_run(errors=["classify(S2) failed: boom"])],
+        _seven_observed())
+    lines = measure.step_accounting_lines(required, accounts, gap)
+    assert lines[0].startswith("steps required: " + " ".join(cvc.STEPS))
+    assert lines[0].endswith("|  conditional: none"), lines
+    assert lines[1].startswith("steps accounting: NOT CLAIMED — "), lines
+    assert "neither observed nor witnessed idle: S2.3" in lines[1], lines
+
+
 def test_the_split_is_the_frozen_records_not_this_probes_choice():
     """Direction matters: a step is conditional because the RECORD says so.
 

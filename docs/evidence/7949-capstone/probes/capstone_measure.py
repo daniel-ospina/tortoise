@@ -1663,6 +1663,30 @@ def step_accounting(conditional: dict[str, dict], runs: list[dict],
     return required, accounts, ""
 
 
+def step_accounting_lines(required: list[str], accounts: list[dict],
+                          steps_gap: str) -> list[str]:
+    """The human log's step SPLIT — the half V5 reads, printed beside the count.
+
+    Seven unconditional steps are REQUIRED and a conditional one is ACCOUNTED
+    (observed, or witnessed idle): a different claim from "eight observed", and a
+    reader who is handed only the count cannot tell the two apart. A separate
+    function so the rendering arm is testable without building a whole log — an
+    untested print is how a claim stops being shown at all.
+    """
+    lines = ["steps required: " + (" ".join(required) if required else "(none)")
+             + "  |  conditional: "
+             + (", ".join(f"{entry['step']}={entry['state']}"
+                           for entry in accounts or []) or "none")]
+    for entry in accounts or []:
+        lines.append(f"conditional {entry['step']}: {entry['state']} — {entry['basis']}")
+    if steps_gap:
+        lines.append(
+            f"steps accounting: NOT CLAIMED — {steps_gap}; the table therefore states "
+            "the pre-#10215 shape (all eight required), so the gate refuses the fact "
+            "that is true rather than a conditionality nothing accounts for")
+    return lines
+
+
 # ── the census ────────────────────────────────────────────────────────────
 
 def census(uri: str) -> dict:
@@ -1947,19 +1971,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"{len([s for s in STEPS if s in observed])}/{len(STEPS)}"
         + (f" (unwitnessed: {', '.join(s for s in STEPS if s not in observed)})"
            if len(observed) < len(STEPS) else ""))
-    # #10215: the SPLIT V5 reads, printed beside the count — seven unconditional
-    # steps are required and a conditional one is ACCOUNTED (observed, or witnessed
-    # idle), which is a different claim from "eight observed" and must read as one.
-    add("steps required: " + (" ".join(required) if required else "(none)")
-        + "  |  conditional: "
-        + (", ".join(f"{entry['step']}={entry['state']}" for entry in accounts)
-           or "none"))
-    for entry in accounts or []:
-        add(f"conditional {entry['step']}: {entry['state']} — {entry['basis']}")
-    if steps_gap:
-        add(f"steps accounting: NOT CLAIMED — {steps_gap}; the table therefore "
-            "states the pre-#10215 shape (all eight required), so the gate refuses "
-            "the fact that is true rather than a conditionality nothing accounts for")
+    lines.extend(step_accounting_lines(required, accounts, steps_gap))
     add("")
     add("## E3 census — derived nodes and their version anchor")
     add(f"e3 rule: {E3_RULE}")
