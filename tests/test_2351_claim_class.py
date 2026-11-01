@@ -1225,10 +1225,14 @@ def test_supersede_repoint_still_carries_the_legal_class_transfers(lane):
     assert _direct_rows(lane, b_new)[0][0] == b_new
 
     # (C) ``<-`` from a derived predecessor onto an ASSERTED target: the only
-    # leg that flows is target -> source (asserted -> derived), so the
-    # successor legitimately inherits it.
+    # leg that flows is target -> source (asserted -> derived), so the DERIVED
+    # successor legitimately inherits it. The successor is DERIVED on purpose —
+    # with an asserted successor every pairing passes and the case would pin
+    # nothing about the direction token, since a both-ways (or forward) reading
+    # of this edge is what a direction-blind guard refuses.
     c_old = lane.create_point("statement", "c v1", claim_class="derived")["id"]
-    c_new = lane.create_point("statement", "c v2")["id"]
+    c_new = lane.create_point("statement", "c v2",
+                              claim_class="derived")["id"]
     c_t = lane.create_point("statement", "c corroborator")["id"]
     lane.create_direct_edge("IMPL", c_old, c_t, direction="<-")
     lane.supersede_point(c_old, c_new)
@@ -1412,9 +1416,26 @@ def test_supersede_repoint_refuses_the_backward_leg_too(lane):
     t = lane.create_point("statement", "authored target")["id"]
     _raw_direct_edge(lane, old, t, direction="unidirectional")
 
+    # ``->`` flows source -> target only, i.e. ``new``(derived) -> ``t``
+    # (asserted): the override. The MIRROR ``<-`` on the same pair flows
+    # target -> source only (asserted -> derived, the corroboration leg) and
+    # must transfer — so the verdict here is a statement about the direction
+    # token, not about the class pair alone.
     with pytest.raises(ValueError, match="DERIVED"):
         lane.supersede_point(old, new)
     assert _direct_rows(lane, new) == []
+
+    mirror_old = lane.create_point("statement", "computed m1",
+                                   claim_class="derived")["id"]
+    mirror_new = lane.create_point("statement", "computed m2",
+                                   claim_class="derived")["id"]
+    _raw_direct_edge(lane, mirror_old, t, direction="unidirectional")
+    lane._get_proj().g.query(
+        "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) "
+        "SET r.direction = '<-'",
+        params={"a": mirror_old, "b": t})
+    lane.supersede_point(mirror_old, mirror_new)  # must not raise
+    assert _direct_rows(lane, mirror_new), _direct_rows(lane, mirror_new)
 
 
 def test_supersede_repoint_does_not_judge_a_non_point_far_endpoint(lane):

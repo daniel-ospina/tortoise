@@ -18741,8 +18741,9 @@ class TortoiseSDK:
         # ⛔ ONE class reader for BOTH endpoints, and it mirrors the creation
         # doors exactly: an id that is an id-ADDRESSABLE string is resolved by
         # the fan-out probe (``claim_class.classes_for_ids``, #7822); any other
-        # id — a raw-written non-string / empty one, which the transfer's
-        # ``MATCH {id:$tid}`` may still RESOLVE — is resolved by a
+        # id — a raw-written NON-STRING one, which the transfer's
+        # ``MATCH {id:$tid}`` may still RESOLVE (measured: an integer id) — is
+        # resolved by a
         # ``:Point``-anchored marker probe instead, because handing it to
         # ``classes_for_ids`` would silently describe nothing (that helper
         # filters non-``str`` ids) and ``None`` reads as "asserted" downstream,
@@ -18750,7 +18751,9 @@ class TortoiseSDK:
         # (measured both: an int-id derived far endpoint, and an int-id derived
         # SUCCESSOR). An endpoint with NO ``:Point`` row is not a CLAIM
         # (:Subject/:Object/:Event, #7902) — ``None`` — and nothing can override
-        # it, nor it anything.
+        # it, nor it anything. An ABSENT / empty id does not resolve in the
+        # transfer at all (measured), so it is skipped for the same reason a
+        # non-``:Point`` endpoint is: no edge is written.
         def _claim_classes_for(node_id) -> frozenset[str] | None:
             if isinstance(node_id, str) and node_id:
                 return _direct_classes.get(node_id)
@@ -18780,9 +18783,14 @@ class TortoiseSDK:
         for _direction, _rows in _direct_rows.items():
             for _row in _rows:
                 _rtype, _rel, _tid = _row[0], _row[1], _row[2]
-                if _tid == new_id:
-                    # 2a-DIRECT DELETES this one (the phantom self-edge
-                    # case) — nothing is re-pointed, so nothing is judged.
+                if _tid in (new_id, old_id):
+                    # ``tid == new_id``: 2a-DIRECT DELETES this one (the
+                    # phantom self-edge case) — nothing is re-pointed.
+                    # ``tid == old_id``: a SELF-LOOP at the predecessor, which
+                    # the out/in passes consume between them (see the
+                    # ``_direct_incident_edges`` note) — no surviving wiring to
+                    # judge, and judging the ``in`` copy of it would refuse a
+                    # supersede over an edge that ends up deleted.
                     continue
                 _row_labels = set(_row[4] or ()) if len(_row) > 4 else set()
                 # The transfer writes an edge only when BOTH endpoints resolve
@@ -18811,9 +18819,14 @@ class TortoiseSDK:
                 # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
                 # and ``direction_flows`` tests membership in a frozenset — so
                 # handing it over aborts the supersede with a ``TypeError`` the
-                # guard is not about. Junk reads as ABSENT (the edge type's own
-                # default), the same reading ``claim_class.normalize`` gives a
-                # hand-edited marker: never a third state.
+                # guard is not about. A NON-SCALAR reads as ABSENT (the edge
+                # type's own default), the same reading
+                # ``claim_class.normalize`` gives a hand-edited marker: never a
+                # third state. ⚠️ A *string* outside the vocabulary is NOT
+                # remapped: it passes through and ``direction_flows`` reads it
+                # as both ways — deliberately, because that is the leg set the
+                # EP backstop sees for the same token (a door that read it more
+                # narrowly would keep a factor the load side drops).
                 _raw_dir = _rdict.get("direction")
                 _eff_dir = self._canonical_direction(
                     _rtype, _raw_dir if isinstance(_raw_dir, str) else None)
@@ -19168,12 +19181,22 @@ class TortoiseSDK:
         # REBUILD half bare while the live half carried the value.
         from .projection.edges import DIRECT_EDGE_ATTR_KEYS
 
-        # #9727: the population here is the one the override pre-flight above
-        # already collected, judged and (where it blocks) refused — ONE
-        # collection, so the door's verdict and this mutation can never cover
-        # different edge sets.
+        # ⛔ The population is re-read PER DIRECTION here, even though the
+        # #9727 pre-flight above already collected it: that ORDER is
+        # load-bearing, not redundant. A self-loop ``(old)-[T]->(old)`` belongs
+        # to BOTH populations, and the ``out`` pass MUTATES it (MERGE
+        # ``(new)-[T]->(old)``, delete the loop) — the ``in`` pass then sees
+        # that new edge as its ``tid == new_id`` row and deletes it. Serving the
+        # ``in`` pass a row set captured BEFORE the ``out`` pass re-pointed the
+        # loop a second time (measured: two residual direct edges on the
+        # superseded point plus a phantom ``DirectEdgeRepoint`` — the E2E-11.6
+        # "zero direct edges remain incident" contract at the top of this
+        # block, and ``tests/test_dry_run_preview.py``'s two self-loop cases).
+        # So ``_direct_incident_edges`` is SHARED as one collection
+        # IMPLEMENTATION (the door and the mutation cannot disagree about what
+        # an edge set IS), while each pass reads its own current state.
         for direction in ("out", "in"):
-            rows = _direct_rows[direction]
+            rows = _direct_incident_edges(direction)
             for row in rows:
                 rtype, r, tid, rid = row[0], row[1], row[2], row[3]
                 # #8622: the label that ACTUALLY carries the far endpoint, in
