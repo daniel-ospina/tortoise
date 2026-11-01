@@ -68,6 +68,36 @@ def _census_unread(manifest: object) -> bool:
                for k in mp._UNKNOWN_PER_MANIFEST_KEYS)
 
 
+def _qid_key(qid: object) -> tuple | str:
+    """A HASHABLE identity for a ``question_id`` read out of untrusted JSON.
+
+    Hashing the id directly killed the probe with a bare ``TypeError:
+    unhashable type: 'list'`` on any input whose ``question_id`` is a list or
+    an object (#10137 follow-up review, P3). That is a real shape for THIS
+    instrument: a spec-legal JSON value (RFC 8259 §3 lets a value be an array
+    or an object — only object NAMES are strings, §4), off this producer's
+    contract, so it arrives as hand-built or foreign JSON — which is exactly
+    what a probe reads. It also broke the module's own stated contract, pinned
+    by ``test_census_probe_refuses_a_report_with_no_posture``: a message, never
+    a traceback.
+
+    A non-str id is keyed under a TYPE-TAGGED tuple, the rule
+    ``report.py:580 _qid_key`` already applies to the same problem: a str qid
+    keys BY VALUE (the string itself) and every other type under a tuple, so a
+    crafted STRING qid (``"['q0']"``) can never collide with the ``repr`` of a
+    list qid (``["q0"]``) — a collision folds two distinct questions into one
+    and silently drops the ablation. ``repr`` is the fallback for the same
+    reason it is there: it is the only stable spelling an arbitrary JSON value
+    has. Value-identical non-str ids therefore dedupe only when their ``repr``
+    agrees — the direction that costs is a MISSED dedupe (a question counted
+    twice) only when one question is spelled two ways, never a fabricated
+    ablation.
+    """
+    if isinstance(qid, str):
+        return qid
+    return (type(qid).__name__, repr(qid))
+
+
 def cells(path: str) -> dict:
     doc = json.loads(pathlib.Path(path).read_text())
     outcomes = doc.get("outcomes") or []
@@ -135,9 +165,13 @@ def cells(path: str) -> dict:
     # ``len(outcomes)`` (``report.py:1106`` -> ``:2376``), so overriding with it
     # silently dropped the failure population in the arm that produces the
     # published artifact — F3 fixed nothing there (#10137 review, P2).
-    outcome_ids = {o.get("question_id") for o in outcomes
+    # ``_qid_key`` and not the raw id: the ids come out of an untrusted
+    # document and an unhashable one used to end the probe in a ``TypeError``
+    # (#10137 follow-up review, P3).
+    outcome_ids = {_qid_key(o.get("question_id")) for o in outcomes
                    if isinstance(o, dict) and o.get("question_id")}
-    failed_ids = {f.get("question_id") for f in failures if f.get("question_id")}
+    failed_ids = {_qid_key(f.get("question_id"))
+                  for f in failures if f.get("question_id")}
     # A reported count larger than the list is a failure population whose ENTRY
     # list the input pruned. Those ids cannot be matched against an outcome, so
     # they are added rather than dropped — undercounting the ablation is the one

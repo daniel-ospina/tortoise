@@ -580,12 +580,20 @@ def test_census_probe_counts_an_overlapped_qid_once(tmp_path):
     by one worker and failed by another lands in both lists (``report.py:1407-
     1410``), and ``_merge_checkpoint`` unions the two independently, the
     ``remove_failures`` tombstone being present only when the writer knew it was
-    a ``--retry-failed`` re-attempt (``run.py:2699-2729``). ``len(outcomes) +
-    len(failures)`` published a 2-question population as a 3-question run — and
-    the gap the README calls "the disclosure" could not see it, because the gap
-    was ``questions_failed`` BY CONSTRUCTION.
+    a ``--retry-failed`` re-attempt (``run.py:2699-2729``). Counting
+    ``len(outcomes) + len(failures)`` would publish this 2-question population
+    as a 3-question run, and the gap the README calls "the disclosure" could
+    not see it, because the gap was ``questions_failed`` BY CONSTRUCTION.
 
     A recovered question is not an ablation: it is in the ratio's denominator.
+
+    Non-vacuous, stated accurately (#10137 follow-up review, P3): the probe
+    MERGED into ``main`` read ``len(outcomes)``, so ``questions_in_run == 2``
+    PASSES on it and this test reds there only through the ABSENT
+    ``questions_failed`` key (``KeyError``) — non-vacuous by PRESENCE on that
+    code, not by arithmetic. The figures still discriminate arithmetic: a
+    summed-lengths implementation publishes 3 here, so ``== 2`` and
+    ``questions_failed == 0`` red on it as well.
     """
     overlapped = {"fingerprint": {"activate_beliefs": True},
                   "outcomes": _outcomes(2),
@@ -613,8 +621,13 @@ def test_census_probe_keeps_the_disclosure_invariant_on_a_duplicate_qid(tmp_path
     ``run.py`` (both lists are built dict-by-qid) — this pins the shape that
     arrives as foreign JSON, which is exactly what a probe reads.
 
-    Non-vacuous: with ``questions_in_run = len(distinct ids)`` this asserts
-    ``2 == 3``.
+    Non-vacuous, stated accurately (#10137 follow-up review, P3): the merged
+    pre-fix REPORT arm read ``n_questions`` — ``len(outcomes)``, = 3 here — so
+    ``questions_in_run == 3`` PASSES on it and this test reds there only
+    through the ABSENT ``questions_failed`` key (``KeyError``); it is
+    non-vacuous by PRESENCE on that code. The ``== 3`` and ``>=`` assertions
+    additionally discriminate the variant the structural derivation replaced:
+    a total derived from ``len(distinct ids)`` publishes 2.
     """
     dup = [{"question_id": "q0", "question_type": "t",
             "belief_activation": _manifest()},
@@ -646,3 +659,77 @@ def test_census_probe_treats_a_non_count_cell_as_unread(tmp_path):
     assert out["cells"]["operators_unread"] == 1
     assert out["per_question_unread"] == 1
     assert out["per_question"][0]["operators"] is True   # published as read
+
+
+def test_census_probe_does_not_sum_the_two_lengths(tmp_path):
+    """The failure population is DISTINCT ids over both lists — never
+    ``len(outcomes) + len(failures)``, and never ``len(outcomes)`` (#10137
+    review, P2).
+
+    This is the ARITHMETIC discriminator the two shape tests above cannot be
+    (#10137 follow-up review, P3 — their published proofs described pre-fix
+    code that never shipped). Two outcomes, one qid that BOTH completed and
+    failed, one that only failed: the answer is 3. A summed-lengths
+    implementation publishes 4 and the merged pre-fix probe
+    (``len(outcomes)``) publishes 2, so every candidate rule gives a DIFFERENT
+    figure and no single wrong one can pass.
+    """
+    doc = {"fingerprint": {"activate_beliefs": True},
+           "outcomes": _outcomes(2),
+           "failures": [{"question_id": "q0", "error": "reader timeout"},
+                        {"question_id": "q-failed", "error": "ingest died"}]}
+    out = _probe().cells(_write(tmp_path, doc))
+
+    assert out["questions"] == 2
+    assert out["questions_failed"] == 1        # only q-failed ablates
+    assert out["questions_in_run"] == 3        # not 4 (sum), not 2 (len only)
+    assert out["questions_in_run"] - out["questions"] == \
+        out["questions_failed"]
+
+
+def test_census_probe_survives_a_non_hashable_question_id(tmp_path):
+    """A ``question_id`` that is a list or an object is a spec-legal JSON
+    value (RFC 8259 §3 — only object NAMES are strings) and off this
+    producer's contract, so it reaches the probe as hand-built or foreign
+    JSON, which is what a probe reads. Hashing it directly ended the probe in a
+    bare ``TypeError: unhashable type: 'list'`` (#10137 follow-up review, P3),
+    breaking the module's own "a message, not a traceback" contract.
+
+    Non-vacuous: the pre-fix probe raises ``TypeError`` on this input instead
+    of publishing a census.
+    """
+    doc = {"fingerprint": {"activate_beliefs": True},
+           "outcomes": [{"question_id": ["q0"], "question_type": "t",
+                         "belief_activation": _manifest()}],
+           "failures": [{"question_id": {"id": "q0"}}]}
+    out = _probe().cells(_write(tmp_path, doc))
+
+    assert out["questions"] == 1
+    # Two DIFFERENT non-str ids, so the failure is genuinely an ablation and
+    # the probe reports the split rather than dying on the way to it.
+    assert out["questions_failed"] == 1
+    assert out["questions_in_run"] == 2
+
+
+def test_census_probe_keys_a_non_str_qid_apart_from_its_repr(tmp_path):
+    """A crafted STRING qid must not collide with the ``repr`` of a non-str
+    one (#10137 follow-up review, P3).
+
+    ``repr(["q0"])`` is the string ``"['q0']"``, so an untagged ``repr`` key
+    — or a bare ``str(...)`` coercion — makes the failure below look like a
+    question that already produced an outcome, i.e. a recovered question and
+    zero ablation. The crash fix would then have quietly re-created the very
+    undercount ``questions_failed`` exists to prevent. The type tag is what
+    ``report.py:580 _qid_key`` does for the same reason.
+
+    Non-vacuous: an untagged ``repr`` key yields ``questions_failed == 0``
+    here.
+    """
+    doc = {"fingerprint": {"activate_beliefs": True},
+           "outcomes": [{"question_id": ["q0"], "question_type": "t",
+                         "belief_activation": _manifest()}],
+           "failures": [{"question_id": "['q0']"}]}
+    out = _probe().cells(_write(tmp_path, doc))
+
+    assert out["questions_failed"] == 1        # NOT folded into the outcome
+    assert out["questions_in_run"] == 2
