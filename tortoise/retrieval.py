@@ -1447,10 +1447,13 @@ class _SafeMarkerCache:
 
     Keyed on ``id(hit)``, which is sound HERE and only here: every hit is held
     by the caller's ``pool`` for the whole call, so no id can be recycled out
-    from under the cache, and the cache (and its strong references) dies with
-    the call. That is why it is a local rather than a module-level memo — a
-    process-lifetime memo keyed on ``id()`` would both leak the hits and admit
-    a recycled id.
+    from under the cache, and the cache dies with the call. It holds NO
+    reference to any hit — the map is ``dict[int, str]`` (id → resolved text),
+    which is why the soundness rests on ``pool`` keeping every hit alive for the
+    call rather than on the cache keeping them alive itself (#9741 review round
+    3, minor). That is also why it is a local rather than a module-level memo —
+    a process-lifetime memo keyed on ``id()`` would admit a recycled id for the
+    life of the process.
 
     The value stored is the RESOLVED text, including ``""``: a content-less
     operator node with no window resolves to ``""`` once and is not re-resolved
