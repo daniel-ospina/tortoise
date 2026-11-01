@@ -1007,6 +1007,14 @@ class _TargetVanishesBeforeTheWrite:
 
     ``matched_rows`` counts what the statements ACTUALLY matched, so "nothing
     landed" is measured rather than assumed.
+
+    ⚠️ Do NOT read this as "a present target never matches zero rows". It has
+    one such shape and the door still reaches it: the REFUSED PROMOTE
+    (``update_point(<retracted>, status='live')``) whose guarded ``SET`` matches
+    nothing — the verdict never becomes a witness ``False`` only because
+    ``_promote_witness`` CONSUMES that result by raising its own documented
+    refusal. That handling is load-bearing; deleting it would hand the wrapper
+    a zero-row result for a shape that is legitimately refused.
     """
 
     def __init__(self, real, needle: str, *, abort_message: str | None = None
@@ -1138,10 +1146,14 @@ def test_an_absent_id_issues_no_statement_for_the_write(tmp_path):
     This is where the #8854 witness question used to be tested, and it can no
     longer be: the door reads the target's existence from the lifecycle guard
     BEFORE the journal append and BEFORE any write, so an absent id issues NO
-    statement at all — ``proxy.matching == 0``, and there is no first attempt
-    to abort and retry. The witness gate itself is now pinned on the shape that
-    still issues a statement,
-    ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``.
+    WRITE statement — ``proxy.matching == 0`` on the write needle, and there is
+    no first attempt to abort and retry. (It does issue exactly ONE statement,
+    the guard's own read: ``MATCH (n:Point {id:$id}) RETURN n.is_operator,
+    n.status, coalesce(n.outdated, false)`` — ``LIFECYCLE_FANOUT_QUERY``. The
+    proxy counts the WRITE needle, which is what "no statement" means here.)
+    The witness gate itself is now pinned on the shape that still issues a
+    write, ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_``
+    ``contract``.
 
     The proxy injects the graph-replaced abort by default precisely so a
     regression that re-opens the write for an absent id cannot pass quietly: it

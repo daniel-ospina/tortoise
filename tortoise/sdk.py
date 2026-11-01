@@ -9560,8 +9560,8 @@ class TortoiseSDK:
             # re-open issuing into a graph the rebuild deleted — nor
             # rewrite the error the guard raises into a "retry the query"
             # instruction for a graph that is gone (#8854 r7 P2).
-            if keep and graph_abort_family(exc):
-                if graph_abort is None:
+            if keep:  # MUTATION A
+                if graph_abort_family(exc) and graph_abort is None:
                     graph_abort = exc
                 if witness is not None and armed_abort is None:
                     # `_WriteNotLanded` is intentionally NOT latched here:
