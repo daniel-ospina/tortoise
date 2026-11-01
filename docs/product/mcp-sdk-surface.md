@@ -467,6 +467,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | Method | Does / depends on | Used by | Recomm. | Rationale |
 |---|---|---|---|---|
 | `TortoiseSDK.delete_point` | reached by no registered MCP tool; caller categories: documentation, engine, other-tooling | tooling, docs | **review** | no MCP tool binds it; callers: documentation, engine, other-tooling |
+| `TortoiseSDK.capture_session` | reached by no registered MCP tool; caller categories: documentation, other-tooling | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: documentation, other-tooling |
 | `TortoiseSDK.apikey_verify` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.calibration_passed` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.compute_reputation` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |

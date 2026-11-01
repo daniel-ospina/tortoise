@@ -17364,6 +17364,216 @@ class TortoiseSDK:
                                     source_id=_slot_source,
                                     target_ids=_slot_targets))
 
+        # ── #9727: the 2a-DIRECT re-point's override pre-flight (#2351) ──
+        # 2a-DIRECT below re-points every OPERATOR-LESS ``IMPL|NAND`` edge
+        # incident to the predecessor onto the successor with a raw edge MERGE,
+        # and it never consulted the claim classes of the edge's OTHER
+        # endpoint — so a supersede could mint the ``DERIVED -[IMPL]-> ASSERTED``
+        # wiring ``create_direct_edge`` / ``create_operator`` refuse to write
+        # (measured: ``create_direct_edge(IMPL, new, t)`` raises the #2351
+        # refusal for exactly the pair the re-point had just created).
+        #
+        # The door the defect reaches through needs no raw write. A direct edge
+        # is judged at CREATE time on the pair it is asked to wire, and that
+        # pair is the PRE-SUPERSEDE one: ``old``(derived) -[IMPL]-> ``t``
+        # (derived) is a LEGAL same-class edge, and so is a supersede whose
+        # successor is AUTHORED (an asserted claim may replace a derived one —
+        # the #2351 guard above only refuses the reverse). Composed, the two
+        # legal acts mint ``new``(asserted) -[IMPL]-> ``t``(derived), whose
+        # flows-back leg is exactly the ``derived -> asserted`` override. The
+        # class of the endpoints was judged once, at creation, against a
+        # predecessor that the supersede then REPLACED — so the wiring is
+        # judged here, on the pair the graph will hold after the write.
+        #
+        # ⛔ ONE predicate: ``claim_class.direction_blocks_create``, fed the
+        # edge's stored direction canonicalized with ``_canonical_direction`` —
+        # the same predicate and the same canonicalizer as ``create_operator``,
+        # ``create_direct_edge``, ``ingest``'s partial-absorb branch and
+        # #10195's operator pre-flight above. A second copy of "may this edge
+        # exist" would be a finding of its own. The REFUSAL message is that
+        # predicate's own (``override_refusal``), with this surface named —
+        # the caller's ways out are the same ones it states.
+        #
+        # ORDER: collected and judged HERE, beside the #329 edge-type
+        # validation and the #10195 slot pre-flight, and BEFORE the
+        # ``PointSuperseded`` append and every other mutation — a refusal that
+        # lands inside 2a-DIRECT would land after the CORRECTS edge and the
+        # operator transfers, i.e. the #329/#4021 partial-mutation defect no
+        # matter how good its message is.
+        #
+        # Skipped, deliberately: ``tid == new_id`` (2a-DIRECT DELETES that edge
+        # as a phantom self-edge and re-points nothing), and any edge the
+        # transfer itself will not write (an unresolvable endpoint label — the
+        # loop's own #8622 condition), and a non-``:Point`` far endpoint — not
+        # a CLAIM, so nothing to override (#7902; the same ``:Point``-only rule
+        # the creation doors apply by building their class sets from Point
+        # rows).
+        def _direct_incident_edges(_direction: str) -> list:
+            """The 2a-DIRECT population for ONE direction (query + op filter).
+
+            ONE collection, read by the pre-flight above AND by the transfer
+            loop below: the population the door judges and the population it
+            mutates must be the same set, and two queries that drifted apart
+            would be a fail-open nobody notices.
+            """
+            if _direction == "out":
+                _dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
+                       "RETURN type(r), r, t.id, ID(r), labels(t), "
+                       "coalesce(t.claimClass, 'asserted')")
+            else:
+                _dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
+                       "RETURN type(r), r, t.id, ID(r), labels(t), "
+                       "coalesce(t.claimClass, 'asserted')")
+            _rows = proj.g.query(_dq, params={"old_id": old_id}).result_set
+            if not _rows:
+                return []
+            # Filter: exclude edges whose OTHER endpoint is an operator Point
+            # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
+            # an operator target; 2a owns op->input edges and runs first;
+            # repointing an operator target would create a topology
+            # create_direct_edge itself rejects). Operators are the CANONICAL
+            # set — ``is_operator = true OR op_type IS NOT NULL``, the same
+            # population 2a and the #10195 pre-flight read (#10418 review P2):
+            # with a narrower set here, an ``op_type``-only operator's edge
+            # fell through to this leg as an operator-LESS direct edge, losing
+            # its ``idx`` slot position and emitting a ``DirectEdgeRepoint``
+            # for a factor the loader builds as an operator factor.
+            _other_ids = [row[2] for row in _rows]
+            _op_rows = proj.g.query(
+                "MATCH (p:Point) WHERE p.id IN $ids AND "
+                "(p.is_operator = true OR p.op_type IS NOT NULL) "
+                "RETURN p.id",
+                params={"ids": _other_ids},
+            ).result_set
+            _op_set = {r[0] for r in _op_rows}
+            return [row for row in _rows if row[2] not in _op_set]
+
+        def _epistemic_label(node_id: str) -> str | None:
+            """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
+            for _label in EPISTEMIC_LABELS:
+                found_row = proj.g.query(
+                    f"MATCH (n:{_label} {{id:$id}}) RETURN ID(n) LIMIT 1",
+                    params={"id": node_id},
+                ).result_set
+                if found_row:
+                    return _label
+            return None
+
+        new_label = _epistemic_label(new_id) if new_id else None
+        _direct_rows: dict[str, list] = {
+            _direction: _direct_incident_edges(_direction)
+            for _direction in ("out", "in")}
+        # ⛔ ONE class reader for BOTH endpoints, and it mirrors the creation
+        # doors exactly: an id that is an id-ADDRESSABLE string is resolved by
+        # the fan-out probe (``claim_class.classes_for_ids``, #7822); any other
+        # id — a raw-written NON-STRING one, which the transfer's
+        # ``MATCH {id:$tid}`` may still RESOLVE (measured: an integer id) — is
+        # resolved by a
+        # ``:Point``-anchored marker probe instead, because handing it to
+        # ``classes_for_ids`` would silently describe nothing (that helper
+        # filters non-``str`` ids) and ``None`` reads as "asserted" downstream,
+        # which is a fail-open on one axis and a false refusal on the other
+        # (measured both: an int-id derived far endpoint, and an int-id derived
+        # SUCCESSOR). An endpoint with NO ``:Point`` row is not a CLAIM
+        # (:Subject/:Object/:Event, #7902) — ``None`` — and nothing can override
+        # it, nor it anything. An ABSENT / empty id does not resolve in the
+        # transfer at all (measured), so it is skipped for the same reason a
+        # non-``:Point`` endpoint is: no edge is written.
+        def _claim_classes_for(node_id) -> frozenset[str] | None:
+            if isinstance(node_id, str) and node_id:
+                return _direct_classes.get(node_id)
+            if node_id is None or node_id == "":
+                return None
+            _rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) "
+                "RETURN coalesce(n.claimClass, 'asserted')",
+                params={"id": node_id},
+            ).result_set
+            return frozenset(
+                _claim_class.normalize(_r[0]) for _r in _rows) or None
+
+        # ⛔ The id list handed to ``classes_for_ids`` is STRINGS only, and
+        # ``new_id`` is NOT unioned in: a non-string successor id would make
+        # ``sorted`` raise ``TypeError`` on a mixed set — aborting a supersede
+        # the guard is not about (#10195 review P3's lesson, one arm over).
+        _direct_other_ids = sorted(
+            {row[2] for _rows in _direct_rows.values() for row in _rows
+             if row[2] != new_id
+             and isinstance(row[2], str) and row[2]})
+        _direct_classes = _claim_class.classes_for_ids(
+            proj.g, _direct_other_ids + ([new_id]
+                                         if isinstance(new_id, str) and new_id
+                                         else []))
+        _new_classes = _claim_classes_for(new_id)
+        for _direction, _rows in _direct_rows.items():
+            for _row in _rows:
+                _rtype, _rel, _tid = _row[0], _row[1], _row[2]
+                if _tid in (new_id, old_id):
+                    # ``tid == new_id``: 2a-DIRECT DELETES this one (the
+                    # phantom self-edge case) — nothing is re-pointed.
+                    # ``tid == old_id``: a SELF-LOOP at the predecessor, which
+                    # the out/in passes consume between them (see the
+                    # ``_direct_incident_edges`` note) — no surviving wiring to
+                    # judge, and judging the ``in`` copy of it would refuse a
+                    # supersede over an edge that ends up deleted.
+                    continue
+                _row_labels = set(_row[4] or ()) if len(_row) > 4 else set()
+                # The transfer writes an edge only when BOTH endpoints resolve
+                # to an epistemic label (the #8622 condition); a row it deletes
+                # instead is nothing to judge.
+                if not (_row_labels & set(EPISTEMIC_LABELS)) or not new_label:
+                    continue
+                # …and the #2351 rule is asked of CLAIMS only. ``Point``-first
+                # label order means this is the label the doors resolve too, so
+                # a :Subject/:Object/:Event endpoint skips on both sides.
+                if new_label != "Point":
+                    continue
+                _tid_label = next(
+                    (lbl for lbl in EPISTEMIC_LABELS if lbl in _row_labels),
+                    None)
+                if _tid_label != "Point":
+                    continue
+                _tid_classes = _claim_classes_for(_tid)
+                if _new_classes is None or _tid_classes is None:
+                    # No ``:Point`` row behind that id — not a claim; the guard
+                    # has no verdict to give and must not invent one.
+                    continue
+                _rdict = (dict(_rel.properties)
+                          if hasattr(_rel, "properties") else {})
+                # ⛔ Only a STRING token reaches the predicate: a raw-written
+                # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
+                # and ``direction_flows`` tests membership in a frozenset — so
+                # handing it over aborts the supersede with a ``TypeError`` the
+                # guard is not about. A NON-SCALAR reads as ABSENT (the edge
+                # type's own default), the same reading
+                # ``claim_class.normalize`` gives a hand-edited marker: never a
+                # third state. ⚠️ A *string* outside the vocabulary is NOT
+                # remapped: it passes through and ``direction_flows`` reads it
+                # as both ways — deliberately, because that is the leg set the
+                # EP backstop sees for the same token (a door that read it more
+                # narrowly would keep a factor the load side drops).
+                _raw_dir = _rdict.get("direction")
+                _eff_dir = self._canonical_direction(
+                    _rtype, _raw_dir if isinstance(_raw_dir, str) else None)
+                if _direction == "out":
+                    _src_id, _tgt_id = new_id, _tid
+                    _src_classes, _tgt_classes = _new_classes, _tid_classes
+                else:
+                    _src_id, _tgt_id = _tid, new_id
+                    _src_classes, _tgt_classes = _tid_classes, _new_classes
+                if _claim_class.direction_blocks_create(
+                        _eff_dir, _src_classes, _tgt_classes):
+                    # ⛔ It names the WIRING IT JUDGED, not ``old->new``: on the
+                    # ``in`` arm the edge being re-pointed is ``tid -> old``
+                    # becoming ``tid -> new``, so a hardcoded ``old->new``
+                    # points the caller at an edge that does not exist.
+                    raise ValueError(_claim_class.override_refusal(
+                        source_id=_src_id, target_ids=[_tgt_id],
+                        surface=(f"supersede_point: re-pointing the "
+                                 f"{_rtype} edge {_src_id!r}->{_tgt_id!r} "
+                                 f"(from {old_id!r} to {new_id!r}, "
+                                 f"direction {_eff_dir!r})")))
+
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
         # before validation produced phantoms on corrupt-edge data).
@@ -17696,49 +17906,22 @@ class TortoiseSDK:
         # REBUILD half bare while the live half carried the value.
         from .projection.edges import DIRECT_EDGE_ATTR_KEYS
 
-        def _epistemic_label(node_id: str) -> str | None:
-            """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
-            for _label in EPISTEMIC_LABELS:
-                found_row = proj.g.query(
-                    f"MATCH (n:{_label} {{id:$id}}) RETURN ID(n) LIMIT 1",
-                    params={"id": node_id},
-                ).result_set
-                if found_row:
-                    return _label
-            return None
-
-        new_label = _epistemic_label(new_id) if new_id else None
+        # ⛔ The population is re-read PER DIRECTION here, even though the
+        # #9727 pre-flight above already collected it: that ORDER is
+        # load-bearing, not redundant. A self-loop ``(old)-[T]->(old)`` belongs
+        # to BOTH populations, and the ``out`` pass MUTATES it (MERGE
+        # ``(new)-[T]->(old)``, delete the loop) — the ``in`` pass then sees
+        # that new edge as its ``tid == new_id`` row and deletes it. Serving the
+        # ``in`` pass a row set captured BEFORE the ``out`` pass re-pointed the
+        # loop a second time (measured: two residual direct edges on the
+        # superseded point plus a phantom ``DirectEdgeRepoint`` — the E2E-11.6
+        # "zero direct edges remain incident" contract at the top of this
+        # block, and ``tests/test_dry_run_preview.py``'s two self-loop cases).
+        # So ``_direct_incident_edges`` is SHARED as one collection
+        # IMPLEMENTATION (the door and the mutation cannot disagree about what
+        # an edge set IS), while each pass reads its own current state.
         for direction in ("out", "in"):
-            if direction == "out":
-                dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
-                      "RETURN type(r), r, t.id, ID(r), labels(t)")
-            else:
-                dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
-                      "RETURN type(r), r, t.id, ID(r), labels(t)")
-            rows = proj.g.query(dq, params={"old_id": old_id}).result_set
-            # Filter: exclude edges whose OTHER endpoint is an operator Point
-            # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
-            # an operator target; 2a owns op->input edges and runs first;
-            # repointing an operator target would create a topology
-            # create_direct_edge itself rejects). Operators are the CANONICAL
-            # set — ``is_operator = true OR op_type IS NOT NULL``, the same
-            # population 2a and the #10195 pre-flight read (#10418 review P2):
-            # with a narrower set here, an ``op_type``-only operator's edge
-            # fell through to this leg as an operator-LESS direct edge, losing
-            # its ``idx`` slot position and emitting a ``DirectEdgeRepoint``
-            # for a factor the loader builds as an operator factor.
-            plain = []
-            if rows:
-                other_ids = [row[2] for row in rows]
-                op_rows = proj.g.query(
-                    "MATCH (p:Point) WHERE p.id IN $ids AND "
-                    "(p.is_operator = true OR p.op_type IS NOT NULL) "
-                    "RETURN p.id",
-                    params={"ids": other_ids},
-                ).result_set
-                op_set = {r[0] for r in op_rows}
-                plain = [row for row in rows if row[2] not in op_set]
-            rows = plain
+            rows = _direct_incident_edges(direction)
             for row in rows:
                 rtype, r, tid, rid = row[0], row[1], row[2], row[3]
                 # #8622: the label that ACTUALLY carries the far endpoint, in
