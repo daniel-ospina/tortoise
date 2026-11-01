@@ -8225,7 +8225,10 @@ class TestSearchOffloadConcurrency:
                                             org=TEST_TEAM))
                 # Empty temp DB -> FTS finds nothing; the meaningful assert is
                 # 200-shaped (no HTTPException) + count == 0.
-                assert result == {"results": [], "count": 0}
+                # #8447: `truncated` is always on the body — an empty read of a
+                # reachable store is COMPLETE, so it says so.
+                assert result == {"results": [], "count": 0,
+                                  "truncated": False}
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 
