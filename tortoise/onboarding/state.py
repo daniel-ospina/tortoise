@@ -457,6 +457,19 @@ def _org_lock(org_id: str) -> threading.Lock:
 #     bless that; it is named here so it is not discovered, and the fix (the
 #     seed's journalled door should be the only minter, or the anchor needs its
 #     own declaration) is tracked on `#9079`'s family.
+#     ⚠️ #10180's promote carry (`carry_onboards_edge`) is the SECOND, and it is
+#     a DELIBERATE WIDENING of what this lane may write to `:Subject`: the
+#     id-only link cannot serve it, because the target graph is the org's new
+#     DEFAULT graph and has never held the anchor, so an id-only MERGE there
+#     mints a name-less `:Subject` that `find_subject_by_name` cannot see (the
+#     next seed files a SECOND Organization anchor beside it) and that
+#     `_count_resource("points")` counts as a tenant point. So it carries the
+#     anchor WITH its identity properties (name/subjectKind/org_id), keyed by
+#     the id the onboarding node already holds. It is still an unjournalled
+#     `:Subject` write — the same #9079 debt, one statement wider — and
+#     `tests/test_9079_onboarding_declared_lane.py::
+#     test_the_subject_anchor_mint_is_not_widened` pins BOTH statements exactly
+#     so a third widening cannot slip in beside them.
 #   * It DOES now cover the eager-init statement on the org-graph lanes
 #     (`#9157`). `eager_init_query()` had only ever BUILT text: its five call
 #     sites issued the result on `proj.db.select_graph(<g>)` — §17.1's escape
