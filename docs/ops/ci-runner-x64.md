@@ -892,3 +892,25 @@ Label matching is cumulative — a runner must carry EVERY label named in `runs-
 Changing the DEFAULT is a decision, and its home is #6897: it needs idle pool capacity at schedule
 time **and** a pool job wall within ~1.2x hosted on these rows, neither of which the runs above
 show. Do not set `pool-split` to "try it out" — a killed leg is a required check.
+
+### The lint's label list is DECLARED, not discovered
+
+`workflow-lint` (the REQUIRED `python-ci-gate` leg) runs `rhysd/actionlint:1.7.12`, and actionlint
+verdicts a `runs-on:` label against a **baked-in list of GitHub-hosted labels**. The arch markers
+above are CUSTOM, so the first workflow that pins one is a hard error — measured on the #10237 canary
+job's first run, which redded the required aggregate for a diff that was correct:
+
+```
+.github/workflows/ci.yml:1534:28: label "self-hosted-x64" is unknown. … set list of labels in
+actionlint.yaml config file [runner-label]
+```
+
+`.github/actionlint.yaml` therefore declares `self-hosted-x64` and `self-hosted-arm64`, spelled in
+full (a `self-hosted-*` glob would swallow the typo that check exists to catch).
+`tests/test_ci_selection.py::test_every_custom_runs_on_label_is_declared_to_actionlint` pins it: any
+new literal custom label in any workflow reds at TEST time instead of on the gate.
+
+⛔ Deleting that file does not "clean up stray config" — it reds `python-ci-gate` on every head that
+pins a pool label. And declaring a label is **not** a schedule: it changes the linter only, so
+everything this runbook says about a pool PIN — WAITS instead of degrading, no hosted half — still
+holds for a label named there. Re-measure `actions/runners` before pinning anything to one.
