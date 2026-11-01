@@ -1528,6 +1528,67 @@ def test_a_plan_with_an_unreadable_count_is_named_not_a_traceback(
     assert needle in message
 
 
+@pytest.mark.parametrize("target", ["prod", 5, ["prod"]])
+def test_a_plan_whose_target_is_not_an_object_is_named_not_a_traceback(
+        target):
+    """#10483 review @ `145e99dde`, P3: `approved_target = plan.get("target")
+    or {}` substitutes `{}` only for a FALSY target — a truthy non-object came
+    back as-is and `.get(...)` raised `AttributeError`, out of a gate that
+    `main` calls with no `try`, i.e. a traceback and exit 1 ("usage error").
+    `_plan_problem`'s own docstring says every dereferenced field is checked
+    BEFORE the first dereference; `target` was the one that was not."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    plan["target"] = target
+    # `live_target` is passed explicitly: the finding is about the PLAN side, and
+    # the default `_gate` argument reads `plan["target"]` (which is now not an
+    # object at all).
+    code, message = _gate(plan, live_target=_target())
+    assert code == purge.REFUSE_PLAN_UNREADABLE, message
+    assert "target" in message
+
+
+def test_execute_refuses_a_plan_whose_target_is_a_STRING_before_any_delete(
+        tmp_path, monkeypatch, capsys):
+    """The same shape through the real entry point: an operator holding a
+    plan whose `target` was hand-edited to a name must get the named refusal
+    and NO delete — not a crash in the destructive arm."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    plan["target"] = "prod"
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]), plan=plan)
+    assert rc == 2
+    assert called == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_PLAN_UNREADABLE in err
+    assert "Traceback" not in err
+
+
+def test_the_docstring_states_the_token_formula_the_code_hashes():
+    """#10483 review @ `145e99dde`, P3: the operator-facing formula still said
+    `v1` and "a canonical serialisation of the purge set" — one commit after
+    `plan_digest` started covering the journal at `v2`. The docstring is the
+    only operator-facing specification of the artefact a human signs, so a
+    reader recomputing the token from it is handed a digest that cannot match.
+    This pins the formula block to the constant and to the second axis; the
+    payload itself is pinned by `test_the_approval_token_covers_the_journal_the_plan_names`
+    below."""
+    doc = purge.__doc__ or ""
+    marker = "plan_digest = sha256("
+    assert marker in doc, "the docstring no longer states a token formula"
+    block = doc.split(marker, 1)[1].split("\n\n", 1)[0]
+    assert "_PLAN_DIGEST_VERSION" in block, (
+        "the documented formula spells a version tag by hand, so it can drift "
+        "from `_PLAN_DIGEST_VERSION` the way `v1` did")
+    assert "journal_path" in block, (
+        "the documented formula omits the journal axis, which `plan_digest` "
+        "covers — the token would read as a set-only hash to an operator "
+        "recomputing it")
+    assert f"`{purge._PLAN_DIGEST_VERSION}`" in doc, (
+        "the docstring never resolves the version constant to its value, so an "
+        "operator cannot tell which canonicalisation their plan uses")
+
+
 def test_a_live_census_whose_counts_disagree_is_a_named_refusal():
     """P3-1: `classify_sessions` raises when a session's count and its id list
     diverge. The PREVIEW caught it (`except (ValueError, KeyError)`); the

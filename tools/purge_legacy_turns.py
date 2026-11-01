@@ -78,16 +78,27 @@ THE EXACT-SET PRECONDITION (the shape the test-reap rule uses)
 =============================================================
 A destructive sweep must re-derive its victim set IMMEDIATELY before it acts
 and refuse if that set is not the one that was approved. The token is a
-SHA-256 over a canonical serialisation of the purge set:
+SHA-256 over a canonical serialisation of the WHOLE decision — WHICH nodes go
+AND WHERE their removal is recorded:
 
-    plan_digest = sha256( "v1\\n" + "\\n".join(sorted(f"{session}\\x00{node_id}"))
+    plan_digest = sha256( _PLAN_DIGEST_VERSION + "\\n" + journal_path + "\\n"
+                          + "\\n".join(sorted(f"{session}\\x00{node_id}"))
                           + "\\n" )
 
-One line per (session, node) pair, sorted, so the digest is order-independent
-and changes if ANY pair is added, removed or re-homed to another session. The
-human approves the digest; `--confirm-plan-digest <digest>` hands it back;
-`--execute` recomputes the set from the live stores and refuses unless the two
-digests are equal, printing the first symmetric differences.
+`_PLAN_DIGEST_VERSION` is `v2` today. The version is named by that constant in
+both places rather than retyped here, because this block is the only
+operator-facing specification of the artefact a human signs: an operator who
+recomputes the token from a stale formula gets a digest that does not match the
+tool's, in the region whose whole subject is that a claim must match its
+artefact. (It said `v1` and "the purge set" alone for one commit after the
+payload started covering the journal — #10483 review.) One line per (session,
+node) pair, sorted, so the digest is order-independent and changes if ANY pair
+is added, removed or re-homed to another session — AND if the journal path
+moves, because a removal recorded in a log the target's rebuild never reads is
+a removal that resurrects (#3316). The human approves the digest;
+`--confirm-plan-digest <digest>` hands it back; `--execute` recomputes the set
+from the live stores and refuses unless the two digests are equal, printing
+the first symmetric differences.
 
 RECOVERY — what brings a PARITY session's transcript back if the record is
 wrong (§4 of the brief)
@@ -1306,6 +1317,19 @@ def _plan_problem(plan) -> str:
             return (f"purge.sessions[{index}] ({session}) has "
                     f"graph_turn_nodes {count!r}, not an integer — a count "
                     "the run cannot read is not a count of zero")
+    # ⛔ AND `target` IS A DEREFERENCED FIELD TOO. `evaluate_gate` reads it as
+    # `plan.get("target") or {}`, where `or {}` substitutes only for a FALSY
+    # target — so a truthy non-object (`"target": "prod"`) came back as-is and
+    # `.get(...)` raised `AttributeError` out of a gate called with no `try`,
+    # i.e. a traceback and exit 1 ("usage error") where the module promises the
+    # guard's refusals are NAMES (#10483 review, P3). A present `target` that is
+    # not an object is unreadable for the same reason a missing `ids` is: the
+    # run dereferences it to compare the plan to the live deployment.
+    if "target" in plan and not isinstance(plan.get("target"), dict):
+        return (f"its `target` block is a {type(plan.get('target')).__name__}, "
+                "not an object — the plan is bound to a deployment by "
+                "comparing that block field by field, so a target the run "
+                "cannot read is not the approved target")
     return ""
 
 
