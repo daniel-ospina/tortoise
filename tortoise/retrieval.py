@@ -1249,10 +1249,20 @@ def _validity_marker(h: dict) -> str:
         # ``search_engine._created_sort_key(raw_vf)[0] == 0``, the one
         # ``validity.effective_precision`` resolves precision behind), not a
         # second notion of "parseable" — so a start clause this renders cannot
-        # disagree with the precision beside it. A numeric bound reaches here
-        # as its own calendar day (``0`` → ``1970-01-01``: epoch 0 IS an
-        # instant, and #9741 removed the truthiness trap that used to drop it);
-        # only a present-but-unorderable STRING renders no start clause.
+        # disagree with the precision beside it. A numeric bound INSIDE the
+        # authored span renders its own calendar day (``0`` → ``1970-01-01``:
+        # epoch 0 IS an instant, and #9741 removed the truthiness trap that used
+        # to drop it). NO start clause renders for a present-but-unorderable
+        # STRING — and none for a NUMBER OUTSIDE that span either:
+        # ``_display_bound`` skips it and the hit is counted, never re-read in
+        # another unit, because the short-circuit at the gate answers "is it
+        # orderable", not "can this renderer date it" — so ``valid_from =
+        # 1719792000000`` renders ``[valid]``. That residual is REAL, KNOWN and
+        # PINNED (``_bounds_an_instant``'s out-of-span note;
+        # ``test_a_millis_bound_is_skipped_rather_than_restating_the_unit``), so
+        # this arm must not claim a NUMBER always states a day — the sentence
+        # here said exactly that, contradicting both the docstring's out-of-span
+        # paragraph and the note below it (#9741 review P3).
         vfd = vf if _bounds_an_instant(raw_vf) else ""
         since = f" since {vfd}" if vfd else ""
         if _end_state_is_unknown(h) or end_unreadable:
