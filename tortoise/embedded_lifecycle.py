@@ -3367,6 +3367,16 @@ def _install_dead_socket_guard() -> None:
 # what removes the recorded-socket replay that made this instant before; but the
 # added latency on that failure path is real and is not something this guard can
 # distinguish.
+#
+# SO IT IS ANNOUNCED (review P2). A bounded wait that leaves no trace is
+# indistinguishable from a wedged lane — the same diagnosis cost the #4921
+# lock branch states the rule for, three functions above: "Say so BEFORE
+# waiting." A retry here spends up to `start_timeout` (60 s under the test
+# floor, `tests/_embedded.py:301`), so it is warned once at the FIRST refusal
+# — naming the socket and the budget — and warned again when the budget is
+# spent, naming the attempt count. Both warnings are the only trace an
+# operator has that a stall was a retry rather than a hang, and without them
+# the `test-slow` legs this guard exists for are the ones hardest to attribute.
 
 #: Bounded pause between refused-connect attempts; the same 0.1 s redislite's
 #: own wait loop sleeps between pings.
@@ -3430,7 +3440,20 @@ def _install_boot_window_guard() -> None:
             budget = float(getattr(self, "start_timeout", 10) or 10)
         except (TypeError, ValueError):  # pragma: no cover — a broken override
             budget = 10.0
-        deadline = time.monotonic() + budget
+        started = time.monotonic()
+        deadline = started + budget
+        attempts = 0
+        announced = False
+
+        def _where() -> object:
+            # `socket_file` is the module's own idiom for naming the server a
+            # client talks to (`getattr(client, "socket_file", None)`); the
+            # db file is the honest fallback for a client that has no socket
+            # yet, and nothing must raise from a log line.
+            return (getattr(self, "socket_file", None)
+                    or getattr(self, "dbfilename", None)
+                    or "<unknown socket>")
+
         while True:
             try:
                 return original(self, *args, **kwargs)
@@ -3441,9 +3464,29 @@ def _install_boot_window_guard() -> None:
                 # that this must keep producing.
                 if not _is_refused_connect(exc):
                     raise
+                attempts += 1
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    # Announce the EXHAUSTION too, with the attempt count: the
+                    # raw error alone cannot say whether this was one refusal or
+                    # a whole budget of them, which is the difference between a
+                    # dead server and a slow one.
+                    logger.warning(
+                        "#10447 boot window: gave up after %d refused connect(s) "
+                        "to %s over %.1fs (the server's own start_timeout "
+                        "budget) — re-raising the connection error unchanged",
+                        attempts, _where(), time.monotonic() - started)
                     raise
+                if not announced:
+                    # Say so BEFORE waiting (the #4921 rule above): an
+                    # unannounced wait in a constructor reads as a wedged lane.
+                    announced = True
+                    logger.warning(
+                        "#10447 boot window: %s exists but is not accepting "
+                        "connections yet — retrying for up to %.1fs (the "
+                        "server's own start_timeout) rather than failing the "
+                        "construction on the first refused connect",
+                        _where(), budget)
                 # Never sleep PAST the deadline: the pause is capped by what is
                 # left of the budget, so the loop cannot overshoot by a sleep on
                 # top of the one attempt it already paid for.
@@ -3493,7 +3536,7 @@ class _RedisliteGuardInstaller:
     """Install the redislite patches the moment redislite finishes importing.
 
     #5386: `import tortoise` must not import redislite (it is ~90% of that
-    module's import cost), yet the five patches above MUST be in place before
+    module's import cost), yet the SIX patches above MUST be in place before
     the first redislite client of ANY kind is constructed — including RAW
     constructions that never go through the guarded `tortoise.FalkorDB`
     (#4487: the reaper's per-server "all owners dead" signal has no other

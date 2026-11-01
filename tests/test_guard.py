@@ -269,11 +269,16 @@ def test_lazy_falkordb_returns_the_same_guarded_subclass():
 def test_redislite_import_alone_installs_the_lifecycle_guards():
     """#4487/#5386: the lifecycle patches must be installed by redislite's OWN
     import — not by access to `tortoise.FalkorDB` — so a RAW redislite
-    construction that never reaches the guarded class is still instrumented."""
+    construction that never reaches the guarded class is still instrumented.
+
+    The flag list is also the install-SET completeness pin: a guard added to
+    `install_redislite_guards()` without its flag here has nothing asserting it
+    was ever installed (`_tortoise_boot_window_guard` was exactly that gap)."""
     assert _run_in_subprocess(
         "import tortoise, redislite.client as c;"
         "print(getattr(c.RedisMixin, '_tortoise_owner_record_patch', False),"
         " getattr(c.RedisMixin, '_tortoise_partial_init_guard', False),"
         " getattr(c.RedisMixin, '_tortoise_dead_socket_guard', False),"
-        " getattr(c.RedisMixin, '_tortoise_missing_dbdir_guard', False))"
-    ) == "True True True True"
+        " getattr(c.RedisMixin, '_tortoise_missing_dbdir_guard', False),"
+        " getattr(c.RedisMixin, '_tortoise_boot_window_guard', False))"
+    ) == "True True True True True"
