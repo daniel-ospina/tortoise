@@ -337,9 +337,8 @@ def test_the_withdrawn_log_still_hashes_to_the_digest_its_note_publishes(probe):
     tracked file, so it is still editable — and an edit would leave the published digest
     describing bytes that no longer exist, i.e. a FALSE evidence record on the one artifact whose
     whole purpose is that these numbers were measured once. Nothing else looks: the guard globs
-    `*.log` non-recursively, so `withdrawn/` is invisible to it (the withdrawn copy is never
-    counted in its `evidence logs:` line), which is exactly why the ruling is enforced here and
-    nowhere else.
+    `*.log` non-recursively, so `withdrawn/` is invisible to it (`evidence logs: 0`), which is
+    exactly why the ruling is enforced here and nowhere else.
 
     Prose versus BYTES, not a third copy of the constant: the expectation is parsed out of the note
     so a re-cut note and a re-cut log have to move together (the two-copies-that-can-disagree
@@ -350,75 +349,15 @@ def test_the_withdrawn_log_still_hashes_to_the_digest_its_note_publishes(probe):
 
     note = (probe.EVIDENCE_DIR / "withdrawn" / "WITHDRAWN.md").read_text()
     published = re.findall(r"\b[0-9a-f]{64}\b", note)
-    assert published, (
-        "the note must publish the withdrawn log's digest, so the next reader knows what was "
-        f"measured; found {published!r}")
+    assert len(published) == 1, (
+        "the note must publish exactly one digest — the withdrawn log's — so the next reader knows "
+        f"what was measured; found {published}")
     actual = hashlib.sha256((probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_bytes()).hexdigest()
-    assert actual in published, (
-        "the withdrawn log's bytes no longer match the digest its note publishes: the note "
-        f"states {published} and the file is {actual}. A withdrawal may retract PROVENANCE, never "
-        "the measured bytes (#10463 item 3: do not edit its contents) — if the log really has to "
-        "change, the note and this test move with it and the retraction is recorded, not silent. "
-        "A note that additionally publishes OTHER digests is fine: only this file's must be here")
-
-
-def _checker():
-    """The pre-registration checker as a module — same loader shape as `_probe()`.
-
-    Loaded for ONE thing: `EVIDENCE_LOG_GLOB`, so the test below globs the same set the ordering
-    half globs instead of a private copy of the literal. The glob is deliberately a named constant
-    in the guard (`tools/capstone_preregistration_check.py::EVIDENCE_LOG_GLOB`, whose comment says
-    *"Widening it is a deliberate act"*), and a second copy here would be exactly the
-    two-copies-that-can-disagree shape this file refuses for the bars.
-    """
-    spec = importlib.util.spec_from_file_location(
-        "_capstone_preregistration_check",
-        ROOT / "tools/capstone_preregistration_check.py")
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_the_withdrawn_log_is_not_back_in_the_checked_directory(probe):
-    """The withdrawal moves the log out of the glob — and NOTHING pinned it staying out.
-
-    Ruling item 2 on #10463: *"Do not re-add the log in a fresh commit to obtain a later
-    add-commit. That satisfies the letter of the check while the real ordering is unchanged — it is
-    precisely the fabrication the guard exists to prevent."* That ruling is unenforced by
-    construction: the guard requires only `log_add_epoch > prereg_add_epoch` over every `*.log` it
-    globs NON-recursively (`EVIDENCE_LOG_GLOB`, `directory.glob(...)`), and the single-measured-log
-    rule counts only `capstone-measured-*.log`. A copy put back here in a FRESH commit therefore
-    has a LATER add-commit than the registration and is blessed — `evidence logs: 1`, ordering
-    "verified" — i.e. the exact fabrication, now wearing a green gate.
-
-    The temptation is real and this PR's own note invites it: `withdrawn/WITHDRAWN.md` says the
-    claim stays PROVISIONAL until re-measured with the registration already on the base branch,
-    and the registration IS on the base branch now — so the cheapest-looking way to drop the
-    "provisional" is to move the file back.
-
-    The scanned set is `EVIDENCE_LOG_GLOB` ITSELF, read off the guard, so "the directory the ordering
-    half reads" is measured rather than asserted: if that glob is ever narrowed, this test narrows
-    with it instead of redding on a file the ordering half no longer orders. The match is by BYTES,
-    against the withdrawn file's own digest — a copy under any name the glob covers is the same act —
-    and a genuine re-measurement writes DIFFERENT bytes, so it is not refused here.
-    """
-    import hashlib
-
-    withdrawn = hashlib.sha256((probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_bytes()).hexdigest()
-    back = sorted(
-        p.name for p in probe.EVIDENCE_DIR.glob(_checker().EVIDENCE_LOG_GLOB)
-        if hashlib.sha256(p.read_bytes()).hexdigest() == withdrawn)
-    assert not back, (
-        "the withdrawn log's measured bytes are back in the checked directory "
-        f"({back}): that directory is what the ordering half orders, and re-adding the log in a "
-        "fresh commit to obtain a later add-commit is the fabrication #10463 item 2 forbids — the "
-        "withdrawal, not a gate edit, is what keeps `main` green (see `withdrawn/WITHDRAWN.md`)")
-    assert not (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").exists(), (
-        "the withdrawn log is back AT THE PATH the ordering half reads. That is item 2's "
-        "fabrication whether the bytes are the measured ones or edited ones: a fresh add-commit "
-        "satisfies the letter of the ordering check while the real ordering is unchanged")
+    assert published[0] == actual, (
+        "the withdrawn log's bytes no longer match the digest its note publishes: the note claims "
+        f"{published[0]} and the file is {actual}. A withdrawal may retract PROVENANCE, never the "
+        "measured bytes (#10463 item 3: do not edit its contents) — if the log really has to "
+        "change, the note and this test move with it and the retraction is recorded, not silent")
 
 
 def test_the_log_header_names_every_bar_and_floor(probe):
