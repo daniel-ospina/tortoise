@@ -347,7 +347,7 @@ def test_an_undrained_archive_is_filed_even_when_the_plain_day_exists(
     summary = _drain(root, store, post)
 
     # Both shapes are FILES, so both are read — the archive (older) first.
-    assert post.session_ids == archived + ["B0"]
+    assert post.session_ids == [*archived, "B0"]
     assert summary["files"] == 2
     assert summary["filed"] == 6
     assert summary["queued"] == 0
@@ -390,7 +390,7 @@ def test_a_partly_drained_archive_keeps_its_own_index_space(
 
     rest = Recorder()
     summary = _drain(root, store, rest)
-    assert rest.session_ids == archived[2:] + ["B0"]         # tail not stranded
+    assert rest.session_ids == [*archived[2:], "B0"]          # tail not stranded
     assert summary["queued"] == 0
 
 
