@@ -149,7 +149,7 @@ checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
 the `result["classify_later"]` block at `:9475-9481` here, not in the log. The `8288-8292` cite is
-the `result["vet"]` block, and it is corrected to `:9485-9489` here — **not** to the `:8550-8554`
+the `result["vet"]` block, and it is corrected to `:9485-9489` here — **not** to the `:8534-8538`
 this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
 head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
 number. (The SYMBOL is what makes
