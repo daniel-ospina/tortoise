@@ -67,8 +67,10 @@ verdict table, not as an exception. The chain:
         SKIPS extraction and still stores the turns, i.e. NO S1–S6 would run
                                                                  → REFUSED
     G4  the real entry point runs one pass                      → REFUSED on raise
-    G5  all EIGHT steps were OBSERVED in that one pass (§4.4's step count)
-                                                                 → REFUSED
+    G5  all EIGHT steps were ACCOUNTED FOR in that one pass — the seven the
+        frozen record leaves unconditional were OBSERVED, and the conditional
+        one was observed or witnessed IDLE with a basis (§4.4's step count;
+        #10215)                                                → REFUSED
     G6  the per-criterion evidence is collected
 
 Nothing is inferred. A refused run emits 5 rows that are NOT green, each naming
