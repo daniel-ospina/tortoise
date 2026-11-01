@@ -687,7 +687,20 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                 f"the live census report cannot be read as a census: "
                 f"{report_problem}. Nothing was deleted")
 
-    classified = classify_sessions(live_report)
+    # ⛔ A CENSUS THAT CANNOT BE TURNED INTO A SET IS A NAMED REFUSAL, NOT A
+    # TRACEBACK. `classify_sessions` raises when a session's count and its id
+    # list disagree, and it raises `TypeError`/`KeyError` on a report whose
+    # per-session blocks are not the shape it dereferences — all fail-closed,
+    # but an uncaught one exits 1 ("usage error") where this module promises
+    # the guard's refusals are NAMES (#10483 review, P3-1).
+    try:
+        classified = classify_sessions(live_report)
+    except (KeyError, TypeError, ValueError) as exc:
+        return (REFUSE_CENSUS_UNREADABLE,
+                f"the live census report cannot be turned into a purge set "
+                f"({exc}) — its per-session counts and id lists do not "
+                f"describe one set, so what a delete would touch is not "
+                f"established. Nothing was deleted")
 
     # A census that REFUSED on its ANOMALY partition is not clean: those nodes
     # are in the delete set (`is_episodic = true`) and were never compared, and
@@ -1091,6 +1104,25 @@ def _plan_problem(plan) -> str:
     Every field the run dereferences is checked BEFORE the first dereference:
     a plan entry with no `ids` used to reach `plan_digest` and escape `main` as
     a `KeyError` traceback (#10483, P1).
+
+    ⛔ AN ENTRY WITH NO IDS IS REFUSED, not tolerated. `all(...)` over an empty
+    list is `True`, so `_plan_problem` accepted one; it contributes no pairs to
+    `plan_digest`, so neither the plan's own self-consistency check nor the
+    live-set check can see it; and `_execute` skips it (`if not ids: continue`)
+    — yet the restore proof only asks that its session be IN the plan. A plan
+    could therefore carry `{"session": "never-purged", "ids": []}`, leave the
+    digest byte-identical, and satisfy #10017's precondition 3 ("one sampled
+    session deleted from a scratch graph and re-served") with a session the run
+    never touches, while every session it DOES delete was never restored
+    (#10483 review, P2-2). A plan that purges nothing is not an approvable plan
+    either — with no entries there is nothing an approval could name.
+
+    ⛔ AND AN UNREADABLE COUNT IS NOT A ZERO. `turn_node_total: "many"` reached
+    `int(...)` in `evaluate_gate` and escaped as a `ValueError` traceback — exit
+    1 ("usage error") where this module promises the guard's refusals are
+    NAMES (#10483 review, P3-1). An absent count is still tolerated (the
+    agreement check below refuses a real mismatch); a PRESENT non-integer one
+    is refused here.
     """
     if not isinstance(plan, dict):
         return f"it is a {type(plan).__name__}, not a JSON object"
@@ -1103,6 +1135,17 @@ def _plan_problem(plan) -> str:
     entries = purge_block.get("sessions")
     if not isinstance(entries, list):
         return "purge.sessions is missing or is not a list"
+    if not entries:
+        return ("purge.sessions names no session — a plan that purges nothing "
+                "is not an approvable plan, and nothing in it can be compared "
+                "to a live census")
+    for key in ("turn_node_total", "session_count"):
+        value = purge_block.get(key)
+        if value is not None and (isinstance(value, bool)
+                                 or not isinstance(value, int)):
+            return (f"purge.{key} is {value!r}, not an integer — the counts "
+                    "are compared against the id list, and a count the run "
+                    "cannot read is not a count of zero")
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             return f"purge.sessions[{index}] is not an object"
@@ -1113,6 +1156,17 @@ def _plan_problem(plan) -> str:
         if not isinstance(ids, list) or not all(isinstance(t, str) for t in ids):
             return (f"purge.sessions[{index}] ({session}) has no `ids` list of "
                     "strings — the digest and the delete both dereference it")
+        if not ids:
+            return (f"purge.sessions[{index}] ({session}) names no ids — an "
+                    "entry with an empty id list is invisible to plan_digest "
+                    "and skipped by the delete, so it can only make the "
+                    "approved set and the purged set disagree")
+        count = entry.get("graph_turn_nodes")
+        if count is not None and (isinstance(count, bool)
+                                  or not isinstance(count, int)):
+            return (f"purge.sessions[{index}] ({session}) has "
+                    f"graph_turn_nodes {count!r}, not an integer — a count "
+                    "the run cannot read is not a count of zero")
     return ""
 
 

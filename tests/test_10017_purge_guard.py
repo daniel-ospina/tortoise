@@ -1218,6 +1218,93 @@ def test_execute_refuses_a_plan_entry_without_ids(
     assert "Traceback" not in err
 
 
+def test_execute_refuses_a_plan_entry_that_names_no_ids(tmp_path, monkeypatch,
+                                                       capsys):
+    """P2-2: an entry with `ids: []` is DIGEST-INVISIBLE and DELETE-INVISIBLE,
+    and it satisfies the restore proof for a session the run never purges.
+
+    The evidence that the entry really is invisible is asserted first (the
+    digest is byte-identical with and without it, so no live-vs-approved
+    comparison can ever see it); then the ONLY defence there is — a plan-shape
+    refusal — is asserted, by effect, through `main`.
+    """
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    ghost = {"session": "never-purged", "class": "PARITY",
+             "graph_turn_nodes": 0, "record_turn_rows": 0, "ids": []}
+    before = purge.plan_digest(plan["purge"]["sessions"])
+    plan["purge"]["sessions"].append(ghost)
+    plan["purge"]["session_count"] += 1
+    # The approved token does NOT move: the ghost contributes no pairs.
+    assert purge.plan_digest(plan["purge"]["sessions"]) == before
+    assert before == plan["plan_digest"]
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]), plan=plan,
+        # …and a proof naming the ghost session is exactly what precondition 3
+        # must NOT accept: nothing is ever restored from it.
+        proof=_proof(session="never-purged"))
+    assert rc == 2
+    assert called == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_PLAN_UNREADABLE in err and "never-purged" in err
+    assert "empty id list" in err
+
+
+def test_execute_refuses_a_plan_that_names_no_session(tmp_path, monkeypatch,
+                                                     capsys):
+    """The degenerate member of P2-2: with no entries the loop runs zero
+    times and `deleted_total == planned_total == 0`, i.e. a run that purges
+    nothing would report a full success (`purged : 0 turn node(s)`)."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    plan["purge"]["sessions"] = []
+    plan["purge"]["session_count"] = 0
+    plan["purge"]["turn_node_total"] = 0
+    plan["plan_digest"] = purge.plan_digest([])
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]), plan=plan)
+    assert rc == 2
+    assert called == []
+    err = capsys.readouterr().err
+    assert purge.REFUSE_PLAN_UNREADABLE in err and "purges nothing" in err
+
+
+@pytest.mark.parametrize("mutate, needle", [
+    (lambda p: p["purge"].__setitem__("turn_node_total", "many"),
+     "turn_node_total"),
+    (lambda p: p["purge"]["sessions"][0].__setitem__("graph_turn_nodes",
+                                                      ["1"]),
+     "graph_turn_nodes"),
+    (lambda p: p["purge"].__setitem__("session_count", 1.5),
+     "session_count"),
+])
+def test_a_plan_with_an_unreadable_count_is_named_not_a_traceback(
+        mutate, needle):
+    """P3-1: `int("many")` / `int([...])` escaped the gate as a `ValueError`
+    traceback — exit 1 ("usage error") where the module promises the guard's
+    refusals are NAMES. Every one of these used to reach `int(...)` below
+    `_plan_problem`."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    mutate(plan)
+    code, message = _gate(plan)
+    assert code == purge.REFUSE_PLAN_UNREADABLE, message
+    assert needle in message
+
+
+def test_a_live_census_whose_counts_disagree_is_a_named_refusal():
+    """P3-1: `classify_sessions` raises when a session's count and its id list
+    diverge. The PREVIEW caught it (`except (ValueError, KeyError)`); the
+    destructive arm did not, so a live census that could not be turned into a
+    set reached a traceback instead of a refusal."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    diverging = _report(clean=[{"session": "s1", "graph_turn_nodes": 3,
+                               "record_turn_rows": 3, "counts_equal": True,
+                               "ids": ["s1_t0"]}])
+    code, message = _gate(plan, live=diverging)
+    assert code == purge.REFUSE_CENSUS_UNREADABLE, message
+    assert "purge set" in message
+
+
 # ── the approval is OUT OF BAND: a plan cannot approve itself ────────────
 
 def test_execute_refuses_without_an_out_of_band_approval(
