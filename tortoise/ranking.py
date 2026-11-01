@@ -1184,11 +1184,14 @@ class StateRanker:
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  ep_degree + about_degree AS degree, "
             "  n.status, coalesce(n.outdated, false), "
-            # #10137 review round 6 — see GraphRanker: has_prior distinguishes
-            # "the read answered with a belief" from "it answered with the
-            # neutral Beta(1,1) default".
-            "  (n.confidence IS NOT NULL OR n.posterior_alpha IS NOT NULL "
-            "   OR n.ep_alpha IS NOT NULL) AS has_prior"
+            # #10137 review rounds 6/8: has_prior distinguishes "the read
+            # answered with a belief" from "it answered with the neutral
+            # Beta(1,1) default". This read is α/β ONLY — it does NOT consult the
+            # `n.confidence` mirror the way GraphRanker does, so a mirror-only
+            # node is scored from the default here and must not claim
+            # `consulted`. (Teaching this read the mirror would change recall
+            # ORDERING — a ranking change, not this PR.)
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_prior"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})

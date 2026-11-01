@@ -432,3 +432,35 @@ def test_a_neutral_default_is_not_a_consulted_belief(sdk):
     assert state
     for r in state:
         assert r["ep"].get("informed_order") != "consulted"
+
+
+def test_the_mirror_counts_only_where_the_read_consults_it(sdk):
+    """Review round 8, P1 — a mirror is RANKING EVIDENCE only for the read that
+    actually uses it.
+
+    `GraphRanker` prefers the pre-#852 `n.confidence` mirror, so a mirror-only
+    node IS a measurement there. `StateRanker` reads α/β only, so the same node
+    is scored from the neutral default in `recall_state` and must NOT claim
+    `consulted`. One predicate for both would put "belief informed this order"
+    beside `confidence_source: "neutral"` on the same hit.
+    """
+    only_mirror = sdk.create_point(
+        "statement", "the deploy pipeline mirror only", status="live")["id"]
+    ordinary = sdk.create_point(
+        "statement", "the deploy pipeline pushes the release", status="live")["id"]
+    sdk.set_point_baseline(ordinary, 10.0, 1.0)
+    # the legacy shape: the mirror, and no α/β columns at all
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id: $pid}) SET n.confidence = 0.95",
+        {"pid": only_mirror})
+
+    graph = {r["id"]: r for r in sdk.tortoise_fts_query(
+        _QUERY, order_by="graph", limit=10)}
+    assert graph[only_mirror]["ep"].get("informed_order") == "consulted", (
+        "GraphRanker reads the mirror, so it IS a measurement there")
+
+    state = {r["id"]: r for r in sdk.recall_state(query=_QUERY, limit=10)}
+    assert state[ordinary]["ep"].get("informed_order") == "consulted"
+    assert state[only_mirror]["ep"].get("informed_order") != "consulted", (
+        "StateRanker does not read the mirror — the row was scored from the "
+        "neutral default and must not claim a consulted belief")
