@@ -450,11 +450,40 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 > **⛔ Querying liveness — do NOT filter the literal `status:'live'` (#9974 R1).** The Object/Subject birth status is DERIVED-OR-ABSENT, so a newborn entity stores **no** `status` property at all, and an absent status READS live. A graph query that filters the literal therefore matches **zero** rows for every status-less birth, where it previously matched every live entity:
 >
 > ```cypher
-> MATCH (o:Object) WHERE o.status = 'live'                     // WRONG since #9974 R1
-> MATCH (o:Object) WHERE o.status IS NULL OR o.status <> 'superseded'  // the terminal predicate
+> MATCH (o:Object) WHERE o.status = 'live'   // WRONG since #9974 R1 — zero rows for every
+>                                            // status-less birth
 > ```
 >
-> The supported filter is the shared terminal predicate, never a literal: `live._terminal_excluded("o.status")` for the Cypher predicate, `live._live_only("o.status")` when drafts must also be excluded, and `live.is_terminal_status(...)` / `live.status_as_reported(...)` on the Python side. Every in-tree read surface already goes through it — FTS, vector, structural, `recall_state`, `expand_relationships`/`provenance`/`fetch_point_epistemic_state`, and the **subgraph payload** (`ranking`'s `recall_subgraph`, `tortoise_recall(mode="subgraph")`) — so the fix changes no product result. A surface that instead renders the RAW property (`create_object`, `get_entity`) reports the record honestly: absent stays absent there, and that boundary is intentional. **This is a consumer-visible bound, not an internal detail** — for a product whose stated interface is "the graph", it is stated here explicitly: the literal still matches LEGACY Objects/Subjects that already carry `live` (no backfill exists or is needed for that case), and `:Point` keeps its born-live fold (`coalesce($st, n.status, 'live')`), so a Point literal filter is unaffected. The gap is exactly the Objects and Subjects born status-less after this change.
+> The supported filter is the shared terminal predicate, never a literal — and it is **not** a
+> one-word exclusion. `:Object`'s terminal vocabulary is FOUR values
+> (`commit_ops.OBJECT_TERMINAL_STATUSES`: `superseded`, `deprecated`, `archived`, `retracted`), so the
+> predicate that the four retrieval legs actually use excludes every one of them and no `outdated`
+> flag:
+>
+> ```cypher
+> // what live._terminal_excluded("o.status", OBJECT_TERMINAL_STATUSES,
+> //                               include_outdated_flag=False) renders — copy THIS shape
+> WHERE o.status IS NULL OR (o.status <> 'archived' AND o.status <> 'deprecated'
+>                            AND o.status <> 'retracted' AND o.status <> 'superseded')
+> ```
+>
+> On the Python side: `live._terminal_excluded(...)` for the Cypher predicate,
+> `live._live_only(...)` when drafts must also be excluded, and `live.is_terminal_status(...)` /
+> `live.status_as_reported(...)` for a value in hand. ⛔ **`live._terminal_excluded("o.status")` with no
+> arguments is the POINT vocabulary plus the Point `outdated` conjunct** (`live.py` says so at the
+> call); an `:Object` reader must pass `excluded=OBJECT_TERMINAL_STATUSES,
+> include_outdated_flag=False`, which is the call `search_engine._status_vocab_for` makes. The
+> default is a superset rather than a hole, but it is not this layer's call.
+>
+> Every in-tree read surface already goes through it — FTS, vector, structural, `recall_state`,
+> `expand_relationships`/`provenance`/`fetch_point_epistemic_state`, and the **subgraph payload**
+> (`ranking`'s `recall_subgraph`, `tortoise_recall(mode="subgraph")`). **What the fix changes in a
+> product result, stated rather than glossed:** nothing for an entity that already carries a stored
+> status; for a status-less legacy/raw entity the read surfaces now render `live` where they rendered
+> `""` (and the subgraph payload now carries the key at all), which IS the contract above — a
+> narrowing of "absent looks broken" to "absent reads live", not an inert change. A surface that
+> instead renders the RAW property (`create_object`, `get_entity`) reports the record honestly: absent
+> stays absent there, and that boundary is intentional. **This is a consumer-visible bound, not an internal detail** — for a product whose stated interface is "the graph", it is stated here explicitly: the literal still matches LEGACY Objects/Subjects that already carry `live` (no backfill exists or is needed for that case), and `:Point` keeps its born-live fold (`coalesce($st, n.status, 'live')`), so a Point literal filter is unaffected. The gap is exactly the Objects and Subjects born status-less after this change.
 >
 > **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
 >
