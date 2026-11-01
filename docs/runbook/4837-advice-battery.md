@@ -70,7 +70,7 @@ precondition (the denominator would have moved).
 
 Variants, replayed on each item's ONE frozen rendered evidence:
 
-* **V1 `v1_shipped`** — `system_prompt_for(resolved question_type)`, captured
+* **V1 `v1_shipped`** — `system_prompt_for(resolved question_type, question=item["question"])`, captured
   from the lane's own wire and asserted equal to the re-derivation (the emitted
   prompt is evidence, not a parallel computation);
 * **V2 `v2_universal_advice`** — V1 + the #4107 `ADVICE_SENTENCE`;

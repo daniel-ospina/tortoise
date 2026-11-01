@@ -3,7 +3,7 @@
   "expect_superseded_markers": false,
   "expected_abstained": false,
   "fixture": "gold-verbatim-commit",
-  "prompt_hash": "77cb724a95df567528948ef0216d813440301b2bf0e56abaa99dba3b662dfea7",
+  "prompt_hash": "28b9a5d845a0e1e1399b29cff731a74dd46e3aa268e079437ae7b6b33225f888",
   "qtype": null,
   "question": "what is the office hours policy?",
   "question_date": "2026-08-29",

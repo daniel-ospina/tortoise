@@ -380,7 +380,7 @@ def _run_item(sdk, al, item: dict, *, replay: bool) -> dict:
     if wire[0]["system"] != shipped:
         raise SystemExit(
             f"{item['question_id']}: the lane's wire system prompt differs from "
-            "system_prompt_for(resolved question_type) — the emitted-prompt claim "
+            "system_prompt_for(resolved question type, question=...) — the emitted-prompt claim "
             "would be a parallel re-computation, not evidence")
 
     normalized = " ".join(evidence.split()).lower()

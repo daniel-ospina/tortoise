@@ -26,13 +26,20 @@ from __future__ import annotations
 
 import pytest
 
+from tortoise import reader as _reader_mod
 from tortoise.aggregate import detect_aggregative_intent
 from tortoise.reader import (
-    _AGGREGATION_FRAGMENT,
     detect_question_type,
     reader_prompt_constants,
     system_prompt_for,
 )
+
+#: Resolved defensively so THIS FILE IMPORTS ON THE PRE-FIX TREE. A hard
+#: ``from tortoise.reader import _AGGREGATION_FRAGMENT`` raises ImportError
+#: there, which turns the whole module into ONE collection error and destroys
+#: the evidence this file exists to produce: a red run whose *assertions* fail,
+#: proving the defect rather than proving the symbol is missing.
+_AGGREGATION_FRAGMENT = getattr(_reader_mod, "_AGGREGATION_FRAGMENT", "")
 
 #: A fragment-only marker: this phrase must appear when the reader has been
 #: given counting discipline, and must not appear otherwise. Kept as one
@@ -163,11 +170,45 @@ def test_aggregation_rules_defer_to_the_presence_commit_rule():
     defers to that rule would push the reader back toward the over-abstention
     the A1 clause exists to prevent."""
     frag = _AGGREGATION_FRAGMENT.lower()
-    assert "refine" in frag and "not " in frag
+    assert "refine" in frag and "do not override" in frag
     assert "do not hedge" in frag
 
 
 # ── prompt-drift coverage (the recording surface must see the new fragment) ──
+
+def test_aggregation_seam_failure_keeps_the_pre_10539_prompt_and_warns_once(
+        monkeypatch, caplog):
+    """The fail-open must stay LOUD (#10539 review, cycle 1 item 6).
+
+    ``_is_aggregative_question`` swallows detector failures so a broken
+    detector can never break a working prompt — but a SILENT swallow lets a run
+    report the aggregation-aware configuration while no prompt carried the
+    clause. Two properties, both pinned here: the prompt degenerates to exactly
+    the pre-#10539 text, and the failure is reported once (not per question).
+    """
+    import logging as _logging
+
+    import tortoise.aggregate as _agg
+
+    def _boom(_q):
+        raise RuntimeError("detector exploded")
+
+    monkeypatch.setattr(_agg, "detect_aggregative_intent", _boom)
+    monkeypatch.setattr(_reader_mod, "_AGGREGATION_SEAM_WARNED", False,
+                        raising=False)
+    q = "How many clothing items did I buy last month?"
+    qtype = detect_question_type(q)
+    with caplog.at_level(_logging.WARNING):
+        first = system_prompt_for(qtype, question=q)
+        second = system_prompt_for(qtype, question=q)
+    # byte-identical to the pre-#10539 prompt: the seam failure changes nothing
+    assert first == system_prompt_for(qtype)
+    assert second == first
+    # ...but it is not silent, and it does not repeat per question
+    warns = [r for r in caplog.records
+             if r.levelno == _logging.WARNING and "10539" in r.getMessage()]
+    assert len(warns) == 1, f"expected exactly one seam warning, got {len(warns)}"
+
 
 def test_aggregation_fragment_is_recorded_for_prompt_drift_reporting():
     """``reader_prompt_constants`` is what the report records verbatim so prompt
