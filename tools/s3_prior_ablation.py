@@ -778,16 +778,40 @@ def main(argv: list[str] | None = None) -> int:
     # The machine record pins the argument it describes; if the two disagree, the bars this run
     # parses are not the bars the bundle's record froze — the residual tuning path review r1 P2
     # named (a re-cut document beside an un-re-cut record).
+    #
+    # ⚠️ ABSENCE REFUSES, IT DOES NOT SKIP (review r6 F4). This was `if record_path.is_file()`, so
+    # the ONLY document↔record cross-check in the module switched itself off when the file was
+    # gone — deleting one file, committed or not, disabled the guard with no refusal and no line in
+    # the log saying the check had not run. Everything else here refuses rather than skips ("a bar
+    # this probe had to guess is not a pre-registered bar"), and a record carrying no
+    # ``document_sha256`` is the same fail-open one field in, so that refuses too.
     record_path = EVIDENCE_DIR / "preregistration.json"
-    if record_path.is_file():
-        import hashlib
+    try:
+        record_label = str(record_path.relative_to(ROOT))
+    except ValueError:  # a bundle outside the repo (tests, a restored copy)
+        record_label = str(record_path)
+    if not record_path.is_file():
+        refuse(f"{record_label} is missing from this evidence bundle — the machine record is what "
+               "pins the argument, so without it nothing checks that the bars this run obeys are "
+               "the bars the bundle froze. A guard that can be switched off by deleting one file "
+               "is not a guard")
+    import hashlib
+    try:
         record = json.loads(record_path.read_text())
-        want = record.get("document_sha256")
-        got = "sha256:" + hashlib.sha256(prereg_text.encode()).hexdigest()
-        if want and want != got:
-            refuse(f"the pre-registration at {args.prereg} hashes to {got}, but "
-                   f"preregistration.json pins {want} — the record does not describe the "
-                   "document this run is about to obey")
+    except json.JSONDecodeError as exc:
+        refuse(f"{record_label} is not JSON ({exc}) — an unreadable record cannot be compared "
+               "with the document, and an unchecked cross-check is not a passed one")
+    if not isinstance(record, dict):
+        refuse(f"{record_label} is not a JSON object; the record must pin document_sha256")
+    want = record.get("document_sha256")
+    got = "sha256:" + hashlib.sha256(prereg_text.encode()).hexdigest()
+    if not want:
+        refuse(f"{record_label} carries no document_sha256 — a record that does not pin the "
+               "argument cannot refuse a re-cut one")
+    if want != got:
+        refuse(f"the pre-registration at {args.prereg} hashes to {got}, but "
+               f"{record_label} pins {want} — the record does not describe the "
+               "document this run is about to obey")
     # One bundle carries ONE measured log. Overwriting it silently is how a superseded run becomes
     # invisible, and how a re-run could replace a falsifying number with a friendlier one. The
     # refusal reads the FILE: `--overwrite` may replace an aborted run, never a log with a verdict.
@@ -804,6 +828,19 @@ def main(argv: list[str] | None = None) -> int:
     tree = assert_clean_tree()
     probe_hash = probe_sha256()
     sessions, corpus_hash = corpus_state(pins)
+
+    # ⚠️ The prerequisites are checked BEFORE the log is created (review r6 F3). They used to run
+    # after ``open_log`` and the eleven header lines, so a keyless or URI-less invocation exited 3
+    # leaving a header-only ``*.log`` inside the evidence bundle — a file that reads as the setup of
+    # a run that never started, which then tripped the one-measured-log refusal (exit 2) on the next
+    # attempt, while the documented reproduce command passes no ``--overwrite``. A refused run now
+    # leaves no file at all. Nothing below needs the log: every header value is already computed.
+    if not (os.environ.get("DEEPSEEK_API_KEY") or "").strip():
+        refuse("s3-ablation: REFUSED — DEEPSEEK_API_KEY is unset; a keyless capture "
+                         "extracts nothing, which measures the absence of a key (#3892)")
+    if not (os.environ.get("TORTOISE_DB_URI") or "").strip():
+        refuse("s3-ablation: REFUSED — TORTOISE_DB_URI is unset; S3 needs a searchable "
+                         "backend (`uv run python tools/test_lane.py uri`)")
 
     lines: list[str] = []
     handle, write_line = open_log(out_path)
@@ -837,13 +874,6 @@ def main(argv: list[str] | None = None) -> int:
         "wrapper around the real function (ON) / stub (OFF), never from a flag. This is a "
         "disclosed deviation from the pre-registration's wording 'asserted from the run receipt' "
         "and an instrument finding for #5087 indicator 3.")
-
-    if not (os.environ.get("DEEPSEEK_API_KEY") or "").strip():
-        refuse("s3-ablation: REFUSED — DEEPSEEK_API_KEY is unset; a keyless capture "
-                         "extracts nothing, which measures the absence of a key (#3892)")
-    if not (os.environ.get("TORTOISE_DB_URI") or "").strip():
-        refuse("s3-ablation: REFUSED — TORTOISE_DB_URI is unset; S3 needs a searchable "
-                         "backend (`uv run python tools/test_lane.py uri`)")
 
     from tests.eval.write_path.corpus import load_gold
 

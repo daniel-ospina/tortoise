@@ -185,6 +185,17 @@ one *observed* fact **machine-enforced**:
    before any model call), and the log prints `tree=<git describe --dirty>` beside the changed-file
    line so it can never read as a clean-tree assertion it did not make. **No number moves** — the
    measured run predates the guard and both arms ran in one process from one working copy.
+10. **Two fail-open ORDERINGS in `main`, neither of which changed a number.** (a) The log file was
+   opened and its eleven header lines written **before** the `DEEPSEEK_API_KEY` and
+   `TORTOISE_DB_URI` refusals, so a keyless or URI-less invocation exited 3 having left a
+   header-only `*.log` inside this bundle — a file that reads as the setup of a run that never
+   started, and the next attempt with the same `--out` was then refused at exit 2 by the one-log
+   rule while the documented reproduce command passes no `--overwrite`. Both prerequisites are now
+   checked **before anything is written**, so a refused run leaves **no file** at all. (b) The
+   document↔record cross-check was `if preregistration.json is a file`, so **deleting the record
+   switched the only check that the bars came from the document off** — no refusal, no line in the
+   log saying it had not run. A missing record, a record with no `document_sha256`, and an
+   unparseable record all **refuse** at `exit 3` now: absence is not an exemption.
 
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
 repeated to get a friendlier number. The one-log rule is enforced from the FILE, not from the flag
@@ -251,6 +262,9 @@ mid-way still leaves the sessions it already measured on disk — the gap that l
 non-production files differ from `HEAD` **or whose metric-definition code differs at all**
 (`METRIC_ARTIFACT_PREFIXES`). It also refuses a **dirty working copy** over the trees that can move a
 number (`assert_clean_tree`), and logs `tree=` (`git describe --dirty`) and `probe_sha256=` so a run
-names both the commit and the bytes it executed. The node census is
+names both the commit and the bytes it executed. Every refusal happens **before the log file is
+created**, so a refused run leaves nothing behind, and the document is cross-checked against
+`preregistration.json`'s `document_sha256` — **a bundle whose record is missing, unparseable or
+carries no digest is refused**, never admitted with the check silently skipped. The node census is
 `docs/evidence/7949-capstone/probes/capstone_measure.py::census`, imported read-only — there is no
 second census.

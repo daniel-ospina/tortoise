@@ -659,3 +659,134 @@ def test_every_prereg_failure_is_exit_3_never_2(probe):
     doc = probe.refuse.__doc__ or ""
     assert "--prereg" not in doc or "not 2" in doc, (
         "refuse()'s docstring must not call --prereg failures exit 2 — they are exit 3")
+
+
+# ── a refused run must leave NO file behind, and a missing record must refuse (r6 F3/F4) ──
+#
+# Two fail-opens, both in `main`'s ordering rather than in what it computes:
+#
+#   F3 — the log was opened and its eleven header lines written BEFORE the `DEEPSEEK_API_KEY` and
+#        `TORTOISE_DB_URI` refusals, so a keyless invocation exited 3 having left a header-only
+#        `*.log` INSIDE the evidence bundle. The next attempt with the same `--out` was then refused
+#        at exit 2 by the one-measured-log rule, and the documented reproduce command passes no
+#        `--overwrite` — one prerequisite mistake and the documented path stops working.
+#   F4 — the document↔record cross-check was `if record_path.is_file()`, so deleting
+#        `preregistration.json` switched the ONLY check that the bars belong to the document off,
+#        with no refusal and no line in the log recording that the check had not run.
+#
+# Both are driven through the real `main`, with everything below the prerequisite refusals stubbed
+# (git, the corpus re-derivation, the census) — the questions here are *did a file get created* and
+# *did the absent record refuse*, neither of which needs a graph or a model key.
+
+
+def _copy_bundle(tmp_path: Path, *, with_record: bool = True,
+                 record: dict | str | None = None) -> tuple[Path, str]:
+    """A minimal evidence bundle: the real pre-registration, and a record that pins it."""
+    import hashlib
+    import json
+
+    source = ROOT / "docs/evidence/5087-hypothesis"
+    bundle = tmp_path / "docs/evidence/5087-hypothesis"
+    bundle.mkdir(parents=True)
+    doc = (source / "PRE-REGISTRATION.md").read_text()
+    (bundle / "PRE-REGISTRATION.md").write_text(doc)
+    if with_record:
+        payload = record
+        if payload is None:
+            payload = json.loads((source / "preregistration.json").read_text())
+            payload["document_sha256"] = "sha256:" + hashlib.sha256(doc.encode()).hexdigest()
+        (bundle / "preregistration.json").write_text(
+            payload if isinstance(payload, str) else json.dumps(payload))
+    return bundle, doc
+
+
+def _stub_below_the_refusals(probe, monkeypatch, bundle: Path, doc: str) -> None:
+    """Everything `main` reaches AFTER the prerequisite refusals: git, corpus, the census."""
+    monkeypatch.setattr(probe, "EVIDENCE_DIR", bundle)
+    monkeypatch.setattr(probe, "head_sha", lambda: "0" * 40)
+    monkeypatch.setattr(probe, "show", lambda sha, rel: doc)
+    monkeypatch.setattr(probe, "assert_source_sha", lambda source_sha, head: [])
+    monkeypatch.setattr(probe, "assert_clean_tree", lambda: "a1075dfc2")
+    monkeypatch.setattr(probe, "probe_sha256", lambda: "sha256:" + "0" * 64)
+    monkeypatch.setattr(probe, "corpus_state", lambda pins: (["wp01_x"] * 7, "sha256:" + "1" * 64))
+
+
+def test_a_refused_run_leaves_no_log_file_behind(probe, monkeypatch, tmp_path, capsys):
+    """F3: the keyless refusal must happen BEFORE the log is created, not after its header."""
+    bundle, doc = _copy_bundle(tmp_path)
+    _stub_below_the_refusals(probe, monkeypatch, bundle, doc)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    out = bundle / "s3-ablation-refused.log"
+
+    with pytest.raises(SystemExit) as refusal:
+        probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
+
+    assert refusal.value.code == 3, "a missing key is an unmeasurable run, never a crash"
+    assert "DEEPSEEK_API_KEY" in capsys.readouterr().err
+    assert not out.exists(), (
+        "a refused run must leave no file: a header-only log inside the bundle reads as the setup "
+        "of a run that never started, and the next attempt is refused at exit 2 by the one-log rule "
+        "while the documented reproduce command passes no --overwrite (r6 F3)")
+
+    # …and the same for the second prerequisite, so the guard is not one-if-order lucky.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "present")
+    with pytest.raises(SystemExit) as refusal:
+        probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
+    assert refusal.value.code == 3
+    assert "TORTOISE_DB_URI" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_a_missing_machine_record_refuses_instead_of_skipping_the_cross_check(
+        probe, monkeypatch, tmp_path, capsys):
+    """F4: absence must refuse. `if record_path.is_file()` made the guard deletable."""
+    bundle, doc = _copy_bundle(tmp_path, with_record=False)
+    _stub_below_the_refusals(probe, monkeypatch, bundle, doc)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "present")
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+    out = bundle / "s3-ablation-x.log"
+
+    with pytest.raises(SystemExit) as refusal:
+        probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
+
+    assert refusal.value.code == 3
+    assert "preregistration.json" in capsys.readouterr().err, (
+        "the refusal must name the file whose absence switched the cross-check off")
+    assert not out.exists(), "a refused run must not start writing the log it refused"
+
+
+@pytest.mark.parametrize(
+    "record, expected",
+    [
+        ({"schema": "capstone-preregistration/v1"}, "document_sha256"),
+        ({"document_sha256": None}, "document_sha256"),
+        ("{not json", "not JSON"),
+        ("[1, 2]", "JSON object"),
+    ],
+    ids=["no-sha-field", "null-sha-field", "unparseable", "not-an-object"],
+)
+def test_a_record_that_cannot_pin_the_document_refuses(
+        probe, monkeypatch, tmp_path, capsys, record, expected):
+    """`if want and want != got` failed open one field in: a record with no digest checked nothing."""
+    bundle, doc = _copy_bundle(tmp_path, record=record)
+    _stub_below_the_refusals(probe, monkeypatch, bundle, doc)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "present")
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+    out = bundle / "s3-ablation-x.log"
+
+    with pytest.raises(SystemExit) as refusal:
+        probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
+
+    assert refusal.value.code == 3
+    assert expected in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_the_bundle_states_the_two_orderings_the_probe_now_enforces(probe):
+    """F3/F4 are behaviour, but the bundle's disclosure list is what a reader trusts."""
+    readme = (probe.EVIDENCE_DIR / "README.md").read_text()
+    assert "before anything is written" in readme, (
+        "the hardening list must say the prerequisite refusals precede the log creation (F3)")
+    assert "a bundle whose record is missing" in readme, (
+        "the reproduce section must say a missing record is REFUSED, not skipped (F4)")
