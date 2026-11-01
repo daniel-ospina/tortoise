@@ -60,12 +60,13 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 
 import pytest
 
-from tortoise import hosted_api, record_read, record_text
+from tortoise import hosted_api, record_read, record_text, record_writer
 from tortoise import record_projection as rp
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -105,8 +106,12 @@ def test_the_carrier_names_its_session_and_carries_the_narrative():
 
     `sessionId` is one of the two spellings the projection accepts (the commit's
     own; the capture's is `session_id`), and `story_arc` is §9.1's narrative
-    under the graph's own name for it — the SAME key the raw Cypher writes one
-    statement earlier, so the record and the cache state one fact.
+    under the RECORD's own name for it — the column `public.session_narrative`
+    reads and the shape-keyed projection consumes. ⛔ It is NOT any more "the
+    SAME key the raw Cypher writes one statement earlier": #10000 deleted that
+    Cypher (`tests/…::test_the_commit_path_emits_the_carrier_and_writes_no_
+    narrative_onto_a_node`), so the record is the only place this fact is
+    stated at all.
     """
     carrier = _carrier()
     assert carrier is not None
@@ -129,15 +134,21 @@ def test_an_empty_narrative_EMITS_NOTHING(empty):
         empty, SUMMARY, session_id=SESSION, event_id="e", captured_at="t") is None
 
 
-def test_the_commit_path_emits_the_carrier_AFTER_the_write_it_describes():
-    """§17.1's APPLY-FIRST lane, pinned structurally.
+def test_the_commit_path_emits_the_carrier_and_writes_no_narrative_onto_a_node():
+    """§9.1/D1's placement, pinned structurally (#9555 / #10000).
 
-    The raw `MERGE (s:Source …) SET s.story_arc=$arc` is not journalled, so the
-    record states the write that ALREADY landed — it must therefore appear after
-    it. Emitting before the write would state a narrative the commit may never
-    have stored (the write is fail-closed below), i.e. a record that outlives its
-    own fact. Line ordering is the checkable half of "apply-first"; the direction
-    is what a reviewer cannot otherwise see.
+    The narrative has exactly ONE home — `public.session_narrative`, written by
+    the `SessionNarrated` carrier — and the graph holds NONE of it. This pin is
+    what reds if the prose comes back onto a node: it walks the commit write
+    phase and refuses a `story_arc` SET on either identity anchor the phase
+    mints (the transcript `:Source`, the AgentSession `:Event`).
+
+    ⛔ THIS USED TO PIN LINE ORDER ("the carrier is emitted AFTER the raw
+    `s.story_arc=$arc` MERGE it describes"), because §17.1's apply-first lane
+    requires a record to state a write that already landed. #10000 DELETED that
+    write — §9.1/D1 forbids it — so the ordering premise is gone and the
+    invariant that remains is the placement itself: the carrier is still
+    emitted, and no narrative text reaches a node. Re-derived, not deleted.
     """
     src = (REPO_ROOT / "tortoise" / "hosted_api.py").read_text()
     tree = ast.parse(src)
@@ -145,9 +156,15 @@ def test_the_commit_path_emits_the_carrier_AFTER_the_write_it_describes():
                if isinstance(n, ast.FunctionDef) and n.name == "_execute_commit_writes"),
               None)
     assert fn is not None, "the commit write phase is gone — re-measure #9555"
-    merge_line = min((n.lineno for n in ast.walk(fn)
-                      if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                      and "s.story_arc=$arc" in n.value), default=None)
+    narrative_node_writes = [
+        (n.lineno, n.value) for n in ast.walk(fn)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        and "story_arc" in n.value]
+    assert not narrative_node_writes, (
+        "the commit write phase writes `story_arc` again at "
+        f"{narrative_node_writes} — §9.1/D1 places the S1 narrative in Postgres "
+        "ONLY (\"not in the graph, not a `Document` node, not a `Point`\"), and "
+        "its one home is `public.session_narrative` (#10000)")
     emit_line = min((n.lineno for n in ast.walk(fn)
                      if isinstance(n, ast.Call)
                      and isinstance(n.func, ast.Attribute)
@@ -155,17 +172,278 @@ def test_the_commit_path_emits_the_carrier_AFTER_the_write_it_describes():
                      and n.args
                      and isinstance(n.args[0], ast.Name)
                      and n.args[0].id == "NARRATIVE_RECORD_TYPE"), default=None)
-    assert merge_line is not None, (
-        "the transcript `:Source` MERGE (`s.story_arc=$arc`) is gone — the "
-        "carrier's anchor moved and this pin must be re-derived, not deleted")
     assert emit_line is not None, (
         "the commit path no longer emits the narrative carrier — that is "
         "exactly the #9555 (b) gap returning: the record keeps the COUNTS and "
-        "loses the TEXT")
-    assert emit_line > merge_line, (
-        f"the carrier is emitted at line {emit_line}, BEFORE the write it "
-        f"describes (line {merge_line}) — §17.1's apply-first lane states the "
-        "write's own result, so the record must follow it")
+        "loses the TEXT, and with the node write gone (#10000) the narrative "
+        "would then be stored NOWHERE")
+
+
+def test_the_commit_path_READS_the_record_outcome_it_cannot_assume():
+    """#10389 review ISSUE 2 — the only writer's outcome is read, not assumed.
+
+    With the node writes deleted the carrier IS the narrative's only write, and
+    `sdk.py::TortoiseSDK._emit_event` is best-effort by contract: no journal
+    configured returns BEFORE the record leg (its `if log is None:` arm), and a
+    raising append returns `False` and skips it (its per-call `return False`).
+    Either lane leaves the prose in NO store while the commit answers 200 — the
+    state this pin refuses.
+
+    (1) FAILS on the pre-fix phase, on both counts: no `record_sink=` at the
+        carrier emit (so the outcome is unobservable) and no call to the
+        reporter that turns it into a log line + a receipt advisory.
+    (2) STRUCTURAL on purpose: calling `_execute_commit_writes` needs a live
+        projection, and the behaviour of the reporter itself is pinned
+        separately below — the two halves cannot cover for each other.
+    """
+    tree = ast.parse((REPO_ROOT / "tortoise" / "hosted_api.py").read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "_execute_commit_writes"),
+              None)
+    assert fn is not None, "the commit write phase is gone — re-measure #9555"
+    carrier_emits = [
+        call for call in ast.walk(fn)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "_emit_event"
+        and call.args
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "NARRATIVE_RECORD_TYPE"]
+    assert carrier_emits, "the commit path no longer emits the narrative carrier"
+    sinks = [kw.value for call in carrier_emits for kw in call.keywords
+             if kw.arg == "record_sink"]
+    assert sinks, (
+        "the carrier emit passes no `record_sink` — the commit door cannot tell "
+        "whether the narrative's ONLY writer landed, so a record that declines "
+        "it (no journal, a raising append, a non-durable journal) answers 200 "
+        "with the narrative in no store at all (#10389 ISSUE 2)")
+    reporters = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+                 and isinstance(c.func, ast.Name)
+                 and c.func.id == "_report_narrative_home"]
+    assert reporters, (
+        "the commit door collects the record's outcome and never reports it — "
+        "reading `record_sink` and doing nothing with it is the same silent "
+        "200 it was adopted to end (#10389 ISSUE 2)")
+
+
+def _record_write(outcome_name: str, *, statements: int = 1, refusal=None):
+    from tortoise.record_writer import RecordWrite, RecordWriteOutcome
+    return RecordWrite(outcome=RecordWriteOutcome[outcome_name],
+                       statements=statements, refusal=refusal)
+
+
+def test_a_narrative_outside_its_record_home_is_NAMED_not_assumed(caplog):
+    """#10389 review ISSUE 2 — the four destinations, decided not guessed.
+
+    The terms are the contract (`narrative_not_recorded` rides the receipt for
+    the three that are not `record`):
+
+    * APPLIED **and** `statements >= 1` — the fold executed something for THIS
+      record. `applied` alone is not enough, which is why the empty-fold case
+      below is asserted: an armed seam that folds nothing would otherwise read
+      as "the record holds the narrative".
+    * APPLIED with ZERO statements — `unfiled`, and NOT `journal` (#10389
+      review P3-2). `statements` is what the FOLD emitted, not what the record
+      did with it, and `record_projection.replay_plan` is deterministic in the
+      record — so a replay emits the same nothing and **cannot heal it**. It
+      used to fall through to `journal`, i.e. a loss reported as a non-loss
+      with a remedial instruction (replay) that provably cannot remediate.
+    * journal appended, record declined — `journal`: replay heals it from that
+      same line, so this is a warning, not a loss.
+    * `no_durable_journal` + a "journalled" return — `nowhere`: a scratch buffer
+      is not a journal and nothing about it survives the process. This is the
+      one case where the seam's own vocabulary overrides the emit return.
+    * nothing journalled and no record outcome (no journal configured, or the
+      append raised) — `nowhere`, at ERROR.
+
+    (1) FAILS pre-fix: `_report_narrative_home` does not exist, so every call
+        here is an AttributeError — the door had no such decision at all.
+    (2) REACHABLE: the outcome objects are the REAL `RecordWrite`/`
+        RecordWriteOutcome` the live seam returns, not a stand-in shape.
+    """
+    report = hosted_api._report_narrative_home
+
+    assert report(session_id=SESSION,
+                  outcome=_record_write("APPLIED", statements=2),
+                  journalled=True) == "record"
+
+    #: ⛔ APPLIED/0 IS ITS OWN TERM, and the term is PINNED — the reviewed head
+    #: only asserted `!= "record"`, so `journal` ("the record heals on replay")
+    #: satisfied it while being false: replay re-runs the same deterministic
+    #: fold over the same journalled dict and emits the same no statements.
+    caplog.clear()
+    assert report(session_id=SESSION,
+                  outcome=_record_write("APPLIED", statements=0),
+                  journalled=True) == "unfiled", (
+        "an APPLIED write that executed ZERO statements was not reported as "
+        "`unfiled` — the folded-nothing case is either read as 'the record "
+        "holds the narrative' or (the reviewed defect) as `journal`, i.e. "
+        "healed by a replay that runs the SAME fold and emits the same "
+        "nothing (#10389 review P3-2)")
+    assert any(r.levelname == "ERROR" and "NO statement" in r.getMessage()
+               for r in caplog.records), (
+        "a narrative the fold applied but never filed was not reported at "
+        "ERROR — a durable journal cannot heal it, so this is a LOSS and the "
+        "WARNING channel would say otherwise")
+    assert not any("heals" in r.getMessage() for r in caplog.records), (
+        "the APPLIED/ZERO-statements report still promises a heal — replay "
+        "runs the same fold over the same record, so it can only reproduce "
+        "the same absence")
+
+    caplog.clear()
+    assert report(session_id=SESSION,
+                  outcome=_record_write("REFUSED", refusal="circuit_open"),
+                  journalled=True) == "journal"
+    assert any(r.levelname == "WARNING" and "narrative" in r.getMessage()
+               for r in caplog.records), (
+        "a record that declined the narrative while the journal held it was "
+        "not reported at all — the caller learns nothing until the verb answers "
+        "nothing for a narrative that exists")
+
+    caplog.clear()
+    assert report(session_id=SESSION,
+                  outcome=_record_write(
+                      "REFUSED",
+                      refusal=record_writer.NON_DURABLE_JOURNAL_REFUSAL),
+                  journalled=True) == "nowhere", (
+        "a NON-DURABLE journal was read as holding the narrative — nothing in "
+        "it survives the process, so replay cannot heal the record from it")
+    assert any(r.levelname == "ERROR" and SESSION in r.getMessage()
+               for r in caplog.records)
+
+    caplog.clear()
+    assert report(session_id=SESSION, outcome=None, journalled=None) == "nowhere"
+    assert any(r.levelname == "ERROR" and "NO store" in r.getMessage()
+               for r in caplog.records), (
+        "the narrative reached no store and the door said nothing — a silent "
+        "200 is the exact state #10389 ISSUE 2 reds")
+
+
+def test_the_reporter_reads_the_seams_refusal_vocabulary_instead_of_retyping_it():
+    """#10389 review P3-2 — the non-durable token is IMPORTED, not re-typed.
+
+    `_report_narrative_home` branches on ONE refusal token: the seam's
+    `no_durable_journal` is the case where the journal DID take the write but
+    nothing in it survives the process, so the narrative is in no store at all.
+    A hardcoded copy of that token was one rename away from silently routing a
+    scratch buffer into the DURABLE branch — downgrading the "stored NOWHERE"
+    ERROR to a WARNING, which is the one outcome the reporter's own docstring
+    says must never happen.
+
+    (1) FAILS pre-fix on both arms: the comparison target was a string CONSTANT
+        inside the function, and `record_writer` declared no such name at all.
+    (2) DERIVED, not restated: the token is read off `record_writer`, and its
+        membership in `LIVE_WRITE_REFUSALS` is asserted here — a rename that
+        forgets the tuple reds in this file rather than at a caller.
+    """
+    token = record_writer.NON_DURABLE_JOURNAL_REFUSAL
+    assert token in record_writer.LIVE_WRITE_REFUSALS, (
+        "the seam's refusal vocabulary and the non-durable token it is built "
+        "from have come apart — a caller branching on the token would miss a "
+        "value the seam actually returns")
+
+    tree = ast.parse((REPO_ROOT / "tortoise" / "hosted_api.py").read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)
+               and n.name == "_report_narrative_home"), None)
+    assert fn is not None, "the narrative-home reporter is gone — re-measure #10389"
+    retyped = [n.value for n in ast.walk(fn)
+               if isinstance(n, ast.Constant) and n.value == token]
+    assert not retyped, (
+        f"`_report_narrative_home` re-types the seam's refusal token ({retyped}) "
+        "instead of reading `record_writer.NON_DURABLE_JOURNAL_REFUSAL` — a "
+        "rename of the token would then route a NON-DURABLE journal into the "
+        "durable branch and downgrade the 'stored NOWHERE' ERROR to a WARNING")
+
+    assert hosted_api._report_narrative_home(
+        session_id=SESSION,
+        outcome=_record_write("REFUSED", refusal=token),
+        journalled=True) == "nowhere", (
+        "the imported token did not reach the decision — the reporter's branch "
+        "and the seam's vocabulary are no longer the same word")
+
+
+def test_the_receipt_says_the_narrative_is_not_in_its_record_home():
+    """The advisory a caller reads: additive, non-blocking, and it names a home.
+
+    `unfiled` is its own message (#10389 review P3-2): it must NOT tell the
+    caller to replay, because replay cannot file a record the fold emitted no
+    statement for — the only remedy it may name is re-deriving the source, and
+    it may not share `journal`'s "the record heals on replay" text.
+    """
+    for home in ("journal", "unfiled", "nowhere"):
+        adv = hosted_api._narrative_home_advisory(home, SESSION)
+        assert adv["code"] == hosted_api.NARRATIVE_NOT_RECORDED
+        assert adv["session_id"] == SESSION
+        assert adv["advisory"] is True
+        assert "severity" not in adv, (
+            "a `severity: block` here would reject a commit whose graph writes "
+            "already landed — the advisory channel is warn-first (#405/#7819)")
+        assert adv["message"], "an advisory with no message tells the caller nothing"
+
+    unfiled = hosted_api._narrative_home_advisory("unfiled", SESSION)["message"]
+    journal = hosted_api._narrative_home_advisory("journal", SESSION)["message"]
+    assert unfiled != journal, (
+        "`unfiled` reuses the `journal` message — the two states differ in the "
+        "one thing a caller acts on: a durable journal heals `journal` on "
+        "replay, and NOTHING heals `unfiled` (#10389 review P3-2)")
+    assert "heals" not in unfiled and "replay" in unfiled, (
+        "the `unfiled` advisory must say replay does NOT heal it — a caller who "
+        "reads a heal waits for one that cannot come")
+    assert "no durable journal holds it" not in unfiled, (
+        "the `unfiled` advisory fell through to the `nowhere` message — but "
+        "the record DID take this write and simply filed no row for it, so "
+        "'no durable journal holds it' is a different (and wrong) state")
+    assert "re-derive" in unfiled, (
+        "the `unfiled` advisory names no reachable remedy — re-deriving the "
+        "source is the only one there is")
+
+
+def test_the_nowhere_remedy_names_the_JOURNAL_precondition_not_the_record(caplog):
+    """#10389 review (532ed707e) — a remedy must be able to remediate.
+
+    The `nowhere` ERROR offered the RECORD as an alternative to the journal
+    ("arm the journal / `TORTOISE_RECORD_DSN`"). It cannot remediate this
+    state: `sdk.py::TortoiseSDK._emit_event` returns BEFORE the record leg when
+    no journal is configured, and `_record_write_without_journal` is the
+    counter for exactly that deployment shape — its own docstring says an
+    operator "can arm the record and not the journal — and then nothing is
+    written". So the second half of that advice was a no-op, and the lane that
+    reads this ERROR would have spent the fix on it. The class is this branch's
+    own: a refusal must not name a remediation that cannot remediate.
+
+    (1) FAILS pre-fix: the reviewed text carried `TORTOISE_RECORD_DSN` as an
+        offered remedy, so the `not in` arm reds. It reads the message the door
+        actually logs, not the docstring's summary of it.
+    (2) DISCRIMINATING the other way: deleting the remedy is not a way to pass
+        — the message must still name the lever that DOES work (the journal).
+    """
+    caplog.clear()
+    assert hosted_api._report_narrative_home(
+        session_id=SESSION, outcome=None, journalled=None) == "nowhere"
+    text = " ".join(r.getMessage() for r in caplog.records
+                    if r.levelname == "ERROR")
+    assert "NO store" in text, (
+        "the `nowhere` lane logged no ERROR naming the state — a silent 200 is "
+        "the loss this reporter exists to name")
+    assert "TORTOISE_JOURNAL" in text, (
+        "the `nowhere` ERROR names no lever. The journal is the one that works "
+        "(`_emit_event` reaches the record leg only after a journal append "
+        "commits); a remedy-less ERROR leaves the operator to guess")
+    assert "TORTOISE_RECORD_DSN" not in text, (
+        "the `nowhere` ERROR still offers arming the RECORD as a remedy. With "
+        "no journal, `_emit_event` returns before the record leg and "
+        "`_record_write_without_journal` counts the shape as `no_journal` — "
+        "arming the DSN alone writes nothing, so the advice is a no-op "
+        "(#10389 review: a refusal must not name a remediation that cannot "
+        "remediate)")
+    #: The advisory the CALLER reads already named the journal only; the log
+    #: line is what disagreed with it, and the two now say the same thing.
+    advisory = hosted_api._narrative_home_advisory("nowhere", SESSION)["message"]
+    assert "journal" in advisory and "TORTOISE_RECORD_DSN" not in advisory, (
+        "the `nowhere` advisory and the `nowhere` ERROR disagree about the "
+        "remedy — one of the two is telling the operator to do something that "
+        "cannot work")
 
 
 # ── §2 the record effect, through the shape-keyed projection ────────────────
@@ -729,13 +1007,29 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
     the same container) cannot inherit a previous narrative and pass on it —
     the isolation is the tenant, which is what the record's own key shape gives.
 
-    ``with_source`` adds the capture's own transcript `:Source` record, which is
-    the record that carries `story_arc` onto a NODE (`hosted_api`
-    `_execute_commit_writes` step 2 does exactly that MERGE). The cache rebuild
-    needs it: without a `:Source` record there is nothing in the record for the
-    rebuild to reproduce the narrative ON, so "the cache holds the narrative" is
-    unmeasurable and a rebuild that writes only the turn Points satisfies every
-    count.
+    ``with_source`` adds a SYNTHETIC `SourceCreated` record carrying
+    `story_arc`: it stands for **door 2 (`#10394`)**, the RECORD → CACHE
+    restore, and for nothing else. The record's `public.source.story_arc` column
+    is classed PRIMARY in the placement table
+    (`docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md:368`),
+    so `cache_projection.projected_columns("source")` keeps it and
+    `record_restore.restore_from_record_view` writes it back onto `:Source` —
+    which is what `tests/test_9555_narrative_cache_rebuild.py:147/187` measure,
+    in that file, not below.
+
+    ⛔ It is NOT the document fold's shape (#10389 review P3). `_upsert_document`
+    folds `DocumentCreated`, and its open passthrough is CLOSED in this PR
+    (`story_arc` is in `_DOC_PASSTHROUGH_HANDLED`, #10403); `_upsert_source`
+    folds `SourceCreated` and DENIES the key through
+    `allow_keys=_SOURCE_EXTRA_PROPS`. Neither fold runs on this seed at all: it
+    replays into **Postgres** (`rp.replay`), and no graph fold is entered, so a
+    denial is not what any assertion here observes. It is also not the commit
+    path's shape — #10000 deleted the raw `s.story_arc=$arc` MERGE.
+
+    The cache rebuild needs SOME record for the narrative: without one there is
+    nothing for the rebuild to reproduce the narrative ON, so "the cache holds
+    the narrative" is unmeasurable and a rebuild that writes only the turn
+    Points satisfies every count.
     """
     # The record's tenancy parents: `organizations(id)` and `graphs(org_id, id)`.
     # `session_narrative`'s FK is `(org_id, graph_id) -> graphs(org_id, id)`, so
@@ -775,10 +1069,12 @@ def _seed(conn, *, org_id: str, graph_id: str, with_source: bool = False) -> Non
             _counts_record(redactions=4, turns=2),
         ]
         if with_source:
-            # The transcript `:Source` the commit's raw MERGE writes
-            # `s.story_arc=$arc` onto — the SAME text the carrier states, so the
-            # record and the cache state one fact (and the rebuild has to
-            # reproduce it on a node, not merely re-count rows).
+            # SYNTHETIC, and named as such (#10000): a `SourceCreated` row
+            # carrying `story_arc`, standing for door 2 — the RECORD → CACHE
+            # restore (#10394), whose PRIMARY `public.source.story_arc` column
+            # `record_restore.restore_from_record_view` re-projects onto
+            # `:Source`. Measured in tests/test_9555_narrative_cache_rebuild.py
+            # (:147/#187), NOT by the fold — no graph fold runs on this seed.
             records.append({
                 "type": "SourceCreated",
                 "id": f"session:{SESSION}",
@@ -1033,3 +1329,313 @@ def test_the_record_type_cannot_bypass_the_replay_registry():
                          org_id="o", graph_id="g")
     assert rp.NARRATIVE_RECORD_TYPE in rp.RECORD_MUTATIONS
     assert rp.NARRATIVE_RECORD_TYPE in rp.JOURNAL_EVENT_TYPES
+
+
+# ── §6 the residual's own coverage: door 2 restores BOTH anchors ────────────
+#
+# `#10389` review P2 — "residual (b) understates door 2: the same route
+# re-materialises the prose on `:Event` too". The design document described
+# `#10394` as the `:Source` half only, and the pin in
+# `tests/test_9555_narrative_cache_rebuild.py:187` asserts a **Source** node, so
+# nothing in the suite could red on the understatement. Measured at
+# `b326d1cc4`: `public.event.story_arc` exists
+# (`supabase/migrations/20261012000001_record_event_stream.sql:237`), it is
+# classed PRIMARY in the placement table, and `projected_columns("event")`
+# keeps it — so the RECORD → CACHE restore re-materialises the prose on
+# `:Event` exactly as it does on `:Source`.
+#
+# This pin is DOC-ANCHORED on purpose. The residual is the artefact that tells
+# the next lane which routes are still open; a residual that names one anchor
+# of a two-anchor route is the "names the wrong mechanism" failure the section
+# exists to prevent. The premise half is derived from the code, not re-typed,
+# so a placement change reds here instead of silently making the prose sentence
+# stale — and the doc half reds if the wording regresses to `:Source` only
+# (which is exactly the state this pin was written against).
+
+_PLACEMENT_DOC = (
+    REPO_ROOT
+    / "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md"
+)
+_STORAGE_DOC = REPO_ROOT / "docs/architecture/STORAGE-ARCHITECTURE.md"
+
+
+def _placement_row(table: str, column: str) -> str:
+    """The placement table's row for `column` in `public.<table>` — a P row or nothing.
+
+    Read rather than restated: the residual's claim is *"the record keeps the
+    column"*, and the only authority for that is the placement table's class.
+
+    ⛔ SCOPED BY TABLE (#10389 review P3-1). The appendix carries ONE SECTION PER
+    NODE TABLE (`### Episodic — `Event`` / `## Event (node) — …`), and the same
+    column name appears in several of them — `story_arc` is a P row for BOTH
+    `public.event` (`:309`) and `public.source` (`:368`). An unscoped scan
+    returns the FIRST match in file order, so the `:Event` half of this test
+    passed on the SOURCE row and deleting the source row red nothing while the
+    failure message claimed it was about `public.event`. The `table` argument
+    was accepted and never used (Ruff would flag `ARG001` if `ARG` were
+    selected).
+
+    The node label for the table is DERIVED from `cache_projection.NODE_TABLES`
+    — the projection's own table map, the same one the restore lane uses — so a
+    table whose label spelling changes moves here instead of silently matching
+    no section at all.
+    """
+    from tortoise import cache_projection
+
+    labels = [label for label, mapped in cache_projection.NODE_TABLES.items()
+              if mapped == table]
+    if len(labels) != 1:
+        return ""
+    in_section = False
+    for line in _PLACEMENT_DOC.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#"):
+            # Section boundaries: the appendix's `## Event (node) — …` heading is
+            # the authority for which table the rows below belong to.
+            stripped = line.lstrip("#").strip()
+            in_section = stripped.split(" ", 1)[0] == labels[0]
+            continue
+        if not in_section:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0] == f"`{column}`" and cells[1] == "P":
+            return line
+    return ""
+
+
+def test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so():
+    """The residual is the routing table for the next lane — it must be whole.
+
+    Two halves, and each is proved falsifiable in a direction the other cannot
+    reach: the PREMISE half reads the decision (placement class) and the code
+    that consumes it, so a placement change reds it; the DOC half reads §9.1's
+    residual, so a regression to the `:Source`-only wording — the shape
+    `b326d1cc4` carried — reds without any code moving.
+    """
+    from tortoise import cache_projection
+
+    # ── the premise: both record tables keep the column, and both project ──
+    for table, node_label in (("source", "Source"), ("event", "Event")):
+        assert _placement_row(table, "story_arc"), (
+            f"the placement table no longer classes `story_arc` PRIMARY for "
+            f"`public.{table}` — if that column left the record, door 2's "
+            "`:Source`/`:Event` halves no longer share one mechanism and this "
+            "pin's premise (not its doc claim) has moved")
+        assert cache_projection.NODE_TABLES[node_label] == table, (
+            f"`cache_projection.NODE_TABLES` no longer maps `:{node_label}` to "
+            f"`public.{table}` — the projection's own table map is what makes "
+            "the restore land on that label")
+        assert "story_arc" in cache_projection.projected_columns(table), (
+            f"`projected_columns({table!r})` no longer keeps `story_arc`, so the "
+            f"RECORD → CACHE restore would stop writing it onto `:{node_label}` "
+            "— the residual's claim, and the reason #10394 is a placement "
+            "decision rather than a key-set entry, would then be false")
+
+    # ── the claim: the design document names BOTH anchors ─────────────────
+    section = _STORAGE_DOC.read_text(encoding="utf-8")
+    start = section.index("(b) The key stays DECLARED")
+    residual = section[start:section.index("**Where that placement is now EXECUTABLE**", start)]
+    for anchor in ("source.story_arc", "event.story_arc"):
+        assert anchor in residual, (
+            f"§9.1's residual (b) no longer names `{anchor}` — door 2 "
+            "(`#10394`) re-materialises the prose on BOTH `:Source` and "
+            "`:Event`, and a residual that names one anchor leaves the other "
+            "route undocumented, which is exactly the understatement #10389's "
+            "review measured at `b326d1cc4`"
+        )
+    assert "public.event.story_arc" in residual, (
+        "§9.1's residual (b) does not state WHERE the `:Event` half lives — the "
+        "reader weighing `#10017`'s purge against the record needs the column, "
+        "not just the label")
+
+
+def test_the_journal_replay_drops_the_prose_and_the_residual_says_so():
+    """The `EntityMutated` replay half, named rather than left implicit.
+
+    `#10389` review P1 asked for exactly this: `story_arc` in
+    `_SOURCE_SERVER_MANAGED_PROPS` is not a write-side guard — the SAME set is
+    read by the `EntityMutated` → `:Source` replay arm
+    (`tortoise/projection/__init__.py`), which pops every member and warns. So a
+    `rebuild_all()` reclaims the prose from a node whose copy arrived through a
+    journalled `EntityMutated`, while residual (a) said only that nodes already
+    carrying the prose keep it. The two halves of that sentence are not
+    compatible, and no test pinned the replay half either way.
+
+    The membership IS the deny here — a later lane that merely removes
+    `story_arc` from the set re-enables replay of the prose with no other edit,
+    and the design document would go on claiming the route is denied. That
+    fail-open is what the code half of this pin exists to catch; the doc half
+    keeps residual (a) from reverting to the `:Source`-untouched reading.
+    """
+    from tortoise.projection import entities as _E
+
+    assert "story_arc" in _E._SOURCE_SERVER_MANAGED_PROPS, (
+        "`story_arc` left `_SOURCE_SERVER_MANAGED_PROPS` — the live tenant route "
+        "accepts it again AND the `EntityMutated` replay arm stops dropping it, "
+        "so a legacy journal line re-materialises §9.1's prose on `:Source` at "
+        "the next `rebuild_all` (the deny residual (b) says is in place)")
+    assert "story_arc" in _E._SOURCE_NODE_PROP_NAMES or "story_arc" in _E._SOURCE_NODE_PROPS, (
+        "`story_arc` left the READ declaration — legacy nodes that still carry "
+        "the prose must keep reading back (§9.1(b): DECLARED is not WRITTEN)")
+
+    text = _STORAGE_DOC.read_text(encoding="utf-8")
+    start = text.index("(a) **Nodes already carrying the prose keep it")
+    residual_a = text[start:text.index("(b) The key stays DECLARED", start)]
+    assert "rebuild_all" in residual_a and "_SOURCE_SERVER_MANAGED_PROPS" in residual_a, (
+        "§9.1's residual (a) no longer names the replay half: a `rebuild_all` "
+        "DROPS `story_arc` from a `:Source` whose copy arrived through a "
+        "journalled `EntityMutated` (the same `_SOURCE_SERVER_MANAGED_PROPS` "
+        "deny), so 'nodes already carrying the prose keep it' is true only for "
+        "copies that did not arrive that way — the contradiction `#10389`'s "
+        "review P1 measured")
+
+
+def test_section_9_1b_names_the_event_routes_it_counts():
+    """The enumeration is a ROUTING TABLE — a count without the rows is a trap.
+
+    `#10389`'s round-5 review (ISSUE 1, P2) measured the defect this pins: §9.1(b)
+    stated a count and an enumeration that were BOTH `:Source`-shaped, while this
+    PR's own pin asserts the AgentSession `:Event` anchor is prose-free and the
+    commit writer's `e.story_arc` SET is deleted. Two caller-reachable `:Event`
+    doors were therefore open and undocumented, and NO test could red on the
+    sentence — the count was prose, so nothing tied it to the code.
+
+    Three arms, all read from the DOCUMENT, so a code change that leaves the
+    passage stale reds here rather than passing:
+
+    (1) both `:Event` mounts are named by SYMBOL, so a renamed deny set cannot
+        leave the prose pointing at an orphan;
+    (2) the Source-only count is gone — the passage may not say "FOUR routes";
+    (3) the one route no deny set reaches is named with its issue, so "the
+        routes below" cannot be read as the whole closure while the `:Point`
+        passthrough still admits the key.
+    """
+    text = _STORAGE_DOC.read_text(encoding="utf-8")
+    start = text.index("(b) The key stays DECLARED")
+    residual = text[start:text.index("**Where that placement is now EXECUTABLE**", start)]
+
+    for symbol in ("_EVENT_HANDLED", "_EVENT_SERVER_MANAGED_PROPS"):
+        assert symbol in residual, (
+            f"§9.1(b) does not name `{symbol}` — the `:Event` routes are "
+            "undocumented again by an enumeration that only describes the "
+            "`:Source` half (#10389 review ISSUE 1)")
+
+    assert "FOUR routes" not in residual, (
+        "§9.1(b) is back to the `:Source`-only count: the two `:Event` routes "
+        "(the `EventRecorded` fold and the generic tenant route on the anchor "
+        "the commit path stops writing) are then undocumented, which is the "
+        "understatement #10389's review measured")
+
+    assert "#10429" in residual, (
+        "§9.1(b) no longer names the one route the enumeration does NOT reach "
+        "(the `:Point` passthrough). Its LIVE doors are refused at the SDK door "
+        "(`#10389`), but `_upsert_point_props` still replays the key — so the "
+        "passage would read as a complete closure while a rebuild of a legacy "
+        "journal still materialises the prose on a `:Point` (#10429)")
+
+
+#: The number words §9.1(b)'s count sentence may spell a count with. DIGITS are
+#: accepted too — the arithmetic is the pin, not the spelling — so a reworded
+#: passage reds only when a NUMBER disagrees with the rows.
+_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9}
+
+
+def _stated_count(residual: str, pattern: str) -> int:
+    """The number §9.1(b) states at `pattern`, read as an int."""
+    match = re.search(pattern, residual)
+    assert match is not None, (
+        f"§9.1(b) no longer states the count `{pattern}` — the arithmetic this "
+        "pin derives from its own enumeration cannot be checked against a "
+        "passage that drops the number (or rewords it past this pattern); "
+        "restate the count and re-point this pattern")
+    word = match.group(1).lower()
+    return int(word) if word.isdigit() else _COUNT_WORDS[word]
+
+
+def _enumerated_routes(residual: str) -> dict[str, int]:
+    """Count §9.1(b)'s bulleted routes per LABEL, off the bullet titles.
+
+    Each bullet's TITLE names the route's label (`:Event` / `:Point` / the
+    RECORD's own route / a `:Source` route by default), which is the only
+    machine-readable thing the enumeration carries — so the count is derived
+    from the rows themselves rather than from a second hardcoded table.
+    """
+    counts = {":Source": 0, ":Event": 0, ":Point": 0, "record": 0}
+    for title in re.findall(r"^- \*\*(.+?)\*\*", residual, re.M):
+        if ":Event" in title:
+            counts[":Event"] += 1
+        elif ":Point" in title:
+            counts[":Point"] += 1
+        elif "RECORD" in title:
+            counts["record"] += 1
+        else:
+            counts[":Source"] += 1
+    return counts
+
+
+def test_section_9_1b_counts_the_routes_it_actually_enumerates():
+    """§9.1(b)'s counts are DERIVED from its rows, not asserted beside them.
+
+    `#10389`'s cycle-6 review (P3) measured the defect this pins: the passage
+    stated *"four on `:Source`"* over **three** bulleted `:Source` routes, while
+    its own next clause (*"five by the projection's own sets"* = 3 + 2) agreed
+    with three. The sentence exists to state a count PER ROUTE and could not
+    count its own enumeration, and nothing in the suite could notice —
+    `test_section_9_1b_names_the_event_routes_it_counts` asserts the RETIRED
+    wording (`"FOUR routes" not in residual`) and two symbol names, so a bare
+    `four` walked past it. That is the class of defect the section was rewritten
+    to remove, one number over.
+
+    So the numbers are read out of the prose and compared against the rows that
+    follow them: every label's stated count, the denied total, and the split
+    between the projection's own deny sets and the `:Point` route's SDK doors.
+
+    (1) FAILS pre-fix: at the reviewed head the sentence said `four on :Source`
+        over three `:Source` bullets, so the first assertion below reds by one.
+    (2) FAILS the other way too — dropping a bullet without touching the count
+        leaves the same disagreement, in the other direction.
+    """
+    text = _STORAGE_DOC.read_text(encoding="utf-8")
+    start = text.index("(b) The key stays DECLARED")
+    residual = text[start:text.index("**Where that placement is now EXECUTABLE**", start)]
+
+    counted = _enumerated_routes(residual)
+    assert counted["record"] == 1, (
+        f"§9.1(b)'s enumeration no longer carries exactly ONE record-owned "
+        f"route (counted {counted['record']}: {counted}) — the count sentence "
+        "treats the RECORD's route as the one route that is not denied, so a "
+        "second record row (or none) makes every number below wrong")
+
+    stated_source = _stated_count(residual, r"\b(\w+) on `:Source`")
+    stated_event = _stated_count(residual, r"\b(\w+) on the `:Event` anchor")
+    stated_point = _stated_count(residual, r"and (\w+) on `:Point`")
+    stated_denied = _stated_count(residual, r"\b(\w+) are denied")
+    stated_sets = _stated_count(residual, r"(\w+) by the projection's own sets")
+
+    assert stated_source == counted[":Source"], (
+        f"§9.1(b) states {stated_source} `:Source` route(s) but enumerates "
+        f"{counted[':Source']} — the count and the rows it introduces "
+        "disagree, which is the defect #10389's cycle-6 review measured "
+        "(`four on :Source` over three bullets). Fix the NUMBER to the rows, "
+        "or add the missing bullet and make the totals agree")
+    assert stated_event == counted[":Event"], (
+        f"§9.1(b) states {stated_event} `:Event` route(s) but enumerates "
+        f"{counted[':Event']}: {counted}")
+    assert stated_point == counted[":Point"], (
+        f"§9.1(b) states {stated_point} `:Point` route(s) but enumerates "
+        f"{counted[':Point']}: {counted}")
+
+    node_routes = counted[":Source"] + counted[":Event"] + counted[":Point"]
+    assert stated_denied == node_routes, (
+        f"§9.1(b) says {stated_denied} routes are DENIED but its enumeration "
+        f"carries {node_routes} node routes (the RECORD's is the one that is "
+        f"not): {counted}")
+    #: The `:Point` route is denied at its two SDK WRITE DOORS rather than by a
+    #: projection set (`sdk._refuse_unpaired_narrative`), so the projection-set
+    #: half of the sentence counts the `:Source` and `:Event` rows only. A new
+    #: denial mechanism that moves a row between those two halves reds here.
+    assert stated_sets == counted[":Source"] + counted[":Event"], (
+        f"§9.1(b) says {stated_sets} routes are denied by the projection's own "
+        f"sets, but {counted[':Source'] + counted[':Event']} rows are "
+        f"`:Source`/`:Event` (the `:Point` row is denied at its SDK doors): "
+        f"{counted}")
