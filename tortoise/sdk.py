@@ -16107,8 +16107,9 @@ class TortoiseSDK:
         # THE TERMINAL GATE IS SCOPED to `_TEMPORAL_RESTAMP_PROPS` (see that
         # constant for why a blanket refusal is wrong here: #3305's
         # post-terminalization revisions are a recorded capability). The GATE
-        # ITSELF now runs on EVERY call (#10119, below); what is scoped is its
-        # terminal RAISE, passed as `refuse_terminal`, so:
+        # ITSELF now runs on every call that reaches the write path — the #1088
+        # status-only-on-live no-op returns above it, taking no work — and what
+        # is scoped is its terminal RAISE, passed as `refuse_terminal`, so:
         #   * a call carrying a temporal prop is refused on a terminal node
         #     exactly as before — including a STATUS-carrying one, which keeps
         #     #7819 whole: `update_point(terminal, status='live', validTo=…)`
@@ -16158,8 +16159,9 @@ class TortoiseSDK:
         # already performed existence reads it could gate on. The predicate
         # lives in `_assert_lifecycle_guard` (the #2498/#7819 instrument: one
         # statement, one classifier, over the whole fan-out — #7822), so this
-        # door now consults it on EVERY call instead of only when a temporal
-        # prop is present. It must run HERE — after the refusals above (so a
+        # door now consults it on every call that reaches the write path (the
+        # #1088 status-only-on-live no-op returns above it) instead of only when
+        # a temporal prop is present. It must run HERE — after the refusals above (so a
         # refused call is reported as itself, not as absent) and BEFORE the
         # journal append and every write (the append is the commit point,
         # #7951 §17.1; an append for a node that is not there is a record of a

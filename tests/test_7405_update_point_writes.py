@@ -985,11 +985,13 @@ _WRITE_SLOT = "another write is in progress, retry the query"
 class _TargetVanishesBeforeTheWrite:
     """The target is PRESENT at the guard read and gone by the write.
 
-    This is the ONE shape in which ``update_point`` still issues a statement
-    that matches nothing (#8854 review round 10, I1): #10119 refuses an id
-    absent AT the guard read before any WRITE statement is issued, so the reachable
-    benign-zero-row case is a point that existed at that read and was removed
-    (rebuild / replay) before the write ran.
+    This is the ONE shape in which a zero-row statement is a legitimate,
+    NON-RAISING outcome for ``update_point`` (#8854 review round 10, I1):
+    #10119 refuses an id absent AT the guard read before any WRITE statement is
+    issued, so the reachable benign-zero-row case is a point that existed at
+    that read and was removed (rebuild / replay) before the write ran. (A
+    promote on an absent id also matches zero rows, but it RAISES `No point`
+    through `_raise_update_point_status_error`, so it is not benign.)
 
     Two polarities, and the difference is the whole point:
 
@@ -1138,7 +1140,8 @@ def test_an_absent_id_issues_no_statement_for_the_write(tmp_path):
     This is where the #8854 witness question used to be tested, and it can no
     longer be: the door reads the target's existence from the lifecycle guard
     BEFORE the journal append and BEFORE any write, so an absent id issues NO
-    statement at all — ``proxy.matching == 0``, and there is no first attempt
+    WRITE statement — ``proxy.matching == 0`` (its only statement is the
+    guard's own read) — and there is no first attempt
     to abort and retry. The witness gate itself is now pinned on the shape that
     still issues a statement,
     ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``.
