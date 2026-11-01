@@ -193,6 +193,17 @@ CAPSTONE_RECORD = re.compile(
 
 #: Every pinned corpus quantity the machine record restates and is cross-checked against. A REQUIRED
 #: set: a pins block missing one of these is a failure, never a silently-skipped comparison.
+#: The epic's eight TOP-LEVEL steps (`EXTRACTOR-V4-ARCHITECTURE.md` §4.1). Declared
+#: here so the pre-registration's step partition is validated against the DESIGN's
+#: own list rather than against itself: a check that compared the document with the
+#: record alone would accept both being emptied (#10215).
+CAPSTONE_STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
+
+#: The fields a CONDITIONAL step's declaration may not omit. A `step:` alone is a
+#: waiver: `condition` says WHEN it does not apply, `idle_evidence` says what a run
+#: must show to claim it did not apply, `evidence_issue` says who measured that.
+CONDITIONAL_STEP_FIELDS = ("condition", "idle_evidence", "evidence_issue")
+
 CROSS_CHECKED_CORPUS_KEYS = (
     "fixtures_hash", "sessions", "seed", "schema_version", "planted_units",
     "planted_operator_edges", "value_bearing_units", "hedge_scope_sentences",
@@ -663,6 +674,138 @@ def _list(container: dict, key: str, where: str) -> list:
 
 def _pins_mapping(pins: dict, key: str) -> dict:
     return _mapping(pins, key, "pins")
+
+
+def check_step_partition(pins: dict, record: dict) -> list[str]:
+    """The eight steps split into unconditional + conditional, once and consistently (#10215).
+
+    The capstone's step gate (V5 in ``tools/capstone_verdict_check.py``, G5 in
+    ``probes/capstone_run.py``) reads this split out of the FROZEN record, so the record is what
+    decides whether a step is required. That makes a silent edit here a silent weakening of the
+    epic's gate, which is why the split is checked from both sides and against the design's own
+    step list:
+
+      * every id is one of §4.1's eight, and the two lists are a STRICT partition — a step may be
+        neither dropped nor listed twice;
+      * a conditional entry carries its condition, the idle evidence a run must show, and the issue
+        that measured it — an entry without them is a waiver with no content;
+      * the document's pins fence and the machine record agree, so neither can rot alone.
+    """
+    failures: list[str] = []
+    record_steps = _mapping(record, "steps", MACHINE_RECORD)
+    try:
+        pins_steps = _pins_mapping(pins, "steps")
+    except CheckError as exc:
+        return [f"pins.steps is unreadable: {exc}"]
+    if not pins_steps:
+        return [
+            "pins.steps is empty — the capstone's step gate reads this split out of the frozen "
+            "record, so a document that does not declare it lets the required step set change "
+            "without a reviewable diff"
+        ]
+
+    unconditional = _list(pins_steps, "unconditional", "pins.steps")
+    conditional = pins_steps.get("conditional") or []
+
+    def _cmp_steps(label: str, want, got) -> None:
+        if got != want:
+            failures.append(
+                f"{MACHINE_RECORD} {label} is {got!r} but the pins block says {want!r} — two "
+                "copies of the required step set that can disagree"
+            )
+
+    if not isinstance(conditional, list):
+        return [f"pins.steps.conditional is {type(conditional).__name__}, expected a list"]
+
+    declared = [str(s) for s in unconditional]
+    entries: dict[str, dict] = {}
+    for entry in conditional:
+        if not isinstance(entry, dict) or not str(entry.get("step") or ""):
+            failures.append(
+                f"pins.steps.conditional carries an entry that is not a {{step: …}} mapping "
+                f"({entry!r}) — it declares nothing"
+            )
+            continue
+        step = str(entry["step"])
+        entries[step] = entry
+        for field in CONDITIONAL_STEP_FIELDS:
+            value = entry.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()) or value == "":
+                failures.append(
+                    f"pins.steps.conditional[{step}] omits {field!r} — a conditional step must "
+                    "state when it does not apply, what a run must show to claim that, and the "
+                    "issue that measured it"
+                )
+
+    unknown = sorted((set(declared) | set(entries)) - set(CAPSTONE_STEPS))
+    if unknown:
+        failures.append(
+            f"pins.steps declares step id(s) {unknown} that are not part of the epic's eight "
+            f"({', '.join(CAPSTONE_STEPS)}) — §4.1 fixes the list, so an invented id is a step the "
+            "gate cannot reach"
+        )
+    both = sorted(set(declared) & set(entries))
+    if both:
+        failures.append(
+            f"pins.steps lists {both} as BOTH unconditional and conditional — the split must be a "
+            "partition, or a step's requirement depends on which list a reader consults"
+        )
+    absent = [s for s in CAPSTONE_STEPS if s not in declared and s not in entries]
+    if absent:
+        failures.append(
+            f"pins.steps drops step(s) {absent} from both lists — the capstone measures the "
+            "pipeline end to end, and a step that is in neither list leaves the gate by omission"
+        )
+    if len(declared) != len(set(declared)):
+        failures.append("pins.steps.unconditional repeats a step id")
+
+    # the record must restate the document's split, field for field: the run probe freezes the
+    # RECORD, so a divergence means the gate enforces something the argument never argued.
+    if not record_steps:
+        failures.append(
+            f"{MACHINE_RECORD} carries no steps block — the run probe reads the required step set "
+            "from the frozen record, so a document alone changes nothing (#10215)"
+        )
+        return failures
+
+    _cmp_steps("steps.unconditional", declared,
+               [str(s) for s in (record_steps.get("unconditional") or [])])
+    record_conditional: dict[str, dict] = {}
+    for entry in record_steps.get("conditional") or []:
+        if isinstance(entry, dict) and str(entry.get("step") or ""):
+            record_conditional[str(entry["step"])] = entry
+    if sorted(record_conditional) != sorted(entries):
+        _cmp_steps("steps.conditional (step ids)", sorted(entries),
+                   sorted(record_conditional))
+    else:
+        for step, entry in sorted(entries.items()):
+            for field in CONDITIONAL_STEP_FIELDS:
+                want = entry.get(field)
+                got = record_conditional[step].get(field)
+                if field == "evidence_issue":
+                    # `#10215` and `10215` are the same issue; compare the number.
+                    want, got = _issue_number(want), _issue_number(got)
+                _cmp_steps(f"steps.conditional[{step}].{field}", want, got)
+    return failures
+
+
+def _issue_number(value) -> object:
+    """``#10215`` / ``10215`` / ``"10215"`` as the same integer."""
+    text = str(value).strip().lstrip("#")
+    return int(text) if text.isdigit() else value
+
+
+def _record_for_steps(directory: Path) -> dict:
+    """The machine record as a mapping, ``{}`` when it cannot be read.
+
+    A missing or unreadable record is already reported by :func:`check_machine_record`; this loader
+    exists so the step rule can be checked without raising a second time for the same cause.
+    """
+    try:
+        record = json.loads((directory / MACHINE_RECORD).read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return {}
+    return record if isinstance(record, dict) else {}
 
 
 def _measured_locations(record: dict) -> list[str]:
@@ -1339,6 +1482,9 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
         ordering = "UNVERIFIED (--no-git)"
     report["ordering"] = ordering
     failures += check_machine_record(directory, pins)
+    # #10215: the step set the capstone's gate reads. Checked after the record so both halves are
+    # already known to PARSE; a partition failure here is a weakened gate, not a document nit.
+    failures += check_step_partition(pins, _record_for_steps(directory))
 
     if use_corpus:
         corpus_state = "verified"

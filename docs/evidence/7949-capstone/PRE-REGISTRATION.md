@@ -261,6 +261,9 @@ reporting one is the defect, not the small number.
 | **E4** | planted operator edges **wired AND persisted** with endpoint refs remapped | the **15** planted operator edges of the full 7-session corpus | `= 15 of 15` |
 | **E5** | hedge/scope/stance-bearing claims recovered as claims in the **narrative** arm | the same claims recovered in the **raw** arm of the same run, both over the **29** marker-bearing sentences (the ratio's denominator); the raw arm's absolute recovery is reported too | `>= 0.90` ratio `and >= 0.80` raw absolute |
 
+⚠️ The **step set** these rows are measured over is not all-unconditional: §10 records which of §4.1's
+eight steps are required and which is conditional on the pipeline having work for it (`#10215`).
+
 ### 3.2 E1 — volume falls, and the bar is bounded by the shipped detector
 
 **Why `<= 0.50 × before_share` and not a round number.** The only measured evidence about how much of
@@ -487,6 +490,12 @@ Exit 0 only when **all** of these hold:
    or a unit whose anchor carries no digit (so it excludes nothing), is a stale pin; and the split is
    a true partition of the 7 sessions. A corpus change therefore fails this check instead of silently
    re-basing the thresholds.
+6. **The step set is a partition, and it is the one the record declares.** The `steps:` block
+   (§10) must split §4.1's eight ids into `unconditional` and `conditional` with **no id missing, none
+   in both, none invented**, and `preregistration.json` must restate it byte-identically. Every
+   conditional entry must carry a `condition`, the `idle_evidence` a run has to show, and the
+   `evidence_issue` that measured it — an entry without them is a waiver with no content. This is the
+   rule that stops a step being quietly dropped from the capstone's gate (`#10215`).
 
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.
@@ -545,6 +554,21 @@ split:
   held_out_counts: {units: 37, operator_edges: 8, value_bearing_units: 9, hedge_scope_sentences: 8}
 criteria: [E1, E1b, E2a, E2b, E3, E4, E5]
 required_criteria_rows: [E1, E2, E3, E4, E5]
+steps:
+  source: "EXTRACTOR-V4-ARCHITECTURE.md §4.1 — the eight top-level steps"
+  unconditional: [S0, S1, S2.1, S2.2, S3, S5, S6]
+  conditional:
+    - step: S2.3
+      condition: >-
+        the S2 map left at least one candidate's kind missing or `unclassified`, so
+        `_collect_classify_items` (tortoise/extractor_v2.py:8078) had an item to hand the classifier;
+        when the map types every candidate the pass has no work and neither classify pass runs
+      idle_evidence: >-
+        the run's own classify surface reads enabled=true with empty s2/union AND the receipt's
+        error/warning surfaces carry no `classify(S2) failed` / `classify(union) failed` /
+        `classify-later init failed` — the fail-open path leaves the SAME empty counters, so the
+        absence of a failure marker is what separates 'nothing to do' from 'crashed'
+      evidence_issue: 10215
 e4_denominator: 15
 denominator_floors:
   e1_objects: 30
@@ -614,3 +638,72 @@ stops being true is visible as a log that does not carry `UNPREREGISTERED`.
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
+| 7 unconditional / 1 conditional step (§10) | `tortoise/extractor_v2.py:8078-8100` (the collector's item set), `:8604`/`:8607` and `:8729`/`:8739` (the two `if items:` gates) |
+
+## 10. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
+
+**Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
+both required **all eight** steps of §4.1 in one pass. One of the eight cannot always run, so that
+requirement was **false by construction** — no run of any corpus could satisfy it — and a gate that
+can never pass is not a gate. This section records which steps are unconditional, which is not, and
+the condition; the gate reads the declaration below instead of asserting eight.
+
+### 10.1 The finding, and what it is not
+
+`_collect_classify_items` (`tortoise/extractor_v2.py:8078-8100`) collects only candidates whose kind
+is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
+non-empty (`:8604` around `:8607`, `:8729` around `:8739`). So S2.3 has work **iff the S2 map left
+something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
+corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
+
+**Measured** (`#10215`, at `a2e80adb2` — PR `#10214`'s head, i.e. with the `#9116` witness surface
+present): one hand-written conversation and three pre-registered fixtures (`wp01`, `wp03`, `wp05`) all
+reported **7/8**, S2.3 missing, with the classify block reading
+`{"enabled": true, "s2": {}, "union": {}}`. `wp05` reported 6/8 for a second, unrelated reason
+(S5). That measurement is **not re-taken here** — it needs a provider key and a live lane graph, and it
+is an observation about a model output; the **structural** half above is what makes the conclusion
+independent of it, and it is re-derivable from the two code sites cited.
+
+**What this is not.** It is not `#9116` (the surface is present and says what it saw), not `#9823`
+(the flag-on/no-activity distinction, which this section *uses*), and not a proposal to change S2.3's
+gating (`#1695` — deliberate, and out of scope here).
+
+### 10.2 The declaration
+
+| step | kind | why |
+|---|---|---|
+| `S0`, `S1`, `S2.1`, `S2.2`, `S3`, `S5`, `S6` | **unconditional** | each has an input-independent trigger: the reader segments, the first LLM stage is called, the map emits candidates, the VET gate reports a pass, a query is spent, the merge accounts items, a payload is produced. A run in which one of these does not happen is a failing run. |
+| `S2.3` | **conditional** | its trigger is `_collect_classify_items(...) != []`, i.e. a candidate the map could not type. Zero candidates ⇒ the pass has nothing to do, and §4.1's own framing (*"assign each SURVIVING candidate its pack kind"*) is satisfied vacuously. |
+
+The machine-readable form is the `steps:` block in the pins fence above, restated byte-identically in
+`preregistration.json`, and `tools/capstone_preregistration_check.py` fails if the two disagree, if the
+split is not a strict partition of the eight, or if the conditional entry loses its condition, its idle
+evidence or its evidence issue.
+
+### 10.3 The restated requirement — and why it is not a relaxation
+
+**V5 / G5 now require every one of the eight steps to be ACCOUNTED FOR, not all eight to be observed:**
+
+1. every **unconditional** step is observed in the one pass (unchanged);
+2. every **conditional** step is either observed, or declared **idle** with its basis, where *idle* is a
+   **witnessed** state: the pass's flag was **ON**, its `s2`/`union` counters are **empty**, and the
+   receipt's own error/warning surfaces carry **no failure marker** for it;
+3. a step may not leave the gate by being omitted from both lists — required ∪ conditional must be
+   exactly the eight (§4.1), and the two must be disjoint;
+4. the conditional **set** is read from the record **at the pre-registration commit**, never from the
+   run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
+   lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
+
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:8621`/`:8751`) leaves
+the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
+block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
+which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
+`classify(S2) failed: …` / `classify(union) failed: …` to `errors` and the raw list to the receipt's
+`diagnostics` (`tortoise/sdk.py`'s `_capture_resp_error_split`), plus the `classify_error` census. So
+"enabled, no activity, no failure marker" is a positive state and a crash cannot impersonate it.
+
+⚠️ **What this section does NOT do.** It does not move any E-row, does not weaken E1–E5's thresholds,
+and does not make the epic closeable: a run still has to produce five measured rows. It removes one
+**impossible** requirement from the step gate so that the gate can answer the question it was built
+to answer.
+
