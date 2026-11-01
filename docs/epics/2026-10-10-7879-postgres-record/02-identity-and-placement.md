@@ -77,7 +77,7 @@ The graph does not key every node by one property, and pretending otherwise is w
 | `:Source` | **`url`** | `source_identity.normalize_source_url` (S0a) | the MERGE key — Sources MERGE by canonicalised url; `id` mirrors `url` |
 
 **⛔ CORRECTION (2026-10-24, #9881) — the `:Subject`/`:Object` row above is the PRE-#3590 key, and the RECORD no longer uses it.**
-#3590 mints an opaque `id` at creation and makes `name` a **mutable natural key** two live
+Issue #3590 mints an opaque `id` at creation and makes `name` a **mutable natural key** two live
 entities may share, so `name` cannot be an identity any more. #9881 moved the record with it: in
 `supabase/migrations/20261027000001_record_semantic_id_key.sql`, `public.object.node_key` and
 `public.subject.node_key` **are the `id`** (`CHECK (id IS NOT NULL AND node_key = id)`), the `name`

@@ -43,7 +43,7 @@ the tool's behaviour over an exactly-enumerable population built from the shapes
 | `<timehex>-<hex12>` | `:Point` | 8,700 | already canonical — untouched |
 | `p-NNNNNNN` | `:Point` | 1,000 | **re-keyed** |
 | `EV-*` | `:Event` (`eventId`, `id` mirrors it) | 30 | out — journal-keyed identity, #7951 owns it |
-| `id` (with `name` as the mutable lookup) | `:Subject` 60 · `:Object` 60 | 120 | out by the 2026-10-10 scope ruling |
+| `id` (`name` is the contract's mutable lookup; not seeded here) | `:Subject` 60 · `:Object` 60 | 120 | out by the 2026-10-10 scope ruling |
 | `url` | `:Source` | 20 | out (§1.2 clause 2 — content key) |
 | uncontracted | `Meta` | 1 | out of contract, counted |
 
