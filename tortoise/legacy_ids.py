@@ -705,6 +705,10 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
     #: ``(label, key)`` of every node as it will be AFTER the pass — the
     #: collision universe, and the thing invariant 3 is checked against.
     final_keys: dict[tuple[str, str], int] = {}
+    #: ``(label, key) -> [dump_id, …]`` for EVERY holder, so the duplicate
+    #: report can ask the only question that matters: do two nodes STILL share
+    #: this key once the renames have been applied?
+    holders: dict[tuple[str, str], list[int]] = {}
     #: ``(label, legacy id) -> dump_id``: two nodes sharing one legacy id under
     #: one label are ONE identity to the write path already, so renaming both
     #: to the same canonical id would merge them (invariant 2).
@@ -733,25 +737,16 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
             value = _props(node).get(key_prop)
             if not isinstance(value, str) or not value.strip():
                 continue
-            held = final_keys.get((node_label, value))
-            if held is not None and held != dump_id:
-                # ⚠️ Only a REKEYED label's duplicate can ever make a rename
-                # ambiguous: `renames.append` below is unreachable unless
-                # `scope == REKEYED`, so no target can ever be a `(Session, …)`
-                # or a `(Object, …)` key. Refusing on those would be a FALSE
-                # BLOCK — a real dump carrying one duplicated `:Session` id
-                # would refuse the whole pass for a collision it cannot cause.
-                # The duplicate is still registered (as `held`, the first
-                # holder) so the key space stays complete; it is reported only
-                # where a rename could actually land on it.
-                if node_label in REKEY_SCOPE:
-                    problems.append(
-                        f"duplicate identity: :{node_label} {value!r} is carried "
-                        f"by both dump_id {held} and {dump_id} — two nodes "
-                        "already share one key, which no rename can fix"
-                    )
-                continue
-            final_keys[(node_label, value)] = dump_id
+            # Every holder is recorded. Whether a duplicate is a PROBLEM is
+            # answered after the plan is built: it is a problem only if two
+            # holders SURVIVE the pass. Asking at registration time is a FALSE
+            # BLOCK in two measured ways — a duplicate on an out-of-scope label
+            # (no rename can ever target it), and `[Point+Session{id: p-5},
+            # Point{id: p-5}]`, where the rename of the plain :Point RESOLVES
+            # the shared key. Over-blocking refuses a fully normalisable dump.
+            holders.setdefault((node_label, value), []).append(dump_id)
+            if (node_label, value) not in final_keys:
+                final_keys[(node_label, value)] = dump_id
 
     for node in nodes:
         if not isinstance(node, dict):
@@ -831,6 +826,21 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
                 new=canonical_id(label, value),
             )
         )
+
+    # Invariant 2, asked of the POST-pass key space: a duplicate is a problem
+    # only when two holders survive the plan. A rename removes its node's old
+    # key, so it can legitimately RESOLVE a shared key.
+    renamed_dump_ids = {r.dump_id for r in renames}
+    for (node_label, value), held_by in holders.items():
+        if len(held_by) < 2 or node_label not in REKEY_SCOPE:
+            continue
+        survivors = [d for d in held_by if d not in renamed_dump_ids]
+        if len(survivors) >= 2:
+            problems.append(
+                f"duplicate identity: :{node_label} {value!r} is carried by "
+                f"dump_id {survivors[0]} and {survivors[1]} after the pass — "
+                "two nodes share one key and no rename in this plan resolves it"
+            )
 
     # Invariants 2 and 3, checked over the FINAL key space (a mapped id may
     # collide with an untouched canonical id, or with another mapped id).

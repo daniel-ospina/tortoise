@@ -58,12 +58,12 @@ uv run python tools/legacy_id_normalise.py --dump dump.json --report dryrun-1.js
 ```
 
 * renames: **1,000** (`{dump_id, label, key_property, old, new}` each)
-* **two dry runs byte-identical**: `sha256 69ace6f570df60ec13548397f788227f380a48340d4e91c81856357f4a285fa2`
+* **two dry runs byte-identical**: `sha256 fc7dc21e242f95ae4e0f3b1d2c7db7c90b4b9aae826808ce34ccbbae64a5a665`
   for both files, `cmp` clean. A plan that differs run to run cannot be reviewed.
-* input fingerprint `dump_sha256 = 13a67208…`, which the plan is bound to. **This fired live while
-  measuring**: a plan built before the population was re-seeded was handed to `--apply` and the tool
-  refused it — *"…is the plan for a DIFFERENT snapshot … and holds 1000 rename(s) — overwriting it
-  would leave that pass unrevertible; pass a different --report"* — exit `2`, nothing written. The
+* input fingerprint `dump_sha256 = 3b83c4f234bc1bfa…`, which the plan is bound to. **This fired live while
+  measuring**: a plan built over an earlier snapshot of the same size was handed to `--apply` and the
+  tool refused it — *"…is the plan for a DIFFERENT snapshot … and holds 1000 rename(s) — overwriting
+  it would leave that pass unrevertible; pass a different --report"* — exit `2`, nothing written. The
   guard is not theoretical: a snapshot whose node count and shape mix are unchanged still has a
   different fingerprint, which is the whole reason a plan cannot be carried across a re-dump.
 

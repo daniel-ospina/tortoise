@@ -449,6 +449,43 @@ def test_a_preexisting_duplicate_on_an_out_of_scope_label_does_not_block_the_pas
     assert len(plan.renames) == census(dump).legacy, "the in-scope renames still plan"
 
 
+def test_a_duplicate_the_rename_resolves_is_not_a_refusal():
+    """A shared key the plan RESOLVES must not be refused as if it were unfixable.
+
+    ``[Point+Session{id: p-0000005}, Point{id: p-0000005}]`` shares a ``:Point``
+    key — but the plain ``:Point`` is a rename candidate, so after the pass the
+    two nodes carry ``p-0000005`` and ``poi-<hash>`` and NO key is shared. The
+    refusal must be raised only when two holders SURVIVE the pass; raising it at
+    registration time blocked a fully normalisable dump, which is the same
+    over-block class as refusing on an out-of-scope label's duplicate.
+    """
+    # A MINIMAL dump: the base fixture already carries every `p-0000NNN` id, so
+    # appending one of those would test the fixture's own duplicate, not this.
+    dump = _dump()
+    dump["nodes"] = [
+        _node(10_010, ["Point", "Session"], id="p-0000005"),
+        _node(10_011, ["Point"], id="p-0000005"),
+    ]
+    dump["edges"] = []
+    dump["node_count"] = 2
+    dump["edge_count"] = 0
+    for field in ("source_node_count", "source_edge_count", "read_edge_count"):
+        if field in dump:
+            dump[field] = 2 if "node" in field else 0
+    plan = build_plan(dump)  # must not raise
+    out, _ = apply_plan(dump, plan)
+    seen: dict[tuple[str, str], list[int]] = {}
+    from tortoise.cache_projection import KEY_PROPERTY as _KP
+
+    for node in out["nodes"]:
+        for label in node["labels"]:
+            kp = _KP.get(label)
+            if kp and isinstance(node["props"].get(kp), str):
+                seen.setdefault((label, node["props"][kp]), []).append(node["dump_id"])
+    shared = {k: v for k, v in seen.items() if len(v) > 1}
+    assert shared == {}, f"the pass left a shared key: {shared}"
+
+
 def test_a_duplicate_dump_id_is_refused():
     dump = _dump()
     dump["nodes"].append(_node(1, ["Point"], id="p-0000999", content="positional clash"))
