@@ -4044,10 +4044,12 @@ def _carries_value(*texts: object) -> bool:
 
 # ── #10360: the verbatim state-value guarantee, made mechanical ─────────────
 
-#: The decimal shape a value token's numeric CORE is read with. Thousands
-#: separators are stripped before it is applied, so ``1,200`` and ``1200`` are
-#: one value; a trailing fractional zero is dropped by ``_value_core``, so
-#: ``4.20`` and ``4.2`` are one value. This is the VALUE-identity reading of
+#: The decimal shape a value token's numeric CORE is read with. ⛔ A token
+#: carrying a SEPARATOR is never read with it at all — see
+#: ``_separator_reads_ambiguously``, which puts that class outside the judged
+#: set rather than deciding what its comma or dot means; a trailing fractional
+#: zero is dropped by ``_value_core``, so ``4.20`` and ``4.2`` are one value.
+#: This is the VALUE-identity reading of
 #: "verbatim": the number the source recorded, not the bytes it was written
 #: with. Two competing readings exist and nothing recorded resolves them
 #: (#10360 §1): TEXT identity would make the guarantee unsatisfiable, because
@@ -4080,6 +4082,54 @@ _CLOCK_FORM = re.compile(
     r"(?:^|(?<=\D))(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
 
 
+def _separator_reads_ambiguously(token: str) -> bool:
+    """Does this token's NUMBER depend on a separator CONVENTION to read?
+
+    ⛔ This predicate exists so that NOTHING here decides what a separator means.
+    ``tortoise/value_normalizer.py`` carries the recorded owner decision this
+    module is built to — **#2817**, option selected 2026-10-07, point 1:
+
+        "**No separator rule, at all.** ``1.234``, ``1,234``, ``1.234,56``,
+        ``1,234.56``, ``800.00`` and ``1 234`` are *all* dropped. There is no
+        'PT-BR reads dots as thousands' rung and no 'EN reads commas as
+        thousands' rung to add one — deciding that ``R$ 1.234,56`` is
+        ``1234.56`` **is** the locale question the design excludes."
+
+    A previous revision of this seam shipped the "EN reads commas as thousands"
+    rung anyway (``str(token).replace(",", "")``) and was caught by review
+    (#10513 cycle 12, P1) — the departure had no ``OVERRIDES:`` record, and it
+    was wrong in the WITHHOLDING direction: ``4,2`` and ``4.2`` reduce to
+    ``42`` and ``4.2``, so a truthful point quoted in a comma-decimal locale
+    diverged from its own quote and was REFUSED (measured).
+
+    The locale question is not a detail a rule can default: UTS #35 (CLDR,
+    Part 3) carries ``decimal`` and ``group`` as per-locale number symbols, and
+    the reference implementation shows one string bound to two numbers —
+    ``format_decimal(1.2345, locale='en_US')`` is ``'1.234'`` while
+    ``format_decimal(12345, locale='de_DE')`` is ``'12.345'`` (Babel 2.17,
+    https://babel.pocoo.org/en/latest/numbers.html). With no locale on this
+    path, the honest reading of a separator-bearing token is NONE — which is
+    exactly #2817's posture, and the reason this returns "not a value" rather
+    than a guess.
+
+    What counts as ambiguous: a comma between digit groups (``1,200`` — EN
+    thousands — and ``4,2`` — ES/PT/de decimal — are one shape), and a dot
+    whose trailing group is a whole number of 3-digit groups (``1.234`` is
+    ``1234`` grouped in de/sv and ``1.234`` decimal in en). A single dot with
+    1-2 fractional digits is not groupable and stays judged (``4.2``, ``4.20``,
+    ``1.5-inch``), ``1.2345`` is not a group either, and a leading ``0.``
+    cannot be one (``0.500`` stays a decimal).
+    """
+    t = str(token or "")
+    if re.search(r"\d,\d", t):
+        return True
+    for m in re.finditer(r"(?<![\d.])(\d+)\.(\d+)", t):
+        whole, frac = m.group(1), m.group(2)
+        if whole != "0" and len(frac) % 3 == 0:
+            return True
+    return False
+
+
 def _value_form_outside_judged(token: str) -> bool:
     """True when a value token's FORM, not its value, is what differs.
 
@@ -4105,11 +4155,21 @@ def _value_form_outside_judged(token: str) -> bool:
     clock (``4:32`` read as a marathon time) is still outside the judged set —
     the two are the same token shape and nothing in the text distinguishes them,
     so this is a stated trade rather than a silent gap.
+
+    ⛔ A SEPARATOR-BEARING number is outside the judged set for the same reason
+    a clock is — its FORM carries a locale this path does not have
+    (``_separator_reads_ambiguously``, #2817 point 1). This is the FAIL-OPEN
+    direction on purpose: the alternative the previous revision shipped decided
+    the locale (comma = thousands) and withheld truthful points written the
+    other way round, which is the false-accusation direction this rule must
+    never take. The cost is named in the registry row's residual (l): a REAL
+    thousands rewrite (``5,000`` against ``6,000``) is not judged either.
     """
     t = str(token or "").lower()
     return (t.startswith("clock") or t.startswith("meridiem-")
             or bool(_ISO_DATE_TOKEN.search(t))
-            or bool(_CLOCK_FORM.search(t)))
+            or bool(_CLOCK_FORM.search(t))
+            or _separator_reads_ambiguously(t))
 
 
 #: Spelling equivalents of one UNIT — the tolerance is SPELLING, never the
@@ -4155,6 +4215,12 @@ _KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
 #: (#10513 review P1, measured: `20k`/`20km` and `5k QPS`/`5,000 QPS` both
 #: REFUSED before this arm existed, withholding a durable memory over a spelling
 #: the rule had no business judging).
+#: ⛔ The SECOND of those pairs is now outside the judged set altogether, because
+#: `5,000` carries a separator (#10513 review cycle 12 P1) — so the arm's live
+#: evidence is the UNGROUPED form (`5k QPS`/`5000 QPS`), which it still decides
+#: and `_magnitude_agrees` still refuses when the number moved (`5k`/`6000`).
+#: The test file spells those rows ungrouped for that reason; a grouped row would
+#: pass with this arm deleted.
 #: ⛔ `M`/`m` is the same collision one letter over and is NOT in this set:
 #: `_value_core` lowercases the suffix, so an uppercase `M` is indistinguishable
 #: from metres there. Stated as residual (i) in `config/v4-mechanisms.yml`
@@ -4177,8 +4243,12 @@ _MAGNITUDE_PREFIXES = frozenset({"k"})
 #: amount) while this table governs VALUE IDENTITY in the write-path refusal,
 #: where `k` is ALREADY a unit identity in `_UNIT_EQUIV` because it is a unit
 #: `_value_bindings` fuses. Without it the rule refuses `5k QPS` against
-#: `5,000 QPS` — a truthful point withheld over a spelling, which is the
+#: `5000 QPS` — a truthful point withheld over a spelling, which is the
 #: false-accusation direction this carve-out must never take (#10513 review P1).
+#: ⚠️ The motivating case was measured as `5,000`, and a GROUPED numeral is now
+#: outside the judged set (`_separator_reads_ambiguously`), so the record above is
+#: stated in the ungrouped form that still exercises the factor: `5 x 1000` closes
+#: the gap against `5000`, and `6000` is still refused.
 #: It re-admits nothing into `value_normalizer`'s money path, which keeps its
 #: ruling unchanged and pinned. RECORDED on #10360 as comment 6563672665 and
 #: mirrored in the registry row's residual (i), so the departure is findable
@@ -4203,17 +4273,35 @@ _MAX_JUDGED_TEXT = 2 * _MAX_CONTENT
 def _value_core(token: str) -> tuple[str, str, str | None] | None:
     """``(sign, numeric core, unit)`` for a value token, or ``None``.
 
-    What is dropped is FORM — thousands separators, a leading currency symbol, a
-    trailing fractional zero, a unit's SPELLING — and what is kept is the value
+    What is dropped is FORM — a leading currency symbol, a trailing fractional
+    zero, a unit's SPELLING — and what is kept is the value
     and the things that change it: the numeric core, its SIGN, and its UNIT.
     The earlier attempt at this issue compared the raw strings and was rejected
-    for refusing truthful points (``1200``/``1,200``, ``4.20``/``4.2``,
-    ``20%``/``20 percent``); erasing the unit in reaction to that would have
+    for refusing truthful points (``4.20``/``4.2``, ``20%``/``20 percent``);
+    erasing the unit in reaction to that would have
     missed ``20 minutes`` → ``20 hours``, which is the rewrite the carve-out
     exists to forbid, so the unit is compared as an identity with a spelling
     table rather than discarded (#10360 review, P2s 3–4).
+
+    ⛔ A SEPARATOR-BEARING numeral is NOT a tolerance this function applies — it
+    returns ``None`` for it (``_separator_reads_ambiguously``), because the
+    reading depends on a locale this path does not have. That is #2817's own
+    posture, and the previous revision's ``.replace(",", "")`` (which decided
+    the locale and withheld truthful comma-decimal points) is asserted RED in
+    ``tests/test_state_value_verbatim_10360.py``.
     """
-    raw = _LEADING_DOT.sub(r"0.\1", str(token or "").replace(",", ""))
+    raw = str(token or "")
+    # ⛔ NO SEPARATOR IS INTERPRETED HERE (#10513 review cycle 12 P1). A
+    # separator-bearing token has no locale-free value identity, so it has no
+    # identity at all and this returns None — the SAME predicate
+    # `_value_form_outside_judged` applies, called here so a direct caller can
+    # never be handed a guess like `'4,2' -> ('', '42', None)` (what the deleted
+    # `str(...).replace(",", "")` returned, and what withheld truthful points
+    # in comma-decimal locales). #2817 point 1; the reasoning is at the
+    # predicate.
+    if _separator_reads_ambiguously(raw):
+        return None
+    raw = _LEADING_DOT.sub(r"0.\1", raw)
     matches = list(_VALUE_DECIMALS.finditer(raw))
     if not matches:
         return None
@@ -4269,22 +4357,23 @@ def _magnitude_agrees(with_prefix: tuple[str, str, str | None],
     is never in dispute, so the arm may not waive a sign or a numeric core. That
     narrowness is load-bearing and was earned by a review finding (#10513 P2,
     measured): an arm that fired on the unit mismatch ALONE also wrote
-    `5k QPS` against `6,000 QPS`, `20k` against `21km` and `-20k` against
+    `5k QPS` against `6000 QPS`, `20k` against `21km` and `-20k` against
     `20km` — a numeric rewrite and a dropped sign, the carve-out's own defects.
 
     Two ways the numbers agree:
       * the cores are EQUAL — `20k`/`20km`, where the suffix only names the unit
         and no number was ever restated;
-      * the prefix reading closes the gap — `5k`/`5,000`, where `5 x 1000` IS
-        the other side's core.
+      * the prefix reading closes the gap — `5k`/`5000`, where `5 x 1000` IS
+        the other side's core. (A GROUPED `5,000` is outside the judged set and
+        never reaches here — `_separator_reads_ambiguously`.)
 
     ⛔ BOTH are gated on the OTHER side's unit (`_K_ABBREVIATES`, #10513 review
     P1). "The cores are equal" is only "the same number" while `k` is standing
     for the other side's unit word: against `m`/`mi`/`M` the same equal cores
     are a 1000x change and the arm must not waive it — `20k`/`20m` (20 km vs
     20 m) is the pair a reviewer measured passing through the first version. The
-    factor arm takes the same gate for the same reason (`5k`/`5,000` is bare,
-    but `5k`/`5,000 mi` is not).
+    factor arm takes the same gate for the same reason (`5k`/`5000` is bare,
+    but `5k`/`5000 mi` is not).
     """
     factor = _MAGNITUDE_FACTORS.get(with_prefix[2])
     if factor is None or with_prefix[0] != other[0]:
@@ -4309,12 +4398,12 @@ def _value_identity_matches(a: tuple[str, str, str | None],
     unit — so a minutes→hours rewrite does not fold.
     """
     # DELIBERATELY BEFORE the numeric-core comparison: `20k`/`20km` bind equal
-    # cores, but `5k`/`5,000` bind `5`/`5000`, so an arm placed after the core
+    # cores, but `5k`/`5000` bind `5`/`5000`, so an arm placed after the core
     # comparison would rescue only half the class it exists for.
     # ⛔ AND IT ONLY EVER *ADDS* TOLERANCE — it cannot return False, so every
     # pair it does not rescue falls through to the same checks it always faced.
     # The gating is `_magnitude_agrees`: the unit mismatch alone is NOT enough
-    # (review P2 — that version wrote `5k`/`6,000`), so a numeric rewrite or a
+    # (review P2 — that version wrote `5k`/`6000`), so a numeric rewrite or a
     # dropped sign still reaches the core comparison below and still refuses.
     if a[2] != b[2] and _MAGNITUDE_PREFIXES & {a[2], b[2]} \
             and (_magnitude_agrees(a, b) or _magnitude_agrees(b, a)):

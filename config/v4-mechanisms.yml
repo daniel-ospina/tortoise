@@ -540,7 +540,7 @@ mechanisms:
       retainable state value: it never judges identifiers at all. It judges
       VALUES over the engine's own bindings, in three tolerances (#10360 lane
       record): (i) value identity, not string identity — a numeric core with its
-      SIGN and its UNIT kept, so ``1200``/``1,200``, ``4.20``/``4.2``,
+      SIGN and its UNIT kept, so ``4.20``/``4.2``,
       ``20%``/``20 percent``, ``.5``/``0.5`` and ``800ms``/``800 milliseconds``
       are one value while ``20 minutes``/``20 hours`` and ``20 km``/``20 mi`` are
       rewrites — and the minus may be spelled ASCII `-`, U+2212 `\u2212`, or a
@@ -557,7 +557,21 @@ mechanisms:
       / 0 refused, re-derived). The clockable start is what keeps `27:12`
       judged (`27` is no hour); a BARE-shape-only arm judged `UTC+03:00`, whose
       core is the two colon runs joined, and so REFUSED `UTC+3` against
-      `UTC+03:00` — one offset spelled two ways (measured, cycle 10); (iii) a
+      `UTC+03:00` — one offset spelled two ways (measured, cycle 10); (ii-bis) a
+      SEPARATOR-BEARING numeral is OUTSIDE the judged set — ``1,200``, ``4,2``,
+      ``1.234``, ``1,234.56`` — because which character is the decimal point is a
+      LOCALE property and this path has no locale (CLDR UTS #35 carries
+      `decimal`/`group` per locale: `format_decimal(1.2345, locale='en_US')` is
+      `'1.234'` while `format_decimal(12345, locale='de_DE')` is `'12.345'`).
+      This one is a RECORDED DECISION complied with, not a tolerance invented
+      here: `tortoise/value_normalizer.py`'s #2817 ruling, point 1 — "**No
+      separator rule, at all** … deciding that ``R$ 1.234,56`` is ``1234.56``
+      **is** the locale question the design excludes". An earlier revision of
+      this row DID ship the "EN reads commas as thousands" rung
+      (`str(token).replace(",", "")`) and withheld truthful points in
+      comma-decimal locales (`4,2` reduced to `42`, so it diverged from `4.2`);
+      it is gone, `_separator_reads_ambiguously` is the gate, and the cost it
+      buys is residual (l); (iii) a
       value is judged only where both sides bind the SAME anchor sequence, so a
       quote that fragments, drops, reorders or adds a value fails OPEN.
       ⚠️ EVERY tolerance above is measured against OVER-REFUSAL on a truthful
@@ -573,7 +587,10 @@ mechanisms:
       the committed census receipts fail open on slot layout, so the rule judges
       62 and refuses 0 today — re-derived by
       `tests/test_state_value_verbatim_10360.py::test_the_residual_is_measured_on_the_committed_census_corpus`
-      from the sealed receipts (produced, not quoted); (b2) STRICT VERBATIM
+      from the sealed receipts (produced, not quoted). ⚠️ Unchanged by (ii-bis):
+      the separator exclusion moved neither number on this corpus (re-measured
+      after it landed, 62 judged / 0 refused), which is why the pin did not have
+      to move; (b2) STRICT VERBATIM
       SURVIVAL stays SHORT of target and is NOT re-measured here: 38/77 = 49.4%
       on the flags-on arm against the 49/90 = 54.4% committed baseline (`#5064`
       comment 2026-10-13, `#7949` E2) — the figure that would move is the E2
@@ -611,12 +628,16 @@ mechanisms:
       direction this rule must never take (pinned by
       `test_an_over_long_side_is_not_tokenised_at_all`).
       (i) A `k` SUFFIX IS NOT JUDGED AS A UNIT WORD, AND IS NOT SCALED. `k` is
-      SI's x1000 prefix (`5k` IS `5,000`) and it is also a unit identity in
+      SI's x1000 prefix (`5k` IS `5000`) and it is also a unit identity in
       `_UNIT_EQUIV`, because it is a unit `_value_bindings` fuses; the single
       symbol serves both jobs, so where the two sides use it for DIFFERENT jobs
       the unit is unjudgeable and the pair fails OPEN (`_MAGNITUDE_PREFIXES`,
-      `20k`/`20km`, `5k QPS`/`5,000 QPS` — both REFUSED before the arm existed,
+      `20k`/`20km`, `5k QPS`/`5000 QPS` — both REFUSED before the arm existed,
       and the false-refusal direction is the one this rule must never take).
+      ⚠️ The case was measured with a GROUPED `5,000`, which (ii-bis) has since
+      put outside the judged set, so this row's live evidence is the UNGROUPED
+      form `5000`; the test file spells it that way on purpose, because a grouped
+      row would stay green with the arm deleted.
       ⛔ WHAT THE TOLERANCE IS *NOT*: it is not a waiver on the value. The arm
       fires only where `_magnitude_agrees` proves the two sides name the SAME
       NUMBER — equal cores, or the prefix reading closing the gap
@@ -663,7 +684,7 @@ mechanisms:
       (`_MAGNITUDE_FACTORS`) IN THIS SEAM ONLY, because #2817 governs the money
       DERIVATION — a magnitude word must not silently scale an amount — while
       here `k` is already a unit identity in `_UNIT_EQUIV`, and without the
-      factor the rule refuses `5k QPS` against `5,000 QPS`: a truthful point
+      factor the rule refuses `5k QPS` against `5000 QPS`: a truthful point
       withheld over a spelling, the false-accusation direction this rule must
       never take. `value_normalizer`'s money path is untouched and keeps its
       ruling pinned. Recorded as a comment on #10360 so the departure is
@@ -696,6 +717,21 @@ mechanisms:
       never writes a rewritten value). Pinned by
       `test_a_dash_attached_to_the_numeral_is_a_sign_and_the_bullet_glyph_shape_is_stated`,
       so a future lane that narrows it has to move this row.
+      (l) A SEPARATOR-BEARING NUMERAL IS NEVER JUDGED, AND THAT IS A MEASURED
+      PRECISION LOSS, not an oversight (#10513 review cycle 12 P1). (ii-bis)
+      puts `1,200`/`4,2`/`1.234`/`1,234.56` outside the judged set because the
+      reading needs a LOCALE, so a REAL thousands rewrite is unjudged too:
+      `we saw 5,000 QPS` against `we saw 6,000 QPS` returns no divergence
+      (pinned by `test_a_separator_bearing_number_is_outside_the_judged_set`, so
+      a future lane that adds a separator rung has to move this row). The trade
+      is deliberate and is the one #2817 point 1 already made: a separator rung
+      has to GUESS the locale, and the guess the previous revision made refused
+      truthful points written the other way round — withholding a durable memory
+      over a spelling, the false-accusation direction this carve-out must never
+      take. Precision over recall, in the direction that keeps memories. NAMED,
+      not fixed: closing it means parsing with a declared locale, which is
+      `value_normalizer`'s OWN territory and needs the owner's decision reopened
+      there, never a rung bolted onto this seam.
       THE RENDER HALF is unchanged and stays pinned where #9775 left it.
       `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered into S1
       (`_granularity_text`), S2/S4 (`_render_master_core_only`,

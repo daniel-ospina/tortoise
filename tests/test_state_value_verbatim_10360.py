@@ -11,6 +11,10 @@ What this file pins, and why each pin is here rather than in a comment:
    ``800ms``/``800 milliseconds`` and ``03:00``/``3am`` (review P1s 1–2, #10360
    lane record §6). A guard that accuses a truthful point of a rewrite it did
    not commit is worse than no guard: it withholds a durable memory.
+   ⛔ ``1200``/``1,200`` is no longer a TOLERANCE the rule applies: a
+   separator-bearing number is outside the judged set entirely
+   (``_separator_reads_ambiguously``, review cycle 12 P1) — the pair agrees
+   because neither side is judged, not because the comma was decided.
 2. **The enforcement, at the emit site.** ``execute_embed`` does not write a
    point whose value contradicts its own quote. This is the pin that fails if
    the rule is DELETED from the write path (mutation-checked in the lane
@@ -65,7 +69,19 @@ BATTERY = (
     ("p95 went from 4.2 to 6.1", "p95 went from 4.2 to 6.0", True, "one of two"),
     ("we have 2 cats and 3 dogs", "we have 3 cats and 2 dogs", True, "quantities swapped"),
     ("the p95 hit 4.0 seconds", "the p95 hit 4.0 seconds", False, "identical"),
-    ("latency was 1200 ms", "latency was 1,200 ms", False, "thousands separator"),
+    ("latency was 1200 ms", "latency was 1,200 ms", False, "separator, unjudged"),
+    # ⛔ A SEPARATOR-BEARING NUMBER IS UNJUDGED (#10513 review cycle 12, P1).
+    # Which of ``,``/``.`` is the decimal point is a LOCALE property (CLDR UTS #35
+    # carries `decimal` and `group` per locale; Babel's `format_decimal(1.2345,
+    # locale='en_US')` is '1.234' while `format_decimal(12345, locale='de_DE')`
+    # is '12.345'), and this path has no locale — so BOTH readings fail OPEN.
+    # The comma pair is the one the previous revision REFUSED, because it had
+    # decided the locale: it deleted the comma, so `4,2` read as `42` against
+    # `4.2` and a truthful point in a comma-decimal locale was withheld.
+    ("the p95 hit 4,2 seconds", "the p95 hit 4.2 seconds", False,
+     "comma decimal, unjudged"),
+    ("the drive was 1.234 km", "the drive was 1234 km", False,
+     "dot thousands, unjudged"),
     ("the p95 hit 4.20 seconds", "the p95 hit 4.2 seconds", False, "trailing zero"),
     ("the share was 20 percent", "the share was 20%", False, "percent form"),
     ("budget 800 milliseconds", "budget 800ms", False, "unit spacing"),
@@ -96,7 +112,7 @@ BATTERY = (
     # SI's x1000 symbol and the table ALSO carries it as a unit identity, so a
     # pair that DISAGREES about which job it did is unjudgeable and fails OPEN.
     ("I ran 20k", "I ran 20km", False, "magnitude prefix vs unit"),
-    ("we saw 5k QPS", "we saw 5,000 QPS", False, "magnitude prefix vs scaled"),
+    ("we saw 5k QPS", "we saw 5000 QPS", False, "magnitude prefix vs scaled"),
     # ...and the tolerance is NARROW, which is what keeps it from being a waiver:
     # a bare-magnitude rewrite is still refused, because both sides agree the
     # suffix is `k` and only the number moved. ⛔ The mutation this row
@@ -112,7 +128,7 @@ BATTERY = (
     # WROTE all three of these — `_value_slot_divergence` returned `()`).
     # `_magnitude_agrees` is the gate that keeps them refused, and these rows are
     # the only thing standing between that arm and a numeric waiver.
-    ("we saw 5k QPS", "we saw 6,000 QPS", True, "magnitude number moved"),
+    ("we saw 5k QPS", "we saw 6000 QPS", True, "magnitude number moved"),
     ("we ran 20k", "we ran 21km", True, "magnitude number moved 2"),
     ("the delta is -20k", "the delta is 20km", True, "magnitude sign dropped"),
 )
@@ -142,14 +158,20 @@ def test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit():
 
     ⛔ That second half is a review finding, not a nicety (#10513 P2, MEASURED):
     an earlier revision of this arm fired on the unit mismatch ALONE and returned
-    before the sign/core check, so `5k QPS`/`6,000 QPS`, `20k`/`21km` and
+    before the sign/core check, so `5k QPS`/`6000 QPS`, `20k`/`21km` and
     `-20k`/`20km` were all WRITTEN. The assertions below are what reds that
     revision; the unit-only arm cannot satisfy them.
+
+    ⛔ THE OTHER SIDE IS SPELLED UNGROUPED (``5000``) ON PURPOSE. The case was
+    measured with ``5,000``, and a grouped numeral is now OUTSIDE the judged set
+    (``_separator_reads_ambiguously``, review cycle 12 P1), so a grouped row
+    would test the fail-open rather than this arm: it would stay green with
+    ``_magnitude_agrees`` deleted. The arm's live evidence is the ungrouped form.
     """
     # Ambiguous unit word: unjudgeable, so it fails OPEN (the refusal direction
     # this rule must never take is the one that withholds a truthful memory).
     assert v2._value_slot_divergence("I ran 20k", "I ran 20km") == ()
-    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5,000 QPS") == ()
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5000 QPS") == ()
     # Same unit on both sides: still judged, and a moved number is a rewrite.
     assert v2._value_slot_divergence("the load was 5k QPS", "the load was 6k QPS")
     # ⛔ EVERY magnitude prefix needs a FACTOR, or `_magnitude_agrees` returns
@@ -159,7 +181,7 @@ def test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit():
     assert set(v2._MAGNITUDE_PREFIXES) <= set(v2._MAGNITUDE_FACTORS)
     # ⛔ The number and the sign are NOT the ambiguity, so they are still judged
     # even where the unit words disagree (this is the P2 the arm first shipped).
-    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 6,000 QPS")
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 6000 QPS")
     assert v2._value_slot_divergence("we ran 20k", "we ran 21km")
     assert v2._value_slot_divergence("the delta is -20k", "the delta is 20km")
     # ⛔ The equal-core half is gated on the OTHER unit (#10513 review P1):
@@ -169,11 +191,56 @@ def test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit():
     # them: measured `20k`/`20m` and `20k`/`20mi` both passed with no warning.
     assert v2._value_slot_divergence("the drive is 20k", "the drive is 20m")
     assert v2._value_slot_divergence("the drive is 20k", "the drive is 20mi")
-    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5,000 mi QPS")
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5000 mi QPS")
     # …and the two tolerance cases the arm exists for still hold, so the gate did
     # not buy the detection by re-introducing the false refusals.
     assert v2._value_slot_divergence("the drive is 20k", "the drive is 20kg") == ()
-    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5,000 QPS") == ()
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5000 QPS") == ()
+
+
+def test_a_separator_bearing_number_is_outside_the_judged_set():
+    """NO SEPARATOR RULE SHIPS — the recorded decision, and the over-refusal.
+
+    ``tortoise/value_normalizer.py`` carries the owner's #2817 ruling, point 1:
+    "**No separator rule, at all.** … There is no 'PT-BR reads dots as
+    thousands' rung and no 'EN reads commas as thousands' rung to add one —
+    deciding that ``R$ 1.234,56`` is ``1234.56`` **is** the locale question the
+    design excludes."
+
+    ⛔ THE PREVIOUS REVISION SHIPPED THE RUNG ANYWAY (#10513 review cycle 12, P1)
+    — ``str(token).replace(",", "")`` — so this test reds on it: pre-fix
+    ``_value_form_outside_judged('1,200')`` was False and ``_value_core('1,200')``
+    was ``('', '1200', None)``, i.e. the locale was decided, and the consequence
+    was in the WITHHOLDING direction: ``4,2`` reduced to ``42`` so it diverged
+    from ``4.2`` and the whole point was refused, losing a durable memory over a
+    spelling. Both directions are asserted below, so neither half can be
+    reverted silently.
+    """
+    # Every reading that needs a separator CONVENTION is outside the judged set,
+    # in both conventions and in the mixed shapes.
+    for token in ("1,200", "4,2", "1.234", "1.234,56", "1,234.56",
+                  "$1,200,000", "1,200km"):
+        assert v2._value_form_outside_judged(token), token
+        assert v2._value_core(token) is None, token
+    # …and a number that reads the same in EVERY locale is still judged, so the
+    # exclusion did not swallow the class it sits beside: a 1-2 digit fraction
+    # cannot be a thousands group, a leading `0.` cannot be one, and an ungrouped
+    # integer carries no separator at all.
+    for token in ("4.2", "4.20", "1200", "5000", "1.2345", "0.500", "800ms",
+                  "1.5-inch", "-4percent", ".5"):
+        assert not v2._value_form_outside_judged(token), token
+        assert v2._value_core(token) is not None, token
+    # The over-refusals the finding MEASURED, end to end: a truthful comma-decimal
+    # quote and a truthful dot-thousands quote are no longer accusations.
+    assert v2._value_slot_divergence("the p95 hit 4,2 seconds",
+                                     "the p95 hit 4.2 seconds") == ()
+    assert v2._value_slot_divergence("the drive was 1.234 km",
+                                     "the drive was 1234 km") == ()
+    # ⛔ THE MEASURED COST, stated rather than hidden (registry residual (l)): a
+    # REAL thousands rewrite is unjudged too, because both sides carry the
+    # ambiguity. Precision over recall, in the direction that keeps memories.
+    assert v2._value_slot_divergence("we saw 5,000 QPS",
+                                     "we saw 6,000 QPS") == ()
 
 
 def test_the_one_classifier_is_the_production_value_engine(monkeypatch):
