@@ -373,6 +373,7 @@ def _atomic_pins(name: str, **overrides) -> dict:
     entry = {
         "reason": "the bars were committed before any arm ran",
         "branch_commits": ["a1075dfc2 prereg: amend definitions before any run"],
+        "squash_merge": "cfa3de857 measure: the merged commit",
     }
     entry.update(overrides)
     return {name: entry}
@@ -447,14 +448,19 @@ def test_a_typed_shrug_is_not_a_disclosure(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     bad = [
-        {"reason": {"a": 1}, "branch_commits": ["a1075dfc2 x"]},
-        {"reason": "because", "branch_commits": [{}]},
+        {"reason": {"a": 1}, "branch_commits": ["a1075dfc2 x"], "squash_merge": "cfa3de857 x"},
+        {"reason": "because", "branch_commits": [{}], "squash_merge": "cfa3de857 x"},
+        {"reason": "because", "branch_commits": ["a1075dfc2 x"], "squash_merge": "not a sha"},
         # A commit entry that names no commit sha points at nothing a reader can resolve.
-        {"reason": "because", "branch_commits": ["some commit message"]},
+        {"reason": "because", "branch_commits": ["some commit message"], "squash_merge": "cfa3de857 x"},
     ]
     for entry in bad:
         failures = check.check_ordering(prereg, [log], None, None, None, {log.name: entry})
-        assert failures, entry
+        # EXACTLY one failure, and it is the field diagnosis — never the FALSE "not one" verdict
+        # beside it (the log IS atomic; only its disclosure is malformed). cycle-3 P2.
+        assert len(failures) == 1, (entry, failures)
+        assert "not a usable disclosure" in failures[0], failures
+        assert "not one" not in failures[0], failures
     # The SAME entries are refused when the log is atomic AND provably unscored (cycle-2 P2).
     monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
     for entry in bad:
@@ -482,8 +488,10 @@ def test_the_run_report_carries_the_qualified_ordering_and_the_commits():
     assert report["ordering_atomic_add"] == ["s3-ablation-a1075dfc.log"]
     assert report["ordering"].startswith("verified (atomic-add DECLARED")
     assert report["run_order_claim"] == report["ordering"]
-    commits = report["ordering_atomic_add_commits"]["s3-ablation-a1075dfc.log"]
-    assert any(c.startswith("a1075dfc2") for c in commits), commits
+    detail = report["ordering_atomic_add_commits"]["s3-ablation-a1075dfc.log"]
+    assert any(c.startswith("a1075dfc2") for c in detail["branch_commits"]), detail
+    # The squash commit is the one pointer a reader can resolve, and it must be carried.
+    assert detail["squash_merge"].startswith("cfa3de857"), detail
 
 
 def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, monkeypatch):
@@ -491,8 +499,8 @@ def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, m
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     for entry in ({"reason": "", "branch_commits": ["a1075dfc2 x"]},
-                  {"reason": "because", "branch_commits": []},
-                  {"reason": "because"},):
+                  {"reason": "because", "branch_commits": [], "squash_merge": "cfa3de857 x"},
+                  {"reason": "because", "squash_merge": "cfa3de857 x"},):
         failures = check.check_ordering(prereg, [log], None, None, None, {log.name: entry})
         assert failures and "not a usable disclosure" in failures[0], failures
 
