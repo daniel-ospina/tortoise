@@ -6039,8 +6039,25 @@ _PROCESS_STARTED_AT: str = datetime.now(UTC).isoformat(timespec="seconds")
 def _migrations_head() -> tuple[str | None, str | None]:
     """`(highest schema migration this image carries, WHERE it was read from)`.
 
-    Answers "has migration 7 landed in prod" from OUTSIDE the process, which
-    previously required reading the database. Resolved through
+    CARRIED, NOT APPLIED — and the field does not claim otherwise (review P2).
+    This is the highest migration-shaped file THE IMAGE CARRIES: the build's own
+    inventory, read from the tree the image ships. It is NOT the answer to
+    "which migration has been APPLIED to the database", and publishing it as
+    though it were would be a false PASS on the question #10447 exists to make
+    answerable. The two diverge in practice, not in theory: this process never
+    applies a schema migration (``entrypoint.sh`` has no migration step —
+    ``supabase/migrations`` is applied by the separate ``supabase-deploy.yml``
+    workflow — "Deploy Supabase migrations + edge functions", ``:1``), and the
+    deploy's own gate classes index-only drift as WARN-class, exit 0
+    (``.github/scripts/check-migration-drift:25-26``), so an index-only
+    migration can land on main,
+    be carried by the next image, and still not be applied in prod. The APPLIED
+    set is a database fact and lives in the database; reading it here would be
+    exactly the DB work on ``/health`` that the issue's anti-goal forbids, so it
+    is declared OUT OF SCOPE (PR body, ``## PARTIAL``) instead of implied by a
+    field that cannot answer it.
+
+    Resolved through
     ``record_projection._migrations_dir()`` — the ONE existing resolver (checkout
     first, wheel second) — so there is no second opinion about where the schema
     lives. No database query: the issue's anti-goal is explicit that ``/health``
@@ -6055,9 +6072,9 @@ def _migrations_head() -> tuple[str | None, str | None]:
 
     THE SECOND ELEMENT IS NOT DECORATION (review P2). A WHEEL ships only the
     record migrations, so it reports the highest of THOSE — a number that is
-    plausible, wrong for the question "has the schema migration landed", and
-    indistinguishable from the checkout's answer unless the reader is told which
-    population it came from. Publishing the source makes the difference visible
+    plausible, wrong for the inventory question ("which schema migrations does
+    this image carry"), and indistinguishable from the checkout's answer unless
+    the reader is told which population it came from. Publishing the source makes the difference visible
     where the datum is, instead of only in a docstring.
 
     ``(None, None)`` when no migration-shaped file is present (a stripped
@@ -6169,6 +6186,9 @@ def _build_identity() -> dict:
         "commit_dirty": dirty_flag,
         "build_identified": identified,
         "started_at": _PROCESS_STARTED_AT,
+        # CARRIED by this image, never "applied in the database" — see
+        # `_migrations_head`'s docstring for why the two diverge and why the
+        # applied set is declared out of scope rather than implied here.
         "migrations_head": _MIGRATIONS_HEAD,
         # WHICH population `migrations_head` was read from (review P2): the
         # checkout tree (the schema, all 77 migrations) or the packaged wheel

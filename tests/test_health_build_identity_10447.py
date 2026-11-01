@@ -381,6 +381,46 @@ def test_the_migrations_head_is_resolved_once_not_per_request(sha_env, monkeypat
     assert first["migrations_head"] == api._MIGRATIONS_HEAD == second["migrations_head"]
 
 
+def test_the_published_head_is_documented_as_CARRIED_not_APPLIED():
+    """#10467 review P2: the field must not be documented as answering a question
+    it cannot answer.
+
+    `_migrations_head` reads the highest migration-shaped file the **image
+    carries**. It said — here and in the PR body — that it answers "has migration
+    7 landed in prod", which is a DIFFERENT and unanswerable question from inside
+    this process: `entrypoint.sh` has no migration step (`supabase-deploy.yml`
+    applies the schema) and the deploy's drift gate classes index-only drift as
+    WARN, exit 0 (`.github/scripts/check-migration-drift:25-26`), so an
+    index-only migration can be carried by an image prod has not applied.
+    Publishing carried as applied is a false PASS on the exact question #10447
+    exists to make answerable.
+
+    The documentation IS the deliverable of that finding, so the CLAIM is what is
+    pinned: the honest reading present, the false one absent, and the applied
+    set pointed at its real home instead of implied here. Pre-fix the docstring
+    carried `Answers "has migration 7 landed in prod"` and no CARRIES wording, so
+    this reds on both halves.
+    """
+    from tortoise import hosted_api as api
+
+    doc = api._migrations_head.__doc__ or ""
+    lowered = doc.lower()
+    assert "carries" in lowered, (
+        "`_migrations_head` no longer says the head is what the IMAGE CARRIES — "
+        "the only reading this process can honestly produce"
+    )
+    assert "landed in prod" not in lowered, (
+        "`_migrations_head` claims 'has migration 7 landed in prod' again — the "
+        "applied set is a database fact this endpoint does not read (and must not: "
+        "`/health` does no DB work), so the field would be a false PASS on it"
+    )
+    assert "applied" in lowered and "database" in lowered, (
+        "`_migrations_head` does not name the distinction (applied / database) — "
+        "a docstring that drops it invites the carried value being read as the "
+        "applied one"
+    )
+
+
 # ── a stale deploy is UP: currency must not be folded into `status` ──────────
 
 def test_a_stale_build_does_not_degrade_status(sha_env, monkeypatch):

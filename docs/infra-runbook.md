@@ -998,6 +998,42 @@ no request is made, so nothing fails and nothing pages; nothing watches for a
 MISSING pass. The backup driver (#596) covers that leg with a run stamp plus an
 out-of-band staleness check, and this one does not yet.
 
+### 4.3 Which build is serving — the `build` block on `/health` (#10447)
+
+**Symptom this answers.** "Is this deployed?" — asked of an endpoint that
+published `status`, `db`, `probe`, `loop_stale_ms`, `backup_watcher`,
+`change_feed` and `record` and named **no build**. A STALE build serves every
+one of those happily, so `status: ok` was true and uninformative at the same
+time. `/health` now carries one additive block, `build` (unauthenticated, like
+the rest of the payload, so no shell and no key are needed):
+
+```bash
+curl -s https://tortoise-y4mjjq.fly.dev/health | python3 -m json.tool | sed -n '/"build"/,/}/p'
+```
+
+| field | what it tells you |
+|---|---|
+| `version` | `tortoise.__version__` — the package version, mirrors `pyproject.toml`. Same value `/v1/version` publishes, from the same resolver |
+| `commit_sha` | the commit the **deploy** was told to build (`TORTOISE_GIT_SHA`, stamped by `deploy-hosted.yml` from `GITHUB_SHA`) — never a hand-edited constant. `null` = nothing stamped it (selfhost / local dev / a stripped deploy), which is an absence that says so, not a value that looks current. Identical to `/v1/version`'s `commit_sha`; the two surfaces cannot disagree |
+| `commit_dirty` | `true` / `false` / **`null`**. ⚠️ `null` means **NOT STAMPED** — nothing sets `TORTOISE_GIT_DIRTY` on this deployment today (declared in #10467's `## PARTIAL`: the stamp needs its own gated deploy change). Read it as "clean" and you have read a fact nobody published. `tortoise/env_truthy.py` is the vocabulary: `1`/`true`/`yes`/`on` → `true`, `0`/`false`/`no`/`off` → `false`, anything else (including unset and blank) → `null`, never `false` |
+| `build_identified` | `true` only for a well-formed 7-40 lowercase-hex `commit_sha` **that is not known-dirty**. `false` is the "cannot check" refusal — `unknown`, `main`, a literally unexpanded `${GITHUB_SHA}`, or a dirty tree. Key a staleness probe on THIS, not on `commit_sha != null` |
+| `started_at` | ISO-8601 UTC timestamp of process start — restart-loop detection (a value that keeps moving means the machine is being recycled, cf. §6) |
+| `migrations_head` | the highest numeric-prefixed `supabase/migrations/*.sql` file **this IMAGE CARRIES**, ordered numerically (`999_b` < `1000_a`), so a stray `seed.sql` cannot publish itself as the head. ⛔ **It is NOT "which migration has been APPLIED to the database".** This process applies no schema migrations (`entrypoint.sh` has no migration step; `supabase-deploy.yml` applies them) and the deploy gate classes index-only drift as WARN (exit 0, `.github/scripts/check-migration-drift:25-26`), so the image can carry a migration prod has not applied. The applied set is a database fact — read `supabase_migrations.schema_migrations`, not this endpoint. `null` = no migration-shaped file in the image at all |
+| `migrations_source` | which population `migrations_head` was read from: `checkout` = the schema tree (all migrations — what the deployed image COPYs) or `package` = only the record lineage a wheel ships. The packaged answer is plausible and wrong for the inventory question, and without this field the two are indistinguishable |
+
+⚠️ **`build` deliberately does NOT fold into `status`.** A stale deploy is UP;
+degrading `status` over it would make Fly restart a healthy process forever
+(the #2850 restart-loop shape). Currency is a **COMPARISON the reader makes** —
+`check-deploy-staleness.sh` compares `commit_sha` against `origin/main` with
+`git merge-base --is-ancestor`. So `status: ok` on `/health` means "this process
+is liveness-healthy", **never** "this is the build I expected"; §4.1's client
+contract is unchanged and `deploy-health-gate.sh` still reads `db.ok` by value.
+
+⛔ **The operator misread this section exists to prevent:** a stale deploy with
+`build_identified: true` and `commit_dirty: null` is **stale and unstamped**,
+not clean. Read `commit_sha` against the expected commit, then read
+`commit_dirty` only as far as it goes (`null` ≠ clean).
+
 ## 4.5 Local Development — Local Stays Local
 
 **Best practice: a self-hosted/local instance is intentionally local.** Do not
