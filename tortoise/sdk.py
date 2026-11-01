@@ -18828,8 +18828,26 @@ class TortoiseSDK:
                 # EP backstop sees for the same token (a door that read it more
                 # narrowly would keep a factor the load side drops).
                 _raw_dir = _rdict.get("direction")
-                _eff_dir = self._canonical_direction(
-                    _rtype, _raw_dir if isinstance(_raw_dir, str) else None)
+                if isinstance(_raw_dir, str):
+                    _eff_dir = self._canonical_direction(_rtype, _raw_dir)
+                elif _raw_dir is None:
+                    # ABSENT: the edge TYPE's own default (NAND ->
+                    # ``unidirectional``), exactly as ``create_direct_edge``
+                    # canonicalizes it before judging.
+                    _eff_dir = self._canonical_direction(_rtype, None)
+                else:
+                    # ⛔ A PRESENT non-string token is NOT "absent" to any
+                    # reader: ``live.direction_flows`` reads it as BOTH ways
+                    # (unknown ⇒ the mutual default), which is also the leg set
+                    # ``ep.py`` sees. Judging it as the type default would judge
+                    # ONE leg of a two-leg wiring — for NAND that let a supersede
+                    # write ``asserted -[NAND {junk}]-> derived``, whose backward
+                    # leg is the override ``create_direct_edge(NAND, …,
+                    # 'bidirectional')`` refuses (measured). Both ways is the
+                    # fail-CLOSED reading, and it also keeps the unhashable case
+                    # away from ``direction_flows``' frozenset membership (which
+                    # raises ``TypeError``).
+                    _eff_dir = "bidirectional"
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
                     _src_classes, _tgt_classes = _new_classes, _tid_classes
