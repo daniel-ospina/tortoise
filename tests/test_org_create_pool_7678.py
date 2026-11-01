@@ -111,9 +111,16 @@ def test_create_org_supabase_lane_routes_every_call_to_the_org_pool(monkeypatch)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
 
     eager_seen: list[tuple] = []
+    listed_stub = {"org_prior-org"}
 
-    def _eager(cp, org_id, name, uid, prior_org_ids=None, prior_moved=None):
-        eager_seen.append((prior_org_ids, prior_moved))
+    # #10510: the lane samples the server-wide listing off-loop too (the
+    # prior-org open is gated on it), so keep this test off a real store read.
+    monkeypatch.setattr(ha, "_registry_existing_graphs",
+                        lambda: set(listed_stub))
+
+    def _eager(cp, org_id, name, uid, prior_org_ids=None, prior_moved=None,
+               prior_listed=None):
+        eager_seen.append((prior_org_ids, prior_moved, prior_listed))
         return f"org_{org_id}"
 
     provision_seen: dict = {}
@@ -143,16 +150,18 @@ def test_create_org_supabase_lane_routes_every_call_to_the_org_pool(monkeypatch)
         "org_by_name",
         "owned_free_org_ids",
         "active_membership_org_ids",
-        # #10452 review P2: the PRIOR org's default namespace is resolved HERE,
-        # off-loop on the same pool, and handed to the eager init — which is
-        # sync and called directly from this coroutine, so a read it issued
-        # would have run on the event loop (two of them: the listing probe and
-        # the `organizations.graph_name` read).
+        # #10452 review P2: the PRIOR org's default namespace AND the
+        # server-wide listing are resolved HERE, off-loop on the same pool, in
+        # ONE submission, and handed to the eager init — which is sync and
+        # called directly from this coroutine, so a read it issued would have
+        # run on the event loop (two of them: the listing probe and the
+        # `organizations.graph_name` read).
         "org_default_namespace",
         "provision_org",
     ], seen
-    # the one membership read is handed to BOTH consumers (no second read)
-    assert eager_seen == [(["prior-org"], None)], eager_seen
+    # the one membership read is handed to BOTH consumers (no second read),
+    # and BOTH prior-org facts are threaded (a name alone is not a gate)
+    assert eager_seen == [(["prior-org"], None, listed_stub)], eager_seen
     assert provision_seen.get("prior_org_ids") == ["prior-org"], provision_seen
 
 
@@ -245,7 +254,7 @@ def test_org_create_active_membership_is_read_once_end_to_end(monkeypatch):
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(ha, "_eager_provision_org_graph",
                         lambda cp, org_id, name, uid, prior_org_ids=None,
-                        prior_moved=None:
+                        prior_moved=None, prior_listed=None:
                         f"org_{org_id}")
 
     calls: list[str] = []

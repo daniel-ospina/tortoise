@@ -2648,14 +2648,20 @@ def test_the_runbook_documents_exactly_the_subject_anchor_states_the_code_return
 # reintroduced by the fix for the fork inheritance.
 
 def test_the_org_create_lane_resolves_the_prior_default_off_the_loop(sb, monkeypatch):
-    """FAIL-ON: restore `_open_org_graph_sdk(prior_org_ids[0])` in
-    `_eager_provision_org_graph` and BOTH assertions below go red — the listing
-    probe runs at all, and the namespace read is seen from a thread that has a
-    running loop.
+    """FAIL-ON, two independent reds:
 
-    The check is the call's OWN view of the loop (a worker thread has no running
-    loop), not a source grep for `to_thread`, so a differently-spelled refactor
-    that puts the read back on the loop fails here too."""
+    * move the namespace read back onto the loop (drop the caller's
+      `_cp_offload`) → the loop-presence assertion below reds;
+    * stop sampling the listing (`prior_listed`) and go back to opening from
+      the NAME alone → ``probes`` is empty and the "sampled at all" assertion
+      reds. That is the #10510 regression: a name says which graph the org's
+      default holds, NOT which names the server lists, so without the listing
+      the open cannot tell the legacy `team_{prior}` arm from the canonical one
+      and cannot skip an absent graph.
+
+    The loop check is the call's OWN view of the loop (a worker thread has no
+    running loop), not a source grep for `to_thread`, so a differently-spelled
+    refactor that puts the read back on the loop fails here too."""
     import asyncio
 
     tc, fake, _ = sb
@@ -2674,8 +2680,12 @@ def test_the_org_create_lane_resolves_the_prior_default_off_the_loop(sb, monkeyp
         return True
 
     probes: list[bool] = []
-    monkeypatch.setattr(ha, "_registry_existing_graphs",
-                        lambda *a, **k: probes.append(_on_loop()))
+
+    def _probe(*_a, **_k):
+        probes.append(_on_loop())
+        return {moved}   # a REAL listing: the promoted default IS listed
+
+    monkeypatch.setattr(ha, "_registry_existing_graphs", _probe)
 
     namespace_reads: list[tuple[str | None, bool]] = []
     real_query = fake.query
@@ -2688,16 +2698,20 @@ def test_the_org_create_lane_resolves_the_prior_default_off_the_loop(sb, monkeyp
 
     monkeypatch.setattr(fake, "query", _query)
 
-    # Which name the prior-org open actually used — the value must be THREADED,
-    # not merely resolved.
-    opened: list[tuple[str, str | None]] = []
-    real_from_name = ha._org_sdk_from_name
+    # Which graph the prior-org open actually used — BOTH sampled facts must be
+    # THREADED into the gated door, not merely resolved somewhere.
+    opened: list[tuple[str, set | None, str | None,
+                       tuple[str | None, str | None] | None]] = []
+    real_open = ha._open_org_graph_sdk
 
-    def _record_from_name(org_id, moved_ns):
-        opened.append((org_id, moved_ns))
-        return real_from_name(org_id, moved_ns)
+    def _record_open(org_id, **kwargs):
+        sdk = real_open(org_id, **kwargs)
+        opened.append((org_id, kwargs.get("listed"), kwargs.get("moved"),
+                       None if sdk is None
+                       else (sdk._graph_name, sdk._namespace)))
+        return sdk
 
-    monkeypatch.setattr(ha, "_org_sdk_from_name", _record_from_name)
+    monkeypatch.setattr(ha, "_open_org_graph_sdk", _record_open)
 
     # MEMBER owns no org (ownership, not membership, is what the one-free-org
     # gate counts), so this is an ordinary create by a user with a prior org.
@@ -2719,9 +2733,102 @@ def test_the_org_create_lane_resolves_the_prior_default_off_the_loop(sb, monkeyp
         f"(loop-presence per read: {prior_reads}, all: {namespace_reads}) — the "
         "eager init is sync and called from the loop, so it belongs in the "
         "caller's `_cp_offload` block")
-    assert probes == [], (
-        "the lane probed the server-wide graph listing — the prior-org open is "
-        f"built from an already-resolved name and needs no probe ({probes})")
-    assert opened and opened[0] == (TEAM, moved), (
+    assert probes, (
+        "the lane never sampled the server-wide graph listing — the prior-org "
+        "open then has no gate at all and opens (and so MINTS) an absent "
+        f"graph: #10510 ({probes})")
+    assert not any(probes), (
+        "the listing probe ran ON THE EVENT LOOP — it is a graph read and "
+        f"belongs in the caller's `_cp_offload` block ({probes})")
+    prior_opens = [o for o in opened if o[0] == TEAM]
+    assert prior_opens, f"the eager init never opened the prior org: {opened}"
+    assert prior_opens[0][1] == {moved}, (
+        "the prior-org open did not receive the server's listing — the gate "
+        f"that keeps it off an absent graph was dropped: {prior_opens[0]}")
+    assert prior_opens[0][2] == moved, (
+        "the prior-org open did not receive the RESOLVED default namespace, "
+        f"so it re-derived a name off the registry: {prior_opens[0]}")
+    assert prior_opens[0][3] == (moved, None), (
         "the eager init opened the prior org somewhere other than the resolved "
-        f"default: {opened}")
+        f"default: {prior_opens[0][3]}")
+
+
+def _store_graphs() -> set[str]:
+    """Every graph the embedded store currently holds (a REAL listing)."""
+    sdk = ha._make_sdk(namespace="registry")
+    try:
+        return set(sdk._get_proj().db.list_graphs() or ())
+    finally:
+        sdk.close()
+
+
+def test_a_pre_3543_prior_org_is_opened_through_its_legacy_graph(sb):
+    """A prior org that predates the `team_` → `org_` rename keeps its data in
+    `team_{prior}`: `moved_default_namespace` answers **None** for that bare
+    shape (deliberately — #10505), so the caller takes the historical open.
+
+    FAIL-ON: open the historical arm with `_make_sdk(namespace=prior)` (the
+    pre-fix `_org_sdk_from_name(prior, None)`) and BOTH assertions red — that
+    opens, and so MINTS, the absent `org_{prior}` (read-path write pin 4), where
+    there is no `:OnboardingState`, so the creator's fork is lost and the new
+    org starts `fork='self'`."""
+    tc, fake, _ = sb
+    legacy = f"team_{TEAM}"
+    fake.tables["organizations"][0]["graph_name"] = legacy
+    _seed_onboarding(legacy, steps=_COMPLETE_STEPS, status="complete",
+                     fork="build")
+    # The resolver refuses the bare legacy shape on purpose: the open below is
+    # what keeps these orgs on the graph that actually holds their record.
+    assert ha._org_default_namespace(TEAM) is None
+    assert f"org_{TEAM}" not in _store_graphs()
+
+    new_org = "team-10180-legacy-heir"
+    ha._eager_provision_org_graph(fake, new_org, "Legacy Heir", OWNER,
+                                  prior_org_ids=[TEAM], prior_moved=None,
+                                  prior_listed={legacy})
+
+    assert f"org_{TEAM}" not in _store_graphs(), (
+        f"the prior-org open minted the absent canonical graph org_{TEAM} — "
+        "the read-path write pin 4, and a read of a graph that never held "
+        "this org's onboarding record")
+    sdk = ha._make_sdk(namespace=new_org)
+    try:
+        node = _onboarding_state().read_onboarding_node(sdk._get_proj(), new_org)
+    finally:
+        sdk.close()
+    assert node is not None, "the eager init wrote no OnboardingState"
+    assert node["fork"] == "build", (
+        "the new org did not inherit the creator's prior fork — the legacy "
+        f"`team_` graph was not opened: {node}")
+
+
+def test_an_unlisted_prior_org_skips_the_fork_read_instead_of_minting(sb, monkeypatch):
+    """Neither tenant name is listed (or the probe failed → `None`): the fork
+    read must be SKIPPED, not attempted through a `namespace=` guess.
+
+    FAIL-ON: the pre-fix unguarded open reads `org_{prior}` anyway — the read
+    runs, and it mints that absent graph (pin 4). Both assertions below red."""
+    tc, fake, _ = sb
+    _os = _onboarding_state()
+    reads: list[str] = []
+    real_read = _os.read_prior_org_fork
+
+    def _record_read(proj, prior_org_id):
+        reads.append(prior_org_id)
+        return real_read(proj, prior_org_id)
+
+    monkeypatch.setattr(_os, "read_prior_org_fork", _record_read)
+    before = _store_graphs()
+    assert f"org_{TEAM}" not in before, before
+
+    new_org = "team-10180-nolist"
+    ha._eager_provision_org_graph(fake, new_org, "No Listing", OWNER,
+                                  prior_org_ids=[TEAM], prior_moved=None,
+                                  prior_listed=set())
+
+    assert reads == [], (
+        "the eager init read a prior graph the listing never had — the "
+        f"pre-fix shape mints and reads an ABSENT graph (pin 4): {reads}")
+    after = _store_graphs()
+    assert f"org_{TEAM}" not in after and f"team_{TEAM}" not in after, (
+        f"the skipped prior-org read still MINTED a graph: {after - before}")

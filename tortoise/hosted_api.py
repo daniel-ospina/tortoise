@@ -672,6 +672,25 @@ class _NamespaceNotResolved:
 _NAMESPACE_NOT_RESOLVED = _NamespaceNotResolved()
 
 
+class _ProbeNotSampled:
+    """Sentinel type for the ``listed=`` argument (``_open_org_graph_sdk``,
+    ``_graph_has_org_namespace``, ``_eager_provision_org_graph``).
+
+    ``None`` already MEANS something on that argument — the registry probe
+    FAILED (fail-open, #3543) — so it cannot double as "the caller did not
+    sample the listing". ``isinstance`` keeps the two distinguishable without
+    a second boolean parameter.
+
+    ⚠️ DEFINED HERE, next to ``_NamespaceNotResolved``, for the same reason: it
+    is a DEFAULT ARGUMENT VALUE (evaluated when its ``def`` is, so every
+    function that takes it must be defined after this line). Its consumers are
+    far apart in this file — ``_eager_provision_org_graph`` at the org-create
+    lane (~22.3k) comes BEFORE the graph-open gate (~33.1k) — and the earlier
+    one wins.
+    """
+_PROBE_NOT_SAMPLED = _ProbeNotSampled()
+
+
 def _default_graph_name(org: dict) -> str | None:
     """The FULL DB graph name this credential's DEFAULT graph resolves to (#10180).
 
@@ -22305,7 +22324,9 @@ async def create_org(body: dict, user: dict = Depends(get_current_user)):  # noq
 def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
                                prior_org_ids: list[str] | None = None,
                                prior_moved: str | _NamespaceNotResolved | None
-                               = _NAMESPACE_NOT_RESOLVED) -> str:
+                               = _NAMESPACE_NOT_RESOLVED,
+                               prior_listed: set[str] | _ProbeNotSampled | None
+                               = _PROBE_NOT_SAMPLED) -> str:
     """Effect the eager default-graph TeamMeta + OnboardingState init for an
     org that is about to be provisioned; return its graph name.
 
@@ -22329,19 +22350,25 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
     ``None`` keeps the legacy behaviour — read it here — for the checkout
     replay lane, which has no caller-side read to reuse.
 
-    ``prior_moved`` (#10452 review, P2): the PRIOR org's already-resolved
-    default namespace, read by an ASYNC caller in its ``_cp_offload`` worker.
-    ⛔ Every argument above is a value the caller already holds; this one is
-    the same rule, and it exists because the alternative violated it: the
-    prior-org open used to go through ``_open_org_graph_sdk``, which probes the
-    server-wide graph listing (``db.list_graphs()`` — a graph read) AND reads
-    ``organizations.graph_name`` (a control plane read) — and this helper is
-    SYNC, called DIRECTLY from ``_create_org_supabase_lane``, so both ran on
-    the event loop of the org-create request. That is the exact class two
-    earlier rounds of this PR removed from request sites.
-    ``_NAMESPACE_NOT_RESOLVED`` (the default) keeps the legacy behaviour —
-    resolve it here — for the checkout-replay lane, which is sync and already
-    issues its control-plane calls inline.
+    ``prior_moved`` / ``prior_listed`` (#10452 review, P2): the PRIOR org's
+    already-resolved default namespace AND the server-wide graph listing, both
+    sampled by an ASYNC caller in its ``_cp_offload`` worker.
+    ⛔ Every argument above is a value the caller already holds; these two are
+    the same rule, and they exist because the alternative violated it: the
+    prior-org open probes the server-wide graph listing
+    (``db.list_graphs()`` — a graph read) AND reads ``organizations.graph_name``
+    (a control plane read) — and this helper is SYNC, called DIRECTLY from
+    ``_create_org_supabase_lane``, so both would run on the event loop of the
+    org-create request. That is the exact class two earlier rounds of this PR
+    removed from request sites.
+
+    ⚠️ Passing the namespace ALONE is not enough, and that was a real defect:
+    the name says WHICH graph the org's default holds, not whether the server
+    LISTS it — and the three answers a legacy org needs (canonical
+    ``org_{id}``, pre-#3543 ``team_{id}``, or "skip the read") come from the
+    listing, not from the registry column. Both default sentinels keep the
+    legacy behaviour — resolve/probe here — for the checkout-replay lane, which
+    is sync and already issues its control-plane calls inline.
     """
     from tortoise.onboarding import state as _os
     graph_name = f"org_{org_id}"
@@ -22381,32 +22408,42 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
         # onboarding mode (`fork='self'`) than the creator chose — the
         # "org-level state stored in the default graph" class this change
         # converts everywhere else.
-        # ⛔ The NAME is resolved by the CALLER when it has a worker to do it in
-        # (`prior_moved`), and opened here with `_org_sdk_from_name` — NO I/O.
-        # Opening through `_open_org_graph_sdk` instead would re-probe the
-        # server-wide listing and re-read the control plane ON THE EVENT LOOP
-        # of an async org-create request (see `prior_moved` above).
-        # For an org that has not promoted, `_org_sdk_from_name` is byte-
-        # identical to the `namespace=` open this used to pass through
-        # `_open_org_graph_sdk` to, so nothing changes for them.
-        # (`namespace=` is also the read-path WRITE pin 4 hazard: it re-derives
-        # `org_{prior}` and MINTs a graph the listing never had. That argument
-        # is why the name is resolved first and the historical arm is not a
-        # `namespace=` guess.)
+        # ⛔ Both facts the open needs are SAMPLED BY THE CALLER (`prior_moved`,
+        # `prior_listed`), because this helper is SYNC and called directly from
+        # `_create_org_supabase_lane`: a read issued here runs ON THE EVENT LOOP
+        # of the org-create request. The OPEN stays on the loop — that is
+        # `_make_sdk` CONSTRUCTION, which belongs here (tortoise#7500: built in
+        # a pooled worker, its store path comes from the thread's stale
+        # inherited test-module stamp).
+        # `_open_org_graph_sdk` — NOT `_org_sdk_from_name` — because it is the
+        # only door that expresses all three answers AND gates each on the
+        # listing (read-path write pin 4; `namespace=` re-derives `org_{id}`,
+        # so for an absent or legacy graph it would open — and so MINT — a
+        # different, absent graph and read an empty one):
+        #   * the PROMOTED namespace `org_{id}_{gid}`  → open it by name;
+        #   * the canonical `org_{id}`, when listed    → the `namespace=` open;
+        #   * the pre-#3543 `team_{id}`, when listed   → open THAT graph (no
+        #     data migration rewrote it: opening `org_{id}` instead reads an
+        #     EMPTY graph, `read_prior_org_fork` answers None, and the new org
+        #     silently starts `fork='self'` — the failure this block exists for);
+        #   * neither listed (or the probe failed)     → None, and the fork read
+        #     is SKIPPED rather than minting `org_{prior}` and reading it.
         moved = prior_moved
         if isinstance(moved, _NamespaceNotResolved):
             # The legacy (checkout-replay) lane: it is sync and already calls
             # the control plane inline, so it resolves in place.
             moved = _org_default_namespace(prior_org_ids[0])
-        prior_sdk = _org_sdk_from_name(prior_org_ids[0], moved)
-        try:
-            prior_fork = _os.read_prior_org_fork(
-                prior_sdk._get_proj(), prior_org_ids[0])
-        except Exception:
-            prior_fork = None
-        finally:
-            with contextlib.suppress(Exception):
-                prior_sdk.close()
+        prior_sdk = _open_org_graph_sdk(prior_org_ids[0], listed=prior_listed,
+                                        moved=moved)
+        if prior_sdk is not None:
+            try:
+                prior_fork = _os.read_prior_org_fork(
+                    prior_sdk._get_proj(), prior_org_ids[0])
+            except Exception:
+                prior_fork = None
+            finally:
+                with contextlib.suppress(Exception):
+                    prior_sdk.close()
     init_fork, init_compact = _os.resolve_init_fork_compact(
         bool(prior_org_ids), prior_fork)
     _init_q, _init_p = _os.eager_init_query(
@@ -22509,25 +22546,34 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     prior_org_ids = await _cp_offload(
         lambda: active_membership_org_ids(cp, user["user_id"]),
         op="active_membership_org_ids", pool="org")
-    # #10180 (review P2): resolve the PRIOR org's default namespace HERE, in a
-    # worker, and hand it to the sync eager-init helper below. That helper is
-    # called directly from this coroutine, so every control-plane read it
-    # issues runs ON THE EVENT LOOP; the two it needs for the prior org — the
-    # server-wide graph listing probe and the `organizations.graph_name` read —
-    # are exactly the class two earlier rounds of this PR removed from request
-    # sites (#3834/#4816: this lane is the one whose own comment measures a
-    # ~9.5 s pass against the 10 s transport bound). One off-loop read here
-    # replaces two on-loop ones, and `None` (no prior org) costs nothing.
-    prior_moved = (
+    # #10180 (review P2): resolve BOTH facts the prior-org open needs HERE, in
+    # a worker, and hand them to the sync eager-init helper below. That helper
+    # is called directly from this coroutine, so every read it issues runs ON
+    # THE EVENT LOOP; the two it needs for the prior org are the server-wide
+    # graph listing probe (`db.list_graphs()`) and the
+    # `organizations.graph_name` read — exactly the class two earlier rounds of
+    # this PR removed from request sites (#3834/#4816: this lane is the one
+    # whose own comment measures a ~9.5 s pass against the 10 s transport
+    # bound). ONE submission replaces two on-loop reads: two submissions would
+    # spend two pool hand-offs and two bound windows on a lane that is already
+    # close to its budget, and the listing probe is fail-soft
+    # (`_registry_existing_graphs` never raises, `None` on failure), so folding
+    # it in adds no new failure mode. `None` (no prior org) costs nothing.
+    # ⛔ The namespace ALONE is not enough: it says which graph the org's
+    # default holds, not which names the server actually LISTS — and the legacy
+    # `team_{prior}` arm and the "skip the read" arm come from the listing.
+    prior_moved, prior_listed = (
         await _cp_offload(
-            lambda: _org_default_namespace(prior_org_ids[0]),
+            lambda: (_org_default_namespace(prior_org_ids[0]),
+                     _registry_existing_graphs()),
             op="org_default_namespace", pool="org")
-        if prior_org_ids else None)
+        if prior_org_ids else (None, None))
     # Eager default-graph TeamMeta FIRST (see _eager_provision_org_graph) — the
     # helper returns the graph name (f"org_{org_id}", the convention above).
     graph_name = _eager_provision_org_graph(cp, org_id, name, user["user_id"],
                                             prior_org_ids=prior_org_ids,
-                                            prior_moved=prior_moved)
+                                            prior_moved=prior_moved,
+                                            prior_listed=prior_listed)
     try:
         # #1921: all-NULL key params → the RPC writes orgs + membership but
         # NO api_keys row (all-or-none guard, migration 20260825214233) —
@@ -33166,19 +33212,6 @@ class OnboardingStateResponse(BaseModel):
 # jsonb writer stays active and the grandfathered-window guard in
 # resolve_wire_completion keeps wizard-completed orgs complete.
 _ACCEPT_AND_DROP = True  # W1 (#1997) landed — PATCH onboarding_complete is dropped on node-present orgs (plan T7)
-
-
-class _ProbeNotSampled:
-    """Sentinel type for ``_open_org_graph_sdk``'s ``listed`` argument.
-
-    ``None`` already MEANS something on that argument — the registry probe
-    FAILED (fail-open, #3543) — so it cannot double as "the caller did not
-    sample the listing". ``isinstance`` keeps the two distinguishable without
-    a second boolean parameter.
-    """
-
-
-_PROBE_NOT_SAMPLED = _ProbeNotSampled()
 
 
 def _graph_has_org_namespace(
