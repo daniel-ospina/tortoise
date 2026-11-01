@@ -101,7 +101,12 @@ from tortoise.entity_identity import (  # #3590: identity is a minted id, a name
     refuse_ambiguous_create,  # the READ-ONLY pre-flight twin of that refusal
     resolve_fold_name,  # #3590 fold-side name resolution
 )
-from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+from tortoise.env_truthy import (  # #4097: the declared truthy contract
+    FALSY,
+    TRUTHY,
+    env_flag,
+    is_truthy,
+)
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
     provenance_basename,
@@ -6136,25 +6141,32 @@ def _build_identity() -> dict:
     "is it up".
     """
     sha = (os.environ.get("TORTOISE_GIT_SHA") or "").strip() or None
-    dirty = (os.environ.get("TORTOISE_GIT_DIRTY") or "").strip()
+    # THE VOCABULARY IS THE REPO'S, NOT A SIXTH ONE (review P2). A bare
+    # `{"1": True, "0": False}` map published `null` for `true`/`True`/`yes`/
+    # `on` — and `true` is the spelling this fleet's own deploy already uses
+    # (`BACKUP_SWEEP_ENABLED=true`), so a stamped dirty build read as "not
+    # claimed". `tortoise/env_truthy.py` is the declared single contract (#4097);
+    # unset/blank/garbage stays `None` ("not stated"), never `False`.
+    norm = (os.environ.get("TORTOISE_GIT_DIRTY") or "").strip().lower()
+    dirty_flag = True if norm in TRUTHY else (False if norm in FALSY else None)
     # `build_identified` is a POLARITY ALLOW-LIST, not `sha is not None` (review
     # P2). Any non-empty stamp used to claim an identified build — `unknown`,
     # `main`, `dev`, or a literally unexpanded `${GITHUB_SHA}` — and a reader keyed
     # on it was told "we know which commit" about a value that cannot be compared
     # to `origin/main`. A commit is 7-40 lowercase hex; anything else is a stamp we
-    # cannot reason with, and it says so. `commit_sha` stays RAW so `/v1/version`'s
-    # two-key contract carries exactly what the deploy staged.
-    identified = bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
+    # cannot reason with, and it says so.
+    #
+    # A DIRTY BUILD IS ALSO NOT THE COMMIT IT NAMES (review P2): the sha matches a
+    # commit, but the tree it was built from did not, so the field answers False —
+    # which is what the pin's own title claims and what a reader keyed on
+    # `build_identified` alone must not be told the opposite of. `commit_sha` stays
+    # RAW so `/v1/version`'s two-key contract carries exactly what the deploy staged.
+    identified = (bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
+                  and not dirty_flag)
     return {
         "version": tortoise.__version__,
         "commit_sha": sha,
-        # AN UNRECOGNISED STAMP IS null, NEVER False (review P2). Coercing it
-        # with `== "1"` reported every other value — including the workflow's
-        # own "unknown" — as `False`, i.e. "the tree was clean, this sha IS the
-        # commit", which is the false PASS this field exists to prevent. The
-        # polarity allow-list is the same rule the fleet's check-run reader
-        # uses: an unnamed value must never fall through a gap.
-        "commit_dirty": {"1": True, "0": False}.get(dirty),
+        "commit_dirty": dirty_flag,
         "build_identified": identified,
         "started_at": _PROCESS_STARTED_AT,
         "migrations_head": _MIGRATIONS_HEAD,

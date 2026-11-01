@@ -232,14 +232,24 @@ def test_a_dirty_build_says_so_and_is_not_the_commit_it_names(sha_env):
     build is NOT the commit it names, and without the flag the sha alone reads as
     a clean match.
 
-    An UNRECOGNISED stamp must read as `null`, never as `false` — `false` is the
-    claim "clean, so this sha is the commit", which is the false PASS this field
-    exists to prevent.
+    THE VOCABULARY IS `tortoise/env_truthy.py`'s, not a local `== "1"` map
+    (review P2): `true` is the spelling this fleet's own deploy uses
+    (`BACKUP_SWEEP_ENABLED=true`), and a stamped `true` must not read as "not
+    claimed". An UNRECOGNISED stamp must read as `null`, never as `false` —
+    `false` is the claim "clean, so this sha is the commit", the false PASS this
+    field exists to prevent.
     """
-    sha_env("b" * 40, dirty="1")
-    assert _health()["build"]["commit_dirty"] is True
-    sha_env("b" * 40, dirty="0")
-    assert _health()["build"]["commit_dirty"] is False
+    for dirty_true in ("1", "true", "TRUE", "yes", "on", " True "):
+        sha_env("b" * 40, dirty=dirty_true)
+        build = _health()["build"]
+        assert build["commit_dirty"] is True, (dirty_true, build)
+        # ...and a dirty build is NOT the commit it names.
+        assert build["build_identified"] is False, (dirty_true, build)
+    for dirty_false in ("0", "false", "no", "off"):
+        sha_env("b" * 40, dirty=dirty_false)
+        build = _health()["build"]
+        assert build["commit_dirty"] is False, (dirty_false, build)
+        assert build["build_identified"] is True, (dirty_false, build)
     sha_env("b" * 40, dirty=None)
     assert _health()["build"]["commit_dirty"] is None
     sha_env("b" * 40, dirty="unknown")
@@ -399,4 +409,9 @@ def test_a_stale_build_does_not_degrade_status(sha_env, monkeypatch):
 
 def test_the_published_build_block_is_json_serialisable(sha_env):
     sha_env("d" * 40, dirty="0")
-    json.dumps(_health())  # a /health that cannot serialise is a 500, not a reading
+    payload = _health()
+    # The BLOCK, not the whole payload (review P2): `json.dumps(payload)` was
+    # satisfied by a payload with NO `build` key at all, so it passed against the
+    # unfixed code and proved nothing about the block it is named for.
+    assert "build" in payload
+    json.dumps(payload["build"])
