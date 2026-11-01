@@ -271,7 +271,8 @@ def test_a_tenantless_credential_is_never_resolved_into_the_other_tenant(
     every other test in this module green — it reddens only here.
     """
     from tortoise import hosted_api as ha
-    from tortoise import record_writer, supabase_control as sc
+    from tortoise import record_writer
+    from tortoise import supabase_control as sc
 
     cp = _two_tenant_cp()
     _wire(monkeypatch, cp)
