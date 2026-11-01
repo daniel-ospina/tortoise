@@ -251,13 +251,27 @@ def test_an_unobservable_ranker_makes_no_claim(sdk):
     the same rule that keeps an ``ep``-less row from carrying a claim.
     """
     class _OpaqueRanker:
+        def __init__(self):
+            self.calls = []
+
         def rerank(self, rows, *, entity_type="point", query=None):
-            return list(reversed(rows))
+            out = list(reversed(rows))
+            self.calls.append(([r["id"] for r in rows],
+                               [r["id"] for r in out]))
+            return out
 
     _seed(sdk)
+    opaque = _OpaqueRanker()
     rows = sdk.tortoise_fts_query(_QUERY, order_by="graph", limit=10,
-                                  graph_ranker=_OpaqueRanker())
+                                  graph_ranker=opaque)
     assert rows
+    # Differential, not vacuous (#10137 review round 6, P2): prove the ranker
+    # RAN — its `reversed` order is what the caller received. Without this the
+    # "no label" half would pass on a path that never re-ordered at all.
+    assert len(opaque.calls) == 1 and opaque.calls[0][0], opaque.calls
+    assert opaque.calls[0][1] == [r["id"] for r in rows], (
+        "the opaque ranker's order must be the one shipped, or the label "
+        "assertion below certifies nothing")
     for r in rows:
         assert "informed_order" not in r["ep"]
 
@@ -321,6 +335,8 @@ def test_an_unobservable_re_ranker_cannot_inherit_the_pool_label(sdk):
 
     from tortoise.ranking import StateRanker
 
+    calls: list[tuple] = []
+
     class _OpaqueStateRanker:
         """Delegates to a real StateRanker — but is not one, so its read is
         unobservable to `belief_read_for` (a decorating wrapper's shape)."""
@@ -329,13 +345,35 @@ def test_an_unobservable_re_ranker_cannot_inherit_the_pool_label(sdk):
             self.inner = inner
 
         def rerank(self, rows, *, entity_type="point", query=None):
-            return self.inner.rerank(rows, entity_type=entity_type, query=query)
+            out = self.inner.rerank(rows, entity_type=entity_type, query=query)
+            calls.append(([r["id"] for r in rows], [r["id"] for r in out]))
+            return out
 
-    rows = sdk.recall_state(
+    observed = sdk.recall_state(
         query=_QUERY, limit=10,
         state_ranker=_OpaqueStateRanker(StateRanker(sdk._get_proj())))
-    assert rows
-    for r in rows:
+    assert observed
+
+    # ⛔ Differential, not vacuous (#10137 review round 6, P2): the re-rank has
+    # to have RUN, and the SAME call with an OBSERVABLE ranker has to carry the
+    # claim — otherwise "no key" is satisfied by a path that never re-ordered
+    # at all (which is exactly what this case could not distinguish).
+    assert len(calls) == 1 and calls[0][0], (
+        f"the opaque re-rank must have run over the pool, not been skipped: {calls}")
+    assert calls[0][1] == [r["id"] for r in observed], (
+        "the inner ranker's order must be the one the caller received")
+
+    observed_rows = sdk.recall_state(query=_QUERY, limit=10,
+                                     state_ranker=StateRanker(sdk._get_proj()))
+    assert [r["id"] for r in observed_rows] == [r["id"] for r in observed], (
+        "both rankers must return the same order — that equality is what makes "
+        "the label difference below the ONLY difference")
+    assert any(r["ep"].get("informed_order") == "consulted"
+               for r in observed_rows), (
+        "the observable ranker's re-order must claim the read, or the "
+        "unobservable case's absent key proves nothing")
+
+    for r in observed:
         assert "informed_order" not in r["ep"], (
             "the unobservable re-rank must clear the pool's claim, not inherit "
             "it")
