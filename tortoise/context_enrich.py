@@ -154,8 +154,11 @@ def _rewrite_one(
     # the boundary's nonce is a hash of the body, so the body cannot close it.
     # `_SYSTEM_PROMPT` stays the trusted side the clause points at ("the ones
     # we wrote outside that block"). Tests:
-    # `test_the_rewrite_prompt_frames_the_window_as_data` and
+    # `test_the_rewrite_prompt_frames_the_window_as_untrusted_data` and
     # `test_a_captured_turn_cannot_close_the_untrusted_block`.
+    # ⛔ The first name is exactly as the test is NAMED — an earlier version of
+    # this comment cited `…_as_data`, which greps to nothing and reads as a
+    # missing test rather than a typo.
     window = (
         f"Previous turn:\n{prev_text}\n\n"
         f"TARGET turn (rewrite this one):\n{text}\n\n"
