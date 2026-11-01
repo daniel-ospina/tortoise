@@ -1511,6 +1511,15 @@ _BUNDLE_SOURCES = {
     "extractor_v2": _REPO / "tortoise/extractor_v2.py",
 }
 
+# The GATE the bundle audits, which the bundle also cites by number. Kept OUT of
+# `_BUNDLE_SOURCES` on purpose: `_BUNDLE_CITE` matches `sdk|edges|extractor_v2`
+# only, so putting a key here would imply the sweep proper reads it when it
+# cannot. These are read by `test_the_bare_continuation_cites_name_what_they_say`
+# instead, by phrase — the same mechanism the bare `:NNNN` continuations need.
+_BUNDLE_TOOL_SOURCES = {
+    "capstone_verdict_check": _REPO / "tools/capstone_verdict_check.py",
+}
+
 # `docs/00_index.md` is a shared router of ~140 table rows, so only the ROW that
 # names this bundle is swept: another epic's row citing `sdk.py` must not red the
 # #7949 pin (it would be told to add a phrase for a line it is not about). The
@@ -1871,6 +1880,16 @@ def test_the_bare_continuation_cites_name_what_they_say():
     `:9044` for the early return and `:8781` for the `_edus_from_conversation`
     call: every one of those rows FAILS the two checks below (the number is not
     on the phrase's line, and the old number carries other code).
+
+    A row may name a SOURCE outside the bundle's own three (`_BUNDLE_TOOL_SOURCES`)
+    — the `E1-E5-PROOFS.md` rows read `tools/capstone_verdict_check.py`, which
+    `_BUNDLE_CITE` cannot match at all. Those numbers had NO reader: the document
+    said so in its own words ("re-checked BY HAND at the audit head") and then
+    went stale within one commit — `#10509` review (P2) found its required-step
+    refusal cited at the lines rule 4 (the frozen-record refusal) occupies. On
+    that pre-fix document the third row FAILS twice over: its sentence carries
+    neither `:475` nor `:477`, and `:460`/`:462` carry the conditional-declaration
+    refusal, not the `missing = …` line the prose names.
     """
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
@@ -1902,12 +1921,38 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("9485", 'result["vet"] = {'),
             ("9489", ("exact", "}")),
         )),
+        # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
+        # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
+        # sweep proper — and until these rows existed the document said so in its
+        # own words ("re-checked BY HAND at the audit head"). It then went stale
+        # in the very commit whose message claimed to fix a stale V5 cite pair:
+        # `#10509` review (P2) found `:460`/`:462` landing on rule 4, the
+        # frozen-record refusal, instead of rule 2, the unobserved-required-step
+        # refusal. A hand-recheck did not hold across one commit, so the numbers
+        # are pinned here instead. The sentence wraps over three lines and a row
+        # scopes to ONE line, so the claim takes three rows.
+        ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
+            ("118", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+                    '"S5", "S6")'),
+        ), "capstone_verdict_check"),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:379`) refuses a GREEN row whose", (
+            ("379", "def _step_accounting("),
+        ), "capstone_verdict_check"),
+        ("E1-E5-PROOFS.md", "run left a REQUIRED step out", (
+            ("475", "missing = [s for s in required if s not in observed]"),
+            ("477", "GREEN with steps not observed in the run:"),
+        ), "capstone_verdict_check"),
     )
     docs = dict(_BUNDLE_DOCS)
     sources = {name: path.read_text(encoding="utf-8").splitlines()
-               for name, path in _BUNDLE_SOURCES.items()}
+               for name, path in (*_BUNDLE_SOURCES.items(),
+                                  *_BUNDLE_TOOL_SOURCES.items())}
     failures: list[str] = []
-    for doc_label, phrase, cites in rows:
+    for row in rows:
+        doc_label, phrase, cites = row[0], row[1], row[2]
+        # a row may name its SOURCE; the bundle's own three are the default
+        source_key = row[3] if len(row) > 3 else "extractor_v2"
+        source_label = f"{source_key}.py"
         lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
         hits = [ln for ln in lines if phrase in ln]
         if len(hits) != 1:
@@ -1925,15 +1970,15 @@ def test_the_bare_continuation_cites_name_what_they_say():
                     f"cite :{number} — a bare continuation is invisible to "
                     f"_BUNDLE_CITE, so this pin is the only thing reading it")
                 continue
-            got = sources["extractor_v2"][int(number) - 1]
+            got = sources[source_key][int(number) - 1]
             if isinstance(anchor, tuple):
                 if got.strip() != anchor[1]:
                     failures.append(
-                        f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                        f"{source_label}:{number} (cited by {doc_label}) reads "
                         f"{got.strip()!r}, not exactly {anchor[1]!r}")
             elif anchor not in got:
                 failures.append(
-                    f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                    f"{source_label}:{number} (cited by {doc_label}) reads "
                     f"{got.strip()!r}, which carries no {anchor!r}")
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "

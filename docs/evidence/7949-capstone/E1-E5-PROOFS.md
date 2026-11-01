@@ -165,13 +165,17 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
 
 `tools/capstone_verdict_check.py:118` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
 "S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:379`) refuses a GREEN row whose
-run left a REQUIRED step out (`:460`, message at `:462`).
+run left a REQUIRED step out (`:475`, message at `:477`).
 
-⚠️ **Those cites are re-checked BY HAND at the audit head, not by the bundle
-sweep.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches only the three
+⚠️ **These four numbers are not read by the bundle sweep — a separate pin reads
+them.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches only the three
 sources this bundle prints numbers for (`sdk.py`, `edges.py`, `extractor_v2.py`), so a
-`tools/*.py` cite and the bare `:N` continuation below are invisible to it — stated
-here so "swept" is never read into a number nothing re-checks.
+`tools/*.py` cite and the bare `:N` continuations above are invisible to it. They are
+pinned by phrase instead, in `test_the_bare_continuation_cites_name_what_they_say`,
+which requires each number to sit on the sentence that names it AND requires the line
+it points at to carry the symbol claimed there. Stated here so "swept" is never read
+into a number nothing re-checks: a **new** `tools/*.py` number in this document is
+unguarded until it earns a row in that pin.
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
