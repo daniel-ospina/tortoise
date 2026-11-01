@@ -10777,12 +10777,22 @@ def _cmd_doctor(args):
     # prevent, one level up. Every state is named here so a new one cannot fall
     # through.
     #
-    # `❌` only for BLOCKED: only a refusal retrying cannot fix fails the report
-    # (and so the exit code). DRAINING and INACTIVE are INFORMATION, not warnings:
-    # a pending capture on a live box is usually the running session awaiting its
-    # own final flush, and a keyless box is a normal install — painting either as
-    # "1 warn" is the alert-fatigue pattern the consent row below already
-    # records (#3615).
+    # `❌` only for a refusal retrying cannot fix: BLOCKED and SATURATED are those
+    # two (and so the exit code). DRAINING and INACTIVE are INFORMATION, not
+    # warnings: a pending capture on a live box is usually the running session
+    # awaiting its own final flush, and a keyless box is a normal install —
+    # painting either as "1 warn" is the alert-fatigue pattern the consent row
+    # below already records (#3615).
+    #
+    # ⛔ A SATURATED SPOOL IS NAMED HERE, NOT LEFT TO THE FALLBACK. It is a
+    # refusal retrying cannot FIX — nothing is evictable, so only filing, adding
+    # a key or deleting entries clears it — which is the paragraph's own rule for
+    # `❌`; rendering it through `"⚠️"` would have made the one report an operator
+    # runs EXIT 0 on a box that captures nothing. It was missing from this map
+    # when the state was added (capture-loss review, #10479), so the comment's own
+    # claim ("every state is named here so a new one cannot fall through") was
+    # already false — the two other enumerations of the same set (the state type
+    # and `_print_capture_health`'s filter) were updated, this one was not.
     try:
         from tortoise.capture_spool import capture_health_line, spool_dir
         _capture_health = capture_health_line(
@@ -10790,6 +10800,7 @@ def _cmd_doctor(args):
         _capture_icon = {
             "blocked": "❌",
             "unreadable": "⚠️",
+            "saturated": "❌",
             "draining": "ℹ️",
             "inactive": "ℹ️",
             "ok": "✅",
