@@ -353,12 +353,25 @@ def test_ci_checks_this_bundle_not_only_the_capstone_one(probe):
     docs/evidence/7949-capstone` and nothing else, so for THIS bundle the ordering rule and the
     record↔pins cross-check did not run in any automated path — and a docs-only diff is exactly the
     change that can move a threshold after the numbers landed.
+
+    Re-cut at #10547 review P1: the remedy is no longer "add a second `--dir`", because that list
+    form cannot name a bundle that does not exist YET — the NEXT bundle would be unread in exactly
+    the same way, and the `SAME_PR_REFUSAL` arm (a registration added beside its own log) could
+    never fire for a bundle nobody listed. So the assertion is that CI runs the gate over the whole
+    DISCOVERED population, which covers this bundle by construction and cannot go stale.
     """
     workflow = (ROOT / ".github/workflows/python-ci.yml").read_text()
     invocations = [line for line in workflow.splitlines()
                    if "tools/capstone_preregistration_check.py" in line]
     assert invocations, "the pre-registration gate must run in CI"
-    assert any("--dir docs/evidence/5087-hypothesis" in line for line in invocations), (
+    assert any("--all-bundles" in line for line in invocations), (
+        "CI must run the gate over EVERY discovered bundle: a bundle named by hand is a bundle the "
+        "next contribution can add without being read. Found: "
+        f"{invocations}")
+    assert any(
+        "--dir docs/evidence/5087-hypothesis" in line or "--all-bundles" in line
+        for line in invocations
+    ), (
         "CI must run the gate on THIS bundle: an ordering rule that no job executes is a rule that "
         f"does not exist. Found: {invocations}")
 

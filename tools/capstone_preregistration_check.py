@@ -163,11 +163,28 @@ SCORED_LOG_GLOB = "capstone-measured-*.log"
 MACHINE_RECORD = "preregistration.json"
 PREREG_SCHEMA = "capstone-preregistration/v1"
 
-#: The bundle CI has always checked. A second pre-registered bundle (#10463's ablation) is added by
-#: repeating ``--dir``: before that, no CI job read it at all, so its ordering rule and its
-#: record↔pins cross-check never executed — and a docs-only diff (which runs only the ``tier1``
-#: slice) is exactly the change that can move a threshold after the numbers landed (#10468 r6 F1).
+#: The bundle checked when nothing else is named. Prefer ``--all-bundles``: a DEFAULT (or a
+#: hand-maintained ``--dir`` list) can only name bundles that already exist, so it is a population
+#: that silently excludes the next one.
 DEFAULT_PREREG_DIR = "docs/evidence/7949-capstone"
+
+#: Every registered bundle in the tree — the population, discovered rather than listed.
+#:
+#: ⛔ WHY DISCOVERY AND NOT A LIST (#10547 review P1). CI used to hand this tool two hardcoded
+#: ``--dir``s. Two consequences, both measured: (a) no CI job read #10463's ablation bundle at all
+#: until a second ``--dir`` was added by hand, so its ordering rule never executed anywhere
+#: (#10468 r6 F1); and (b) the arm that refuses a registration added BESIDE its own log
+#: (:data:`SAME_PR_REFUSAL`) can only fire for a bundle someone hands over — with a list, a
+#: contribution that adds a new ``docs/evidence/<bundle>/`` is not refused, it is never READ. That
+#: arm exists precisely to stop such a contribution at PR time, so it must be reached by an
+#: automated path or it is decoration. Enumerating the tree is the only form that cannot go stale.
+BUNDLE_GLOB = "docs/evidence/*/PRE-REGISTRATION.md"
+
+NO_BUNDLES = (
+    f"no bundles discovered under docs/evidence/ ({BUNDLE_GLOB}): --all-bundles was asked to check "
+    "every registered bundle and found NONE, so this run consulted no subject at all. An empty "
+    "discovery is a check that could not be performed, never a pass"
+)
 
 #: The document's own sha256, restated in the record and REQUIRED there. ``git log`` bounds the
 #: document only where history is available (a shallow checkout has none) and ``--diff-filter=A``
@@ -1465,6 +1482,18 @@ def check_pins(pins: dict, derived: dict) -> list[str]:
 # ── entry point ─────────────────────────────────────────────────────────────
 
 
+def discover_bundles(root: Path | None = None) -> list[Path]:
+    """Every bundle directory carrying a ``PRE-REGISTRATION.md``, sorted — the whole population.
+
+    A bundle is *defined by* the document, so a bundle that is missing its ``preregistration.json``
+    is still discovered (and then REFUSED by the record check) rather than skipped: filtering on
+    the record would turn a missing record into an invisible bundle, which is the same silence this
+    discovery exists to remove.
+    """
+    base = Path(root) if root is not None else REPO_ROOT
+    return sorted({path.parent for path in base.glob(BUNDLE_GLOB)})
+
+
 def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
         base_ref: str | None = None) -> dict:
     prereg = directory / PREREG_NAME
@@ -1573,6 +1602,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dir", action="append", default=None,
                     help="directory holding PRE-REGISTRATION.md and its evidence logs; REPEAT to "
                          f"check several bundles in one run (default: {DEFAULT_PREREG_DIR})")
+    ap.add_argument("--all-bundles", action="store_true",
+                    help="check EVERY registered bundle in the tree "
+                         f"({BUNDLE_GLOB}) — the population, discovered, so a bundle a change ADDS "
+                         "is read rather than skipped; combines with --dir (union)")
     ap.add_argument("--no-git", action="store_true",
                     help="skip the commit-ordering check (pre-commit authoring)")
     ap.add_argument("--no-corpus", action="store_true",
@@ -1583,10 +1616,25 @@ def main(argv: list[str] | None = None) -> int:
                          f"first of {', '.join(BASE_REF_CANDIDATES)}; ${BASE_REF_ENV} also sets it)")
     args = ap.parse_args(argv)
 
-    directories = []
-    for entry in args.dir or [DEFAULT_PREREG_DIR]:
+    discovered: list[Path] = []
+    if args.all_bundles:
+        discovered = discover_bundles()
+        if not discovered:
+            # Fail closed: "I found nothing to check" must never leave as exit 0.
+            print(f"ERROR: {NO_BUNDLES}", file=sys.stderr)
+            return 2
+
+    directories: list[Path] = []
+    for entry in args.dir or ([] if args.all_bundles else [DEFAULT_PREREG_DIR]):
         directory = Path(entry)
         directories.append(directory if directory.is_absolute() else REPO_ROOT / directory)
+    # Union, not replacement: an explicit `--dir` and the discovered population checked together
+    # would otherwise be two runs, and a bundle named by hand twice must not be reported twice.
+    named = {directory.resolve() for directory in directories}
+    for directory in discovered:
+        if directory.resolve() not in named:
+            directories.append(directory)
+            named.add(directory.resolve())
 
     reports: list[dict] = []
     errors: list[tuple[Path, str]] = []
@@ -1618,6 +1666,12 @@ def main(argv: list[str] | None = None) -> int:
 
     for directory, message in errors:
         print(f"ERROR: {directory}: {message}", file=sys.stderr)
+    if args.all_bundles:
+        # The population is DECLARED, not implied: a verdict that names the ref it measured
+        # (:data:`BASE_REF_CANDIDATES`) still reads the same whether it consulted one bundle or
+        # every bundle, and "which bundles were read" is the question a green line cannot answer.
+        print(f"bundles discovered: {len(discovered)} "
+              f"({', '.join(str(d) for d in discovered)})")
     for report in reports:
         if len(directories) > 1:
             print(f"=== {report['document']} ===")
@@ -1625,6 +1679,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"criteria rows: {', '.join(r['id'] for r in report['rows']) or '(none)'}")
         print(f"evidence logs: {len(report['evidence_logs'])}"
               + (f" ({', '.join(report['evidence_logs'])})" if report["evidence_logs"] else ""))
+        if "ordering_base" in report:
+            print(f"ordering measured against: {report['ordering_base']}")
         if "derived" in report:
             d = report["derived"]
             print(

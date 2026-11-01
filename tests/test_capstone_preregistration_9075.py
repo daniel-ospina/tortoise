@@ -1545,14 +1545,16 @@ def test_a_skipped_corpus_half_is_reported_not_hidden(capsys):
 
 #: The CI invocation of the ordering half, verbatim — the whole command, not a substring of it.
 ORDERING_HALF_INVOCATION = (
-    # Re-cut 2026-11 (#10468 r6 F1): a SECOND pre-registered bundle was added to this one step,
-    # because no CI job read `docs/evidence/5087-hypothesis/` at all — its ordering rule and its
-    # record↔pins cross-check never executed, and a docs-only diff (which runs only the `tier1`
-    # slice) is exactly the change that can move a threshold after the numbers landed. `--dir` is
-    # repeatable, so this stays ONE command on ONE line with no shell operator between two runs
-    # (an `&&` chain would be a second command, and the pin refuses to describe two).
-    "python3 tools/capstone_preregistration_check.py "
-    "--dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis"
+    # Re-cut 2026-11 (#10547 review P1): `--all-bundles` REPLACES the hand-maintained `--dir` pair
+    # this constant used to pin. The list form was the defect, not the wording: it can only name
+    # bundles that already exist, so #10463's bundle went unread until someone added a second
+    # `--dir` by hand (#10468 r6 F1) — and, worse, the `SAME_PR_REFUSAL` arm could only fire for a
+    # bundle on the list, so a change that added a NEW `docs/evidence/<bundle>/` was never read. This
+    # is a DELIBERATE re-cut of a pinned invocation, not a silent edit: the tool discovers
+    # `docs/evidence/*/PRE-REGISTRATION.md` (unit-tested in this file) so the set of checked bundles
+    # cannot go stale, and the run declares the population it consulted. Still ONE command on ONE
+    # line with no shell operator between two runs.
+    "python3 tools/capstone_preregistration_check.py --all-bundles --no-corpus"
 )
 
 #: The only `if:` forms that do not drop enforcement. Judged on its own (`_SAFE_STEP_KEYS`
@@ -1796,6 +1798,12 @@ def _loose_pin_holds(workflow: dict) -> bool:
     silencing mutation really was invisible to it — the point of the rewrite is that this
     predicate is green on a gate that can never fail a PR.
 
+    Re-cut at #10547 review P1 with the SELECTOR only (`--all-bundles` replaces the single
+    `--dir`): the weakness this model reproduces — a MEMBERSHIP test over the joined `run:`
+    scalars — is unchanged, and each mutation below still keeps that membership intact while
+    neutralising the gate. Modelling the old selector instead would make every case fail its own
+    premise, which would delete the evidence for the rewrite rather than refresh it.
+
     The `fetch-depth` half is reproduced faithfully on purpose: a shallow checkout WAS caught
     before this rewrite, so modelling it here as unpinned would overstate the pre-fix gap. That
     mutation is therefore a separate still-caught case (`test_the_ci_pin_still_catches_*`), not
@@ -1812,7 +1820,7 @@ def _loose_pin_holds(workflow: dict) -> bool:
     runs = " ".join(str(s.get("run", "")) for s in steps)
     return (
         "tools/capstone_preregistration_check.py" in runs
-        and "--dir docs/evidence/7949-capstone" in runs
+        and "--all-bundles" in runs
     )
 
 
@@ -2218,8 +2226,8 @@ def _mutations():
                 "name": "Install pyyaml",
                 "run": "printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/python3"}),
         "a `\\`-continuation in the gate step": lambda w: gate_step(w).__setitem__(
-            "run", "python3 tools/capstone_preregistration_check.py \\\n"
-                   "    --dir docs/evidence/7949-capstone --no-corpus"),
+            "run", "python3 tools/capstone_preregistration_check.py --all-bundles \\\n"
+                   "    --no-corpus"),
         "a `runs-on:` swap on the gate's job": lambda w: w["jobs"]["changes"].__setitem__(
             "runs-on", "self-hosted"),
         "a `runs-on:` swap on the required aggregate": lambda w: w["jobs"][
@@ -2709,3 +2717,99 @@ def test_equal_epochs_on_the_base_are_still_not_before(tmp_path, monkeypatch):
     failures = check.check_ordering(prereg, [log])
     assert failures, "equal epochs must not pass as 'before'"
     assert "not strictly after" in failures[0], failures[0]
+
+
+# ── #10547 review P1: the refusal arm must be REACHED — CI checks the DISCOVERED population ─────
+#
+# WHY THESE TESTS EXIST. The base-ancestry arm above is only a gate if an automated path executes
+# it. CI handed the tool two hardcoded `--dir`s, so a contribution that added a NEW
+# `docs/evidence/<bundle>/` was not refused — it was never READ, and `SAME_PR_REFUSAL` (the whole
+# point of #10463's re-scope) could not fire for it. `--all-bundles` makes the checked population
+# equal to the registered population; the tests below pin discovery, the refusal arriving THROUGH
+# `main` (the path CI runs), and the fail-closed answer when discovery finds nothing.
+
+
+def _bundle(repo: Path, name: str) -> Path:
+    directory = repo / "docs" / "evidence" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _commit_files(repo: Path, paths: list[Path], epoch: int, message: str) -> None:
+    _git(repo, "add", *[str(path.relative_to(repo)) for path in paths])
+    _git(repo, "commit", "-q", "-m", message, epoch=epoch)
+
+
+def _readable_registration(directory: Path) -> Path:
+    """A registration the checker can READ, so the run reaches the ordering arm.
+
+    `parse_pins` raises `CheckError` (exit 2) on a document without a pins fence, and exit 2 is
+    "could not check" — it would short-circuit before ordering and make this test prove nothing
+    about the refusal. The pins block is the REAL registration's, so the only thing under test here
+    is the ordering.
+    """
+    real = PREREG.read_text()
+    at = real.find(check.PINS_FENCE)
+    assert at > 0, "the real registration must carry a pins block"
+    target = directory / check.PREREG_NAME
+    target.write_text(f"# test\n\n{real[at:]}")
+    return target
+
+
+def test_discovery_reads_every_registered_bundle_and_only_those(tmp_path, monkeypatch):
+    """The population is the TREE, not a list CI was told about.
+
+    A directory without a registration is not a bundle; a bundle missing its `preregistration.json`
+    IS one, because filtering on the record would turn a missing record into an invisible bundle —
+    the same silence this discovery exists to remove.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    for name in ("aaaaaaaa", "bbbbbbbb"):
+        (_bundle(repo, name) / check.PREREG_NAME).write_text("x\n")
+    (_bundle(repo, "no-registration") / "evidence.log").write_text("x\n")
+    assert check.discover_bundles() == [
+        repo.resolve() / "docs" / "evidence" / "aaaaaaaa",
+        repo.resolve() / "docs" / "evidence" / "bbbbbbbb",
+    ]
+
+
+def test_all_bundles_refuses_a_registration_added_beside_its_own_log(tmp_path, monkeypatch,
+                                                                    capsys):
+    """THE AUTOMATED PATH: the refusal reaches `main`, not only a direct `check_ordering` call.
+
+    Bundle `7949-capstone` is published on the base and ordered; bundle `9999-throwaway` adds a
+    registration AND a log in ONE commit — the shape #10468 redded `main` with. The second bundle is
+    named by NOTHING on any command line, which is exactly the situation the hardcoded `--dir` pair
+    left it in, so a green here would mean the arm is decoration.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    published = _bundle(repo, "7949-capstone")
+    prereg = _readable_registration(published)
+    _commit_files(repo, [prereg], epoch=1_700_000_100, message="add the published registration")
+    _publish_base(repo)                       # the registration's own PR merged
+    (published / "e1-e2.log").write_text("x\n")
+    _commit_files(repo, [published / "e1-e2.log"], epoch=1_700_000_200, message="add its log")
+    same = _bundle(repo, "9999-throwaway")
+    _readable_registration(same)
+    (same / "s3-ablation.log").write_text("x\n")
+    _commit_files(repo, [same / check.PREREG_NAME, same / "s3-ablation.log"],
+                  epoch=1_700_000_300, message="a registration and a log in one commit")
+
+    assert check.main(["--all-bundles", "--no-corpus"]) == 1
+    out = capsys.readouterr().out
+    assert "bundles discovered: 2" in out, out
+    assert "9999-throwaway" in out, out
+    assert "not on the merge base" in out, out
+    assert "own PR" in out, out
+
+
+def test_all_bundles_with_nothing_to_discover_fails_closed(tmp_path, monkeypatch, capsys):
+    """An empty discovery is "could not check", never a pass — exit 2, with the reason named.
+
+    Without this arm, `--all-bundles` in a tree whose bundles had been moved would check nothing and
+    exit 0: the silent-green shape this tool exists to refuse, wearing discovery's clothes.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    (repo / "docs" / "evidence").mkdir(parents=True)
+    assert check.main(["--all-bundles", "--no-corpus"]) == 2
+    assert "no bundles discovered" in capsys.readouterr().err

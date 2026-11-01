@@ -480,7 +480,16 @@ jobs:
         # SAYS the half was skipped (`corpus pins NOT checked`), so a partial run can never read as
         # a verified one. The step fails closed: exit 1 on an ordering violation, 2 on an
         # unreadable document/record.
-        run: python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis
+        #
+        # `--all-bundles` on purpose (#10547 review P1, deliberate re-cut of the pinned invocation):
+        # the step used to name two bundles by hand. A hand-maintained list can only name bundles
+        # that ALREADY exist, so (a) #10463's bundle went unread until a second `--dir` was added
+        # manually (#10468 r6 F1), and (b) the arm that refuses a pre-registration added in the SAME
+        # change as its evidence log (`SAME_PR_REFUSAL`) could never fire for a NEW
+        # `docs/evidence/<bundle>/` — it was not refused, it was never read. Discovery in the tool
+        # (`docs/evidence/*/PRE-REGISTRATION.md`, unit-tested) makes the population of read bundles
+        # equal to the population of registered bundles, and the run DECLARES both.
+        run: python3 tools/capstone_preregistration_check.py --all-bundles --no-corpus
       - name: Secrets scan (evidence artifacts, #1349)
         # Evidence commits (T8/T15/T16) must never carry live keys. The
         # provenance writer redacts (primary defense); this grep is the
