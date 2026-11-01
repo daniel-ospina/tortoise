@@ -6167,8 +6167,6 @@ def _marker_scope(content: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-
-
 def _scripts(content: str) -> frozenset[str]:
     """Scripts the claim's letters are drawn from — a language difference in
     the one form decidable without a model."""
@@ -6290,8 +6288,6 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
         if not ta or not tb:
             # Nothing to compare: refuse the fold rather than assume agreement.
             return "unreadable", _UNREADABLE
-        absorbed: list[str] = []
-        absorbed: list[str] = []
         identity = _identity_differences(a, b, absorbed=absorbed)
         dimension: str | None = None
         # The identity dimensions come first, because they are the ones that
