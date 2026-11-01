@@ -2539,14 +2539,14 @@ def test_a_step_dropped_from_both_lists_fails():
 
 def test_a_step_declared_both_ways_fails():
     pins = check.parse_pins(PREREG.read_text())
-    pins["steps"]["unconditional"] = list(pins["steps"]["unconditional"]) + ["S2.3"]
+    pins["steps"]["unconditional"] = [*pins["steps"]["unconditional"], "S2.3"]
     failures = check.check_step_partition(pins, _record_with_steps())
     assert any("BOTH unconditional and conditional" in f for f in failures), failures
 
 
 def test_a_step_id_outside_the_eight_fails():
     pins = _pins_with_steps(
-        unconditional=list(check.CAPSTONE_STEPS[:3]) + ["S4"])
+        unconditional=[*check.CAPSTONE_STEPS[:3], "S4"])
     failures = check.check_step_partition(pins, _record_with_steps())
     assert any("not part of the epic's eight" in f for f in failures), failures
 
@@ -2572,7 +2572,7 @@ def test_a_record_that_diverges_from_the_document_fails():
     """The probe freezes the RECORD, so a divergence means the gate enforces something the
     argument never argued."""
     rec = _record_with_steps()
-    rec["steps"]["unconditional"] = ["S0", "S1"] + list(rec["steps"]["unconditional"])
+    rec["steps"]["unconditional"] = ["S0", "S1", *rec["steps"]["unconditional"]]
     failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
     assert any("steps.unconditional" in f and "can disagree" in f for f in failures), failures
 
