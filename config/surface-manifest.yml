@@ -93,6 +93,39 @@ response_fields:
   unchanged_when_off: n/a — not flag-gated; the key is absent on every non-outdated hit, so those responses stay
     byte-identical
 - response: tortoise_search
+  field: truncated
+  emitted_when: 'ALWAYS on the hosted GET /v1/search body — the #8447 truncation marker: true when the
+    delivered set is NOT the whole set this read matched (the `limit` cap cut rows, a downstream stage
+    dropped them — a `min_confidence` floor, a hit whose entity read came back empty — or a retrieval leg that
+    was ASKED and never answered: it raised, missed the collective deadline, or its circuit breaker refused);
+    false only when nothing was dropped.
+    It answers "did I get everything this read matched?", NOT "did the cap fire?" — a row lost
+    downstream is as unreachable as one lost at the cap, so a cap-only reading would report a filtered-empty
+    read COMPLETE. A leg that was NEVER ASKED (no embedder installed, say) is not a drop: that is `status:
+    degraded`, the recorded vocabulary, and marking it here would make the field meaningless. Not flag-gated
+    (unlike status / residency): its own decision is
+    two len() calls over lists the read already holds, and it additionally asks the retrieval path for a per-leg
+    trace when the caller supplied none — an append-only audit record, one entry per asked leg, that never changes
+    which rows are returned (a leg that was ASKED and never answered drops rows exactly as a cap does, so the proof
+    is not optional). Bounded, not free; and a default-off marker would still preserve the defect it fixes.
+    Its ONE home is tortoise/truncation.py; it is its OWN field and never a fifth read-status term (#7952 §17.2
+    forbids one). OVERRIDES: the #1745 fail-safe default-OFF convention — there is no retrieval delta to measure on a
+    response marker, and a default-off marker is the silent-subset bug itself (precedent: #8487). The MCP tool
+    `tortoise_search` returns a bare list, so it does not carry the field; wrapping a list in an object is a declared
+    return-type change and therefore an MCP Surface Approval decision, not a consequence of this row'
+  unchanged_when_off: 'n/a — always emitted; the flag is never consulted, so it cannot be off. `results` and `count`
+    keep their exact prior values and the parameter set is unchanged'
+- response: tortoise_search
+  field: total_available
+  emitted_when: 'the hosted GET /v1/search body, ONLY when `truncated` is true AND the count is EXACT — i.e. no
+    retrieval leg filled its own window (len(candidates) < str_limit) and every ASKED leg answered (a leg that
+    never answered could have matched rows nobody read), so the population behind the cut is the whole
+    match set. ABSENT means the exact total is UNKNOWN, never zero: a candidate pool is itself bounded, so publishing
+    a saturated count would render a lower bound as a total — the same defect one level down (Elasticsearch carries
+    `hits.total.relation: eq|gte` for exactly this; Google documents `totalResults` as an estimate)'
+  unchanged_when_off: n/a — not flag-gated; the key is absent on every complete or unprovable read, so those
+    responses are byte-identical to their pre-#8447 form
+- response: tortoise_search
   field: provenance.source
   emitted_when: 'TORTOISE_SEARCH_PROVENANCE is truthy (1/true/yes/on; unset or 0 means off) AND the hit is a Point
     carrying `extractedFrom` — the Source/document ref (#3837, objectives 5/9). Recorded here because the #3986
@@ -3298,11 +3331,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.capture_session.
-  dependency: 'reached by no registered MCP tool; caller categories: documentation'
+  dependency: 'reached by no registered MCP tool; caller categories: documentation, other-tooling'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: documentation'
+  reason: 'no MCP tool binds it; callers: documentation, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
