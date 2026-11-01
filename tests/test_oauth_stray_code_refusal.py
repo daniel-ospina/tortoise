@@ -116,6 +116,7 @@ for (const c of cases) {
     hsts: res.headers.get('Strict-Transport-Security'),
     cacheControl: res.headers.get('Cache-Control'),
     referrerPolicy: res.headers.get('Referrer-Policy'),
+    csp: res.headers.get('Content-Security-Policy'),
     contentType: res.headers.get('Content-Type'),
     body,
   });
@@ -176,6 +177,23 @@ def _assert_named_refusal(res: dict, where: str) -> None:
         "must precede the render"
     )
     assert res["hsts"], f"{where}: the constructed response lost the HSTS stamp (#1003)"
+    # The CSP is the property that makes the refusal safe to SERVE at all: the
+    # page arrives carrying a credential, so it must make no outbound request —
+    # including the analytics/beacon origins the marketing document's
+    # `RELAXED_CSP` deliberately allows. Asserted on the RESPONSE, not on the
+    # source: a source scan that only pins which policy NAMES exist in the file
+    # cannot see the two stamps being swapped, and measured, swapping them left
+    # this whole suite green while a page carrying an authorization code shipped
+    # with the analytics policy (PR #10514 review, finding 2).
+    assert (res["csp"] or "").startswith("default-src 'none'"), (
+        f"{where}: the refusal was served with CSP {res['csp']!r}, want the "
+        "no-resource policy `default-src 'none'…` (`STRAY_RETURN_CSP`) — any other "
+        "value lets the page beacon the URL it was handed"
+    )
+    assert "http" not in (res["csp"] or "") and "*" not in (res["csp"] or ""), (
+        f"{where}: the refusal's CSP names a remote origin or a wildcard "
+        f"({res['csp']!r}) — this page must fetch nothing at all"
+    )
 
 
 @pytest.mark.parametrize("host", [TORTOISE_HOST, COMPANY_HOST])
@@ -449,4 +467,13 @@ def test_ordinary_marketing_requests_are_not_refused(path: str) -> None:
         f"{path} was answered with the stray-return refusal — `code_challenge` is a "
         "PKCE verifier hash and a bare `error` is not the authorization-response "
         "shape, so this is an over-block that fails closed on a real visitor"
+    )
+    # The refusal policy must not leak onto the ordinary path either: an
+    # over-broad stamp would serve every marketing page from a `default-src
+    # 'none'` policy and break the site (the reason `RELAXED_CSP` exists). This
+    # is the counterpart of the swap mutation in `_assert_named_refusal`.
+    assert "default-src 'none'" not in (res["csp"] or ""), (
+        f"{path} was served the REFUSAL's `default-src 'none'` policy "
+        f"({res['csp']!r}) — the stray-return stamp has leaked onto an ordinary "
+        "marketing request"
     )
