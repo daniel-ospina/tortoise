@@ -36215,15 +36215,17 @@ class TortoiseSDK:
             if _claim_class_applies and _claim_classes_ok:
                 ranked = _with_claim_class(ranked, claim_classes)
             from .ranking import annotate_belief_order as _belief_label
-            from .ranking import belief_consulted_for as _belief_asked
-            # #10137 review round 3: the label describes the READ, not the
-            # branch name and not the ranker's configuration — and it is scoped
-            # to THESE rows (`belief_consulted_for`), so a fetch that answered
-            # other ids cannot certify this page. A duck-typed `graph_ranker`
-            # whose read we cannot observe makes NO claim (None ⇒ key absent).
+            from .ranking import belief_read_for as _belief_read
+            # #10137 review rounds 3-4: the label describes the READ, not the
+            # branch name and not the ranker's configuration, and it is scoped
+            # PER ROW — a row the read did not answer was scored from a default
+            # and makes no claim. A duck-typed `graph_ranker` whose read we
+            # cannot observe makes no claim either (None ⇒ key absent).
+            _consulted, _answered = _belief_read(ranker, ranked)
             return _with_read_status(_belief_label(
-                ranked, consulted=_belief_asked(ranker, ranked)))
+                ranked, consulted=_consulted, answered=_answered))
         belief_consulted = False
+        read = None
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
             # that ep.confidence_mean carries. GraphRanker reads the
@@ -36263,7 +36265,8 @@ class TortoiseSDK:
         if _claim_class_applies and _claim_classes_ok:
             out = _with_claim_class(out, claim_classes)
         from .ranking import annotate_belief_order as _belief_label
-        return _with_read_status(_belief_label(out, consulted=belief_consulted))
+        return _with_read_status(_belief_label(
+            out, consulted=belief_consulted, answered=frozenset(read or ())))
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
 
@@ -37171,10 +37174,11 @@ class TortoiseSDK:
         # `relevance ** a × confidence ** b` over the EP belief mean, so the
         # order the caller actually receives DID consult the layer. The label is
         # owned by the LAST re-order, so it is re-stated here from the ranker's
-        # own read outcome (`belief_consulted_for`: None ⇒ no claim).
+        # own read outcome (`belief_read_for`: None ⇒ no claim).
         from .ranking import annotate_belief_order as _belief_label
-        from .ranking import belief_consulted_for as _belief_asked
-        ranked = _belief_label(ranked, consulted=_belief_asked(ranker, ranked))
+        from .ranking import belief_read_for as _belief_read
+        _consulted, _answered = _belief_read(ranker, ranked)
+        ranked = _belief_label(ranked, consulted=_consulted, answered=_answered)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
         # #2598: a DRAFT whose belief EP has not measured carries

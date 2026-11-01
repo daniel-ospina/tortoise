@@ -87,8 +87,8 @@ BELIEF_ORDER_CONSULTED = "consulted"
 BELIEF_ORDER_NOT_CONSULTED = "not_consulted"
 
 
-def annotate_belief_order(rows: list[dict], *,
-                          consulted: bool | None) -> list[dict]:
+def annotate_belief_order(rows: list[dict], *, consulted: bool | None,
+                          answered: frozenset | None = None) -> list[dict]:
     """Label each hit's ``ep`` block with whether the ORDER read the belief.
 
     Additive and in-place (the read path builds these dicts per call): only a
@@ -102,29 +102,42 @@ def annotate_belief_order(rows: list[dict], *,
     value = BELIEF_ORDER_CONSULTED if consulted else BELIEF_ORDER_NOT_CONSULTED
     for row in rows:
         ep = row.get("ep")
-        if isinstance(ep, dict):
-            ep["informed_order"] = value
+        if not isinstance(ep, dict):
+            continue
+        if consulted and answered is not None and row.get("id") not in answered:
+            # The read answered for other rows but not this one: its own score
+            # came from a neutral default, so it makes NO claim (the key stays
+            # absent) rather than borrowing the page's verdict.
+            continue
+        ep["informed_order"] = value
     return rows
 
 
-def belief_consulted_for(ranker, rows: list[dict]) -> bool | None:
+def belief_read_for(ranker, rows: list[dict]) -> tuple[bool | None, frozenset]:
     """Did `ranker`'s order for `rows` actually READ the belief layer?
 
-    Three states, and the distinction is the point (#10137 review):
+    Answers ``(verdict, answered_ids)``, and the distinctions are the point
+    (#10137 review rounds 3-4):
+
       * ``None``  — the ranker is not one whose read we can observe (a
         duck-typed or caller-supplied object): make NO claim.
       * ``False`` — the read failed or was never attempted (``signals_read``
         is set only by a rerank whose fetch ANSWERED), so every score came
-        from neutral fallbacks.
-      * ``True``  — the read answered for at least one of THESE rows. A fetch
-        that answered ids absent from this page certifies nothing about them.
+        from a neutral fallback.
+      * ``True``  — the read answered, and ``answered_ids`` names WHICH rows it
+        answered for. The verdict is NOT spread over the whole page: a row
+        whose own id the read did not answer was scored from a default, and
+        ``annotate_belief_order`` leaves that row without a claim. A page-level
+        "some row was answered" bit would stamp ``consulted`` on a belief-free
+        row — the very ambiguity this field removes.
     """
     if not isinstance(ranker, (GraphRanker, StateRanker)):
-        return None
+        return None, frozenset()
     if not getattr(ranker, "signals_read", False):
-        return False
-    answered = getattr(ranker, "signals_answered", frozenset())
-    return any(r.get("id") in answered for r in rows)
+        return False, frozenset()
+    answered = frozenset(getattr(ranker, "signals_answered", frozenset()))
+    page = frozenset(r.get("id") for r in rows if r.get("id") in answered)
+    return (True, page) if page else (False, frozenset())
 
 
 # Default signal weights — must sum to 1.0.
@@ -912,6 +925,10 @@ class StateRanker:
             raise ValueError(
                 f"centrality_weight must be 0-1, got {centrality_weight}")
         self.projection = projection
+        # #10137: same observation surface as GraphRanker, so an un-reranked
+        # instance ABSTAINS (see `belief_read_for`) instead of claiming.
+        self.signals_read = False
+        self.signals_answered: frozenset = frozenset()
         self.relevance_exp = relevance_exp
         self.confidence_exp = confidence_exp
         self.centrality_weight = centrality_weight
@@ -998,6 +1015,13 @@ class StateRanker:
             self.signals_answered = frozenset(signals)
         else:
             signals = self._embedded_signals(results)
+            # #10137 review round 4: the embedded `state_confidence` IS the
+            # belief the score multiplies in, so a row that carried one was
+            # READ — answering for the ids that actually supplied a number
+            # keeps a pool row (which carries none) at `not_consulted`.
+            self.signals_read = True
+            self.signals_answered = frozenset(
+                pid for pid, sig in signals.items() if "confidence" in sig)
         # W4-b contested-relevance resolution (ONE batch read, S8): only
         # POINT results can be contested (objects aggregate means); the
         # embedded (projection=None) unit path has no graph to resolve

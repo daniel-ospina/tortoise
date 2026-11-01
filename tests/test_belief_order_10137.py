@@ -259,3 +259,47 @@ def test_an_unobservable_ranker_makes_no_claim(sdk):
     assert rows
     for r in rows:
         assert "informed_order" not in r["ep"]
+
+
+def test_a_partially_answered_read_does_not_certify_the_whole_page(sdk, monkeypatch):
+    """Review round 4, P1 — the verdict is per ROW, never per page.
+
+    A read that answers one id and not another leaves the unanswered row scored
+    from a neutral default. Stamping that row ``consulted`` would tell a
+    belief-free row its belief informed the order — so it must carry NO claim
+    (the key is absent), exactly like the unobservable-ranker case.
+    """
+    from tortoise.ranking import GraphRanker
+
+    _seed(sdk)
+    real = GraphRanker._fetch_point_signals
+
+    def _only_first(self, ids):
+        got = real(self, ids)
+        first = sorted(got)[0]
+        return {first: got[first]}
+
+    monkeypatch.setattr(GraphRanker, "_fetch_point_signals", _only_first)
+    rows = sdk.tortoise_fts_query(_QUERY, order_by="graph", limit=10)
+    labels = {r["id"]: r["ep"].get("informed_order") for r in rows}
+    assert "consulted" in labels.values(), labels
+    assert None in labels.values(), (
+        "a row the read did not answer must make no claim, not borrow the "
+        f"page's verdict: {labels}")
+    for r in rows:
+        if labels[r["id"]] == "consulted":
+            assert r["graph_ranking"]["graph_boost"] != 0.0
+
+
+def test_a_projectionless_state_ranker_still_labels_its_embedded_read(sdk):
+    """The embedded `state_confidence` IS the belief the score multiplies in."""
+    from tortoise.ranking import StateRanker
+
+    ranker = StateRanker(None)
+    rows = [{"id": "a", "similarity": 0.9, "state_confidence": 0.95},
+            {"id": "b", "similarity": 0.9, "state_confidence": 0.05}]
+    ranked = ranker.rerank(rows)
+    assert [r["id"] for r in ranked] == ["a", "b"]
+    from tortoise.ranking import belief_read_for
+    consulted, answered = belief_read_for(ranker, ranked)
+    assert consulted is True and answered == frozenset({"a", "b"})
