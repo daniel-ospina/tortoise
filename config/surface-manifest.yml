@@ -212,13 +212,14 @@ response_fields:
   unchanged_when_off: n/a — not gated by a flag; it is a receipt field, not a response-shape change (#4911)
 - response: tortoise_session_capture
   field: stats.step_witness
-  emitted_when: always on the v2 capture path — the eight per-stage witness blocks (#9116), copied from the extractor's
+  emitted_when: "always on the v2 capture path — the eight per-stage witness blocks (#9116), copied from the extractor's
     own return (reader/story/map/vet/classify_later/search/merge/commit), each carrying that stage's counts. Recorded
-    because this receipt is caller-facing on all three served surfaces, and the witness cannot drift between
-    them — all three read the SAME `meta['stats']` that `_extract_session_v2`'s meta fold produces. The MCP tool and
-    the hosted `POST /v1/sessions` body share `_capture_session_impl`'s receipt literal, and
-    `TortoiseSDK.capture_session` assembles its own `resp` (sdk.py) from that same `meta` — so this key is identical
-    on all three, while a field added to `_capture_session_impl`'s literal alone would NOT reach the SDK receipt
+    because this receipt is caller-facing on both served surfaces, and the witness cannot drift between
+    them — they all read the SAME `meta['stats']` that `_extract_session_v2`'s meta fold produces. The MCP tool and
+    the hosted `POST /v1/sessions` body share `_capture_session_impl`'s receipt literal, so this key is identical on
+    both. `TortoiseSDK.capture_session` was the third binding — it assembled its own `resp` from that same `meta` —
+    and #4282 DELETED it on 2026-10-27 (body recoverable at the tag `archive/4282-surplus-sdk-methods`), so there is
+    no SDK receipt left for a field added to `_capture_session_impl`'s literal alone to miss"
   unchanged_when_off: yes — a flag-gated stage still emits its block with `enabled` false, so the shape never moves
     with a flag; the seam forwards COUNTS only (the VET gate's per-candidate `decisions` text stays on the extractor's
     return), and the replay/M2 lanes never reach this fold, so their receipt is unchanged
