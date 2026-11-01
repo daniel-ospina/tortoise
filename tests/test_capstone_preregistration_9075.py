@@ -426,6 +426,52 @@ def test_a_correctly_ordered_same_second_pair_needs_no_disclosure(tmp_path, monk
     assert added == []  # ordered by ancestry, so nothing was disclosed
 
 
+def test_a_future_dated_log_that_is_a_true_ancestor_still_hard_fails(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-5 P1): `%ct` is attacker-controlled, so ancestry decides.
+
+    The log's add-commit is a TRUE ANCESTOR of the registration's, but its committer date was set
+    LATER. Gating the reverse-ancestry test behind `log_epoch <= prereg_epoch` let that tree pass
+    green with no disclosure and no failure — the exact route this guard exists to close.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_500)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
+    failures = check.check_ordering(prereg, [log])
+    assert any("not strictly after" in f for f in failures), failures
+
+
+def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-5 P2): the print path re-read UNVALIDATED JSON and raised.
+
+    `atomic_add_ordering: {log: "yes"}` reached `run()`'s detail comprehension and escaped as
+    `AttributeError` — no failure text, nothing from `--json`, and the module's own exit-2 contract
+    bypassed on precisely the input the validator promises to refuse.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    for entry in ("yes", {"reason": "r", "branch_commits": 5, "squash_merge": "cfa3de857 x"}):
+        added: list[str] = []
+        detail: dict = {}
+        failures = check.check_ordering(prereg, [log], None, None, added, {log.name: entry}, detail)
+        assert failures, entry
+        assert any("not a usable disclosure" in f for f in failures), failures
+        assert added == [] and detail == {}, (added, detail)
+
+
+def test_a_report_never_claims_a_declaration_the_record_does_not_carry(tmp_path, monkeypatch):
+    """An atomic + provably-unscored log with NO disclosure must not be reported as DECLARED."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    added: list[str] = []
+    exempted: list[str] = []
+    detail: dict = {}
+    assert check.check_ordering(prereg, [log], None, exempted, added, None, detail) == []
+    assert added == [] and detail == {}      # nothing was declared
+    assert exempted == [log.name]            # and the waiver is still visible
+
+
 def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
     """The ATOMIC shape: the registration and the log land in the SAME commit.
 
