@@ -696,6 +696,11 @@ def _touch_epochs(path: Path) -> list[int]:
 BASE_REF_ENV = "PREREG_ORDERING_BASE_REF"
 BASE_REF_CANDIDATES = ("origin/main", "main")
 
+#: What the report says when NO base ref could be resolved. A named constant, not a literal: it is
+#: a value consumers assert on, and a shallow checkout legitimately reports it (review cycle 3,
+#: finding 2).
+UNRESOLVED_BASE = "(unresolved)"
+
 NO_BASE_REF = (
     "no base ref: this checkout has a remote but "
     f"{'/'.join(BASE_REF_CANDIDATES)} does not resolve and no --base-ref / ${BASE_REF_ENV} was "
@@ -729,6 +734,15 @@ def no_base_ref_message(explicit: str | None) -> str:
         return NO_BASE_REF_EXPLICIT.format(explicit=explicit, env=BASE_REF_ENV) + _NO_BASE_REF_TAIL
     return NO_BASE_REF + _NO_BASE_REF_TAIL
 
+
+SQUASH_COLLAPSE_REMEDY = (
+    " Both artefacts were added on {base} by the SAME commit ({sha}), i.e. they landed there in ONE "
+    "squash merge — so this history cannot be edited into an ordering, and re-running will not "
+    "change the answer. The remedy is a WITHDRAWAL: take the log out of the checked directory in "
+    "its own PR (move it under `withdrawn/` with a one-line note of why — do not delete it, and do "
+    "not edit its contents), let that land on {base}, and re-add the log in a PR of its own, after "
+    "the registration is published there."
+)
 SAME_PR_REFUSAL = (
     "{prereg} is not on the merge base ({base}): this change adds {n} evidence log(s) against a "
     "pre-registration that is NOT published there. TWO causes, and the remedy differs — check "
@@ -811,6 +825,29 @@ def _added_epochs_on(ref: str, path: Path) -> list[int]:
     if code != 0:
         return []
     return sorted(int(x) for x in out.split() if x.strip().isdigit())
+
+
+def _add_commits_on(ref: str, path: Path) -> dict[str, int]:
+    """``{commit sha: epoch}`` for the commits that ADDED ``path`` on ``ref``.
+
+    ``_added_epochs_on`` answers *when*; this answers *by which commit*, which is the only way to
+    tell the two causes of an equal-epoch refusal apart: a log that legitimately predates the
+    registration (nothing to do but order it properly next time) versus a log and a registration
+    that arrived in ONE commit — the squash-merge collapse, whose only remedy is a withdrawal.
+    """
+    try:
+        rel = path.resolve().relative_to(REPO_ROOT)
+    except ValueError:
+        return {}
+    code, out = _git_stdout(["log", "--diff-filter=A", "--format=%H %ct", ref, "--", str(rel)])
+    if code != 0:
+        return {}
+    found: dict[str, int] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            found[parts[0]] = int(parts[1])
+    return found
 
 
 def _mapping(container: dict, key: str, where: str) -> dict:
@@ -1124,6 +1161,10 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         )
         return failures
     prereg_epoch = min(prereg_epochs)
+    # The commit(s) that published the registration on the base — used only to diagnose, never to
+    # decide: a shared add-commit means the two artefacts landed in ONE squash merge, and the
+    # refusal's remedy is then a withdrawal rather than a re-ordering.
+    prereg_add_commits = set(_add_commits_on(base, prereg))
     for log in logs:
         base_log_epochs = _added_epochs_on(base, log)
         if base_log_epochs:
@@ -1174,13 +1215,24 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 if exempted is not None:
                     exempted.append(log.name)
                 continue
-            failures.append(
+            failure = (
                 f"{log.name}: added at {log_epoch} which is not strictly after the "
                 f"pre-registration's appearance on {base} at {prereg_epoch} — the log may have "
                 "been scored against thresholds chosen after it was read, and it does not prove "
                 "it measured nothing "
                 f"({why})"
             )
+            # ⛔ The remedy text must match CAUSE (review cycle 3, finding 1c). "Not strictly after"
+            # alone sends an operator looking for an ordering to fix, and in the squash-collapsed
+            # shape there is none to fix: the two artefacts share their add-commit on the base, so
+            # the only path to green is to withdraw the log and re-add it after the registration is
+            # published. That is precisely what redded `main` at cfa3de857 (#10468).
+            shared = prereg_add_commits & set(_add_commits_on(base, log))
+            if shared:
+                failure += SQUASH_COLLAPSE_REMEDY.format(
+                    base=base, sha=sorted(shared)[0][:12]
+                )
+            failures.append(failure)
     return failures
 
 
@@ -1585,7 +1637,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             # The base the ordering was measured against is REPORTED, not implied: a verdict whose
             # subject ref is invisible reads the same whether it measured `origin/main` or this
             # branch's own HEAD, and that difference is the whole point of #10463.
-            report["ordering_base"] = resolve_base_ref(base_ref) or "(unresolved)"
+            report["ordering_base"] = resolve_base_ref(base_ref) or UNRESOLVED_BASE
             failures += check_ordering(prereg, logs, pins, content_exempt, base_ref=base_ref)
             report["ordering_exempt"] = sorted(content_exempt)
             ordering = "verified"

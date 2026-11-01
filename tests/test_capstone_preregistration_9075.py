@@ -93,7 +93,15 @@ def test_the_real_registration_is_complete_and_orders_against_its_logs():
     assert report["ok"], report["failures"]
     # The base the verdict was measured against is REPORTED (#10463 review cycle 2, finding 5): a
     # green line must not read the same whether it measured the published base or this branch's HEAD.
-    assert report["ordering_base"] in {"origin/main", "main", "HEAD"}, report["ordering_base"]
+    # ⛔ …but it must not become an assertion this repo cannot satisfy everywhere (review cycle 3,
+    # finding 2). In a depth-1 checkout there is no `origin/main` and no local `main`, so the honest
+    # report is the unresolved marker — asserting a RESOLVED base there would red a correctly ordered
+    # tree from inside the test that exists to prevent exactly that. A base is required only where
+    # one is measurable.
+    named = {"origin/main", "main", "HEAD"}
+    if check.history_unavailable():
+        named.add(check.UNRESOLVED_BASE)
+    assert report["ordering_base"] in named, report["ordering_base"]
     ids = [r["id"] for r in report["rows"]]
     assert "E1" in ids and "E4" in ids and "E5" in ids
     # E2 is allowed to be split; both halves must exist and be complete.
@@ -2807,3 +2815,135 @@ def test_a_skipped_git_half_says_the_base_was_never_measured(capsys):
     assert "ordering measured against: (not measured)" in out, out
     report = check.run(PREREG_DIR, use_git=False, use_corpus=False)
     assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+
+# ── #10463 review cycle 3: the arms the tests must actually discriminate ───────────────────────
+#
+# WHAT CHANGED AND WHY THESE EXIST. Cycle 3 found (1) an acceptance assertion that cannot hold in a
+# depth-1 checkout, (3) two added tests that a full revert of the new predicate still passes, and
+# (1c) an equal-epoch refusal that names no remedy. Each test below fails on the pre-fix code.
+# (Cycle 3's finding 4 — the base-ref refusal misstating its own cause — is pinned by
+# `test_the_base_ref_refusal_names_the_cause_that_actually_fired` above; cycle 4 landed it with
+# both branches asserted, so it is deliberately not duplicated here.)
+
+
+def _git_out(repo: Path, *args: str) -> str:
+    """stdout of a read-only git call, stripped."""
+    out = subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def _write_prereg_uncommitted(repo: Path, text: str = "x\n") -> Path:
+    target = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    return target
+
+
+def _stage_log(repo: Path, name: str, body: str = "x\n") -> Path:
+    target = repo / "docs" / "evidence" / "7949-capstone" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body)
+    return target
+
+
+def _commit_together(repo: Path, epoch: int, names: tuple[str, ...] = ("capstone.log",)) -> None:
+    """Add the registration AND its logs in ONE commit — the shape a squash merge produces."""
+    _write_prereg_uncommitted(repo)
+    for name in names:
+        _stage_log(repo, name)
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "the registration and its log in one commit", epoch=epoch)
+
+
+def _squashed_base(repo: Path, epoch: int, names: tuple[str, ...] = ("capstone.log",)) -> str:
+    """A ref adding the registration AND its log in ONE commit, NOT an ancestor of the contribution.
+
+    That is what a squash-merged `main` looks like to a branch that has not been rebased, and it is
+    the only shape in which the base reading and the PR-internal reading disagree on a REFUSAL.
+    """
+    branch = _git_out(repo, "symbolic-ref", "--short", "HEAD")
+    _git(repo, "checkout", "-q", "--orphan", "squashed-base")
+    _git(repo, "rm", "-rq", "--cached", "docs")
+    _commit_together(repo, epoch=epoch, names=names)
+    sha = _git_out(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-qf", branch)
+    return sha
+
+
+def test_a_depth_one_checkout_without_a_base_reports_the_unresolved_base(tmp_path, monkeypatch):
+    """REGRESSION (#10463 review cycle 3, finding 2): the reported base must tolerate depth 1.
+
+    The acceptance test asserts `report["ordering_base"]` is one of the resolved candidates. In a
+    depth-1 checkout of a single branch there is no `origin/main` and no local `main`, so the honest
+    report is `(unresolved)` — and an assertion that insists on a resolved ref reds a correctly
+    ordered tree from inside the test written to prevent exactly that. The value must stay a
+    reported fact; what it must NOT do is turn the unprovable third outcome into a failure.
+    """
+    origin = _repo(tmp_path, monkeypatch)
+    bundle = origin / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True, exist_ok=True)
+    for item in PREREG_DIR.iterdir():
+        if item.is_file():
+            (bundle / item.name).write_bytes(item.read_bytes())
+    _git(origin, "add", "docs")
+    _git(origin, "commit", "-q", "-m", "the real bundle", epoch=1_700_000_100)
+    _git(origin, "branch", "-m", "contrib")
+
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "-q", "--depth", "1", "--single-branch", "--branch", "contrib",
+         f"file://{origin.resolve()}", str(shallow))
+    monkeypatch.setattr(check, "REPO_ROOT", shallow.resolve())
+    assert check.history_unavailable() is True, "the fixture must really be a depth-1 checkout"
+
+    report = check.run(shallow / "docs" / "evidence" / "7949-capstone", use_git=True,
+                       use_corpus=False)
+    assert report["ok"], report["failures"]
+    assert report["ordering_base"] == check.UNRESOLVED_BASE, report["ordering_base"]
+    # …and the third outcome is what it is: UNPROVABLE, never "violated".
+    assert report["ordering"] == check.HISTORY_UNAVAILABLE, report["ordering"]
+
+
+def test_the_base_ref_is_what_decides_the_pass_not_the_contribution(tmp_path, monkeypatch):
+    """The PASS arm, made discriminating by its SUBJECT (review cycle 3, finding 3).
+
+    A pass arm alone cannot tell the two predicates apart: adds on the base are a subset of the adds
+    on the contribution, so `min(base) >= min(HEAD)` and the pre-fix PR-internal predicate accepted
+    every tree the base predicate accepts. What does distinguish them is which ref the verdict was
+    measured against — so the same tree is asked twice: against the published base it passes, and
+    against a base that predates the registration it REFUSES. The pre-fix code had no base at all,
+    so both answers were identical, which is the defect.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    stale = _git_out(repo, "rev-parse", "HEAD")   # the base BEFORE the registration is published
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    _publish_base(repo)                           # the registration's own PR merged
+    log = _write_and_commit(repo, "s3-ablation.log", epoch=1_700_000_200)
+
+    assert check.check_ordering(prereg, [log]) == []
+    pinned = check.check_ordering(prereg, [log], base_ref=stale)
+    assert len(pinned) == 1, pinned
+    assert "not on the merge base" in pinned[0], pinned[0]
+    assert stale in pinned[0], f"the refusal must name the base it measured: {pinned[0]}"
+
+
+def test_a_squash_collapsed_pair_names_the_withdrawal_remedy(tmp_path, monkeypatch):
+    """The equal-epoch refusal must name the remedy that can actually clear it (cycle 3, 1c).
+
+    When both artefacts share their add-commit on the base, no re-ordering can help — this is what
+    redded `main` at `cfa3de857` (#10468), and the only path back to green is a WITHDRAWAL of the
+    log (#10544). A message that only says "not strictly after" sends the operator hunting for an
+    ordering to fix that does not exist.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    _commit_together(repo, epoch=1_700_000_100)
+    _publish_base(repo)                     # both landed on the base in ONE squash commit
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    log = repo / "docs" / "evidence" / "7949-capstone" / "capstone.log"
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, failures
+    assert "not strictly after" in failures[0], failures[0]
+    assert "WITHDRAWAL" in failures[0], failures[0]
+    assert "SAME commit" in failures[0], failures[0]
+    # It names the offending commit, so the operator can look at what collapsed.
+    assert _git_out(repo, "rev-parse", "--short=12", "HEAD") in failures[0], failures[0]
