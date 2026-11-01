@@ -1266,7 +1266,14 @@ def test_the_record_can_clear_the_carriers_it_can_set():
 
 
 def test_a_status_only_restatus_is_folded_from_the_records_own_stream():
-    """#9974 CLOSED: a `restatus` value survives a record-sourced rebuild.
+    """THIS WRITER'S HALF OF #9974: a `restatus` value survives a record rebuild.
+
+    ⛔ NOT "#9974 closed". The issue's criterion 2 — a `restatus` exit should be
+    a NAMED refusal rather than `SET node_key = node_key` — is still open (its
+    own verification comment, 2026-10-31), and this PR does not touch it. Say
+    what this leg pins, not what the issue has not yet reached: a docstring that
+    claims a closure the tracker contradicts is the defect class this PR's own
+    review rounds keep re-finding.
 
     `status` is a projection-owned cache (§2.6), so the layer tables refuse it
     (`OpDispatch.never_store`, `chk_object_props_no_derived`) — and the LAYER
