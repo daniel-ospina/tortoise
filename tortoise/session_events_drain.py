@@ -66,6 +66,7 @@ import hashlib
 import json
 import os
 import time
+import zlib
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -231,7 +232,16 @@ def _read_lines(path: Path) -> list[str] | None:
         opener = gzip.open if path.name.endswith(".gz") else open
         with opener(path, "rt", encoding="utf-8", errors="replace") as fh:  # type: ignore[operator]
             return [line for line in fh.read().split("\n") if line.strip()]
-    except (OSError, EOFError, gzip.BadGzipFile):
+    except (OSError, EOFError, gzip.BadGzipFile, zlib.error):
+        # `zlib.error` is the DEFLATE-corrupt case (a flipped byte inside a valid
+        # gzip header): neither an OSError nor a `BadGzipFile`, so it escaped
+        # `drain_session_events` entirely — the pass aborted before the cursor
+        # write, and a corrupt EARLIEST day meant no later day was ever read
+        # (every record stranded, no `unreadable` report); a corrupt LATEST day
+        # meant the healthy days were re-POSTed on every pass. `--dry-run` had
+        # the same hole. A read failure MUST be a reported day, not a crash.
+        return None
+    except Exception:  # a decompressor bug is a DAY, never a crashed pass
         return None
 
 

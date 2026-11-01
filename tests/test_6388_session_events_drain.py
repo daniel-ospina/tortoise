@@ -477,3 +477,33 @@ def test_the_probe_slot_rotates_so_a_recoverable_record_is_not_starved(
 
     assert "a-recover" in post.session_ids
     assert run["queued"] == 1  # only the permanently-refused record remains
+
+
+def test_a_deflate_corrupt_archive_day_is_reported_and_does_not_abort_the_pass(
+        tmp_path: Path) -> None:
+    """P1 from the final re-review: `zlib.error` escaped the whole drain.
+
+    A flipped byte INSIDE a valid gzip stream raises `zlib.error`, which is
+    neither an OSError nor a `BadGzipFile`. It aborted the pass BEFORE the cursor
+    write, so a corrupt earliest day stranded every later day with no report.
+    """
+    import gzip
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    archive = root / "archive"
+    archive.mkdir(parents=True)
+    payload = (json.dumps(_record("sealed-1")) + "\n").encode()
+    sealed = archive / "2026-09-30.jsonl.gz"
+    sealed.write_bytes(gzip.compress(payload))
+    blob = bytearray(sealed.read_bytes())
+    blob[12] ^= 0xFF  # corrupt the DEFLATE stream, not the header
+    sealed.write_bytes(bytes(blob))
+    _write_day(root, "2026-10-01.jsonl", [_record("s-later")])
+    post = Recorder()
+
+    run = _drain(root, store, post)
+
+    assert [str(sealed)] == run["unreadable"]
+    assert run["filed"] == 1                      # the later day still drains
+    assert post.session_ids == ["s-later"]
+    assert (store / "session-events-cursor.json").exists()
