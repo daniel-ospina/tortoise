@@ -744,6 +744,40 @@ RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
     "(#9231 review P2)",
     ["reason"],
 )
+# #10515: a LEGITIMATE revision was refused by `update_point`'s ABSENT arm.
+#
+# The arm itself is #10119's and is correct: an id absent from the live graph at
+# THIS read gets no journal row, no epoch delta and no `_dirty_roots` entry, so a
+# TYPO cannot strand the instance out of its dream cycle. What it cannot do is
+# tell the typo from the OTHER state that produces the same read — an id the
+# JOURNAL knows but the LIVE graph does not hold (a rebuild in flight) — and both
+# used to leave exactly nothing behind: no log line, no counter. The caller got
+# the documented `{}` and cannot tell which happened; pre-#10470 the revision was
+# at least DURABLE (a `PointRevised` a replay would pick up), post-#10470 it lands
+# nowhere.
+#
+# `reason` vocabulary, and it names WHY the read could not distinguish the two:
+#
+# * ``journal_known`` — the journal carries the id, the live graph does not. The
+#   revision is real and was dropped; a replay that has not caught up is the
+#   window (#7405's rebuild).
+# * ``graph_unavailable`` — the graph's key could not be CONFIRMED
+#   (`_graph_presence` answered False/None: a rebuild replaced it, or the probe
+#   could not run). The write cannot be judged absent-vs-present, so it is
+#   reported rather than assumed absent.
+#
+# The typo path is NOT counted and NOT logged: absent from the graph AND from the
+# journal is the one shape #10119 handled, and turning it into an alarm is
+# indicator 2 of #10515.
+#
+# Single writer: `TortoiseSDK._report_absent_revision` (the #501/#3677 house
+# shape).
+SILENT_REVISION_LOSS_COUNT = Counter(
+    "tortoise_silent_revision_loss_total",
+    "update_point calls refused by the ABSENT arm for an id the journal knows, "
+    "or while the graph key could not be confirmed (#10515)",
+    ["reason"],
+)
 # #9307 review F1: an armed write whose journal append SUCCEEDED but could not
 # PROVE the record's position — `EventLog.append` returned ``None``. Its own
 # counter, because it is neither of the two above:
@@ -1421,6 +1455,23 @@ def record_non_journal_skip(reason: str = "no_durable_journal") -> None:
 def record_non_journal_skip_counts() -> dict[str, int]:
     """In-process snapshot of ``RECORD_NON_JOURNAL_SKIP_COUNT``, by reason."""
     return _collect_by_label(RECORD_NON_JOURNAL_SKIP_COUNT, "reason")
+
+
+def record_silent_revision_loss(reason: str) -> None:
+    """Count one LEGITIMATE revision refused by ``update_point``'s ABSENT arm.
+
+    Called from ``TortoiseSDK._report_absent_revision`` when the target is
+    absent from the live graph but the read could not conclude "no such point":
+    the journal carries the id (``journal_known``), or the graph key could not be
+    confirmed (``graph_unavailable``). See ``SILENT_REVISION_LOSS_COUNT`` for why
+    this is its own counter rather than a log line (#10515).
+    """
+    SILENT_REVISION_LOSS_COUNT.labels(reason=reason).inc()
+
+
+def silent_revision_loss_counts() -> dict[str, int]:
+    """In-process snapshot of ``SILENT_REVISION_LOSS_COUNT``, by reason."""
+    return _collect_by_label(SILENT_REVISION_LOSS_COUNT, "reason")
 
 
 def record_position_unproven() -> None:
@@ -4677,6 +4728,11 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # keeps meaning "no record row was lost" on a healthy armed deployment —
         # every `capture_session` emits through the M2 lane.
         "record_non_journal_skips": record_non_journal_skip_counts(),
+        # #10515: `update_point`'s ABSENT arm refused a write that may have been
+        # a LEGITIMATE revision (the journal knows the id, or the graph key could
+        # not be confirmed). Zero on a healthy lane means "no revision was lost in
+        # silence" — the typo path does not touch it, by design.
+        "silent_revision_losses": silent_revision_loss_counts(),
         # #9307 review F1: a DURABLE journal whose append could not prove the
         # record's position writes no layer-1 row (a replay heals it). Its own
         # key, so neither the failure counter nor the non-journal skip counter

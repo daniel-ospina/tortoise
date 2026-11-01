@@ -4103,6 +4103,27 @@ _GRAPH_EVENT_TYPES = frozenset({
 })
 
 
+def _rec_point_id(rec: dict):
+    """The POINT id a journal record carries, read from EITHER of its shapes.
+
+    ``PointAdded`` carries the whole snapshot under ``point`` (#548's replay
+    payload); ``PointRevised`` carries ``id`` at the top level (#548's id+extra
+    shape). A reader that knows only one of the two is wrong in a way that is
+    invisible: #10515's discriminator looks for an id the journal KNOWS, and a
+    created-then-unprojected point lives in the ``point`` shape, so reading
+    ``rec['id']`` alone would answer "a typo" for exactly the rebuild-window
+    revision the discriminator exists to report.
+    """
+    if not isinstance(rec, dict):
+        return None
+    pid = rec.get('id')
+    if pid is None:
+        point = rec.get('point')
+        if isinstance(point, dict):
+            pid = point.get('id')
+    return pid
+
+
 def _change_feed_enabled() -> bool:
     """Is the #2353 semantic change feed (and its PointRevised store half) on?
 
@@ -9538,6 +9559,102 @@ class TortoiseSDK:
         graph, while a false negative is only a loud miss.
         """
         return self._graph_presence(proj) is True
+
+    def _journal_knows_point(self, point_id: str) -> bool | None:
+        """Does the JOURNAL carry *point_id*? ``None`` when there is no journal.
+
+        The second half of #10515's discriminator. ``update_point``'s ABSENT arm
+        reads the LIVE graph; an id the journal knows but the projection does not
+        hold is a rebuild in flight (#7405), not a typo, and the two are the same
+        read at that door. The journal is read through the same fold-free scan the
+        recovery path uses (``EventLog.read_all``, keyed on record ``id``), not a
+        second index — no new oracle, one source of truth.
+
+        COST, stated because absent ids are the common typo path: a full scan per
+        call would make a typo'd write pay for the whole journal. The scan is
+        therefore MEMOISED on ``EventLog.position()`` (the record count — cheap,
+        and it moves exactly when the journal gains a record), so a stream of
+        absent writes re-folds only when the journal actually changed. A journal
+        whose position cannot be read is not memoised (a stale answer here would
+        report a loss that did not happen, or hide one that did).
+        """
+        log = self._get_event_log()
+        if log is None:
+            return None
+        try:
+            stamp = log.position()
+        except Exception:  # noqa: BLE001, RUF100 — unmemoised, not unanswerable
+            stamp = None
+        cache = getattr(self, '_journal_known_ids_cache', None)
+        if cache is not None and stamp is not None and cache[0] == stamp \
+                and cache[2] is log:
+            return point_id in cache[1]
+        try:
+            records = log.read_all()
+        except Exception:  # noqa: BLE001, RUF100 — reported below, never fatal
+            _logger.warning(
+                "journal could not be read to check whether %r is a known "
+                "point; an absent live read is reported as UNJUDGED rather "
+                "than asserted to be a typo (#10515)",
+                point_id, exc_info=True)
+            return None
+        known = {
+            str(_rec_point_id(rec)) for rec in records
+            if isinstance(rec, dict) and _rec_point_id(rec) is not None
+        }
+        if stamp is not None:
+            self._journal_known_ids_cache = (stamp, known, log)
+        return point_id in known
+
+    def _report_absent_revision(self, point_id: str) -> None:
+        """Make a LEGITIMATE revision refused by the ABSENT arm VISIBLE (#10515).
+
+        The ABSENT early return in ``update_point`` is #10119's and stays exactly
+        as it is: it keeps a TYPO from appending a ``PointRevised`` row, advancing
+        ``:EpMeta.ep_version`` and stranding a ``_dirty_roots`` entry (#2422 /
+        #7505 / #9269). Its cost — stated in that door's own comment — is that a
+        target absent at this read gets no record and no retry, so a revision
+        that is legitimate DURING a rebuild (#7405) landed nowhere at all and said
+        nothing.
+
+        ⛔ THIS REPORTS THE LOSS; IT DOES NOT PREVENT IT. Nothing here retries the
+        write, restores a journal-first append, or changes the documented ``{}``
+        reply. The issue's target is that the loss stops being SILENT (indicator
+        1), and that a typo does not turn into an alarm (indicator 2):
+
+        * ``graph_unavailable`` — the graph's key could not be CONFIRMED, so the
+          absence cannot be judged at all (a rebuild replaced the graph, or the
+          probe could not run);
+        * ``journal_known`` — the journal carries the id and the LIVE graph does
+          not, i.e. a real point whose projection is behind;
+        * neither — absent from BOTH, the typo shape, and it stays silent.
+
+        Rides the existing ``monitoring`` seam (``metrics()``
+        ``["silent_revision_losses"]``) exactly as ``record_write_failures`` does,
+        because a warning alone is a line nothing watches.
+        """
+        # `_proj` DIRECTLY, not `_get_proj()`: this runs on the absent path, where
+        # the guard above already read the graph, and `_get_proj` would CONNECT
+        # (pool + embedding warm-up) to answer a question about a call that is
+        # being refused.
+        proj = getattr(self, '_proj', None)
+        if self._graph_presence(proj) is not True:
+            reason = 'graph_unavailable'
+        elif self._journal_knows_point(point_id) is True:
+            reason = 'journal_known'
+        else:
+            return
+        monitoring.record_silent_revision_loss(reason)
+        _logger.warning(
+            "update_point(%r): the LIVE graph does not hold this point, but %s "
+            "— the revision was NOT recorded and will not be replayed. If this "
+            "is a rebuild in flight (#7405) the write is lost; if the id is a "
+            "typo, ignore this line (#10515)",
+            point_id,
+            "the graph key could not be confirmed"
+            if reason == 'graph_unavailable'
+            else "the journal still carries the id",
+        )
 
     def _graph_write_with_retry(self, fn, *, what: str, witness=None):
         """Issue a DIRECT graph write through the bounded-retry primitive (#7405).
@@ -16585,6 +16702,14 @@ class TortoiseSDK:
             # ABSENT. Zero side effects, and the same `{}` the documented
             # contract already returns — no journal row, no epoch advance,
             # no dirty root, so a typo cannot strand the instance.
+            # #10515: the trade above keeps the TYPO quiet, but it also made a
+            # LEGITIMATE revision refused during a rebuild leave no trace at all
+            # (no row, no epoch delta, no dirty root, no line, no counter). The
+            # reply stays `{}`; the loss is now REPORTED — a warning plus
+            # `metrics()["silent_revision_losses"]` — when the graph key cannot be
+            # confirmed or the journal still carries the id, and stays silent for
+            # an id absent from both. It reports the loss; it does not prevent it.
+            self._report_absent_revision(id)
             return {}
         # ⛔ ORDERING (#10495 review P3). This block runs AFTER the ABSENT
         # early return above, not before it. `encode_for_row` is a real
