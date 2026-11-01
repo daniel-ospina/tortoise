@@ -32,8 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_oauth_consent_page_step4 import (  # noqa: F401 — helper reuse
-    APP_ORIGIN,
+from tests.test_oauth_consent_page_step4 import (
     REDIRECT,
     _authorize_params,
     _pkce,

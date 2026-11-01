@@ -4,7 +4,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root: docs/evidence/8607-w1b/<this>
 from tortoise.cache_projection import KEY_PROPERTY
 from tortoise.legacy_ids import LEGACY, census, is_canonical, shape
 

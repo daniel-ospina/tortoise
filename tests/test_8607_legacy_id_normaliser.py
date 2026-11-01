@@ -36,10 +36,12 @@ membership claim: the flag is the session-wide "no URI" opt-in (`epic #1647`), w
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import os
 import sys
+import types
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1587,3 +1589,52 @@ def test_a_closed_stdout_is_a_message_not_a_traceback(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         main(["--dump", str(dump_path)])
     assert "standard output is closed" in str(exc.value.code)
+
+
+# ── the evidence bundle's own bootstrap (#10484 F2) ───────────────────────────
+# `docs/evidence/8607-w1b/*.py` are the scripts that produced every number in that
+# README, and they put the REPO ROOT on `sys.path` so they import `tortoise` from the
+# checkout rather than from whatever happens to be installed. The depth is not free:
+# for `python <script>` the first `sys.path` entry is the script's OWN directory
+# (CPython, "The initialization of the sys.path module search path"), so the number of
+# `parents[N]` is the distance from `docs/evidence/8607-w1b/` to the root — 3, not 2.
+# `parents[2]` is `docs/`, which contains no `tortoise` package, so the line is INERT:
+# it reads as a working bootstrap and does nothing, and the script then fails with
+# `ModuleNotFoundError: tortoise` for the reader who is not inside `uv run`.
+_EVIDENCE_DIR = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "8607-w1b"
+
+
+def _bootstrap_target(script: Path) -> Path:
+    """Execute the script's OWN `sys.path.insert(...)` line and return what it adds."""
+    source = script.read_text(encoding="utf-8")
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "insert"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "path"
+    ]
+    assert len(calls) == 1, f"{script.name}: expected exactly one sys.path.insert, got {len(calls)}"
+    segment = ast.get_source_segment(source, calls[0])
+    assert segment, f"{script.name}: could not read the sys.path.insert line"
+    namespace = {
+        "sys": types.SimpleNamespace(path=[]),
+        "Path": Path,
+        "__file__": str(script),
+    }
+    exec(compile(segment, str(script), "exec"), namespace)  # the file's own line, not ours
+    added = namespace["sys"].path
+    assert len(added) == 1, f"{script.name}: the bootstrap added {len(added)} entries"
+    return Path(added[0])
+
+
+@pytest.mark.parametrize("name", ["seed.py", "measure.py", "verify-revert.py"])
+def test_each_evidence_script_puts_THE_REPO_ROOT_on_sys_path(name):
+    """The bootstrap must resolve the root, not `docs/` — an inert line is worse than none."""
+    target = _bootstrap_target(_EVIDENCE_DIR / name)
+    assert target == _EVIDENCE_DIR.parents[2], f"{name} put {target} on sys.path, not the repo root"
+    # `parents[2]` is `docs/` and has no `tortoise` package: this is the whole defect.
+    assert (target / "tortoise" / "__init__.py").is_file()
+    assert (target / "pyproject.toml").is_file()

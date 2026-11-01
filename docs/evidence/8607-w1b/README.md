@@ -71,6 +71,13 @@ uv run python tools/legacy_id_normalise.py --dump dump.json --report dryrun-1.js
 * renames: **1,000** (`{dump_id, label, key_property, old, new}` each)
 * **two dry runs byte-identical**: `sha256 fc7dc21e242f95ae4e0f3b1d2c7db7c90b4b9aae826808ce34ccbbae64a5a665`
   for both files, `cmp` clean. A plan that differs run to run cannot be reviewed.
+
+⚠️ **That digest is THE record for the pair.** `dryrun-1.json` / `dryrun-2.json` are not committed
+here — they are 1,000-row plans over a seeded population, and §9.3 already owns the population — so
+the value is *reproduced by re-running the two-run command above*, not read from an artifact in this
+directory. A dry-run digest quoted anywhere else without this `fc7dc21e…` prefix is a **stale
+reading of an earlier plan**, not a second measurement: a re-plan is deterministic, so there is
+exactly one value this population can produce.
 * input fingerprint `dump_sha256 = 3b83c4f234bc1bfa…`, which the plan is bound to. **This fired live while
   measuring**: a plan built over an earlier snapshot of the same size was handed to `--apply` and the
   tool refused it — *"…is the plan for a DIFFERENT snapshot … and holds 1000 rename(s) — overwriting
@@ -193,8 +200,11 @@ via `restore_graph`, so an intact pre-pass snapshot is a second, independent way
 
 `seed.py`, `measure.py` and `verify-revert.py` in this directory are the scripts that produced every
 number above. They are evidence scripts, not tools: they seed a throwaway graph and never address a
-live one. Run them **from the directory the artifacts live in**, with the port of your own lane
-instance (`uv run python tools/test_lane.py uri` prints it):
+live one. Each puts the **repo root** on `sys.path` itself (`parents[3]` from this directory — for
+`python <script>` the first search entry is the script's own directory, so the depth is not free), so
+a plain `python seed.py` works from a checkout too; `uv run` stays the documented form because it is
+the one that pins the dependency set. Run them **from the directory the artifacts live in**, with the
+port of your own lane instance (`uv run python tools/test_lane.py uri` prints it):
 
 ```text
 # from the REPO ROOT: prints the port of your own lane instance

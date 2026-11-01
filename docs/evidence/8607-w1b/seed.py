@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root: docs/evidence/8607-w1b/<this>
 
 from falkordb import FalkorDB
 

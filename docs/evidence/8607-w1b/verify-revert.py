@@ -1,5 +1,9 @@
 import hashlib
 import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root: docs/evidence/8607-w1b/<this>
 
 from tortoise.legacy_ids import _edge_digest
 
