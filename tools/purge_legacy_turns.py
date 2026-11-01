@@ -3,13 +3,15 @@
 the preview is the token.
 
 This tool is the destructive half of #10000, and it is built so that its
-destructive arm cannot run by accident. **`--dry-run` is the DEFAULT**; it
+destructive arm cannot run by accident. **A PREVIEW is the DEFAULT — there is
+no `--dry-run` flag: the ABSENCE of `--execute` is the preview**; it
 reads the graph and the record through the census that already gates this
 issue (`tools/turn_parity_census.py`, #10029 — imported, never re-implemented),
 classifies every session that holds turn nodes, and writes an APPROVABLE PLAN
 artefact: the exact session list, the exact node count per session, the total,
 the excluded sessions with their class and reason, a canonical digest of the
-whole set, and the recovery path (or `NEEDS-RECOVERY-PATH(<what is missing>)`).
+whole set, the journal path the target's rebuild reads, and the recovery path
+(or `NEEDS-RECOVERY-PATH(<what is missing>)`).
 
 `--execute` exists. It refuses unless EVERY precondition is asserted at
 runtime, and one of those assertions is the **exact-set precondition**: the
@@ -143,22 +145,52 @@ refused anything is decoration.
 
 USAGE
 =====
-    # 1. PREVIEW (the default — no flag needed, nothing is written to a store)
+    # 1. PREVIEW (the default — no flag needed, nothing is written to a store).
+    #    --event-log-path is REQUIRED here and recorded in the plan: the journal
+    #    is named by the artefact a human approves, not chosen at delete time.
     python tools/purge_legacy_turns.py \
         --uri '<target FalkorDB URI>' --graph-name <graph> \
         --record-dsn "$TORTOISE_RECORD_DSN" \
         --org-id <org> --graph-id <graph> \
         --health-json /tmp/health.json \
+        --event-log-path '<the JSONL journal a rebuild of THIS graph replays>' \
         --target-note 'prod: tortoise-y4mjjq, approved by <owner> <date>' \
         --plan-out /tmp/purge-plan.json [--json /tmp/census.json]
 
-    # 2. APPROVE — a human reads the plan and its digest.
-    # 3. EXECUTE (refuses unless every precondition holds, including a restore
-    #    proof and the plan's digest):
+    # 2. APPROVE — a human reads the plan and its digest, and records an
+    #    APPROVAL out of band (an approval record kept somewhere the plan file
+    #    is not: `{"plan_digest":…, "approved_by":…, "recorded_at":…}`).
+    #    The plan file alone is NEVER sufficient: both sides of the
+    #    --confirm-plan-digest comparison were read out of it otherwise.
+    # 3. EXECUTE (refuses unless every precondition holds, including a fresh
+    #    restore proof, fresh armed evidence, the out-of-band approval, and the
+    #    plan's digest):
     python tools/purge_legacy_turns.py --execute --plan /tmp/purge-plan.json \
         --confirm-plan-digest <the digest the plan states> \
+        --approval-record /tmp/approval.json \
         --restore-proof /tmp/restore-proof.json --health-json /tmp/health.json \
+        --event-log-path '<the same journal the plan names>' \
         ... (the same target flags, re-derived live)
+
+EVIDENCE HAS AN AGE AND AN ADDRESS
+=================================
+`--health-json` and `--restore-proof` are CALLER-SUPPLIED artefacts, so each
+must say (a) WHEN it was read and (b) WHICH deployment it describes, or it is
+not evidence for this run:
+
+  * `/health` — `record.armed` must be the boolean `true`; the artefact must
+    state `org_id`, `graph_id` and `recorded_at`, the tenant must equal the
+    live target's, and the read must be at most `_HEALTH_MAX_AGE_SECONDS` old
+    (`REFUSE_ARMED_EVIDENCE_STALE`; a file from whenever the record was last
+    armed would otherwise satisfy precondition 1 forever).
+  * restore proof — `scratch_session` (one this plan purges),
+    `served_from_record: true`, `org_id`, `graph_id`, `graph`/`uri_host`, and
+    `recorded_at`, at most `_RESTORE_PROOF_MAX_AGE_SECONDS` old, on the same
+    tenant and graph as the live target (`REFUSE_RESTORE_PROOF_STALE`).
+
+The two bounds are not measured safe intervals — they exist so that "when was
+this read, and about what?" has an answer. Raising one is a one-line diff
+someone reviews; omitting the check is what let a foreign file pass.
 
 EXIT CODES
 ==========
@@ -225,8 +257,23 @@ REFUSE_MISMATCH = "mismatch"
 REFUSE_NOT_IN_PLAN = "session-not-in-plan"
 REFUSE_JOURNAL_UNCONFIRMED = "journal-unconfirmed"
 REFUSE_NO_JOURNAL = "no-journal"
+REFUSE_JOURNAL_UNUSABLE = "journal-unusable"
 REFUSE_CENSUS_NOT_CLEAN = "census-not-clean"
+REFUSE_CENSUS_UNREADABLE = "census-unreadable"
 REFUSE_TARGET_DRIFT = "target-drift"
+REFUSE_ARMED_EVIDENCE_STALE = "armed-evidence-stale"
+REFUSE_NO_APPROVAL = "no-approval"
+REFUSE_PARTIAL_SWEEP = "partial-sweep"
+
+#: How old a caller-supplied artefact may be before it stops describing the
+#: deployment this run is about to mutate. See the module docstring, "EVIDENCE
+#: HAS AN AGE AND AN ADDRESS".
+_HEALTH_MAX_AGE_SECONDS = 24 * 3600
+_RESTORE_PROOF_MAX_AGE_SECONDS = 7 * 24 * 3600
+
+#: A timestamp a few minutes in the FUTURE is clock skew between the collector
+#: and this host, not evidence from a later run; beyond this it is refused.
+_CLOCK_SKEW_TOLERANCE_SECONDS = 300
 
 
 def classify_sessions(report: dict) -> dict:
@@ -355,7 +402,8 @@ def digest_set(eligible: list[dict]) -> set[str]:
 
 def build_plan(report: dict, *, target: dict, health: dict | None,
                restore_proof: dict | None, target_note: str,
-               recovery_missing: list[str]) -> dict:
+               recovery_missing: list[str],
+               journal_path: str | None = None) -> dict:
     """The approvable artefact: pairs, counts, exclusions, digest, recovery."""
     classified = classify_sessions(report)
     eligible = classified["eligible"]
@@ -370,6 +418,11 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
         "target": target,
         "target_note": target_note,
         "armed_evidence": health,
+        # The journal a rebuild of THIS graph replays. Recorded in the plan so
+        # the artefact a human approves NAMES it: `--event-log-path` at execute
+        # time must be this path, or a typo would create a fresh file whose
+        # removals the target's rebuild never reads (#10483 review, P1).
+        "journal": {"path": journal_path},
         "census": {
             "episodic_graph_nodes": pop.get("episodic_graph_nodes"),
             "turn_shaped_nodes": pop.get("turn_shaped_nodes"),
@@ -420,17 +473,25 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
 
 
 def evaluate_gate(*, plan: dict | None, live_report: dict | None,
-                  armed: bool, restore_proof: dict | None,
-                  confirm_digest: str, target_note: str,
-                  live_target: dict | None = None) -> tuple[str, str]:
+                  health: dict | None, restore_proof: dict | None,
+                  approval: dict | None, confirm_digest: str,
+                  target_note: str, live_target: dict) -> tuple[str, str]:
     """The `--execute` gate. Pure: no I/O, no deletion, one verdict.
 
     Returns `(refusal_code, message)` where an EMPTY code means "every
     precondition holds". Every branch is a named refusal reachable in
     isolation, which is what `tests/test_10017_purge_guard.py` asserts — the
     three the brief mandates (record not armed, a target session
-    RECORD-BEHIND, a live census one node off the approved set) plus the two
-    the issue adds (no restore proof, no matching confirmation token).
+    RECORD-BEHIND, a live census one node off the approved set) plus the ones
+    the issue adds (no restore proof, no matching confirmation token, no
+    out-of-band approval).
+
+    ⛔ `live_target` IS REQUIRED AND HAS NO DEFAULT. The target binding shipped
+    with `live_target=None`, i.e. a check any caller could omit by forgetting a
+    keyword — a fail-open default in a guard whose doctrine is fail-closed
+    (#10483 review round 2 addendum, P2 on finding #1). A guard that is opt-out
+    by omission is not a guard, so the parameter has no default and an empty
+    target is itself a `REFUSE_TARGET_DRIFT`.
     """
     if not target_note or not str(target_note).strip():
         return (REFUSE_NO_TARGET_NOTE,
@@ -440,12 +501,24 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
         return (REFUSE_NO_PLAN,
                 "no --plan: --execute acts on an APPROVED plan artefact "
                 "only. Run without --execute to produce one")
-    if not armed:
-        return (REFUSE_RECORD_NOT_ARMED,
-                "the record is not proven ARMED for this deployment (a "
-                "/health artefact with record.armed=true is required, #9548 / "
-                "PR #9989). An unarmed record holds no turns, so the delete "
-                "would have no surviving copy")
+    # ⛔ SHAPE BEFORE ANY DEREFERENCE. A plan that parses but has an entry with
+    # no `ids` used to reach `plan_digest` and escape as a `KeyError` traceback
+    # — indistinguishable from a crash, and the documented refusal never
+    # printed (#10483 review, P1).
+    plan_problem = _plan_problem(plan)
+    if plan_problem:
+        return (REFUSE_PLAN_UNREADABLE,
+                f"the plan artefact cannot be read as a plan: "
+                f"{plan_problem}. Nothing was deleted — regenerate the plan "
+                f"and re-approve")
+    if not isinstance(live_target, dict) or not live_target:
+        return (REFUSE_TARGET_DRIFT,
+                "no live target was supplied, so the plan cannot be compared "
+                "to the deployment this run would mutate — an unverified "
+                "target is not the approved target")
+    armed_code, armed_problem = _armed_evidence_problem(health, live_target)
+    if armed_code:
+        return (armed_code, armed_problem)
     if not restore_proof:
         return (REFUSE_NO_RESTORE_PROOF,
                 "no --restore-proof: #10017 precondition 3 requires one "
@@ -455,7 +528,8 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
 
     planned_sessions = [e["session"] for e in
                         (plan.get("purge", {}) or {}).get("sessions") or []]
-    proof_problem = _restore_proof_problem(restore_proof, planned_sessions)
+    proof_problem = _restore_proof_problem(restore_proof, planned_sessions,
+                                           live_target)
     if proof_problem:
         return (REFUSE_RESTORE_PROOF_STALE,
                 f"the restore proof does not establish precondition 3: "
@@ -466,17 +540,44 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
     # snapshot, a staging clone or a re-provisioned graph re-derives a
     # BYTE-IDENTICAL digest. Executing an approval given for one of those
     # against another is the same set applied to the wrong store, so the target
-    # block is compared field by field (#10483 review round 2, P1-A).
-    if live_target is not None:
-        approved_target = plan.get("target") or {}
-        drift = [k for k in ("graph", "uri_host", "db_path", "org_id",
-                             "graph_id")
-                 if approved_target.get(k) != live_target.get(k)]
-        if drift:
-            return (REFUSE_TARGET_DRIFT,
-                    "the plan was approved for a DIFFERENT deployment: "
-                    + ", ".join(f"{k} (plan {approved_target.get(k)!r} vs live "
-                                f"{live_target.get(k)!r})" for k in drift))
+    # block is compared field by field (#10483 review round 2, P1-A) — and the
+    # operator's own --target-note is compared too, because a plan approved for
+    # "prod A" must not execute under "prod B"'s note (#10483 review, P2).
+    approved_target = plan.get("target") or {}
+    drift = [k for k in ("graph", "uri_host", "db_path", "org_id",
+                         "graph_id")
+             if approved_target.get(k) != live_target.get(k)]
+    if (plan.get("target_note") or "") != str(target_note):
+        drift.append("target_note")
+    if drift:
+        return (REFUSE_TARGET_DRIFT,
+                "the plan was approved for a DIFFERENT deployment: "
+                + ", ".join(
+                    f"{k} (plan {(plan.get('target_note') if k == 'target_note' else approved_target.get(k))!r} "
+                    f"vs live {(target_note if k == 'target_note' else live_target.get(k))!r})"
+                    for k in drift))
+
+    # ⛔ THE ARMED EVIDENCE THE HUMAN SAW IS PART OF THE APPROVAL. A plan
+    # generated without one was approved over an unarmed record, so it cannot
+    # authorise a delete even if a fresher /health passes today.
+    approved_armed = plan.get("armed_evidence")
+    if not isinstance(approved_armed, dict) or not approved_armed:
+        return (REFUSE_NOT_IN_PLAN,
+                "the plan records no armed evidence — it was generated "
+                "without a /health artefact, so the record was not proven "
+                "ARMED when it was approved. Regenerate it with "
+                "--health-json and re-approve")
+    plan_armed_identity = _evidence_identity(approved_armed)
+    live_armed_identity = _evidence_identity(health)
+    armed_drift = [k for k in ("org_id", "graph_id")
+                   if plan_armed_identity.get(k) != live_armed_identity.get(k)]
+    if armed_drift:
+        return (REFUSE_TARGET_DRIFT,
+                "the ARMED evidence in this run was read from a DIFFERENT "
+                "deployment than the one the plan was approved against: "
+                + ", ".join(f"{k} (plan {plan_armed_identity.get(k)!r} vs "
+                            f"live {live_armed_identity.get(k)!r})"
+                            for k in armed_drift))
 
     approved = plan.get("plan_digest") or ""
     # ⛔ THE ARTEFACT MUST BE SELF-CONSISTENT. The digest is what a human
@@ -519,11 +620,28 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                 f"(plan {approved[:12]}…, given "
                 f"{(confirm_digest or '<none>')[:12]}…)")
 
+    # ⛔ THE APPROVAL IS NOT A FIELD OF THE PLAN. `--confirm-plan-digest` and
+    # `plan["plan_digest"]` are both read from the artefact under review, so
+    # together they prove the operator OPENED the file, not that a human
+    # approved THAT SET: a plan whose `purge.sessions` and `plan_digest` were
+    # both rewritten passes both (#10483 review, P2). The approval is therefore
+    # a separate artefact, kept somewhere the plan file is not.
+    approval_problem = _approval_problem(approval, approved)
+    if approval_problem:
+        code = (REFUSE_NO_APPROVAL if not approval
+                else REFUSE_CONFIRMATION_MISMATCH)
+        return (code, approval_problem)
+
     if live_report is None:
         return (REFUSE_EXACT_SET_MISMATCH,
                 "the live census produced no report, so the approved set "
                 "cannot be re-derived — an unverifiable set is not an "
                 "approved set")
+    report_problem = _report_problem(live_report)
+    if report_problem:
+        return (REFUSE_CENSUS_UNREADABLE,
+                f"the live census report cannot be read as a census: "
+                f"{report_problem}. Nothing was deleted")
 
     classified = classify_sessions(live_report)
 
@@ -585,18 +703,21 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
     return ("", "every precondition asserted; the approved set is the live set")
 
 
-def _restore_proof_problem(proof, planned_sessions: list[str]) -> str:
+def _restore_proof_problem(proof, planned_sessions: list[str],
+                          live_target: dict | None = None) -> str:
     """Why this restore-proof artefact is not evidence — or `""`.
 
     `--restore-proof` used to be truthiness-checked, which made an arbitrary
     `{"garbage": 1}` satisfy #10017's precondition 3. The artefact must name
     the session it restored (and that session must be in the plan), state that
-    the transcript was re-served FROM THE RECORD, and name the tenant/graph it
-    was done on.
+    the transcript was re-served FROM THE RECORD, name the tenant/graph it was
+    done on, and say WHEN — the refusal code is `restore-proof-stale`, so a
+    `recorded_at` that was never read made the name a lie (#10483, P1).
     """
     if not isinstance(proof, dict):
         return "the artefact is not a JSON object"
-    missing = [k for k in ("scratch_session", "served_from_record")
+    missing = [k for k in ("scratch_session", "served_from_record",
+                           "recorded_at", "org_id", "graph_id")
                if k not in proof]
     if missing:
         return f"it does not state {', '.join(missing)}"
@@ -607,6 +728,207 @@ def _restore_proof_problem(proof, planned_sessions: list[str]) -> str:
         return (f"the session it restored ({proof.get('scratch_session')!r}) "
                 "is not one of the sessions this plan purges, so it proves "
                 "nothing about them")
+    if live_target is not None:
+        # A proof produced on tenant A says nothing about tenant B's record, so
+        # the ADDRESS is part of the evidence (#10483, P1).
+        drift = [k for k in ("org_id", "graph_id")
+                 if proof.get(k) != live_target.get(k)]
+        if not (proof.get("graph") or proof.get("uri_host")):
+            return "it names neither the graph nor the host it was done on"
+        if (proof.get("graph") is not None
+                and proof.get("graph") != live_target.get("graph")):
+            drift.append("graph")
+        if (proof.get("uri_host") is not None
+                and proof.get("uri_host") != live_target.get("uri_host")):
+            drift.append("uri_host")
+        if drift:
+            return ("it describes a DIFFERENT deployment than the plan "
+                    "targets: " + ", ".join(
+                        f"{k} (proof {proof.get(k)!r} vs target "
+                        f"{live_target.get(k)!r})" for k in drift))
+    age = _age_seconds(proof.get("recorded_at"))
+    if age is None:
+        return ("recorded_at is not an ISO-8601 timestamp, so the proof's age "
+                "is not established")
+    if age < -_CLOCK_SKEW_TOLERANCE_SECONDS:
+        return (f"recorded_at is {abs(age):.0f}s in the FUTURE — it cannot be "
+                "a record of a restore that happened")
+    if age > _RESTORE_PROOF_MAX_AGE_SECONDS:
+        return (f"it was recorded {age / 86400:.1f} day(s) ago, beyond the "
+                f"{_RESTORE_PROOF_MAX_AGE_SECONDS / 86400:.0f}-day bound — a "
+                "restore path is re-exercised before a pass, not once ever")
+    return ""
+
+
+def _age_seconds(value) -> float | None:
+    """How old an ISO-8601 timestamp is, or `None` when it is not one."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    from datetime import datetime, timezone
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - stamp).total_seconds()
+
+
+def _evidence_identity(artifact) -> dict:
+    """The deployment a caller-supplied artefact describes.
+
+    A `/health` payload may nest its facts under `target` or `record`, or carry
+    them at the top level; the FIRST block that names an `org_id` wins, so the
+    identity is read from one place per artefact — never merged from several,
+    which would let two half-blind artefacts add up to a whole one.
+    """
+    if not isinstance(artifact, dict):
+        return {}
+    for block in (artifact.get("target"), artifact.get("record"), artifact):
+        if isinstance(block, dict) and block.get("org_id"):
+            return {k: block.get(k)
+                    for k in ("org_id", "graph_id", "recorded_at")}
+    return {}
+
+
+def _armed_evidence_problem(health, live_target: dict) -> tuple[str, str]:
+    """The ARMED precondition, with its AGE and its ADDRESS (#10483, P1).
+
+    Returns `("", "")` when the evidence stands. Three defects are refused,
+    each with its own code: not armed at all, armed for some OTHER deployment,
+    and armed so long ago that it no longer describes the record this run would
+    delete from. A caller-supplied file has no other way to be tied to a run.
+    """
+    if not isinstance(health, dict):
+        return (REFUSE_RECORD_NOT_ARMED,
+                "no --health-json artefact was supplied, so the record is not "
+                "proven ARMED for this deployment (#9548 / PR #9989). An "
+                "unarmed record holds no turns, so the delete would have no "
+                "surviving copy")
+    if not _health_armed(health):
+        return (REFUSE_RECORD_NOT_ARMED,
+                "the /health artefact does not report record.armed as the "
+                "boolean true (#9548 / PR #9989). An unarmed record holds no "
+                "turns, so the delete would have no surviving copy")
+    identity = _evidence_identity(health)
+    missing = [k for k in ("org_id", "graph_id", "recorded_at")
+               if not identity.get(k)]
+    if missing:
+        return (REFUSE_RECORD_NOT_ARMED,
+                "the /health artefact does not state "
+                f"{', '.join(missing)} — without the tenant and the read time "
+                "it cannot be tied to the deployment this run mutates, and a "
+                "caller-supplied file is otherwise evidence for any target")
+    drift = [k for k in ("org_id", "graph_id")
+             if identity.get(k) != live_target.get(k)]
+    if drift:
+        return (REFUSE_TARGET_DRIFT,
+                "the ARMED evidence was read from a DIFFERENT deployment: "
+                + ", ".join(f"{k} (health {identity.get(k)!r} vs live "
+                            f"{live_target.get(k)!r})" for k in drift))
+    age = _age_seconds(identity.get("recorded_at"))
+    if age is None:
+        return (REFUSE_ARMED_EVIDENCE_STALE,
+                "the /health artefact's recorded_at is not an ISO-8601 "
+                "timestamp, so its age is not established")
+    if age < -_CLOCK_SKEW_TOLERANCE_SECONDS:
+        return (REFUSE_ARMED_EVIDENCE_STALE,
+                f"the /health artefact is dated {abs(age):.0f}s in the FUTURE "
+                "— it cannot be a record of a read that happened")
+    if age > _HEALTH_MAX_AGE_SECONDS:
+        return (REFUSE_ARMED_EVIDENCE_STALE,
+                f"the ARMED evidence was read {age / 3600:.1f}h ago, beyond "
+                f"the {_HEALTH_MAX_AGE_SECONDS / 3600:.0f}h bound — it "
+                "describes the record as it was then, not as it is before "
+                "this delete. Re-read /health for this target")
+    return ("", "")
+
+
+def _approval_problem(approval, approved_digest: str) -> str:
+    """Why the out-of-band approval does not authorise THIS set — or `""`.
+
+    The approval is a separate artefact (kept somewhere the plan file is not),
+    because `--confirm-plan-digest` compared against `plan["plan_digest"]` reads
+    BOTH sides out of the artefact under review: a plan whose `purge.sessions`
+    and digest were rewritten together passes that check (#10483, P2).
+    """
+    if not isinstance(approval, dict) or not approval:
+        return ("no --approval-record: the approval must be recorded in an "
+                "artefact kept OUTSIDE the plan file (an approval comment on "
+                "#10017, saved separately). The plan's own digest field "
+                "cannot approve itself")
+    for key in ("plan_digest", "approved_by", "recorded_at"):
+        if not approval.get(key):
+            return f"the approval record does not state {key}"
+    digest = str(approval.get("plan_digest")).strip()
+    if digest != approved_digest:
+        return (f"the approval record authorises {digest[:12]}…, not this "
+                f"plan ({approved_digest[:12]}…) — the set the human approved "
+                "is not the set this artefact would delete")
+    if _age_seconds(approval.get("recorded_at")) is None:
+        return ("the approval record's recorded_at is not an ISO-8601 "
+                "timestamp, so when it was given is not established")
+    return ""
+
+
+def _report_problem(report) -> str:
+    """Why this is not a census report — or `""`.
+
+    `--census-json` accepted any JSON, and an EMPTY one collapsed "I never held
+    a census" into "empty, so nothing to purge": `{}` exited 0 and printed a
+    signable plan with the empty-set digest (#3175's defect, in the artefact a
+    human approves — #10483, P1). A missing side is not an empty side.
+    """
+    if not isinstance(report, dict):
+        return f"it is a {type(report).__name__}, not a JSON object"
+    for key in ("population", "parity", "dry_run"):
+        if not isinstance(report.get(key), dict):
+            return f"it carries no `{key}` block"
+    for key in ("clean_sessions", "failed_sessions"):
+        if not isinstance(report["parity"].get(key), list):
+            return f"parity.{key} is missing or is not a list"
+    if not isinstance(report["dry_run"].get("would_delete_ids"), list):
+        return ("dry_run.would_delete_ids is missing — the purge set has ONE "
+                "derivation, and a report without it describes no set")
+    if report.get("verdict") in (None, ""):
+        return ("it carries no census VERDICT — a report that never ran a "
+                "census is not a clean one")
+    if not isinstance(report.get("refused_for"), list):
+        return "refused_for is missing or is not a list"
+    return ""
+
+
+def _plan_problem(plan) -> str:
+    """Why this is not a plan artefact — or `""`.
+
+    Every field the run dereferences is checked BEFORE the first dereference:
+    a plan entry with no `ids` used to reach `plan_digest` and escape `main` as
+    a `KeyError` traceback (#10483, P1).
+    """
+    if not isinstance(plan, dict):
+        return f"it is a {type(plan).__name__}, not a JSON object"
+    digest = plan.get("plan_digest")
+    if not isinstance(digest, str) or len(digest) != 64:
+        return "it carries no 64-hex plan_digest"
+    purge_block = plan.get("purge")
+    if not isinstance(purge_block, dict):
+        return "it has no `purge` block"
+    entries = purge_block.get("sessions")
+    if not isinstance(entries, list):
+        return "purge.sessions is missing or is not a list"
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            return f"purge.sessions[{index}] is not an object"
+        session = entry.get("session")
+        if not isinstance(session, str) or not session:
+            return f"purge.sessions[{index}] has no session id"
+        ids = entry.get("ids")
+        if not isinstance(ids, list) or not all(isinstance(t, str) for t in ids):
+            return (f"purge.sessions[{index}] ({session}) has no `ids` list of "
+                    "strings — the digest and the delete both dereference it")
     return ""
 
 
@@ -690,6 +1012,10 @@ def _recovery_missing(args, restore_proof: dict | None,
         missing.append(
             "no /health artefact showing record.armed=true for this target "
             "(#9548 / PR #9989)")
+    if not getattr(args, "event_log_path", None):
+        missing.append(
+            "no --event-log-path: the journal the target's rebuild replays is "
+            "not named in this plan, so `--execute` will refuse it")
     missing.append(
         "no recorded `python -m tortoise record-backup --drill` run against "
         "this target (the record's restore is implemented and documented, "
@@ -700,7 +1026,14 @@ def _recovery_missing(args, restore_proof: dict | None,
     return missing
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> _UsageParser:
+    """The ONE argument surface.
+
+    Extracted from `main` so a test can assert that every flag the module
+    docstring names actually exists — the docstring documented a `--dry-run`
+    flag the parser never had, and a reader following it got an argparse usage
+    error (#10483 review, P2).
+    """
     parser = _UsageParser(
         prog="purge_legacy_turns",
         description="#10017 step 9 — the gated purge of pre-#10000 turn "
@@ -725,6 +1058,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="a /health artefact (record.armed evidence)")
     parser.add_argument("--restore-proof", default=None,
                         help="a restore-proof artefact (issue precondition 3)")
+    parser.add_argument("--approval-record", default=None,
+                        help="the OUT-OF-BAND approval of the plan digest "
+                             "(--execute): {plan_digest, approved_by, "
+                             "recorded_at}. A plan cannot approve itself")
     parser.add_argument("--census-json", default=None,
                         help="reuse a census report instead of reading the "
                              "stores (preview only — --execute ALWAYS "
@@ -747,8 +1084,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="the plan digest the human approved (--execute)")
     parser.add_argument("--event-log-path", default=None,
                         help="the JSONL journal a rebuild of THIS graph reads "
-                             "(--execute). Required: an unjournaled removal is "
-                             "a resurrection (#3316)")
+                             "(--execute). Required at PREVIEW time too: the "
+                             "plan records it, so the artefact a human "
+                             "approves names the journal the deletions land "
+                             "in (an unjournaled removal is a resurrection, "
+                             "#3316)")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     if args.sample < 0:
@@ -772,7 +1117,18 @@ def main(argv: list[str] | None = None) -> int:
                     "every time (a cached census is exactly the stale set the "
                     "exact-set precondition exists to refuse).\n")
                 return 1
-            report = _load_json(args.census_json)
+            try:
+                report = _load_json(args.census_json)
+            except Exception as exc:
+                # A mistyped path is a CONFIG fault: exit 3 and a named
+                # refusal, never an uncaught FileNotFoundError a caller reads
+                # as a crash (the module documents exit 3 for this).
+                sys.stderr.write(
+                    f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_UNREADABLE}: "
+                    f"--census-json could not be read ({type(exc).__name__}: "
+                    f"{exc}) — an absence is NOT established, so no plan can "
+                    f"be written.\n")
+                return 3
         else:
             if not record_dsn:
                 sys.stderr.write(
@@ -798,9 +1154,22 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"purge_legacy_turns: {exc}\n")
         return 3
 
+    # ⛔ A REPORT THAT NEVER HELD A CENSUS IS NOT AN EMPTY CENSUS. `{}` used to
+    # produce exit 0 and a signable "0 node(s) would be purged" plan with the
+    # empty-set digest — #3175's collapse, in the artefact a human signs
+    # (#10483 review, P1).
+    report_problem = _report_problem(report)
+    if report_problem:
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_UNREADABLE}: the "
+            f"census report cannot be read as a census: {report_problem}. "
+            f"Nothing was deleted and no plan was written.\n")
+        return 3
+
     try:
         health = _load_json(args.health_json)
         restore_proof = _load_json(args.restore_proof)
+        approval = _load_json(args.approval_record)
     except Exception as exc:
         # A mistyped path or malformed JSON is a CONFIG fault: exit 3 (a side
         # could not be read), never an uncaught traceback a caller reads as a
@@ -820,8 +1189,8 @@ def main(argv: list[str] | None = None) -> int:
                              f"{REFUSE_PLAN_UNREADABLE}: {exc}\n")
             return 2
         code, message = evaluate_gate(
-            plan=plan, live_report=report, armed=_health_armed(health),
-            restore_proof=restore_proof,
+            plan=plan, live_report=report, health=health,
+            restore_proof=restore_proof, approval=approval,
             confirm_digest=args.confirm_plan_digest or "",
             target_note=args.target_note, live_target=target)
         if code:
@@ -835,7 +1204,8 @@ def main(argv: list[str] | None = None) -> int:
                           restore_proof=restore_proof,
                           target_note=args.target_note,
                           recovery_missing=_recovery_missing(args, restore_proof,
-                                                             health))
+                                                             health),
+                          journal_path=args.event_log_path)
     except (ValueError, KeyError) as exc:
         # A census report whose counts and id lists disagree cannot describe a
         # purge set. Named refusal, never an uncaught traceback (`main`'s own
@@ -873,6 +1243,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"recovery   : {plan['recovery']['verdict']}")
     for item in plan["recovery"]["missing"]:
         print(f"  MISSING   {item}")
+    print(f"journal    : "
+          f"{plan['journal']['path'] or '<NOT NAMED — --execute will refuse>'}")
     print("dry run    : NOTHING WAS DELETED. This is a preview; the purge "
           "requires --execute with the digest above, a restore proof and an "
           "armed-record artefact.")
@@ -882,23 +1254,104 @@ def main(argv: list[str] | None = None) -> int:
 def _execute(plan: dict, args, target: dict) -> int:
     """The destructive arm. ⛔ NEVER RUN IN THE LANE THAT WROTE IT (#10017).
 
-    Order is the landed one, and the JOURNAL is a precondition checked BEFORE
-    the first delete:
+    Order is the landed one, and both the JOURNAL and the per-session RECORD
+    re-verify are preconditions checked BEFORE the delete they protect:
 
-        0. the SDK must be addressing the SAME graph the census read, and it
-           must have a journal — an unjournalable target is refused up front,
-           never discovered after a session has already been deleted (a
-           rebuild would resurrect those turns while this run reported a
-           failure);
-        1. delete the exact planned ids per session and VERIFY absence;
-        2. journal every VERIFIED-ABSENT id — including the ones a partially
-           failing session did delete — through the SDK's own
-           `_journal_turn_removal` (#10076), the ONE removal record, and
-           refuse if the journal cannot carry the removal;
-        3. fail unless the deleted total equals the plan's stated total.
+        0a. the journal the plan NAMES exists, is not empty, and is the one this
+            run was given. A mistyped `--event-log-path` silently CREATES a
+            fresh file (`EventLog.append`), so the removals would land in a log
+            the target's rebuild never reads — `record != replay(journal)`
+            forever, while the run reports success (#10483 review, P1);
+        0b. the SDK must be addressing the SAME graph the census read, and it
+            must have a journal — an unjournalable target is refused up front,
+            never discovered after a session has already been deleted (a
+            rebuild would resurrect those turns while this run failed);
+        1. PER SESSION, immediately before its delete: the RECORD must still
+            hold every planned id. The record is read once in `main`, and
+            between that census and session k's delete sit a paged graph read,
+            a tenant record read and k-1 deletes — a row lost in that window
+            makes RECORD-BEHIND invisible and the graph copy the only copy
+            (#10483 review, P0). Kubernetes states the same rule on the delete
+            itself: `DeleteOptions.preconditions` — "must be fulfilled before a
+            deletion is carried out" (`k8s.io/apimachinery/pkg/apis/meta/v1`);
+        2. delete the exact planned ids per session and VERIFY absence;
+        3. journal every VERIFIED-ABSENT id — including the ones a partially
+            failing session did delete — through the SDK's own
+            `_journal_turn_removal` (#10076), the ONE removal record, and
+            refuse if the journal cannot carry the removal;
+        4. fail unless the deleted total equals the plan's stated total, with
+            its OWN code (`partial-sweep`): "the set drifted before the delete"
+            and "only part of the set is gone after it" are different
+            diagnoses and an operator cannot act on one shared name.
+
+    ⛔ Residual, stated rather than left to be assumed: step 1 re-verifies that
+    each planned KEY is still in the record; it does not re-compare the parity
+    FIELDS. A row whose text changed after the live census would pass step 1,
+    and the census's field comparison is the instrument that covers it.
     """
     from tortoise.projection import FalkorProjection
     from tortoise.sdk import TortoiseSDK
+
+    # ⛔ 0a. THE JOURNAL IS NAMED BY THE APPROVED PLAN, AND MUST ALREADY EXIST.
+    journal_path = args.event_log_path
+    journal_block = plan.get("journal")
+    planned_journal = (journal_block.get("path")
+                       if isinstance(journal_block, dict) else None)
+    if not journal_path:
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_NO_JOURNAL}: no journal is "
+            "configured for the target, so a removal could not be recorded "
+            "and a later rebuild would resurrect it. Pass --event-log-path "
+            "naming the journal the target's rebuild reads. Nothing was "
+            "deleted.\n")
+        return 2
+    if not planned_journal:
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_JOURNAL_UNUSABLE}: the plan "
+            f"names no journal — it was generated without --event-log-path, so "
+            f"nothing the human approved says which log these removals belong "
+            f"in. Regenerate the plan with --event-log-path. Nothing was "
+            f"deleted.\n")
+        return 2
+    if planned_journal != journal_path:
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_JOURNAL_UNUSABLE}: this run "
+            f"would journal into {journal_path!r} but the approved plan names "
+            f"{planned_journal!r}. A removal recorded anywhere but the target's "
+            f"own journal is a removal its rebuild never sees. Nothing was "
+            f"deleted.\n")
+        return 2
+    journal_file = Path(journal_path)
+    if not journal_file.exists():
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_JOURNAL_UNUSABLE}: "
+            f"{journal_path!r} DOES NOT EXIST — and an append CREATES it, so a "
+            f"typo'd path would silently start a fresh journal whose ordinals "
+            f"begin at 1 (the #10017 ruling: the copy and the delete append to "
+            f"the graph's OWN journal). If the target really has no journal "
+            f"yet, that is a setup fault to resolve first, not a file to "
+            f"create here. Nothing was deleted.\n")
+        return 2
+    if journal_file.stat().st_size == 0:
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_JOURNAL_UNUSABLE}: "
+            f"{journal_path!r} is EMPTY — a journal with no history is not the "
+            f"target's replay source, and removals recorded into it are not "
+            f"removals the target's rebuild can replay. Nothing was "
+            f"deleted.\n")
+        return 2
+
+    # ⛔ 0a-bis. The per-session re-verify needs the record. Without a DSN the
+    # TOCTOU gate cannot run, so the delete cannot start: a side that cannot be
+    # read is not a side that agrees.
+    record_dsn = args.record_dsn or os.environ.get("TORTOISE_RECORD_DSN", "")
+    if not record_dsn:
+        sys.stderr.write(
+            "purge_legacy_turns: no record DSN — pass --record-dsn or set "
+            "TORTOISE_RECORD_DSN. The record cannot be re-read before each "
+            "delete, so parity is not established at the moment of the delete "
+            "and nothing was deleted.\n")
+        return 3
 
     if args.uri:
         proj = FalkorProjection.from_uri(args.uri, graph_name=args.graph_name)
@@ -921,11 +1374,9 @@ def _execute(plan: dict, args, target: dict) -> int:
     # every one of them, silently, while the graph looks drained (#3316).
     if sdk._get_event_log() is None:
         sys.stderr.write(
-            f"purge_legacy_turns: REFUSED {REFUSE_NO_JOURNAL}: no journal is "
-            "configured for the target, so a removal could not be recorded "
-            "and a later rebuild would resurrect it. Pass --event-log-path "
-            "naming the journal the target's rebuild reads. Nothing was "
-            "deleted.\n")
+            f"purge_legacy_turns: REFUSED {REFUSE_NO_JOURNAL}: the SDK reports "
+            "no journal for this target, so a removal could not be recorded "
+            "and a later rebuild would resurrect it. Nothing was deleted.\n")
         return 2
     sdk_proj = sdk._get_proj()
     sdk_graph = getattr(sdk_proj, "graph_name", None)
@@ -938,13 +1389,41 @@ def _execute(plan: dict, args, target: dict) -> int:
             f"target never sees. Nothing was deleted.\n")
         return 2
 
+    # Read BEFORE the first delete: a plan whose `turn_node_total` is missing
+    # must not be discovered after 20,000 removals (#10483 review, P1).
+    planned_total = int(plan["purge"]["turn_node_total"])
     deleted_total = 0
     journaled_total = 0
-    unconfirmed: list[str] = []
+    survivors_left: list[str] = []
     for entry in plan["purge"]["sessions"]:
         sid, ids = entry["session"], list(entry["ids"])
         if not ids:
             continue
+        # ⛔ THE TOCTOU GATE: re-verify the RECORD for this session immediately
+        # before its DELETE, through the census's own record leg (one
+        # implementation of the read, `node_keys=` scoped to the planned ids).
+        try:
+            held = census_mod.read_record_turns(
+                record_dsn, target.get("org_id"), target.get("graph_id"),
+                node_keys=ids)["rows_by_key"]
+        except census_mod.CensusError as exc:
+            sys.stderr.write(
+                f"purge_legacy_turns: the record could not be re-read before "
+                f"session {sid}'s delete ({exc}) — nothing in this session was "
+                f"deleted.\n")
+            return 3
+        lost = [tid for tid in ids if tid not in held]
+        if lost:
+            sys.stderr.write(
+                f"purge_legacy_turns: REFUSED {REFUSE_RECORD_BEHIND}: session "
+                f"{sid} is RECORD-BEHIND at delete time — {len(lost)} planned "
+                f"id(s) have no record row NOW, so deleting the graph copies "
+                f"destroys the only copy of those turns: "
+                f"{', '.join(lost[:10])}. The census that authorised this run "
+                f"is stale; backfill first. {deleted_total} node(s) were "
+                f"deleted and journaled BEFORE this check, and this run stops "
+                f"here.\n")
+            return 2
         # EXACT-SET DELETE: the id list is the approved one, and the statement
         # is scoped both by the session wiring and by `t.id IN $ids`, so a turn
         # that appeared after the census is not swept in.
@@ -994,31 +1473,33 @@ def _execute(plan: dict, args, target: dict) -> int:
                 return 2
             deleted_total += len(absent)
             journaled_total += len(outcomes)
-        unconfirmed.extend(sorted(survivors))
         if survivors:
+            survivors_left.extend(sorted(survivors))
             sys.stderr.write(
                 f"purge_legacy_turns: session {sid}: {len(survivors)} planned "
                 f"node(s) SURVIVED the delete (and were NOT journaled): "
                 f"{', '.join(sorted(survivors)[:10])}\n")
 
+    if deleted_total != planned_total:
+        # ⛔ ITS OWN CODE. "The set drifted before the delete" (the
+        # exact-set check) and "only part of the set is gone after it" are
+        # different diagnoses; sharing one name was a guard whose refusals were
+        # not distinguishable (#10483 review, P2). The deletes ALREADY HAPPENED
+        # and are journaled, so the message says so instead of reading like a
+        # refusal that prevented one.
+        sys.stderr.write(
+            f"purge_legacy_turns: REFUSED {REFUSE_PARTIAL_SWEEP}: the plan "
+            f"states {planned_total} node(s) but {deleted_total} were purged. "
+            f"The {deleted_total} removals above ALREADY HAPPENED and are "
+            f"journaled, so re-running the same plan will not finish them — "
+            f"regenerate the plan from a fresh census. Still standing: "
+            f"{', '.join(survivors_left[:10]) or '<none reported>'}\n")
+        return 2
+    # Only now is "purged" true: printing it before the checks made the log read
+    # as success with a refusal after it (#10483 review, P2).
     print(f"purged     : {deleted_total} turn node(s) from "
           f"{plan['purge']['session_count']} session(s), "
           f"{journaled_total} journaled removal(s)")
-    if deleted_total != int(plan["purge"]["turn_node_total"]):
-        # The plan's headline total and what was actually purged must agree: a
-        # shortfall is a partial sweep, and reporting it as success is how a
-        # "done" claim outlives the work.
-        sys.stderr.write(
-            f"purge_legacy_turns: REFUSED {REFUSE_EXACT_SET_MISMATCH}: the "
-            f"plan states {plan['purge']['turn_node_total']} node(s) but "
-            f"{deleted_total} were purged.\n")
-        return 2
-    if unconfirmed:
-        sys.stderr.write(
-            f"purge_legacy_turns: REFUSED {REFUSE_EXACT_SET_MISMATCH}: "
-            f"{len(unconfirmed)} planned node(s) were NOT gone after the "
-            f"delete: {', '.join(unconfirmed[:10])}\n")
-        return 2
     return 0
 
 

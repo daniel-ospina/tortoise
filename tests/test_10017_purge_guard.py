@@ -2,19 +2,29 @@
 
 A destructive tool whose guard has never refused anything is not gated. This
 file therefore pins the REFUSALS (the three the lane brief mandates, plus the
-two the issue adds) and the two pure decisions the refusals rest on:
+ones the issue adds) and the two pure decisions the refusals rest on:
 per-session CLASSIFICATION and the exact-set DIGEST.
 
-Nothing here touches a graph, a Postgres, or a container: `evaluate_gate` and
-`classify_sessions` are pure over a census-shaped report, which is why the
-cases can construct the exact adversarial reports the live stores would have
-to be broken in a specific way to produce.
+⛔ AND IT PINS THEM **BY EFFECT** WHERE IT CAN (#10483 review, P1): a refusal
+asserted only as a pure function's return value leaves `main`'s wiring — and
+`_execute` itself — free to be inverted while every test stays green. The
+`test_execute_wiring_*` and `test_execute_refuses_*_before_any_delete` cases
+below drive `main([... "--execute" ...])` or `_execute(...)` with the store legs
+patched, and assert that no DELETE was issued; the positive arm is there too, so
+the set is not "a guard that always says no".
+
+Nothing here touches a graph, a Postgres, or a container: the census legs are
+monkeypatched, `evaluate_gate` and `classify_sessions` are pure over a
+census-shaped report, and the SDK/projection seams `_execute` imports are
+replaced with fakes that record the statements they are asked to run.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -73,29 +83,63 @@ def _clean_with_ids(session: str, ids: list[str], record_rows=None):
     return v
 
 
-def _armed() -> dict:
-    return {"record": {"armed": True, "ok": True}}
+def _ts(age_seconds: float = 60) -> str:
+    """An ISO-8601 stamp `age_seconds` old — every caller-supplied artefact now
+    has to state WHEN it was read (a file with no age describes any run)."""
+    stamp = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _proof(session: str = "s1") -> dict:
+def _target(graph_name: str | None = None) -> dict:
+    """The target block `_target_from_args` derives for `_TARGET_ARGV`."""
+    return {"graph": graph_name or "<uri default>",
+            "uri_host": "127.0.0.1:1", "db_path": None,
+            "org_id": "org", "graph_id": "graph",
+            "record_dsn_present": True}
+
+
+_TARGET_ARGV = ["--uri", "docker://:pw@127.0.0.1:1/x",
+                "--org-id", "org", "--graph-id", "graph"]
+
+
+def _health(armed=True, age: float = 60) -> dict:
+    return {"record": {"armed": armed, "ok": True,
+                       "org_id": "org", "graph_id": "graph",
+                       "recorded_at": _ts(age)}}
+
+
+def _proof(session: str = "s1", age: float = 60, org: str = "org",
+           graph_id: str = "graph", graph: str = "<uri default>") -> dict:
     """A restore proof that names a session the default plan actually purges —
-    a proof about some OTHER session proves nothing (see REFUSE_RESTORE_PROOF_STALE)."""
+    a proof about some OTHER session proves nothing (see REFUSE_RESTORE_PROOF_STALE).
+    It also states its ADDRESS and its AGE, which the gate now requires."""
     return {"issue": 10017, "scratch_session": session,
-            "served_from_record": True, "recorded_at": "2026-11-01T00:00:00Z"}
+            "served_from_record": True, "recorded_at": _ts(age),
+            "org_id": org, "graph_id": graph_id, "graph": graph}
 
 
-def _plan(clean) -> dict:
+def _approval(digest: str | None = None, who: str = "owner") -> dict:
+    """The approval, recorded OUTSIDE the plan file: the plan cannot approve
+    itself (`--confirm-plan-digest` alone compares two fields of one artefact)."""
+    return {"issue": 10017, "plan_digest": digest, "approved_by": who,
+            "recorded_at": _ts(60)}
+
+
+def _plan(clean, *, journal_path: str | None = "/tmp/journal.jsonl") -> dict:
     report = _report(clean=clean)
-    return purge.build_plan(report, target={"graph": "t"}, health=_armed(),
+    return purge.build_plan(report, target=_target(), health=_health(),
                             restore_proof=_proof(), target_note="test target",
-                            recovery_missing=[])
+                            recovery_missing=[], journal_path=journal_path)
 
 
-def _gate(plan, live=None, armed=True, proof=None, confirm=None,
-          note="test target", live_target=None):
+def _gate(plan, live=None, health=None, proof=None, confirm=None,
+          note="test target", live_target=None, approval=None):
     return purge.evaluate_gate(
-        plan=plan, live_report=live, armed=armed,
+        plan=plan, live_report=live,
+        health=_health() if health is None else health,
         restore_proof=_proof() if proof is None else proof,
+        approval=(_approval(plan["plan_digest"]) if approval is None
+                  else approval),
         confirm_digest=(plan["plan_digest"] if confirm is None else confirm),
         target_note=note,
         live_target=(plan["target"] if live_target is None else live_target),
@@ -170,7 +214,8 @@ def test_digest_is_order_independent_and_sensitive_to_one_node():
 def test_execute_refuses_when_the_record_is_not_armed():
     plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
     code, message = _gate(plan, live=_report(
-        clean=[_clean_with_ids("s1", ["s1_t0"])]), armed=False)
+        clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        health=_health(armed=False))
     assert code == purge.REFUSE_RECORD_NOT_ARMED
     assert "record" in message and "armed" in message.lower()
 
@@ -261,14 +306,31 @@ def test_execute_refuses_a_confirmation_token_that_is_not_the_plan_digest():
 
 
 def test_execute_refuses_without_a_plan_or_a_target_note():
-    code, _ = purge.evaluate_gate(plan=None, live_report=None, armed=True,
-                                  restore_proof=_proof(), confirm_digest="x",
-                                  target_note="t")
+    code, _ = purge.evaluate_gate(plan=None, live_report=None,
+                                  health=_health(),
+                                  restore_proof=_proof(), approval=_approval("x"),
+                                  confirm_digest="x", target_note="t",
+                                  live_target=_target())
     assert code == purge.REFUSE_NO_PLAN
     plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
     code, _ = _gate(plan, live=_report(
         clean=[_clean_with_ids("s1", ["s1_t0"])]), note="")
     assert code == purge.REFUSE_NO_TARGET_NOTE
+
+
+def test_the_gate_has_no_default_live_target():
+    """The target binding shipped as `live_target=None`, i.e. a check any
+    caller could omit by forgetting a keyword — a fail-open default in a guard
+    whose doctrine is fail-closed (#10483, P2)."""
+    import inspect
+    params = inspect.signature(purge.evaluate_gate).parameters
+    assert params["live_target"].default is inspect.Parameter.empty
+    # …and an EMPTY target is itself a refusal, not a pass.
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), live_target={})
+    assert code == purge.REFUSE_TARGET_DRIFT
+    assert "no live target" in message
 
 
 def test_a_clean_gate_passes_every_precondition():
@@ -343,8 +405,11 @@ def test_every_refusal_code_is_a_distinct_name(code):
              purge.REFUSE_EXACT_SET_MISMATCH, purge.REFUSE_RECORD_BEHIND,
              purge.REFUSE_MISMATCH, purge.REFUSE_NOT_IN_PLAN,
              purge.REFUSE_JOURNAL_UNCONFIRMED, purge.REFUSE_NO_JOURNAL,
-             purge.REFUSE_CENSUS_NOT_CLEAN, purge.REFUSE_TARGET_DRIFT}
-    assert len(codes) == 15
+             purge.REFUSE_JOURNAL_UNUSABLE, purge.REFUSE_CENSUS_NOT_CLEAN,
+             purge.REFUSE_CENSUS_UNREADABLE, purge.REFUSE_TARGET_DRIFT,
+             purge.REFUSE_ARMED_EVIDENCE_STALE, purge.REFUSE_NO_APPROVAL,
+             purge.REFUSE_PARTIAL_SWEEP}
+    assert len(codes) == 20
     assert code in codes
 
 
@@ -370,9 +435,10 @@ def test_execute_refuses_a_restore_proof_that_proves_nothing():
                     {"scratch_session": "s1", "served_from_record": False},
                     {"scratch_session": "other", "served_from_record": True}):
         code, _ = purge.evaluate_gate(
-            plan=plan, live_report=live, armed=True,
-            restore_proof=garbage, confirm_digest=plan["plan_digest"],
-            target_note="test target")
+            plan=plan, live_report=live, health=_health(),
+            restore_proof=garbage, approval=_approval(plan["plan_digest"]),
+            confirm_digest=plan["plan_digest"], target_note="test target",
+            live_target=_target())
         assert code in (purge.REFUSE_NO_RESTORE_PROOF,
                         purge.REFUSE_RESTORE_PROOF_STALE), garbage
 

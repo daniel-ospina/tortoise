@@ -230,6 +230,7 @@ import json
 import os
 import re
 import struct
+from collections.abc import Iterable
 from pathlib import Path
 
 #: The all-decimal suffix rule (`sdk._capture_turn_ids` — `isdecimal`, never
@@ -503,8 +504,9 @@ def read_graph_turns(uri: str | None, db_path: str | None,
 
 
 def read_record_turns(record_dsn: str, org_id: str,
-                      graph_id: str) -> dict[str, dict]:
-    """The record leg: every turn row for the tenant, grouped by session.
+                      graph_id: str,
+                      node_keys: Iterable[str] | None = None) -> dict[str, dict]:
+    """The record leg: turn rows for the tenant, keyed by `node_key`.
 
     The connection goes through the repo's own doors — ``record_serve.
     open_record`` (bounded, statement_timeout) then ``record_projection.
@@ -512,6 +514,12 @@ def read_record_turns(record_dsn: str, org_id: str,
     REFUSES a role that can bypass RLS). An unscoped read is the #10024 P0:
     it returns zero rows and would certify vacuously; this leg cannot take
     that shape — the scope either holds or the census exits 3.
+
+    ``node_keys`` narrows the read to an exact key set, and exists so a
+    destructive caller can re-verify a SESSION's rows immediately before it
+    deletes that session (#10483 review, P0 TOCTOU) **through this leg**
+    rather than through a second statement of the record query. `None` (the
+    census's own call) reads the whole tenant, unchanged.
     """
     try:
         import psycopg2  # noqa: F401 - availability probe, record's own driver
@@ -533,9 +541,18 @@ def read_record_turns(record_dsn: str, org_id: str,
         raise CensusError(
             f"the record could not be opened ({type(exc).__name__}: {exc}) — "
             "an absence is NOT established") from exc
+    sql, params = _RECORD_TURNS_SQL, (org_id, graph_id)
+    if node_keys is not None:
+        keys = [str(k) for k in node_keys]
+        if not keys:
+            # An EMPTY key set is an empty read — never a whole-tenant read
+            # that a caller could mistake for "nothing was asked".
+            return {"rows_by_key": {}, "non_turn_shaped": 0}
+        sql = _RECORD_TURNS_SQL + " AND node_key = ANY(%s)"
+        params = (org_id, graph_id, keys)
     try:
         cursor = record_projection.scope_connection(conn, org_id)
-        cursor.execute(_RECORD_TURNS_SQL, (org_id, graph_id))
+        cursor.execute(sql, params)
         columns = [d[0] for d in cursor.description]
         rows = cursor.fetchall()
     except Exception as exc:
