@@ -478,65 +478,102 @@ mechanisms:
     declared_in:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §7, the narrower-than-it-looks carve-out (#2453)
       - docs/architecture/STORAGE-ARCHITECTURE.md       # §7, the two-class retain table
-    state: not-implemented
+    state: implemented
     tracking_issue: 10360
+    code:
+      - tortoise/extractor_v2.py
+    tests:
+      - tests/test_state_value_verbatim_10360.py
+    symbols:
+      - _value_slot_divergence
+      - _refuse_rewritten_value
+      - _value_slots
     note: >-
-      The MECHANISM is the guarantee: a state value or a decision-relevant
-      operational value (a measurement, deadline, threshold/TTL, version or
-      count) survives extraction VERBATIM, so any mechanical filter must carry
-      the carve-out rather than drop it. ⚠️ The state is `not-implemented` on
-      purpose, and naming the halves is the whole point of the row:
-      WHAT EXISTS — the prompt-side carve-out, on EVERY path that builds a
-      prompt. `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered
-      into S1 (`_granularity_text`), S2/S4 (`_render_master_core_only`,
-      `_render_master_verbose`) and — since `#9775` — S2/S4 compact
-      (`_render_master_compact`), which appends it and the user-personal-state
-      vocabulary it names UNCONDITIONALLY, OUTSIDE its `if story:` gate: the
+      WHAT IS NOW MECHANICAL (both halves, and neither is prompt text):
+      (1) A NON-VERBATIM VALUE IS NOT SILENTLY WRITTEN — `_refuse_rewritten_value`
+      is called on `execute_embed`'s S1/S2 model path, where the model authors
+      the quote, and a point whose own verbatim `quote` holds a DIFFERENT value
+      in the SAME slot is not written. ⚠️ That is not RETENTION: a refused point
+      loses its value entirely, so what is enforced is "the graph never records
+      a rewritten value as verbatim", not "every value survives". ⛔ It is
+      deliberately NOT wired at the S5 minted-endpoint site: there `quote` is
+      `content[:200]` — the point's OWN text — so a rewrite is impossible by
+      construction and the only reachable divergence would be that site's own
+      clamp, i.e. a false accusation. S5 would need a rule against the resolved
+      TURN text, a different rule with a weaker precision profile: a follow-up. That is the shape of a rewrite, which the
+      carve-out forbids outright ("never round, paraphrase, or label them");
+      the refusal is on the POINT, never on the offsets — withholding only the
+      span leaves the rounded value in the graph with the corrected value one
+      `find` away. The refusal is REPORTED with both values, so the rewrite is
+      recoverable from the run.
+      (2) ONE classifier, the production one: `_value_slots` reads
+      `_value_bindings` (the E5/E7 contradiction engine, live) and adds no
+      second value CLASSIFIER — the P2 that killed the previous attempt at this
+      row.
+      THE DISCRIMINATOR — how the rule tells a droppable identifier from a
+      retainable state value: it never judges identifiers at all. It judges
+      VALUES, over the engine's own bindings, in three tolerances (#10360 lane
+      record): value identity, not string identity — a numeric core with its
+      SIGN and its UNIT kept, so ``1200``/``1,200``, ``4.20``/``4.2``,
+      ``20%``/``20 percent`` and ``800ms``/``800 milliseconds`` are one value
+      while ``20 minutes``/``20 hours`` is still a rewrite; clocks and ISO dates
+      are OUTSIDE the judged set (a strict containment rule refuses 16 of the
+      101 truthful census spans and all 16 are normalised FORMS, catching zero
+      rewrites); and a value is judged only where both sides bind the SAME
+      anchor sequence — a quote that fragments, drops or reorders a value fails
+      OPEN, because a different slot layout is not a contradiction.
+      ⚠️ EVERY tolerance above is measured against OVER-REFUSAL on a truthful
+      corpus; the UNDER-detection direction is unmeasured, which is why the
+      residual below is stated rather than implied. `value_gate.identifier_only` (#4899) is untouched: this row
+      moving does not re-admit one identifier that predicate drops, and
+      `tests/test_state_value_verbatim_10360.py` asserts both halves together.
+      ⛔ WHAT IS STILL NOT ENFORCED — read this before improving a number:
+      (a) a value the model never EMITS is unrecoverable by any rule in this
+      module; the capstone E2a class (1 of 14, bar >= 13) is that class, and it
+      is UPSTREAM of selection (#9775); (b) 50 of the 112 value-bearing points
+      in the committed census receipts fail open on slot layout, so the rule
+      judges 62 and refuses 0 today — re-derived by
+      `tests/test_state_value_verbatim_10360.py::test_the_residual_is_measured_on_the_committed_census_corpus`
+      from the sealed receipts (produced, not quoted); (b2) STRICT VERBATIM
+      SURVIVAL stays SHORT of target and is NOT re-measured here: 38/77 = 49.4%
+      on the flags-on arm against the 49/90 = 54.4% committed baseline (`#5064`
+      comment 2026-10-13, `#7949` E2) — the figure that would move is the E2
+      arm's, and this lane ran no LLM arm. `UNMEASURED(<an E2 LLM arm run>)`. (c) a rewritten CLOCK or ISO date is not caught (form is
+      excluded by design); (d) the rule refuses, it does not REPAIR — retaining
+      by substituting the verbatim value into the claim is the follow-up.
+      THE RENDER HALF is unchanged and stays pinned where #9775 left it.
+      `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered into S1
+      (`_granularity_text`), S2/S4 (`_render_master_core_only`,
+      `_render_master_verbose`) and S2/S4 compact (`_render_master_compact`),
+      which appends it UNCONDITIONALLY, OUTSIDE its `if story:` gate: the
       compaction rule may drop HINTS (the matched-domain granularity block, the
-      story-selected pack sections), never the guarantee. That row used to record
-      an ABSENCE here; it now records the rule that keeps the absence from coming
-      back. `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
-      `_s2s4_rules()` — never S1, never a master render. Pinned, in five places
-      because each catches a different insertion: never-S1 by
+      story-selected pack sections), never the guarantee. `VALUE_FIDELITY_RULE`
+      rides the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` — never S1,
+      never a master render. Pinned, in five places because each catches a
+      different insertion: never-S1 by
       `tests/test_extractor_v4_citation_rot.py`; the core-only render
       byte-for-byte by `tests/test_extractor_v2.py`; the `VALUE_FIDELITY_RULE`
       text absent from all three renders by
-      `tests/test_v4_declared_mechanisms.py::test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render`
-      (which also asserts the rule still rides `_s2s4_rules()`, so the absence
-      cannot pass by vacancy — measured before that test: appending the rule to
-      `_render_master_verbose`, the DEFAULT render, shipped a second copy of one
-      instruction inside one prompt with every gate green); and — since `#9775` —
-      the carve-out PRESENT, whole, on every render path, the vocabulary it names
-      on all three master renders (S1 renders granularity, never the master
-      list), and through both dispatch entry points, by
+      `tests/test_v4_declared_mechanisms.py::test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render`;
+      and the carve-out PRESENT, whole, on every render path, the vocabulary it
+      names on all three master renders (S1 renders granularity, never the
+      master list), and through both dispatch entry points, by
       `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires`
       together with
       `tests/test_v4_declared_mechanisms.py::test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly`
       — the render-path pin over three story shapes (matched, `None`, unmatched)
       precisely because a carve-out appended INSIDE the story gate passes the
       matched case, and the dispatcher pin because that one never reaches a
-      dispatcher: it is the half that passes `core_only=False` EXPLICITLY (the
-      default resolves from `TORTOISE_CLASSIFY_LATER`, and with that flag on the
-      dispatcher half contributed NOTHING — measured), that proves the COMPACT
-      branch is the one rendered (`PACK KINDS` plus the compact master header),
-      and that asserts `count(...) == 1` on the real S2/S4 path. The mutation the
-      render-path pin is written to catch is the story-gated variant, not
-      deletion alone.
-      ⚠️ Pinned, and NOT read off a comment: the `SEAMS:` comment above
-      `SHORT_SESSION_FACT_RULE` belongs to a different constant and names S1 as
-      one of ITS seams, so citing it as authority for value-fidelity's never-S1
-      would say the opposite of what the row claims.
-      ⚠️ PRESENT-IN-A-PROMPT IS NOT THE GUARANTEE, and this row is where the
-      distinction is kept. The FILTER side is mechanical
-      (`tortoise/value_gate.py::identifier_only` is the SELECTION predicate that
-      drops identifier-like residues, `#4899`, and the EMBED gate reuses the same
-      rule set — row `embed_gate`), but nothing enforces RETENTION. VERBATIM
-      SURVIVAL is prompt-only (`#2453`'s own closing records this; the enforcement
-      half is `#10360`) and it is measured SHORT: 38/77 = 49.4% strict verbatim
-      survival on the flags-on arm against a 49/90 = 54.4% committed baseline
-      (`#5064` comment 2026-10-13, `#7949` E2). A row marked `implemented` would
-      make the prompt text read as the guarantee — the exact
-      declared-implies-present defect this registry exists to catch.
+      dispatcher: it is the half that passes `core_only=False` EXPLICITLY, that
+      proves the COMPACT branch is the one rendered (`PACK KINDS` plus the
+      compact master header), and that asserts `count(...) == 1` on the real
+      S2/S4 path.
+      ⚠️ PRESENT-IN-A-PROMPT IS STILL NOT THE GUARANTEE, which is why this row
+      separates what the write path now REFUSES from what it cannot see. The
+      prompt half makes the guarantee *uniformly declared*;
+      `_refuse_rewritten_value` makes a rewritten value *unreachable*; and the
+      residual (a) above is STATED rather than absorbed.
+
 
   - id: atomic_point_write
     name: "an ATOMIC point write — §4.2's FOURTH precondition for the against-store exact dedup"

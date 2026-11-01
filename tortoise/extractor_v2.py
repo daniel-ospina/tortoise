@@ -4041,6 +4041,220 @@ def _carries_value(*texts: object) -> bool:
     return any(_value_bindings(str(t)) for t in texts if t)
 
 
+# ── #10360: the verbatim state-value guarantee, made mechanical ─────────────
+
+#: The decimal shape a value token's numeric CORE is read with. Thousands
+#: separators are stripped before it is applied, so ``1,200`` and ``1200`` are
+#: one value; a trailing fractional zero is dropped by ``_value_core``, so
+#: ``4.20`` and ``4.2`` are one value. This is the VALUE-identity reading of
+#: "verbatim": the number the source recorded, not the bytes it was written
+#: with. Two competing readings exist and nothing recorded resolves them
+#: (#10360 §1): TEXT identity would make the guarantee unsatisfiable, because
+#: the pipeline *normatively* normalises form (``2026-10-09`` from "yesterday",
+#: ``03:00`` from "3am"), so a form-only difference is reported as a rewrite it
+#: is not. VALUE identity is the reading this check implements, and its
+#: tolerance bound is MEASURED (see ``_value_slot_divergence``).
+_VALUE_DECIMALS = re.compile(r"\d+(?:\.\d+)?")
+
+#: An ISO date. The pipeline derives these from "yesterday" / "November 9"
+#: (normatively), so the FORM is not a value identity the guarantee can judge —
+#: a date slot is outside the judged set, exactly like a clock.
+_ISO_DATE_TOKEN = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _value_form_outside_judged(token: str) -> bool:
+    """True when a value token's FORM, not its value, is what differs.
+
+    Clocks and ISO dates are excluded from the judged set DELIBERATELY, and the
+    exclusion is measured rather than argued: a strict "is every content value
+    present in the source" rule refuses 16 of the 101 truthful census spans and
+    **every one** of the 16 is a normalised form (``03:00``/``3am``,
+    ``2026-10-09``/"yesterday", ``2026-11-02``/"November 2") while catching
+    zero rewrites (#10360 lane record, §4). The clock exclusion reads the forms
+    ``_canonicalise_clocks`` produces (``clocka0300``, ``meridiem-pm``) as well
+    as a raw ``9:30``, so a value the ONE engine already canonicalised is not
+    re-judged by a second opinion here.
+    """
+    t = str(token or "").lower()
+    return (t.startswith("clock") or t.startswith("meridiem-")
+            or ":" in t or bool(_ISO_DATE_TOKEN.search(t)))
+
+
+#: Spelling equivalents of one UNIT — the tolerance is SPELLING, never the
+#: unit itself. ``800ms``/``800 milliseconds`` is one value; ``20
+#: minutes``/``20 hours`` is NOT, and the review finding that earned this table
+#: is that erasing the suffix accepted a minutes→hours rewrite — the carve-out's
+#: own named class (a threshold/TTL). ``_value_bindings`` already fuses a
+#: unit into the value token (``20minutes``, ``800ms``), so the suffix is
+#: recoverable without a second pass over the text.
+_UNIT_EQUIV = {
+    "ms": "ms", "msec": "ms", "msecs": "ms", "millisecond": "ms",
+    "milliseconds": "ms",
+    "s": "s", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
+    "min": "min", "mins": "min", "minute": "min", "minutes": "min",
+    "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
+    "%": "%", "percent": "%", "pct": "%",
+}
+
+#: A leading-dot decimal: ``.5`` is a legitimate written form of ``0.5``, and
+#: refusing a truthful point over it is the false-accusation direction this rule
+#: must never take (review P2).
+_LEADING_DOT = re.compile(r"(?<![\d.])\.(\d)")
+
+
+def _value_core(token: str) -> tuple[str, str, str | None] | None:
+    """``(sign, numeric core, unit)`` for a value token, or ``None``.
+
+    What is dropped is FORM — thousands separators, a leading currency symbol, a
+    trailing fractional zero, a unit's SPELLING — and what is kept is the value
+    and the things that change it: the numeric core, its SIGN, and its UNIT.
+    The earlier attempt at this issue compared the raw strings and was rejected
+    for refusing truthful points (``1200``/``1,200``, ``4.20``/``4.2``,
+    ``20%``/``20 percent``); erasing the unit in reaction to that would have
+    missed ``20 minutes`` → ``20 hours``, which is the rewrite the carve-out
+    exists to forbid, so the unit is compared as an identity with a spelling
+    table rather than discarded (#10360 review, P2s 3–4).
+    """
+    raw = _LEADING_DOT.sub(r"0.\1", str(token or "").replace(",", ""))
+    runs = _VALUE_DECIMALS.findall(raw)
+    if not runs:
+        return None
+    sign = "-" if raw.lstrip().startswith("-") else ""
+    out: list[str] = []
+    for run in runs:
+        if "." in run:
+            whole, frac = run.split(".", 1)
+            whole = whole.lstrip("0") or "0"
+            frac = frac.rstrip("0")
+            run = whole + ("." + frac if frac else "")
+        else:
+            run = run.lstrip("0") or "0"
+        out.append(run)
+    tail = raw[runs[-1].__len__() + raw.find(runs[-1]):]
+    suffix = re.sub(r"[^a-z%]+", "", tail.lower())
+    return (sign, "/".join(out), _UNIT_EQUIV.get(suffix))
+
+
+def _value_identity_matches(a: tuple[str, str, str | None],
+                            b: tuple[str, str, str | None]) -> bool:
+    """Two value identities agree, allowing ONE side to omit the unit.
+
+    ``800`` and ``800ms`` agree (the unit is written or not), the way a point may
+    distil "800ms" from a source sentence that says "800". A unit that appears on
+    BOTH sides must be the SAME unit (spelling-normalised), so a minutes→hours
+    rewrite does not fold.
+    """
+    if a[0] != b[0] or a[1] != b[1]:
+        return False
+    return a[2] is None or b[2] is None or a[2] == b[2]
+
+
+def _value_slots(text: object) -> tuple[tuple[str, tuple], ...]:
+    """The judgeable (anchor, value-core) slots of ``text``, IN ORDER.
+
+    The anchor is ``_value_bindings``'s own binding anchor — the content token
+    the value sits beside — so this reads the ONE production value engine and
+    adds NO second value CLASSIFIER (the P2 that killed the previous attempt: a
+    new ``_REWRITE_QUANTITY_RE`` beside the engine's vocabulary). Values whose
+    form is outside the judged set (``_value_form_outside_judged``) and tokens
+    with no numeric core are skipped, so the result is what the guarantee can
+    judge mechanically.
+    """
+    out: list[tuple[str, tuple]] = []
+    for anchor, value in _value_bindings(str(text or "")):
+        if _value_form_outside_judged(value):
+            continue
+        core = _value_core(value)
+        if core is not None:
+            out.append((str(anchor), core))
+    return tuple(out)
+
+
+def _value_slot_divergence(content: object, quote: object,
+                           ) -> tuple[tuple[str, str, str], ...]:
+    """#10360: the slots where the point's value CONTRADICTS its own quote.
+
+    Returns ``(anchor, content_value, quote_value)`` for each slot whose value
+    differs, and ``()`` — the fail-open answer — everywhere else.
+
+    ⛔ **The discriminator, and why it is not a plain containment test.** A
+    point and its quote do not have to carry the SAME values: the quote may be
+    the context sentence, and the point may distil in a value the quote does
+    not hold at all (measured: ``"forty round-trips blew up the p95"`` quoted
+    as ``"the calls blew up the p95"``). Comparing value BAGS refuses those
+    truthful points. So the two sides are compared SLOT BY SLOT, and a value is
+    judged only when the two sides bind the SAME anchor sequence — the point
+    says a value in the SAME SLOT as the quote, and states a different one.
+    That is the shape of a REWRITE (``"the p95 hit 4.0 seconds"`` against
+    ``"the p95 hit 4.2 seconds"``), and a rewrite is the one thing the
+    carve-out forbids outright ("never round, paraphrase, or label them").
+
+    Measured over the committed census receipts (``#10360`` §5): **0 refusals
+    on 62 judged value-bearing points of 112** — the other 50 fail open because
+    their quote binds a different anchor sequence (a fragment, a dropped value,
+    or a reordered pair). Precision over recall on purpose: every false
+    accusation the previous attempt was rejected for is in the fail-open
+    direction, and a refusal here withholds a durable memory.
+    """
+    # Cheap early-out first: a same-slot contradiction requires the QUOTE to
+    # carry a value at all, and most points carry none (review P3).
+    if not _carries_value(quote):
+        return ()
+    content_slots = _value_slots(content)
+    quote_slots = _value_slots(quote)
+    if not content_slots or not quote_slots:
+        return ()
+    if tuple(a for a, _ in content_slots) != tuple(a for a, _ in quote_slots):
+        return ()  # a different slot layout is not a same-slot contradiction
+    return tuple(
+        (anchor, _value_core_str(cv), _value_core_str(qv))
+        for (anchor, cv), (_, qv) in zip(content_slots, quote_slots)
+        if not _value_identity_matches(cv, qv)
+    )
+
+
+def _value_core_str(identity: tuple) -> str:
+    """The readable form of a ``_value_core`` identity, for the warning."""
+    sign, core, unit = identity
+    return f"{sign}{core}{unit or ''}"
+
+
+def _refuse_rewritten_value(content: object, quote: object, *,
+                            warnings: list[str]) -> bool:
+    """#10360: True when this point must NOT be written — its value was rewritten.
+
+    The ENFORCEMENT half of the carve-out, in the write path rather than in
+    prompt text. Called at every emit site that can put a value-bearing point
+    into the payload (the S1/S2 model path and the S5 minted-endpoint path), so
+    the guarantee is a fact about the write, not about the instruction.
+
+    ⛔ **What this rule CANNOT do, stated so the row cannot overclaim.** It
+    cannot drop a state value that IS carried verbatim: it fires only when the
+    point's own quote holds a DIFFERENT value in the same slot, i.e. only on a
+    value that is not the verbatim one. And it cannot RECOVER a value the model
+    never emitted — that loss is upstream of every mechanical rule in this
+    module (the capstone E2a class, 1 of 14, is that class), which is why the
+    registry row keeps that residual named.
+
+    The refusal is deliberate and REPORTED: the warning quotes both values and
+    the verbatim one, so the rewrite is recoverable from the run without the
+    original session.
+    """
+    diverged = _value_slot_divergence(content, quote)
+    if not diverged:
+        return False
+    shown = "; ".join(
+        f"{anchor or '<start>'}: point says {cv!r}, quote says {qv!r}"
+        for anchor, cv, qv in diverged[:3]
+    )
+    warnings.append(
+        f"value-bearing point '{str(content)[:60]}' REWRITES its own verbatim "
+        f"quote — {shown} — refused (#10360: the carve-out carries the value "
+        "verbatim, never rounded or paraphrased)"
+    )
+    return True
+
+
 def _turn_text_by_index(edus: list[dict] | None, index: int) -> str:
     """The raw text of the transcript turn carrying ``index`` ("" when the
     turn does not exist). Resolved by INDEX VALUE, not list position — see
@@ -7943,6 +8157,24 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             warnings.append(f"point '{content[:60]}' has {len(sents)} sentences — "
                             "E3 atomicity expects ONE claim per point")
         quote = str(p.get("quote") or "").strip()[:_MAX_QUOTE]
+        # #10360: the carve-out's ENFORCEMENT half. A value-bearing point whose
+        # own verbatim quote holds a DIFFERENT value in the same slot is a
+        # rewritten value, and writing it puts a non-verbatim value in the
+        # graph — refuse the POINT (never just the offsets: withholding the
+        # address leaves the value wrong and the address one `find` away).
+        #
+        # ⛔ Judged on the UNCLAMPED texts. A value that straddles
+        # `_MAX_QUOTE`/`_MAX_CONTENT` reads as a DIFFERENT value once cut, and
+        # refusing a truthful point over this module's own truncation is the
+        # false-accusation direction this rule must never take (review P1).
+        # ⛔ And it runs HERE, before `classify_consolidation` and before any
+        # supersede record is collected: a refusal that fired later left
+        # `supersessions` naming a pid that is never written, which the commit
+        # layer then reported as a failed supersede (review P2).
+        if _refuse_rewritten_value(str(p.get("content") or ""),
+                                   str(p.get("quote") or ""),
+                                   warnings=warnings):
+            continue
         search_keys = _clean_search_keys(p.get("search_keys"), warnings,
                                          f"point '{content[:60]}'")
         # E7 (D1): the consolidation decision vs the S3-retrieved priors — pure
@@ -8367,6 +8599,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                         f"value-bearing minted endpoint ({where}) resolved to "
                         f"turn {_turn} without a verbatim anchor — it carries "
                         "no source span (the value cannot be re-read verbatim)")
+                # ⛔ #10360 is NOT enforced here, deliberately. `quote` at
+                # this site is `content[:200]` (the point's OWN text), so there
+                # is no model-authored excerpt to diverge from — a rewrite is
+                # impossible by construction and the only reachable divergence
+                # would be this site's own clamp, i.e. a false accusation
+                # (review P2). S5 has no independent quote; a rule here must
+                # compare against the resolved turn text, which is a different
+                # rule with a weaker precision profile — a follow-up, not a
+                # claim in this row.
         payload_points.append(pt_entry)
         point_ids[n] = pid
         # `_resolve` probes the UNTRUNCATED ref, so register that key too when
