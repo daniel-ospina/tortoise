@@ -4440,6 +4440,14 @@ surfaces:
   # implementation (extractor_v2.fold_allowed), so the file is registered
   # alongside test_consolidation_4way.py, which guards the same classifier.
   - test_never_across_fold_5080.py
+  # #5329: the vocabulary-gap census on the SAME seam as the two files below —
+  # `extractor_v2._boundary` is the one place every fold/supersede decision
+  # passes through, and the census counts the one-sided tokens a FOLD absorbed.
+  # Registered `core` for the same reason as its siblings: `extractor_v2.py` is
+  # not a SHARED_MODULE, so a diff touching only it selects `core` — and
+  # unregistered, this file is ALSO the `ci_selection.py --integrity` drift the
+  # `manifest-integrity` required check reds on (#10475).
+  - test_vocabulary_gap_census_5329.py
   # #5006: the attachments half of the same D12/O4 ruling — a fold that would
   # drop an entity only the candidate names is refused. Registered `core` beside
   # `test_never_across_fold_5080.py` (same classifier, same fold asymmetry):
