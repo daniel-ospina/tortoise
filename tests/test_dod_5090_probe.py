@@ -20,6 +20,9 @@ claims:
 | `test_the_census_refuses_to_report_zero_for_an_unreadable_store` | the 2026-09-24 error (`stored`-only / silent 0) | a store that could not be read is reported as `0` anything |
 | `test_an_unmeasurable_run_exits_two` | the documented exit-code contract | a run that could not measure exits 0 or 1, so a caller reads "could not measure" as "a row was NOT MET" |
 | `test_the_instrument_is_selected_by_its_own_subjects` | the pins above actually RUN in CI | a subject diff stops selecting this file — a falsifier that never executes |
+| `test_two_package_inits_keep_distinct_writer_identities` | the writer map's exhaustiveness | two writers in one package collapse into one key, so a label bullet 2 compares vanishes |
+| `test_a_duplicate_writer_identity_holds_bullet_two_at_partial` | bullet 2's honesty | a writer whose label could not be resolved stops holding the row, while bullet 1 still reports the same hole |
+| `test_the_tool_parses_under_the_floor` | the `#5128` guard is PROTECTIVE, not documentary | 3.12-only syntax (PEP 701) creeps back in, so the file dies in the tokenizer before its own guard can refuse |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
 measurement-only; the instrument is read-only and its pin must be too.
@@ -27,7 +30,10 @@ measurement-only; the instrument is read-only and its pin must be too.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -139,9 +145,11 @@ def test_a_second_pattern_list_in_the_embed_gate_reads_as_drift(tmp_path, monkey
 def test_every_embedding_write_path_reaches_the_gate_seam():
     """#5008's seam is reached by the entity writers — not by the raw primitive."""
     seams = probe._write_seams_that_embed()
-    for writer in ("entities::_upsert_point_props", "entities::_upsert_subject",
-                   "entities::_upsert_object", "entities::_upsert_document",
-                   "entities::_upsert_event"):
+    for writer in ("tortoise.projection.entities::_upsert_point_props",
+                   "tortoise.projection.entities::_upsert_subject",
+                   "tortoise.projection.entities::_upsert_object",
+                   "tortoise.projection.entities::_upsert_document",
+                   "tortoise.projection.entities::_upsert_event"):
         assert writer in seams, (
             f"{writer} embeds a written row without reaching encode_for_row — "
             f"the ungated-primitive state #5008 closed. Measured seams: {sorted(seams)}"
@@ -312,7 +320,7 @@ def test_a_write_path_outside_the_gate_is_counted(tmp_path, monkeypatch):
         "    return emb\n", encoding="utf-8")
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
     writers = probe.embedding_writers()
-    assert writers["writer::main"]["kind"] == "ungated", writers
+    assert writers["tortoise.writer::main"]["kind"] == "ungated", writers
 
 
 def test_the_predicate_count_searches_the_embed_path_not_a_whitelist(
@@ -445,7 +453,9 @@ def test_the_census_measures_the_graph_its_row_NAMES(monkeypatch):
 
 
 def test_an_unparseable_module_holds_the_rows(tmp_path, monkeypatch):
-    """A tree that will not fully parse must not read as clean (review P2-1)."""
+    """A tree that will not fully parse must not read as clean (review P2-1),
+    and more than one of them must not collapse into a single opaque entry
+    (review round 5, P3)."""
     (tmp_path / "tortoise").mkdir()
     (tmp_path / "tortoise" / "embeddings.py").write_text(
         "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
@@ -456,8 +466,12 @@ def test_an_unparseable_module_holds_the_rows(tmp_path, monkeypatch):
         encoding="utf-8")
     (tmp_path / "tortoise" / "broken.py").write_text(
         "def oops(:\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "broken_two.py").write_text(
+        "def oops_again(:\n", encoding="utf-8")
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
-    assert probe.unparsed_modules() == ["UNPARSEABLE"], probe.unparsed_modules()
+    assert probe.unparsed_modules() == [
+        "tortoise/broken.py", "tortoise/broken_two.py"
+    ], probe.unparsed_modules()
     assert probe.score_path_bullet().verdict == "PARTIAL"
 
 
@@ -621,3 +635,102 @@ def test_served_labels_are_the_RUNNERS_declaration():
 
     assert probe.served_labels() == {entity_label(t) for t in VALID_ENTITY_TYPES}
 
+
+
+# ── Writer identity, and the guard that has to be able to RUN ───────────────
+
+
+def test_two_package_inits_keep_distinct_writer_identities(tmp_path, monkeypatch):
+    """`path.stem` is a BASENAME: every package `__init__.py` collapsed to it.
+
+    Two writers in two packages — one per `__init__.py` — used to share the key
+    `__init__::_upsert_point`, so the second became `duplicate`, which
+    `written_labels()` excluded. The map reported ONE writer and bullet 2
+    compared a label set with both writers missing from it (review round 5, P2).
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    for pkg, label in (("alpha", "Point"), ("beta", "Object")):
+        (tmp_path / "tortoise" / pkg).mkdir()
+        (tmp_path / "tortoise" / pkg / "__init__.py").write_text(
+            "from ..embeddings import encode_for_row\n"
+            "def _upsert_point(ev):\n"
+            "    vec = encode_for_row('x', None)\n"
+            f"    return 'MERGE (n:{label} {{id: 1}}) SET n.embedding = $vec'\n",
+            encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    writers = probe.embedding_writers()
+    assert "tortoise.alpha::_upsert_point" in writers, sorted(writers)
+    assert "tortoise.beta::_upsert_point" in writers, sorted(writers)
+    assert not [k for k in writers if k.startswith("__init__::")], sorted(writers)
+    written = probe.written_labels(writers)
+    assert written["tortoise.alpha::_upsert_point"] == "Point", written
+    assert written["tortoise.beta::_upsert_point"] == "Object", written
+
+
+def test_a_duplicate_writer_identity_holds_bullet_two_at_partial(monkeypatch):
+    """Bullet 2 must not read `MET` over a writer whose label it lost.
+
+    A `duplicate` entry carries no label, so including it as `UNKNOWN` is the
+    only honest option — excluding it made the two rows disagree about the same
+    hole: bullet 1 held `PARTIAL` on `duplicates` while bullet 2 said `MET`
+    (review round 5, P2).
+    """
+    writers = {
+        "tortoise.x::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "Point",
+        },
+        "tortoise.y::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/y.py:2",
+            "kind": "duplicate", "label": "UNKNOWN(duplicate writer name)",
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()   # every label IS served here
+    assert row.verdict == "PARTIAL", row.observed
+    assert any("duplicate writer identities" in n for n in row.notes), row.notes
+    assert probe.written_labels()["tortoise.y::_upsert_point"].startswith("UNKNOWN")
+
+
+def _pre_312_interpreter() -> str | None:
+    """A real `python3` older than the floor, or None (as the guard suite does)."""
+    for candidate in ("/usr/bin/python3", shutil.which("python3")):
+        if not candidate or not Path(candidate).exists():
+            continue
+        run = subprocess.run(
+            [candidate, "-c",
+             "import sys; sys.exit(0 if sys.version_info < (3, 12) else 1)"],
+            capture_output=True, text=True,
+        )
+        if run.returncode == 0:
+            return candidate
+    return None
+
+
+def test_the_tool_parses_under_the_floor():
+    """`#5128`'s guard is only worth having if the file can REACH it.
+
+    `tests/test_entry_point_python_guard.py` requires the refusal to be the
+    first statement, which is worthless for a file the older interpreter cannot
+    tokenize: nested same-quote f-strings are PEP 701 **syntax** (3.12), so the
+    module dies at `f"…{d['at']}…"` before the guard runs. This pins the
+    remedy, not the guard.
+
+    Declared bound: a box with no pre-3.12 interpreter SKIPS visibly rather
+    than passing.
+    """
+    old = _pre_312_interpreter()
+    if old is None:
+        pytest.skip("no <3.12 interpreter on this box: cannot re-derive the parse")
+    run = subprocess.run(
+        [old, "-c", "import ast,sys; ast.parse(open(sys.argv[1]).read())",
+         str(Path(probe.__file__))],
+        capture_output=True, text=True,
+    )
+    assert run.returncode == 0, (
+        f"{old} cannot parse {probe.__file__}, so its `#5128` guard never runs "
+        f"and the refusal is documentary (use different quote characters):\n"
+        f"{run.stderr}"
+    )

@@ -234,7 +234,8 @@ def embedding_writers() -> dict[str, dict]:
     ``gated`` (reaches ``encode_for_row``), ``ungated`` (produces a vector the
     gate never sees) or ``producer`` (a function that computes a vector a
     DIFFERENT function writes — `encode_for_store`'s read/backfill callers, and
-    the journal stampers).
+    the journal stampers). ``writer`` is ``<dotted module>::<function>``, so two
+    writers in different modules can never share a key.
 
     **The label is derived from the Cypher, not from the writer's name.** That
     matters: a name-derived map draws from the same small vocabulary as the
@@ -252,6 +253,28 @@ def embedding_writers() -> dict[str, dict]:
     return _embedding_writers(REPO_ROOT)
 
 
+def _module_name(path: Path, root: Path) -> str:
+    """The DOTTED module path a file is imported as — `tortoise.projection`.
+
+    ⛔ NOT `path.stem`. A stem is the BASENAME, so every package's
+    `__init__.py` collapses into `__init__` (8 of them under `tortoise/` today),
+    as do `tortoise/monitoring.py` / `tortoise/shared_state/monitoring.py` and
+    the two `selfhost.py`. Python's own module identity is the dotted path, and
+    a package's module **is** the package: `__init__.py` is *implicitly
+    executed, and the objects it defines are bound to names in the package's
+    namespace* (docs, the import system §5.2).
+
+    The collapse was not cosmetic: the SECOND writer under a shared key became
+    `duplicate`, which `written_labels()` excluded, so a writer whose label
+    could not be resolved silently vanished from the set bullet 2 compares
+    while bullet 2 still read `MET` (this tool's own review, P2).
+    """
+    parts = list(path.relative_to(root).with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
 @functools.lru_cache(maxsize=8)
 def _embedding_writers(root: Path) -> dict[str, dict]:
     writers: dict[str, dict] = {}
@@ -260,11 +283,17 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
     for path in sorted((root / "tortoise").rglob("*.py")):
         if path == seam_module:
             continue  # the primitives themselves are not write paths
+        rel = path.relative_to(root).as_posix()
+        module = _module_name(path, root)
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):
-            writers.setdefault("UNPARSEABLE", {
-                "callee": "", "at": str(path.relative_to(REPO_ROOT)), "kind": "unparsed",
+            # ⛔ Keyed by the PATH, not by one shared sentinel: N modules that
+            # will not parse used to collapse into a single `UNPARSEABLE`
+            # entry carrying ONE path, so the row named a hole it could not
+            # locate and the rest were unreported (this tool's own review, P3).
+            writers.setdefault(f"UNPARSEABLE:{rel}", {
+                "callee": "", "at": rel, "kind": "unparsed",
                 "label": "UNKNOWN",
             })
             continue
@@ -298,9 +327,9 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # (review round 5, P2 — measured: 17 functions carry an
                 # embedding-write clause, 9 of them were absent from this map).
                 if kind is None and _EMBED_WRITE.search(source):
-                    writers[f"{path.stem}::{node.name}"] = {
+                    writers[f"{module}::{node.name}"] = {
                         "callee": "unrecognised",
-                        "at": f"{path.relative_to(root)}:{node.lineno}",
+                        "at": f"{rel}:{node.lineno}",
                         "kind": "unresolved_write",
                         "label": "UNKNOWN(unresolved producer)",
                     }
@@ -314,8 +343,8 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # Two labels in one writer's Cypher: picking one would report a
                 # stored label as covered while the other may be unserved.
                 label = "UNKNOWN(two labels: " + ",".join(sorted(labels)) + ")"
-                writers[f"{path.stem}::{node.name}"] = {
-                    "callee": callee, "at": f"{path.relative_to(root)}:{node.lineno}",
+                writers[f"{module}::{node.name}"] = {
+                    "callee": callee, "at": f"{rel}:{node.lineno}",
                     "kind": kind, "label": label,
                 }
                 continue
@@ -331,23 +360,25 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # `module::name` key — so a same-named writer in another module
                 # cannot silently inherit it.
                 label = WRITER_LABEL_OVERRIDES[node.name]
-                overridden.add(f"{path.stem}::{node.name}")
-            # ⛔ Keyed by `module::name`: a bare name merges two writers across
-            # modules (last-path-wins, no sentinel) and silently SHRINKS both
-            # rows — `main` is exactly such a name, and it is the only ungated
-            # entry today (review round 5, P2).
-            key = f"{path.stem}::{node.name}"
+                overridden.add(f"{module}::{node.name}")
+            # ⛔ Keyed by the DOTTED module path, not by the file's stem: a bare
+            # name merges two writers across modules (last-path-wins, no
+            # sentinel) and silently SHRINKS both rows — `main` is exactly such
+            # a name, and it is the only ungated entry today. A STEM is not a
+            # module: it collapses every package `__init__.py` into `__init__`
+            # (review round 5, P2).
+            key = f"{module}::{node.name}"
             if key in writers:
                 writers[key] = {
                     "callee": callee,
-                    "at": f"{path.relative_to(root)}:{node.lineno}",
+                    "at": f"{rel}:{node.lineno}",
                     "kind": "duplicate",
                     "label": "UNKNOWN(duplicate writer name)",
                 }
                 continue
             writers[key] = {
                 "callee": callee,
-                "at": f"{path.relative_to(root)}:{node.lineno}",
+                "at": f"{rel}:{node.lineno}",
                 "kind": kind,
                 "label": label,
             }
@@ -543,18 +574,27 @@ def written_labels(writers: dict[str, dict] | None = None) -> dict[str, str]:
     # whose label this instrument could not resolve, so it must hold the row —
     # excluding it made the row claim `written ⊆ served` over a set that left
     # out the very paths its sibling row flags (this tool's own review, P1).
+    # `duplicate` is INCLUDED for the same reason: the later definition
+    # overwrote the earlier one's label, so that label is UNRESOLVED — leaving
+    # it out made bullet 2 read `MET` while bullet 1 held `PARTIAL` on the same
+    # hole (this tool's own review, P2).
     return {
         w: (d["label"] if d["kind"] in ("gated", "ungated")
-            else "UNKNOWN(unresolved producer)")
+            else ("UNKNOWN(unresolved producer)" if d["kind"] == "unresolved_write"
+                  else "UNKNOWN(duplicate writer name)"))
         for w, d in sorted(writers.items())
-        if d["kind"] in ("gated", "ungated", "unresolved_write")
+        if d["kind"] in ("gated", "ungated", "unresolved_write", "duplicate")
     }
 
 
 def unparsed_modules(writers: dict[str, dict] | None = None) -> list[str]:
-    """Modules whose writers could not be enumerated — a hole, never a zero."""
+    """Modules whose writers could not be enumerated — a hole, never a zero.
+
+    Returns the repo-relative PATHS: one sentinel key for every unparseable
+    module named a hole with no location (this tool's own review, P3).
+    """
     writers = embedding_writers() if writers is None else writers
-    return sorted(w for w, d in writers.items() if d["kind"] == "unparsed")
+    return sorted(d["at"] for d in writers.values() if d["kind"] == "unparsed")
 
 
 def served_labels() -> set[str]:
@@ -576,11 +616,13 @@ def served_labels() -> set[str]:
 
 def score_path_bullet() -> Row:
     """Bullet 2 — every label a write path embeds is one the query path serves."""
-    written = written_labels()
+    writers = embedding_writers()
+    written = written_labels(writers)
     served = served_labels()
     labels = {label for label in written.values() if not label.startswith("UNKNOWN")}
     unknown = {fn: label for fn, label in written.items() if label.startswith("UNKNOWN")}
-    unparsed = unparsed_modules()
+    duplicates = sorted(w for w, d in writers.items() if d["kind"] == "duplicate")
+    unparsed = unparsed_modules(writers)
     orphans = labels - served
     notes = [
         f"written labels: {sorted(labels)}",
@@ -589,6 +631,11 @@ def score_path_bullet() -> Row:
     ]
     if unknown:
         notes.append(f"unresolved writers (hold this row at PARTIAL): {sorted(unknown)}")
+    if duplicates:
+        notes.append(
+            "duplicate writer identities (hold this row at PARTIAL — the later "
+            f"definition overwrote the earlier one's label): {duplicates}"
+        )
     if unparsed:
         notes.append(f"unparseable modules (hold this row at PARTIAL): {unparsed}")
     overridden = sorted(_overridden_writers() & set(written))
@@ -598,8 +645,10 @@ def score_path_bullet() -> Row:
             f"Cypher (reported, as that comment promises): {overridden}"
         )
     # A stored-and-unqueryable class is the bullet's failure; an UNRESOLVED
-    # writer is not proof either way, so it can at most hold the row at PARTIAL.
-    verdict = "NOT MET" if orphans else ("PARTIAL" if (unknown or unparsed) else "MET")
+    # writer (or a collapsed/duplicate identity, or a module that will not
+    # parse) is not proof either way, so it can at most hold the row at PARTIAL.
+    verdict = "NOT MET" if orphans else (
+        "PARTIAL" if (unknown or unparsed or duplicates) else "MET")
     return Row(
         bullet=2,
         text=BULLETS[1],
