@@ -908,7 +908,8 @@ actionlint.yaml config file [runner-label]
 `.github/actionlint.yaml` therefore declares `self-hosted-x64` and `self-hosted-arm64`, spelled in
 full (a `self-hosted-*` glob would swallow the typo that check exists to catch).
 `tests/test_ci_selection.py::test_every_custom_runs_on_label_is_declared_to_actionlint` pins it: any
-new literal custom label in any workflow reds at TEST time instead of on the gate.
+new literal custom label in any workflow reds at TEST time instead of on the gate (case-FOLDED —
+actionlint's presets match case-insensitively, so `[self-hosted, Linux, X64, …]` is accepted there).
 
 ⛔ Deleting that file does not "clean up stray config" — it reds `python-ci-gate` on every head that
 pins a pool label. And declaring a label is **not** a schedule: it changes the linter only, so
@@ -922,8 +923,8 @@ holds for a label named there. Re-measure `actions/runners` before pinning anyth
 no hosted half, so it is a cost of BLOCKING A MERGE; this job is in neither `.mergify.yml`
 `queue_conditions` (`pricing-artifact`, `docs`, `test-isolation`, `license-surface`, `legal-e2e`,
 `ai-review-gate`) nor `merge_conditions` (`python-ci-gate`), and `needs: repo-harnesses` appears
-nowhere. When the pool is unreachable the loss is one slow non-required check — which is the
-measurement the #10237 canary exists to take.
+nowhere. When the pool is unreachable the loss is one slow non-required check — a SCHEDULING plus
+minimal-`PATH`-shell measurement, which is not #10237 ask 1's proof list (see the scope note below).
 
 Why it was taken: `ubuntu-latest` is answered by **0 of the pool's 12 runners** (measured
 2026-11-01T16:41Z, `actions/runners`), so every `ubuntu-latest` job is served only by GitHub-hosted,
@@ -935,3 +936,35 @@ and job queue waits in run `41320964047` were 15.3, 17.8, 19.0, 25.5, 33.7, 34.5
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to a job whose failure costs a
 wait, and a required leg's failure costs the merge. It also bypasses the label attachment
 `scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
+
+### Scope of the #10237 canary's proof — scheduling only; the ask's proof list is NOT discharged
+
+#10237's ask 1 is two-part: a canary on one NON-required job, **and** a proof list taken on it —
+*"docker available, the FalkorDB image pullable, `uv sync --extra embeddings --extra parity`
+working, and a representative test file green"*. `repo-harnesses` runs STUBBED shell harnesses: no
+docker, no `uv`, no pytest, no DB, no network. So its `success` on `pi-runner-cmux-x64-8` (run
+`41328630369`) discharges:
+
+- the job **schedules** on the pool's own labels with no GitHub-hosted queue wait; and
+- the **minimal-`PATH` shell contract** holds on the pool — `python3` and the `agent-infra-guard`
+  checkout are provisioned ahead of the harnesses, and both provisioners now carry
+  `if: ${{ !cancelled() }}` so one upstream red cannot SKIP them while the harnesses below (which
+  all run under `!cancelled()`) still execute against a missing interpreter and a missing guard tree.
+
+It does **NOT** discharge ask 1's proof list (docker / image pull / `uv sync` / a real test file
+green). Ask 2 — *"Only then the five `python-ci-gate` legs"* — rests on that proof list, so its
+precondition is deliberately **unmet**: no required leg is pinned to the pool, and this canary's
+green is not licence to move one.
+
+Two further facts measured on the canary, so the next author copies the right premise:
+
+- **`jq` is present on the pool.** `runner-tools.sh ensure_one` installs `gh` and nothing else, so
+  `ensure jq` can never repair an absent jq — it fails closed with
+  `reason=absent-not-provisionable`. It is therefore an ASSERTION, and the canary's own green
+  (run `41328630369`, at a head carrying it unconditionally) is the measurement that jq resolves
+  there. The premise it was first justified with — "the hosted image ships both; the pool does
+  not" — is false for jq and was corrected in `ci.yml`.
+- **It is gated the way its consumer is.** The only real jq invocation in that job is
+  `registry-cron.test.sh:280` (`jq -Rsc`), gated on the `driver_scripts` surface, so the assert
+  carries the same gate. Ungated it would red every PR — including the large majority that cannot
+  touch the driver — naming a tool nothing would have used.

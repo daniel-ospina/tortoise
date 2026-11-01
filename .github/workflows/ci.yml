@@ -1532,34 +1532,63 @@ jobs:
     # attachment provides, and this job bypasses it. Accepted here because the
     # job is non-required; it must NOT be copied onto a required leg.
     runs-on: [self-hosted, self-hosted-x64]
+    # ⚠️ WHAT THIS CANARY PROVES — READ IT NARROWLY (#10237 ask 1).
+    # The ask is two-part: a non-required canary, AND a proof list on it ("docker
+    # available, the FalkorDB image pullable, `uv sync --extra embeddings --extra
+    # parity` working, and a representative test file green"). This job runs
+    # STUBBED shell harnesses — no docker, no `uv`, no pytest, no DB, no network
+    # (see above) — so its green discharges SCHEDULING plus the minimal-`PATH`
+    # shell contract, and does NOT discharge that proof list. Ask 2 ("Only then
+    # the five python-ci-gate legs") rests on ask 1, so its precondition is
+    # deliberately UNMET by this change; that is why the required legs stay on
+    # `ubuntu-latest` here.
     steps:
       - uses: actions/checkout@v4
       # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────────
       # `runs-on: [self-hosted, self-hosted-x64]` names a BARE agent, not the
       # `ubuntu-latest` image this job was written against. Three of its
       # harnesses shell out to bare `python3` (`registry-cron.test.sh`,
-      # `ai-review-gate.test.sh`, `orphan-bound.test.sh`), and two invoke real
-      # `jq` (`registry-cron.test.sh`, `ai-review-gate.test.sh`). The hosted
-      # image ships both; the pool does not. Without the steps below the failure
-      # is `exit 127: command not found` that READS as a test failure (#9018),
+      # `ai-review-gate.test.sh`, `orphan-bound.test.sh`). The hosted image ships
+      # it; a pool box need not. Without the steps below the failure is
+      # `exit 127: command not found` that READS as a test failure (#9018),
       # reddening the SIGPIPE / ai-review-evidence / backup guards for a reason
       # unrelated to the diff. Same shape as `ci-timing.yml:56-62`.
       #
-      # ⚠️ ONLY `python3` IS PROVISIONED. `runner-tools.sh ensure_one` installs
-      # `gh` and nothing else — `jq` is not provisionable without root, so
-      # `ensure jq` is an ASSERTION that fails CLOSED with
-      # `reason=absent-not-provisionable` rather than an install. Measured
-      # present on `pi-runner-cmux-x64-8` (run 41328630369) and NOT on all ~10
-      # x64 runners, so this canary's greenness still rests on the runner it
-      # lands on. That is the contract's own intent (fail with a message naming
-      # the tool, never inherit the machine), but it is an assertion — do not
+      # ⚠️ `jq` IS PRESENT ON THE POOL, and this step is an ASSERTION, not an
+      # install. The premise it was first justified with ("the hosted image
+      # ships both; the pool does not") is falsified by this PR's own run: the
+      # job concluded `success` on `pi-runner-cmux-x64-8` (run 41328630369) at a
+      # head carrying an UNCONDITIONAL `ensure jq`, and an unsatisfied assertion
+      # exits 1 and reds the job. `runner-tools.sh ensure_one` (`:197-213`)
+      # installs `gh` and nothing else, so `ensure jq` can never repair an absent
+      # jq — it fails CLOSED with `reason=absent-not-provisionable`. That is the
+      # contract's own intent (name the tool, never inherit the machine); do not
       # read "ensure" as "provisioned" when copying this onto another leg.
+      #
+      # ⚠️ AND IT IS GATED THE WAY ITS CONSUMER IS. The only REAL `jq`
+      # invocation in this job is `registry-cron.test.sh:280` (`jq -Rsc`), whose
+      # step is gated on `driver_scripts`; `ai-review-gate.test.sh` merely greps
+      # `--jq .body` inside a STUBBED `gh` argv and never runs jq itself.
+      # Ungated, an absent jq redded EVERY PR — including the large majority
+      # whose diff cannot touch the driver — naming a tool nothing would have
+      # used, which is the #9018 misdiagnosis one layer up.
       - name: Runner tool contract — assert jq is present (#9018)
+        if: ${{ !cancelled() && needs.changes.outputs.driver_scripts == 'true' }}  # #2149: driver surface only
         run: bash .github/scripts/runner-tools.sh ensure jq
+      # `!cancelled()` on BOTH provisioners rather than the implicit default.
+      # Every harness step below runs under `!cancelled()`, which is TRUE after a
+      # failure — so with the default `success()` one red upstream (the jq
+      # assert, the SIGPIPE guard) SKIPPED `setup-python` and the agent-infra
+      # checkout and then still ran the harnesses, against no `python3` and no
+      # `.agent-infra-guard`: one named failure became 2-4 that read as real
+      # defects (a missing interpreter, a missing guard tree). Provision first,
+      # then let the harnesses report.
       - uses: actions/setup-python@v5
+        if: ${{ !cancelled() }}
         with:
           python-version: '3.12'
       - uses: actions/checkout@v4
+        if: ${{ !cancelled() }}
         with:
           repository: daniel-ospina/agent-infra
           path: .agent-infra-guard

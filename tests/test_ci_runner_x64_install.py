@@ -4605,6 +4605,9 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
         ("docs/ops/ci-runner-x64.md", 25): r"^\| `ubuntu-latest` \|",
+        # the POOL-ONLY class rule: the vocabulary `tests/test_runner_tool_contract.py`'s new
+        # `_POOL_ONLY_LABEL` arm is written against (#10511 review)
+        ("docs/ops/ci-runner-x64.md", 60): r"not a spelling but a CLASS",
     }
 
     ref = re.compile(r"((?:tests/[A-Za-z0-9_/]+\.py)|(?:docs/ops/ci-runner-x64\.md)):(\d+)")
