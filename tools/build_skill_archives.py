@@ -94,11 +94,52 @@ def source_path(name: str, root: Path = REPO_ROOT) -> Path:
     return root / SERVED_SKILLS_REL / name / "SKILL.md"
 
 
-def build(name: str, root: Path = REPO_ROOT) -> bytes:
-    """Bytes of the `.skill` archive for `name` (a zip with ONE entry)."""
-    src = source_path(name, root)
+def build(name: str, source: Path | None = None, *, root: Path = REPO_ROOT) -> bytes:
+    """Bytes of the `.skill` archive for `name` (a zip with ONE entry).
+
+    TWO keyword-labelled overrides, because two callers exist and neither may
+    silently win (#10423 + #10437 merge):
+
+    * ``root`` (keyword-only) is the checkout to read the served copy from —
+      ``write_stale_archives`` and this CLI drive a partial tree with it.
+      ⛔ Keyword-only on purpose: both parameters are ``Path``, so a positional
+      second argument would be ambiguous between "the repo root" and "the file
+      to read" — that ambiguity is exactly what collided when #10423 (root) and
+      #10437 (source) were merged.
+    * ``source`` overrides the FILE the payload is read from; the default is the
+      served copy in this checkout. It exists for a caller that has already
+      resolved a DIFFERENT file (a test zipping an arbitrary body through this
+      entry point).
+
+    ⛔ ``--sync`` does NOT use either on the write path: the sync derives the
+    served copy itself and must archive the bytes it FETCHED, so it calls
+    ``build_from_bytes`` with the payload in memory — building from this root's
+    file is exactly the disk read that made `--sync --dry-run` zip the pre-sync
+    mirror and report "no archive changes" over a stale one (#10088). Keep the
+    two entry points agreeing about what an archive is; do not route a sync
+    through ``source``.
+    """
+    src = source_path(name, root) if source is None else source
     if not src.is_file():
         raise SystemExit(f"missing source skill: {src}")
+    return build_from_bytes(name, src.read_bytes())
+
+
+def build_from_bytes(name: str, payload: bytes) -> bytes:
+    """Bytes of the `.skill` archive for `name` from a skill body in MEMORY.
+
+    The archive is a pure function of the skill body, so the body does not have
+    to exist on disk to be archived. That is what lets a caller report the
+    archive it WOULD derive without writing anything — `--sync --dry-run` reads
+    no post-write file (there is none) and must still name the artifacts a real
+    run would rewrite; building from the fetched payload it already holds is the
+    only way to say that truthfully. A dry run that built from disk would zip
+    the PRE-sync mirror, find it equal to the stale archive, and report "no
+    archive changes" on exactly the #10088 shape.
+
+    ``build`` delegates here, so the two entry points cannot drift apart about
+    what a `.skill` byte stream is.
+    """
     import io
 
     buf = io.BytesIO()
@@ -106,7 +147,7 @@ def build(name: str, root: Path = REPO_ROOT) -> bytes:
         info = zipfile.ZipInfo(f"{name}/SKILL.md", date_time=_FIXED_DATE)
         info.external_attr = 0o644 << 16
         info.compress_type = zipfile.ZIP_DEFLATED
-        zf.writestr(info, src.read_bytes())
+        zf.writestr(info, payload)
     return buf.getvalue()
 
 
@@ -143,7 +184,7 @@ def write_stale_archives(root: Path = REPO_ROOT, names=None) -> list[str]:
         if not source_path(name, root).is_file():
             continue
         target = archive_path(name, root)
-        payload = build(name, root)
+        payload = build(name, root=root)
         if target.is_file() and target.read_bytes() == payload:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)

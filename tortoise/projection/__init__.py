@@ -11576,18 +11576,30 @@ class FalkorProjection(
             if cause_message is not None:
                 raise RuntimeError(cause_message)
             if is_prod or not self._is_embedded:
+                # #10437: `from self._probe_error` — the two generic branches
+                # below name no cause, so WITHOUT the chain the exception that
+                # actually failed the probe is unreachable from the traceback
+                # (the message is unchanged, so every message-matching
+                # consumer keeps holding). MEASURED cost of swallowing it: on
+                # CI run 41236504180 the embedded branch raised a CORRUPTION
+                # verdict for a store redislite had just spawned, and the
+                # reader had nothing saying the probe error was a socket
+                # TIMEOUT (2 × 10 s, i.e. a slow-starting daemon) rather than
+                # an unresponsive graph.
                 raise RuntimeError(
                     "DB health check failed on open (server/production mode). "
                     "Recover manually: python -m tortoise rebuild --dir "
                     "<jsonl-dir> --db <db> — see "
-                    "operations/skills/tortoise-rebuild/SKILL.md")
+                    "operations/skills/tortoise-rebuild/SKILL.md"
+                ) from self._probe_error
             events_dir = self._find_local_jsonl_dir()
             if not events_dir:
                 raise RuntimeError(
                     f"DB health check failed on open and no adjacent JSONL "
                     f"event log was found for recovery ({self._path!r}). "
                     f"Restore from backup or rebuild manually — see "
-                    f"operations/skills/tortoise-rebuild/SKILL.md")
+                    f"operations/skills/tortoise-rebuild/SKILL.md"
+                ) from self._probe_error
             self._recover_or_raise(events_dir)
             logger.warning("auto-recovered embedded DB from %s", events_dir)
             return
