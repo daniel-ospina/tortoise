@@ -447,8 +447,11 @@ _UNRESOLVED = {
     # the statement interpolates a JOINED fragment (`' AND '.join(clauses)`) and
     # the rendered terminal predicate. Checked by hand: the resolvable part is a
     # `MATCH … RETURN` read listing the candidate rows (hash, pointKind,
-    # content, id, terminal flag); it appends no record, writes nothing, and
-    # exists only to decide whether a fold WOULD be refused before any write.
+    # content, id, stored `key`, terminal flag); it appends no record, writes
+    # nothing, and exists only to decide whether a fold WOULD be refused before
+    # any write. The stored `key` column is still a READ — `create_point`
+    # predicts a content fold's key-drop from it (#9819 review P1), it does not
+    # write one.
     "_terminal_content_candidates",
     # #8400 review P3: ONE query now backs both key legs. It was hoisted out of
     # the per-leg copies — those callers no longer reach the graph handle

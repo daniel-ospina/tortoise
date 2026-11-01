@@ -37,11 +37,10 @@ import pytest
 
 from tortoise.exceptions import BundleValidationError
 from tortoise.sdk import (
-    TortoiseSDK,
     _POINT_ITEM_MINT_STATUS_DEPTH,
+    TortoiseSDK,
     _content_candidate_resolution,
     _content_hash,
-    _content_key_lands,
     _item_effective_status,
     _item_stored_point_kind,
 )
@@ -642,161 +641,6 @@ class TestPhase1GuardSeesTheContentIdentity:
             "the key fold pops the declared status, so no terminal mint ever "
             f"happens and points[0]'s node stays live (got {rows})")
 
-    def test_a_key_the_writer_drops_is_not_an_in_bundle_key_mint(self, sdk):
-        """#9819 review P1 (round 10): "the key is FREE" is not "the item
-        WRITES it" — and the difference is FAIL-OPEN, not an over-reject.
-
-        ``create_point`` DROPS a supplied key when a CONTENT hit resolves to a
-        node that already holds a DIFFERENT, non-empty key (#6110:
-        ``props.pop("key", None)``). points[0] below is exactly that item: its
-        key misses the graph, so recording it as an in-bundle key mint looked
-        right, but the write never applies it. Every later item under the key
-        therefore read ``_key_folds_here = True`` and recorded **nothing**, so
-        points[1]'s real ``retracted`` mint went unrecorded and points[2]
-        key-folded onto it with Phase 1 certifying the bundle (the #8400/#9819
-        mutation, over a node this same bundle minted).
-
-        Discriminating: pre-fix no ``BundleValidationError`` is raised at all —
-        the bundle COMMITS and mutates — so the ``pytest.raises`` fails on the
-        missing raise, and the zero-write assertion fails with it.
-        """
-        k = "#9819 dropped key"
-        holder = sdk.create_point("statement", "DROP-A", key="other-key")["id"]
-
-        with pytest.raises(BundleValidationError, match="reuses key"):
-            sdk.ingest(
-                {"points": [
-                    {"ref": "p0", "kind": "statement", "content": "DROP-A",
-                     "key": k},
-                    {"ref": "p1", "kind": "statement", "content": "DROP-B",
-                     "key": k, "status": "retracted"},
-                    {"ref": "p2", "kind": "statement", "content": "DROP-C",
-                     "key": k, "props": {"confidence": 0.9}},
-                ]},
-                promotion_policy="auto",
-            )
-        # The premise the record has to model: points[0]'s write never applied
-        # `k`, so the holder still carries its own key …
-        assert sdk.get_point(holder).get("key") == "other-key"
-        # … and Phase 1 refused BEFORE any write.
-        assert sdk._get_proj().g.query(
-            "MATCH (n:Point) WHERE n.content IN ['DROP-B','DROP-C'] "
-            "OR n.key = $k RETURN n.id",
-            params={"k": k},
-        ).result_set == [], (
-            "the phantom key record certified a fold onto a terminal point "
-            "this bundle minted (#9819)")
-
-    def test_the_dropped_key_reproducer_also_closes_on_the_content_axis(
-            self, sdk):
-        """The SAME phantom through the CONTENT identity: once points[1]'s mint
-        is unrecorded, a later item can reach that terminal node by content
-        instead of by key. ``minted_terminal_content`` is the record that has to
-        survive the (correctly) dropped key record.
-        """
-        k = "#9819 dropped key content"
-        sdk.create_point("statement", "DROPC-A", key="other-key-2")
-
-        with pytest.raises(BundleValidationError, match="reuses content"):
-            sdk.ingest(
-                {"points": [
-                    {"ref": "p0", "kind": "statement", "content": "DROPC-A",
-                     "key": k},
-                    {"ref": "p1", "kind": "statement", "content": "DROPC-B",
-                     "key": k, "status": "retracted"},
-                    {"ref": "p2", "kind": "statement", "content": "DROPC-B",
-                     "props": {"confidence": 0.9}},
-                ]},
-                promotion_policy="auto",
-            )
-        assert sdk._get_proj().g.query(
-            "MATCH (n:Point) WHERE n.content = 'DROPC-B' OR n.key = $k "
-            "RETURN n.id",
-            params={"k": k},
-        ).result_set == []
-
-    def test_a_key_adopted_on_a_content_hit_is_still_an_in_bundle_key_mint(
-            self, sdk):
-        """THE ARM THAT MUST NOT BE THROWN AWAY with the phantom (#9819 review
-        P1: "the two arms have to be settled together").
-
-        Mirror of the test above, on the shape where the writer DOES apply the
-        key: a content hit onto a node holding NO key adopts it
-        (``test_content_hit_on_unkeyed_point_adopts_the_key``). points[0] mints
-        nothing (it folds onto the unkeyed live node) but the key LANDS there,
-        so points[1] — whose key now hits — mints nothing either, and points[2]
-        mints the retracted point whose node points[3] would fold onto.
-
-        Discriminating against the LAZY fix ("stop recording ``minted_keys`` on
-        any content hit"): that one drops points[0]'s record, so points[1] is
-        recorded as a CONTENT mint it never performs, its phantom record
-        suppresses points[2]'s terminal record, and points[3] folds onto that
-        retracted node — no ``BundleValidationError``. Pinned rather than
-        described, because it is the exact regression the round-8 commit fixed.
-        """
-        k = "#9819 adopted key"
-        adopted = sdk.create_point("statement", "ADOPT-A")["id"]
-        assert sdk.get_point(adopted).get("key") is None, "the premise"
-
-        with pytest.raises(BundleValidationError, match="reuses content"):
-            sdk.ingest(
-                {"points": [
-                    {"ref": "p0", "kind": "statement", "content": "ADOPT-A",
-                     "key": k},
-                    {"ref": "p1", "kind": "statement", "content": "ADOPT-B",
-                     "key": k},
-                    {"ref": "p2", "kind": "statement", "content": "ADOPT-B",
-                     "status": "retracted"},
-                    {"ref": "p3", "kind": "statement", "content": "ADOPT-B",
-                     "props": {"confidence": 0.9}},
-                ]},
-                promotion_policy="auto",
-            )
-        assert sdk._get_proj().g.query(
-            "MATCH (n:Point) WHERE n.content IN ['ADOPT-B'] OR n.key = $k "
-            "RETURN n.id",
-            params={"k": k},
-        ).result_set == []
-
-    def test_an_ambiguous_content_holder_set_does_not_record_the_key(self, sdk):
-        """When ONE content has SEVERAL holders the writer's pick among them is
-        UNSPECIFIED (``_find_point_by_content`` returns ``rows[0][0]`` from a
-        query with no ``ORDER BY``), so "one of the holders would have accepted
-        the key" does not mean the key landed. The record therefore takes the
-        FAIL-CLOSED branch — do not claim the key — which is the same posture
-        the content leg already takes for the terminal-twin ambiguity.
-
-        Two live carriers of one content, each with its OWN key (#6110's
-        documented ``dedup=False`` remedy is how that state is reached):
-        whichever points[0] resolves, its key is popped, so `k` is free for
-        points[1] and its retracted mint must be recorded.
-
-        Discriminating: pre-fix points[0]'s key is recorded on presence alone,
-        points[1]'s mint goes unrecorded, and the bundle COMMITS — points[2]
-        folds onto the retracted node.
-        """
-        k = "#9819 ambiguous holders"
-        sdk.create_point("statement", "AMB-A", key="amb-key-1")
-        sdk.create_point("statement", "AMB-A", key="amb-key-2", dedup=False)
-
-        with pytest.raises(BundleValidationError, match="reuses key"):
-            sdk.ingest(
-                {"points": [
-                    {"ref": "p0", "kind": "statement", "content": "AMB-A",
-                     "key": k},
-                    {"ref": "p1", "kind": "statement", "content": "AMB-B",
-                     "key": k, "status": "retracted"},
-                    {"ref": "p2", "kind": "statement", "content": "AMB-C",
-                     "key": k, "props": {"confidence": 0.9}},
-                ]},
-                promotion_policy="auto",
-            )
-        assert sdk._get_proj().g.query(
-            "MATCH (n:Point) WHERE n.content IN ['AMB-B','AMB-C'] "
-            "OR n.key = $k RETURN n.id",
-            params={"k": k},
-        ).result_set == []
-
     def test_intra_bundle_content_guard_does_not_over_reject(self, sdk):
         """A terminal item followed by an item with DIFFERENT content is the
         writer's legal path and must commit."""
@@ -1178,6 +1022,325 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert rows[0][0] == "live", (
             "the declared 'retracted' was popped by the dedup fold, so nothing "
             "in this bundle mounts a terminal mint")
+
+
+class TestAFreeKeyIsNotAKeyThisItemWrites:
+    """#9819 review P1 (round 9): the bundle-order KEY record must describe the
+    write, and "the key is FREE" is not the same fact as "this item WRITES
+    it".
+
+    ``create_point`` resolves the key first, and on a MISS falls through to
+    CONTENT — where the fold applies the supplied ``key`` through
+    ``update_point`` **only if the resolved point holds no other key**; a point
+    that already holds one keeps it and the supplied key is POPPED
+    (``props.pop("key", None)``). So an item can leave the key unheld while
+    the simulation had already recorded it as ``minted_keys`` — and that record
+    is what every later item keys its ``_key_folds_here`` decision off. A
+    phantom record therefore suppresses EVERY later record for that key (no key
+    mint, no content mint, no ``minted_terminal``/``minted_terminal_content``),
+    so a later item's real terminal mint goes unrecorded and a third item
+    key-folds onto it with Phase 1 certifying the bundle.
+
+    ⛔ The mirror is why this cannot be fixed by simply dropping the record: a
+    content-folding item whose fold target holds NO key DOES write it, so
+    treating that key as free makes the NEXT item's real fold look like a mint
+    and over-rejects the item after it. Both directions are driven below — the
+    fail-open pair and the over-reject controls — and the two in-bundle arms
+    (a fold onto a node an EARLIER item minted) are driven too, because that
+    node is invisible to the graph read.
+    """
+
+    def test_the_three_item_bundle_that_key_folded_onto_a_self_minted_terminal(
+            self, sdk):
+        """FAIL-OPEN. The reviewer's reproducer, end to end through ``ingest``.
+
+        ``main`` already holds a LIVE point with content ``C0`` under a
+        DIFFERENT key. points[0] declares the free key ``K`` with content
+        ``C0``: its key misses, its content hits, and the writer keeps the
+        existing key and pops ``K`` — so points[0] holds NOTHING. points[1]
+        then really MINTS a retracted point under ``K``, and points[2] really
+        key-folds onto it. The simulation recorded ``minted_keys[K]`` for
+        points[0] anyway, so points[1]'s terminal mint was never recorded and
+        points[2] was certified.
+
+        Discriminating: pre-fix no ``BundleValidationError`` is raised — the
+        bundle COMMITS and points[1]'s retracted node comes back with
+        ``batch_id`` stamped / ``confidence`` written (the #8400/#9819
+        mutation, over a node this same bundle minted).
+        """
+        live_id = sdk.create_point(
+            "statement", "FK-C0", key="FK-OTHER")["id"]
+        before = sdk.get_point(live_id)
+        with pytest.raises(BundleValidationError, match="reuses key"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p0", "kind": "statement", "content": "FK-C0",
+                     "key": "FK-K"},
+                    {"ref": "p1", "kind": "statement", "content": "FK-C1",
+                     "key": "FK-K", "status": "retracted"},
+                    {"ref": "p2", "kind": "statement", "content": "FK-C2",
+                     "key": "FK-K", "props": {"confidence": 0.9}},
+                ]},
+                promotion_policy="auto",
+            )
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN ['FK-C1','FK-C2'] "
+            "OR n.key = 'FK-K' RETURN n.id"
+        ).result_set
+        assert rows == [], (
+            "Phase-1 must reject BEFORE any write — the phantom key record "
+            f"certified a fold onto a terminal node (got {rows})")
+        assert sdk.get_point(live_id) == before, (
+            "the standing point must be untouched as well")
+
+    def test_the_content_identical_form_of_the_same_bundle_is_refused(self, sdk):
+        """FAIL-OPEN, the other identity. Same head bundle, but points[2]
+        carries points[1]'s CONTENT instead of its key — so the fold lands on
+        the retracted node through ``minted_terminal_content``, which the
+        phantom key record had suppressed just the same (``_mints_here`` is
+        gated on ``_key_folds_here``).
+
+        Discriminating: pre-fix the bundle COMMITS and the retracted node comes
+        back with ``batch_id`` stamped.
+        """
+        sdk.create_point("statement", "FKC-C0", key="FKC-OTHER")
+        with pytest.raises(BundleValidationError, match="reuses content"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p0", "kind": "statement", "content": "FKC-C0",
+                     "key": "FKC-K"},
+                    {"ref": "p1", "kind": "statement", "content": "FKC-C1",
+                     "key": "FKC-K", "status": "retracted"},
+                    {"ref": "p2", "kind": "statement", "content": "FKC-C1",
+                     "props": {"confidence": 0.9}},
+                ]},
+                promotion_policy="auto",
+            )
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'FKC-C1' RETURN n.id"
+        ).result_set
+        assert rows == [], (
+            f"Phase-1 must reject before any write (got {rows})")
+
+    def test_a_content_fold_onto_an_UNKEYED_point_adopts_the_key(self, sdk):
+        """OVER-REJECT CONTROL for the fix, and it reds the NAIVE fix.
+
+        points[0]'s key misses while its content hits a LIVE point that holds
+        NO key — so the fold WRITES the key onto that point ("a dedup hit on an
+        unkeyed point adopts the key", #6110, pinned by
+        ``test_content_hit_on_unkeyed_point_adopts_the_key``). Every later item
+        under that key then key-folds onto a LIVE point and mints nothing: the
+        bundle is legal and ``origin/main`` commits it.
+
+        ⛔ Dropping the record for every content-folding item — the one-line
+        "fix" — makes points[1]'s real key fold look like a terminal mint and
+        refuses points[2] with *"reuses key … mints with status 'retracted'"*, a
+        statement that is false about the write. So this test passes pre-fix and
+        FAILS on that shortcut, which is the half of the pair the reviewer's
+        "the two arms have to be settled together" warns about.
+        """
+        holder = sdk.create_point("statement", "UK-C0")["id"]
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p0", "kind": "statement", "content": "UK-C0",
+                 "key": "UK-K"},
+                {"ref": "p1", "kind": "statement", "content": "UK-C1",
+                 "key": "UK-K", "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "UK-C2",
+                 "key": "UK-K"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 0, (
+            f"every item folds — nothing mints (got {res})")
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {key:'UK-K'}) RETURN n.content, n.status, n.id"
+        ).result_set
+        assert [list(r) for r in rows] == [["UK-C0", "live", holder]], (
+            "the ORIGINAL point keeps its content and its live status, and is "
+            f"the only carrier of the key (got {rows})")
+
+    def test_an_in_bundle_UNKEYED_mint_hands_the_key_on_the_same_way(self, sdk):
+        """OVER-REJECT CONTROL for the IN-BUNDLE arm — the fold target is a
+        node an EARLIER item of this bundle minted, which the graph read cannot
+        see, so the key it stores has to be carried through the simulation
+        (``minted_content_keys``).
+
+        points[0] mints content ``IK-C0`` with NO key; points[1] supplies key
+        ``IK-K`` and the same content, so it folds onto that node and the fold
+        WRITES the key; points[2] re-stating the key is a plain key fold onto a
+        LIVE, in-bundle node — legal. A fix that treats "the fold target is an
+        in-bundle mint" as "the key may be dropped" refuses points[3] for a
+        terminal mint that never happens.
+
+        Passes pre-fix (the phantom record produced the same accept), so it is
+        not discriminating against the head — it is discriminating against the
+        incomplete fix, which is what it is here for.
+        """
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p0", "kind": "statement", "content": "IK-C0"},
+                {"ref": "p1", "kind": "statement", "content": "IK-C0",
+                 "key": "IK-K"},
+                {"ref": "p2", "kind": "statement", "content": "IK-C1",
+                 "key": "IK-K", "status": "retracted"},
+                {"ref": "p3", "kind": "statement", "content": "IK-C2",
+                 "key": "IK-K"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 1, (
+            f"only points[0] mints — the rest fold (got {res})")
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point {key:'IK-K'}) RETURN n.content, n.status"
+        ).result_set
+        assert [list(r) for r in rows] == [["IK-C0", "live"]], (
+            "the in-bundle mint is the one carrier, still live (the declared "
+            f"'retracted' was popped by the fold) — got {rows}")
+
+    def test_an_in_bundle_mint_holding_ANOTHER_key_does_not_hand_the_key_on(
+            self, sdk):
+        """FAIL-OPEN, the in-bundle arm: the fold target is a node an EARLIER
+        item minted under a DIFFERENT key, so the supplied key is popped and
+        the key stays free. points[2] therefore really MINTS a retracted point
+        under it, and points[3] really folds onto that.
+
+        Discriminating: pre-fix the bundle COMMITS and points[2]'s retracted
+        node comes back with ``batch_id`` stamped.
+        """
+        with pytest.raises(BundleValidationError, match="reuses key"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p0", "kind": "statement", "content": "BK-C0",
+                     "key": "BK-FIRST"},
+                    {"ref": "p1", "kind": "statement", "content": "BK-C0",
+                     "key": "BK-K"},
+                    {"ref": "p2", "kind": "statement", "content": "BK-C1",
+                     "key": "BK-K", "status": "retracted"},
+                    {"ref": "p3", "kind": "statement", "content": "BK-C2",
+                     "key": "BK-K", "props": {"confidence": 0.9}},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN ['BK-C0','BK-C1','BK-C2'] "
+            "RETURN n.id"
+        ).result_set == [], "Phase-1 must reject before any write"
+
+    def test_duplicate_content_with_conflicting_keys_fails_closed(self, sdk):
+        """The RESIDUAL, disclosed rather than hidden: when SEVERAL live points
+        share one content identity and they DISAGREE about the key, which node
+        the writer folds onto is not decidable at Phase-1 time —
+        ``_find_point_by_content`` takes ``rows[0]`` of a query with no
+        ``ORDER BY``. The answer the guard gives is the fail-closed one ("the
+        key may be dropped"), so this bundle is refused for a fold that MAY not
+        happen — the same conservative posture, for the same reason, as the
+        content leg's "ANY terminal holder" rule.
+
+        What it must never do is the opposite: betting that the key landed is
+        the direction that masks a later terminal fold. Pre-fix this bundle
+        COMMITS (the phantom record), so the two directions are distinguishable
+        right here.
+        """
+        sdk.create_point("statement", "DUP-C0")
+        twin = sdk.create_point("statement", "DUP-C0", dedup=False)["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.key = 'DUP-OTHER'",
+            params={"id": twin})
+        with pytest.raises(BundleValidationError, match="reuses key"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p0", "kind": "statement", "content": "DUP-C0",
+                     "key": "DUP-K"},
+                    {"ref": "p1", "kind": "statement", "content": "DUP-C1",
+                     "key": "DUP-K", "status": "retracted"},
+                    {"ref": "p2", "kind": "statement", "content": "DUP-C2",
+                     "key": "DUP-K"},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN ['DUP-C1','DUP-C2'] "
+            "RETURN n.id").result_set == [], (
+            "Phase-1 must reject before any write")
+
+    def test_a_second_fold_under_the_same_content_sees_the_key_the_first_one_wrote(
+            self, sdk):
+        """FAIL-OPEN on the SNAPSHOT arm: the fold target is a point already in
+        the graph, so `_fold_keys` is a read taken BEFORE any item was written —
+        and it says "no key" for an item that will hold one by the time the next
+        item runs.
+
+        points[0] folds onto the unkeyed live point ``SG-C0`` and writes
+        ``SG-K1`` onto it; points[1] supplies a DIFFERENT key for the same
+        content, so the fold keeps ``SG-K1`` and pops ``SG-K2`` — the key stays
+        FREE. Judging points[1] by the stale read ("the target has no key, so
+        the key lands") recorded it, which suppressed points[2]'s real terminal
+        mint and certified points[3]'s fold onto that retracted node.
+
+        Discriminating: pre-fix no ``BundleValidationError`` is raised and the
+        bundle COMMITS over a live point (measured), and it also reds a fix that
+        reads `_fold_keys` once without tracking the key an in-bundle fold
+        writes.
+        """
+        sdk.create_point("statement", "SG-C0")
+        with pytest.raises(BundleValidationError, match="reuses key"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p0", "kind": "statement", "content": "SG-C0",
+                     "key": "SG-K1"},
+                    {"ref": "p1", "kind": "statement", "content": "SG-C0",
+                     "key": "SG-K2"},
+                    {"ref": "p2", "kind": "statement", "content": "SG-C1",
+                     "key": "SG-K2", "status": "retracted"},
+                    {"ref": "p3", "kind": "statement", "content": "SG-C2",
+                     "key": "SG-K2", "props": {"confidence": 0.9}},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN ['SG-C1','SG-C2'] "
+            "OR n.key IN ['SG-K1','SG-K2'] RETURN n.id"
+        ).result_set == [], (
+            "Phase-1 must reject before any write — not even points[0]'s key "
+            "may be applied")
+
+    def test_the_resolver_hands_back_the_fold_targets_stored_keys(self, sdk):
+        """UNIT: ``_content_candidate_resolution``'s third answer is the
+        evidence the fix rests on, so it is pinned directly rather than only
+        through a bundle verdict — a resolver that returned an empty set
+        everywhere would let the key look "free" on every content fold.
+
+        Also pins that the WRITER's arm decides it: a hash-present candidate
+        suppresses the A10 arm, so the hash-less row's key must not be read.
+        """
+        sdk.create_point("statement", "RK-HELD", key="RK-KEY")
+        sdk.create_point("statement", "RK-FREE")
+        # a hash-less terminal twin under a content that ALSO has a hashed row
+        hashed = sdk.create_point("statement", "RK-SHADOW")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.content_hash = NULL, "
+            "n.key = 'RK-SHADOW-KEY'", params={"id": hashed})
+        sdk.create_point("statement", "RK-SHADOW")
+        sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'RK-SHADOW' "
+            "AND n.content_hash IS NOT NULL SET n.key = 'RK-HASH-KEY'")
+
+        cands = sdk._terminal_content_candidates([
+            ("RK-HELD", "statement"), ("RK-FREE", "statement"),
+            ("RK-SHADOW", "statement"), ("RK-ABSENT", "statement")])
+        res = {c: _content_candidate_resolution(cands, c, "statement")
+               for c in ("RK-HELD", "RK-FREE", "RK-SHADOW", "RK-ABSENT")}
+        assert res["RK-HELD"][2] == frozenset({"RK-KEY"}), (
+            f"the stored key of the fold target, got {res['RK-HELD']}")
+        assert res["RK-FREE"][2] == frozenset(), (
+            "an unkeyed holder answers the empty set — the fold ADOPTS the key, "
+            f"which is why empty is not the same as 'no target' (got {res['RK-FREE']})")
+        assert res["RK-SHADOW"][2] == frozenset({"RK-HASH-KEY"}), (
+            "the hash arm is the writer's resolution, so the hash-LESS twin's "
+            f"key must not be read (got {res['RK-SHADOW']})")
+        assert res["RK-ABSENT"][1] is True and res["RK-ABSENT"][2] == frozenset(), (
+            f"a mint has no fold target at all (got {res['RK-ABSENT']})")
 
 
 class TestTheMintRecordIsKeyedByTheSTOREDKind:
@@ -1727,7 +1890,7 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
         cands = sdk._terminal_content_candidates(
             [(content, kind) for kind, content in pairs])
         return {pair: _content_candidate_resolution(
-            cands, pair[1], pair[0]) for pair in pairs}
+            cands, pair[1], pair[0])[:2] for pair in pairs}
 
     def test_batched_resolution_equals_the_per_item_helpers(self, sdk):
         pairs = self._states(sdk)
@@ -1796,7 +1959,7 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
 
         cands = sdk._terminal_content_candidates([(content, "statement")])
         assert _content_candidate_resolution(
-            cands, content, "statement") == (None, True), (
+            cands, content, "statement") == (None, True, frozenset()), (
             "an array-kind row must read as NO terminal hit and MINT — the "
             "writer's `n.pointKind = $kind` cannot match an array")
         # …and it agrees with the per-item helpers this batched read replaced.
@@ -1844,7 +2007,7 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
 
         cands = sdk._terminal_content_candidates(
             [("ARRAY-AND-STRING-9819", "statement")])
-        hit, mints = _content_candidate_resolution(
+        hit, mints, _fold_keys = _content_candidate_resolution(
             cands, "ARRAY-AND-STRING-9819", "statement")
         assert hit == live_id, (
             "the STRING-kind terminal twin must still be the hit — the skip "
@@ -1865,55 +2028,3 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
         assert sdk._validate_bundle({"points": [{"content": only}]}) == []
         out = sdk.ingest({"points": [{"content": only}]})
         assert out, "the ingest must commit, not raise"
-
-    def test_the_key_projection_answers_the_writers_reassignment_rule(self, sdk):
-        """#9819 review P1: the THIRD question the batched read had to learn.
-
-        ``_content_candidate_resolution`` answers "does this item mint?" — a
-        graph read. "Did the write APPLY this item's key?" is a different
-        question with a different answer on a content hit, because
-        ``create_point`` pops the supplied key when the resolved node already
-        holds a different, non-empty one (#6110). The projection this pins is
-        ``content_keys``, the STORED ``n.key`` per identity that
-        ``_content_key_lands`` reads.
-
-        Discriminating shape by shape: the ghost, the adopter, the same-key
-        holder, an absent content, the AMBIGUOUS multi-carrier set (the writer's
-        pick is unspecified, so this refuses to claim the key), and a
-        list-valued stored key — which must not raise ``TypeError: unhashable
-        type`` (the class of defect the STORED-kind skip already closes; a raw
-        value is compared rather than hashed for exactly this reason).
-        """
-        sdk.create_point("statement", "KEYPROJ-OTHER", key="theirs")
-        sdk.create_point("statement", "KEYPROJ-NONE")
-        sdk.create_point("statement", "KEYPROJ-SAME", key="mine")
-        sdk.create_point("statement", "KEYPROJ-DUP", key="dup-1")
-        sdk.create_point("statement", "KEYPROJ-DUP", key="dup-2", dedup=False)
-        array_keyed = sdk.create_point("statement", "KEYPROJ-ARRAY")["id"]
-        sdk._get_proj().g.query(
-            "MATCH (n:Point {id:$id}) SET n.key = ['x']",
-            params={"id": array_keyed})
-
-        contents = ("KEYPROJ-OTHER", "KEYPROJ-NONE", "KEYPROJ-SAME",
-                    "KEYPROJ-DUP", "KEYPROJ-ARRAY", "KEYPROJ-ABSENT")
-        cands = sdk._terminal_content_candidates(
-            [(c, "statement") for c in contents])
-
-        def lands(content: str) -> bool:
-            return _content_key_lands(cands, content, "statement", "mine")
-
-        assert lands("KEYPROJ-OTHER") is False, (
-            "the resolved node holds a DIFFERENT key — the writer pops the "
-            "supplied one, so recording it as an in-bundle key mint is the "
-            "phantom that fails OPEN (#9819 P1)")
-        assert lands("KEYPROJ-NONE") is True, (
-            "an unkeyed holder ADOPTS the key (#6110), so it must be recorded")
-        assert lands("KEYPROJ-SAME") is True
-        assert lands("KEYPROJ-ABSENT") is True, (
-            "no holder at all -> the item MINTS, and a mint writes the key")
-        assert lands("KEYPROJ-DUP") is False, (
-            "several carriers, each with its own key: the writer's pick is "
-            "unspecified, so the fail-CLOSED branch must not claim the key")
-        assert lands("KEYPROJ-ARRAY") is True, (
-            "a non-str stored key is not a blocker (writer: "
-            "isinstance(_existing_key, str)) and must not raise")
