@@ -759,7 +759,15 @@ class _CannedQuery:
         elif "eventId IS NOT NULL" in cypher:                              # event_stamped
             rows = [[159]]
         elif "type(r) AS t" in cypher:                                     # relationships
-            rows = [["extractedFrom", 150, 141], ["references", 7, 7],
+            # The log's own `e3_census.relationship_counts` / `.relationship_anchored`
+            # (`capstone-measured-e0fc940b.log:250-260`): `extractedFrom` carries **141**
+            # links, all 141 anchored — the same 141 claims, one link each. A 150 here
+            # was the writer-class size (`extraction_claims` + `other`) written into the
+            # LINK slot, and the 9 `other` Points are defined by `deriv = 0`, i.e. by
+            # carrying no link at all, so 150 links is not a shape that graph can have.
+            # `test_the_canned_census_transcribes_the_committed_log_it_cites` checks
+            # every one of these numbers against the artifact.
+            rows = [["extractedFrom", 141, 141], ["references", 7, 7],
                     ["aboutObject", 211, 0]]
         elif "AS points" in cypher:                                        # composition
             # Columns, in `census()`'s own unpack order (#10525 review):
@@ -851,6 +859,53 @@ def test_the_sibling_ablation_instrument_still_counts_objects(monkeypatch):
     assert (composition["turn_rows"] + composition["operator_points"]
             + composition["extraction_claims"]
             + composition["other_points"]) == composition["points"], composition
+
+
+def test_the_canned_census_transcribes_the_committed_log_it_cites(monkeypatch):
+    """The fixture SAYS it is the shipped log's block; check that against the artifact.
+
+    Round 4 of this PR found the claim unchecked in three columns at once — the
+    composition row carried the `extractedFrom` LINK count in the extraction-CLAIM
+    slot (so its own classes summed to 347, not the 338 the census reports), and the
+    relationship row carried the writer-class total in the link slot. A fixture whose
+    provenance is asserted in a comment rather than read from the file it cites can
+    pin any number at all — which is the defect class this whole PR is about, turned
+    on the very test that was supposed to catch it.
+
+    So: parse the committed log's own machine record (`=== CAPSTONE-VERDICT-BEGIN/END
+    ===`, the same block `capstone_verdict_check.extract_block` reads) and require the
+    fixture to match it field for field. The fake is a REDUCED census — it answers the
+    statements these tests exercise, not every one — so each field it DOES answer must
+    be the log's.
+    """
+    text = (_REPO / "docs/evidence/7949-capstone"
+            / "capstone-measured-e0fc940b.log").read_text()
+    begin, end = "=== CAPSTONE-VERDICT-BEGIN ===", "=== CAPSTONE-VERDICT-END ==="
+    assert begin in text and end in text, "the shipped log lost its verdict block"
+    record = json.loads(text.split(begin, 1)[1].split(end, 1)[0])
+    block = record["run"]["e3_census"]
+
+    data = _canned_census(monkeypatch)
+
+    # 1. The composition row, column for column (`census()`'s own unpack order).
+    assert data["point_composition"] == block["point_composition"], (
+        data["point_composition"], block["point_composition"])
+
+    # 2. The per-label block — and `Document` is a real 0, not a dropped key.
+    for label, expected in block["per_label"].items():
+        got = data["per_label"][label]
+        assert (got["nodes"], got["anchored"], got["anchored_out"],
+                got["anchored_in"]) == (
+                    expected["nodes"], expected["anchored"],
+                    expected["anchored_out"], expected["anchored_in"]), (label, got)
+    assert "Document" not in block["per_label"], block["per_label"]
+    assert data["per_label"]["Document"]["nodes"] == 0, data["per_label"]
+
+    # 3. Every relationship the fake answers carries the log's count AND anchor count.
+    for name, count in data["relationship_counts"].items():
+        assert count == block["relationship_counts"][name], (name, count)
+        assert (data["relationship_anchored"][name]
+                == block["relationship_anchored"][name]), (name, count)
 
 
 # ── the eight steps: measured, derived, never assigned (#9089 round 5 F3) ─
