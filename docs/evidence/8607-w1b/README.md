@@ -78,6 +78,7 @@ the value is *reproduced by re-running the two-run command above*, not read from
 directory. A dry-run digest quoted anywhere else without this `fc7dc21e…` prefix is a **stale
 reading of an earlier plan**, not a second measurement: a re-plan is deterministic, so there is
 exactly one value this population can produce.
+
 * input fingerprint `dump_sha256 = 3b83c4f234bc1bfa…`, which the plan is bound to. **This fired live while
   measuring**: a plan built over an earlier snapshot of the same size was handed to `--apply` and the
   tool refused it — *"…is the plan for a DIFFERENT snapshot … and holds 1000 rename(s) — overwriting
