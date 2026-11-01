@@ -33321,10 +33321,12 @@ def _open_org_graph_sdk(
     byte-identical to before this helper existed.
 
     #10180: when the org's default graph has been PROMOTED its namespace is a
-    per-graph one (`org_{org_id}_{gid}`), so THAT is the default this helper
-    must open — resolved through `_org_default_namespace`, and still gated on
-    the listing (a name the probe did not observe is never opened). For every
-    org that has not promoted that call returns None and nothing changes.
+    per-graph one (`org_{org_id}_{gid}`, or the pre-#3543
+    `team_{org_id}_{gid}` for a graph minted before the tenancy rename), so THAT
+    is the default this helper must open — resolved through
+    `_org_default_namespace`, and still gated on the listing (a name the probe
+    did not observe is never opened). For every org that has not promoted that
+    call returns None and nothing changes.
 
     None means "not listed" OR "the registry probe failed" —
     ``_registry_existing_graphs`` returns None on a probe failure, and
@@ -33348,8 +33350,8 @@ def _open_org_graph_sdk(
         moved = _org_default_namespace(org_id)
     if moved is not None:
         # #10180: this org's default graph was PROMOTED into its own namespace
-        # (`org_{org_id}_{gid}`), so that name — not `org_{org_id}` — is the
-        # default this helper is named for. Same listing guard as below: a name
+        # (`org_{org_id}_{gid}`, or a pre-#3543 `team_{org_id}_{gid}`), so that
+        # name — not `org_{org_id}` — is the default this helper is named for. Same listing guard as below: a name
         # the probe did not observe is not opened (pin 4: the read path must not
         # materialize).
         return _make_sdk(graph_name=moved) if moved in listed else None
