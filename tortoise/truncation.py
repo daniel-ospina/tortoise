@@ -17,9 +17,16 @@ term of the status vocabulary"), which forbids one, so no term is minted.
 
 **Why the marker is not flag-gated.** ``status`` and ``residency`` are opt-in
 because they cost something (a classified trace; a bounded store probe). This
-one costs two ``len()`` calls over lists the read already holds — so gating it
-OFF by default would preserve exactly the defect it fixes: a caller who did not
-know to opt in would still be served a silent subset. It is always emitted.
+one's own decision is two ``len()`` calls over lists the read already holds, and
+it also asks the retrieval path for a per-leg trace when the caller supplied
+none (``sdk.py`` allocates ``status_trace`` under the sink; ``degradation_chain``
+gates its per-leg lists on ``trace_active``) — an append-only audit record, one
+entry per asked leg, that never changes which rows are returned. That proof is
+not optional: a leg that was ASKED and never answered drops rows exactly as a
+cap does, and without the trace the marker cannot see it. So the cost is
+bounded, not free — and gating the marker OFF by default would still preserve
+exactly the defect it fixes: a caller who did not know to opt in would still be
+served a silent subset. It is always emitted.
 ``OVERRIDES:`` the #1745 fail-safe convention (a new read lever ships OFF until
 a measured delta adopts it) — the lever here is a marker on an existing
 response, not a change to what is retrieved, so there is no retrieval delta to

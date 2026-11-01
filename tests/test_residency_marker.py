@@ -480,10 +480,10 @@ class TestHostedSearchRoute:
         hosted_api = self._patch_route(monkeypatch)
         self._flags(monkeypatch, status=False, residency=False)
         body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
-        # #8447: `truncated` is NOT flag-gated (it costs two len() calls and a
-        # default-off marker preserves the silent subset), so it is the one key
-        # present here. The property this test guards — `status` and `residency`
-        # absent by default — is unchanged.
+        # #8447: `truncated` is NOT flag-gated (its proof is two len() calls plus
+        # an append-only per-leg trace, and a default-off marker preserves the
+        # silent subset), so it is the one key present here. The property this
+        # test guards — `status` and `residency` absent by default — is unchanged.
         assert body == {"results": [{"id": "p1", "content": "alpha",
                                      "kind": "statement"}], "count": 1,
                         "truncated": False}

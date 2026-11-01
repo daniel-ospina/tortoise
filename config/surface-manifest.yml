@@ -103,8 +103,11 @@ response_fields:
     downstream is as unreachable as one lost at the cap, so a cap-only reading would report a filtered-empty
     read COMPLETE. A leg that was NEVER ASKED (no embedder installed, say) is not a drop: that is `status:
     degraded`, the recorded vocabulary, and marking it here would make the field meaningless. Not flag-gated
-    (unlike status / residency): it costs
-    two len() calls over lists the read already holds, so a default-off marker would preserve the defect it fixes.
+    (unlike status / residency): its own decision is
+    two len() calls over lists the read already holds, and it additionally asks the retrieval path for a per-leg
+    trace when the caller supplied none — an append-only audit record, one entry per asked leg, that never changes
+    which rows are returned (a leg that was ASKED and never answered drops rows exactly as a cap does, so the proof
+    is not optional). Bounded, not free; and a default-off marker would still preserve the defect it fixes.
     Its ONE home is tortoise/truncation.py; it is its OWN field and never a fifth read-status term (#7952 §17.2
     forbids one). OVERRIDES: the #1745 fail-safe default-OFF convention — there is no retrieval delta to measure on a
     response marker, and a default-off marker is the silent-subset bug itself (precedent: #8487). The MCP tool
