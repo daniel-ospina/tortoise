@@ -725,11 +725,23 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     # only index is keyed on the event's own subject, so the predicate filters
     # after the scope scan (see `read_lifecycle_events`).
     target = node.props.get("name")
-    if label in EVENT_STREAM_FOLDS and isinstance(target, str) and target:
+    # ⛔ The gate is the FOLD's membership, not a NAME. Since #9881 an Object's
+    # record key is `id`, and a row with no `name` is legal — gating on the name
+    # left such a node unfolded by this door while `rebuild_from_record` folded
+    # its `restatus` by id, which is the two-answer split this half exists to
+    # remove. `key` is required non-empty above, so the fold always has one
+    # coordinate.
+    if label in EVENT_STREAM_FOLDS:
         node = apply_event_stream_folds(
             (node,),
             read_lifecycle_events(conn, org_id=org_id, graph_id=graph_id,
-                                  target=target),
+                                  # #9974: the second coordinate. A `restatus`
+                                  # names its target by the stable id, so a
+                                  # name-only narrowing would filter out the
+                                  # record that carries the value and this door
+                                  # would answer a status the rebuild does not.
+                                  target=target if isinstance(target, str) and target else None,
+                                  target_id=key),
         )[0]
     return dict(node.props)
 
