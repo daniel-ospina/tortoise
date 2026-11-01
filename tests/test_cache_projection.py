@@ -2101,8 +2101,11 @@ def test_the_connector_fold_never_writes_a_subject_status():
     labels — so without the label gate, adding `Subject` to
     `EVENT_STREAM_FOLDS` fabricated `:Subject.status='completed'` from a
     `github.issue.closed` that named the Object. That value is written by every
-    `rebuild_from_record`, is answered by the single-row door, and is INVISIBLE
-    to `record_reconcile` (both sides read this same fold).
+    `rebuild_from_record` and answered by the single-row door. ⚠️ It is NOT
+    "invisible to `record_reconcile`" — that verb's cache side reads raw graph
+    properties, so a record-side-only value is counted, not hidden; what
+    reconcile cannot do is tell a fabricated value from a correct one once the
+    two sides agree. The gate prevents the divergence rather than masking it.
     """
     obj = cp.node_from_row("Object", {"id": "x-1", "name": "acme"})
     subj = cp.node_from_row("Subject", {"id": "s-1", "name": "acme"})

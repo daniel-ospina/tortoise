@@ -1294,9 +1294,11 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
         if row.get("event_type") == "EntityMutated":
             # #9974: the caller's explicit lifecycle write. It carries NO
             # `eventKind`, so the connector/pack branch below cannot see it and
-            # this arm is the only reader. `status` must be a non-empty string
-            # to be a value the caller wrote — an empty/absent one is not a
-            # status and must not fold as one.
+            # this arm is the only reader. Any STRING folds — `''` included,
+            # because the graph STORES `''` and `_is_terminal_status('')` is
+            # false, so skipping it would keep an earlier terminal fold and hide
+            # a name the graph resolves (review round 7). Only a NON-STRING is
+            # skipped, and that shape is R4's declared bound.
             node_id = row.get("node_id")
             # ⚠️ `''` IS a value here: the graph stores it (`status=''` is an
             # accepted write) and `_is_terminal_status('')` is false, so a reader
@@ -1522,10 +1524,14 @@ def apply_event_stream_folds(
         # Without this gate, adding `Subject` to EVENT_STREAM_FOLDS fabricated
         # `:Subject.status='completed'` from a `github.issue.closed` that named
         # the Object — a value the live fold cannot produce, written by every
-        # `rebuild_from_record` AND answered by the read door, and INVISIBLE to
-        # `record_reconcile` because both sides read this same fold. The
-        # `restatus` leg needs no such gate: it is id-keyed and already
-        # label-matched, which is exactly how the live state op matches.
+        # `rebuild_from_record` AND answered by the read door. ⚠️ Not
+        # "invisible to `record_reconcile`": that verb's CACHE side reads raw
+        # graph properties (`scan_cache_view`), so a record-side-only value is
+        # counted (`field_mismatches`), not hidden. The gate's job is to prevent
+        # the divergence, not to hide it — and reconcile cannot tell a FABRICATED
+        # value from a correct one once both sides agree on it. The `restatus`
+        # leg needs no such gate: it is id-keyed and already label-matched,
+        # which is exactly how the live state op matches.
         object_side = node.label == "Object"
 
         # The replay: `evs` is in `seq` order, and EVERY connector/pack write is
