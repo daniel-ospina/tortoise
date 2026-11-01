@@ -1966,6 +1966,17 @@ surfaces:
   # `manifest drift: ['test_10121_recency_tie.py']`, and `fast_pool()` is
   # manifest-derived, so the pins would run in NO leg.
   - test_10121_recency_tie.py
+  # #10088 ask 3: the marketing Pages project REFUSES a stray OAuth authorization
+  # response instead of rendering the page with a live `code` in its URL. `core`
+  # is the right arm for the same reason the rows above state: the subject
+  # (`website/functions/_middleware.ts`) matches no `SOURCE_PATTERNS` entry and
+  # falls through to `core`, and it is the same file — and the same Node
+  # middleware harness — as `test_admin_origin_redirect.py`. Without this row
+  # `uv run python tools/ci_selection.py --integrity` exits 1 with
+  # `manifest drift: ['test_oauth_stray_code_refusal.py']`, and because the suite
+  # would belong to no surface it would be selected by NO leg, so the guard's
+  # only regression test would never run on a PR that edits that middleware.
+  - test_oauth_stray_code_refusal.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
