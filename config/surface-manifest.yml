@@ -3331,11 +3331,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.capture_session.
-  dependency: 'reached by no registered MCP tool; caller categories: documentation'
+  dependency: 'reached by no registered MCP tool; caller categories: documentation, other-tooling'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: documentation'
+  reason: 'no MCP tool binds it; callers: documentation, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
