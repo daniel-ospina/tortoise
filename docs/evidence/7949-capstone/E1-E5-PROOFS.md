@@ -165,17 +165,21 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
 
 `tools/capstone_verdict_check.py:118` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
 "S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:379`) refuses a GREEN row whose
-run left a REQUIRED step out (`:475`, message at `:477`).
+run left a REQUIRED step out: the rule is `missing = [s for s in required if s not in
+observed]`, reported as `GREEN with steps not observed in the run: …`. (Those two inner
+cites are deliberately NOT line numbers — #10215's own review rounds moved them twice
+inside this one PR, once in the commit that had just re-pointed them.)
 
-⚠️ **These four numbers are not read by the bundle sweep — a separate pin reads
+⚠️ **The two numbers above are not read by the bundle sweep — a separate pin reads
 them.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches only the three
 sources this bundle prints numbers for (`sdk.py`, `edges.py`, `extractor_v2.py`), so a
 `tools/*.py` cite and the bare `:N` continuations above are invisible to it. They are
 pinned by phrase instead, in `test_the_bare_continuation_cites_name_what_they_say`,
 which requires each number to sit on the sentence that names it AND requires the line
-it points at to carry the symbol claimed there. Stated here so "swept" is never read
-into a number nothing re-checks: a **new** `tools/*.py` number in this document is
-unguarded until it earns a row in that pin.
+it points at to carry the symbol claimed there; the two claims stated as quoted RULES
+are held against the gate's text by the same pin, so a renamed message cannot leave the
+quote behind. Stated here so "swept" is never read into a number nothing re-checks: a
+**new** `tools/*.py` number in this document is unguarded until it earns a row there.
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —

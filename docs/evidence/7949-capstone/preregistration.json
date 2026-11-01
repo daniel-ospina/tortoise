@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:faec0615950b103fae93c46427e7b560a6bb44326fa6cc5706757c3ad42e5ff8",
+  "document_sha256": "sha256:c51f9fb1fdbd0087960141d32ddfef136890255e2c36497e46ff6e0aeedc4c08",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -110,7 +110,7 @@
       {
         "step": "S2.3",
         "condition": "the S2 map left at least one candidate's kind missing or `unclassified`, so `_collect_classify_items` (tortoise/extractor_v2.py:8666, `def _collect_classify_items`) had an item to hand the classifier; when the map types every candidate the pass has no work and neither classify pass runs",
-        "idle_evidence": "the run's own classify surface reads enabled=true with empty s2/union AND the receipt's error/warning surfaces carry no `classify(S2) failed` / `classify(union) failed` / `classify-later init failed` — the fail-open path leaves the SAME empty counters, so the absence of a failure marker is what separates 'nothing to do' from 'crashed'",
+        "idle_evidence": "the run's own classify surface reads enabled=true with empty s2/union, the receipt's error/warning surfaces carry no `classify(S2) failed` / `classify(union) failed` / `classify-later init failed` — the fail-open path leaves the SAME empty counters, so the absence of a failure marker is what separates 'nothing to do' from 'crashed' — AND the receipt's `step_witness` carries a POSITIVE candidate count for the map: an absent or zero count is the shape an EMPTY item set leaves when it skips the pass's `try`, so it cannot support an idle claim (#10215 review r2 P2)",
         "evidence_issue": 10215
       }
     ]
