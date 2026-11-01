@@ -404,7 +404,9 @@ def test_a_neutral_default_is_not_a_consulted_belief(sdk):
     """Review round 6, P1 — a row with NO prior is not a belief measurement.
 
     `_fetch_point_signals` answers a ROW for a claim that has no persisted
-    α/β, with the neutral Beta(1,1) mean 0.5. Keying "the read answered" on row
+    belief at all — no α/β columns AND no `n.confidence` mirror (this read
+    coalesces the mirror FIRST; `StateRanker`'s read has no mirror, so α/β alone
+    decides there) — with the neutral Beta(1,1) mean 0.5. Keying "the read answered" on row
     membership therefore labelled a belief-free row ``consulted`` while the same
     hit said ``has_ep: False`` — two contradictory claims on one hit. The read
     supplies a MEASUREMENT or it does not; the label follows that.
