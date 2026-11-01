@@ -162,6 +162,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # TORTOISE_DB_PATH to a tmp_path db) — the delenv IS the point, and the
     # fixture-param monkeypatch auto-restores at teardown (no lane leak).
     "test_attribution_actor.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # embedded lane via delenv (the test_billing pattern — db_path-pinned store, so the constructions never ride the URI)
+    # #10180: the promote verb's suite seeds its own named graphs
+    # (`graph_name=f"org_{team}"`) and then reads them back through the
+    # onboarding projection, whose existence verdict probes the registry. A
+    # URI in the ambient env makes that probe answer about the LANE server
+    # while `patched_tortoise_sdk` binds every construction to a temp db_path —
+    # two backends, so the seeded namespace is `absent` and three of the file's
+    # own tests red on every CI shard (measured: green embedded, RED with the
+    # URI set). The delenv IS the point; the fixture-param monkeypatch
+    # auto-restores at teardown (no lane leak).
+    "test_10180_promote_default_graph.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_audit.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
     "test_billing.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
