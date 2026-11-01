@@ -24,7 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise import rerank  # noqa: E402, RUF100
+from tortoise import rerank, retrieval  # noqa: E402, RUF100
 
 #: 3 hits in a deliberately WRONG retrieval order: x0 is irrelevant, x1 has
 #: partial query overlap, x2 is the best match. A working reranker promotes
@@ -219,16 +219,53 @@ def test_byte_guard_charges_the_assembly_framing():
     assert ok == []
 
 
-def test_budget_guard_never_raises_on_a_malformed_hit(monkeypatch):
-    """The A7 never-raise contract holds even when the guard renders a hit
-    the scorer path never touched (e.g. a non-dict ``superseded_by``)."""
+def test_budget_guard_never_raises_when_the_render_itself_raises(monkeypatch):
+    """The A7 never-raise contract holds even when the guard's OWN rendering
+    fails: it degrades to the untouched pool and DECLARES why.
+
+    The fault is INJECTED here rather than borrowed from a malformed hit
+    (#10506). This test used to pin the same contract through a non-dict
+    ``superseded_by``, on the premise that ``render_context`` would raise on
+    it — and #9741's marker containment (``_safe_marker``) made that premise
+    false: the hit now renders, so the guard correctly applies and never
+    enters the envelope. Keeping the old fixture would have asserted a crash
+    the product no longer produces; injecting the raise tests the envelope
+    itself, which is what the A7 contract is about.
+    """
+    _inject_fake(monkeypatch)
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("render exploded")
+
+    monkeypatch.setattr(retrieval, "render_context", _boom)
+    out, stats = rerank.ask_lane_rerank(
+        QUERY, list(HITS), proj=None, top_k=2, enabled=True,
+        max_context_tokens=8000)
+    assert out == HITS                    # the untouched pool, never a truncation
+    assert stats["applied"] is False
+    assert stats["degrade_reason"].startswith(
+        "reranked-set-context-check-failed")
+
+
+def test_a_malformed_hit_renders_so_the_guard_can_still_decide(monkeypatch):
+    """#10506: the marker is contained, so a hit the scorer path never touched
+    RENDERS instead of exploding and the budget guard stays live over it.
+
+    This is the fixture the leg above used to rely on, pinned from the other
+    side: it fails on the pre-#10506 tree (where the marker raised, the guard
+    degraded and nothing was applied), so it proves the containment the
+    rendering depends on. A marker that starts raising again — or a guard that
+    stops seeing the rendered pool — reds here rather than silently applying
+    nothing.
+    """
     _inject_fake(monkeypatch)
     hits = [{"id": "a", "content": "gym gym", "session_id": "s",
              "superseded_by": ["not-a-dict"]}]
+    reasons, _, _ = rerank.context_budget_overrun(hits, max_context_tokens=8000)
+    assert reasons == []
     out, stats = rerank.ask_lane_rerank(
         QUERY, hits, proj=None, top_k=1, enabled=True,
         max_context_tokens=8000)
     assert out == hits
-    assert stats["applied"] is False
-    assert stats["degrade_reason"].startswith(
-        "reranked-set-context-check-failed")
+    assert stats["applied"] is True
+    assert "degrade_reason" not in stats
