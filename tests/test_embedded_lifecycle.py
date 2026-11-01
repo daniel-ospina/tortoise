@@ -5037,7 +5037,7 @@ import redislite.client as _redislite_client  # noqa: E402
 
 from tortoise.embedded_lifecycle import (  # noqa: E402
     _ORIGINAL_WAIT_FOR_SERVER_START,
-    _REFUSED_CONNECT_RETRY_S as _RETRY_S,
+    _REFUSED_CONNECT_RETRY_S,
 )
 
 
@@ -5116,7 +5116,7 @@ def test_the_boot_window_guard_still_fails_loudly_once_the_budget_is_spent():
     assert elapsed >= 0.9, (
         f"the guard gave up after {elapsed:.2f}s, before the declared "
         f"start_timeout budget")
-    max_attempts = int(budget / _RETRY_S) + 2
+    max_attempts = int(budget / _REFUSED_CONNECT_RETRY_S) + 2
     assert stuck.pings <= max_attempts, (
         f"{stuck.pings} attempts inside a {budget}s budget (ceiling "
         f"{max_attempts}) — the guard is spending a fresh budget per retry "
