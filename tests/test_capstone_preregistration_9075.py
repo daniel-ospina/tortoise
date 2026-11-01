@@ -2595,3 +2595,117 @@ def test_a_multi_bundle_json_error_names_the_bundle_it_came_from(tmp_path, capsy
     assert payload["reports"], "the readable bundle's report must survive the other's error"
     assert [e["directory"] for e in payload["errors"]] == [str(empty)]
     assert f"no {check.PREREG_NAME}" in payload["errors"][0]["error"]
+
+
+# ── #10463: the ordering is measured against the BASE, not against the contribution ────────────
+#
+# WHY THESE TESTS EXIST. The rule these replace compared two add-commits INSIDE one contribution,
+# which is not squash-invariant: a squash merge rewrites those commits into one, so the same tree
+# passed its PR checks and redded `main` minutes later (#10468). The property the epic wants —
+# "no number is scored against a threshold whose author could already see it" — survives the
+# change, because a registration on the base is published, hash-pinned and cannot be retro-edited
+# inside the merge that carries the log. What must be tested is therefore (a) a registration that
+# WAS published first passes, (b) one added by the SAME change is REFUSED — that refusal is the
+# whole point, since it is the arm that fires at PR time instead of after the merge — and (c) the
+# strictness survived: equal epochs are still not "before".
+
+
+def _repo_with_published_base(tmp_path: Path, monkeypatch) -> Path:
+    """A throwaway repo carrying a PUBLISHED base ref (`origin/main`) the check can measure against.
+
+    The base is a remote-tracking ref on purpose: it does not move when the contribution commits, so
+    a test can land a registration, publish it, and then add a log — which is the shape a
+    two-PR contribution actually has.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    anchor = repo / "README.md"
+    anchor.write_text("base\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "base", epoch=1_700_000_000)
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    return repo
+
+
+def _publish_base(repo: Path) -> None:
+    """Advance the published base to the current commit — "the registration landed in an earlier PR"."""
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+
+def _commit_prereg(repo: Path, epoch: int) -> Path:
+    target = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x\n")
+    _git(repo, "add", str(target.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "add prereg", epoch=epoch)
+    return target
+
+
+def test_a_registration_published_on_the_base_lets_a_later_log_pass(tmp_path, monkeypatch):
+    """The shape the rule ASKS FOR: the registration lands first, in its own PR; the log follows.
+
+    This is the case #10468 was: on the branch the two commits were ordered, and the squash merge
+    collapsed them. Here the registration is published (so a squash of the LOG's merge cannot touch
+    it), and the log's add-commit is measured in the contribution that carries it.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    _publish_base(repo)                       # the registration's own PR merged
+    log = _write_and_commit(repo, "s3-ablation.log", epoch=1_700_000_200)
+    assert check.check_ordering(prereg, [log]) == []
+
+
+def test_a_registration_added_by_the_same_change_is_refused(tmp_path, monkeypatch):
+    """THE NEW ARM (#10463): both artefacts in one contribution has nothing on the base to appeal to.
+
+    Refusing here is what makes this a gate rather than a red `main`: the merged history would carry
+    the two in one commit, where the ordering cannot be shown at all. The message must name the
+    remedy — land the registration alone, then add the log — not merely say "ordering violated".
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)   # NOT published: same change
+    log = _write_and_commit(repo, "s3-ablation.log", epoch=1_700_000_200)
+    failures = check.check_ordering(prereg, [log])
+    assert len(failures) == 1, failures
+    assert "not on the merge base" in failures[0], failures[0]
+    assert "origin/main" in failures[0], failures[0]
+    assert "own PR" in failures[0], failures[0]
+
+
+def test_the_refusal_is_not_a_no_op_when_the_base_is_missing(tmp_path, monkeypatch):
+    """A checkout WITH a remote but NO resolvable base fails closed (UNPROVABLE), never green.
+
+    Losing this arm would let an environment change silently downgrade the check to the
+    PR-internal rule this change exists to remove — a gate that passes because it could not read its
+    subject. Reported as `HistoryUnavailable` (the documented third outcome), not as a violation.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    # Force a branch name that is NOT `main`, so the only reason the base is unresolvable is the
+    # one under test, and give the repo a remote so the HEAD fallback must not apply.
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/contrib")
+    _git(repo, "remote", "add", "upstream", "https://example.invalid/x.git")
+    anchor = repo / "README.md"
+    anchor.write_text("base\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "base", epoch=1_700_000_000)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_200)
+    with pytest.raises(check.HistoryUnavailable) as exc:
+        check.check_ordering(prereg, [log])
+    assert "no base ref" in str(exc.value), str(exc.value)
+
+
+def test_equal_epochs_on_the_base_are_still_not_before(tmp_path, monkeypatch):
+    """The STRICTNESS survives the change: "same second is not before…" is not relaxed by it.
+
+    Both artefacts already published, added at the same epoch — the squash-merged shape that redded
+    `main` (#10468) and the reason the log was withdrawn. A registration that cannot be shown to
+    precede its log is not a registration that preceded it.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    same = 1_700_000_100
+    log = _write_and_commit(repo, "capstone.log", epoch=same)
+    _publish_base(repo)
+    failures = check.check_ordering(prereg, [log])
+    assert failures, "equal epochs must not pass as 'before'"
+    assert "not strictly after" in failures[0], failures[0]
