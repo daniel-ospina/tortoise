@@ -171,7 +171,73 @@
       "pool_items": 8,
       "package_items": 8,
       "collapsed_duplicates": 0,
-      "ids_identical": true
+      "ids_identical": true,
+      "scope": "SINGLE-TIER pool (statements only) — byte-identity is the right assertion HERE, and it cannot observe the D3 tier regroup (see no_dupe_tier_boundary)"
+    },
+    "no_dupe_tier_boundary": {
+      "pool_items": 9,
+      "package_items": 9,
+      "collapsed_duplicates": 0,
+      "shape": "a raw chunk ranked ABOVE the statements, no duplicates",
+      "pool_order": [
+        "mc0",
+        "c0",
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c6",
+        "c7"
+      ],
+      "package_order": [
+        "c0",
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c6",
+        "c7",
+        "mc0"
+      ],
+      "pool_tiers": [
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "package_tiers": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2
+      ],
+      "ids_identical": false,
+      "tier_key_order": [
+        "c0",
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c6",
+        "c7",
+        "mc0"
+      ],
+      "tier_regroup_matches_key": true,
+      "ids_identical_within_tier": true,
+      "why": "the chunk starts at pool rank 0 and is packaged BEHIND every statement (tier 2 vs 0), so ids_identical is FALSE by design and blanket byte-identity would assert the wrong clause. The two tier-scoped assertions are what this pool can actually falsify: tier_regroup_matches_key fails if _package_type_tier leaves the sort key, and ids_identical_within_tier fails if the regroup also disturbs the peers it is not allowed to touch. Hermetic pin of the same clause: tests/test_evidence_assembly.py::test_unmarked_mixed_type_pool_regroups_by_hit_type"
     }
   },
   "verdicts": {
@@ -223,7 +289,12 @@
           "a": "v1",
           "b": "v2",
           "values": "300/400",
-          "overlap": 0.8,
+          "content_overlap": 0.8,
+          "content_below_threshold": true,
+          "content_leg_reachable": false,
+          "quote_overlap": 0.8,
+          "quote_below_threshold": false,
+          "same_turn_leg_reachable": false,
           "turns": [
             "t1",
             "t2"
@@ -234,7 +305,12 @@
           "a": "v3",
           "b": "v4",
           "values": "12/60",
-          "overlap": 0.6,
+          "content_overlap": 0.6,
+          "content_below_threshold": true,
+          "content_leg_reachable": false,
+          "quote_overlap": 0.6,
+          "quote_below_threshold": true,
+          "same_turn_leg_reachable": false,
           "turns": [
             "t3",
             "t4"
@@ -243,7 +319,8 @@
         }
       ],
       "collapse_threshold": 0.9,
-      "why": "the 300/400 (normalised overlap 0.80, turns t1/t2) and 12/60 (normalised overlap 0.60, turns t3/t4) pairs sit below the 0.90 collapse threshold and carry distinct turns, so no value pair is a collapse candidate on its own account. The guard is still consulted — 119 calls across the three packaging arms (post_2978_assembly=40, post_2978_assembly_value_marked=40, provenance_free_assembly=39), 2 of them refusals (post_2978_assembly=1, post_2978_assembly_value_marked=1, provenance_free_assembly=0) — and forcing it to accept everything leaves this arm's ids/order unchanged, so no refusal decides an outcome here. Its own regression is tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse"
+      "same_turn_threshold": 0.75,
+      "why": "the 300/400 (content overlap 0.80 < the 0.90 near-verbatim threshold; quote overlap 0.80 >= the 0.75 same-turn threshold; turns t1/t2) and 12/60 (content overlap 0.60 < the 0.90 near-verbatim threshold; quote overlap 0.60 < the 0.75 same-turn threshold; turns t3/t4) pairs clear both collapse legs on their own terms: every content overlap is below the near-verbatim threshold, and the only quote overlap at or above the same-turn threshold belongs to a pair on DISTINCT turns, where that leg is unreachable, so no value pair is a collapse candidate on its own account, and every pair carries distinct turns. The guard is still consulted — 119 calls across the three packaging arms (post_2978_assembly=40, post_2978_assembly_value_marked=40, provenance_free_assembly=39), 2 of them refusals (post_2978_assembly=1, post_2978_assembly_value_marked=1, provenance_free_assembly=0) — and forcing it to accept everything leaves this arm's ids/order unchanged, so no refusal decides an outcome here. Its own regression is tests/test_evidence_assembly.py::test_production_length_different_values_never_collapse"
     },
     "provenance_leg_is_lane_scoped": {
       "measured": "with provenance 1 verbatim refs kept / 2 flood slots; without it 0 refs kept / 12 flood slots",
