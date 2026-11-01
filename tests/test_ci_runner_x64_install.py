@@ -3997,8 +3997,8 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
     `runs-on: ${{ fromJSON(matrix.runner) }}` in `python-ci.yml`. Two consequences, neither
     re-derived against the tree the merge produced:
 
-      1. the inventory is **76** `ubuntu-latest` jobs, not the 77 the page states (a number this PR
-         added itself);
+      1. the inventory was **76** `ubuntu-latest` jobs at that head, not the 77 the page stated then
+         (a number this PR added itself);
       2. that one non-static block makes `--status`' `label-coverage` read refuse with `exit 4`
          BEFORE it verdicts any label — so the page's *Verify it* section told the operator to
          confirm the mitigation with a read that prints the header, the refusal, and ZERO

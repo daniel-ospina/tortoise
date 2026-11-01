@@ -34,31 +34,34 @@ and only ONLINE runners are counted — an offline runner cannot be handed a job
 `ubuntu-latest = 0 of 12 online runner(s)` (a report — the gate is simply not routing that label
 here). ⛔ On THIS tree that block refuses instead — `exit 4` and NO row — because one job has no
 static label set at all (see *Verify it*); it counted 85 / 12 before it stripped whole-line
-comments. Both rows count only jobs whose `runs-on` names a single `ubuntu-*` label, so ONE job
-here is in neither; `--status` reads every documented `runs-on` form (scalar, array, block
-sequence, and a `group:`/`labels:` mapping)
-and refuses with `exit 4` rather than guess on an expression it cannot resolve to a static label
-set — including when the expression is only ONE member of a list that otherwise parses, since a
-parsed sibling must not answer for an unparsed one (GitHub documents both the combined
-`group:`/`labels:` form and expressions in `labels:`). The refusal is a **content** test, not a
-prefix one: the expression may be the whole value (`${{ matrix.os }}`), one member of a list
-(`[self-hosted, "${{ matrix.arch }}"]`) or only PART of a label
-(`ubuntu-24.04-${{ matrix.arch }}`), and a token this parser cannot carry as one static label — a
-space-bearing scalar, or a YAML alias (`runs-on: *pool`) — is refused for the same reason: the
-`runs-on:` has no static label set, so there is nothing to verdict. The `ubuntu-latest` row was
-previously written as 83 against a measured 79, so treat both rows as a dated measurement and
-re-derive them rather than trusting the numbers.
+comments. Both rows count only jobs whose `runs-on` names a single `ubuntu-*` label, so TWO jobs
+here are in neither — `python-ci.yml`'s `test` (`${{ fromJSON(matrix.runner) }}`, the refusal below)
+and `ci.yml`'s `repo-harnesses` (`[self-hosted, self-hosted-x64]`, the #10237 canary, which names
+no `ubuntu-*` label); `--status` reads every documented `runs-on` form (scalar, array, block
+sequence, and a `group:`/`labels:` mapping) and refuses with `exit 4` rather than guess on an
+expression it cannot resolve to a static label set — including when the expression is only ONE
+member of a list that otherwise parses, since a parsed sibling must not answer for an unparsed
+one (GitHub documents both the combined `group:`/`labels:` form and expressions in `labels:`). The
+refusal is a **content** test, not a prefix one: the expression may be the whole value
+(`${{ matrix.os }}`), one member of a list (`[self-hosted, "${{ matrix.arch }}"]`) or only PART of
+a label (`ubuntu-24.04-${{ matrix.arch }}`), and a token this parser cannot carry as one static
+label — a space-bearing scalar, or a YAML alias (`runs-on: *pool`) — is refused for the same
+reason: the `runs-on:` has no static label set, so there is nothing to verdict. The `ubuntu-latest`
+row was previously written as 83 against a measured 79, so treat both rows as a dated measurement
+and re-derive them rather than trusting the numbers.
 
 The architecture labels are **derived by GitHub from the host at registration** and cannot be
 set by hand: the ARM64 VMs register `self-hosted, Linux, ARM64, self-hosted-arm64, ubuntu-latest`,
 and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`. So:
 
-- `ARM64`/`X64` are **ornaments in DEFAULT routing** — no job in the default tree requests them, so
-  nothing distinguishes the classes today. They are NOT unroutable: labels match cumulatively and a
-  custom label routes on its own (that is how `ubuntu-latest` reaches the pool, next bullet), so a
-  bare `runs-on: self-hosted-x64` DOES select this box. What the repo refuses **as a default** is
-  not a spelling but a CLASS — any POOL-ONLY label: `self-hosted`, and equally the bare custom
-  `self-hosted-x64` above, since no GitHub-hosted runner carries either. The `test-slow` pin's
+- `ARM64`/`X64` are **ornaments in DEFAULT routing** — exactly one job in the default tree names
+  one (`ci.yml`'s `repo-harnesses`, `[self-hosted, self-hosted-x64]`, the #10237 canary recorded
+  below, whose pin excludes the ARM64 VMs), and nothing else in the tree is class-sensitive today.
+  They are NOT unroutable: labels match cumulatively and a custom label routes on its own (that is
+  how `ubuntu-latest` reaches the pool, next bullet), so a bare `runs-on: self-hosted-x64` DOES
+  select this box. What the repo refuses **as a default** is not a spelling but a CLASS — any
+  POOL-ONLY label: `self-hosted`, and equally the bare custom `self-hosted-x64` above, since no
+  GitHub-hosted runner carries either. The `test-slow` pin's
   header in `.github/workflows/python-ci.yml:1891` is "Do NOT change it back to `ubuntu-latest`, and
   never to `self-hosted`", and the reason is recorded at `:1863-1865` — a `self-hosted` pin removes
   the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS and "the
