@@ -5011,3 +5011,76 @@ def test_embedded_start_refuses_a_db_directory_that_is_gone(tmp_path, capfd):
     assert "FATAL CONFIG FILE ERROR" not in captured, (
         "redis-server was spawned into a missing db dir — the unattributable "
         "FATAL this guard exists to prevent")
+
+
+def test_the_embedded_start_timeout_floor_reaches_the_client_tortoise_builds(
+        monkeypatch):
+    """#10437: the session floor must hold on the class the embedded client IS.
+
+    The 10 s default expires on a loaded shard and raises
+    ``RedisLiteServerStartError("The redis-server process failed to start")``
+    for a server that is merely slow — measured red on run 41253635128 leg
+    ``test-slow (a)`` in ``tests/test_mcp_http.py``, a file the PR under test did
+    not touch, and ``ci-introduced-failure`` then blocked the merge.
+
+    Two halves, because a floor applied to the WRONG class reads identical to
+    one applied to the right class: (a) **this fixture** applied the floor in
+    this process (reds without the `tests/conftest.py` call), and (b) it is set
+    on ``redislite.client.Redis``, which ``redislite/falkordb_client.py`` imports
+    by name, so it is the class ``tortoise.FalkorDB``'s embedded client is
+    constructed from — not a sibling nothing uses.
+
+    ⛔ Half (a) is asserted through the RECORD, not the live class attribute.
+    `Redis.start_timeout >= EMBEDDED_START_TIMEOUT_FLOOR` does NOT red when the
+    fixture's call is deleted: `tests/test_eval_ingest_retry.py:109` and
+    `tests/test_eval_resume_retry_failed.py:84` (and
+    `tools/longmem_eval/run.py:313`) assign the same class attribute to the same
+    60 and never restore it, and `--dist loadfile` hands a worker more than one
+    file — so once such a file has run, a bare `>=` holds under exactly the
+    mutant this docstring claims to catch. Those call sites cannot produce the
+    record: they do not go through `tests/_embedded.py`.
+    """
+    import redislite.client as _rc
+    import redislite.falkordb_client as _fc
+
+    from tests._embedded import (
+        EMBEDDED_FLOOR_FIXTURE_SOURCE,
+        EMBEDDED_START_TIMEOUT_FLOOR,
+        START_TIMEOUT_APPLICATIONS,
+        raise_embedded_start_timeout_floor,
+    )
+
+    assert _fc.Redis is _rc.Redis, (
+        "falkordb_client stopped re-exporting client.Redis — the floor below "
+        "would then be set on a class no embedded client is built from")
+
+    applied = [a for a in START_TIMEOUT_APPLICATIONS
+               if a[0] == EMBEDDED_FLOOR_FIXTURE_SOURCE]
+    assert applied, (
+        f"the session fixture `{EMBEDDED_FLOOR_FIXTURE_SOURCE}` never applied "
+        f"the {EMBEDDED_START_TIMEOUT_FLOOR}s floor — it recorded no "
+        "application, so every embedded start still waits redislite's default "
+        "and a starved host raises RedisLiteServerStartError for a server that "
+        "is merely slow")
+    _source, prev, post = applied[0]
+    assert post >= EMBEDDED_START_TIMEOUT_FLOOR, (
+        f"the floor was recorded as applied but did not take effect: "
+        f"start_timeout={post} after the call (was {prev}) — the assignment "
+        "was removed while the record was kept")
+
+    # End state, NOT the mutation proof (see half (a) above): a worker that ran
+    # an #1988 file earlier satisfies this with the fixture's call deleted.
+    assert _rc.Redis.start_timeout >= EMBEDDED_START_TIMEOUT_FLOOR, (
+        f"the session floor is not in effect: start_timeout="
+        f"{_rc.Redis.start_timeout} < {EMBEDDED_START_TIMEOUT_FLOOR}; an "
+        f"embedded start that outlives it raises RedisLiteServerStartError "
+        f"for a merely slow host")
+
+    # Raise-only: a caller that widened the bound further keeps its value, and
+    # the previous bound is REPORTED rather than assumed.
+    monkeypatch.setattr(_rc.Redis, "start_timeout",
+                        EMBEDDED_START_TIMEOUT_FLOOR + 30)
+    assert raise_embedded_start_timeout_floor() == EMBEDDED_START_TIMEOUT_FLOOR + 30
+    assert _rc.Redis.start_timeout == EMBEDDED_START_TIMEOUT_FLOOR + 30, (
+        "the floor must never LOWER a bound a caller raised deliberately")
+
