@@ -86,6 +86,24 @@ failed".
 
 from __future__ import annotations
 
+import sys
+
+#: `#5128`'s contract, applied to THIS entry point: refuse an interpreter older
+#: than the floor BEFORE any other import. The guard must also be PROTECTIVE
+#: rather than documentary — nothing below may use 3.12-only SYNTAX, or the file
+#: would die in the tokenizer and never reach this statement. That is why the
+#: two nested same-quote f-strings in `score_rule_bullet` are built as plain
+#: locals: PEP 701 (`f"…{d['at']}…"` inside a `"`-delimited f-string,
+#: https://peps.python.org/pep-0701/ — *Python-Version: 3.12*, "quote reuse")
+#: cannot be tokenized before 3.12, and `tests/test_dod_5090_probe.py::
+#: test_the_tool_parses_under_the_floor` pins that.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/dod_5090_probe.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/dod_5090_probe.py`"
+    )
+
 import argparse
 import ast
 import contextlib
@@ -93,7 +111,6 @@ import functools
 import json
 import os
 import re
-import sys
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -445,6 +462,15 @@ def score_rule_bullet() -> Row:
     ambient = embed_gate.embed_gate_enabled()
     shipped = flag_in_shipped_configs(embed_gate.ENV_FLAG)
     on_by_default = ambient or shipped["on"]
+    # ⛔ Built as locals, never nested inside another f-string: nesting a
+    # `'`-delimited f-string inside a `"`-delimited one is PEP 701 **syntax**
+    # (`Python-Version: 3.12`), so it cannot be tokenized by the older
+    # interpreters this file's `#5128` guard exists to refuse — the guard would
+    # be documentary and the file would die before reaching it.
+    ungated_at = ", ".join(f"{w} @ {d['at']}" for w, d in sorted(ungated.items()))
+    unresolved_at = ", ".join(
+        f"{w} @ {d['at']}" for w, d in sorted(unresolved_writes.items())
+    )
     notes = [
         f"stated: {stated} (predicate in embed_gate: {stated_in_gate}; "
         f"{SEAM} calls it: {seam_wired})",
@@ -453,7 +479,7 @@ def score_rule_bullet() -> Row:
         f"write paths reaching the gated seam: {len(gated)} "
         f"({', '.join(sorted(gated)) or 'none'})",
         f"write paths that embed OUTSIDE the gate: {len(ungated)} "
-        f"({', '.join(f'{w} @ {d['at']}' for w, d in sorted(ungated.items())) or 'none'})"
+        f"({ungated_at or 'none'})"
         + (" — the session/Turn writers #5008 declares as exempt"
            if ungated else ""),
         f"gate enabled by default: {on_by_default} (ambient "
@@ -476,7 +502,7 @@ def score_rule_bullet() -> Row:
         f"name-level enumeration cannot tell an exemption from a bypass; a "
         f"bypass that reads as exempt is the failure this row exists to "
         f"prevent): "
-        f"{', '.join(f'{w} @ {d["at"]}' for w, d in sorted(unresolved_writes.items())) or 'none'}",
+        f"{unresolved_at or 'none'}",
         f"duplicate writer names (hold this row): {sorted(duplicates) or 'none'}",
     ]
     if not stated or not shared or not gated:
