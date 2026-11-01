@@ -796,6 +796,131 @@ def test_the_bundle_says_the_measured_run_came_from_an_uncommitted_probe(probe):
     assert "uncommitted" in readme, "the bundle must say plainly that the probe was uncommitted"
 
 
+# ── the bundle's prose about its own refusals must be true of the code (r7 F2) ─────────────
+#
+# The Reproduce section said "Every refusal happens **before the log file is created**, so a refused
+# run leaves nothing behind". That holds for the pin / pins / record / `--out` / prerequisite
+# refusals and is FALSE for three that can only be reached once the arms have run: `_turns()` (a
+# fixture carrying no conversation), `paired_sessions()` (two arms of unequal length) and `main`'s
+# single-arm refusal. Each exits 3 leaving the sessions already measured on disk — which is the
+# incremental writer doing exactly its job, and which the same section says two paragraphs earlier.
+# The sentence is the one a reader uses to decide a refusal is side-effect free, so the prose and
+# the behaviour are both pinned here: the first assertion fails on the pre-fix README, the second
+# fails if the claim is ever "corrected" back to a nicer one the code does not have.
+
+
+def test_the_bundle_does_not_claim_every_refusal_precedes_the_log(probe):
+    """r7 F2: the universal was false for three refusals raised after `open_log`."""
+    # ⚠️ Assert on the TEXT, never the wrapping: the bundle is hard-wrapped at ~98 columns, so the
+    # pre-fix sentence was broken as "…**before the log file is\ncreated**…" and a literal
+    # substring test passed against the very README it was written to reject (measured: the first
+    # draft of this test did exactly that).
+    flat = " ".join((probe.EVIDENCE_DIR / "README.md").read_text().split())
+    assert "Every refusal happens **before the log file is created**" not in flat, (
+        "three refusals run only after the arms start (`_turns`, `paired_sessions`, the single-arm "
+        "refusal at the end of `main`) and each exits 3 with the measured sessions already on "
+        "disk — the bundle must not state a universal its own code falsifies")
+    assert "leaving the sessions already measured on disk" in flat, (
+        "the corrected sentence must say what a post-arm refusal DOES leave behind, and why that "
+        "is the incremental writer working rather than a lost run")
+    assert "`--overwrite` replaces it" in flat, (
+        "such a log carries no `RATIO:`/`VERDICT:`, so it is replaceable — the reader needs that "
+        "to recover from a refusal they can only see after it happened")
+
+
+def test_a_post_arm_refusal_REALLY_leaves_the_measured_sessions(probe, monkeypatch, tmp_path):
+    """…and the corrected sentence is grounded in behaviour, not in a kinder wording.
+
+    Driven through the real `main` on a single-arm `--arm-order`: the log is opened, the arm's
+    lines are flushed, and the refusal that follows exits 3 **with the file still on disk**. Put
+    the universal back and this is the run that disproves it.
+    """
+    bundle, doc = _copy_bundle(tmp_path)
+    _stub_below_the_refusals(probe, monkeypatch, bundle, doc)
+    monkeypatch.setattr(probe, "corpus_state", lambda pins: ([], "sha256:" + "1" * 64))
+    monkeypatch.setattr(probe, "load_census", lambda: object())
+    monkeypatch.setattr(probe, "run_arm", lambda arm, graph, sessions, census, golds, log: {
+        "arm": arm,
+        "real_search_calls": 0,
+        "totals": {"extraction_nodes": 0, "label_instances": 0, "operator_edges": 0},
+        "real_facts": {"survived": 0, "total": 0},
+        "llm_calls": 0,
+        "sessions": [],
+    })
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "present")
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+    out = bundle / "s3-ablation-single-arm.log"
+
+    with pytest.raises(SystemExit) as refusal:
+        probe.main(["--prereg", "a1075dfc2", "--arm-order", "OFF", "--out", str(out)])
+
+    assert refusal.value.code == 3
+    assert out.exists(), (
+        "a refusal raised after `open_log` does NOT leave nothing behind — this is the state the "
+        "README's corrected sentence describes")
+    text = out.read_text()
+    assert "--- ARM OFF" in text, "the sessions already measured must survive the refusal"
+    assert "RATIO:" not in text and "VERDICT:" not in text, (
+        "only a run that reached a verdict can write one — so this log carries no measurement and "
+        "stays replaceable with `--overwrite`")
+
+
+# ── the frozen pre-registration cannot be corrected in place (r7 F3) ──────────────────────
+#
+# §4b claims the bars "are the numbers this document was committed with in its first commit, and
+# the commit that carries this amendment changes only definitions and floors". The amendment commit
+# IS the document's only add-commit (`a1075dfc2` adds all 236 lines), so the second clause describes
+# a diff that does not exist — an unverifiable process claim, the class this lane has re-cut for
+# several rounds. It is withdrawn in the README rather than deleted from the document, and that is
+# not a preference: `preregistration.json` pins the document's BYTES, the probe compares that pin
+# against the document AT THE `--prereg` COMMIT, and `tools/capstone_preregistration_check.py`
+# compares it against the worktree file in CI. No single digest satisfies both sides of an in-place
+# edit, so correcting the sentence there would break the record↔document cross-check permanently
+# and re-cut the registration this falsification is reported against. Both halves are pinned: the
+# erratum must exist, and the frozen bytes must still be the ones the record pins.
+
+
+def test_the_bundle_withdraws_the_frozen_documents_unverifiable_first_commit_claim(probe):
+    """r7 F3: the claim is withdrawn where it CAN be corrected, and the pin is named."""
+    flat = " ".join((probe.EVIDENCE_DIR / "README.md").read_text().split())
+    assert "## Errata in the frozen pre-registration" in flat, (
+        "the document's known inaccuracy must be recorded — silence leaves a claim a reader will "
+        "take as verified")
+    errata = flat.split("## Errata in the frozen pre-registration", 1)[1]
+    assert "first-commit claim" in errata and "unverifiable" in errata, (
+        "the erratum must name the claim and say it cannot be verified from history")
+    assert "only add-commit" in errata, (
+        "it must say WHY: the amendment commit is the document's only add-commit")
+    assert "changes nothing" in errata and "00:12:17Z" in errata, (
+        "and what still holds — the add-commit epoch strictly precedes the log's, which is what "
+        "the ordering half reads")
+    assert "a1075dfc2" in errata and "325f2a1a5" in errata, (
+        "the erratum must name the same two commits the log and the record do (the amendment "
+        "add-commit and the measured log's add-commit), so it cannot drift onto another")
+
+
+def test_the_frozen_pre_registration_is_still_the_document_its_record_pins(probe):
+    """The constraint the erratum exists for: an in-place correction would break the pin.
+
+    A future lane that reads r7 F3 as "delete the sentence" and edits `PRE-REGISTRATION.md` reds
+    here. `capstone_preregistration_check.py` catches the same edit in CI against the worktree;
+    this catches it against the probe's own commit-side pin as well, because the two cannot both
+    hold after an edit and the probe would then refuse every run at exit 3.
+    """
+    import hashlib
+    import json
+
+    document = (ROOT / probe.PREREG_REL).read_bytes()
+    record = json.loads((probe.EVIDENCE_DIR / "preregistration.json").read_text())
+    got = "sha256:" + hashlib.sha256(document).hexdigest()
+    assert got == record["document_sha256"], (
+        f"{probe.PREREG_REL} hashes to {got} but preregistration.json pins "
+        f"{record['document_sha256']} — the frozen document is pinned by BYTES, and the probe "
+        "compares that pin against the document at the `--prereg` COMMIT, so an in-place edit "
+        "(an erratum included) makes every run refuse at exit 3. Record corrections in the "
+        "README's errata section; re-cutting the registration is a NEW pre-registration")
+
+
 # ── `--prereg` mistakes are exit 3, not 2 (r5 P3) ─────────────────────────
 #
 # The module header and README item 4 said 3; `refuse()`'s own docstring said `--prereg` mistakes

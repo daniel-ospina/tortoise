@@ -55,12 +55,31 @@ carries a ``RATIO:``/``VERDICT:``).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128 shape (D9): refuse a <3.12 interpreter BEFORE the imports below, because they are where an
+# old interpreter actually dies — `from typing import …`/3.11+ stdlib names raise `ImportError` or
+# `AttributeError` first, and the traceback then names the import rather than the interpreter. The
+# position is load-bearing (tests/test_entry_point_python_guard.py enforces it), not cosmetic:
+# `pyproject`'s `requires-python = ">=3.12"` only binds a run that goes THROUGH `uv`, and the
+# documented invocation here is a bare `python3 tools/…`, whose ambient interpreter can be older.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # 2 is this tool's own "the invocation/environment is wrong" code (`main` returns 3 only for a
+    # REFUSED/ARM-INVALID measurement), so an old interpreter stays legible to a runner that keys on
+    # the exit code alone.
+    print(
+        f"tools/s3_prior_ablation.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/s3_prior_ablation.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import importlib.util
 import json
 import os
 import subprocess
-import sys
 import time
 from collections.abc import Callable
 from pathlib import Path

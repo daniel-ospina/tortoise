@@ -268,9 +268,39 @@ mid-way still leaves the sessions it already measured on disk — the gap that l
 non-production files differ from `HEAD` **or whose metric-definition code differs at all**
 (`METRIC_ARTIFACT_PREFIXES`). It also refuses a **dirty working copy** over the trees that can move a
 number (`assert_clean_tree`), and logs `tree=` (`git describe --dirty`) and `probe_sha256=` so a run
-names both the commit and the bytes it executed. Every refusal happens **before the log file is
-created**, so a refused run leaves nothing behind, and the document is cross-checked against
+names both the commit and the bytes it executed. **The refusals that precede the log's creation**
+— an `--out` that escapes this bundle or already carries a `RATIO:`/`VERDICT:`, an unreadable
+`--prereg`, a malformed pins block, a document↔record digest mismatch, a moved production or
+metric-definition file, a dirty tree, a corpus-hash drift, and the two prerequisites — leave **no
+file** behind. **Three refusals are raised AFTER the log exists**, because they can only be known
+once the arms have run: a fixture carrying no conversation, two arms of unequal length, and an
+`--arm-order` naming a single arm. Those exit 3 **leaving the sessions already measured on disk**
+— which is the incremental writer doing its job, not a lost run — and because such a log carries no
+`RATIO:`/`VERDICT:`, `--overwrite` replaces it. The document is cross-checked against
 `preregistration.json`'s `document_sha256` — **a bundle whose record is missing, unparseable or
 carries no digest is refused**, never admitted with the check silently skipped. The node census is
 `docs/evidence/7949-capstone/probes/capstone_measure.py::census`, imported read-only — there is no
 second census.
+
+## Errata in the frozen pre-registration
+
+The pre-registration is **frozen by digest**, so its one known inaccuracy is recorded here rather
+than corrected in place. `preregistration.json` pins `PRE-REGISTRATION.md`'s bytes
+(`sha256:70264efe…`), the probe compares that pin against the document **at the `--prereg` commit**
+(`git show <sha>:…`), and `tools/capstone_preregistration_check.py` compares the same pin against
+the worktree file in CI. No single digest satisfies both sides of an in-place edit, and the run was
+taken against the frozen text: editing it would re-cut the registration this falsification is
+reported against, which is the deviation the practice this bundle follows forbids. The bars
+survive because they are parsed out of the **commit**, never this file.
+
+1. **The first-commit claim in §4b is unverifiable.** It says the bars "are the numbers this
+   document was committed with in its first commit, and the commit that carries this amendment
+   changes only definitions and floors". There is no pre-amendment version in the history: the
+   amendment commit `a1075dfc2` is also the document's only add-commit
+   (`git log --diff-filter=A -- docs/evidence/5087-hypothesis/PRE-REGISTRATION.md`), so it *adds* all
+   236 lines and changes nothing. The anti-tuning property the sentence reaches for still holds, by
+   a different mechanism: the add-commit (`00:12:17Z`) strictly precedes the measured log's
+   add-commit (`325f2a1a5`, `00:26:01Z`) — which is what `capstone_preregistration_check.py`'s
+   ordering half reads — and the bars are read out of that commit rather than the worktree. **No
+   bar, floor, denominator or number moves**; the defect is a process claim, and it is withdrawn
+   here.
