@@ -948,6 +948,14 @@ def test_an_empty_record_declares_partial_not_complete():
 #: and `_project_journal_rows` honours that declaration (and only that one).
 _UNWRAP_MARK = "jsonb_typeof(payload -> 'event') = 'object'"
 
+#: The `restatus` leg's id predicate, as `_LIFECYCLE_EVENTS_FOR_ONE_SQL` spells it.
+#: The fake parses the KEY out of the statement it is handed (see
+#: `_project_journal_rows`) instead of assuming `id`, so a clause rewritten to a
+#: different column cannot keep passing. ⚠️ It is unambiguous: every other
+#: narrowing clause interpolates `_PAYLOAD_EVENT`, a `COALESCE(...)` expression,
+#: so the ONLY literal `payload ->> '<key>'` in the statement is the id one.
+_ID_CLAUSE_RE = re.compile(r"payload ->> '(\w+)' = %s")
+
 
 def _project_journal_rows(sql: str, rows, params):
     """Emulate the JSONB projection `_LIFECYCLE_EVENTS_SQL` asks Postgres for.
@@ -968,7 +976,31 @@ def _project_journal_rows(sql: str, rows, params):
     """
     unwrap = _UNWRAP_MARK in sql
     narrow = "to_jsonb(" in sql
-    target = params[-1] if (narrow and params) else None
+    # #9974: the narrowing now has TWO coordinates — the connector/pack fold's
+    # `target` (a NAME, binds 1-3) and the `restatus` state op's stable `id`
+    # (`target_id`, the trailing bind). Post-fix the statement always binds all
+    # four, so the name is read positionally rather than as `params[-1]`: the
+    # trailing bind is the id now, and taking it as the name would filter out
+    # every event and silently pass a reader that folds nothing.
+    name_target = params[-4] if (narrow and len(params) >= 4) else None
+    id_target = params[-1] if (narrow and len(params) >= 4) else None
+    # ⛔ #9974 review round 11 (P2): THE FAKE MUST EMULATE THE PREDICATE IT WAS
+    # GIVEN. It used to take both coordinates from the reader's INTENDED shape,
+    # which left it unable to fail in the two ways that matter:
+    #   * a NULL name bind — `name_target in names` is True for a row whose
+    #     `object` is also NULL, so a NULL bind acted as a WILDCARD, where
+    #     Postgres evaluates `payload ->> 'object' = NULL` as NULL (never true)
+    #     and only the id clause can match;
+    #   * the id coordinate was compared against `payload -> 'id'` whichever
+    #     expression the SQL actually asked for, so rewriting that clause to
+    #     `payload ->> 'key'` — a plausible temptation, since the record's own key
+    #     resolution is `payload.get("id") or payload.get("key")` — kept both
+    #     read-door tests green while production filtered the row out and
+    #     `read_node` answered no `status` where the rebuild folded one.
+    # The key is now READ OUT OF THE STATEMENT, so an unmodelled rewrite finds
+    # nothing here either.
+    _id_clause = _ID_CLAUSE_RE.search(sql)
+    id_key = _id_clause.group(1) if _id_clause else None
     out = []
     for row in rows:
         payload = row.get("payload")
@@ -976,15 +1008,28 @@ def _project_journal_rows(sql: str, rows, params):
             row = dict(row)
             nested = payload.get("event") if isinstance(payload, dict) else None
             src = nested if (unwrap and isinstance(nested, dict)) else (payload or {})
+            row["event_type"] = row.get("event_type") or src.get("type")
             row["event_kind"] = src.get("eventKind")
             row["object_name"] = src.get("object")
             row["about_entities"] = src.get("about_entities")
             row["about_entities_camel"] = src.get("aboutEntities")
+            row["label"] = src.get("label")
+            row["node_id"] = src.get(id_key or "id")
+            state = src.get("state")
+            row["restatus_status"] = (state.get("status")
+                                      if isinstance(state, dict) else None)
         if narrow:
             about = row.get("about_entities") or row.get("about_entities_camel")
             names = [row.get("object_name")]
             names.extend(about if isinstance(about, list) else [about])
-            if target not in names:
+            matched = (
+                (name_target is not None and name_target in names)
+                or (id_key is not None
+                    and id_target is not None
+                    and row.get("event_type") == "EntityMutated"
+                    and row.get("node_id") == id_target)
+            )
+            if not matched:
                 continue
         out.append(row)
     return out
@@ -1220,33 +1265,149 @@ def test_the_record_can_clear_the_carriers_it_can_set():
     )
 
 
-def test_a_status_only_restatus_derives_nothing_the_record_cannot_carry():
-    """`restatus`: #9974's residue, and `superseded` is IN it.
+def test_a_status_only_restatus_is_folded_from_the_records_own_stream():
+    """THIS WRITER'S HALF OF #9974: a `restatus` value survives a record rebuild.
 
-    The bound names `superseded` FIRST among the values this table cannot
-    derive, because it is the on-point status and the one a reader would assume
-    is covered. Measured: `update_entity(subject, status='superseded')`
-    leaves the node `status='superseded'` with BOTH carriers absent, and the
-    record mutation is the `never_store` no-op — so a rebuild derives nothing
-    and the entity comes back LIVE. That remains #9974's open window; this test
-    exists so the bound cannot silently claim otherwise.
+    ⛔ NOT "#9974 closed". The issue's criterion 2 — a `restatus` exit should be
+    a NAMED refusal rather than `SET node_key = node_key` — is still open (its
+    own verification comment, 2026-10-31), and this PR does not touch it. Say
+    what this leg pins, not what the issue has not yet reached: a docstring that
+    claims a closure the tracker contradicts is the defect class this PR's own
+    review rounds keep re-finding.
+
+    `status` is a projection-owned cache (§2.6), so the layer tables refuse it
+    (`OpDispatch.never_store`, `chk_object_props_no_derived`) — and the LAYER
+    tables are not the record. `public.journal_event.payload -> 'state' ->
+    'status'` is, and `EntityMutated op=restatus` is in that stream because
+    every journal record gets a layer-1 position row. The live fold applies it as
+    `MATCH (n:$label {id:$rid}) SET n += $state`; the cache now replays the same
+    record, so the two cannot disagree about the value.
+
+    Asserted on the OBSERVABLE value — what a rebuild writes on the node — never
+    on a message. The consequence being guarded is the READ one:
+    `live._terminal_excluded` emits `(clause IS NULL OR …)`, so an ABSENT status
+    reads LIVE and the name keeps resolving.
     """
-    from tortoise.record_projection import mutations_for
+    row = {"id": "o-1", "name": "acme-migration", "object_kind": "service"}
 
-    stmts = mutations_for(
-        {"type": "EntityMutated", "label": "Subject", "op": "restatus",
-         "state": {"status": "superseded"}, "id": "s-1"},
-        org_id="o", graph_id="g",
+    # BEFORE the fold the record row alone carries nothing: that is the defect.
+    assert cp.node_from_row("Object", row).props.get("status") is None, (
+        "the record row now carries a status — `status` is a projection-owned "
+        "cache (§2.6) and `chk_object_props_no_derived` refuses it, so this "
+        "leg's premise is gone"
     )
-    sql = " ".join(s.sql for s in stmts)
-    assert "superseded_by" not in sql and "superseded_at" not in sql, (
-        f"a status-only restatus now carries a supersession column ({sql!r}) "
-        "— if it started to, `superseded` would leave the NOT-DERIVED residue "
-        "and the bound must be re-derived"
+
+    for live_status in ("archived", "deprecated", "retracted", "superseded",
+                        "live"):
+        node = cp.apply_event_stream_folds(
+            (cp.node_from_row("Object", row),),
+            (cp.LifecycleEvent(seq=7, event_kind="",
+                               restatus_status=live_status,
+                               target_id="o-1", target_label="Object"),),
+        )[0]
+        assert node.props.get("status") == live_status, (
+            f"a `restatus` to {live_status!r} came back "
+            f"{node.props.get('status')!r} from a record-sourced rebuild — the "
+            "cache and the record's own event stream disagree, which is #9974"
+        )
+
+    # And the value reaches the STATEMENT that a rebuild executes, not only the
+    # in-memory node — a fold that stopped at the model would materialize
+    # nothing.
+    stmt = cp.node_statement(cp.apply_event_stream_folds(
+        (cp.node_from_row("Object", row),),
+        (cp.LifecycleEvent(seq=7, event_kind="", restatus_status="archived",
+                           target_id="o-1", target_label="Object"),),
+    )[0])
+    assert stmt.params["props"]["status"] == "archived"
+
+
+def test_a_restatus_is_applied_unguarded_within_the_replay():
+    """A `restatus` is NOT subject to the connector fold's terminal latch.
+
+    The live fold applies a state op as `SET n += $state` with NO terminal guard
+    (`projection/__init__.py`, `_ENTITY_MUTATION_STATE_OPS`), while the
+    connector/pack fold's every `SET` carries `AND (o.status IS NULL OR NOT
+    (o.status IN $excluded))`. Within the replay that difference is real and this
+    is the only test that reaches it: a PACK fold writes a TERMINAL word
+    (`archive` → `archived`, the shape `_terminal_index` exists for) and a later
+    `resume` is refused by the latch — but a `restatus` after it still moves the
+    node, because it is the caller's own write.
+
+    ⚠️ SCOPE, because the first draft of this test exercised neither half: the
+    earlier fixture chained `github.issue.closed` → `completed`, and `completed`
+    is NOT in `commit_ops.OBJECT_TERMINAL_STATUSES`, so a guarded `restatus` arm
+    passed it and the docstring's claim was untested. The preconditions here are
+    the pack fold's terminal latch and then the `restatus`. The CARRIER-derived
+    terminal case is different and deliberately guarded — see
+    `test_a_carried_supersession_beats_an_earlier_restatus`.
+    """
+    index = _terminal_index("archived")
+    row = {"id": "o-2", "name": "deal-2", "object_kind": "venture:tranche"}
+
+    def folded(events):
+        return cp.apply_event_stream_folds(
+            (cp.node_from_row("Object", row),), events, index=index)[0]
+
+    # The pack fold writes a TERMINAL word, then a later pack fold is latched
+    # out — the live fold's state machine.
+    latched = folded((
+        cp.LifecycleEvent(seq=1, event_kind="archive", object_name="deal-2"),
+        cp.LifecycleEvent(seq=2, event_kind="resume", object_name="deal-2"),
+    ))
+    assert latched.props.get("status") == "archived", (
+        "a pack fold's terminal word was resurrected — the replay lost the "
+        "live fold's per-event terminal guard"
     )
-    # …and the row it produces really derives nothing: no carrier, no status.
-    assert "status" not in _node("Subject", {"id": "s-1", "name": "role",
-                                               "subject_kind": "team"}).props
+
+    # …and a `restatus` after it still moves the node, as it does live.
+    revived = folded((
+        cp.LifecycleEvent(seq=1, event_kind="archive", object_name="deal-2"),
+        cp.LifecycleEvent(seq=2, event_kind="", restatus_status="live",
+                          target_id="o-2", target_label="Object"),
+    ))
+    assert revived.props.get("status") == "live", (
+        "a `restatus` was refused by the terminal latch — the live fold applies "
+        "a state op unguarded (`SET n += $state`), so the rebuild would leave "
+        "this node terminal where the graph un-terminated it"
+    )
+
+
+def test_the_restatus_fold_cannot_cross_the_label_on_a_shared_id():
+    """An id-keyed state op folds only onto its OWN label's node.
+
+    Ids are per-label, not global, so the SAME id can name an `:Object` and a
+    `:Subject` at once — and the fold's `target_label` check is what keeps a
+    state op off the other family's node. (A `restatus` record carries no `name`
+    at all, so "matched on name" is not a reachable failure mode here; the
+    collision the fixture builds is.) The label is carried for exactly that
+    reason.
+    """
+    obj = cp.node_from_row("Object", {"id": "x-3", "name": "acme"})
+    # ⛔ The SAME id on both labels. With distinct ids, `by_id.get(node.key)` is
+    # already None for the Subject and deleting the label filter leaves this test
+    # green — the filter would be decoration. Ids are per-label, so a collision is
+    # exactly the shape it exists for.
+    subj = cp.node_from_row("Subject", {"id": "x-3", "name": "acme"})
+    event = cp.LifecycleEvent(seq=1, event_kind="", restatus_status="archived",
+                              target_id="x-3", target_label="Object")
+    folded = cp.apply_event_stream_folds((obj, subj), (event,))
+    by_label = {n.label: n for n in folded}
+    assert by_label["Object"].props.get("status") == "archived"
+    # ⚠️ This assertion is only reachable because `Subject` is an
+    # EVENT_STREAM_FOLDS member (it joined at #9974), AND the fixture gives both
+    # labels the same id — with distinct ids the `by_id` lookup is already empty
+    # for the Subject and deleting the label filter would leave this green.
+    assert "status" not in by_label["Subject"].props, (
+        "the restatus leaked onto the :Subject that shares the id — the fold "
+        "ignored `target_label`"
+    )
+    # A restatus naming an id the view does not hold touches nothing.
+    absent = cp.apply_event_stream_folds(
+        (subj,),
+        (cp.LifecycleEvent(seq=1, event_kind="", restatus_status="archived",
+                           target_id="x-999", target_label="Object"),))
+    assert "status" not in absent[0].props
 
 
 def test_an_id_only_supersession_is_derived_not_left_live():
@@ -1683,12 +1844,16 @@ def test_a_superseded_object_is_never_resurrected_by_a_connector_event():
 def test_the_event_stream_fold_can_never_write_a_terminal_status():
     """The bound, stated as an invariant instead of a promise.
 
-    The record carries no signal for a TERMINAL `restatus`
-    (`deprecated`/`archived`/`retracted` — see `DERIVED_FROM_RECORD`'s
-    NOT-DERIVED bullet), so a rebuild cannot honour one the GRAPH set, and the
-    fold may label an Object the graph kept terminal. That is survivable because
-    an ABSENT status already reads LIVE to `_terminal_excluded`, so the
-    pre-#10198 rebuild showed such an Object too.
+    ✅ THIS PARAGRAPH IS SUPERSEDED (#9974). It used to say the record carries
+    no signal for a TERMINAL `restatus` (`deprecated`/`archived`/`retracted`) and
+    that a rebuild therefore could not honour one the GRAPH set. That was true of
+    the LAYER tables only: the value's carrier is the record's layer-1 history
+    (`public.journal_event.payload -> 'state' -> 'status'`), which the cache now
+    folds — see `EVENT_STREAM_FOLDS`' «A TERMINAL `restatus` IS honoured now» and
+    `test_a_restatus_is_applied_unguarded_within_the_replay`. What SURVIVES here,
+    and is what this test actually pins, is narrower: no BUILT-IN connector fold
+    declares a terminal target, so the connector vocabulary alone can never write
+    one.
 
     ⚠️ This test alone is NOT the guard, and reading it as one was the review's
     finding: it asserts over `BUILTIN_CONNECTOR_FOLDS` (the half with no
@@ -1807,9 +1972,16 @@ def test_the_fold_vocabulary_is_status_folds_one_home_and_not_a_copy():
             "holds a copy of the vocabulary, which is the second home #10198 "
             "forbids")
     # …and its declared scope is pinned, so a widening is a red, not a drift.
-    assert cp.EVENT_STREAM_FOLDS == {"Object": ("status",)}, (
+    assert cp.EVENT_STREAM_FOLDS == {"Object": ("status",),
+                                     "Subject": ("status",)}, (
         "EVENT_STREAM_FOLDS gained or lost a derived property — every member "
-        "needs its own evidence that the record's event stream decides it")
+        "needs its own evidence that the record's event stream decides it. "
+        "`Subject` joined at #9974: its `status` is the projection-owned cache "
+        "`ONTOLOGY.md:421` reaches (\"Projection-owned since #1423 — the Subject "
+        "twin of the Object status cache\"; §2.6 rules on the Object half), it "
+        "reaches the record only through the same `state.status` write, and "
+        "leaving it out left one of the two labels that carry the field "
+        "divergent")
 
 
 def test_the_record_read_door_answers_the_same_status_the_rebuild_writes():
@@ -1844,3 +2016,286 @@ def test_the_record_read_door_answers_the_same_status_the_rebuild_writes():
         events,
     )[0]
     assert dict(props) == dict(rebuilt.props)
+
+
+def test_a_status_carrying_rename_is_folded_not_just_a_bare_restatus():
+    """The predicate is `state.status`, NOT `op='restatus'` (review P1).
+
+    `_ENTITY_MUTATION_STATE_OPS` is `{rename, restatus, revise, supersede}` and
+    the live fold applies every one as `SET n += $state`, while
+    `classify_entity_mutation_op` labels the record by precedence
+    (`supersededBy` > `name` > `status`). So `update_entity(obj, name='acme-2',
+    status='archived')` journals an `op='rename'` record that CARRIES
+    `state.status='archived'`. A reader filtering on the op label drops the
+    value — and `never_store` means no layer table holds it — so the rebuild
+    answers LIVE for an archived node.
+    """
+    sql = cp._LIFECYCLE_EVENTS_SQL
+    assert "jsonb_typeof(payload -> 'state' -> 'status') = 'string'" in sql, (
+        "the record reader no longer selects by the PAYLOAD — a status carried "
+        "by a rename/revise record is invisible again"
+    )
+    assert "'restatus'" not in sql, (
+        "the record reader filters on the op LABEL — `classify_entity_mutation_op` "
+        "documents that a consumer wanting every status transition must NOT do that"
+    )
+    # …and the fold arms on the value, not on a synthesized kind.
+    row = {"id": "o-8", "name": "acme-8", "object_kind": "service"}
+    node = cp.apply_event_stream_folds(
+        (cp.node_from_row("Object", row),),
+        (cp.LifecycleEvent(seq=3, event_kind="", restatus_status="archived",
+                           target_id="o-8", target_label="Object"),),
+    )[0]
+    assert node.props.get("status") == "archived"
+
+
+def test_a_carried_supersession_beats_an_earlier_restatus():
+    """The carrier is the row's FINAL state; the stream must not replay over it.
+
+    `DERIVED_FROM_RECORD` derives `superseded` from `superseded_by`/
+    `superseded_at` **as they stand now**, so it is not a seed the event stream
+    may overwrite. Measured pre-fix: an Object created, un-terminated
+    (`status='live'`) and then superseded folded back to `live` — the live graph
+    holds `superseded`, and `live._terminal_excluded` then resolved the terminal
+    entity's name again, which is #9974's own consequence.
+    """
+    row = {"id": "o-9", "name": "acme-9",
+           "superseded_by": "acme-10",
+           "superseded_at": "2026-01-01T00:00:00Z"}
+    base = cp.node_from_row("Object", row)
+    assert base.props.get("status") == "superseded"      # the carrier's verdict
+    folded = cp.apply_event_stream_folds(
+        (base,),
+        (cp.LifecycleEvent(seq=2, event_kind="", restatus_status="live",
+                           target_id="o-9", target_label="Object"),),
+    )[0]
+    assert folded.props.get("status") == "superseded", (
+        "an earlier `restatus` overwrote the row's own supersession — the "
+        "rebuild answers LIVE for an entity the graph holds terminal"
+    )
+
+
+def test_a_subject_restatus_is_folded_too():
+    """#9974 names `Object` AND `Subject`; `Subject.status` is the same cache.
+
+    #9974's Subject evidence is the `mutations_for({… "label": "Subject",
+    "state": {"status": "archived"}})` measurement on the issue (its headline
+    reproduction is the Object), and `ONTOLOGY.md:421` carries the Subject twin
+    of the cache — so a fold that stopped at `:Object` would close the issue on
+    one of the two labels that rule on the field.
+    """
+    row = {"id": "s-1", "name": "platform-team", "subject_kind": "team"}
+    assert cp.node_from_row("Subject", row).props.get("status") is None
+    folded = cp.apply_event_stream_folds(
+        (cp.node_from_row("Subject", row),),
+        (cp.LifecycleEvent(seq=4, event_kind="", restatus_status="retracted",
+                           target_id="s-1", target_label="Subject"),),
+    )[0]
+    assert folded.props.get("status") == "retracted", (
+        "a `:Subject` `restatus` was dropped — its name still resolves after a "
+        "record-sourced rebuild (`entity_identity` excludes on `n.status`)"
+    )
+
+
+def test_the_read_door_folds_a_restatus_it_reads_by_id():
+    """The single-row door must answer the status the rebuild writes (#9974).
+
+    `read_node` narrowed the fold on the node's NAME, so the id coordinate this
+    change adds was unreachable — and a `restatus` names its target by id. A door
+    that answered nothing while the rebuild answered `archived` is the two-answer
+    split #9974 exists to remove.
+    """
+    from tortoise import record_serve as rs
+
+    conn = _FakeConn({
+        "object": [{"id": "o-7", "name": "issue-7", "object_kind": "issue",
+                    "props": {}}],
+        "journal_event": [
+            {"seq": 1, "payload": {"type": "EntityMutated", "op": "restatus",
+                                   "label": "Object", "id": "o-7",
+                                   "state": {"status": "archived"}}},
+        ],
+    })
+    props = rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                         key="o-7")
+    assert props is not None and props.get("status") == "archived", (
+        f"the read door answered {props!r} — the rebuild writes 'archived'"
+    )
+    # …and the rebuild's own view agrees, so the two doors cannot split.
+    view = cp.read_record_view(conn, org_id="o", graph_id="g")
+    obj = next(n for n in view.nodes if n.label == "Object")
+    assert obj.props.get("status") == props.get("status")
+
+
+def test_the_connector_fold_never_writes_a_subject_status():
+    """The built-in/pack lifecycle leg is `:Object`-only, as the live fold is.
+
+    `_fold_object_status` issues `MATCH (o:Object {id:$n})` and resolves
+    `about_entities` against `"Object"`, so it can never write a lifecycle word
+    onto a `:Subject`. This reader is keyed on a NAME, and names collide across
+    labels — so without the label gate, adding `Subject` to
+    `EVENT_STREAM_FOLDS` fabricated `:Subject.status='completed'` from a
+    `github.issue.closed` that named the Object. That value is written by every
+    `rebuild_from_record` and answered by the single-row door. ⚠️ It is NOT
+    "invisible to `record_reconcile`" — that verb's cache side reads raw graph
+    properties, so a record-side-only value is counted, not hidden; what
+    reconcile cannot do is tell a fabricated value from a correct one once the
+    two sides agree. The gate prevents the divergence rather than masking it.
+    """
+    obj = cp.node_from_row("Object", {"id": "x-1", "name": "acme"})
+    subj = cp.node_from_row("Subject", {"id": "s-1", "name": "acme"})
+    folded = cp.apply_event_stream_folds(
+        (obj, subj),
+        (cp.LifecycleEvent(seq=1, event_kind="github.issue.closed",
+                           object_name="acme"),),
+    )
+    by_label = {n.label: n for n in folded}
+    assert by_label["Object"].props.get("status") == "completed"
+    assert "status" not in by_label["Subject"].props, (
+        "the connector fold wrote a lifecycle word onto the :Subject of the same "
+        "name — the live fold cannot produce that value. ⚠️ Reconciliation "
+        "DOES see a record-side-only value (`scan_cache_view` reads raw graph "
+        "props); what it cannot do is discriminate a fabricated value once both "
+        "sides agree — so the gate must prevent this, not report it"
+    )
+
+
+def test_read_node_folds_an_object_whose_name_is_the_empty_string():
+    """The read door must not gate the fold on a NAME (#9881 shape).
+
+    Since #9881 an Object's record key is the `id` (`node_key = id`), so `name` is
+    not the coordinate the fold needs. ⚠️ A row with NO name is NOT legal
+    (`chk_object_node_key_is_contract_key: name IS NOT NULL`), so the reachable
+    shape is an EMPTY-STRING name — which the old truthiness gate (`and target`)
+    treated exactly like absent. For such a node the door answered nothing while
+    `rebuild_from_record` folded it by id. Pinned, because reverting the gate
+    otherwise leaves the suite green: every other `read_node` fixture in the repo
+    gives its node a non-empty name.
+    """
+    from tortoise import record_serve as rs
+
+    conn = _FakeConn({
+        "object": [{"id": "o-6", "name": "", "object_kind": "issue",
+                    "props": {}}],
+        "journal_event": [
+            {"seq": 1, "payload": {"type": "EntityMutated", "op": "restatus",
+                                   "label": "Object", "id": "o-6",
+                                   "state": {"status": "archived"}}},
+        ],
+    })
+    props = rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                         key="o-6")
+    assert props is not None and props.get("status") == "archived", (
+        "an Object with an empty name was answered without the status the "
+        "rebuild writes — the fold is still gated on `name`"
+    )
+
+
+def test_a_label_subset_view_still_folds_its_stream():
+    """`read_record_view(labels=(…))` must read the stream for ANY fold member.
+
+    The gate used to be a hard-coded `"Object" in labels`, so a caller that asked
+    for `Subject` alone — a supported shape, and a generator caller is already
+    pinned elsewhere — got `lifecycle_events == ()`, and a `rebuild_from_record`
+    over that view materialized the Subject LIVE while `read_node` answered the
+    folded status.
+    """
+    conn = _FakeConn({
+        "subject": [{"id": "s-2", "name": "platform-team",
+                     "subject_kind": "team", "props": {}}],
+        "journal_event": [
+            {"seq": 1, "payload": {"type": "EntityMutated", "op": "restatus",
+                                   "label": "Subject", "id": "s-2",
+                                   "state": {"status": "retracted"}}},
+        ],
+    })
+    view = cp.read_record_view(conn, org_id="o", graph_id="g",
+                               labels=("Subject",))
+    subj = next(n for n in view.nodes if n.label == "Subject")
+    assert subj.props.get("status") == "retracted", (
+        "a Subject-only view skipped the record's stream — the rebuild over it "
+        "materializes a LIVE Subject while the read door answers terminal"
+    )
+
+
+def test_a_status_only_restatus_carries_no_supersession_column():
+    """The pin that keeps `restatus` and `supersede` apart on the RECORD side.
+
+    This assertion lived in the test this PR replaces; dropping it silently would
+    let a status-only `restatus` start writing `superseded_by`/`superseded_at`,
+    at which point a record row would derive `superseded` from a write that never
+    meant to supersede — and the rebuild would hide a name the graph resolves.
+    R2's whole argument rests on the carrier being written by a `supersede`
+    record, so the separation is pinned rather than assumed.
+    """
+    from tortoise.record_projection import mutations_for
+
+    for label, table in (("Object", "object"), ("Subject", "subject")):
+        stmts = mutations_for(
+            {"type": "EntityMutated", "label": label, "op": "restatus",
+             "state": {"status": "deprecated"}, "id": "x-1"},
+            org_id="o", graph_id="g",
+        )
+        sql = " ".join(st.sql for st in stmts)
+        assert "superseded_by" not in sql and "superseded_at" not in sql, (
+            f"a status-only restatus now carries a supersession column on "
+            f"{table} ({sql!r}) — `superseded` would leave the NOT-DERIVED "
+            "residue and a rebuild would hide a live name"
+        )
+
+
+def test_an_empty_string_status_is_folded_because_the_graph_stores_it():
+    """Parity, not tidiness: `status=''` is a value the graph holds.
+
+    `update_entity(obj, status='')` is accepted on `:Object` and the graph stores
+    the empty string; `_is_terminal_status('')` is false, so the graph reads LIVE.
+    Excluding `''` at the reader (the first draft's "repair") kept an earlier
+    terminal fold, so the rebuilt cache HID a name the graph resolves — the very
+    direction the exclusion claimed to avoid. Folding it reproduces the graph.
+
+    ⛔ ASSERTED THROUGH THE READER, NOT ON ITS SOURCE TEXT (#9974 review round
+    11, P2). The first version matched two spellings — `"or not restatus"` in
+    `_lifecycle_events`' source and `"<> ''"` in the SQL — and so pinned nothing
+    about behaviour: `if restatus == "": continue`, `if not restatus.strip():`,
+    `length(...) > 0` and `<> ''''` all leave both strings untouched while
+    dropping the value. The leg below fails on ANY of them, because it asks the
+    single-row door what it actually answers.
+    """
+    from tortoise import record_serve as rs
+
+    # Two writes on one Object, in journal order: terminal, then the empty
+    # string. The graph ends LIVE (an earlier terminal fold must not survive),
+    # so every door that reads the record must answer `''` too.
+    conn = _FakeConn({
+        "object": [{"id": "o-5", "name": "acme-5", "object_kind": "service",
+                    "props": {}}],
+        "journal_event": [
+            {"seq": 1, "payload": {"type": "EntityMutated", "op": "restatus",
+                                   "label": "Object", "id": "o-5",
+                                   "state": {"status": "archived"}}},
+            {"seq": 2, "payload": {"type": "EntityMutated", "op": "restatus",
+                                   "label": "Object", "id": "o-5",
+                                   "state": {"status": ""}}},
+        ],
+    })
+    answered = rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                            key="o-5")
+    assert answered is not None and answered.get("status") == "", (
+        f"the read door answered status={answered.get('status') if answered else None!r} "
+        "where the graph holds '' — a reader that drops the empty string keeps "
+        "the earlier terminal fold and hides a name the graph resolves"
+    )
+
+    # …and the fold applies it, over an earlier terminal value.
+    row = {"id": "o-5", "name": "acme-5", "object_kind": "service"}
+    folded = cp.apply_event_stream_folds(
+        (cp.node_from_row("Object", row),),
+        (cp.LifecycleEvent(seq=1, event_kind="", restatus_status="archived",
+                           target_id="o-5", target_label="Object"),
+         cp.LifecycleEvent(seq=2, event_kind="", restatus_status="",
+                           target_id="o-5", target_label="Object")),
+    )[0]
+    assert folded.props.get("status") == "", (
+        f"the rebuild answered {folded.props.get('status')!r} where the graph "
+        "holds '' — an empty status reads LIVE, so this hides a live name"
+    )
