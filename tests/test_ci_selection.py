@@ -2168,6 +2168,64 @@ def test_a_consent_token_only_diff_runs_the_bridge_guard():
     )
 
 
+def test_a_client_identity_only_diff_runs_the_consent_identity_guards():
+    """#8218 review (finding 3): the identity RULE's own diff must select the
+    guards that pin it.
+
+    `tortoise/client_identity.py` owns the decision (which name, if any, the
+    consent screen may print). Before it was a `SOURCE_PATTERNS["api"]` entry it
+    matched no pattern and fell to `core`, where neither consent suite is
+    registered — so a diff that touched ONLY the rule ran no test that pins it,
+    while a diff to the render site that merely CALLS it (`tortoise/oauth.py`)
+    ran two. That is the #2938/#3154/#4367 silent-drop class, on exactly the file
+    a follow-up (the CIMD brand-prefix residual, #10482) would change.
+
+    Asserts the SELECTION, not the registration, so it reds on the pre-fix
+    patterns.
+    """
+    r = _sel(["tortoise/client_identity.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"], (
+        f"a client_identity.py-only diff selects {r['surfaces']} — both consent "
+        "guards are registered on `api`, and `core` does not run either"
+    )
+    assert "test_oauth_consent_client_identity_8218.py" in r["test_files"], (
+        "a client_identity.py-only diff does not run the count-based invariant "
+        "that owns this module (#8218)"
+    )
+    assert "test_oauth_mcp.py" in (set(r["test_files"])
+                                    | set(r.get("slow_selected") or ())), (
+        "a client_identity.py-only diff does not run tests/test_oauth_mcp.py, "
+        "whose renderer-contract assertions pin what the page prints (#8218). "
+        "It is a `slow_files` member, so it arrives through `slow_selected` — "
+        "checking `test_files` alone would call this covered when it is not"
+    )
+
+
+def test_an_already_classified_non_api_module_still_runs_the_identity_enumeration():
+    """#10472 review (F2): the enumeration half is NOT reachable through `api`.
+
+    `test_the_identity_sources_are_exactly_the_known_writers` and its
+    `client_name` sibling fail on ANY new function in the `tortoise/` package
+    that mentions the table or the column — a second identity source written in
+    an already-classified module that is not a "render path" file. `api`-only
+    registration cannot see that diff: `tortoise/render.py` matches no named
+    pattern and falls to `core`, so the guard was asleep on exactly the edit the
+    invariant exists to catch. Asserts the SELECTION, so it reds on the pre-fix
+    `api`-only registration.
+    """
+    r = _sel(["tortoise/render.py"])
+    assert r["full"] is False, (
+        "tortoise/render.py selected the whole matrix, so this assertion proves "
+        "nothing about the per-file registration")
+    assert "core" in r["surfaces"], r["surfaces"]
+    assert "test_oauth_consent_client_identity_8218.py" in r["test_files"], (
+        "an edit to an already-classified non-`api` module does not run the "
+        "identity enumeration, so a second render site introduced there ships "
+        "with the count invariant asleep (#8218)"
+    )
+
+
 def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
     """#3524: the guard's two `docs/` subjects must select it on a docs-only diff.
 

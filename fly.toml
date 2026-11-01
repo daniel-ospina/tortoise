@@ -279,6 +279,37 @@ kill_timeout = 30
   TORTOISE_CONTROL_PLANE = "supabase"
   TORTOISE_REAUTH_WINDOW_SECONDS = "900"
   TORTOISE_MANUAL_LINKING_ENABLED = "1"
+  # ── #8218 — the CONSENT SCREEN'S CLIENT-IDENTITY ALLOWLIST ────────────────
+  # `{"<client_id>": "<canonical name>"}`, read per request by
+  # `tortoise/client_identity.py`. It is the ONLY path by which a human-authored
+  # name reaches the consent screen: without an entry, every client renders as
+  # "An unverified app (<client_id>)" with the name it registered withheld,
+  # because DCR metadata is self-asserted (RFC 7591) and an unbacked name is the
+  # phishing payload that screen exists to stop. Keyed by client_id, NOT by the
+  # name a client claims, so a different client claiming the same name stays
+  # unverified.
+  #
+  # WHY IT LIVES HERE AND NOT in `config/required-bindings.yml`: that file is the
+  # Cloudflare Pages binding manifest, and this knob's only reader runs in THIS
+  # Fly-hosted authorization server — no Pages Function imports it, so declaring
+  # it there was a warning no dashboard deploy could ever satisfy, pointing an
+  # operator at a deployment that cannot read the value (#10472 review).
+  # Non-secret, human-authored config belongs in version control, so `[env]` is
+  # its home and it is declared `fly-toml-env` in
+  # `.github/scripts/fly-managed-secrets.txt` — which is what makes (a) a Fly
+  # SECRET of this name fail the provenance gate as a shadow, (b) the deploy
+  # apply this value, and (c) `check-fly-machine-env.py` assert the RUNNING
+  # machine carries it (#4568: an out-of-band revert is otherwise invisible).
+  # An entry is a CODE CHANGE — review it like one.
+  #
+  # ⛔ `"{}"` IS THE DOCUMENTED DEFAULT, not an oversight: the value attests
+  # nobody, which is exactly the behaviour of an unset knob (absence and
+  # malformed values are both fail-closed). It is written out so the declaration
+  # is TRUE — `tests/test_fly_secret_drift.py` asserts this parses to the same
+  # empty map `tortoise/client_identity.py` defaults to, so a divergence between
+  # the code default and the versioned value reds in review. Attesting a real
+  # first-party client means adding its minted `ct_…` client_id here.
+  TORTOISE_OAUTH_ATTESTED_CLIENTS = "{}"
 
 [deploy]
   wait_timeout = "5m"
