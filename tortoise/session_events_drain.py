@@ -124,13 +124,6 @@ CURSOR_FILE = "session-events-cursor.json"
 #: the line an operator already reads, with no new reader.
 DEAD_LETTER_FILE = "dead-letter.jsonl"
 DEAD_LETTER_MAX_ROWS = 500
-#: Server window bounds (`tortoise/quota.py::MAX_SESSION_TURNS`, and the Pi
-#: leg's `TURN_MAX_CHARS`). Applied here for the same reason the Pi leg applies
-#: them: the server's 400 for an over-long capture is PERMANENT, so an
-#: un-windowed record would be dead-lettered as "refused" when it is a legal
-#: conversation the product itself caps on every other leg.
-MAX_TURNS = 500
-TURN_MAX_CHARS = 5000
 #: ``TORTOISE_SESSION_EVENTS_DIR`` overrides the substrate root, so a box whose
 #: substrate is not beside its spool is still drainable.
 SESSION_EVENTS_DIR_ENV = "TORTOISE_SESSION_EVENTS_DIR"
@@ -306,13 +299,39 @@ def _sid_of(line: str) -> str | None:
 
 
 def _window(conversation: Any) -> list[dict]:
-    """The turns to POST — the last ``MAX_TURNS``, each capped at ``TURN_MAX_CHARS``.
+    """The turns to POST — the last ``MAX_SESSION_TURNS``, each clipped and MARKED.
 
     Keeping the MOST RECENT turns matches every other capture leg
     (``capture_spool`` snapshots, ``extractTurns`` in the Pi leg): recent context
     is what memory wants, and the server's cap is what makes an over-long record
     a permanent 4xx instead of a legal filing.
+
+    ⛔ NEITHER BOUND IS DECLARED HERE, and neither cut is silent (#4897). Both
+    come from the modules that own them, the same way the transcript leg
+    (``__main__.py``, the ``window_turns`` block) imports them rather than
+    restating them:
+
+    * ``tortoise.quota.MAX_SESSION_TURNS`` is the SERVER's bound —
+      ``hosted_api`` raises a hard 400 above it, and ``classify_failure`` reads
+      every 4xx outside ``{402, 408, 425, 429, 409}`` as ``permanent``, so this
+      record would be dead-lettered AND the cursor crossed. A local copy that
+      drifts LOWER therefore dead-letters every record in the band on its first
+      pass — the exact outcome the window exists to prevent.
+    * ``tortoise.sdk._clip_capture_turn_content`` is the ONE definition of the
+      stored window. A bare ``content[:5000]`` slice both re-declared the cap and
+      cut SILENTLY: a turn sliced to EXACTLY the cap is not *over* it, so the
+      server's own re-windowing adds no marker either, and a reader could not
+      tell a complete turn from a cut one. The clip reserves its marker INSIDE
+      the cap, so the cut survives the server's re-application of the window.
+
+    Applied to the text exactly as the record carries it and exactly once — this
+    leg never re-windows an already-scrubbed body (the false-marker defect of
+    #4897's P1). A turn that already sits at the cap is returned verbatim, so a
+    second application is a no-op rather than a fresh marker.
     """
+    from tortoise.quota import MAX_SESSION_TURNS
+    from tortoise.sdk import _clip_capture_turn_content
+
     turns: list[dict] = []
     if not isinstance(conversation, list):
         return turns
@@ -325,8 +344,9 @@ def _window(conversation: Any) -> list[dict]:
             continue
         if not content.strip():
             continue
-        turns.append({"role": role, "content": content[:TURN_MAX_CHARS]})
-        if len(turns) > MAX_TURNS:
+        turns.append({"role": role,
+                      "content": _clip_capture_turn_content(content)})
+        if len(turns) > MAX_SESSION_TURNS:
             turns.pop(0)
     return turns
 

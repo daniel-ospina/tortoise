@@ -326,6 +326,86 @@ def test_a_conversation_is_windows_to_the_last_500_turns(tmp_path: Path) -> None
     assert turns[-1]["content"] == "turn 501 of s-long"
 
 
+def test_the_window_obeys_the_SERVERS_bound_and_not_a_local_copy(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#4897 / review ISSUE (b): the turn bound is ``quota.MAX_SESSION_TURNS``.
+
+    A local re-declaration is not a style problem: ``hosted_api`` 400s above the
+    server's bound and ``classify_failure`` reads that 400 as PERMANENT, so a
+    copy that drifts LOWER dead-letters every record in the band on its first
+    pass AND crosses the cursor. The bound is therefore read from its owner at
+    call time — patching the owner must move this leg's window, which a bare
+    ``MAX_TURNS = 500`` literal here cannot do.
+    """
+    import tortoise.quota
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    _write_day(root, "2026-10-01.jsonl", [_record("s-five", turns=5)])
+    post = Recorder()
+    monkeypatch.setattr(tortoise.quota, "MAX_SESSION_TURNS", 3)
+
+    _drain(root, store, post)
+
+    turns = post.posted[0]["conversation"]
+    # The MOST RECENT ``MAX_SESSION_TURNS`` turns — not the first ones, and not
+    # five of them because this module remembered its own number.
+    assert [t["content"] for t in turns] == [
+        "turn 2 of s-five", "turn 3 of s-five", "turn 4 of s-five"]
+
+
+def test_an_over_cap_turn_is_CLIPPED_WITH_A_MARKER_never_silently_cut(
+        tmp_path: Path) -> None:
+    """#4897 / review ISSUE (a): the cut must be observable to a reader.
+
+    The bare slice this leg used to apply cut to EXACTLY the cap, so the server's
+    own re-windowing saw a turn that is not *over* the window and added no marker
+    either: the stored turn was truncated with nothing telling a reader it had
+    been cut. The SDK clip reserves its marker INSIDE the cap, so the mark
+    survives the server's re-application.
+    """
+    from tortoise.sdk import _CAPTURE_TURN_CAP, _capture_truncation_marker
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    total = _CAPTURE_TURN_CAP + 77
+    raw = "z" * total
+    record = _record("s-wide")
+    record["conversation"][0] = {"role": "user", "content": raw}
+    _write_day(root, "2026-10-01.jsonl", [record])
+    post = Recorder()
+
+    _drain(root, store, post)
+
+    content = post.posted[0]["conversation"][0]["content"]
+    # Within the window the server accepts...
+    assert len(content) <= _CAPTURE_TURN_CAP
+    # ...the SILENT slice's output (the pre-fix behaviour, and what a marker-less
+    # re-window would produce) is distinguishable from this one.
+    assert content != raw[:_CAPTURE_TURN_CAP]
+    # ...and the marker carries the TRUE original length, which the cut destroys.
+    assert content.endswith(_capture_truncation_marker(total))
+
+
+def test_a_turn_exactly_at_the_cap_is_NOT_marked(tmp_path: Path) -> None:
+    """The companion claim: only an ACTUAL cut marks — a complete turn is complete.
+
+    Guards the over-marking half of #4897's P1: a turn at the boundary is
+    returned verbatim, so the marker means "there is more", never "we reached
+    the limit".
+    """
+    from tortoise.sdk import _CAPTURE_TURN_CAP
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    exact = "w" * _CAPTURE_TURN_CAP
+    record = _record("s-exact")
+    record["conversation"][0] = {"role": "user", "content": exact}
+    _write_day(root, "2026-10-01.jsonl", [record])
+    post = Recorder()
+
+    _drain(root, store, post)
+
+    assert post.posted[0]["conversation"][0]["content"] == exact
+
+
 def _read_records(path: Path) -> list[str]:
     return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
