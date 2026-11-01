@@ -108,6 +108,12 @@ _TARGET_ARGV = ["--uri", "docker://:pw@127.0.0.1:1/x",
 _DSN = "postgresql://record_app:pw@127.0.0.1:5432/tortoise"
 _FINGERPRINT = hashlib.sha256(_DSN.encode()).hexdigest()[:8]
 
+#: The journal path `_plan` writes into the artefact. It is part of the APPROVAL
+#: TOKEN (`plan_digest(eligible, journal_path)`), so every hand-minted digest
+#: below has to name it — a digest minted without it covers only half the
+#: decision (#10483 review round 10, P1).
+_JOURNAL = "/tmp/journal.jsonl"
+
 
 def _health(armed: bool = True, age: float = 60,
             fingerprint: str | None = _FINGERPRINT,
@@ -224,13 +230,13 @@ def test_digest_is_order_independent_and_sensitive_to_one_node():
          {"session": "s2", "ids": ["s2_t0"]}]
     b = [{"session": "s2", "ids": ["s2_t0"]},
          {"session": "s1", "ids": ["s1_t1", "s1_t0"]}]
-    assert purge.plan_digest(a) == purge.plan_digest(b)
+    assert purge.plan_digest(a, _JOURNAL) == purge.plan_digest(b, _JOURNAL)
     off_by_one = [{"session": "s1", "ids": ["s1_t0", "s1_t1", "s1_t2"]},
                   {"session": "s2", "ids": ["s2_t0"]}]
-    assert purge.plan_digest(a) != purge.plan_digest(off_by_one)
+    assert purge.plan_digest(a, _JOURNAL) != purge.plan_digest(off_by_one, _JOURNAL)
     rehomed = [{"session": "s1", "ids": ["s1_t0"]},
                {"session": "s2", "ids": ["s2_t0", "s1_t1"]}]
-    assert purge.plan_digest(a) != purge.plan_digest(rehomed)
+    assert purge.plan_digest(a, _JOURNAL) != purge.plan_digest(rehomed, _JOURNAL)
 
 
 # ── REFUSAL 1 of 3 (mandated): the record is not armed ──────────────────
@@ -389,7 +395,7 @@ def test_cli_default_is_a_dry_run_and_writes_the_plan(tmp_path, capsys):
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     assert plan["purge"]["turn_node_total"] == 2
     assert plan["plan_digest"] == purge.plan_digest(
-        [{"session": "s1", "ids": ["s1_t0", "s1_t1"]}])
+        [{"session": "s1", "ids": ["s1_t0", "s1_t1"]}], None)
     # No armed evidence and no restore proof were supplied: the plan says so
     # rather than implying a recovery path that has not been proven.
     assert plan["recovery"]["verdict"].startswith("NEEDS-RECOVERY-PATH")
@@ -1462,11 +1468,11 @@ def test_execute_refuses_a_plan_entry_that_names_no_ids(tmp_path, monkeypatch,
     plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
     ghost = {"session": "never-purged", "class": "PARITY",
              "graph_turn_nodes": 0, "record_turn_rows": 0, "ids": []}
-    before = purge.plan_digest(plan["purge"]["sessions"])
+    before = purge.plan_digest(plan["purge"]["sessions"], _JOURNAL)
     plan["purge"]["sessions"].append(ghost)
     plan["purge"]["session_count"] += 1
     # The approved token does NOT move: the ghost contributes no pairs.
-    assert purge.plan_digest(plan["purge"]["sessions"]) == before
+    assert purge.plan_digest(plan["purge"]["sessions"], _JOURNAL) == before
     assert before == plan["plan_digest"]
     rc, called = _cli_execute(
         tmp_path, monkeypatch,
@@ -1490,7 +1496,7 @@ def test_execute_refuses_a_plan_that_names_no_session(tmp_path, monkeypatch,
     plan["purge"]["sessions"] = []
     plan["purge"]["session_count"] = 0
     plan["purge"]["turn_node_total"] = 0
-    plan["plan_digest"] = purge.plan_digest([])
+    plan["plan_digest"] = purge.plan_digest([], _JOURNAL)
     rc, called = _cli_execute(
         tmp_path, monkeypatch,
         report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]), plan=plan)
@@ -1590,7 +1596,8 @@ def test_an_edited_plan_cannot_borrow_the_approval_of_the_original():
     edited["purge"]["sessions"] = [{"session": "s1", "ids": ["s1_t0", "s1_t9"],
                                     "graph_turn_nodes": 2}]
     edited["purge"]["turn_node_total"] = 2
-    edited["plan_digest"] = purge.plan_digest(edited["purge"]["sessions"])
+    edited["plan_digest"] = purge.plan_digest(edited["purge"]["sessions"],
+                                             edited["journal"]["path"])
     live = _report(clean=[_clean_with_ids("s1", ["s1_t0", "s1_t9"])])
     # The gate's own self-consistency check passes on the edited file…
     code, _ = purge.evaluate_gate(
@@ -1599,6 +1606,73 @@ def test_an_edited_plan_cannot_borrow_the_approval_of_the_original():
         confirm_digest=edited["plan_digest"], target_note="test target",
         live_target=edited["target"], health_fetched=True)
     assert code == purge.REFUSE_CONFIRMATION_MISMATCH      # …the approval does not
+
+
+# ── round 10: the approval token covers BOTH damage axes ─────────────────
+#
+# A purge has two ways to do damage: delete nodes nobody approved, and bury the
+# record of the removal in a log the target's rebuild never reads (the #3316
+# resurrection). v1's digest hashed only the (session, node) pairs, so the
+# journal — the second axis — was the one field of the approved artefact the
+# token could not reach: an edited `journal.path` still carried the approved
+# digest, and `_execute`'s own check compared the plan to the ARGV (both of
+# which the editor controls), never to the approval.
+
+def test_the_approval_token_covers_the_journal_the_plan_names():
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    sessions = plan["purge"]["sessions"]
+    assert purge.plan_digest(sessions, _JOURNAL) == plan["plan_digest"]
+    # The SAME approved set, a different journal: a different token. That is the
+    # whole fix — one line of payload, and the edit is now visible to the
+    # artefact the human signed.
+    assert purge.plan_digest(sessions, "/tmp/other.jsonl") != plan["plan_digest"]
+    # …including the difference between "names a journal" and "names none",
+    # which is the plan `--execute` refuses as unrepairable.
+    assert purge.plan_digest(sessions, None) != plan["plan_digest"]
+
+
+def test_a_plan_whose_JOURNAL_was_edited_cannot_reach_a_delete(
+        tmp_path, monkeypatch, capsys):
+    """BY EFFECT, because that is the claim: with the plan's journal edited to
+    sit where this run appends (so `_execute`'s plan-vs-ARGV check agrees) and
+    the plan re-cutting its OWN digest (so the file is self-consistent), the
+    approved set still deletes and the removals land in a log the target's
+    rebuild does not read — unless the out-of-band approval binds them.
+    (#10483 review round 10, P1)"""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    edited = json.loads(json.dumps(plan))
+    edited["journal"]["path"] = str(tmp_path / "journal.jsonl")
+    edited["plan_digest"] = purge.plan_digest(edited["purge"]["sessions"],
+                                             edited["journal"]["path"])
+    # The approval is the one the human gave, for the plan they were shown —
+    # whose journal was `_JOURNAL`.
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        plan=edited, approval=_approval(plan["plan_digest"]))
+    assert rc == 2
+    assert called == []
+    assert purge.REFUSE_CONFIRMATION_MISMATCH in capsys.readouterr().err
+
+
+def test_the_preview_census_set_failure_is_named_UNREADABLE(tmp_path, capsys):
+    """One failure, one name. A report whose counts and id lists do not add up
+    is `census-unreadable` in `evaluate_gate`; the preview called it
+    `census-not-clean`, which this module defines as "the census REFUSED on its
+    anomaly partition" — so an operator (or a monitor rule) reading the code
+    was sent to resolve graph anomalies instead of the incoherent report
+    (#10483 review round 10, P2)."""
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    report["parity"]["clean_sessions"][0]["graph_turn_nodes"] = 7
+    census_path = tmp_path / "census.json"
+    census_path.write_text(json.dumps(report), encoding="utf-8")
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t",
+                     "--event-log-path", "j.jsonl",
+                     "--census-json", str(census_path)])
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert purge.REFUSE_CENSUS_UNREADABLE in err
+    assert purge.REFUSE_CENSUS_NOT_CLEAN not in err
 
 
 # ── evidence has an AGE and an ADDRESS ──────────────────────────────────
@@ -2028,7 +2102,7 @@ def _arming_missing(health, *, health_url: bool = True) -> list[str]:
     missing = purge._recovery_missing(
         purge._build_parser().parse_args(argv),
         _proof(), health, _report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
-        _target())
+        _target(), record_dsn=_DSN)
     return [m for m in missing if "ARMED" in m]
 
 
@@ -2040,7 +2114,7 @@ def _proof_missing(proof) -> list[str]:
         purge._build_parser().parse_args(
             [*_TARGET_ARGV, "--target-note", "t", "--event-log-path", "j.jsonl"]),
         proof, _health(), _report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
-        _target())
+        _target(), record_dsn=_DSN)
     return [m for m in missing if "precondition 3" in m]
 
 
@@ -2057,6 +2131,14 @@ def test_the_preview_and_the_execute_gate_ask_the_same_arming_question():
         ("flattened-no-dsn", {"record.armed": True, "fetched_at": _ts(60)}),
         ("unarmed", _health(armed=False)),
         ("absent", None),
+        # ⛔ THE TWO DIMENSIONS THAT NEED THE RUN'S OWN FACTS, which the preview
+        # used to skip (#10483 review round 10, P2): an artefact that is armed
+        # and names A record, but not THIS run's, and one that names another
+        # tenant. Both were certified by the preview and refused by
+        # `--execute` one round trip later, so the agreement test has to carry
+        # them or it measures agreement only where it was never in doubt.
+        ("other-record", _health(fingerprint="deadbeef")),
+        ("other-tenant", {**_health(), "org_id": "someone-else"}),
     ]
     for name, body in bodies:
         preview_gap = bool(_arming_missing(body))
@@ -2090,6 +2172,30 @@ def test_the_preview_and_the_gate_agree_that_a_FILE_is_not_arming_evidence():
     # …and the live source of the SAME body is clean, so this is a measurement
     # of the source and not a constant.
     assert _arming_missing(_health(), health_url=True) == []
+
+
+def test_the_preview_names_evidence_armed_for_ANOTHER_record():
+    """The round-10 P2, pinned on its own: `_armed_evidence_gap` answers "is
+    this an ARMED artefact?", not "is it armed for the record THIS run reads
+    and deletes around". A preview that stops at the first question prints
+    RECOVERY-PATH-STATED over a body naming another record, and the operator
+    signs a digest `--execute` then refuses `target-drift` (#10483 review round
+    10, P2)."""
+    arming = _arming_missing(_health(fingerprint="deadbeef"))
+    assert arming, "the preview must not certify arming evidence for another record"
+    assert purge.REFUSE_TARGET_DRIFT in arming[0]
+    # …and the SAME body with THIS run's fingerprint is clean, so what the arm
+    # measures is the binding and not the presence of the field.
+    assert _arming_missing(_health()) == []
+
+
+def test_the_preview_names_evidence_from_ANOTHER_tenant():
+    """The tenant half of the same question, on the preview side (#10483
+    review round 10, P2)."""
+    arming = _arming_missing({**_health(), "org_id": "someone-else"})
+    assert arming, "the preview must not certify another tenant's arming evidence"
+    assert purge.REFUSE_TARGET_DRIFT in arming[0]
+    assert _arming_missing(_health()) == []
 
 
 # ── round 8: the SAME agreement question, for the SECOND evidence artefact ──

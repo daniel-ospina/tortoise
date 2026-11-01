@@ -272,7 +272,16 @@ import turn_parity_census as census_mod  # the ONE parity implementation
 #: The digest's format tag. Bumping it invalidates every previously approved
 #: plan on purpose: a plan approved under a different canonicalisation must not
 #: silently re-bind to a set this tool now serialises differently.
-_PLAN_DIGEST_VERSION = "v1"
+#:
+#: v2 — the payload also covers the JOURNAL PATH. v1 hashed the (session, node)
+#: pairs alone, so `journal.path` was the one field of the approved artefact the
+#: approval token did not reach: a plan whose journal was edited (with a
+#: matching `--event-log-path`, which was all `_execute` compared) still carried
+#: the approved digest, deleted the approved SET, and recorded the removals in a
+#: log the target's rebuild never reads — the #3316 resurrection
+#: `REFUSE_JOURNAL_UNUSABLE` exists to prevent, reached through the one door the
+#: digest did not cover (#10483 review round 10, P1).
+_PLAN_DIGEST_VERSION = "v2"
 
 #: The classes a session can be in. PARITY (with its RECORD-AHEAD flag) is the
 #: ONLY one that may be purged; the signature of this tuple is that "eligible"
@@ -433,17 +442,29 @@ def classify_sessions(report: dict) -> dict:
     return {"eligible": eligible, "excluded": excluded, "counts": counts}
 
 
-def plan_digest(eligible: list[dict]) -> str:
-    """SHA-256 over the canonical (session, node) set — the approval token.
+def plan_digest(eligible: list[dict], journal_path: str | None) -> str:
+    """SHA-256 over the canonical (session, node) set AND the journal — the
+    approval token.
 
     Order-independent by construction (sorted pairs), and sensitive to ANY
     change: one pair added, removed, or moved to another session changes the
     digest. This is the "exact-set precondition": the human approves this
     string, and `--execute` refuses unless the live set re-derives it.
+
+    ⛔ THE JOURNAL PATH IS IN THE PAYLOAD, and it is not decoration. A purge has
+    exactly two damage axes — WHICH nodes go, and WHERE their removal is
+    recorded — and a removal recorded in a log the target's rebuild never reads
+    is a removal that resurrects (#3316). While the payload covered only the
+    pairs, `journal.path` was the one field of the approved artefact the token
+    did not reach. `journal_path` therefore has NO default: a caller that
+    cannot name the journal has not established the second axis, and an
+    approval token minted without it would certify half the decision (#10483
+    review round 10, P1).
     """
     pairs = sorted(f"{e['session']}\x00{tid}"
                    for e in eligible for tid in e["ids"])
-    payload = _PLAN_DIGEST_VERSION + "\n" + "\n".join(pairs) + "\n"
+    payload = (_PLAN_DIGEST_VERSION + "\n" + (journal_path or "") + "\n"
+               + "\n".join(pairs) + "\n")
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -454,6 +475,22 @@ def digest_set(eligible: list[dict]) -> set[str]:
     an operator refusing an execute needs the difference, not the hash.
     """
     return {f"{e['session']}\x00{tid}" for e in eligible for tid in e["ids"]}
+
+
+def _plan_journal_path(plan: dict | None) -> str | None:
+    """The journal path the plan NAMES — the half of the token a set cannot
+    carry.
+
+    `None` when the plan names none, so an absent `journal` block and a block
+    with no path hash identically; `_execute` refuses both on its own grounds
+    (`REFUSE_JOURNAL_UNUSABLE`), and a plan edited from one shape into the other
+    still fails the approval binding because the digest moved.
+    """
+    block = (plan or {}).get("journal")
+    if isinstance(block, dict):
+        path = block.get("path")
+        return path if isinstance(path, str) and path else None
+    return None
 
 
 def build_plan(report: dict, *, target: dict, health: dict | None,
@@ -521,7 +558,7 @@ def build_plan(report: dict, *, target: dict, health: dict | None,
             "turn_nodes_held_back": sum(e["graph_turn_nodes"]
                                         for e in classified["excluded"]),
         },
-        "plan_digest": plan_digest(eligible),
+        "plan_digest": plan_digest(eligible, journal_path),
         "recovery": {
             "record_side": ("journaled EntityMutated op=delete with "
                             "cache_tier='record_only' → tier DEMOTE, not a row "
@@ -685,7 +722,8 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
     # and every check below compares the LIVE set to that digest, never the
     # list to it. Re-derive it here, first, before anything trusts either.
     purge_block = plan.get("purge", {}) or {}
-    if plan_digest(purge_block.get("sessions") or []) != approved:
+    if plan_digest(purge_block.get("sessions") or [],
+                   _plan_journal_path(plan)) != approved:
         return (REFUSE_NOT_IN_PLAN,
                 "the plan's own purge.sessions do not serialise to the "
                 "digest it states — the artefact has been edited since it "
@@ -790,7 +828,8 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                 "target session(s) MISMATCH — the record holds a DIFFERENT "
                 "transcript for these turns: " + ", ".join(mismatched[:10]))
 
-    live_digest = plan_digest(classified["eligible"])
+    live_digest = plan_digest(classified["eligible"],
+                              _plan_journal_path(plan))
     if live_digest != approved:
         approved_set = digest_set(plan.get("purge", {}).get("sessions") or [])
         live_set = digest_set(classified["eligible"])
@@ -1364,7 +1403,7 @@ class _UsageParser(argparse.ArgumentParser):
 
 def _recovery_missing(args, restore_proof: dict | None,
                       health: dict | None, report: dict,
-                      live_target: dict) -> list[str]:
+                      live_target: dict, *, record_dsn: str) -> list[str]:
     """What is still absent on the recovery axis — named, never assumed.
 
     ⛔ ONE QUESTION, ASKED BY BOTH ARMS (again). `--restore-proof` was the LAST
@@ -1399,13 +1438,24 @@ def _recovery_missing(args, restore_proof: dict | None,
                 "the --restore-proof artefact does not establish #10017 "
                 f"precondition 3 ({REFUSE_RESTORE_PROOF_STALE}): "
                 f"{proof_problem} — `--execute` will refuse it")
-    # The SAME question the destructive arm asks: an artefact can be armed and
-    # still prove nothing about the record (#10483 review round 5, P2).
-    armed_gap = _armed_evidence_gap(health)
+    # The SAME question the destructive arm asks — the WHOLE of it, through the
+    # destructive arm's own function. Round 5 shared `_armed_evidence_gap`,
+    # which judges only whether the artefact IS evidence (armed? does it name a
+    # `record.dsn`?); the two dimensions that need the RUN's own facts — that
+    # the fingerprint is THIS run's record, and that the tenant did not drift —
+    # stayed in `_armed_evidence_problem`, so a preview over a body naming
+    # another record printed RECOVERY-PATH-STATED and `--execute` refused
+    # `target-drift` one round trip later: the "burns a signed digest" failure
+    # round 5 set out to close, one dimension over (#10483 review round 10, P2).
+    # `record_dsn` has NO default for the same reason `journal_path` has none:
+    # an arm that cannot name the record cannot answer the binding question, and
+    # a default would let it skip the question instead (#10483 review round 5).
+    armed_code, armed_gap = _armed_evidence_problem(
+        health, live_target, record_dsn=record_dsn)
     if armed_gap:
         missing.append(
             "no usable /health ARMED evidence for this target (#9548 / PR "
-            f"#9989): {armed_gap}")
+            f"#9989, {armed_code}): {armed_gap}")
     # …and the same question about its SOURCE. `--execute` refuses a CAPTURED
     # body outright (`main` cannot tell a file from a live read, so a
     # hand-written body would satisfy the arming precondition — #10483 review,
@@ -1663,7 +1713,8 @@ def main(argv: list[str] | None = None) -> int:
                           restore_proof=restore_proof,
                           target_note=args.target_note,
                           recovery_missing=_recovery_missing(
-                              args, restore_proof, health, report, target),
+                              args, restore_proof, health, report, target,
+                              record_dsn=record_dsn),
                           journal_path=args.event_log_path,
                           # Provenance, never a gate: `--execute` re-derives the
                           # census from the live stores and refuses a cached
@@ -1693,8 +1744,15 @@ def main(argv: list[str] | None = None) -> int:
         # operator ONE answer (#10483 review round 9, P3). `AttributeError` is
         # here as the net under the shape gate above: a dereference we have not
         # anticipated still fails closed with a name, never a crash.
+        # ⛔ `census-unreadable`, the code `evaluate_gate` uses for this SAME
+        # failure (line ~753), not `census-not-clean` — which this module
+        # defines as "the census REFUSED on its anomaly partition". One
+        # condition carrying two names sends an operator (or a monitor rule
+        # grepping the code) to resolve graph anomalies when the real fault is
+        # a report whose counts and id lists do not add up (#10483 review round
+        # 10, P2).
         sys.stderr.write(f"purge_legacy_turns: REFUSED "
-                         f"{REFUSE_CENSUS_NOT_CLEAN}: the census report cannot "
+                         f"{REFUSE_CENSUS_UNREADABLE}: the census report cannot "
                          f"be turned into a purge set ({exc}).\n")
         return 3
     if args.json:
@@ -2194,7 +2252,7 @@ def _execute(plan: dict, args, target: dict) -> int:
             return 3
         except (KeyError, TypeError, ValueError) as exc:
             sys.stderr.write(
-                f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_NOT_CLEAN}: the "
+                f"purge_legacy_turns: REFUSED {REFUSE_CENSUS_UNREADABLE}: the "
                 f"re-read of session {sid} could not be compared ({exc}) — "
                 f"nothing in this session was deleted. {deleted_total} "
                 f"node(s) were deleted and journaled BEFORE this check.\n")
