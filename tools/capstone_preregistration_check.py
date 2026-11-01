@@ -552,23 +552,49 @@ def history_unavailable() -> bool:
     return out.stdout.strip().lower() == "true"
 
 
-def _added_epochs(path: Path) -> list[int]:
-    """Commit epochs at which ``path`` was ADDED, oldest-first. Empty when never added."""
+def _added_commits(path: Path) -> list[tuple[int, str]]:
+    """``(epoch, sha)`` for every commit that ADDED ``path``, oldest-first. Empty when never added.
+
+    ⛔ THE SHA IS NOT DECORATION (#10531 review cycle 4, P1). The first cut of this change inferred
+    "the pair entered the repository atomically" from ``log_epoch == prereg_epoch`` — but two
+    DIFFERENT commits can share a second, and git can order them by ANCESTRY. Comparing epochs alone
+    therefore (a) let the attack shape through once a disclosure was supplied — a log commit and a
+    thresholds commit in the same second, where the log is a true ancestor — and (b) told the
+    HONEST two-commit-same-second shape it was "the SAME commit", compelling a false record entry.
+    Atomicity is identical-SHA, and distinct commits are ordered by ``git merge-base --is-ancestor``;
+    the epoch is only what names the commit in a message.
+    """
     try:
         rel = path.resolve().relative_to(REPO_ROOT)
     except ValueError:
         return []
     try:
         out = subprocess.run(
-            ["git", "log", "--diff-filter=A", "--format=%ct", "--", str(rel)],
+            ["git", "log", "--diff-filter=A", "--format=%H %ct", "--", str(rel)],
             cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
         )
     except OSError:  # pragma: no cover - git absent
         return []
     if out.returncode != 0:
         return []
-    epochs = [int(x) for x in out.stdout.split() if x.strip().isdigit()]
-    return sorted(epochs)
+    found: list[tuple[int, str]] = []
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].strip().isdigit():
+            found.append((int(parts[1]), parts[0]))
+    return sorted(found)
+
+
+def _is_ancestor(older: str, newer: str) -> bool:
+    """Is ``older`` an ancestor of ``newer`` (or the same commit)? Never raises."""
+    try:
+        out = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", older, newer],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError:  # pragma: no cover - git absent
+        return False
+    return out.returncode == 0
 
 
 def _is_tracked(path: Path) -> bool:
@@ -938,7 +964,7 @@ def _record_atomic_add(directory: Path) -> dict:
     return _mapping(record, ATOMIC_ADD_KEY, MACHINE_RECORD)
 
 
-def _atomic_add_failure(name: str, declared: object, prereg_epoch: int) -> str | None:
+def _atomic_add_failure(declared: object, prereg_epoch: int) -> str | None:
     """``None`` when the disclosure is complete, else the one reason it is not.
 
     Fail-closed on TYPE, not merely on emptiness (#10531 review P2): ``str({})`` is truthy, so a
@@ -1047,8 +1073,8 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     if history_unavailable():
         raise HistoryUnavailable(HISTORY_UNAVAILABLE, failures)
 
-    prereg_epochs = _added_epochs(prereg)
-    if not prereg_epochs:
+    prereg_adds = _added_commits(prereg)
+    if not prereg_adds:
         if not logs:
             return failures  # not committed yet, and nothing to be ordered against
         if not _is_tracked(prereg):
@@ -1062,14 +1088,14 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             "cannot establish that it precedes the evidence logs"
         )
         return failures
-    prereg_epoch = min(prereg_epochs)
+    prereg_epoch, prereg_sha = prereg_adds[0]
     # ⛔ EVERY present disclosure is TYPE-CHECKED once, here, before the per-log arms (#10531 review
     # cycle 2, P2). The arms previously validated only the SCORED atomic path, so a disclosure on an
     # atomic-and-unscored log was never checked (`reason: {a: 1}` was accepted), and the field rules
     # applied to whichever arm happened to run first rather than to the disclosure itself.
     disclosure_failed: set[str] = set()
     for name in sorted(set(atomic) & present):
-        problem = _atomic_add_failure(name, atomic.get(name), prereg_epoch)
+        problem = _atomic_add_failure(atomic.get(name), prereg_epoch)
         if problem:
             disclosure_failed.add(name)
             failures.append(
@@ -1077,14 +1103,14 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 f"{problem}"
             )
     for log in logs:
-        log_epochs = _added_epochs(log)
-        if not log_epochs:
+        log_adds = _added_commits(log)
+        if not log_adds:
             if _is_tracked(log):
                 failures.append(
                     f"{log.name}: tracked but with no add-commit — ordering unprovable"
                 )
             continue  # untracked log: it cannot predate a commit that already exists
-        log_epoch = min(log_epochs)
+        log_epoch, log_sha = log_adds[0]
         if log.name in exempt:
             if log_epoch > prereg_epoch:
                 failures.append(
@@ -1108,10 +1134,29 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     "in-place edit can put a measurement number into a grandfathered log after "
                     "the thresholds were written, and the add-commit cannot see that"
                 )
+            # ⛔ Record the atomic state before this `continue` (#10531 review cycle 4, P2): an
+            # exempt log that IS atomic and carries a disclosure reached the anti-rot loop and was
+            # told "but it is not one" — the cycle-3 defect class resurfacing through this arm.
+            if log_sha == prereg_sha:
+                atomic_seen.add(log.name)
+                if atomic_added is not None and log.name in atomic:
+                    atomic_added.append(log.name)
             continue
+        # ⛔ ATOMIC IS IDENTICAL-SHA, NOT EQUAL-EPOCH (#10531 review cycle 4, P1). Two DISTINCT
+        # commits can share a second, and git orders those by ancestry — so an `==` epoch test would
+        # both admit the attack shape (a log commit that IS an ancestor of the thresholds commit,
+        # hidden behind an equal second) and accuse the honest two-commit-same-second shape of being
+        # "the SAME commit", demanding a false record entry. `atomic_pair` is therefore identity,
+        # and distinct commits are settled by `git merge-base --is-ancestor`; the epoch survives
+        # only to name the commit in a message.
+        atomic_pair = log_sha == prereg_sha
+        ordered_by_ancestry = (
+            not atomic_pair and log_epoch <= prereg_epoch
+            and _is_ancestor(prereg_sha, log_sha)
+        )
         # A log that provably produced NO number cannot have been scored against thresholds
         # chosen after it was read. Re-asked of the content on every run, so the moment it gains a
-        # number this gate reds it again (#9089). This arm is asked FIRST in both shapes below: an
+        # number this gate reds it again (#9089). This arm is asked FIRST in both shapes: an
         # unscored log needs no disclosure to be ordered, whichever commit carried it.
         if log_epoch <= prereg_epoch:
             ok, why = _log_declares_no_measurement(log)
@@ -1119,30 +1164,27 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 # ⛔ The atomic state is recorded HERE too (#10531 review P1): a log that is both
                 # atomic AND provably unscored is honestly disclosable, and a disclosure was being
                 # punished as "not an atomic add" because this `continue` skipped the bookkeeping.
-                if log_epoch == prereg_epoch:
+                # It is also REPORTED (#10531 review cycle 4, P2): a disclosure nobody prints is
+                # the silent path this tool refuses.
+                if atomic_pair:
                     atomic_seen.add(log.name)
+                    if atomic_added is not None:
+                        atomic_added.append(log.name)
                 if exempted is not None:
                     exempted.append(log.name)
                 continue
-        if log_epoch < prereg_epoch:
-            # THE ATTACK. Untouched and undeclarable (#10531).
-            failures.append(
-                f"{log.name}: added at {log_epoch} which is not strictly after the "
-                f"pre-registration's add-commit {prereg_epoch} — the log may have been scored "
-                f"against thresholds chosen after it was read, and it does not prove it measured "
-                f"nothing ({why})"
-            )
-            continue
-        if log_epoch == prereg_epoch:
-            # ATOMIC ADD (#10531): the pair entered the repository in one commit — a squash merge of
+        if ordered_by_ancestry:
+            continue  # distinct commits, provably ordered: nothing to disclose
+        if atomic_pair:
+            # ATOMIC ADD (#10531): the pair entered the repository in ONE commit — a squash merge of
             # an ordered branch, or a single commit written after the numbers were read. The git
             # object is identical, so the comparison answers nothing; the disclosure is required.
             if log.name in disclosure_failed:
                 continue  # the specific field failure is already reported above
             if log.name not in atomic:
                 failures.append(
-                    f"{log.name}: added at {log_epoch}, the SAME commit that added "
-                    f"{PREREG_NAME} ({prereg_epoch}) — the ordering is atomic, so git cannot show "
+                    f"{log.name}: added at {log_epoch} by the SAME commit that added "
+                    f"{PREREG_NAME} ({log_sha[:9]}) — the ordering is atomic, so git cannot show "
                     f"which came first (a squash merge of an ordered branch and one commit "
                     f"written after the numbers look identical). Disclose it under "
                     f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY} or the ordering is unproven."
@@ -1156,6 +1198,18 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             atomic_seen.add(log.name)
             if atomic_added is not None:
                 atomic_added.append(log.name)
+            continue
+        if log_epoch <= prereg_epoch:
+            # THE ATTACK, and the conservative catch-all. Untouched and undeclarable (#10531).
+            # Distinct commits where git shows the log's add as the OLDER one, OR cannot order them
+            # at all (identical epoch, unrelated history) — `main`'s verdict, kept, because an
+            # unprovable ordering is not an ordering and this is NOT the squash shape.
+            failures.append(
+                f"{log.name}: added at {log_epoch} which is not strictly after the "
+                f"pre-registration's add-commit {prereg_epoch} — the log may have been scored "
+                f"against thresholds chosen after it was read, and it does not prove it measured "
+                f"nothing ({why})"
+            )
             continue
     # Declarations are held to the same anti-rot rule as the exemption: one describing a NORMALLY
     # ordered log is a waiver granted where none is needed — and a waiver that is routine is the

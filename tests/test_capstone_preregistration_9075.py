@@ -379,6 +379,53 @@ def _atomic_pins(name: str, **overrides) -> dict:
     return {name: entry}
 
 
+def _two_commits_same_second(repo: Path, log_first: bool,
+                             epoch: int = 1_700_000_000) -> tuple[Path, Path]:
+    """Two DISTINCT commits with the SAME epoch — git can still order them by ANCESTRY.
+
+    Atomicity is identical-SHA, not equal-epoch (#10531 review cycle 4, P1): an `==` epoch test
+    admitted the attack shape (log commit is a true ancestor, hidden behind an equal second) and
+    accused the honest shape of being one commit.
+    """
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    log = repo / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+    first, second = (log, prereg) if log_first else (prereg, log)
+    for target in (first, second):
+        target.write_text("x\n")
+        _git(repo, "add", str(target.relative_to(repo)))
+        _git(repo, "commit", "-q", "-m", f"add {target.name}", epoch=epoch)
+    return prereg, log
+
+
+def test_a_same_second_attack_is_still_a_hard_failure(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-4 P1): the log's commit is a TRUE ancestor, one second shared.
+
+    An equal-epoch rule handed this to the atomic arm, where a disclosure would have waived a real
+    ordering violation. Identity + ancestry keeps it a hard failure — and undeclarable.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _two_commits_same_second(repo, log_first=True)
+    failures = check.check_ordering(prereg, [log])
+    assert any("not strictly after" in f for f in failures), failures
+    # A disclosure must not launder it.
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("not strictly after" in f for f in failures), failures
+
+
+def test_a_correctly_ordered_same_second_pair_needs_no_disclosure(tmp_path, monkeypatch):
+    """The honest shape: two distinct commits, same second, registration the older one.
+
+    The equal-epoch rule called this "the SAME commit" and demanded a disclosure — a false record
+    entry, which is the mirror of the attack it was meant to stop (#10531 cycle-4 P1).
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _two_commits_same_second(repo, log_first=False)
+    added: list[str] = []
+    assert check.check_ordering(prereg, [log], None, None, added) == []
+    assert added == []  # ordered by ancestry, so nothing was disclosed
+
+
 def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
     """The ATOMIC shape: the registration and the log land in the SAME commit.
 
@@ -500,7 +547,10 @@ def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, m
     prereg, log = _both_in_one_commit(repo)
     for entry in ({"reason": "", "branch_commits": ["a1075dfc2 x"]},
                   {"reason": "because", "branch_commits": [], "squash_merge": "cfa3de857 x"},
-                  {"reason": "because", "squash_merge": "cfa3de857 x"},):
+                  {"reason": "because", "squash_merge": "cfa3de857 x"},
+                  # The squash commit is REQUIRED, not merely format-checked (cycle-4 P2): a squash
+                  # leaves the branch commits unreachable, so this is the only resolvable pointer.
+                  {"reason": "because", "branch_commits": ["a1075dfc2 x"]},):
         failures = check.check_ordering(prereg, [log], None, None, None, {log.name: entry})
         assert failures and "not a usable disclosure" in failures[0], failures
 
