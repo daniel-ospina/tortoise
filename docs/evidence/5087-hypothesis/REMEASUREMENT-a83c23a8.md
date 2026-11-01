@@ -12,12 +12,20 @@ aboutObjects: "tools/s3_prior_ablation.py, tests/eval/write_path, s3-ablation-a8
 
 # Re-measurement record — the S3 prior-injection ablation, run a second time on purpose
 
-**Verdict: `HYPOTHESIS-FALSIFIED` at ratio `0.9881` — not met against the pre-registered `<= 0.75` bar.**
+**Verdict: `HYPOTHESIS-FALSIFIED` at ratio `0.9881` — E1 not met against the pre-registered `<= 0.75` bar.**
 The recorded log said `0.870`. **The two disagree by 0.118**, and the disagreement matters: `0.870` reads as
-*"priors cut creates by 13 %"*, while `0.988` reads as *"no measurable effect — the counts are 253 vs 250"*.
-The **qualitative** conclusion is unchanged (the hypothesis is falsified either way); the **effect size is not**,
-and the number that was being quoted overstated it. Both logs are in this bundle; this note is the provenance
-record the ruling on `#10463` (`comment 6564634454`) asked for.
+*"priors cut creates by about a seventh"*, while `0.988` reads as *"no measurable effect — 253 vs 250 nodes"*.
+The **qualitative** conclusion is unchanged (falsified either way). The **magnitude** is not, and `0.870`
+overstated it.
+
+⚠️ **Read this before quoting `0.988`.** The same pinned tree, corpus and 7 sessions produced an **untreated**
+baseline of `284` in the recorded run and `253` here — a **31-node (10.9 %) drift in the arm that received no
+treatment**, roughly three times the 3-node ON−OFF difference. This instrument cannot resolve an effect below
+about 11 % between runs, so the defensible sentence is *"no measurable effect at ~0.99, well inside the ~11 %
+between-run drift this instrument shows on its untreated arm"* — **not** *"priors cut creates by 1 %"*. If you
+need one number, quote the pair (`253 / 250`) beside the drift, or quote `0.870` and `0.988` together as the
+range this corpus supports. The six-decimal ratio is an arithmetic artefact of a 3-node difference, not a
+measurement that fine.
 
 ## 1. Why a second run exists at all
 
@@ -26,7 +34,7 @@ and its log landed in ONE squash commit (`cfa3de857`), so both carry epoch `1793
 property — *"the registration strictly precedes the log"* — could not be shown. The ruling kept the guard
 unchanged and said the conclusion stands only **once re-measured with the registration already on the base
 branch**. This run is that re-measurement. It is not a re-run to obtain a friendlier number: `0.988` is a
-*less* favourable result for the hypothesis being tested than `0.870` was.
+*less* favourable result for the hypothesis than `0.870` was.
 
 ## 2. Ordering provenance (the property the recorded log lacked)
 
@@ -48,16 +56,19 @@ contribution.
 | run head | `a83c23a851df7ff7aca45ae6898b17a6e4433a19` (the probe's own `head=` line) |
 | `--prereg` | `a1075dfc2a964a6e9e1a49ec990ebadf8c9a180a` (bars parsed out of the COMMIT, never the worktree) |
 | pinned source tree | `source_sha=718ee3b4…`; **0** production files and **0** metric-definition files differ between it and the run head |
-| corpus | `tests/eval/write_path`, 7 sessions, `fixtures_hash sha256:dd7e8520…` (re-derived, matches the pin) |
-| graph | a private throwaway FalkorDB lane (`tools/test_lane.py`), a fresh graph per arm, non-zero baseline refused |
+| corpus | `tests/eval/write_path`, 7 sessions, `fixtures_hash sha256:dd7e8520…` (re-derived by the probe and matched to the pin) |
+| graph | a private throwaway FalkorDB lane (`tools/test_lane.py down` after the run), one graph per arm, named `s3ablate_a83c23a8_<epoch>_off` / `_on` — distinct from every other run's graphs. ⚠️ **The probe at this head has no baseline assertion** (`assert_fresh_graph` landed at `2e1d5d730`, ten commits later), so freshness here is *by construction of the graph name and the lane*, and the log carries no baseline line and could not. The bundle's `README.md` item 11 records the same limitation for this instrument generation. |
+| witness | the arms' S3 state is asserted from the value `search_graph` **actually returned** per session, not from the run receipt — see §5 item 3 |
 
 **Why that head and not `main`.** The registration's §6 pin refuses a head where production code moved. Since
-the registration was written, `tortoise/` has moved by 24 files — **including `extractor_v2.py`, which implements
-the treatment** — and the two metric-definition files (`capstone_measure.py`, `capstone_run.py`) have moved too.
-The pin therefore refuses `origin/main` at exit 3 (`35 production file(s) differ …`) and that refusal is correct:
-measuring today's tree would measure a different system, not the registered experiment. `a83c23a85` is a
-retained commit that carries the pinned production tree **and** a probe that can witness the arms, which is what
-makes a re-measurement on the registered tree possible at all.
+the **`--prereg` commit `a1075dfc2` / the pinned `source_sha` `718ee3b4`**, `tortoise/` has moved by 24 files —
+**including `extractor_v2.py`, which implements the treatment** — and both metric-definition files
+(`capstone_measure.py`, `capstone_run.py`) have moved too. (Measured against `cfa3de857` instead, the count is 4
+files and `extractor_v2.py` is *not* among them — the 24-file figure is against the pinned tree, which is the
+baseline the pin actually uses.) The pin therefore refuses `origin/main` at exit 3 (`35 production file(s)
+differ …`), and that refusal is correct: measuring today's tree measures a different system, not the registered
+experiment. `a83c23a85` is a retained commit that carries the pinned production tree **and** a probe that can
+witness the arms, which is what makes a re-measurement on the registered tree possible at all.
 
 ## 4. Result, beside the recorded one
 
@@ -68,57 +79,83 @@ makes a re-measurement on the registered tree possible at all.
 | **ratio (E1, bar `<= 0.75`)** | **0.870** | **0.9881** |
 | verdict | `HYPOTHESIS-FALSIFIED` | `HYPOTHESIS-FALSIFIED` |
 | arm integrity (E3, need 14/14) | 14/14 | **14/14** (OFF: 0 real calls; ON: 7 real calls) |
-| real facts (E2a guard, `>= 1.00×`) | 47 → 40 (fell, guard violated) | **41 → 44** (rose, guard met) |
-| operator edges (E4 guard, `>= 1.00×`) | 171 → 139 (fell) | **141 → 166** (rose) |
-| sessions whose creates fell (E2b, `>= 4 of 7`) | 5 of 7 | **4 of 7** |
-| model calls (E5, `<= 2.00×`) | — | 21 → 27 (`1.29×`) |
-| concentration (largest session's share) | — | `0.4` (below `0.60`, no qualifier) |
+| real facts (E2a guard) | 47 → 40 (fell, guard violated) | **41 → 44** (rose, guard met) |
+| operator edges (E4 guard) | 171 → 139 (fell) | **141 → 166** (rose) |
+| sessions whose creates fell (E2b) | 5 of 7 | **4 of 7** |
+| model calls (E5, `<= 2.00×`) | 21 → 27 (`1.29×`) | 21 → 27 (`1.29×`) |
+| concentration (largest session's share) | `0.395` | `0.4` (both below `0.60`, no qualifier) |
 
-Per-session, this run: `33→40`, `34→40`, `41→31`, `42→36`, `42→40`, `30→39`, `31→24`. **Three sessions
-increased** (by 7, 6 and 9 nodes) and four fell; per-session ratios span `0.756 … 1.300`.
+Per-session, this run: `33→40`, `34→40`, `41→31`, `42→36`, `42→40`, `30→39`, `31→24`. Per-session ratios span
+`0.756 … 1.300`.
 
-**How to read the two numbers together.** They are the same verdict with different magnitudes. Both falsify the
-hypothesis, so nothing about the epic's plan changes because of the re-measurement. What changes is the
-*sentence a reader would write*: `0.870` supports *"priors reduce creates by about a seventh, but not enough to
-clear the bar"*; `0.988` supports *"priors do not measurably change creates at all"*. The second is the honest
-one for this corpus: a 3-node difference on a 253-node base is inside the session-to-session spread this run
-itself shows (a single session moved by 10 nodes in either direction).
+**Session 1 is blind in both arms** — the pre-registration says so in §0 and §4 (*"Session 1 is blind in BOTH
+arms (fresh graph, nothing exists); that is stated here so its near-zero delta is not read as a treatment effect
+after the fact"*). `wp01_quarry_debug` is session 1, and it moved `33 → 40` (**+7**) with no prior content
+available to either arm. **That +7 is noise by construction**, and it is the clearest single datum on this run's
+noise floor: the treatment provably could not act, yet the counts moved by 7. So the honest count of sessions
+that increased is **two** (`wp02` +6, `wp06` +9), not three, and the four sessions that fell
+(`wp03 −10`, `wp04 −6`, `wp05 −2`, `wp07 −7`) must be read against a ±10 swing that exists without the
+treatment.
+
+**How to read the two numbers together.** Same verdict, different magnitudes. Both falsify the hypothesis, so
+nothing in the epic's plan changes because of the re-measurement. What changes is the sentence a reader would
+write: `0.870` supports *"priors reduce creates by about a seventh, but not enough to clear the bar"*; `0.988`
+supports *"priors do not measurably change creates at all"*. The second is the one this corpus supports — but
+**only at the resolution in the warning at the top of this file**: an 11 % between-run drift on the untreated
+arm is larger than every per-session delta in both runs, and far larger than the 3-node difference between the
+two arms here.
 
 ## 5. Method differences, disclosed — and the one thing that did NOT move
 
 No bar, floor, denominator or metric definition was changed to accommodate this run. The registration's pinned
-block is unchanged, and `created_new_nodes`, `real_facts`, `operator_edges` and the verdict arithmetic are
-byte-identical between the two runs' probe code; what differs is **instrumentation around them** (the plate that
-holds the gauge, not the gauge):
+block is unchanged; `created_new_nodes`, `real_facts`, `operator_edges` and the verdict arithmetic are
+byte-identical between the two runs' probe code, and the only files this run's head differs by from the pin are
+evidence/docs/tests/tooling. What differs is **instrumentation around those functions**, plus four deviations
+that are stated here rather than left for a reader to find:
 
-1. **The recorded run's probe bytes were never committed.** Its log names `head=a1075dfc2`, but the probe at that
-   commit reads a receipt field this lane does not populate and would have reported arm integrity `0/14`
-   (`ARM-INVALID`), while the log prints `7/7 + 7/7`. The probe that produced `0.870` existed only as an
-   uncommitted working copy; the README's own errata record that, and this run exists partly to give the number a
-   probe that a reader can check out. **This run executed committed bytes** — `git show a83c23a85:tools/s3_prior_ablation.py`
-   — and both logs' `head=` lines now name commits that actually contain the probe that ran.
+1. **The recorded run's probe bytes were never committed, and this run's probe cannot prove it was the bytes
+   that ran.** The recorded log names `head=a1075dfc2`, but the probe at that commit reads a receipt field this
+   lane never populates and would have reported arm integrity `0/14` (`ARM-INVALID`), while the log prints
+   `7/7 + 7/7`. So the probe that produced `0.870` existed only as an uncommitted working copy — the bundle's
+   `README.md` item 7 records exactly that. For **this** run the situation is better but not proved: the
+   committed log's line set matches `git show a83c23a85:tools/s3_prior_ablation.py` in every respect (every
+   format string present, and no `tree=` / `probe_sha256=` / baseline line, which that revision cannot print),
+   but **that revision predates `probe_sha256=` and `assert_clean_tree`**, so it cannot *certify* the bytes it
+   executed. Claim made here: *the log is consistent with the committed probe at this head* — not *the log
+   proves it*. The first instrument generation that can certify its own bytes is later than both runs.
 2. **§6's admission rule is narrower than the letter of the frozen document.** §6 says the pin allows a head
    whose differing files are "inside `docs/evidence/` or `tools/`". The probe lineage this run used admits
    `docs/`, `tests/` and `tools/`, guarding the corpus and the metric artifacts separately and more strictly.
    The **property** §6 protects holds exactly — zero production files and zero metric-definition files moved —
-   but the letter is wider than §6's wording, and that is stated here rather than left for a reader to notice.
-3. **`--prereg a1075dfc2` is not an ancestor of `origin/main`** (the squash replaced it). The registration-on-base
+   but the letter is wider than §6's wording.
+3. **The E3 witness is the S3 function's return value, not the run receipt.** The log says this in its own
+   `S3 WITNESS:` line; it is a disclosed deviation from the pre-registration's wording *"asserted from the run
+   receipt"*, because the `capture_session` lane surfaces no `search` block at all. Repeated here because this
+   note is the document the ruling asked for.
+4. **§3 rule 5's verdict text is not printed in full.** The registration fixes the form
+   `HYPOTHESIS-FALSIFIED (ratio X)`; the log prints `RATIO: 0.9881` and `VERDICT: HYPOTHESIS-FALSIFIED` on
+   separate lines rather than folding the ratio into the verdict token. The failure branch that sets the frozen
+   text is guard-violated only at this head (the bundle's `README.md` item 12 records the same deviation), so
+   the ratio and the verdict agree but are not in one string.
+5. **`--prereg a1075dfc2` is not an ancestor of `origin/main`** (the squash replaced it). The registration-on-base
    claim rests on the **byte-identical document** at `cfa3de857` (§2), not on ancestry of the `--prereg` commit.
    Said plainly because a reader checking ancestry alone would find the opposite.
-4. **This is a second run of the pair.** §4 of the registration says *"one run of the pair is the measurement; a
+6. **This is a second run of the pair.** §4 of the registration says *"one run of the pair is the measurement; a
    second run is a new pre-registration"*. This instance is ordered by the ruling on `#10463`, and it is
    recorded as a **separate instance with the same frozen bars** — not as a silent repeat under §4. The pins are
    unchanged; a reader who wants §4 applied at its word should read this log as a second registration instance
-   whose only difference is the run head and the instrument version.
-5. **Filename.** The probe wrote this log under a working filename; it is committed as
-   `s3-ablation-a83c23a8.log` (named for the run head, as the bundle's reproduce command does). **The bytes were
-   not touched** — sha256 `796c1a49c0d2ff22266377ca58713c0e3ff14febab2a9a62aca9a27689a06174`, identical before and
-   after the rename.
+   whose only differences are the run head and the instrument version.
+7. **Filename.** The probe wrote this log to the path given to `--out`, which was a working filename
+   (`s3-ablation-88b4e19d9.log`); it is committed as `s3-ablation-a83c23a8.log`, named for the run head as the
+   bundle's reproduce command names it. No filename appears anywhere inside the log, so nothing in it is
+   inconsistent with the name it is committed under — **but the pre-rename bytes were not recorded, so the
+   rename is disclosed, not verifiable.** The committed blob's sha256 is
+   `796c1a49c0d2ff22266377ca58713c0e3ff14febab2a9a62aca9a27689a06174`.
 
 ## 6. Reproduce
 
 ```bash
-# at a83c23a85 (pinned production tree intact, probe committed there):
+# at a83c23a85 (pinned production tree intact, witness-capable probe committed there):
 git checkout a83c23a85
 uv run python tools/s3_prior_ablation.py \
     --prereg a1075dfc2a964a6e9e1a49ec990ebadf8c9a180a \
@@ -126,13 +163,18 @@ uv run python tools/s3_prior_ablation.py \
 ```
 
 A repeat at a later head is refused by design at exit 3 (production code moved) — reproducing there needs its
-own registration, which is the property that makes the bars untunable.
+own registration, which is the property that makes the bars untunable. A repeat at the **same** head is a new
+draw, and the two runs already in this bundle differ by 10.9 % on the untreated arm: treat any single draw as
+one sample, not as the effect size.
 
 ## 7. What this does not claim
 
 - **Not** that the preregistered pipeline order changed: no production file was touched by this lane.
 - **Not** that `0.870` was dishonest: its arithmetic was right for the run that produced it. What it lacked was a
-  probe a reader could check out, and an ordering that could be shown. The re-measurement supplies both and gets
-  `0.988`, which is the number the epic should now quote.
+  probe a reader could check out, and an ordering that could be shown. The re-measurement supplies the ordering,
+  comes within reach of the probe question, and gets `0.988` — which is the number to quote **with the drift**,
+  not instead of it.
+- **Not** that this run supersedes the recorded one as *the* measurement. Two draws on one corpus, 10.9 % apart
+  on the untreated arm, agree on the verdict and disagree on the magnitude. That disagreement is the finding.
 - **Not** a promotion of this bundle over the withdrawn log: that file is untouched, and the withdrawal ordered by
   the ruling is carried by its own lane (`#10544`).
