@@ -759,6 +759,11 @@ jobs:
           TORTOISE_RECORD_DSN: ${{ secrets.TORTOISE_RECORD_DSN }}
           TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          # #8133: the probe above reads $VENICE_API_KEY, so the step must bind
+          # it — an unbound variable expands to the empty string, the probe
+          # reports the name ABSENT, and the gate fails a deploy for a secret
+          # that IS configured (the #4334 "reference it but never wire it" drift).
+          VENICE_API_KEY: ${{ secrets.VENICE_API_KEY }}
           # #4759: the bypass report's window start and its per-job audit marker.
           SKIP_FLY_SECRET_PROVENANCE_SET_AT: ${{ vars.SKIP_FLY_SECRET_PROVENANCE_SET_AT }}
           DEPLOY_BYPASS_MARKER: ${{ runner.temp }}/deploy-bypass-marker.txt

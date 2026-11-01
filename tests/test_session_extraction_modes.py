@@ -254,6 +254,83 @@ def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
     )
 
 
+# ── The "keyless capture" helpers must scrub the DERIVED provider set ──────
+#
+# #8133 registered ``venice`` in ``ingest._PROVIDERS``, which is the registry
+# these helpers' four-key hand-lists had never heard of. Three modules whose
+# whole premise is "no LLM extraction runs (no network, no mock)" therefore
+# started building a REAL ``OpenAICompatModel`` against
+# ``https://api.venice.ai/api/v1`` on any box with an ambient ``VENICE_API_KEY``
+# — and issuing a billed request — while staying green in CI, which has none.
+# That is the #3695 / #5477 class verbatim (``tests/conftest.py``: "green in CI
+# and red on a venice-configured box").
+#
+# The guard below is the durable half: the helpers must scrub the set the
+# REGISTRIES define, so a fifth provider cannot re-open the hole, and the
+# scrub must be observable from outside the helper (the ambient key really is
+# gone), not just asserted inside its own docstring.
+
+#: ``(module, helper)`` for every module that declares a keyless capture.
+#: The helper name differs per module, so it is named rather than guessed.
+_KEYLESS_CAPTURE_HELPERS = (
+    ("tests.test_turn_embedding_write_path_4194", "_keyless"),
+    ("tests.test_capture_secret_redaction_4911", "_keyless"),
+    ("tests.test_4199_dense_scope_coverage", "_offline_llm"),
+)
+
+
+def _derived_provider_key_envs() -> tuple[str, ...]:
+    """Every provider API-key env var, derived from the two registries.
+
+    Same derivation as ``tests/conftest.py::provider_key_envs`` — re-stated here
+    rather than imported because ``from tests.conftest import …`` re-executes
+    conftest's top-level code mid-session and re-points the journal
+    (``tests/_embedded.py`` review P0). Both halves are production derivations,
+    so this holds no key literal of its own.
+    """
+    from tortoise.hosted_api import _llm_provider_keys
+    from tortoise.model_adapters import _PROVIDER_KEY_ENV
+
+    return tuple(sorted(
+        set(_llm_provider_keys()) | set(_PROVIDER_KEY_ENV.values())))
+
+
+@pytest.mark.parametrize("module_name,helper_name", _KEYLESS_CAPTURE_HELPERS)
+def test_a_keyless_capture_helper_scrubs_every_registered_provider_key(
+        monkeypatch, module_name, helper_name):
+    """An ambient key for ANY registered provider must not survive the helper.
+
+    Every key is set ambient (as a developer box or a cell would have it), then
+    the module's own keyless helper is called and the extractor must still be
+    unbuildable. On the pre-#8133 helpers this fails on ``VENICE_API_KEY``: the
+    hand-list omits it, so ``_build_session_llm_extractor()`` returns a live
+    billed extractor instead of ``None``.
+    """
+    import importlib
+
+    module = importlib.import_module(module_name)
+    helper = getattr(module, helper_name)
+
+    keys = _derived_provider_key_envs()
+    assert "VENICE_API_KEY" in keys, (
+        "the derived provider-key set lost VENICE_API_KEY — the #8133 "
+        "registration regressed, so this guard would be vacuous"
+    )
+    for name in keys:
+        monkeypatch.setenv(name, "ambient-from-the-box")
+
+    helper(monkeypatch)
+
+    from tortoise.sdk import _build_session_llm_extractor
+
+    assert _build_session_llm_extractor() is None, (
+        f"{module_name}.{helper_name} leaves an extraction path open on an "
+        f"ambient provider key — the module's premise is 'no network, no "
+        f"mock', so this is a billed egress event in a test that promises "
+        f"none (#8133 review; #3695 / #5477 class)"
+    )
+
+
 def test_analyze_keys_subset_of_session_keys():
     """#1197: every analyze._LLM_PROVIDERS key must be usable by the SESSION
     extractor — an analyze-only key (in analyze but not in ingest._PROVIDERS)
