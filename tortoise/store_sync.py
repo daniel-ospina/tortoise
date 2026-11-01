@@ -330,10 +330,9 @@ def run_sweep(
         if dry_run:
             # A PLAN still answers "how big is the backlog": the leg counts what
             # it would drain and moves nothing.
-            from tortoise.session_events_drain import drain_session_events
-
             receipt["session_events"] = drain_session_events(
-                lambda _payload: None, dry_run=True)
+                lambda _payload: None, dry_run=True,
+                store=cursor_dir if cursor_dir is not None else default_cursor_dir())
         elif not capture_consent_enabled():
             receipt["session_events"] = {
                 "status": "declined",

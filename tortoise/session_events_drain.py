@@ -316,6 +316,8 @@ class _Cursor:
                                        if isinstance(i, int) and i >= 0})
                     if isinstance(crossed, list) else [],
                     "total": total if isinstance(total, int) and total >= 0 else -1,
+                    "probes": value.get("probes") if isinstance(value.get("probes"), int)
+                    and value.get("probes") >= 0 else 0,
                     "strikes": {
                         str(k): v for k, v in (strikes or {}).items()
                         if isinstance(v, int) and v > 0
@@ -325,7 +327,7 @@ class _Cursor:
 
     def day(self, key: str) -> dict:
         return self.days.setdefault(key, {"consumed": 0, "crossed": [], "strikes": {},
-                                          "total": -1})
+                                          "total": -1, "probes": 0})
 
     def consumed(self, key: str) -> int:
         return int(self.day(key).get("consumed") or 0)
@@ -378,6 +380,13 @@ class _Cursor:
             crossed.add(index)
         day["crossed"] = sorted(crossed)
 
+    def next_probe(self, key: str) -> int:
+        """This day's rotating probe ordinal, advanced once per pass."""
+        day = self.day(key)
+        ordinal = int(day.get("probes") or 0)
+        day["probes"] = ordinal + 1
+        return ordinal
+
     def set_total(self, key: str, total: int) -> None:
         self.day(key)["total"] = int(total)
 
@@ -415,9 +424,17 @@ def _append_dead_letter(store: Path, row: dict) -> bool:
     ``O_APPEND``, single line, no read-modify-rewrite: the log half's worker
     (``cursor-store.ts::recordDeadLetter``) writes the same file, and a
     truncate-then-write here would erase rows it committed between our read and
-    our write (found in review). The 500-row cap therefore belongs to the
-    READERS — this substrate is a status surface, not a second unbounded log, and
-    a record's own row is written once (its path key is unique).
+    our write (found in review).
+
+    ⚠️ STATED RESIDUAL: the LOG half's writer (``cursor-store.ts:270-293``) folds
+    and prunes this shared file (``rows.slice(-500)`` + truncate+rewrite), so a
+    row this drain appended can be erased by it before a reader looks — and rows
+    older than its 500-row window age out. This drain crosses a record once its
+    row LANDED, which is the strongest guarantee available without owning that
+    writer; the rows are therefore evidence-at-write-time, not a permanent
+    archive. Giving this leg its own append-only file would close it, at the cost
+    of a second dead-letter surface (#1178's spirit) — a decision left to the
+    review of that trade, not taken silently here.
     """
     # `ensure_ascii=True`: a lone surrogate is legal JSON (the TS writer's
     # `JSON.stringify` emits exactly that form for an unpaired code unit) and
@@ -550,7 +567,15 @@ def drain_session_events(
             cursor.day(key)["consumed"] = 0
             cursor.day(key)["crossed"] = []
             summary["detail"] = f"{key}: cursor exceeded the file, re-filing"
-        settled = _file_age(path) > SETTLE_GRACE_SECONDS
+        settled = _file_age(path, clock) > SETTLE_GRACE_SECONDS
+        # The probe slot: ONE struck record per day file, chosen by a rotating
+        # ordinal so every struck record is eventually probed again.
+        struck = [i for i in range(cursor.consumed(key), total)
+                  if cursor.strikes(key, i) >= MAX_STRIKES]
+        probe_index = -1
+        if struck:
+            ordinal = cursor.next_probe(key)
+            probe_index = struck[ordinal % len(struck)]
         index = -1
         for line in lines:
             index += 1
@@ -559,14 +584,18 @@ def drain_session_events(
             if summary["posts"] >= cap:
                 stopped = stopped or "batch"
                 break
-            if (cursor.strikes(key, index) >= MAX_STRIKES
-                    and summary["stuck_retries"] >= STUCK_RETRIES_PER_PASS):
+            if cursor.strikes(key, index) >= MAX_STRIKES and index != probe_index:
                 # A known-stuck record would spend the whole POST budget on
                 # itself every pass, so the cap could never reach a not-yet-
                 # struck record — the escape hatch defeated exactly when it is
                 # needed (found in re-review). It is skipped WITHOUT a POST and
-                # stays queued; `STUCK_RETRIES_PER_PASS` keeps ONE probe per pass
-                # so it still recovers when the refusal lifts.
+                # stays queued.
+                #
+                # The ONE probe per pass is ROTATED (`probe_index`), not given to
+                # the first struck record in scan order: a single global slot
+                # meant only that record was ever probed, so a record that would
+                # recover (a quota top-up) stayed unfiled for ever while the pass
+                # reported a clean line (found in the next re-review).
                 summary["stuck"] += 1
                 continue
             if cursor.strikes(key, index) >= MAX_STRIKES:
@@ -647,10 +676,10 @@ def drain_session_events(
     return summary
 
 
-def _file_age(path: Path) -> float:
+def _file_age(path: Path, now: float | None = None) -> float:
     """Seconds since a day file was last written (0 when it cannot be stat'd)."""
     try:
-        return max(0.0, time.time() - path.stat().st_mtime)
+        return max(0.0, (time.time() if now is None else now) - path.stat().st_mtime)
     except OSError:
         return 0.0
 

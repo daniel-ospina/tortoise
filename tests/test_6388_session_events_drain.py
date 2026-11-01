@@ -443,3 +443,37 @@ def test_an_unreadable_day_does_not_mislabel_a_bound_stop(tmp_path: Path) -> Non
 
     assert run["unreadable"], "the broken day must be reported"
     assert run["stopped"] == "batch"
+
+def test_the_probe_slot_rotates_so_a_recoverable_record_is_not_starved(
+        tmp_path: Path) -> None:
+    """P1 from the third re-review: one global probe slot starved every record
+    except the first struck one, for ever."""
+    from tortoise.session_events_drain import MAX_STRIKES
+
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    # `z-perm` refuses for ever and sorts FIRST, so a global slot would always be
+    # spent on it; `a-recover` refuses MAX_STRIKES times and then succeeds.
+    _write_day(root, "2026-10-01.jsonl", [_record("z-perm"), _record("a-recover")])
+
+    class Recorder2(Recorder):
+        def __init__(self) -> None:
+            super().__init__()
+            self.refusals = 0
+
+        def __call__(self, payload: dict):
+            sid = payload.get("session_id")
+            if sid == "z-perm":
+                self.posted.append(payload)
+                return PostOutcome(ok=False, status=402, detail="quota")
+            if sid == "a-recover" and self.refusals < MAX_STRIKES:
+                self.refusals += 1
+                self.posted.append(payload)
+                return PostOutcome(ok=False, status=402, detail="quota")
+            return super().__call__(payload)
+
+    post = Recorder2()
+    for _ in range(30):
+        run = _drain(root, store, post)
+
+    assert "a-recover" in post.session_ids
+    assert run["queued"] == 1  # only the permanently-refused record remains
