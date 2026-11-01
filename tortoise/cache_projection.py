@@ -466,8 +466,10 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   ⛔ **STATED BOUND — the BIRTH status is a third writer this table does not
 #:   read (#9974 review round 3).** `_upsert_object`/`_upsert_subject` seed
 #:   `status=coalesce($st, 'live')` from the creation record's own payload
-#:   (`projection/entities.py`), and `sdk.create_entity` accepts a caller status
-#:   (§4.2 validates it) — so `create_object(name, status='superseded')` writes a
+#:   (`projection/entities.py`), and `sdk.create_entity` accepts a caller status —
+#:   ⚠️ the SUBJECT door validates it against §4.2, the OBJECT door validates
+#:   nothing (`sdk.py:4923`, `:23474-23479`: `:Object`/`:Event` "do not validate,
+#:   they STORE the value") — so `create_object(name, status='superseded')` writes a
 #:   terminal status at birth that `never_store` keeps out of the layer tables and
 #:   these two legs do not select (`ObjectRegistered`/`SubjectAdded` are not
 #:   `EventRecorded`). A record-sourced rebuild materializes it with NO status →
@@ -569,8 +571,8 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #: reader now folds in `seq` order. So an Object held `archived` and then
 #: receiving a `github.issue.closed` keeps `archived` here, matching the live
 #: fold's refusal (measured: the terminal guard latches on the replayed value).
-#: ⚠️ **BOUND — a status write AFTER a supersession is unmodelled, in BOTH
-#: directions, and this is the honest statement of it (#9974 review round 3).**
+#: ⚠️ **BOUND — a status write AFTER a supersession is unmodelled, and it points
+#: ONE way (#9974 review rounds 3-5).**
 #: The guard above refuses EVERY fold once the carrier-derived `current` is
 #: terminal, so a later `state.status` write is ignored: a *status-only*
 #: un-terminate (`update_entity(status='live')`, which leaves both carriers in
@@ -592,9 +594,13 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #: scope, exactly as the other two exceptions are pinned.
 EVENT_STREAM_FOLDS: dict[str, tuple[str, ...]] = {
     # BOTH families. `status` is a projection-owned cache on each (§2.6), and an
-    # explicit `restatus` reaches `:Subject` through the same `_ENTITY_MUTATION_
-    # STATE_OPS` write — leaving Subject out would close #9974 for the label whose
-    # own reproduction (`update_entity(subject, status='superseded')`) opened it.
+    # explicit state-op write reaches `:Subject` through the same `_ENTITY_MUTATION_
+    # STATE_OPS` arm as `:Object` — leaving Subject out would close #9974 for one
+    # of the two labels §2.6 rules on. #9974's own Subject evidence is the
+    # `record_projection.mutations_for({… "label": "Subject", "state":
+    # {"status": "archived"}})` measurement on the issue (its headline
+    # reproduction is the Object), so this is a member of the ruled field, not a
+    # widened scope.
     "Object": ("status",),
     "Subject": ("status",),
 }
@@ -608,7 +614,7 @@ class LifecycleEvent:
     from two places and a rebuild that read one of them reproduced half the
     field:
 
-    * ``EntityRecorded``-class history — an `EventRecorded` whose `eventKind` a
+    * `EventRecorded` history — an event whose `eventKind` a
       connector or pack fold maps onto ``Object.status`` (#10198). Joined to the
       row by NAME — which is this READER's join key, not the live fold's match:
       since #3590 `_fold_object_status` issues `MATCH (o:Object {id:$n})`.

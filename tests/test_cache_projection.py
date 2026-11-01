@@ -1337,12 +1337,15 @@ def test_a_restatus_is_applied_unguarded_within_the_replay():
     )
 
 
-def test_the_restatus_fold_matches_on_the_id_and_never_the_name():
-    """An id-keyed state op cannot fold onto a same-NAMED neighbour.
+def test_the_restatus_fold_cannot_cross_the_label_on_a_shared_id():
+    """An id-keyed state op folds only onto its OWN label's node.
 
-    Ids are per-label and names are not unique across labels, so a `restatus`
-    that matched on `name` would move a `:Subject` of the same name. The label is
-    carried for exactly that reason.
+    Ids are per-label, not global, so the SAME id can name an `:Object` and a
+    `:Subject` at once — and the fold's `target_label` check is what keeps a
+    state op off the other family's node. (A `restatus` record carries no `name`
+    at all, so "matched on name" is not a reachable failure mode here; the
+    collision the fixture builds is.) The label is carried for exactly that
+    reason.
     """
     obj = cp.node_from_row("Object", {"id": "x-3", "name": "acme"})
     # ⛔ The SAME id on both labels. With distinct ids, `by_id.get(node.key)` is
