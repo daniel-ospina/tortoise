@@ -148,7 +148,7 @@ def test_concentration_flags_one_session_carrying_the_result(probe):
     off = _arm(14, [100, 10, 10, 10, 10, 10, 10], facts=60, operator_edges=10)
     on = _arm(14, [10, 10, 10, 10, 10, 10, 10], facts=60, operator_edges=10)
     result = probe.decide(BARS, FLOORS, off, on)
-    assert result["qualifier"] == "SINGLE-SESSION-DRIVEN"
+    assert "SINGLE-SESSION-DRIVEN" in (result["qualifier"] or "")
 
 
 def test_an_increase_cannot_subsidise_another_sessions_share(probe):
@@ -163,11 +163,20 @@ def test_outside_the_evidence_bundle_is_refused(probe):
     assert not probe.inside_evidence(Path("/tmp/x.log"))
 
 
-def test_only_evidence_and_tools_count_as_nothing_changed(probe):
+def test_only_non_production_paths_count_as_nothing_changed(probe):
+    """`docs/`, `tools/` and `tests/` are not production code; `tortoise/` is.
+
+    The first cut allowed only `docs/evidence/` + `tools/`, which made the probe's own documented
+    reproduce command REFUSE at its own PR head (the PR also touches `docs/architecture/` and
+    `tests/`) — a refusal that would have been read as "production code changed" (review r1 P1).
+    The corpus under `tests/eval/write_path/` is allowed here because it is hash-guarded instead.
+    """
     assert probe.is_evidence_or_tool("docs/evidence/5087-hypothesis/x.log")
+    assert probe.is_evidence_or_tool("docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md")
     assert probe.is_evidence_or_tool("tools/s3_prior_ablation.py")
+    assert probe.is_evidence_or_tool("tests/test_s3_prior_ablation.py")
     assert not probe.is_evidence_or_tool("tortoise/extractor_v2.py")
-    assert not probe.is_evidence_or_tool("tests/eval/write_path/gold/x.json")
+    assert not probe.is_evidence_or_tool("config/routing.yml")
 
 
 def test_bars_are_parsed_from_the_pins_block(probe):
@@ -192,3 +201,49 @@ def test_the_census_is_reused_not_reimplemented(probe):
     assert "capstone_measure.py" in source
     assert "def census(" not in source
     assert "MATCH (n) UNWIND labels(n)" not in source
+
+
+def test_witness_must_be_this_sessions_and_match_the_arm(probe):
+    """Arm integrity cannot be inherited or arm-total (review r1 P1).
+
+    An empty witness proves nothing however healthy the blob reads; and ON needs at least one real
+    call IN THIS SESSION while OFF needs none — an arm total of 7 over 7 sessions could otherwise
+    be 7 in one session and 0 in six.
+    """
+    healthy = {"mode": "real", "degraded": False, "queries_run": 3}
+    assert probe.witness_ok("ON", healthy, 1)
+    assert not probe.witness_ok("ON", healthy, 0)
+    assert not probe.witness_ok("ON", {}, 1)
+    stub = {"mode": "real", "degraded": False, "queries_run": 0}
+    assert probe.witness_ok("OFF", stub, 0)
+    assert not probe.witness_ok("OFF", stub, 1)
+    assert not probe.witness_ok("OFF", {}, 0)
+
+
+def test_the_session_floor_refuses(probe):
+    """`denominator_floors.sessions` is a REFUSED floor, not decoration (review r1 P2)."""
+    # The integrity bar is lowered so the SESSION floor is the thing under test: at the real bar
+    # (14 of 14) a short arm is refused by integrity first, which is the correct precedence.
+    off = _arm(14, [100] * 7, facts=60, operator_edges=10)
+    on = _arm(14, [50] * 6, facts=60, operator_edges=10)   # short arm
+    result = probe.decide(dict(BARS, arm_integrity_required=12), FLOORS, off, on)
+    assert result["verdict"] == probe.VERDICT_REFUSED
+    assert result["ratio"] is None
+
+
+def test_a_non_majority_result_is_qualified_not_silently_omitted(probe):
+    """E2b is a registered QUALIFIER: 2 of 7 sessions falling must be said out loud."""
+    off = _arm(14, [100, 100, 10, 10, 10, 10, 10], facts=60, operator_edges=10)
+    on = _arm(14, [40, 40, 10, 10, 10, 10, 10], facts=60, operator_edges=10)
+    result = probe.decide(BARS, FLOORS, off, on)
+    assert result["corroboration_met"] is False
+    assert "not-majority-of-sessions" in (result["qualifier"] or "")
+
+
+def test_the_guard_floor_comes_from_the_bars(probe):
+    """The guards compare against `guard_ratio_min`, never a hardcoded 1."""
+    loose = dict(BARS, guard_ratio_min=0.5)
+    off = _arm(14, [100] * 7, facts=60, operator_edges=10)
+    on = _arm(14, [50] * 7, facts=40, operator_edges=5)
+    assert probe.decide(BARS, FLOORS, off, on)["guard_facts"] is False
+    assert probe.decide(loose, FLOORS, off, on)["guard_facts"] is True

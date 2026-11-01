@@ -64,6 +64,19 @@ VERDICT_REFUSED = "REFUSED"
 VERDICT_ARM_INVALID = "ARM-INVALID"
 
 
+
+def refuse(message: str) -> "NoReturn":
+    """A refusal is exit 3, never 1: 1 is what a crash looks like.
+
+    `raise SystemExit(str)` exits **1**, so a REFUSED run and an unhandled exception were
+    indistinguishable to any caller — the module's own header promises 3 (review r1 P2).
+    `--prereg` mistakes are the exception: they are invocation errors and exit 2.
+    """
+    print(message if message.startswith("s3-ablation:") else f"s3-ablation: REFUSED — {message}",
+          file=sys.stderr)
+    raise SystemExit(3)
+
+
 # ── the pre-registration (read out of the COMMIT, never the worktree) ──────
 
 def show(sha: str, rel: str) -> str:
@@ -71,7 +84,7 @@ def show(sha: str, rel: str) -> str:
     proc = subprocess.run(["git", "show", f"{sha}:{rel}"], cwd=str(ROOT),
                           capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        raise SystemExit(f"s3-ablation: REFUSED — {rel} is not readable at {sha}: "
+        refuse(f"s3-ablation: REFUSED — {rel} is not readable at {sha}: "
                          f"{proc.stderr.strip()[:300]}")
     return proc.stdout
 
@@ -81,18 +94,18 @@ def parse_pins(text: str) -> dict:
     import yaml
     start = text.find(PINS_FENCE)
     if start < 0:
-        raise SystemExit(f"s3-ablation: REFUSED — the pre-registration carries no "
+        refuse(f"s3-ablation: REFUSED — the pre-registration carries no "
                          f"`{PINS_FENCE}` block; the bars cannot be read")
     body_start = text.find("\n", start)
     end = text.find("\n```", body_start)
     if body_start < 0 or end < 0:
-        raise SystemExit("s3-ablation: REFUSED — the pins fence is unterminated")
+        refuse("s3-ablation: REFUSED — the pins fence is unterminated")
     pins = yaml.safe_load(text[body_start:end])
     if not isinstance(pins, dict):
-        raise SystemExit("s3-ablation: REFUSED — the pins block is not a mapping")
+        refuse("s3-ablation: REFUSED — the pins block is not a mapping")
     for key in ("hypothesis_bars", "corpus", "source_sha", "denominator_floors"):
         if key not in pins:
-            raise SystemExit(f"s3-ablation: REFUSED — the pins block carries no {key!r}; "
+            refuse(f"s3-ablation: REFUSED — the pins block carries no {key!r}; "
                              "a bar this probe had to guess is not a pre-registered bar")
     return pins
 
@@ -102,14 +115,24 @@ def changed_files(source_sha: str, head: str) -> list[str]:
     proc = subprocess.run(["git", "diff", "--name-only", source_sha, head],
                           cwd=str(ROOT), capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        raise SystemExit(f"s3-ablation: REFUSED — cannot diff {source_sha}..{head}: "
+        refuse(f"s3-ablation: REFUSED — cannot diff {source_sha}..{head}: "
                          f"{proc.stderr.strip()[:300]}")
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
 def is_evidence_or_tool(path: str) -> bool:
-    """True when ``path`` is bundle/tooling, i.e. not production code under test."""
-    return path.startswith("docs/evidence/") or path.startswith("tools/")
+    """True when ``path`` is NOT production code under test.
+
+    The pinned ``source_sha`` must be the tree the run executes, so a file differing between it and
+    ``HEAD`` is allowed only when it cannot change what extraction does: the evidence bundles, the
+    probes, the docs, and the test suite. ``tortoise/`` (and any other production tree) is refused.
+
+    ⚠️ ``tests/eval/write_path/`` is the CORPUS and is allowed here because it is guarded
+    separately and more strictly: ``corpus_state`` re-derives ``fixtures_hash`` from the tree at run
+    time and REFUSES a corpus that moved. A path allowlist cannot express "same corpus" — a hash
+    can, and does.
+    """
+    return path.startswith(("docs/", "tools/", "tests/"))
 
 
 def assert_source_sha(source_sha: str, head: str) -> list[str]:
@@ -121,13 +144,12 @@ def assert_source_sha(source_sha: str, head: str) -> list[str]:
     proc = subprocess.run(["git", "merge-base", "--is-ancestor", source_sha, head],
                           cwd=str(ROOT), capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        raise SystemExit(f"s3-ablation: REFUSED — source_sha {source_sha} is not an "
+        refuse(f"s3-ablation: REFUSED — source_sha {source_sha} is not an "
                          f"ancestor of HEAD {head}; the pinned tree is not the tree that runs")
     changed = changed_files(source_sha, head)
     production = [path for path in changed if not is_evidence_or_tool(path)]
     if production:
-        raise SystemExit(
-            f"s3-ablation: REFUSED — {len(production)} production file(s) differ between the "
+        refuse(f"s3-ablation: REFUSED — {len(production)} production file(s) differ between the "
             f"pinned source_sha {source_sha} and HEAD {head}: {production[:5]} — the pinned sha "
             "must be the tree the run executes"
         )
@@ -144,12 +166,12 @@ def corpus_state(pins: dict) -> tuple[list[str], str]:
     actual = compute_fixtures_hash()
     want = (pins.get("corpus") or {}).get("fixtures_hash")
     if want != actual:
-        raise SystemExit(f"s3-ablation: REFUSED — the corpus in this checkout hashes to "
+        refuse(f"s3-ablation: REFUSED — the corpus in this checkout hashes to "
                          f"{actual}, the pre-registration froze {want} — a different "
                          "corpus is refused, never scored")
     frozen_n = (pins.get("corpus") or {}).get("sessions")
     if isinstance(frozen_n, int) and len(sessions) != frozen_n:
-        raise SystemExit(f"s3-ablation: REFUSED — the pre-registration freezes {frozen_n} "
+        refuse(f"s3-ablation: REFUSED — the pre-registration freezes {frozen_n} "
                          f"sessions, this corpus has {len(sessions)}")
     return sessions, actual
 
@@ -161,11 +183,11 @@ def load_census():
     spec = importlib.util.spec_from_file_location("_capstone_census", CAPSTONE_CENSUS)
     module = importlib.util.module_from_spec(spec)
     if spec.loader is None:  # pragma: no cover - import machinery guard
-        raise SystemExit(f"s3-ablation: REFUSED — cannot load {CAPSTONE_CENSUS}")
+        refuse(f"s3-ablation: REFUSED — cannot load {CAPSTONE_CENSUS}")
     spec.loader.exec_module(module)
     census = getattr(module, "census", None)
     if not callable(census):  # pragma: no cover - the artifact moved
-        raise SystemExit("s3-ablation: REFUSED — capstone_measure.census is not callable")
+        refuse("s3-ablation: REFUSED — capstone_measure.census is not callable")
     return census
 
 
@@ -275,6 +297,21 @@ def arm_s3_state(arm: str, search: dict, witness_source: str = "receipt") -> dic
             "reason": reason, "state": note, "proven": resolved}
 
 
+def witness_ok(arm: str, blob: dict, session_calls: int) -> bool:
+    """Is the witness provable, and does the PER-SESSION call count match the arm?
+
+    Two independent failure modes, both a review finding (r1 P1): an EMPTY witness proves nothing
+    however healthy the blob reads (a session that never reached the S3 call site used to inherit
+    the previous session's dict), and an ARM-TOTAL call count cannot say whether a given session
+    made its call — so the count that matters is this session's own delta.
+    """
+    if not blob:
+        return False
+    if arm == "ON":
+        return session_calls >= 1
+    return session_calls == 0
+
+
 def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, dict],
             log) -> dict:
     """One full replay of the corpus into a fresh graph, with the arm's S3 behaviour."""
@@ -282,17 +319,19 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
     from tortoise.sdk import TortoiseSDK
 
     real_search = ev.search_graph
-    calls = {"real": 0}
+    calls = {"real": 0, "session": 0}
     witness: dict = {}
 
     def counting(*args, **kwargs):
         calls["real"] += 1
+        calls["session"] += 1
         result = real_search(*args, **kwargs)
         witness.clear()
         witness.update(result or {})
         return result
 
     def off_stub(*args, **kwargs):
+        calls["session"] += 1
         result = off_arm_stub(ev.resolve_backend_mode())
         witness.clear()
         witness.update(result)
@@ -307,6 +346,12 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
         before = created_counts(census(uri))
         for sid in sessions:
             started = time.time()
+            # A session's witness must be THIS session's: cleared per session so a session that
+            # never reaches the S3 call site cannot inherit the previous one's dict and be proven
+            # from it, and the call count is read as a PER-SESSION delta — an arm total of 7 over
+            # 7 sessions could otherwise be 7 in one session and 0 in six (review r1 P1).
+            witness.clear()
+            calls["session"] = 0
             receipt = sdk.capture_session(_turns(sid), session_id=sid)
             stats = receipt.get("stats") or {}
             # ⚠️ THE RECEIPT CARRIES NO `search` BLOCK ON THIS LANE. `capture_session` ->
@@ -318,6 +363,19 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
             receipt_search = receipt.get("search") or {}
             witness_source = "receipt" if receipt_search else "search_graph-return"
             s3_blob = receipt_search or dict(witness)
+            s3_state = arm_s3_state(arm, s3_blob)
+            # The PER-SESSION call delta is part of the proof: ON must have made at least the real
+            # call this session needed, OFF must have made none — and an EMPTY witness is not
+            # provable at all whatever the blob says (review r1 P1: a session that never reached
+            # the S3 call site must not be proven from the previous session's dict).
+            bad_calls = not witness_ok(arm, s3_blob, calls["session"])
+            if bad_calls:
+                s3_state = {**s3_state, "proven": False,
+                            "state": (f"NOT proven ({witness_source}; this session's S3 calls "
+                                      f"{calls['session']}; witness "
+                                      f"{'empty' if not s3_blob else 'present'})")}
+            s3_state = {**s3_state, "witness_source": witness_source,
+                        "session_calls": calls["session"]}
             after = created_counts(census(uri))
             created = {key: after[key] - before[key] for key in after}
             rows.append({
@@ -325,7 +383,7 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
                 "ok": bool(receipt.get("ok")),
                 "created": created,
                 "llm_calls": int(((stats.get("llm") or {}).get("calls") or 0)),
-                "s3": {**arm_s3_state(arm, s3_blob), "witness_source": witness_source},
+                "s3": s3_state,
                 "errors": list(receipt.get("errors") or [])[:3],
                 "elapsed_s": round(time.time() - started, 1),
             })
@@ -356,7 +414,7 @@ def _turns(sid: str) -> list[dict]:
 
     turns = (load_fixture(sid) or {}).get("conversation")
     if not isinstance(turns, list) or not turns:
-        raise SystemExit(f"s3-ablation: REFUSED — fixture {sid} carries no conversation")
+        refuse(f"s3-ablation: REFUSED — fixture {sid} carries no conversation")
     return turns
 
 
@@ -397,6 +455,12 @@ def decide(bars: dict, floors: dict, off: dict, on: dict) -> dict:
 
     created_off = off["totals"]["extraction_nodes"]
     created_on = on["totals"]["extraction_nodes"]
+    if len(off["sessions"]) != int(floors["sessions"]) or \
+            len(on["sessions"]) != int(floors["sessions"]):
+        return {"verdict": VERDICT_REFUSED,
+                "why": (f"the arms replay {len(off['sessions'])}/{len(on['sessions'])} sessions, "
+                        f"the pre-registration freezes {floors['sessions']}"),
+                "ratio": None, "qualifier": None}
     if created_off < int(floors["created_nodes_off"]):
         return {"verdict": VERDICT_REFUSED,
                 "why": f"the OFF arm created {created_off} extraction nodes, below the "
@@ -416,10 +480,16 @@ def decide(bars: dict, floors: dict, off: dict, on: dict) -> dict:
     qualifier = None
     if conc["share"] is not None and conc["share"] > float(bars["concentration_max"]):
         qualifier = "SINGLE-SESSION-DRIVEN"
-    guard_facts = (on["real_facts"]["survived"] >= off["real_facts"]["survived"])
-    guard_operators = (on["totals"]["operator_edges"] >= off["totals"]["operator_edges"])
+    guard_floor = float(bars["guard_ratio_min"])
+    off_facts = off["real_facts"]["survived"]
+    off_edges = off["totals"]["operator_edges"]
+    guard_facts = (on["real_facts"]["survived"] >= guard_floor * off_facts)
+    guard_operators = (on["totals"]["operator_edges"] >= guard_floor * off_edges)
     primary_met = ratio is not None and ratio <= float(bars["primary_ratio_max"])
     fell = sum(1 for off_n, on_n in pairs if on_n < off_n)
+    if fell < int(bars["corroboration_min_sessions"]):
+        # Registered in §3 (E2b): a qualifier, never the primary bar, and never a silent omission.
+        qualifier = ",".join(filter(None, [qualifier, "not-majority-of-sessions"]))
     if primary_met and guard_facts and guard_operators:
         verdict = VERDICT_SUPPORTED
     elif primary_met:
@@ -431,8 +501,12 @@ def decide(bars: dict, floors: dict, off: dict, on: dict) -> dict:
     payload = {"verdict": verdict, "ratio": ratio, "qualifier": qualifier,
                "primary_met": primary_met, "guard_facts": guard_facts,
                "guard_operators": guard_operators, "concentration": conc,
-               "sessions_fell": fell, "created_off": created_off, "created_on": created_on,
-               "cost_ratio": (on["llm_calls"] / off["llm_calls"]) if off["llm_calls"] else None}
+               "sessions_fell": fell,
+               "corroboration_met": fell >= int(bars["corroboration_min_sessions"]),
+               "created_off": created_off, "created_on": created_on,
+               "cost_ratio": (on["llm_calls"] / off["llm_calls"]) if off["llm_calls"] else None,
+               "cost_met": ((on["llm_calls"] <= float(bars["cost_ratio_max"]) * off["llm_calls"])
+                            if off["llm_calls"] else None)}
     if primary_met and not (guard_facts and guard_operators):
         payload["why"] = (f"E1 met (ratio {ratio:.3f} <= {bars['primary_ratio_max']}) but "
                           f"GUARD-VIOLATED: {broken} fell — volume bought by extracting less "
@@ -474,6 +548,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="corpus replay order of the two arms (default: OFF,ON)")
     ap.add_argument("--graph-prefix", default=None)
     ap.add_argument("--json", action="store_true", help="also print the record as JSON")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="replace an existing --out (only for an aborted, unmeasured run)")
     args = ap.parse_args(argv)
 
     out_path = Path(args.out)
@@ -487,6 +563,28 @@ def main(argv: list[str] | None = None) -> int:
     head = head_sha()
     prereg_text = show(args.prereg, PREREG_REL)
     pins = parse_pins(prereg_text)
+    # The machine record pins the argument it describes; if the two disagree, the bars this run
+    # parses are not the bars the bundle's record froze — the residual tuning path review r1 P2
+    # named (a re-cut document beside an un-re-cut record).
+    record_path = EVIDENCE_DIR / "preregistration.json"
+    if record_path.is_file():
+        import hashlib
+        record = json.loads(record_path.read_text())
+        want = record.get("document_sha256")
+        got = "sha256:" + hashlib.sha256(prereg_text.encode()).hexdigest()
+        if want and want != got:
+            refuse(f"the pre-registration at {args.prereg} hashes to {got}, but "
+                   f"preregistration.json pins {want} — the record does not describe the "
+                   "document this run is about to obey")
+    # One bundle carries ONE measured log. Overwriting it silently is how a superseded run becomes
+    # invisible, and how a re-run could replace a falsifying number with a friendlier one.
+    if out_path.exists() and not args.overwrite:
+        print(f"s3-ablation: REFUSED — {out_path.relative_to(ROOT)} already exists. One bundle "
+              "carries one measured log: a re-run writes a NEW file (and the superseded one is"
+              " deleted deliberately, with the supersede chain disclosed), never an overwrite. "
+              "Pass --overwrite only when you are replacing an aborted, unmeasured run.",
+              file=sys.stderr)
+        return 2
     bars = pins["hypothesis_bars"]
     floors = pins["denominator_floors"]
     changed = assert_source_sha(str(pins["source_sha"]), head)
@@ -519,10 +617,10 @@ def main(argv: list[str] | None = None) -> int:
         "and an instrument finding for #5087 indicator 3.")
 
     if not (os.environ.get("DEEPSEEK_API_KEY") or "").strip():
-        raise SystemExit("s3-ablation: REFUSED — DEEPSEEK_API_KEY is unset; a keyless capture "
+        refuse("s3-ablation: REFUSED — DEEPSEEK_API_KEY is unset; a keyless capture "
                          "extracts nothing, which measures the absence of a key (#3892)")
     if not (os.environ.get("TORTOISE_DB_URI") or "").strip():
-        raise SystemExit("s3-ablation: REFUSED — TORTOISE_DB_URI is unset; S3 needs a searchable "
+        refuse("s3-ablation: REFUSED — TORTOISE_DB_URI is unset; S3 needs a searchable "
                          "backend (`uv run python tools/test_lane.py uri`)")
 
     from tests.eval.write_path.corpus import load_gold
@@ -549,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
         log(f"  [{data['arm']}] model calls: {data['llm_calls']}\n")
 
     if "OFF" not in arms or "ON" not in arms:
-        raise SystemExit("s3-ablation: REFUSED — both arms are required; a single-arm result is "
+        refuse("s3-ablation: REFUSED — both arms are required; a single-arm result is "
                          "never a verdict")
 
     result = decide(bars, floors, arms["OFF"], arms["ON"])
@@ -591,7 +689,11 @@ def main(argv: list[str] | None = None) -> int:
     log(f"OPERATOR EDGES: OFF {arms['OFF']['totals']['operator_edges']} "
         f"ON {arms['ON']['totals']['operator_edges']}")
     log(f"COST: model calls OFF {arms['OFF']['llm_calls']} ON {arms['ON']['llm_calls']} "
-        f"(ratio {result.get('cost_ratio')})")
+        f"(ratio {result.get('cost_ratio')}; bar <= {bars['cost_ratio_max']}; "
+        f"met={result.get('cost_met')})")
+    log(f"SESSIONS WHOSE CREATES FELL: {result.get('sessions_fell')} of {len(sessions)} "
+        f"(E2b bar >= {bars['corroboration_min_sessions']}; "
+        f"met={result.get('corroboration_met')})")
     log(f"FAILED SESSIONS: OFF {off_recover} ON {on_recover}")
     verdict_line = result.get("verdict_text") or result["verdict"]
     if result["verdict"] in (VERDICT_REFUSED, VERDICT_ARM_INVALID):

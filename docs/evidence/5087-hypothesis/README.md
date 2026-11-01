@@ -86,6 +86,44 @@ carries one measured log.
    query failure, so `queries_failed == 0` is asserted as `degraded == False`; the log says so beside
    the number instead of implying a key that does not exist.
 
+## Post-run instrument hardening — disclosed, and **no number moved**
+
+The measurement above was produced by `tools/s3_prior_ablation.py` as committed in `325f2a1a5`.
+Review of this PR then found eight hardening gaps in the probe. **All eight were fixed AFTER the
+run, and none of them changes a reported number** — the arithmetic (`created_counts`, `real_facts`,
+`concentration`, `decide`'s bar comparisons) is unchanged, and the run's own log already printed
+each session's S3 state at the moment of that session's capture. What the hardening does is make
+one *observed* fact **machine-enforced**:
+
+1. **Arm integrity could be inherited.** The S3 witness was cleared only inside the wrappers, so a
+   session that never reached the S3 call site could be "proven" from the previous session's dict;
+   and the real-call count was an ARM total (7 calls over 7 sessions could be 7 in one session and 0
+   in six). Now the witness is cleared **per session**, the count is read as a **per-session delta**,
+   and an empty witness is unprovable however healthy the blob reads. ⚠️ In the measured run every
+   session's own printed line read `s3=resolved` (ON) / `suppressed (OFF-ARM)` (OFF) immediately
+   after its capture, and ON made exactly 7 real calls for 7 sessions — the per-session fact held;
+   the hardening is what now prevents it from *silently* not holding in a future run.
+2. **`denominator_floors.sessions` was never checked** — now it refuses.
+3. **Two pinned bars were parsed and never compared** — `guard_ratio_min` (the guards hardcoded
+   `>=`) and `corroboration_min_sessions` (E2b's qualifier was computed into the payload and never
+   emitted). Both are now compared, and E2b's failure prints `not-majority-of-sessions` beside the
+   verdict instead of vanishing.
+4. **A refusal exited 1**, indistinguishable from a crash; refusals are now exit **3**, and an
+   `--out` escaping the bundle is exit 2.
+5. **An existing `--out` was silently overwritten** — the residual tuning path (re-run, replace the
+   evidence). It now refuses without `--overwrite`, and `--prereg`'s document is cross-checked
+   against `preregistration.json`'s `document_sha256` so a re-cut argument beside a stale record is
+   refused.
+6. **The source-sha allowlist was `docs/evidence/` + `tools/`**, which made this probe's own
+   documented reproduce command REFUSE at this PR's head (the PR also touches `docs/architecture/`
+   and `tests/`). It is now `docs/`, `tools/`, `tests/` — production code under `tortoise/` is still
+   refused, and the corpus is guarded by its `fixtures_hash` instead of by path.
+7. **The log did not say which probe revision produced it** — the log's `head=a1075dfc` names the
+   commit the bars were read from, not the tool revision; this README now states it (`325f2a1a5`).
+
+No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
+repeated to get a friendlier number (the probe now refuses to overwrite the log at all).
+
 ## Reproduce
 
 ```bash
