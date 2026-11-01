@@ -35601,9 +35601,12 @@ class TortoiseSDK:
         # proof does NOT survive a post-retrieval filter, though — the filters at
         # the seams above (``exclude_status`` / ``claim_class`` /
         # ``exclude_turn_echo_session``) SHRINK the union after the legs filled
-        # their windows, so a short set over a filtered read proves nothing. Both
-        # conditions must hold, or the count is withheld rather than published as
-        # a floor wearing a total's clothes.
+        # their windows, so a short set over a filtered read proves nothing. Nor
+        # does it survive a leg that never ANSWERED at all (``_lost_legs``
+        # below): its rows are absent from the union for a reason that has
+        # nothing to do with how many matches exist. Every one of those
+        # conditions must hold, or the count is withheld rather than published
+        # as a floor wearing a total's clothes.
         _filters_shrank = bool(
             exclude_status or claim_class is not None
             or exclude_turn_echo_session
