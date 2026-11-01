@@ -4291,6 +4291,19 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     ``tests/test_state_value_verbatim_10360.py``.
     """
     raw = str(token or "")
+    # ⛔ DIGITS ARE FOLDED TO ASCII BEFORE ANY COMPARISON (#10513 review cycle 16
+    # P2, measured). `_VALUE_DECIMALS` is `\d+`, which matches EVERY Unicode
+    # decimal digit (Nd), while the normalisation below (`lstrip("0")`,
+    # `rstrip("0")`) and the caller's `a[1] != b[1]` compare CORE STRINGS — so
+    # `\uff14.\uff12` (fullwidth), `\u0664.\u0662` (Arabic-Indic) and
+    # `\u096a.\u0968` (Devanagari) each DIVERGED from `4.2` and a truthful point
+    # was dropped. NFKC does NOT fold Arabic-Indic, so the fold is per codepoint
+    # via `unicodedata.digit`, which is total on Nd by definition.
+    if not raw.isascii():
+        raw = "".join(
+            str(unicodedata.digit(ch)) if unicodedata.category(ch) == "Nd" else ch
+            for ch in raw
+        )
     # ⛔ NO SEPARATOR IS INTERPRETED HERE (#10513 review cycle 12 P1). A
     # separator-bearing token has no locale-free value identity, so it has no
     # identity at all and this returns None — the SAME predicate
@@ -4313,8 +4326,19 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     # `_keeps_numeric_edge` keeps a LEADING `Pd`, the dash reaches here and has
     # to be read as the sign it is. `value_normalizer.py` already reads the
     # typographic minus as a sign, so this is this module JOINING that reading.
-    sign = "-" if raw.lstrip().startswith(
-        ("-", "\u2212", "\u2013", "\u2014")) else ""
+    # ⛔ The sign is read from the SAME PREDICATE that admitted the edge
+    # (`_keeps_numeric_edge`: a LEADING `Pd`) plus U+2212 MINUS SIGN, which is
+    # `Sm`. A four-literal tuple read only `-`/U+2212/U+2013/U+2014 while that
+    # predicate keeps EVERY `Pd` — so U+2010, U+2011 (non-breaking hyphen, what
+    # PDF and Word extraction emits), U+2012, U+2015, U+FE63 and U+FF0D reached
+    # the identity with NO sign, and a truthful `\u20115` against `-5` was
+    # REFUSED (#10513 review cycle 16 P2, measured). That is the same
+    # false-accusation shape cycle 10 fixed for en/em dash, left open for the
+    # rest of the family: two lists that must agree, so read one of them.
+    _stripped = raw.lstrip()
+    sign = "-" if _stripped and (
+        unicodedata.category(_stripped[0]) == "Pd" or _stripped[0] == "\u2212"
+    ) else ""
     out: list[str] = []
     for m in matches:
         run = m.group(0)
@@ -8594,7 +8618,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # endpoint produced 2, and a byte-variant endpoint re-minted the
             # rewritten value. The clamped key is the one the comparison needs;
             # the raw key stays for the whitespace-collapse shape cycle 6 pinned.
+            # ⛔ The bound is enforced on BOTH keys (#10513 review cycle 16 P2,
+            # measured): `_value_slot_divergence` refuses to judge past
+            # `_MAX_JUDGED_TEXT`, but this collector fed `_value_slots` the
+            # UNCLAMPED `_raw_content` with no length guard, so the "cost is
+            # bounded by construction" claim was false on the refusal path — a
+            # 2 MB content took 7.53 s to refuse and a 5 MB one 17.67 s. Skipping
+            # an over-cap key loses only a key `_value_slot_divergence` would
+            # never have judged either, so the two bounds now agree.
             for _key_text in (_raw_content, content):
+                if len(str(_key_text or "")) > _MAX_JUDGED_TEXT:
+                    continue
                 _refused_slots = _value_slots(_key_text)
                 if _refused_slots:
                     refused_value_slots.add(_refused_slots)
@@ -9035,7 +9069,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # point losing its E3 anchor — not what happened) never reaches the
         # payload's warnings.
         if edus:
-            _probe = {"content": content, "quote": content[:_MAX_QUOTE]}
+            # ⛔ `_write_span`, not `content[:_MAX_QUOTE]` (#10513 review cycle 16
+            # P2, measured): `_write_span` is "the module's ONE truncation
+            # helper" and says so, but this site still hard-cut. Measured, an
+            # operator ref of `"a " * 99 + "12.5 seconds overall"` minted a
+            # point whose stored quote ended `a a a 12` against `content`'s
+            # `12.5 seconds overall` — `_value_slot_divergence` then reports
+            # `(('', '12.5', '12'),)` with NO warning, i.e. exactly the
+            # fabricated-value class cycle 14/15 fixed at the mint pre-pass and
+            # in `_mint_endpoint`. The row's residual (e) claimed this site was
+            # safe "by construction" because `quote` is the point's OWN text;
+            # its own CLAMP is the reachable divergence, and it is now cut the
+            # same way every other span in this module is.
+            _probe = {"content": content,
+                      "quote": _write_span(content, _MAX_QUOTE)}
             _scratch: list[str] = []
             _turn = _resolve_source_turn(_probe, edus, warnings=_scratch)
             if _turn is None:
@@ -9044,12 +9091,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     "left unquoted (no source_turn_id)")
             else:
                 _turn_text = _turn_text_by_index(edus, _turn)
-                _anchor = re.sub(r"\s+", " ", content[:_MAX_QUOTE].strip().lower())
+                _anchor = re.sub(r"\s+", " ",
+                                 _write_span(content, _MAX_QUOTE).strip().lower())
                 _verbatim = bool(_anchor) and re.sub(
                     r"\s+", " ", _turn_text.lower()).find(_anchor) >= 0
                 pt_entry["source_turn_id"] = _turn
                 if _verbatim:
-                    pt_entry["quote"] = content[:_MAX_QUOTE]
+                    pt_entry["quote"] = _write_span(content, _MAX_QUOTE)
                 # #2684 (Slice B): a MINTED ENDPOINT is a statement Point, so a
                 # VALUE-BEARING one takes the same verbatim-span gate the model
                 # path takes ABOVE, in S1/S2 (``_value_verbatim_span``, stamping at

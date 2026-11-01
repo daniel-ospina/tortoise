@@ -646,9 +646,20 @@ mechanisms:
       on purpose, because refusing `800millis`/`800ms` is the false-accusation
       direction this rule must never take; (e) the S5
       minted-endpoint site is not judged against its own quote — there `quote` is
-      `content[:200]`, the point's OWN text, so a rewrite is impossible by
-      construction and a rule there must compare against the resolved TURN text,
-      a different rule with a weaker precision profile: a follow-up; (f) the rule
+      the point's OWN text, cut with the module's one truncation helper
+      (`_write_span`), so a rewrite is impossible by construction and a rule
+      there must compare against the resolved TURN text,
+      a different rule with a weaker precision profile: a follow-up; (e1) the
+      S5 quote spans were HARD-cut (`content[:_MAX_QUOTE]`) until review cycle
+      16, and the clamp — not the text — was the reachable divergence: measured,
+      an operator ref of `"a " * 99 + "12.5 seconds overall"` minted a quote
+      ending `a a a 12` against a `12.5 seconds overall` content with no warning.
+      All three spans now cut with `_write_span`, so this bullet's "impossible by
+      construction" is true of the CLAMP as well as the text it clamps;
+      (e2) a value written in a NON-ASCII decimal script is judged as the value
+      it is (the fold was added in cycle 16 alongside (e1)), and the whole `Pd`
+      dash family reads as one minus — before that, `４.２`/`4.2` and
+      `‑5`/`-5` each refused a truthful point; (f) the rule
       REFUSES, it does not REPAIR — retaining by substituting the verbatim value
       into the claim is the follow-up; (g) a LEADING CURRENCY SYMBOL is FORM, not
       value — `_value_core` reads the numeric core and the unit written AFTER the

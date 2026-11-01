@@ -30,6 +30,7 @@ What this file pins, and why each pin is here rather than in a comment:
 
 from __future__ import annotations
 
+import inspect
 import json
 import pathlib
 
@@ -1242,3 +1243,161 @@ def test_the_changelog_records_the_flip_and_marks_the_old_claim_superseded():
         "#10360 that records it")
     # and the residuals that are NOT enforced stay readable in the same entry
     assert "REFUSE" in tail and "REPAIR" in tail, tail[:400]
+
+
+# ---------------------------------------------------------------------------
+# Review cycle 16 — four false-accusation / cost defects found at `dede0d903`,
+# each fixed in `tortoise/extractor_v2.py` and pinned here.
+#
+# The common shape: the rule's own docstring says a guard that accuses a
+# truthful point of a rewrite "is worse than no guard: it withholds a durable
+# memory". Three of these four were exactly that, reachable from ordinary
+# extracted text. Every test below carries the positive control that keeps the
+# fix from becoming an unjudged hole.
+# ---------------------------------------------------------------------------
+
+
+def test_a_unicode_decimal_digit_is_the_same_value_in_every_script():
+    """Cycle 16 P2: `\\d` matches every Nd script, the COMPARISON did not.
+
+    `_VALUE_DECIMALS` is `\\d+`, so a fullwidth, Arabic-Indic or Devanagari
+    numeral was BOUND and then normalised as a core STRING — the same value
+    spelled in another decimal script diverged and the point was REFUSED.
+    Measured at `dede0d903`: `_value_slot_divergence("…\\uff14.\\uff12 …",
+    "…4.2 …") == (('hit', '\\uff14.\\uff12', '4.2'),)` — a dropped durable
+    memory over typography, and it was in no residual.
+
+    NFKC does NOT fold Arabic-Indic (checked, not assumed), so the fold is per
+    codepoint through `unicodedata.digit`, which is total on category Nd.
+    """
+    # Every script spells the ONE value `4.2`, so the pair AGREES.
+    for token in ("\uff14.\uff12", "\u0664.\u0662", "\u096a.\u0968"):
+        assert v2._value_core(token) == ("", "4.2", None), token
+        assert not v2._value_slot_divergence(
+            f"the p95 hit {token} seconds", "the p95 hit 4.2 seconds"), token
+
+    # POSITIVE CONTROL — the fold must not flatten a DIFFERENT value into
+    # agreement. `4.3` in fullwidth is still a different value from `4.2`.
+    assert v2._value_slot_divergence(
+        "the p95 hit \uff14.\uff13 seconds", "the p95 hit 4.2 seconds"), (
+        "folding must make SCRIPT invisible, never VALUE")
+    # …and a sign in another script is still a sign, not a digit.
+    assert v2._value_core("-5") == ("-", "5", None)
+
+
+def test_the_whole_Pd_dash_family_reads_as_one_minus_not_just_four_literals():
+    """Cycle 16 P2: the edge predicate keeps every `Pd`; the sign read four.
+
+    `_keeps_numeric_edge` admits a LEADING `Pd` (so the dash reaches
+    `_value_core` at all) while the sign tuple named only `-`, U+2212, U+2013
+    and U+2014 — so the comment's own invariant ("now that the edge is kept, the
+    dash reaches here and has to be read as the sign it is") was false for
+    U+2010, U+2011, U+2012, U+2015, U+FE63 and U+FF0D. Measured at `dede0d903`:
+    a truthful `\\u20115` (non-breaking hyphen — what PDF and Word extraction
+    emits) against `-5` was REFUSED, the same shape cycle 10 fixed for en/em
+    dash and left open for the rest of the family. The fix reads the sign from
+    the SAME predicate, so the two lists cannot drift again.
+    """
+    family = ("\u2010", "\u2011", "\u2012", "\u2013", "\u2014",
+              "\u2015", "\ufe63", "\uff0d", "\u2212")
+    for ch in family:
+        assert v2._value_core(f"{ch}5") == ("-", "5", None), hex(ord(ch))
+        assert not v2._value_slot_divergence(
+            f"the temperature was {ch}5 degrees",
+            "the temperature was -5 degrees"), hex(ord(ch))
+
+    # POSITIVE CONTROL — one minus in nine spellings must not make a REAL sign
+    # change invisible. Every member still diverges from the unsigned value…
+    for ch in family:
+        assert v2._value_slot_divergence(
+            f"the temperature was {ch}5 degrees",
+            "the temperature was 5 degrees"), hex(ord(ch))
+    # …and a leading SPACED dash stays decoration, so the widened sign read did
+    # not turn markup into a quantity (residual (k)'s boundary).
+    assert not v2._value_slot_divergence("\u2014 5 minutes of downtime",
+                                         "5 minutes of downtime")
+
+
+def test_the_S5_mint_span_is_token_safe_so_it_cannot_fabricate_a_value():
+    """Cycle 16 P2: the last holdout on the HARD `[:cap]` cut.
+
+    `_write_span`'s own docstring calls itself "the module's ONE truncation
+    helper", and `_mint_endpoint` was moved onto it in cycle 15 — but the S5
+    quote spans (`_probe`, `_anchor`, `pt_entry["quote"]`) still hard-cut with
+    `content[:_MAX_QUOTE]`. Measured, an operator ref of
+    `"a " * 99 + "12.5 seconds overall"` minted a point whose stored quote ended
+    `a a a 12` against a content of `12.5 seconds overall`, and
+    `_value_slot_divergence` reports `(('', '12.5', '12'),)` with NO warning:
+    the fabricated-value class the row's residual (e) claimed this site could
+    not reach "by construction", because the point's own CLAMP is the reachable
+    divergence.
+
+    Non-vacuous both ways: the hard cut MUST diverge (that is the defect) and
+    the token-safe span MUST not (that is the fix).
+    """
+    content = "a " * 99 + "12.5 seconds overall"
+    assert len(content) > v2._MAX_QUOTE
+
+    hard = content[:v2._MAX_QUOTE]
+    assert v2._value_slot_divergence(content, hard), (
+        "the hard cut is supposed to be the defect this test pins — if it no "
+        "longer diverges, the fixture stopped straddling the cap")
+
+    safe = v2._write_span(content, v2._MAX_QUOTE)
+    assert not v2._value_slot_divergence(content, safe), (
+        "the token-safe span must never read a value SHORT out of the cap")
+
+    # And the S5 sites use it. This is a SOURCE property by nature ("one
+    # truncation helper"), so it is asserted as one rather than inferred.
+    # Comments are stripped first: the fix's own note QUOTES the old cut to
+    # explain it, and a pin that reds on its own explanation is not a pin.
+    src = inspect.getsource(v2.execute_embed)
+    mint = src[src.index("def _mint_endpoint"):]
+    mint = "\n".join(
+        line for line in mint.splitlines() if not line.lstrip().startswith("#"))
+    assert "content[:_MAX_QUOTE]" not in mint, (
+        "the S5 mint quotes are still hard-cut — the value can be fabricated")
+    assert mint.count("_write_span(content, _MAX_QUOTE)") >= 3, (
+        "all three S5 quote spans (probe, anchor, stored quote) must cut with "
+        "the module's one truncation helper")
+
+
+def test_a_refusal_over_the_judged_cap_never_tokenises_the_unclamped_text():
+    """Cycle 16 P2: the cost bound was claimed by construction and not enforced.
+
+    `_value_slot_divergence` refuses to judge past `_MAX_JUDGED_TEXT`, and the
+    docstring said "the write path never reaches it, because it hands the rule
+    the span the write keeps". That was FALSE on the refusal path: the
+    `refused_value_slots` collector fed `_value_slots` the UNCLAMPED
+    `_raw_content` with no guard, so cost was linear and unbounded in the
+    model-authored content length — measured 7.53 s to refuse a 2 MB content and
+    17.67 s for 5 MB.
+
+    The pin asserts the CONTRACT on the shipped refusal path — an over-cap text
+    contributes no slot key — plus the MEASUREMENT that the pure function's own
+    bound still refuses to judge it. Wall-clock is deliberately not asserted, so
+    the pin cannot flake on a loaded box; the bound is the property, the seconds
+    were the symptom.
+    """
+    cap = v2._MAX_JUDGED_TEXT
+    over = "the p95 hit 4.0 seconds " + ("z " * cap)
+    assert len(over) > cap
+    # The pure function's own bound still holds — unchanged by this fix.
+    assert v2._value_slot_divergence(over, "the p95 hit 4.2 seconds") == ()
+
+    # The COLLECTOR, which is where the bound was missing, now enforces the same
+    # cap on both keys. Asserted against the shipped source (there is no
+    # side-effect-free seam to count calls through `execute_embed`), together
+    # with the behavioural half above that the skipped key loses nothing a
+    # judge would have used.
+    src = inspect.getsource(v2.execute_embed)
+    guard = "for _key_text in (_raw_content, content):\n"
+    assert guard in src, "the two-key refusal collector moved — re-read this pin"
+    after = src[src.index(guard):]
+    after = after[:after.index("refused_value_slots.add")]
+    assert "_MAX_JUDGED_TEXT" in after, (
+        "the refusal collector tokenises the UNCLAMPED text with no length "
+        "bound again — cost is linear in the model-authored content length")
+    assert "continue" in after, (
+        "the bound must SKIP the over-cap key, not truncate it (a truncated key "
+        "describes a string the mint never produces)")
