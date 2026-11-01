@@ -6387,6 +6387,24 @@ def _distinct_preserving_order(items) -> list:
     return out
 
 
+def _item_supplied_key(item: dict) -> object:
+    """The raw ``key`` value an ingest bundle item SUPPLIES — read by the same
+    PRESENCE precedence ``_coerce_props`` applies when it flattens the item
+    (#6110, #8400).
+
+    One home for that precedence, because both questions asked of the value
+    (below) must agree on WHICH value they are asking about, even where they
+    disagree on what counts as present. A top-level ``key`` whose value is
+    ``None`` still SHADOWS a nested ``props["key"]``: a reader that instead
+    "fell back when the top-level value was None" would consult a key the
+    writer never uses.
+    """
+    if "key" in item:
+        return item.get("key")
+    nested = item.get("props")
+    return nested.get("key") if isinstance(nested, dict) else None
+
+
 def _item_dedup_key(item: dict) -> str | None:
     """The effective dedup ``key`` of an ingest bundle item — the SAME value
     ``create_point`` sees after ``_coerce_props`` flattens the item (#6110,
@@ -6394,21 +6412,44 @@ def _item_dedup_key(item: dict) -> str | None:
 
     ``_coerce_props`` gives explicit top-level kwargs precedence over nested
     ``props`` on collision, and that precedence is by PRESENCE, not by
-    truthiness: a top-level ``key`` whose value is ``None`` still SHADOWS a
-    nested ``props["key"]``. A reader that instead "fell back when the
-    top-level value was None" would consult a key the writer never uses, so
-    the ingest counter/guard would predict a fold for a write that mints —
-    #2892's counter/writer parity broken in the opposite direction (#8400).
+    truthiness — see :func:`_item_supplied_key`, the one home for it.
 
-    A blank or non-string key is treated as absent (the historic
-    content-only path), exactly as ``_resolve_dedup_hit`` treats it.
+    ⛔ THIS answers *"what key does the RESOLVER receive?"*, which is why a
+    blank key is treated as ABSENT (the historic content-only path). That is
+    ``create_point``'s own test on the way IN (``_has_key`` is a ``.strip()``
+    test, and it passes ``key=None`` when it fails). It is NOT the same
+    question as *"what does the minted NODE hold?"* — see
+    :func:`_item_stored_key`; reading the stored side with this test is the
+    ``.strip()``/truthiness mismatch that re-opened the round-9 fail-open
+    (#9819 review P2).
     """
-    if "key" in item:
-        val = item.get("key")
-    else:
-        nested = item.get("props")
-        val = nested.get("key") if isinstance(nested, dict) else None
+    val = _item_supplied_key(item)
     return val if isinstance(val, str) and val.strip() else None
+
+
+def _item_stored_key(item: dict) -> str | None:
+    """The ``key`` VALUE an ingest item's CREATE stores on the node — the
+    writer's own question, answered with the writer's own test.
+
+    ⛔ Two questions, two tests, and conflating them is fail-open (#9819
+    review P2):
+      * :func:`_item_dedup_key` asks *"what key does the RESOLVER receive?"* —
+        ``create_point``'s ``_has_key`` is a ``.strip()`` test, so a
+        whitespace-only key never reaches ``_resolve_dedup_hit``;
+      * this asks *"what does the NODE hold afterwards?"* — the value rides the
+        props bag verbatim into the CREATE map, so ``key="  "`` IS stored, and
+        ``create_point``'s content-fold test on the resolved point is plain
+        TRUTHINESS (``isinstance(_existing_key, str) and _existing_key``), so
+        that stored key DOES pop a later item's supplied one.
+
+    Neither non-string nor empty is stored as a key the fold can pop (the same
+    truthiness test as ``create_point``'s), so both answer ``None``. The graph
+    side of the same question — ``_terminal_content_candidates``'s
+    ``keys_by_hash`` — filters with this identical truthiness test, and says so
+    in place; a ``strip()`` on either side would disagree with the writer.
+    """
+    val = _item_supplied_key(item)
+    return val if isinstance(val, str) and val else None
 
 
 def _item_point_kind(item: dict) -> str:
@@ -24277,6 +24318,15 @@ class TortoiseSDK:
             pkind = _item_point_kind(pitem)
             mkind = _item_stored_point_kind(pitem)
             holders: list[str] = []
+            # ⛔ The writer resolves the KEY first (`_resolve_dedup_hit`), so an
+            # item whose key FOLDS — onto a committed holder, or onto a node an
+            # EARLIER item of THIS bundle minted — never reaches its content leg
+            # and mints nothing on either identity. Settled HERE, before the
+            # content leg, because it is what decides whether that leg runs at
+            # all: computing it after the leg refused bundles the writer commits,
+            # for a fold onto a terminal point the item would never touch
+            # (#9819 review P2).
+            _key_folds_here = False
             if _has_pkey:
                 holders, holder = self._key_holder_state(pkind, pkey)
                 if holder:
@@ -24323,6 +24373,25 @@ class TortoiseSDK:
                     # later items under the key land on that live holder. The
                     # writer never reaches its content leg on a key hit (#6110),
                     # so no content check runs here either.
+                    continue
+                # …and the IN-BUNDLE holder is the same fact one snapshot
+                # later. `minted_keys` records the (POSITIONAL kind, key) pair an
+                # EARLIER item's write applied, which is exactly what this item's
+                # key-first resolution lands on — but the graph read above is a
+                # snapshot taken before ANY item was written, so `holders` is
+                # empty and the `continue` there cannot fire. Judging the CONTENT
+                # identity of a key-folded item refused bundles the writer
+                # COMMITS: points[0] mints (K, content X); points[1] re-uses K and
+                # its content matches a STANDING terminal point, but
+                # `create_point` folds it by KEY and never reaches content, so
+                # that terminal point is never touched (#9819 review P2). The
+                # remediation the content leg printed ("mint OUTSIDE the bundle
+                # with DIFFERENT content") is wrong advice for this shape.
+                # ⚠️ AFTER the `minted_terminal` arm above, never before it: a
+                # key an earlier item minted TERMINAL is a real fold onto a
+                # terminal node and stays refused.
+                _key_folds_here = (pkind, pkey) in minted_keys
+                if _key_folds_here:
                     continue
             # ── #9819: the CONTENT identity half of the same point-write
             # prediction. Reached when the item carries NO key, or its key is a
@@ -24416,9 +24485,11 @@ class TortoiseSDK:
             # ⛔ …and the writer's order is KEY FIRST. An item whose key an
             # earlier item of THIS bundle minted folds onto that node by key,
             # never reaches its content leg, and therefore mints nothing on the
-            # CONTENT axis (`_key_folds_here`). Recording it was a phantom mint
-            # on BOTH axes — the fail-open above and its mirror over-reject.
-            _key_folds_here = _has_pkey and (pkind, pkey) in minted_keys
+            # CONTENT axis. Recording it was a phantom mint on BOTH axes — the
+            # fail-open above and its mirror over-reject. `_key_folds_here` is
+            # settled in the KEY leg above (which is also where such an item
+            # skips this leg entirely); it is read — never recomputed — here so
+            # the two decisions cannot drift.
             # ⛔ A key that is FREE among the records is NOT a key this item
             # WRITES (#9819 review P1). Those come apart on exactly one shape,
             # and the writer's own code names it: the key is free, the CONTENT
@@ -24509,9 +24580,18 @@ class TortoiseSDK:
                 # The key the minted NODE stores, so a later item that
                 # content-folds onto it can answer the same question without a
                 # graph read (`_key_writes_here` above). `None` means "the mint
-                # wrote no key", which accepts any supplied one.
+                # wrote no POPPABLE key", which accepts any supplied one.
+                # ⛔ `_item_stored_key`, NOT `pkey if _has_pkey else None`: the
+                # record describes what the node HOLDS, and the writer's test on
+                # a held key is TRUTHINESS, not `_item_dedup_key`'s `.strip()`.
+                # Reading it with the resolver's test recorded `None` for a mint
+                # storing `key="  "`, so the next item's key looked applied
+                # while `create_point` popped it — a phantom `minted_keys`
+                # record, then an unrecorded terminal mint, then a certified
+                # fold onto it: the round-9 fail-open, re-entered through the
+                # two tests' disagreement (#9819 review P2).
                 minted_content_keys[(mkind, _content_id)] = (
-                    pkey if _has_pkey else None)
+                    _item_stored_key(pitem))
             if (isinstance(mint_status, str)
                     and mint_status in TERMINAL_EXCLUDED_STATUSES):
                 # ⛔ This record predicts a node BORN TERMINAL, so BOTH halves

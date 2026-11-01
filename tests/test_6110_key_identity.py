@@ -41,7 +41,9 @@ from tortoise.sdk import (
     TortoiseSDK,
     _content_candidate_resolution,
     _content_hash,
+    _item_dedup_key,
     _item_effective_status,
+    _item_stored_key,
     _item_stored_point_kind,
 )
 
@@ -640,6 +642,57 @@ class TestPhase1GuardSeesTheContentIdentity:
         assert rows[0][0] == "live", (
             "the key fold pops the declared status, so no terminal mint ever "
             f"happens and points[0]'s node stays live (got {rows})")
+
+    def test_an_item_that_key_folds_in_bundle_does_not_run_the_content_leg(
+            self, sdk):
+        """#9819 review P2 (OVER-REJECT): the writer resolves the KEY first, so an
+        item whose key an EARLIER item of THIS bundle minted folds onto that
+        node by key and NEVER reaches its content leg — even when its content
+        happens to match a STANDING terminal point it would never touch.
+
+        The graph read behind the committed-holder arm is a snapshot taken
+        before ANY item is written, so it cannot see points[0]'s mint: that arm
+        is empty, the content leg ran anyway, and the bundle was REFUSED with
+        *"content matches terminal point … (dedup hit)"* — plus remediation
+        advice ("mint the point OUTSIDE the bundle with DIFFERENT content") that
+        is wrong for this shape, since points[1] never writes its content at
+        all. ``origin/main`` commits this bundle.
+
+        Discriminating: pre-fix this raises ``BundleValidationError`` matching
+        "dedup hit" and nothing is written.
+        """
+        terminal = sdk.create_point(
+            "statement", "KF-TERM", dedup=False)["id"]
+        sdk.retract_point(terminal)
+        before = sdk.get_point(terminal)
+        res = sdk.ingest(
+            {"points": [
+                {"ref": "p0", "kind": "statement", "content": "KF-FRESH",
+                 "key": "KF-K"},
+                {"ref": "p1", "kind": "statement", "content": "KF-TERM",
+                 "key": "KF-K"},
+            ]},
+            promotion_policy="auto",
+        )
+        assert res["created"]["points"] == 1
+        assert res["deduped"]["points"] == 1
+        assert res["ids"]["points"][1] == res["ids"]["points"][0], (
+            "points[1] folds onto points[0] BY KEY — the key is the identity "
+            f"(#6110) and its content is never written (got {res['ids']})")
+        holders = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content = 'KF-TERM' RETURN n.id"
+        ).result_set
+        assert [r[0] for r in holders] == [terminal], (
+            "the item's content was never written — the key hit returns before "
+            "the content leg, so the ONLY carrier of 'KF-TERM' is the standing "
+            f"terminal point (got {holders})")
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "the terminal point this item would never touch must stay "
+            "UNSTAMPED (#9819)")
+        assert after.get("updatedAt") == before.get("updatedAt")
+        assert _points_with_key(sdk, "KF-K") == [res["ids"]["points"][0]], (
+            "one carrier of the key — points[1] folded onto it")
 
     def test_intra_bundle_content_guard_does_not_over_reject(self, sdk):
         """A terminal item followed by an item with DIFFERENT content is the
@@ -1341,6 +1394,91 @@ class TestAFreeKeyIsNotAKeyThisItemWrites:
             f"key must not be read (got {res['RK-SHADOW']})")
         assert res["RK-ABSENT"][1] is True and res["RK-ABSENT"][2] == frozenset(), (
             f"a mint has no fold target at all (got {res['RK-ABSENT']})")
+
+
+    def test_a_whitespace_only_STORED_key_is_not_a_free_key(self, sdk):
+        """FAIL-OPEN, re-entered through the ``.strip()``/truthiness mismatch
+        the round-9 fix left in the in-bundle record.
+
+        ``create_point`` asks two DIFFERENT questions about a key, with two
+        different tests: the key it RESOLVES is a ``.strip()`` test
+        (``_has_key``), so ``key="  "`` never reaches ``_resolve_dedup_hit`` —
+        but the props bag carries the value into the CREATE map verbatim, so the
+        node HOLDS ``key="  "``, and the key a FOLD meets is tested for plain
+        TRUTHINESS (``isinstance(_existing_key, str) and _existing_key``), so a
+        stored ``"  "`` DOES pop the next item's supplied key.
+
+        Reading the STORED side with the RESOLVER's test recorded "the mint
+        wrote no key" (``None`` = "accepts any supplied one"): points[1]'s key
+        looked applied while ``create_point`` popped it, points[2]'s real
+        retracted mint went unrecorded, and points[3] folded onto it with Phase
+        1 certifying the bundle. The graph-read side is pinned to truthiness
+        too (``keys_by_hash`` says so in place), so this was the asymmetry that
+        function's own docstring forbids, one function away from the record.
+
+        Discriminating: pre-fix the bundle COMMITS (measured: created=2,
+        deduped=2) and points[2]'s retracted node comes back with
+        ``confidence`` written by points[3]'s fold.
+        """
+        with pytest.raises(BundleValidationError, match="reuses key"):
+            sdk.ingest(
+                {"points": [
+                    {"ref": "p0", "kind": "statement", "content": "WS-C1",
+                     "key": "  "},
+                    {"ref": "p1", "kind": "statement", "content": "WS-C1",
+                     "key": "WS-K"},
+                    {"ref": "p2", "kind": "statement", "content": "WS-C2",
+                     "key": "WS-K", "status": "retracted"},
+                    {"ref": "p3", "kind": "statement", "content": "WS-C3",
+                     "key": "WS-K", "props": {"confidence": 0.9}},
+                ]},
+                promotion_policy="auto",
+            )
+        assert sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.content IN ['WS-C1','WS-C2','WS-C3'] "
+            "OR n.key = 'WS-K' RETURN n.id"
+        ).result_set == [], (
+            "Phase-1 must reject BEFORE any write — the phantom key record "
+            "certified a fold onto a retracted node this bundle mints (#9819)")
+
+    def test_create_point_stores_a_whitespace_only_key(self, sdk):
+        """The PREMISE of the arm above, pinned on its own: the node really
+        HOLDS ``"  "``, because nothing on the write path strips or refuses it
+        (``_sanitize_props`` passes it through and ``key`` is a declared Point
+        prop).
+
+        If a later change strips — or rejects — a blank key at the write
+        boundary, this reds, which is the signal that ``_item_stored_key``'s
+        truthiness test must be revisited WITH it (that change would collapse
+        the two questions into one, and this test would be the tripwire).
+        """
+        pid = sdk.create_point("statement", "WS-STORED", key="  ")["id"]
+        assert sdk.get_point(pid).get("key") == "  "
+
+    def test_the_stored_key_and_the_resolver_key_answer_different_questions(
+            self, sdk):
+        """UNIT: the two readers of an item's ``key``, pinned side by side.
+
+        They exist because the writer asks two questions with two tests, and
+        every fail-open in this area has been one of them answering the other's
+        question. Both still read the SAME value (``_item_supplied_key``'s
+        presence precedence: a top-level ``key`` of ``None`` SHADOWS a nested
+        ``props["key"]``, exactly as ``_coerce_props`` does).
+        """
+        assert _item_dedup_key({"key": "  "}) is None, (
+            "the RESOLVER never receives a blank key (create_point's .strip() "
+            "test)")
+        assert _item_stored_key({"key": "  "}) == "  ", (
+            "…but the CREATE stores it verbatim, and truthiness is what the "
+            "fold tests it with")
+        assert _item_stored_key({"key": "K"}) == "K"
+        assert _item_stored_key({"props": {"key": "K"}}) == "K"
+        assert _item_stored_key({"key": None, "props": {"key": "K"}}) is None, (
+            "presence, not truthiness: the top-level None SHADOWS the nested "
+            "key — the #8400 precedence both readers share")
+        assert _item_stored_key({"key": 7}) is None, (
+            "a non-str stored key is not one a fold can pop")
+        assert _item_stored_key({"key": ""}) is None
 
 
 class TestTheMintRecordIsKeyedByTheSTOREDKind:
