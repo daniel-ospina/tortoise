@@ -1,3 +1,14 @@
+---
+title: "W1b evidence — #8607, the legacy-id normaliser measured end to end"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-01
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#8607, #7955, epic #7879, tortoise/legacy_ids.py, tools/legacy_id_normalise.py"
+---
+
 # W1b — the legacy-id normaliser, measured end to end (#8607)
 
 The mechanics (`tortoise/legacy_ids.py`, `tools/legacy_id_normalise.py`) landed in #9523. This
@@ -13,7 +24,7 @@ lane.
 ⚠️ **This census is over a SEEDED population, not the dogfood graph.** No graph on this box holds
 legacy ids — measured, not assumed:
 
-```
+```text
 uv run python -c "from falkordb import FalkorDB; print(FalkorDB(host='127.0.0.1', port=16379, \
     password='').select_graph('tortoise').query('MATCH (n) RETURN count(n)').result_set)"
 #   -> [[0]]
@@ -53,7 +64,7 @@ which is why `by_label` is the field to read.
 
 ## 3. The dry-run plan — deterministic, and byte-comparable
 
-```
+```text
 uv run python tools/legacy_id_normalise.py --dump dump.json --report dryrun-1.json   # twice
 ```
 
@@ -96,7 +107,7 @@ single-label (§9.3), so this guard is unit-proven, not measured here.
 
 ## 5. Idempotence — a second run changes nothing
 
-```
+```text
 uv run python tools/legacy_id_normalise.py --dump dump.json --apply \
     --out normalised.json --report plan.json          # apply 1
 uv run python tools/legacy_id_normalise.py --dump normalised.json --report plan-2nd.json
@@ -105,7 +116,7 @@ uv run python tools/legacy_id_normalise.py --dump normalised.json --apply \
 cmp normalised.json normalised-2nd.json               # byte-identical
 ```
 
-```
+```text
 apply 1: nodes 9871 in · 9871 out · renamed 1000 · canonical 8700 → 9700 · legacy 1000 → 0
 re-plan the OUTPUT: nodes 9871 · canonical 9700 · legacy 0 · renames 0
 apply 2: renamed 0 · canonical 9700 → 9700 · legacy 0 → 0
@@ -144,7 +155,7 @@ same `dump_id` the plan renamed: **20/20**. Extended to the whole rename set, wi
 
 A wrong pass over live ids is unrecoverable without this, so it is demonstrated:
 
-```
+```text
 uv run python tools/legacy_id_normalise.py --dump normalised.json --revert \
     --report plan.json --out restored.json > revert.json
 ```
@@ -185,9 +196,15 @@ number above. They are evidence scripts, not tools: they seed a throwaway graph 
 live one. Run them **from the directory the artifacts live in**, with the port of your own lane
 instance (`uv run python tools/test_lane.py uri` prints it):
 
-```
-export T8607_PORT=<the lane instance's published port>
-uv run python docs/evidence/8607-w1b/seed.py            # seeds + dumps -> dump.json
-uv run python docs/evidence/8607-w1b/measure.py         # needs normalised.json: run §5's commands first
-uv run python docs/evidence/8607-w1b/verify-revert.py   # needs restored.json: run §8's command first
+```text
+# from the REPO ROOT: prints the port of your own lane instance
+uv run python tools/test_lane.py uri
+
+# then from THIS directory, so the scripts' bare dump.json / normalised.json
+# resolve where they were written
+cd docs/evidence/8607-w1b
+export T8607_PORT=<the port the line above printed>
+uv run python seed.py            # seeds + dumps -> dump.json
+uv run python measure.py         # needs normalised.json: run §5's commands first
+uv run python verify-revert.py   # needs restored.json: run §8's command first
 ```
