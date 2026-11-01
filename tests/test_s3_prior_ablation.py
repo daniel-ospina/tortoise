@@ -203,20 +203,21 @@ def test_the_census_is_reused_not_reimplemented(probe):
     assert "MATCH (n) UNWIND labels(n)" not in source
 
 
-def test_witness_must_be_this_sessions_and_match_the_arm(probe):
-    """Arm integrity cannot be inherited or arm-total (review r1 P1).
+def test_witness_must_be_this_sessions_and_count_REAL_calls(probe):
+    """Arm integrity cannot be inherited, arm-total, or counted from the STUB (r1 P1, r2 P1).
 
-    An empty witness proves nothing however healthy the blob reads; and ON needs at least one real
-    call IN THIS SESSION while OFF needs none — an arm total of 7 over 7 sessions could otherwise
-    be 7 in one session and 0 in six.
+    An empty witness proves nothing however healthy the blob reads; ON needs at least one real call
+    IN THIS SESSION; and OFF must be judged on calls to the REAL function — the OFF stub is invoked
+    once per session, so a counter the stub increments makes every OFF session unprovable by
+    construction (ARM-INVALID 0 of 7, always). The third argument is REAL calls, per session.
     """
     healthy = {"mode": "real", "degraded": False, "queries_run": 3}
     assert probe.witness_ok("ON", healthy, 1)
     assert not probe.witness_ok("ON", healthy, 0)
     assert not probe.witness_ok("ON", {}, 1)
     stub = {"mode": "real", "degraded": False, "queries_run": 0}
-    assert probe.witness_ok("OFF", stub, 0)
-    assert not probe.witness_ok("OFF", stub, 1)
+    assert probe.witness_ok("OFF", stub, 0)      # stub ran, real function did not: PROVEN
+    assert not probe.witness_ok("OFF", stub, 1)  # the real function ran in the OFF arm: unproven
     assert not probe.witness_ok("OFF", {}, 0)
 
 

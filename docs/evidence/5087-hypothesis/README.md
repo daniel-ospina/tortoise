@@ -124,14 +124,25 @@ one *observed* fact **machine-enforced**:
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
 repeated to get a friendlier number (the probe now refuses to overwrite the log at all).
 
+⚠️ **Two emissions therefore post-date the measured log**, which the log cannot carry because it was
+written before they existed — both are computed from the numbers that ARE in it, and both are printed
+here with their pre-registered bar so a reader does not have to take them on trust:
+**E2b** `SESSIONS WHOSE CREATES FELL: 5 of 7` (bar `>= 4`, **met** — so no
+`not-majority-of-sessions` qualifier); **E5** `model calls 27 vs 21 = 1.286 ×` (bar `<= 2.00 ×`,
+**met**). A cycle-2 review also found that the per-session integrity counter was incremented by the
+OFF **stub**, which would have made every OFF session unprovable by construction on any re-run
+(`ARM-INVALID` 0 of 7 always) — fixed to count only calls to the REAL function, which is what E3's
+registered wording asks for. The measured run predates that defect, so its `14 of 14` stands.
+
 ## Reproduce
 
 ```bash
 uv run python tools/test_lane.py run -- true          # a private FalkorDB lane
 export TORTOISE_DB_URI=... TORTOISE_TEST_DOCKER_PORT=... TORTOISE_TEST_DOCKER_PASSWORD=...
+# A NEW filename: the committed log is NEVER overwritten (the probe refuses an existing --out).
 uv run python tools/s3_prior_ablation.py \
     --prereg a1075dfc2a964a6e9e1a49ec990ebadf8c9a180a \
-    --out docs/evidence/5087-hypothesis/s3-ablation-a1075dfc.log
+    --out "docs/evidence/5087-hypothesis/s3-ablation-$(git rev-parse --short HEAD).log"
 uv run python tools/capstone_preregistration_check.py --dir docs/evidence/5087-hypothesis
 ```
 

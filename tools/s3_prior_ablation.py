@@ -297,19 +297,25 @@ def arm_s3_state(arm: str, search: dict, witness_source: str = "receipt") -> dic
             "reason": reason, "state": note, "proven": resolved}
 
 
-def witness_ok(arm: str, blob: dict, session_calls: int) -> bool:
-    """Is the witness provable, and does the PER-SESSION call count match the arm?
+def witness_ok(arm: str, blob: dict, real_calls_this_session: int) -> bool:
+    """Is the witness provable, and did the REAL function run the number of times the arm allows?
 
-    Two independent failure modes, both a review finding (r1 P1): an EMPTY witness proves nothing
-    however healthy the blob reads (a session that never reached the S3 call site used to inherit
-    the previous session's dict), and an ARM-TOTAL call count cannot say whether a given session
-    made its call — so the count that matters is this session's own delta.
+    Three review findings folded into one predicate:
+
+    * an EMPTY witness proves nothing however healthy the blob reads — a session that never reached
+      the S3 call site used to inherit the previous session's dict;
+    * an ARM-TOTAL call count cannot say whether a given session made its call, so the count that
+      matters is this session's own delta; and
+    * ⚠️ the count must be of calls to the **REAL** function, never of calls intercepted. In the OFF
+      arm the stub IS called once per session, so a counter incremented by the stub made every OFF
+      session unprovable by construction — `ARM-INVALID` 0 of 7, always (review r2 P1). E3's
+      registered wording is "zero REAL-function calls", and that is what is counted here.
     """
     if not blob:
         return False
     if arm == "ON":
-        return session_calls >= 1
-    return session_calls == 0
+        return real_calls_this_session >= 1
+    return real_calls_this_session == 0
 
 
 def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, dict],
@@ -319,19 +325,24 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
     from tortoise.sdk import TortoiseSDK
 
     real_search = ev.search_graph
-    calls = {"real": 0, "session": 0}
+    # ``real`` is the arm total; ``real_session`` is THIS session's calls to the REAL function, and
+    # it is the only one arm integrity may read. ``intercepted`` counts calls that reached either
+    # wrapper, so a run that never reaches the call site at all is distinguishable from one whose
+    # stubbed call was healthy — the two are different failures and the log says which happened.
+    calls = {"real": 0, "real_session": 0, "intercepted": 0}
     witness: dict = {}
 
     def counting(*args, **kwargs):
         calls["real"] += 1
-        calls["session"] += 1
+        calls["real_session"] += 1
+        calls["intercepted"] += 1
         result = real_search(*args, **kwargs)
         witness.clear()
         witness.update(result or {})
         return result
 
     def off_stub(*args, **kwargs):
-        calls["session"] += 1
+        calls["intercepted"] += 1
         result = off_arm_stub(ev.resolve_backend_mode())
         witness.clear()
         witness.update(result)
@@ -351,7 +362,8 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
             # from it, and the call count is read as a PER-SESSION delta — an arm total of 7 over
             # 7 sessions could otherwise be 7 in one session and 0 in six (review r1 P1).
             witness.clear()
-            calls["session"] = 0
+            calls["real_session"] = 0
+            calls["intercepted"] = 0
             receipt = sdk.capture_session(_turns(sid), session_id=sid)
             stats = receipt.get("stats") or {}
             # ⚠️ THE RECEIPT CARRIES NO `search` BLOCK ON THIS LANE. `capture_session` ->
@@ -368,14 +380,16 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
             # call this session needed, OFF must have made none — and an EMPTY witness is not
             # provable at all whatever the blob says (review r1 P1: a session that never reached
             # the S3 call site must not be proven from the previous session's dict).
-            bad_calls = not witness_ok(arm, s3_blob, calls["session"])
+            bad_calls = not witness_ok(arm, s3_blob, calls["real_session"])
             if bad_calls:
                 s3_state = {**s3_state, "proven": False,
-                            "state": (f"NOT proven ({witness_source}; this session's S3 calls "
-                                      f"{calls['session']}; witness "
+                            "state": (f"NOT proven ({witness_source}; this session's REAL S3 "
+                                      f"calls {calls['real_session']}, intercepted "
+                                      f"{calls['intercepted']}; witness "
                                       f"{'empty' if not s3_blob else 'present'})")}
             s3_state = {**s3_state, "witness_source": witness_source,
-                        "session_calls": calls["session"]}
+                        "session_real_calls": calls["real_session"],
+                        "session_intercepted": calls["intercepted"]}
             after = created_counts(census(uri))
             created = {key: after[key] - before[key] for key in after}
             rows.append({
