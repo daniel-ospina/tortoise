@@ -715,8 +715,9 @@ to answer.
 ## Deviations
 
 A protocol deviation is a change made **after** the first scored evidence log (§8). Each entry
-carries the date, the original value, the new value and the reason; the original wording is struck
-through rather than edited. This section was missing until `#10215`'s review caught it — which is
+carries the date, the original value, the new value and the reason; the original rule is **quoted
+from the code it lived in** rather than silently edited, and a surviving statement of the old rule
+is struck through. This section was missing until `#10215`'s review caught it — which is
 itself the entry below.
 
 ### D1 — 2026-11-01 — the step set: "all eight observed" became "seven required + S2.3 conditional"

@@ -2694,11 +2694,10 @@ def test_a_conditional_step_without_a_record_block_fails():
     rec = _record()
     failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
     assert any("carries no steps block" in f for f in failures), failures
-import json
 
 
-def _deviation_dir(tmp_path, *, steps=True, field="capstone-measured-e0fc940b.log",
-                   scored=True):
+
+def _deviation_dir(tmp_path, *, steps=True, declared=None, scored=True):
     """A throwaway bundle dir: a machine record (± a steps block) and ± a scored log."""
     record = {"schema": check.PREREG_SCHEMA,
               "written_before_any_scored_run": True,
@@ -2706,8 +2705,8 @@ def _deviation_dir(tmp_path, *, steps=True, field="capstone-measured-e0fc940b.lo
               "document": "PRE-REGISTRATION.md"}
     if steps:
         record["steps"] = {"conditional": [{"step": "S2.3"}]}
-    if field:
-        record["steps_pinned_after_scored_log"] = field
+    if declared:
+        record["steps_pinned_after_scored_log"] = declared
     (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(record))
     if scored:
         (tmp_path / "capstone-measured-e0fc940b.log").write_text(
@@ -2715,33 +2714,53 @@ def _deviation_dir(tmp_path, *, steps=True, field="capstone-measured-e0fc940b.lo
     return tmp_path
 
 
-def test_a_steps_pin_added_after_a_scored_log_is_a_deviation(tmp_path):
-    """#10215 review: the blanket `written_before_any_scored_run` cannot cover a rule
-    that was authored AFTER the number was seen.
+def test_a_record_asserting_BOTH_a_pre_scored_freeze_and_a_post_scored_pin_reds(tmp_path):
+    """#10215 review P2 — the two claims are incompatible, and that needs no history.
 
-    The `steps` block IS the acceptance rule V5 applies, so pinning it once a scored
-    log exists is the "rule chosen after the number" shape §8 exists to prevent. The
-    failure this closes is a FALSE PASS — the checker tested the freeze claim only for
-    truthiness, and printed OK over exactly this state.
+    The step set IS the acceptance rule V5 applies, so a `steps` block authored
+    after a scored log is a PROTOCOL DEVIATION (§8), not a pre-registration edit.
+    An earlier cut of this rule instead REQUIRED the declaration, which made the
+    only passing record a self-contradicting one and let an author clear the
+    finding by writing one JSON line — a gate satisfied by asserting it.
     """
-    failures = check.check_steps_block_is_pre_scored(_deviation_dir(tmp_path, field=""))
-    assert failures, "a steps pin postdating a scored log must not pass silently"
-    assert check.STEPS_PINNED_AFTER in failures[0], failures
-    assert "PROTOCOL DEVIATION" in failures[0], failures
+    d = _deviation_dir(tmp_path, declared="capstone-measured-e0fc940b.log")
+    failures = check.check_steps_block_is_pre_scored(d)
+    assert failures, "both claims cannot hold"
+    assert "cannot both hold" in failures[0], failures
 
 
-def test_a_record_that_NAMES_the_log_it_postdates_passes(tmp_path):
-    """The honest shape: the record says which scored log the pin postdates."""
-    assert check.check_steps_block_is_pre_scored(_deviation_dir(tmp_path)) == []
+def test_no_steps_block_means_no_deviation(tmp_path):
+    assert check.check_steps_block_is_pre_scored(
+        _deviation_dir(tmp_path, steps=False, declared="x")) == []
 
 
 def test_a_steps_pin_with_no_scored_log_needs_no_deviation(tmp_path):
     """Pre-scored, §8's revision rule applies instead — nothing to record."""
     assert check.check_steps_block_is_pre_scored(
-        _deviation_dir(tmp_path, field="", scored=False)) == []
+        _deviation_dir(tmp_path, declared="capstone-measured-e0fc940b.log",
+                       scored=False)) == []
 
 
-def test_the_real_bundle_names_the_log_its_steps_pin_postdates():
-    """The shipped record must satisfy the rule it is judged by — this reds if the
-    field is dropped while the scored log stands."""
+def test_the_deviation_section_is_detected_from_the_HEADING_not_a_mention():
+    """§8's requirement is a section. This file also MENTIONS the heading inside §8's
+    own prose, so a substring search would pass on the rule text alone."""
+    assert check._document_has_deviations(PREREG.parent) is True
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        from pathlib import Path
+
+        d = Path(tmp)
+        (d / check.PREREG_NAME).write_text(
+            "## 8. Change control\n\nrecorded in a `## Deviations` section appended below\n")
+        assert check._document_has_deviations(d) is False, (
+            "a MENTION of the heading is not the section")
+        (d / check.PREREG_NAME).write_text("## Deviations\n\n### D1\n")
+        assert check._document_has_deviations(d) is True
+
+
+def test_the_shipped_bundle_satisfies_the_rule_it_is_judged_by():
+    """Reds if the record re-gains a post-scored declaration, or if the argument
+    loses its `## Deviations` section while the scored log stands."""
     assert check.check_steps_block_is_pre_scored(PREREG.parent) == []

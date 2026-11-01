@@ -1327,45 +1327,114 @@ def check_single_measured_log(directory: Path) -> list[str]:
     ]
 
 
+def _steps_block_epoch(directory: Path) -> int | None:
+    """The commit epoch that FIRST introduced the record's ``steps`` block.
+
+    Walked oldest-first over the record's own history, comparing each revision's
+    parsed JSON, because ``--diff-filter=A`` names when the FILE appeared — not
+    when this block did. ``None`` when no revision carries one (or git cannot
+    answer), which the caller reads as "nothing to compare", never as "fine".
+    """
+    path = directory / MACHINE_RECORD
+    try:
+        rel = path.resolve().relative_to(REPO_ROOT)
+    except ValueError:
+        return None
+    try:
+        out = subprocess.run(["git", "log", "--reverse", "--format=%H %ct", "--", str(rel)],
+                             cwd=str(REPO_ROOT), capture_output=True, text=True, check=False)
+    except OSError:                                   # pragma: no cover - git absent
+        return None
+    if out.returncode != 0:
+        return None
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            continue
+        sha, epoch = parts[0], int(parts[1])
+        try:
+            blob = subprocess.run(["git", "show", f"{sha}:{rel}"],
+                                  cwd=str(REPO_ROOT), capture_output=True, text=True,
+                                  check=False)
+            record = json.loads(blob.stdout)
+        except (OSError, json.JSONDecodeError, RecursionError):
+            continue
+        if isinstance(record, dict) and "steps" in record:
+            return epoch
+    return None
+
+
+def _document_has_deviations(directory: Path) -> bool:
+    """Whether the argument carries a real ``## Deviations`` heading (§8)."""
+    try:
+        text = (directory / PREREG_NAME).read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return any(line.strip().startswith("## Deviations") for line in text.splitlines())
+
+
 def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
     """A ``steps`` pin authored AFTER a scored log is a PROTOCOL DEVIATION (#10215).
 
-    ``written_before_any_scored_run`` describes the record's ORIGINAL freeze, and the
-    ``steps`` block is not original: it is the acceptance rule V5 applies
-    (``capstone_verdict_check.py::_step_accounting`` rules 1 and 4), so pinning it in
-    the record once a scored log exists is the "rule chosen after the number" shape
-    this whole artefact exists to prevent — while the blanket freeze claim makes the
-    record read as if the new content were covered by it.
+    ``written_before_any_scored_run`` describes the record's ORIGINAL freeze, and
+    the ``steps`` block is not original: it is the acceptance rule V5 applies
+    (``capstone_verdict_check.py::_step_accounting`` rules 1 and 4). Pinning the
+    rule once a scored log exists is the "rule chosen after the number" shape §8
+    exists to prevent, and the blanket claim makes the record read as if the new
+    content were covered.
 
-    The failure closed here is a FALSE PASS, not a wording problem: measured at
-    ``#10215``'s head, ``capstone-measured-e0fc940b.log`` (a COMPLETED run carrying
-    E3/E4/E5 rows) was already on ``main`` when the ``steps`` block was authored, and
-    this checker printed OK over it because it tested the freeze claim only for
-    truthiness.
+    ⛔ **The predicate is AUTHORING ORDER, never a self-declaration.** An earlier
+    cut of this rule required the record to name the log it postdated, which was
+    wrong in both directions: the honest lifecycle — freeze ``steps``, then let
+    the probe write ``capstone-measured-<head8>.log`` into this same directory —
+    arrives with a ``steps`` block and a scored log and was REFUSED, while the
+    only passing exit was to add the declaration, i.e. to clear a false-pass
+    finding by writing one JSON line. A gate satisfied by asserting it is not a
+    gate. Order is computed instead, from the same history ``check_ordering``
+    reads, and where git cannot establish it (a shallow checkout) the rule
+    returns NO verdict rather than demanding an attestation.
 
-    §8 of the argument is the rule: after the first scored log, a change like this is
-    recorded in a ``## Deviations`` section, and the record names WHICH log it
-    postdates rather than resting on the blanket claim.
+    The field is kept ONLY as a contradiction check: a record that declares both
+    ``written_before_any_scored_run`` and ``steps_pinned_after_scored_log`` is
+    asserting two incompatible facts, and that needs no history to refuse.
     """
     record = _record_for_steps(directory)
     if "steps" not in record:
         return []
-    scored = sorted(p.name for p in directory.glob(SCORED_LOG_GLOB))
+    scored = sorted(directory.glob(SCORED_LOG_GLOB))
     if not scored:
         return []
+
+    failures: list[str] = []
     declared = str(record.get(STEPS_PINNED_AFTER) or "").strip()
-    if declared in scored:
-        return []                       # the honest shape: it names its postdate
-    return [
-        f"{MACHINE_RECORD} carries a `steps` block while {len(scored)} scored log(s) "
-        f"already exist ({', '.join(scored)}) and it declares {STEPS_PINNED_AFTER}="
-        f"{declared!r} — the step set IS the acceptance rule V5 applies, so pinning it "
-        "after a scored run is a PROTOCOL DEVIATION (§8), not a pre-registration edit: "
-        f"the record must name the scored log it postdates in {STEPS_PINNED_AFTER!r} and "
-        "the argument must record the change in a `## Deviations` section with the date, "
-        "the original rule, the new rule and the reason. A blanket "
-        "written_before_any_scored_run cannot cover content added after the number was seen"
-    ]
+    if declared and record.get("written_before_any_scored_run"):
+        failures.append(
+            f"{MACHINE_RECORD} declares {STEPS_PINNED_AFTER}={declared!r} AND "
+            "written_before_any_scored_run=true — those cannot both hold: the step set is "
+            "the acceptance rule V5 applies, so a `steps` block authored after a scored log "
+            "is a PROTOCOL DEVIATION (§8), not a pre-registration edit. Record the deviation "
+            "in the argument's `## Deviations` section and drop whichever claim is false"
+        )
+        return failures          # the contradiction is the finding; order adds nothing
+
+    if history_unavailable():
+        return failures          # UNPROVABLE — never demand an attestation instead
+
+    steps_epoch = _steps_block_epoch(directory)
+    log_epochs = [epoch for log in scored for epoch in _added_epochs(log)]
+    if steps_epoch is None or not log_epochs:
+        return failures          # nothing to compare; not a finding either way
+    earliest = min(log_epochs)
+    if earliest < steps_epoch and not _document_has_deviations(directory):
+        failures.append(
+            f"{MACHINE_RECORD}'s `steps` block was authored {steps_epoch - earliest}s AFTER "
+            f"the scored log(s) {', '.join(p.name for p in scored)} were added, and "
+            f"{PREREG_NAME} carries no `## Deviations` section — the step set IS the "
+            "acceptance rule V5 applies, so a rule pinned after the number was seen is a "
+            "PROTOCOL DEVIATION (§8): record it with the date, the original rule, the new "
+            "rule and the reason"
+        )
+    return failures
 
 
 def check_completeness(rows: list[dict[str, str]]) -> list[str]:
