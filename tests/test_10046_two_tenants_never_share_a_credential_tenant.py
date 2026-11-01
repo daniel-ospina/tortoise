@@ -51,16 +51,25 @@ USER_A_ONLY = "22222222-2222-2222-2222-222222222222"
 TOKEN_A = "oat_" + "a" * 40
 TOKEN_B = "oat_" + "b" * 40
 
-#: BOTH orgs share one `graph_name`. That is the REAL shape, not an accident:
-#: `graph_name` is a user-editable label (`supabase_control.set_graph_name`), so
-#: two organizations can carry the same one. Deriving it per org ("org_" +
-#: org_id) would make a `graph_name`-keyed memo of the resolved default row
-#: UNABLE to collide, i.e. it would make the very mutation this module claims to
-#: catch ship green (measured: a `graph_name`-keyed cache in
-#: `_session_user_org` left both alternation tests green until this was shared).
-#: The two tenants are distinguished by `org_id` and by their DISTINCT
-#: `graphs.id` (`ROW_A`/`ROW_B`) — which is what the record's FK actually keys
-#: on, so a name collision must not be able to select the wrong tenant.
+#: BOTH orgs deliberately share one `organizations.graph_name`, and that pair is
+#: SYNTHETIC — do not read it as a reachable production state. Production keeps
+#: orgs' data-plane namespaces unique (`0011_teams_name_unique.sql`, on a name
+#: the provisioning RPCs derive as `team_{name}` / `team_{team_id}`), because two
+#: orgs sharing one namespace is interleaved points and quota between distinct
+#: tenants. The USER-EDITABLE label is `public.graphs.name`, renamed by
+#: `supabase_control.set_graph_name`, and `20261028000001` states a rename never
+#: touches the namespace.
+#:
+#: So why share it? Because a collision is the only way to make this module's
+#: claimed mutation KILLABLE. Deriving the label per org ("org_" + org_id) means
+#: a `graph_name`-keyed memo of the resolved default row can never collide, and
+#: that mutation then ships green through both alternation tests (measured in
+#: review: the memo reddens the test with this shared value and stays green when
+#: the label is derived). The tenants are still distinguished by `org_id` and by
+#: their DISTINCT `graphs.id` (`ROW_A`/`ROW_B`) — the pair the record's FK keys on
+#: — and the shared label is inert on this lane: `_session_user_org` reads only
+#: the default row's ID, never its namespace (the fixture's per-org
+#: `graphs.namespace` exists only to keep the fake's rows well-formed).
 SHARED_GRAPH_NAME = "org_shared_label"
 
 
@@ -175,9 +184,9 @@ def test_two_session_credentials_never_share_a_tenant(monkeypatch):
     """A, then B, then A again — each session names its OWN default graph.
 
     Mutation this discriminates: a memo of the resolved default row keyed on
-    anything that is NOT `org_id` — the org's `graph_name` included, which BOTH
-    tenants share in this fixture because it is a user-editable label that two
-    orgs really can share — or a module global → the third read (A again, after
+    anything that is NOT `org_id` — this fixture shares `graph_name` across both
+    tenants precisely so a name-keyed memo CAN collide (see
+    `SHARED_GRAPH_NAME`) — or a module global → the third read (A again, after
     B) returns B's row and the checker reddens. Single-shot resolution cannot
     catch it, which is why the alternation is the test.
     """
