@@ -4144,15 +4144,32 @@ def _apply_journal_presence(line: bytes, point_id: str,
         rec = _json.loads(line.decode('utf-8', 'replace'))
     except ValueError:
         return
-    if not isinstance(rec, dict) or _rec_point_id(rec) != point_id:
+    if not isinstance(rec, dict):
         return
     kind = rec.get('type')
+    # `PointsMerged` names its ids in `keep_id` / `merge_ids`, NOT under `id` or
+    # `point` — so it never reaches `_rec_point_id` and a merged-away point folded
+    # back to presence through its `PointAdded` record (review round 3, finding 2;
+    # measured: a merged loser's `update_point` warned `journal still holds the
+    # id` on a healthy lane). The projection's own presence scan folds it the same
+    # way (`projection/__init__.py:8060`).
+    if kind == 'PointsMerged':
+        if rec.get('keep_id') == point_id:
+            state[point_id] = True
+        elif point_id in (rec.get('merge_ids') or ()):
+            state[point_id] = False
+        return
+    if _rec_point_id(rec) != point_id:
+        return
     if kind == 'EntityMutated' and rec.get('op') == 'delete':
         state[point_id] = False
     elif kind == 'PointRetracted' and rec.get('deleted'):
         # The HARD delete (`_deleted_point_payload` writes `deleted`
         # unconditionally). A `retract_point` TOMBSTONE keeps the node, so it is
-        # presence, not absence.
+        # presence, not absence. RESIDUAL: a hard delete journalled BEFORE that
+        # marker existed (`{"id": …}` only) folds to presence — the marker's own
+        # docstring records that those rows read as tombstones, so this inherits
+        # that ambiguity rather than inventing one.
         state[point_id] = False
     else:
         state[point_id] = True
@@ -4181,7 +4198,11 @@ def _journal_presence_mentions(path, point_id: str) -> dict[str, bool]:
       reasoning;
     * the splitter handles ``\\n``, ``\\r\\n`` and bare ``\\r`` (``EventLog``
       documents all three), but a line SPLIT ACROSS TWO CHUNKS is carried by
-      ``tail`` and parsed only once complete.
+      ``tail`` and parsed only once complete. ⚠️ The memory bound follows the
+      separator: for a ``\\n``/``\\r\\n`` journal the peak is one chunk, but a
+      journal with NO ``\\n`` at all makes ``tail`` the whole file, so memory is
+      linear in journal size there (the ANSWER stays correct — the run of
+      ``\\r``-separated records is still folded).
     """
     needle = str(point_id).encode('utf-8')
     state: dict[str, bool] = {}
@@ -9641,7 +9662,22 @@ class TortoiseSDK:
         return self._graph_presence(proj) is True
 
     def _journal_knows_point(self, point_id: str) -> bool | None:
-        """Is *point_id* a point the JOURNAL still holds? ``None`` = no journal.
+        """Is *point_id* a point the JOURNAL still holds?
+
+        THREE answers, and the third is not the second (review round 3,
+        finding 1):
+
+        * ``True`` — the journal holds it (a real point whose projection is behind);
+        * ``False`` — the journal does not name it, OR **no journal is
+          configured**. The no-journal case is deliberately ``False``, not
+          ``None``: without a replay source nothing can be judged LOST, so the
+          caller must stay SILENT. The first cut returned ``None`` for it and the
+          caller read ``None`` as "unreadable", which alarmed EVERY TYPO on the
+          default configuration (`event_log_path=None`: `__main__`, the embedded
+          lane, every test SDK) with "the revision was NOT recorded" — indicator 2
+          reversed, and a counter that grows with typos can never be alerted on;
+        * ``None`` — a journal IS configured and its READ FAILED. That is
+          genuinely unjudged, and the caller reports it as `journal_unreadable`.
 
         The second half of #10515's discriminator. ``update_point``'s ABSENT arm
         reads the LIVE graph; an id the journal knows but the projection does not
@@ -9672,8 +9708,10 @@ class TortoiseSDK:
         and 30x lighter, and linear in journal size (97.5 ms / 100k records =
         ~1 ms per 1k records). The result is memoised on the journal file's
         ``os.stat`` identity (inode + size + mtime_ns): repeats of the SAME id pay
-        nothing while the journal is unchanged, and a DIFFERENT id pays one scan
-        per journal state.
+        nothing for the SCAN while the journal is unchanged, and a DIFFERENT id
+        pays one scan per journal state. (The scan is not the whole per-call cost:
+        `_report_absent_revision` also issues one `EXISTS` probe first, which is a
+        round trip — O(1), but counted here rather than left implicit.)
 
         ⛔ NOT ``EventLog.position()`` (review B2). That read takes the
         process-wide append lock AND the cross-process ``flock``, opens the
@@ -9704,7 +9742,11 @@ class TortoiseSDK:
         """
         log = self._get_event_log()
         if log is None:
-            return None
+            # NO JOURNAL CONFIGURED is `False`, not `None`: there is no replay
+            # source, so nothing can be judged LOST and the caller stays silent
+            # (round 3, finding 1 — `None` here alarmed every typo on the default
+            # `event_log_path=None` configuration).
+            return False
         stat_key = self._journal_stat_key(log)
         cache = getattr(self, '_journal_presence_memo', None)
         known: dict[str, bool] = {}

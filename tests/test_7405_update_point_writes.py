@@ -1307,6 +1307,55 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
             "two journal-known points in ONE journal state must BOTH be "
             "counted — a single-slot memo answers 'typo' for the second, "
             "which is the silence #10515 removes")
+
+        # ── a MERGED-AWAY point is gone, not lost (review round 3, finding 2) ──
+        # `PointsMerged` names its ids in `keep_id`/`merge_ids`, not under `id` or
+        # `point`, so a fold that only reads `_rec_point_id` skipped it and the
+        # loser kept its earlier `PointAdded` presence — a routine dedup reported
+        # as a lost revision on a healthy lane. The record is appended in the
+        # PRODUCER's shape (`tortoise/api.py::merge_points`), and the loser is
+        # removed from the live graph the way the merge fold removes it.
+        keep = _pid(sdk)
+        loser = _pid(sdk)
+        sdk._get_event_log().append(
+            {"type": "PointsMerged", "keep_id": keep, "merge_ids": [loser]})
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": loser})
+        assert not sdk.get_point(loser)
+        merged_before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(loser, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == merged_before, (
+            "a point the lane deliberately MERGED AWAY must not be counted as "
+            "a lost revision")
+        assert not any("will not be replayed" in r.getMessage()
+                       for r in caplog.records), (
+            "a write after a merge must not warn about a lost revision")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_typo_on_a_journal_less_sdk_stays_silent(tmp_path):
+    """#10515 indicator 2, on the DEFAULT configuration (review round 3, finding 1).
+
+    ``event_log_path=None`` is the documented default (``__main__``, the embedded
+    lane, every test SDK). With no journal there is no replay source, so nothing
+    can be judged LOST — the absent read is not a loss and must stay SILENT. The
+    first cut returned ``None`` from the journal question for this case and the
+    caller read ``None`` as "unreadable", which alarmed every typo with "the
+    revision was NOT recorded" and grew ``journal_unreadable`` with typo traffic.
+    """
+    from tortoise import monitoring
+
+    sdk = _sdk(tmp_path, "nojournal")
+    try:
+        before = monitoring.silent_revision_loss_counts()
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == before, (
+            "a journal-less SDK cannot judge a loss, so a typo must add nothing "
+            "to any reason")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

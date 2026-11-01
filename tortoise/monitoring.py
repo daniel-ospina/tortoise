@@ -766,6 +766,12 @@ RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
 #   could not run). The write cannot be judged absent-vs-present, so it is
 #   reported rather than assumed absent.
 #
+# * ``journal_unreadable`` — a journal IS configured and its read FAILED
+#   (permissions, I/O, a path removed mid-flight). "Unjudged" is not "a typo":
+#   nothing can tell what was lost, so it is reported rather than folded into
+#   silence. A journal-less lane is NOT this — with no replay source nothing can
+#   be judged lost, and that path stays silent.
+#
 # The typo path is NOT counted and NOT logged: absent from the graph AND from the
 # journal is the one shape #10119 handled, and turning it into an alarm is
 # indicator 2 of #10515.
@@ -1461,10 +1467,11 @@ def record_silent_revision_loss(reason: str) -> None:
     """Count one LEGITIMATE revision refused by ``update_point``'s ABSENT arm.
 
     Called from ``TortoiseSDK._report_absent_revision`` when the target is
-    absent from the live graph but the read could not conclude "no such point":
-    the journal carries the id (``journal_known``), or the graph key could not be
-    confirmed (``graph_unavailable``). See ``SILENT_REVISION_LOSS_COUNT`` for why
-    this is its own counter rather than a log line (#10515).
+    absent from the live graph but the read could not conclude "no such point".
+    ``reason`` is one of ``journal_known`` (the journal still holds the id),
+    ``graph_unavailable`` (the graph key could not be confirmed) or
+    ``journal_unreadable`` (a journal IS configured and its read failed). See
+    ``SILENT_REVISION_LOSS_COUNT`` for why this is its own counter (#10515).
     """
     SILENT_REVISION_LOSS_COUNT.labels(reason=reason).inc()
 
