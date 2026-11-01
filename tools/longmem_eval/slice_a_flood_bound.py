@@ -577,6 +577,21 @@ def _value_pairs_sentence(value_pairs: list[dict[str, Any]]) -> str:
     overlaps sit above a threshold and assert the wording flips.
     """
 
+    # AN EMPTY MEASUREMENT IS NOT A PASS (#8945, one level down). "Every
+    # content overlap is below the threshold" is a UNIVERSAL, and over zero
+    # pairs it is vacuously true; the sentence would then read as a safety
+    # verdict drawn from a comparison nothing ran — the exact defect this
+    # function exists to remove, re-created one level down. The shape is not
+    # hypothetical: the comparable default CONFLATES it, since dbt's data-test
+    # rule is "zero failing rows → pass" and an empty population therefore
+    # reads as a pass. So an empty population is stated as unmeasured.
+    if not value_pairs:
+        return (
+            "no value pair was measured, so this verdict states nothing about "
+            "either collapse threshold — an empty measurement is not a safety "
+            "result"
+        )
+
     def _comparator(below: bool) -> str:
         return "<" if below else ">="
 
@@ -617,17 +632,27 @@ def _value_pairs_sentence(value_pairs: list[dict[str, Any]]) -> str:
     else:
         out += (
             "clear both collapse legs on their own terms: every content overlap "
-            "is below the near-verbatim threshold, and the only quote overlap at "
-            "or above the same-turn threshold belongs to a pair on DISTINCT "
-            "turns, where that leg is unreachable"
-            if any(
-                not p["quote_below_threshold"] and p["distinct_turns"]
-                for p in value_pairs
-            )
-            else "clear both collapse legs on their own terms: every content "
-            "overlap is below the near-verbatim threshold and every quote "
-            "overlap is below the same-turn threshold"
+            "is below the near-verbatim threshold"
         )
+        # COUNT the above-threshold quote pairs; never claim "the only" from an
+        # ``any()``. With two such pairs the singular sentence was false on a
+        # measured fact — a count asserted from a boolean, which is #8945's
+        # shape again (prose outrunning the measurement).
+        above_turn = [p for p in value_pairs if not p["quote_below_threshold"]]
+        if not above_turn:
+            out += " and every quote overlap is below the same-turn threshold"
+        elif len(above_turn) == 1:
+            out += (
+                ", and the only quote overlap at or above the same-turn "
+                "threshold belongs to a pair on DISTINCT turns, where that leg "
+                "is unreachable"
+            )
+        else:
+            out += (
+                ", and every quote overlap at or above the same-turn threshold "
+                "belongs to a pair on DISTINCT turns, where that leg is "
+                "unreachable"
+            )
         out += ", so no value pair is a collapse candidate on its own account"
 
     if all(p["distinct_turns"] for p in value_pairs):

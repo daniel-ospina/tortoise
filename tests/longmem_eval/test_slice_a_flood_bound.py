@@ -300,6 +300,74 @@ def test_value_pairs_sentence_is_composed_not_fixed() -> None:
     assert "SAME TURN" in above_quote_reachable, above_quote_reachable
 
 
+def _pair(**over: object) -> dict:
+    """One synthetic ``value_pairs`` entry, overridable field by field."""
+    base = {
+        "a": "x1", "b": "x2", "values": "300/400",
+        "content_overlap": 0.5, "content_below_threshold": True,
+        "content_leg_reachable": False,
+        "quote_overlap": 0.5, "quote_below_threshold": True,
+        "same_turn_leg_reachable": False,
+        "turns": ["t1", "t2"], "distinct_turns": True,
+    }
+    base.update(over)
+    return base
+
+
+def test_sentence_from_an_empty_measurement_is_not_a_safety_verdict() -> None:
+    """#8945, one level down: a UNIVERSAL over zero pairs is vacuously true.
+
+    With no pairs measured, "every content overlap is below the threshold" and
+    "no value pair is a collapse candidate" are both true statements about an
+    empty set — i.e. a safety verdict from a comparison nothing ran, which is
+    precisely the defect this composer replaced. The comparable default
+    aggravates it (dbt's data-test rule is "zero failing rows -> pass"), so the
+    composer must say the population was empty instead of inheriting a pass.
+
+    Pre-fix this reds: the else-branch emitted "clear both collapse legs on
+    their own terms" and "no value pair is a collapse candidate" for `[]`.
+    """
+    sentence = instrument._value_pairs_sentence([])
+    assert "clear both collapse legs on their own terms" not in sentence, sentence
+    assert "no value pair is a collapse candidate" not in sentence, sentence
+    assert "empty measurement is not a safety" in sentence, sentence
+    assert "no value pair was measured" in sentence, sentence
+
+
+def test_sentence_counts_above_threshold_pairs_instead_of_claiming_the_only_one(
+) -> None:
+    """#8945: a COUNT must not be asserted from an ``any()``.
+
+    Two pairs whose quote overlaps are at or above the same-turn threshold, on
+    DISTINCT turns, both satisfy the old branch's ``any(...)`` condition — and
+    the sentence then said "the only quote overlap at or above" threshold,
+    which is false on a measured fact. That is the same shape as the defect
+    this composer removed: prose outrunning the measurement. The wording must
+    follow the COUNT (one -> "the only", more -> "every ... belongs to").
+
+    Pre-fix this reds on the plural case: it emitted the singular clause.
+    """
+    one = instrument._value_pairs_sentence(
+        [_pair(values="300/400", quote_overlap=0.8, quote_below_threshold=False)]
+    )
+    assert "the only quote overlap at or above the same-turn threshold" in one, one
+
+    two = instrument._value_pairs_sentence([
+        _pair(values="300/400", quote_overlap=0.8, quote_below_threshold=False,
+              turns=["t1", "t2"]),
+        _pair(values="12/60", quote_overlap=0.9, quote_below_threshold=False,
+              turns=["t3", "t4"]),
+    ])
+    assert "the only quote overlap" not in two, two
+    assert (
+        "every quote overlap at or above the same-turn threshold belongs to a "
+        "pair on DISTINCT turns" in two
+    ), two
+    # both values still named, and the conclusion unchanged
+    assert "300/400" in two and "12/60" in two, two
+    assert "no value pair is a collapse candidate" in two, two
+
+
 def test_refused_pair_overlap_is_measured_not_silently_null(receipt: dict) -> None:
     """#8945 item 3: the ``hasattr`` guard degraded a rename to a plausible
     ``null``. The field is now a direct call, so it is always a number — and
