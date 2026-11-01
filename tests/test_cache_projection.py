@@ -1299,7 +1299,8 @@ def test_a_restatus_is_unconditional_and_matches_the_live_set_state_op():
     """
     row = {"id": "o-2", "name": "issue-2", "object_kind": "service"}
     node = cp.node_from_row("Object", row)
-    # A pack/connector fold makes it terminal first…
+    # A connector fold writes first (`completed`, which is NOT terminal, so this
+    # fixture does NOT exercise the terminal latch — see the docstring's SCOPE)…
     terminal = cp.apply_event_stream_folds(
         (node,),
         (cp.LifecycleEvent(seq=1, event_kind="github.issue.closed",
@@ -2089,4 +2090,59 @@ def test_the_connector_fold_never_writes_a_subject_status():
         "the connector fold wrote a lifecycle word onto the :Subject of the same "
         "name — the live fold cannot produce that value, and reconciliation "
         "cannot see it because it reads the same fold"
+    )
+
+
+def test_read_node_folds_a_nameless_object():
+    """The read door must not gate the fold on a NAME (#9881 shape).
+
+    Since #9881 an Object's record key is `id`, and a row may legally carry no
+    `name`. Gating the fold on the name answered nothing for such a node while
+    `rebuild_from_record` folded it by id — the two-door split, on the shape the
+    gate was removed for. Pinned, because reverting the gate otherwise leaves the
+    suite green: every other `read_node` fixture in the repo gives its node a
+    name.
+    """
+    from tortoise import record_serve as rs
+
+    conn = _FakeConn({
+        "object": [{"id": "o-6", "object_kind": "issue", "props": {}}],
+        "journal_event": [
+            {"seq": 1, "payload": {"type": "EntityMutated", "op": "restatus",
+                                   "label": "Object", "id": "o-6",
+                                   "state": {"status": "archived"}}},
+        ],
+    })
+    props = rs.read_node(conn, org_id="o", graph_id="g", label="Object",
+                         key="o-6")
+    assert props is not None and props.get("status") == "archived", (
+        "a nameless Object was answered without the status the rebuild writes "
+        "— the fold is still gated on `name`"
+    )
+
+
+def test_a_label_subset_view_still_folds_its_stream():
+    """`read_record_view(labels=(…))` must read the stream for ANY fold member.
+
+    The gate used to be a hard-coded `"Object" in labels`, so a caller that asked
+    for `Subject` alone — a supported shape, and a generator caller is already
+    pinned elsewhere — got `lifecycle_events == ()`, and a `rebuild_from_record`
+    over that view materialized the Subject LIVE while `read_node` answered the
+    folded status.
+    """
+    conn = _FakeConn({
+        "subject": [{"id": "s-2", "name": "platform-team",
+                     "subject_kind": "team", "props": {}}],
+        "journal_event": [
+            {"seq": 1, "payload": {"type": "EntityMutated", "op": "restatus",
+                                   "label": "Subject", "id": "s-2",
+                                   "state": {"status": "retracted"}}},
+        ],
+    })
+    view = cp.read_record_view(conn, org_id="o", graph_id="g",
+                               labels=("Subject",))
+    subj = next(n for n in view.nodes if n.label == "Subject")
+    assert subj.props.get("status") == "retracted", (
+        "a Subject-only view skipped the record's stream — the rebuild over it "
+        "materializes a LIVE Subject while the read door answers terminal"
     )
