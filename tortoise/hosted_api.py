@@ -22352,7 +22352,9 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
 
     ``prior_moved`` / ``prior_listed`` (#10452 review, P2): the PRIOR org's
     already-resolved default namespace AND the server-wide graph listing, both
-    sampled by an ASYNC caller in its ``_cp_offload`` worker.
+    sampled by an ASYNC caller in its OFFLOAD WORKERS — ``_cp_offload`` for the
+    control-plane read, ``_graph_offload`` for the graph listing (#3718/#3773:
+    they ride different lanes, so they are two submissions, not one).
     ⛔ Every argument above is a value the caller already holds; these two are
     the same rule, and they exist because the alternative violated it: the
     prior-org open probes the server-wide graph listing
@@ -22546,28 +22548,44 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     prior_org_ids = await _cp_offload(
         lambda: active_membership_org_ids(cp, user["user_id"]),
         op="active_membership_org_ids", pool="org")
-    # #10180 (review P2): resolve BOTH facts the prior-org open needs HERE, in
-    # a worker, and hand them to the sync eager-init helper below. That helper
-    # is called directly from this coroutine, so every read it issues runs ON
-    # THE EVENT LOOP; the two it needs for the prior org are the server-wide
-    # graph listing probe (`db.list_graphs()`) and the
+    # #10180 (review P2): resolve BOTH facts the prior-org open needs HERE, off
+    # the event loop, and hand them to the sync eager-init helper below. That
+    # helper is called directly from this coroutine, so every read it issues
+    # runs ON THE EVENT LOOP; the two it needs for the prior org are the
+    # server-wide graph listing probe (`db.list_graphs()`) and the
     # `organizations.graph_name` read — exactly the class two earlier rounds of
     # this PR removed from request sites (#3834/#4816: this lane is the one
     # whose own comment measures a ~9.5 s pass against the 10 s transport
-    # bound). ONE submission replaces two on-loop reads: two submissions would
-    # spend two pool hand-offs and two bound windows on a lane that is already
-    # close to its budget, and the listing probe is fail-soft
-    # (`_registry_existing_graphs` never raises, `None` on failure), so folding
-    # it in adds no new failure mode. `None` (no prior org) costs nothing.
+    # bound). `None` (no prior org) costs nothing, and pays no submission.
     # ⛔ The namespace ALONE is not enough: it says which graph the org's
     # default holds, not which names the server actually LISTS — and the legacy
     # `team_{prior}` arm and the "skip the read" arm come from the listing.
-    prior_moved, prior_listed = (
-        await _cp_offload(
-            lambda: (_org_default_namespace(prior_org_ids[0]),
-                     _registry_existing_graphs()),
-            op="org_default_namespace", pool="org")
-        if prior_org_ids else (None, None))
+    # ⛔ TWO submissions, not one: the two facts ride DIFFERENT lanes
+    # (#3718/#3773). `organizations.graph_name` is a control-plane read and
+    # belongs on this lane's `org` pool (#7678); the listing probe is a
+    # REGISTRY read — `db.list_graphs()` through `_registry_probe_sdk`, i.e. a
+    # cold projection open (connect + version probe + `_ensure_indexes()`) on
+    # the first call after boot — and it must reach the graph pool THROUGH
+    # `_graph_offload`, never `_cp_offload`. Folding both into ONE `org`-pool
+    # submission (the shape this replaces, chosen to save a hand-off) charged
+    # the registry read to the PostgREST lane's contract: `timeout=None`
+    # resolves to `CONTROL_PLANE_OFFLOAD_TIMEOUT_S` (10 s) instead of
+    # `graph_offload_timeout_s()` (~30 s: `probe_setup_timeout()` + the margin
+    # that exists precisely so a cold projection open is not false-degraded),
+    # and a bound miss mapped to `_control_plane_unavailable` — the SIGN-IN 503
+    # body — instead of `_graph_unavailable`. The probe's OWN exceptions stay
+    # swallowed (`_registry_existing_graphs` returns `None` on failure), but a
+    # bound miss is raised by the SEAM, not by the callable, so the fold DID
+    # add a failure mode on this request path: a graph-capacity failure dressed
+    # as an auth outage, on a lane already budgeted close to 10 s. One extra
+    # hand-off is the price; a wrong-pool submission is not payable.
+    prior_moved = (await _cp_offload(
+        lambda: _org_default_namespace(prior_org_ids[0]),
+        op="org_default_namespace", pool="org")
+        if prior_org_ids else None)
+    prior_listed = (await _graph_offload(
+        _registry_existing_graphs, op="registry_existing_graphs")
+        if prior_org_ids else None)
     # Eager default-graph TeamMeta FIRST (see _eager_provision_org_graph) — the
     # helper returns the graph name (f"org_{org_id}", the convention above).
     graph_name = _eager_provision_org_graph(cp, org_id, name, user["user_id"],

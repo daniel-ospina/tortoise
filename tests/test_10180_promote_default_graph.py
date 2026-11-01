@@ -2796,7 +2796,7 @@ def test_the_org_create_lane_resolves_the_prior_default_off_the_loop(sb, monkeyp
         f"graph: #10510 ({probes})")
     assert not any(probes), (
         "the listing probe ran ON THE EVENT LOOP — it is a graph read and "
-        f"belongs in the caller's `_cp_offload` block ({probes})")
+        f"belongs in the graph lane's offload worker (#3718) ({probes})")
     prior_opens = [o for o in opened if o[0] == TEAM]
     assert prior_opens, f"the eager init never opened the prior org: {opened}"
     assert prior_opens[0][1] == {moved}, (
