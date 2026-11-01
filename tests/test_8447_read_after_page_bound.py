@@ -13,20 +13,23 @@ anywhere saying so. That is exactly the contract #8447 pins: a bounded
 operation returns complete results or says it is incomplete; it never returns a
 silently truncated page that is indistinguishable from a complete one.
 
-The bound itself is not new, and it is not invented here — it was already
-declared in two places and enforced by a silent clamp in a third:
+The bound itself is not new, and it is not invented here — it was declared in
+two places and silently clamped in two others:
 
-* ``GET /v1/events`` — ``Query(100, ge=1, le=MAX_PAGE)`` (already REFUSES 422);
-* ``read_after``'s own docstring ("default 100, max 1000");
-* ``webhook_delivery``'s caller, which carried its own ``min(..., 1000)`` —
-  now derived from ``MAX_PAGE`` like the REST route (one instrument, #1178),
-  and its ``more_pending`` test now compares against that same clamped page
-  rather than the unclamped batch.
+* declared: ``GET /v1/events`` — ``Query(100, ge=1, le=MAX_PAGE)`` (already
+  REFUSES 422) — and ``read_after``'s own docstring ("default 100, max 1000");
+* clamped: this seam (the defect) and ``webhook_delivery``'s caller, which
+  carried its own ``min(..., 1000)`` — now derived from ``MAX_PAGE`` like the
+  REST route (one instrument, #1178), with its ``more_pending`` comparison
+  moved onto that same clamped page instead of the unclamped batch.
 
 These tests pin both directions: an out-of-domain ask refuses (so no path can
 clamp it silently), and an in-domain ask still returns its rows (so the refusal
-is not over-broad). The THREE "no false refusal" tests are green before the fix
-too — that is deliberate: they are what would catch an over-broad fix.
+is not over-broad). Three tests are the no-false-refusal guards — they pass
+under the clamp-restore mutation (``MAX_PAGE`` left in place), which is a
+narrower claim than "they pass on the pre-fix tree": two of them name
+``MAX_PAGE``, which does not exist at ``7df48ec7c``, so against that tree they
+ERROR.
 """
 import pytest
 
@@ -82,6 +85,46 @@ def test_over_limit_ask_refuses_rather_than_clamping(sdk_factory, tmp_path):
     msg = str(exc.value)
     assert "1000" in msg and "5000" in msg, msg
     assert "clamped" in msg, msg
+
+
+def test_a_fractional_ask_refuses_instead_of_being_floored(sdk_factory, tmp_path):
+    """`limit=2.9` used to serve 2 rows — the caller's ask, silently shrunk.
+
+    `int(limit)` flooring is the same defect in miniature: the page is shorter
+    than the ask for a reason nothing reports, and the refusal message would
+    name a value the caller never passed (`5000.7` → "got 5000").
+    """
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    _seed(proj, 5)
+    with pytest.raises(ValueError) as exc:
+        event_store.read_after(proj, 0, limit=2.9)
+    assert "whole number" in str(exc.value) and "2.9" in str(exc.value)
+
+
+def test_a_duplicate_event_id_inside_a_full_page_shrinks_it(sdk_factory, tmp_path):
+    """A short page is STILL not proof the stream is drained — pinned, not fixed.
+
+    Dedup runs AFTER the query's ``LIMIT``: 5 rows with a duplicate at position
+    3 return 3 distinct rows for ``limit=4``, while ``seq=5`` exists and was
+    never delivered. This is pre-existing and structurally separate from
+    #8447's clamp (the state is normally prevented by the unique constraint),
+    so it is documented in `read_after`'s docstring and pinned here rather than
+    left as "the clamp was the only way to get a short page".
+    """
+    sdk = sdk_factory(tmp_path)
+    proj = sdk._get_proj()
+    _seed(proj, 5)
+    # make seq=3 a DUPLICATE of seq=2's event_id — the state the dedup defends
+    # against (tests/test_event_store.py::test_read_dedups_duplicate_event_ids
+    # builds the same one)
+    proj.g.query("MATCH (e:GraphEvent {seq: 3}) SET e.event_id = 'e2'")
+
+    page = event_store.read_after(proj, 0, limit=4)
+    assert [e["seq"] for e in page] == [1, 2, 4]
+    assert len(page) < 4, "a short page — the very shape that reads as drained"
+    tail = event_store.read_after(proj, page[-1]["seq"], limit=4)
+    assert [e["seq"] for e in tail] == [5], "...and rows beyond it DID exist"
 
 
 def test_domain_low_end_refuses(sdk_factory, tmp_path):

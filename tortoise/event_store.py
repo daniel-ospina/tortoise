@@ -886,8 +886,10 @@ def _event_row_exists(proj, event_id: str) -> bool | None:
 
 #: The page bound `read_after` enforces. It is the SAME domain `GET /v1/events`
 #: already declares — `Query(100, ge=1, le=MAX_PAGE)` (`hosted_api.events_poll`)
-#: — and the bound is stated in `poll_events`' own docstring. Three declarations,
-#: one seam: the clamp that used to be the enforcement here (#8447 row #6).
+#: — and the bound is stated in `poll_events`' own docstring. It was declared in
+#: two places (#8447 row #6) and silently clamped in two others: this seam
+#: (`max(1, min(int(limit), 1000))`, the defect) and the `webhook_delivery`
+#: page read, which carried its own copy of the literal.
 MAX_PAGE = 1000
 
 
@@ -896,7 +898,15 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
     """Return events with seq > after_seq, ordered seq ASC, deduped by event_id.
 
     `types` filters by event type if provided. `limit` caps the page and must
-    lie in ``1 .. MAX_PAGE`` (default 100, max ``MAX_PAGE`` — 1000).
+    be an integer in ``1 .. MAX_PAGE`` (default 100).
+
+    ⚠️ ``len(page) < limit`` is NOT evidence that the stream is drained — page
+    by ``seq``, passing the last ``seq`` you received as ``after_seq``. Two
+    reasons, and only the first is #8447's: an out-of-domain ask is REFUSED
+    (see below), and a duplicate ``event_id`` is dropped AFTER the query's
+    ``LIMIT`` (defense in depth), so a page of ``limit`` rows can legitimately
+    come back with fewer distinct rows while more remain beyond it (pinned by
+    ``test_a_duplicate_event_id_inside_a_full_page_shrinks_it``).
 
     #8447 row #6: an ask OUTSIDE that domain is REFUSED (``ValueError``) rather
     than clamped. It used to be ``max(1, min(int(limit), 1000))`` — so a caller
@@ -911,7 +921,14 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
     Dedup: a duplicate event_id (defense in depth — the unique constraint
     normally prevents them) keeps the FIRST occurrence.
     """
+    raw = limit
     limit = int(limit)
+    if isinstance(raw, float) and raw != limit:
+        # A fractional ask cannot be honoured without silently shrinking it,
+        # and the shrink then reads as a short page (the inference removed
+        # above). Refuse it, and name the value the CALLER passed — reporting
+        # the floored int would describe a call that never happened.
+        raise ValueError(f"limit must be a whole number, got {raw!r}")
     if not 1 <= limit <= MAX_PAGE:
         raise ValueError(
             f"limit must be between 1 and {MAX_PAGE}, got {limit}. "

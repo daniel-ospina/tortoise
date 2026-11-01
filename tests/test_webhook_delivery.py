@@ -1247,3 +1247,32 @@ def test_rest_requires_auth(client):
         assert tc.delete("/v1/context/subscriptions/sub_x").status_code == 401
         assert tc.get("/v1/context/subscriptions/sub_x/deliveries").status_code == 401
     assert ha_mod  # imported for the harness parity above
+
+
+def test_more_pending_compares_against_the_page_that_was_read(sdk_factory):
+    """#8447 row #6: `more_pending` must test the page, not the raw `batch`.
+
+    Pre-#8447 the read was clamped to `MAX_PAGE` while the comparison used the
+    UNCLAMPED ``batch``, so for any ``batch`` above the bound
+    ``len(events) >= batch`` was never true: a stream with more to deliver
+    reported ``more_pending: 0`` — the same short-page-reads-as-drained defect
+    one layer out. Above the bound the two numbers now agree, so this asserts
+    the clamped page is what drove the answer.
+    """
+    from tortoise import event_store
+
+    sdk = sdk_factory(ensure_schema=True)
+    proj = sdk._get_proj()
+    proj.g.query(
+        "UNWIND range(1, $n) AS i CREATE (:GraphEvent {seq: i, "
+        "event_id: 'e' + toString(i), type: 'PointAdded', "
+        "ts: '2026-01-01T00:00:00+00:00', payload: '{}'})",
+        params={"n": event_store.MAX_PAGE + 1},
+    )
+    wd.create_subscription(proj, url="https://hooks.example.com/cb",
+                           types=["PointAdded"])
+    # 503 on the first attempt stops delivery immediately; `more_pending` is
+    # decided from the READ, before any egress, so the counter is still pinned.
+    summary = wd.dispatch_pending(proj, transport=FakeTransport([503]),
+                                  batch=event_store.MAX_PAGE + 4000)
+    assert summary["more_pending"] == 1, summary

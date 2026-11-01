@@ -1207,8 +1207,11 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
             # #8447 row #6: the page bound is `read_after`'s, and the SAME value
             # is the completeness test below. Comparing the page against the
             # UNCLAMPED `batch` (the pre-#8447 form) meant a batch above the
-            # bound could never set `more_pending` — a short page reported as
-            # drained, the identical defect one layer out.
+            # bound could never set `more_pending` — a short page read as
+            # drained, the identical DEFECT one layer out. Note the counter
+            # itself has no reader today (#2081's callers discard the summary),
+            # so this is the measurement being right, not a live behaviour
+            # change: nothing was delivered wrongly, a backlog count lied.
             page = max(1, min(int(batch), MAX_PAGE))
             events = read_after(proj, int(sub.get("cursor") or 0), types=types,
                                 limit=page)
