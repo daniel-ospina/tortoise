@@ -10,5 +10,7 @@ a, b = sig(orig), sig(rest)
 print("original node signature:", a)
 print("restored node signature:", b)
 print("ROUND-TRIP EXACT (every dump_id, label and prop value):", a == b)
-print("edges digest orig/rest:", orig["edge_count"], rest["edge_count"])
+from tortoise.legacy_ids import _edge_digest
+print("edge COUNTS orig/rest:", orig["edge_count"], rest["edge_count"],
+      "| edge DIGESTS identical:", _edge_digest(orig["edges"]) == _edge_digest(rest["edges"]))
 print("node_count:", orig["node_count"], "->", rest["node_count"])

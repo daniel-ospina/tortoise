@@ -11,8 +11,17 @@ lane.
 ## 1. The population, and why it is seeded
 
 ⚠️ **This census is over a SEEDED population, not the dogfood graph.** No graph on this box holds
-legacy ids: the only reachable server (`127.0.0.1:16379`) has a `tortoise` graph with **0 nodes**,
-and `127.0.0.1:6379` refuses connections. The dogfood census is therefore **`UNMEASURED`** here —
+legacy ids — measured, not assumed:
+
+```
+uv run python -c "from falkordb import FalkorDB; print(FalkorDB(host='127.0.0.1', port=16379, \
+    password='').select_graph('tortoise').query('MATCH (n) RETURN count(n)').result_set)"
+#   -> [[0]]
+(timeout 2 bash -c '</dev/tcp/127.0.0.1/6379') 2>&1 | head -1
+#   -> bash: connect: Connection refused
+```
+
+so the only reachable server has an empty `tortoise` graph and `:6379` refuses connections. The dogfood census is therefore **`UNMEASURED`** here —
 reporting it as `0` would be the false-clean this whole exercise guards against. What IS measured is
 the tool's behaviour over an exactly-enumerable population built from the shapes
 `STORAGE-ARCHITECTURE.md` §17.5 records, exported **by the repo's own dumper**

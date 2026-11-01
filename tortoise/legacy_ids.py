@@ -735,11 +735,21 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
                 continue
             held = final_keys.get((node_label, value))
             if held is not None and held != dump_id:
-                problems.append(
-                    f"duplicate identity: :{node_label} {value!r} is carried by "
-                    f"both dump_id {held} and {dump_id} — two nodes already "
-                    "share one key, which no rename can fix"
-                )
+                # ⚠️ Only a REKEYED label's duplicate can ever make a rename
+                # ambiguous: `renames.append` below is unreachable unless
+                # `scope == REKEYED`, so no target can ever be a `(Session, …)`
+                # or a `(Object, …)` key. Refusing on those would be a FALSE
+                # BLOCK — a real dump carrying one duplicated `:Session` id
+                # would refuse the whole pass for a collision it cannot cause.
+                # The duplicate is still registered (as `held`, the first
+                # holder) so the key space stays complete; it is reported only
+                # where a rename could actually land on it.
+                if node_label in REKEY_SCOPE:
+                    problems.append(
+                        f"duplicate identity: :{node_label} {value!r} is carried "
+                        f"by both dump_id {held} and {dump_id} — two nodes "
+                        "already share one key, which no rename can fix"
+                    )
                 continue
             final_keys[(node_label, value)] = dump_id
 

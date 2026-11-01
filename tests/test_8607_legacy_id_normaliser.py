@@ -432,6 +432,23 @@ def test_a_multi_label_node_is_in_the_collision_universe():
     assert any("target collision" in p for p in exc.value.problems), exc.value.problems
 
 
+def test_a_preexisting_duplicate_on_an_out_of_scope_label_does_not_block_the_pass():
+    """A duplicate `:Session` id cannot make a RENAME ambiguous, so it is not a refusal.
+
+    Only a REKEYED label can be a rename target, so refusing here would be a
+    false block: a real dump that happens to carry two nodes under one
+    `:Session` key would refuse the whole pass for a collision it cannot cause.
+    The duplicate is still registered in the collision universe.
+    """
+    dump = _dump()
+    session_id = "session_dup_4a3b2c1d0e9f"
+    dump["nodes"].append(_node(10_008, ["Session"], id=session_id, sessionId=session_id))
+    dump["nodes"].append(_node(10_009, ["Session"], id=session_id, sessionId=session_id))
+    dump["node_count"] = len(dump["nodes"])
+    plan = build_plan(dump)  # must not raise
+    assert len(plan.renames) == census(dump).legacy, "the in-scope renames still plan"
+
+
 def test_a_duplicate_dump_id_is_refused():
     dump = _dump()
     dump["nodes"].append(_node(1, ["Point"], id="p-0000999", content="positional clash"))
