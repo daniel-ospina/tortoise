@@ -34,6 +34,98 @@ import { RELAXED_CSP } from "./_shared/security-headers.ts";
 
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
+// ── A stray OAuth authorization response must be REFUSED, not rendered (#10088 ask 3) ──
+//
+// The measured failure (issue #10088, D2): GoTrue did not honour `redirect_to`,
+// substituted the project **Site URL**, and delivered a LIVE authorization code
+// to a marketing page —
+//
+//     https://tortoise.premiselabs.co/?code=50605f24-15a1-40f0-8e86-f3722cccce13#
+//
+// — which rendered normally, ignored the parameter and silently discarded the
+// code. The user saw a product page and the connector was never connected; the
+// code was burned, so their natural "try again" cost a fresh authorize request
+// and looked like a flaky connector. Supabase documents the mechanism ("If
+// omitted—or not accepted—the Site URL serves as the default redirect
+// destination"), and RFC 9700 puts the obligation on the receiving side:
+// verify the response arrived at the EXPECTED redirect URI and ABORT the flow
+// on a mismatch.
+//
+// This project serves no OAuth callback on ANY path — the callback moved to the
+// app origin (#4054), which is exactly why the `/auth/*` surface 302s there —
+// so a `code` (or GoTrue's error shape) arriving here is always misdirected. The
+// refusal is therefore keyed to the PARAMETER, not to a path, and it fires
+// before any asset is fetched: a page that renders and discards the credential
+// is the defect, and a page that renders AROUND the refusal is the same defect
+// with nicer words.
+//
+// What the refusal deliberately does NOT do:
+//   * no Location — forwarding a code the AS never issued for that origin only
+//     moves the misdirection (and the wrong-origin `/auth/callback` case is a
+//     recorded, pinned 302 whose cleanup is the OPEN audit #8680, not this lane);
+//   * no echo of `code`/`error_description` — a credential in a URL leaks via
+//     browser history, `Referer`, CDN logs and analytics, and OAuth error text
+//     is attacker-influenced; hence `Referrer-Policy: no-referrer` and a CSP
+//     that permits no third-party resource at all;
+//   * no cacheability — `no-store`, or a cached refusal would be served to the
+//     next ordinary visitor of the page it refuses.
+//
+// `code_challenge` (a PKCE verifier HASH, present on ordinary authorize links)
+// and a bare `error` (which a marketing link may legitimately carry) are NOT the
+// authorization-response shape and deliberately fall through — an over-block
+// here would fail closed on a real visitor.
+const STRAY_RETURN_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; " +
+  "form-action 'none'; frame-ancestors 'none'";
+
+function isOAuthAuthorizationResponse(url: URL): boolean {
+  if (url.searchParams.has("code")) return true;
+  return (
+    url.searchParams.has("error") &&
+    (url.searchParams.has("error_description") ||
+      url.searchParams.has("error_code"))
+  );
+}
+
+function strayReturnRefusal(): Response {
+  // Self-contained: no external stylesheet, no font, no script. The page must
+  // not make a single outbound request while a credential is in its URL.
+  const body = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>This sign-in did not return to the connector</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#0b0b0d;color:#f2f2f4;font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:34rem;padding:2.5rem 1.5rem}
+h1{font-size:1.35rem;line-height:1.3;margin:0 0 1rem}
+p{margin:0 0 1rem;color:#c9c9d1}
+a{color:#8ab4ff}
+</style></head><body><main>
+<h1>This sign-in did not return to the connector</h1>
+<p>Your browser arrived here with a one-time sign-in code, but this page is not
+the one that code belongs to, so it cannot be completed here. Nothing was
+connected, and the code has now expired.</p>
+<p><strong>To finish connecting, start again from your MCP client</strong> (for example
+ChatGPT: <em>Settings &rarr; Connectors &rarr; Connect another account</em>) and complete the
+sign-in in the window it opens.</p>
+<p>If it keeps happening, please <a href="/contact">tell us</a> — quote the time you
+tried, not the code.</p>
+<p><a href="/">Continue to the site</a></p>
+</main></body></html>`;
+  return new Response(body, {
+    status: 400,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy": STRAY_RETURN_CSP,
+      ...HSTS,
+    },
+  });
+}
+
 export const onRequest: PagesFunction = async (context) => {
   const url = new URL(context.request.url);
   const host = context.request.headers.get("host") || "";
@@ -259,6 +351,20 @@ export const onRequest: PagesFunction = async (context) => {
       status: 302,
       headers: { Location: APP_ORIGIN + "/admin" + url.search, ...HSTS },
     });
+  }
+
+  // ── A stray OAuth authorization response is REFUSED before any page renders ──
+  // Placed HERE, after every routing decision that can legitimately consume or
+  // forward a credential, and BEFORE the first branch that can render:
+  //   * `/auth` and `/auth/*` returned above — that surface 302s to the origin
+  //     that owns the flow cookie, where a code CAN be exchanged (pinned by
+  //     #4054/#4346; its wrong-origin allow-list entry is the OPEN audit #8680);
+  //   * `/admin` also returned above, to the same app origin (#4171);
+  // so the guard covers every page this project actually SERVES — the class the
+  // issue names ("hand the user a marketing page with a stray `code=`"). Placing
+  // it after the asset rewrite below would leave `/` rendering the product page.
+  if (isOAuthAuthorizationResponse(url)) {
+    return strayReturnRefusal();
   }
 
   // On the tortoise host, the raw /product, /product.html and /index.html
