@@ -275,8 +275,29 @@ def _as_date(value) -> str | None:
     ``validFrom`` is legal — see ``tests/test_validity_windows.py``). A
     naive ``str(v)[:10]`` misreads an epoch, so epochs are converted through
     ``datetime`` and everything is compared at the same DAY granularity the
-    reader's ``[valid …]`` markers use. Unparseable values return ``None``
-    (treated as "no window information", never as stale).
+    reader's ``[valid …]`` markers use. Unparseable values return ``None``.
+
+    ⛔ ``None`` does NOT mean "not stale" here, and this docstring used to say
+    it did ("treated as 'no window information', never as stale") — the very
+    sentence :func:`is_stale_entry` had to delete to stop an un-datable END
+    from covering every later instant (#9202). The two readers of this
+    primitive disagree deliberately, and neither is this function's verdict:
+
+    * an **END**: the caller resolves the STATE through
+      :func:`tortoise.validity.end_state`, the ONE home for "does this stored
+      value point at an instant?". A present end that names none is
+      ``END_UNKNOWN`` — ENDED, at a time we cannot pin — and never reaches the
+      comparison below; only a DATED end (``END_KNOWN``) does. So an
+      unparseable end IS read as stale.
+    * a **START**: :func:`is_not_yet_effective` keeps the old reading (#6140) —
+      a start that names no instant means *no start was recorded*, so it is
+      never demoted.
+
+    The measure that decides "names an instant" is
+    ``search_engine._created_sort_key`` (via ``validity._names_an_instant``),
+    never this function alone: it is why an epoch spelled as a STRING
+    (``"1900000000"``) is un-datable here and there, while the NUMBER
+    ``1900000000`` is the 2030-03-17 instant in both.
     """
     if value is None or isinstance(value, bool):
         return None

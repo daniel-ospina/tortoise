@@ -233,6 +233,59 @@ def test_numeric_epoch_windows_normalize():
                               question_date="2026-09-25")
 
 
+def test_an_epoch_spelled_as_a_STRING_names_no_instant_so_the_end_is_ENDED():
+    """The STRING-epoch twin of the numeric case above — ruled, not accidental.
+
+    FAIL VALUE: ``False`` (the pre-#9202 reading — an un-datable end read as
+    "still true") for ``valid_to="1900000000"``.
+
+    ``1900000000.0`` as a NUMBER is the 2030-03-17 instant and is NOT stale to a
+    2026 question (asserted in ``test_numeric_epoch_windows_normalize``). The
+    SAME instant spelled as a STRING is not the same datum to this codebase's
+    ONE measure of *"does this stored value point at an instant?"*:
+    ``search_engine._created_sort_key`` reads an epoch from a NUMBER and never
+    from a string (it gates on ``len >= 10`` plus a ``-``/``T``, so a digit
+    string keys ``(1, text)``). ``validity._EPOCH_AS_STRING_RE`` names that
+    shape explicitly — *"this names no instant while its intent is
+    unmistakable — #9202's named fault, REFUSED with the number named as the
+    fix"* — so the write door does not accept it from a CALLER.
+
+    The ruling (owner, 2026-10-25, option B; ``ONTOLOGY.md`` §4.7) makes such an
+    end ``END_UNKNOWN``: the fact ENDED at an instant we cannot pin. The ranking
+    joining that reading is the whole point of this change — ``_covers``
+    already treats the same value as bounding no instant (#9408), and the reply
+    already reports ``end_state: "unknown"`` for it. Dating it here instead
+    would be a FOURTH notion of "parseable", i.e. the defect #9202 exists to
+    remove.
+
+    Reachable, and the reason this is pinned rather than left to prose:
+    ``sdk._supersede_window_end`` deliberately EXEMPTS a NUMERIC ``valid_from``
+    kwarg and stamps ``str(valid_from)`` into the predecessor's ``validTo``
+    (#5360's remaining exemption, pinned by
+    ``tests/test_validity_windows.py::test_window_end_numeric_kwarg_resolved_before_measure``).
+    Fixing THAT is the write route's job (follow-up), not a reason to re-open
+    the read side.
+
+    Date-independence is the discriminator: no ``question_date`` rescues it, so
+    a fix that only compared the junk spelling against the question string
+    cannot satisfy this.
+    """
+    from tortoise.validity import END_UNKNOWN, end_state
+
+    for spelled in ("1900000000", "1900000000.0"):
+        assert end_state(spelled, None) == END_UNKNOWN, (
+            f"{spelled!r} is an epoch spelled as a STRING — no instant to the "
+            f"ordering measure")
+        for qd in ("1990-01-01", "2026-09-25", "2050-01-01", None):
+            assert is_stale_entry({"valid_to": spelled}, question_date=qd), (
+                f"valid_to={spelled!r} must read ENDED at every question_date "
+                f"(qd={qd!r}); it is a present end that names no instant")
+    # The NUMBER for that same instant keeps its own, unchanged reading — the
+    # ruling is about the SPELLING, not about the horizon.
+    assert not is_stale_entry({"valid_to": 1900000000.0},
+                             question_date="2026-09-25")
+
+
 def test_an_undatable_end_is_stale_but_an_absent_or_future_one_is_not():
     """A PRESENT-but-un-orderable end means ENDED — never "still true" (#9202).
 
