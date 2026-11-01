@@ -1093,13 +1093,28 @@ def _validity_marker(h: dict) -> str:
         (``[valid 2024-01-01 → TBD]``, the #9741 residual). The state is
         CONSUMED, never re-decided here — see :func:`_end_state_is_unknown`.
         The THIRD end-bearing field joins them (#9741 review P2-1): a stored
-        ``expired_at`` that names no instant, with no ``valid_to`` stating the
-        end, renders the same ``… ; end unknown`` form. The expiry stamp is an
-        ASSERTED end — ``time_aware.is_stale_entry`` resolves both end fields
-        and reads a present-but-un-pinnable one as ENDED — so its
-        unreadability can never render as "still true". It is gated on
-        ``not valid_to``: a STATABLE end owns the window's end and is never
-        relabelled by an unstatable expiry beside it.
+        ``expired_at`` this renderer cannot DATE — a mapping, a list, a number
+        outside the authored span, i.e. the shapes ``_display_bound`` SKIPS
+        (``not ex``) — with no ``valid_to`` stating the end, renders the same
+        ``… ; end unknown`` form. The expiry stamp is an ASSERTED end, and the
+        authority for that reading is the #9202 owner ruling
+        (``validity.py:35-42``) plus ``END_UNKNOWN``'s own definition — "the
+        window ENDED, but at a time we cannot pin" (``validity.py:23``) — so
+        an expiry this renderer cannot date can never render as "still true".
+        ⚠️ ``time_aware.is_stale_entry`` answers a DIFFERENT question (which
+        version ranks first) and is corroboration ONLY for the spellings
+        ``validity.end_state`` calls ``END_UNKNOWN``; for an un-pinnable
+        NUMBER it disagrees, because ``_names_an_instant`` short-circuits
+        every number to ``END_KNOWN`` (``validity.py:203-207``) and the
+        numeric keys then fail to order, so ``nan``/``inf`` still rank as
+        current (measured; root **#10478**). It cannot be cited as the reason
+        this arm is right — the ruling is.
+        It is gated on ``not valid_to``: a STATABLE end owns the window's end
+        and is never relabelled by an unstatable expiry beside it. And it
+        reaches only what ``_display_bound`` SKIPS: a stored STRING is
+        interpolated as text, so ``expired_at="TBD"`` beside no ``valid_to``
+        still renders the open form — the recorded #9741 residual,
+        pre-existing on ``main`` and out of scope here.
       - undated hits → NO validity marker (byte-identical rendering)
       - a PRESENT but UNORDERABLE start (``valid_from="TBD"`` /
         ``"not-a-date"``) → the start clause is OMITTED, never interpolated
@@ -1216,12 +1231,20 @@ def _validity_marker(h: dict) -> str:
     # ``expired_at`` was left out, so a record whose ONLY asserted end is the
     # expiry stamp fell through to the open arm whenever that stamp could not
     # be dated — ``{valid_from: "2024-06-01", expired_at: [...]}`` rendered
-    # ``[valid since 2024-06-01]``, "still true", for a window
-    # ``time_aware.is_stale_entry`` resolves to ENDED (it reads ``valid_to``
-    # AND ``expired_at``, and treats present-but-un-pinnable as stale). One
-    # stored fact, two answers, across the two surfaces #2350's 3-state end
-    # exists to reconcile. The census above already saw the bound, which made
-    # the wrong reading sharper rather than smaller.
+    # ``[valid since 2024-06-01]``, "still true", for a window whose one end
+    # column HOLDS A VALUE. The #9202 owner ruling settles that: an end column
+    # carrying a value is an ASSERTED end, so its un-datable spelling is
+    # ``END_UNKNOWN`` and never ``END_OPEN`` (``validity.py:35-42``; the state
+    # is defined as "the window ENDED, but at a time we cannot pin",
+    # ``validity.py:23``). One stored fact, one answer, on the surface that
+    # states it to a reader. The citation for it is that RULING — ⚠️ not
+    # ``time_aware.is_stale_entry``, which answers the RANKING question and
+    # agrees only on the shapes ``validity.end_state`` calls ``END_UNKNOWN``:
+    # on an un-pinnable NUMBER it reads "still current" instead (numeric
+    # short-circuit at ``validity.py:203-207``; measured, root **#10478**), so
+    # it is neither evidence for nor against this rendering. The census above
+    # already saw the bound, which made the wrong reading sharper rather than
+    # smaller.
     #
     # Gated on ``not vt``: a STATABLE ``valid_to`` owns the window's end and is
     # never relabelled by an unstatable expiry riding beside it as a

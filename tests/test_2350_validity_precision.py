@@ -1185,14 +1185,17 @@ def test_an_unreadable_expiry_never_reads_as_an_open_window():
         {"valid_from": "2024-06-01", "expired_at": <junk>}
             -> "[valid since 2024-06-01]"   ("still true")
 
-    — while ``time_aware.is_stale_entry`` resolves ``valid_to`` AND
-    ``expired_at`` through the one resolver and reads a present-but-un-pinnable
-    one as ENDED. One stored fact, two answers across the two surfaces #2350's
-    3-state end exists to reconcile (the #9202 owner ruling: an end column
-    carrying a value is an ASSERTED end, never an open one). It cannot be
-    delegated to ``_end_state_is_unknown``: on the wire ``end_state`` is
-    resolved from ``valid_to`` ONLY, so ``end_state: "known"`` says nothing
-    about the expiry.
+    The reading is the #9202 owner ruling's, not a second module's: an end
+    column carrying a value is an ASSERTED end, never an open one, so its
+    un-datable spelling is ``END_UNKNOWN`` (``validity.py:35-42``, the state's
+    own definition at ``validity.py:23``). It cannot be delegated to
+    ``_end_state_is_unknown`` either: on the wire ``end_state`` is resolved
+    from ``valid_to`` ONLY, so ``end_state: "known"`` says nothing about the
+    expiry. ``time_aware.is_stale_entry`` is corroboration ONLY, and only for
+    the spellings ``validity.end_state`` calls ``END_UNKNOWN`` — on an
+    un-pinnable NUMBER it answers "still current" instead (root #10478), which
+    ``test_the_ranking_surface_agrees_only_where_the_state_is_END_UNKNOWN``
+    measures so this sentence cannot rot back into an over-claim.
 
     Fails pre-fix: every junk-expiry shape rendered ``[valid since
     2024-06-01]``.
@@ -1228,6 +1231,74 @@ def test_an_unreadable_expiry_never_reads_as_an_open_window():
                              "expired_at": "2026-01-02",
                              "end_state": "known"}) == \
         "[valid 2024-06-01 → 2024-09-01; expired 2026-01-02]"
+
+
+def test_the_ranking_surface_agrees_only_where_the_state_is_END_UNKNOWN():
+    """#9741 review P3 — the expiry arm's corroboration, MEASURED, not assumed.
+
+    The arm's rationale cites ``time_aware.is_stale_entry`` beside the #9202
+    ruling. That citation is honest only for the spellings
+    ``validity.end_state`` calls ``END_UNKNOWN``: there the ranking resolver
+    answers ENDED as well, and this test pins the agreement so the sentence
+    cannot drift back into the blanket "the two surfaces always agree" it used
+    to state (a reviewer read that version against a stale ``time_aware`` and
+    reported it as wrong — the claim, not the behaviour, was the defect).
+
+    The numeric half is the exception and is pinned AS A MEASUREMENT (root
+    **#10478**, open): ``validity._names_an_instant`` short-circuits EVERY
+    number to "names an instant" (``validity.py:203-207``), so a ``nan``/
+    ``inf``/out-of-span epoch reports ``END_KNOWN``, ``time_aware._as_date``
+    yields nothing, and the numeric keys ``(0, nan)`` / ``(0, 1.7e12)`` do not
+    order against the question date — the resolver then returns "not stale",
+    the fail-open #10478 records. The home for that question is ``validity``;
+    this renderer must NOT be "aligned" to it, and this block is what tells
+    the next lane the divergence is KNOWN rather than undetected. If #10478
+    lands and the numerics start reading ENDED, this block fails on purpose:
+    the prose citing the divergence has to be re-read at that point.
+
+    Non-vacuous both ways: it fails on the pre-#10462 ``time_aware`` (whose
+    ``continue`` made every shape here "not stale"), and it fails if the
+    measured divergence silently disappears.
+    """
+    from tortoise.retrieval import _validity_marker
+    from tortoise.time_aware import is_stale_entry
+    from tortoise.validity import END_KNOWN, END_UNKNOWN, end_state
+
+    qd = "2024-07-01"
+    unstatable = ({"nested": 1}, ["x"], float("nan"), float("inf"),
+                  1719792000000, 10 ** 20)
+    states = [end_state(v, None) for v in unstatable]
+    # ... the comparison below is only meaningful if BOTH sides occur here.
+    assert END_UNKNOWN in states and END_KNOWN in states, states
+
+    for raw, state in zip(unstatable, states, strict=True):
+        entry = {"id": "p", "valid_from": "2024-06-01",
+                 "expired_at": raw, "end_state": "known"}
+        ended = is_stale_entry({"expired_at": raw}, question_date=qd)
+        if state == END_UNKNOWN:
+            # AGREEMENT: the ranking resolver reads it ENDED too, which is the
+            # only sense in which it corroborates this arm.
+            assert ended is True, (raw, state, ended)
+            # ... and the marker states the vocabulary's own END_UNKNOWN form
+            # rather than the "still true" reading the arm exists to prevent.
+            assert _validity_marker(entry) == \
+                "[valid since 2024-06-01; end unknown]", raw
+        else:
+            # THE RECORDED DIVERGENCE (root #10478): pinned, never "fixed"
+            # here by widening or narrowing the marker's arm.
+            assert state == END_KNOWN and ended is False, (raw, state, ended)
+
+    # The residual the arm deliberately does NOT reach (recorded on #9741,
+    # pre-existing on ``main``): a stored STRING is interpolated as text by
+    # ``_display_bound``, so an un-datable string expiry alone still renders
+    # the open form. Pinned so "the arm covers every un-datable end" — a claim
+    # this PR's earlier prose made — cannot be re-asserted without a red test.
+    assert end_state("TBD", None) == END_UNKNOWN
+    assert is_stale_entry({"expired_at": "TBD"}, question_date=qd) is True
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                              "expired_at": "TBD",
+                              "end_state": "known"}) == \
+        "[valid since 2024-06-01]"
 
 
 def test_an_unreadable_expiry_on_the_search_wire_states_the_end(lane):
