@@ -68,6 +68,7 @@ assertions are on the status, the headers, and the body of the real response.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -384,7 +385,7 @@ def test_the_pinned_redirect_surfaces_are_exempt_and_keep_their_status_and_query
     live behaviours, not hypotheticals: a refusal on `/admin` breaks the operator
     console, on `/signup` breaks the signup funnel, and on `/auth` turns a stale
     bookmark or a pre-cutover email link into the dead end #4328's rationale
-    (`_middleware.ts:350-355`) exists to avoid. `tests/test_admin_origin_redirect.py`
+    (`_middleware.ts:360-365`) exists to avoid. `tests/test_admin_origin_redirect.py`
     drives the same paths but never with `?code=`, so it cannot see an over-block here.
 
     So these assert the PRE-EXISTING answer (the pinned 30x, query preserved),
@@ -417,7 +418,7 @@ def test_an_app_only_page_forwards_on_the_company_host_and_the_BACKSTOP_refuses_
     company-host `/signup?code=…` keeps its #4054 301 to `app.premiselabs.co`
     instead of being refused — the signup funnel. (b) On a host the
     consolidation block does not handle, the same path is exempt from the
-    PRIMARY guard and reaches the BACKSTOP at `_middleware.ts:423-435`, which
+    PRIMARY guard and reaches the BACKSTOP at `_middleware.ts:433-444`, which
     refuses it. PR #10514 review, finding 1: deleting the whole 789-character
     backstop block changed **0** of the suite's 17 cases, so the branch the
     comment credits with order-independence was deletable machinery.
@@ -477,3 +478,95 @@ def test_ordinary_marketing_requests_are_not_refused(path: str) -> None:
         f"({res['csp']!r}) — the stray-return stamp has leaked onto an ordinary "
         "marketing request"
     )
+
+
+# ── The docstring's `_middleware.ts` citations must resolve ─────────────────────
+# This PR's artifacts have needed four citation corrections across review rounds,
+# all found by a reviewer reading two files side by side — which is the one thing
+# CI does not do, and an uncited claim reads as settled. `website_architecture.md`
+# anchored on `:432` (a blank line) and now names `:442`; `config/ci-surfaces.yml`
+# named two `ci_selection.py` ranges that hold unrelated code; and the two ranges
+# corrected above pointed at a neighbouring comment rather than the one the
+# sentence describes. These guards are the cheap substitute for that reading: a
+# citation must land on real, non-blank source, and the one the prose quotes *as*
+# a construct must land on that construct — so a re-numbered branch reds here
+# instead of sending the next reader to an unrelated comment.
+
+_MIDDLEWARE_CITATION = re.compile(r"_middleware\.ts:(\d+)(?:-(\d+))?")
+
+
+def _doc_paragraph(needle: str) -> str:
+    """The blank-line-delimited paragraph of THIS module that contains `needle`."""
+    text = Path(__file__).read_text(encoding="utf-8")
+    for block in re.split(r"\n[ \t]*\n", text):
+        if needle in block:
+            return block
+    raise AssertionError(
+        f"no paragraph of {Path(__file__).name} contains {needle!r} — the claim these "
+        "citations support is gone, so the guard over it has no subject"
+    )
+
+
+def _cited_middleware_text(paragraph: str) -> str:
+    """The `_middleware.ts` source cited by `paragraph`, for the ranges it names."""
+    lines = MIDDLEWARE.read_text(encoding="utf-8").splitlines()
+    spans = []
+    for match in _MIDDLEWARE_CITATION.finditer(paragraph):
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        assert 1 <= start <= end <= len(lines), (
+            f"{match.group(0)} is out of bounds — {MIDDLEWARE.name} has {len(lines)} lines"
+        )
+        spans.append("\n".join(lines[start - 1:end]))
+    assert spans, f"the paragraph cites no `_middleware.ts` line range:\n{paragraph}"
+    return "\n".join(spans)
+
+
+def test_the_backstop_citation_names_the_backstop_check() -> None:
+    """The sentence's BACKSTOP citation must point at the backstop, not near it.
+
+    The citation shipped naming a range that ended before the block it described,
+    so a reader following it landed on the `/admin` 302 branch above — a branch
+    that *returns*, i.e. the opposite of the property the sentence asserts.
+    """
+    cited = _cited_middleware_text(_doc_paragraph("BACKSTOP at"))
+    assert "isStrayAuthorizationCode(" in cited, (
+        "the docstring cites `_middleware.ts` for the BACKSTOP but the cited lines do "
+        f"not contain the backstop check; they are:\n{cited}"
+    )
+
+
+def test_the_4328_citation_names_the_4328_rationale() -> None:
+    """`#4328's rationale` must resolve to the comment that actually records it.
+
+    #4328 is the "NOT a 404, deliberately" decision. Citing the BFF-move comment
+    above it instead is how a reader concludes the dead-end argument was made
+    about a branch it was never made about.
+    """
+    cited = _cited_middleware_text(_doc_paragraph("#4328's rationale"))
+    assert "#4328" in cited, (
+        "the docstring cites `_middleware.ts` as #4328's rationale but the cited lines "
+        f"do not mention #4328; they are:\n{cited}"
+    )
+
+
+def test_no_middleware_citation_in_this_file_lands_on_a_blank_line() -> None:
+    """Every citation resolves, and none anchors on a blank line (the `:432` shape)."""
+    text = Path(__file__).read_text(encoding="utf-8")
+    lines = MIDDLEWARE.read_text(encoding="utf-8").splitlines()
+    citations = list(_MIDDLEWARE_CITATION.finditer(text))
+    assert len(citations) >= 2, (
+        "this file no longer cites `_middleware.ts` by line — the citations were deleted "
+        "rather than corrected, which loses the pointer instead of fixing it"
+    )
+    for match in citations:
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        assert 1 <= start <= end <= len(lines), (
+            f"{match.group(0)} is out of bounds — {MIDDLEWARE.name} has {len(lines)} lines"
+        )
+        for n in (start, end):
+            assert lines[n - 1].strip(), (
+                f"{match.group(0)} anchors on line {n} of {MIDDLEWARE.name}, which is blank "
+                "— a blank anchor sends the reader nowhere and reads as a checked pointer"
+            )
