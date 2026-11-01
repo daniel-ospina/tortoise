@@ -4772,10 +4772,12 @@ _PROMOTE_DEFAULT_ERROR_CODES: dict[str, tuple[int, str]] = {
     "promote_default_graph: the target namespace is not one the org-wide "
     "lanes can follow": (409, "GRAPH_NAMESPACE_UNFOLLOWABLE"),
     # #10180 review round 8, P2: the IDEMPOTENT arm is asked for a repair while
-    # the org already holds two active defaults. That arm returns before the
-    # demote, so it cannot converge the drift — retrying is pointless, and the
-    # operator dials in a promotion of the intended graph (which does converge
-    # it) or repairs the rows.
+    # the org already holds two ACTIVE defaults. That arm returns before the
+    # demote, so it cannot converge the drift — and neither can promoting either
+    # drifted row (both take that same arm, i.e. the same 409; round 10 caught
+    # this map advising exactly that). The converging route is a promotion of a
+    # graph that is NOT currently a default (demote-then-promote converges the
+    # drift), or tombstoning all but the intended row.
     "promote_default_graph: the org already holds more than one active "
     "default": (409, "GRAPH_DEFAULT_DRIFT"),
 }
@@ -4796,8 +4798,10 @@ class PromoteDefaultGraphError(RuntimeError):
     no org-wide resolver can follow (``GRAPH_NAMESPACE_UNFOLLOWABLE`` — pick a
     graph whose namespace derives from this org), an org that already holds two
     active defaults when the idempotent arm was asked for a repair
-    (``GRAPH_DEFAULT_DRIFT`` — promote the intended graph instead, which DOES
-    converge the drift), and the trash/non-active refusals above.
+    (``GRAPH_DEFAULT_DRIFT`` — promoting either drifted row is refused by the
+    SAME arm, so the converging call is a promotion of a graph that is not
+    currently a default, or tombstoning all but the intended row), and the
+    trash/non-active refusals above.
     """
 
     def __init__(self, message: str, *, status: int, code: str) -> None:

@@ -122,7 +122,8 @@ Consequences (E2E-5 exit gate):
   `insert_graph`/`_provision_graph` mint) or the pre-#3543
   `team_{org_id}_{gid}` that no data migration rewrites — plus the org's own
   bare `org_{org_id}`, which the historical open already resolves (that is what
-  promoting the ORIGINAL graph back looks like). ⛔ The BARE `team_{org_id}` is
+  promoting the ORIGINAL graph back looks like, for an org whose graph 0 carries
+  the `org_` spelling — see the legacy note below). ⛔ The BARE `team_{org_id}` is
   NOT accepted: it is a real stored value, but the historical open resolves
   `org_{org_id}`, not `team_{org_id}`, so promoting a legacy org-level row would
   point every lane at a third graph — neither the promoted one nor the demoted
@@ -135,7 +136,22 @@ Consequences (E2E-5 exit gate):
   A target that is already the current default also refuses
   `409 GRAPH_DEFAULT_DRIFT` when the org carries two ACTIVE default rows: that
   arm returns before the demote, so it cannot be the call that converges the
-  drift — promote the intended graph instead, which does.
+  drift — and neither can promoting either drifted row (both take that same arm
+  and get the same 409). The converging call is a promotion of a graph that is
+  **not currently a default** (its demote-then-promote clears the extra rows),
+  after which the intended graph promotes normally; or tombstone all but the
+  intended default row.
+  ⛔ **A legacy org's own original row cannot be promoted back** — a one-way door
+  worth knowing BEFORE the first promotion. For an org whose graph 0 still
+  carries a pre-#3543 namespace (`team_{org_id}`, or a pre-#1903 `org_{name}`),
+  promoting a modern graph forward works, but the un-promote is refused
+  `409 GRAPH_NAMESPACE_UNFOLLOWABLE`: the historical open resolves `org_{org_id}`,
+  not `team_{org_id}`, so the pointer would name a third graph, and following the
+  legacy spelling instead is #2023's pin. The graph stays fully addressable with
+  a graph-bound key; restoring it as the ORG default is an ops fix, tracked as
+  #10505. (For the same reason: the idempotent REPAIR arm is exempt from the
+  namespace guard — it converges whatever namespace the default row already
+  carries.)
 - **No key rotation** — every pre-epic key is `graph_id NULL` +
   `scopes []` + `delegation_depth NULL` = the `legacy_full_access` class
   (resolution derives full team/default-graph access; byte-identical
