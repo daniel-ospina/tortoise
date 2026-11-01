@@ -11387,9 +11387,11 @@ class _VocabularyGapCensus:
         NEVER raises, and the suppress is LOAD-BEARING (review cycle 1): the
         call sits in ``_boundary``'s ``finally``, OUTSIDE its ``try/except``, so
         an escaping exception is not swallowed as an "unreadable" pair — it
-        propagates out of ``_boundary``/``fold_allowed`` into the caller
-        (the SDK dedup seam, ``dedup_classify``'s per-candidate loop), neither
-        of which wraps the call. A maintainer who moved this call INSIDE the
+        would leave ``fold_allowed`` entirely and abort the capture.
+        ``_boundary`` reaches this through ``_record_vocabulary_gap`` (end of
+        module), which owns the local no-escape guarantee for that call site;
+        this suppress is defence in depth, so a second caller cannot
+        reintroduce the escape. A maintainer who moved the call INSIDE the
         ``try`` would convert a raising handler into the silent false refusal
         this suppress exists to prevent.
         """
@@ -11425,6 +11427,20 @@ class _VocabularyGapCensus:
             # read as identity announces itself the first time it is absorbed.
             # Guarded: a handler that raises (structured/JSON/Sentry handlers
             # do) must not reach the boundary's fail-closed branch.
+            #
+            # ⚠️ THE TOKENS THEMSELVES GO TO THE LOG — a DELIBERATE trade, not
+            # an oversight (review cycle 2). They are claim-derived content, so
+            # every configured handler (structured, JSON, Sentry) sees up to
+            # `_VOCABULARY_GAP_LOG_CAP` of them per process; the in-memory
+            # census does not leave the box, this line does. Kept because the
+            # alarm is only actionable WITH the token: "a fold absorbed 3
+            # tokens" names nothing a reader can act on, and #5329's whole
+            # failure was a silent loss that no count alone can localise. The
+            # exposure is bounded by that cap and by
+            # `_VOCABULARY_GAP_MAX_TOKEN`; the durable record (and the full
+            # token set) stays in-process behind `vocabulary_gap_report()`, so
+            # a deployment that cannot ship tenant text off-box can drop this
+            # handler and keep the census.
             with contextlib.suppress(Exception):  # a raising handler must not decide
                 import logging
 
