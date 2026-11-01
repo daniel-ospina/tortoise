@@ -235,17 +235,34 @@ export const onRequest: PagesFunction = async (context) => {
   // to the PARAMETER, so it belongs ahead of every branch that can put the code
   // in a `Location`, not merely ahead of the branches that render.
   //
-  // EXEMPT — the surfaces where a `code` may legitimately be present, because
-  // they hand the response to the origin that OWNS the flow and can redeem it:
-  //   * the auth surface — `/auth` (+`.html`) and the `/auth/*` BFF subtree,
-  //     where `/auth/callback` really does exchange a code (pinned by
-  //     #4054/#4346; its wrong-origin allow-list entry is the OPEN audit #8680);
+  // EXEMPT — the surfaces where a `code` is forwarded rather than refused. The
+  // reason is NOT "the origin can redeem it" (PR #10514 review, finding 2: that
+  // premise is false for five of the six shapes, and the backstop's own comment
+  // down this file says so — the app's `signup.html` reads `next`/`mode`/
+  // `error`, `invite-accept.html` reads `token`, `welcome.html` and `/admin`
+  // read nothing, and `/auth` hands off to an app page that redeems nothing
+  // either). The reason is that these redirects are PINNED DECISIONS, and
+  // refusing a code on one of them would replace a decided redirect with a 400:
+  //   * the auth surface — `/auth` (+`.html`) and the `/auth/*` BFF subtree
+  //     (#4054/#4346). This is the ONE shape that redeems a code today:
+  //     `/auth/callback` really does exchange it (its wrong-origin allow-list
+  //     entry is the OPEN audit #8680, not this lane's);
   //   * `/admin`, the operator console on the session origin (#4171/#4409);
   //   * the APP_ONLY pages, which the company-host block 301s to that same app
-  //     origin (`/signup`, `/welcome`, `/invite-accept`).
+  //     origin (`/signup`, `/welcome`, `/invite-accept`, #4054). A refusal here
+  //     would break the signup funnel, the operator console, or turn a stale
+  //     bookmark / pre-cutover email link into the dead end #4328 rejects.
   // Everything else in this project can only RENDER a page, so a code on it is
   // un-redeemable and is refused here. The guard below (after the 30x branches)
   // stays as the backstop for anything exempt-shape that still reaches it.
+  //
+  // ⚠ Because this exemption sits IN FRONT of the primary guard, these shapes
+  // still construct a `Location` that carries the code on the company host
+  // (`premiselabs.co/signup?code=…` → `app.premiselabs.co/signup?code=…`). That
+  // is the one exception to the "no `Location`" framing in the header above, it
+  // is deliberate (the pinned redirect wins), and the PR's Residual list records
+  // it. Do NOT "complete" the guard by refusing these — that reverses #4054/
+  // #4171/#4409 with nothing in the change saying so.
   const forwardsCredential =
     APP_ONLY.has(path) ||
     url.pathname.startsWith("/auth/") ||

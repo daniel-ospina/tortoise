@@ -298,7 +298,7 @@ def test_the_provider_ERROR_shape_keeps_the_1224_banner_reachable() -> None:
         "/?error=access_denied&error_code=bad_oauth_state",
         "/?error=server_error&error_description=Unable+to+exchange+external+code",
     ]
-    for where, res in zip(paths, _run([_case(p) for p in paths])):
+    for where, res in zip(paths, _run([_case(p) for p in paths]), strict=True):
         assert res["status"] == 200, (
             f"{where}: answered {res['status']}, want 200 — the error shape is not the "
             "authorization-response shape (it carries no code) and `product.html`'s "
@@ -332,6 +332,92 @@ def test_the_moved_auth_surface_still_redirects_and_is_NOT_refused(host: str) ->
         "its 302 to the app origin (a refusal here would break the staged #8680 audit)"
     )
     assert res["location"] == f"{APP_ORIGIN}/auth/callback?code={STRAY_CODE}", res
+
+
+@pytest.mark.parametrize(
+    "host,path,status,app_path",
+    [
+        # The auth surface (#4054): a 301 to the app origin, query preserved.
+        # `/auth.html` is the raw-asset spelling the 301 normalizes onto `/auth`.
+        (TORTOISE_HOST, "/auth", 301, "/auth"),
+        (COMPANY_HOST, "/auth", 301, "/auth"),
+        (TORTOISE_HOST, "/auth.html", 301, "/auth"),
+        # The operator console (#4171/#4409): 302, and `/admin/blog` collapses
+        # onto `/admin` while keeping the query.
+        (TORTOISE_HOST, "/admin", 302, "/admin"),
+        (COMPANY_HOST, "/admin", 302, "/admin"),
+        (TORTOISE_HOST, "/admin/blog", 302, "/admin"),
+        (COMPANY_HOST, "/admin/blog", 302, "/admin"),
+    ],
+)
+def test_the_pinned_redirect_surfaces_are_exempt_and_keep_their_status_and_query(
+        host: str, path: str, status: int, app_path: str) -> None:
+    """`forwardsCredential` is the axle the whole guard turns on, and it was unpinned.
+
+    Every shape it exempts (`APP_ONLY` — which is `/auth`, `/auth.html`,
+    `/signup`, `/welcome`, `/invite-accept` — the `/auth/` prefix, and the three
+    `/admin` spellings) had exactly ONE representative in this suite:
+    `/auth/callback`, under `test_the_moved_auth_surface_still_redirects_and_is_NOT_refused`.
+
+    PR #10514 review, finding 1 (P2) — MEASURED, not argued: a mutant that keeps
+    only the `/auth/` prefix and drops `APP_ONLY.has(path)` and all three `/admin`
+    alternatives refuses `/auth?code=…`, `/admin?code=…` and a company-host
+    `/signup?code=…` with a **400**, and **reds nothing** in this suite. Those are
+    live behaviours, not hypotheticals: a refusal on `/admin` breaks the operator
+    console, on `/signup` breaks the signup funnel, and on `/auth` turns a stale
+    bookmark or a pre-cutover email link into the dead end #4328's rationale
+    (`_middleware.ts:350-355`) exists to avoid. `tests/test_admin_origin_redirect.py`
+    drives the same paths but never with `?code=`, so it cannot see an over-block here.
+
+    So these assert the PRE-EXISTING answer (the pinned 30x, query preserved),
+    never the refusal — the exemption exists to preserve those decisions
+    (#4054/#4346, #4171/#4409), which is why a code on them is forwarded.
+    """
+    (res,) = _run([_case(f"{path}?code={STRAY_CODE}", host=host)])
+    assert res["status"] == status, (
+        f"{host}{path}?code=… answered {res['status']}, want {status} — the exemption in "
+        "`forwardsCredential` must preserve the pinned redirect for this shape; a 400 "
+        f"here is an over-block on a real visitor (body {res['body'][:200]!r})"
+    )
+    assert NAMED_REFUSAL not in res["body"], (
+        f"{host}{path}?code=… was answered with the stray-return refusal — the guard "
+        "over-blocked a surface whose redirect is a pinned decision"
+    )
+    assert res["location"] == f"{APP_ORIGIN}{app_path}?code={STRAY_CODE}", (
+        f"{host}{path}?code=… was sent to {res['location']!r}, want "
+        f"{APP_ORIGIN}{app_path}?code=… — the query must survive the hop (invite "
+        "`?token=`, recovery `?type=recovery` and the #1224 `?error=` all rely on it)"
+    )
+
+
+@pytest.mark.parametrize("path", ["/signup", "/welcome", "/invite-accept"])
+def test_an_app_only_page_forwards_on_the_company_host_and_the_BACKSTOP_refuses_elsewhere(
+        path: str) -> None:
+    """The two halves of the second guard, neither of which the suite could see.
+
+    (a) `APP_ONLY` is one of the four shapes `forwardsCredential` exempts, so a
+    company-host `/signup?code=…` keeps its #4054 301 to `app.premiselabs.co`
+    instead of being refused — the signup funnel. (b) On a host the
+    consolidation block does not handle, the same path is exempt from the
+    PRIMARY guard and reaches the BACKSTOP at `_middleware.ts:406-417`, which
+    refuses it. PR #10514 review, finding 1: deleting the whole 789-character
+    backstop block changed **0** of the suite's 17 cases, so the branch the
+    comment credits with order-independence was deletable machinery.
+
+    (b) is what pins it: without the backstop the request falls through to
+    `context.next()` and this 400 becomes the 200 marketing render.
+    """
+    company, tortoise = _run([
+        _case(f"{path}?code={STRAY_CODE}", host=COMPANY_HOST),
+        _case(f"{path}?code={STRAY_CODE}", host=TORTOISE_HOST),
+    ])
+    assert company["status"] == 301, (
+        f"{COMPANY_HOST}{path}?code=… answered {company['status']}, want 301 — the "
+        "`APP_ONLY` arm of the exemption must keep the company-host hand-off to the "
+        "app origin (a refusal here breaks the signup funnel)"
+    )
+    assert company["location"] == f"{APP_ORIGIN}{path}?code={STRAY_CODE}", company
+    _assert_named_refusal(tortoise, f"{TORTOISE_HOST}{path}?code=…")
 
 
 @pytest.mark.parametrize(
