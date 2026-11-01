@@ -138,28 +138,46 @@ def cells(path: str) -> dict:
     outcome_ids = {o.get("question_id") for o in outcomes
                    if isinstance(o, dict) and o.get("question_id")}
     failed_ids = {f.get("question_id") for f in failures if f.get("question_id")}
-    # A reported count larger than the list is a failure population whose ENTRY
-    # list the input pruned. Those ids cannot be matched against an outcome, so
-    # they are added rather than dropped — undercounting the ablation is the one
-    # direction that resurrects ``N/N = 1.00``.
+    # A reported count larger than the id set is a failure population whose
+    # ENTRY list the input pruned: those questions cannot be matched against an
+    # outcome, and undercounting the ablation is the one direction that
+    # resurrects ``N/N = 1.00``, so the shortfall is kept.
+    #
+    # ⛔ ``isinstance(x, int)`` is TRUE for a JSON ``true``, so the bool is
+    # excluded explicitly — the same rule ``_optional_int`` applies to the
+    # manifest cells below ("a bool is not a count"). ``n_failed: true`` used to
+    # fabricate one ablated question (#10137 review, P3).
     unlisted = 0
-    if isinstance(reported_failed, int) and reported_failed > len(failed_ids):
-        unlisted = reported_failed - len(failed_ids)
-    questions_failed = len(failed_ids - outcome_ids) + unlisted
-    # DERIVED from the two published figures — never a second, independent count
-    # of "how many questions". ``summary["questions"]`` is the runner's own
-    # ``len(rows)`` (``measurement_posture.py:353``), i.e. ROWS, while the id sets
-    # above are distinct non-empty ids; an input with a duplicate or absent
-    # ``question_id`` therefore made the two disagree and could publish a total
-    # SMALLER than the ratio's own denominator (#10137 review, P3 — reachable
-    # from hand-built/foreign JSON only: ``run.py``'s loader builds both lists
-    # dict-by-qid, and the vendored ``report.py`` grades per-qid precisely
-    # because duplicate outcome entries are a documented shape there, ``:1407-
-    # 1412``). Adding the ablation to the denominator instead makes the
-    # invariant ``questions_in_run - questions == questions_failed`` hold BY
-    # CONSTRUCTION for every input, which is what the disclosure claims.
-    n = (summary.get("questions") if isinstance(summary.get("questions"), int)
-         else len(outcome_ids)) + questions_failed
+    if (isinstance(reported_failed, int)
+            and not isinstance(reported_failed, bool)):
+        unlisted = max(reported_failed - len(failed_ids), 0)
+    # The ablation is the LARGER of the two witnesses, never their SUM (#10137
+    # review, P3): a failure list that repeats a qid is not a pruned list —
+    # ``n_failed`` counts ENTRIES (``report.py:2793``) while ``failed_ids`` is
+    # distinct ids, so adding the shortfall to the id count published a phantom
+    # question for one duplicated entry. Both witnesses bound the same
+    # quantity from below, so ``max`` is the honest combination.
+    questions_failed = max(len(failed_ids - outcome_ids), unlisted)
+    # DERIVED from the published denominator plus that ablation — never a
+    # second, independent count of "how many questions". ``summary["questions"]``
+    # is the runner's own ``len(rows)`` (``measurement_posture.py:339``), i.e.
+    # ROWS, while the id sets above are distinct non-empty ids; an input with a
+    # duplicate or absent ``question_id`` therefore made the two disagree and
+    # could publish a total SMALLER than the ratio's own denominator (#10137
+    # review, P3 — reachable from hand-built/foreign JSON only: ``run.py``'s
+    # loader builds both lists dict-by-qid, and the vendored ``report.py`` grades
+    # per-qid precisely because duplicate outcome entries are a documented shape
+    # there, ``:1407-1412``). The fallback is ``len(rows)`` — the SAME basis the
+    # runner's own count uses, never the id set, which is the count that
+    # disagreed (#10137 review, P3). Adding the ablation to the denominator makes
+    # ``questions_in_run - questions == questions_failed`` hold BY CONSTRUCTION
+    # for every input, which is what the disclosure claims.
+    reported_questions = summary.get("questions")
+    denominator = (reported_questions
+                   if isinstance(reported_questions, int)
+                   and not isinstance(reported_questions, bool)
+                   else len(rows))
+    n = denominator + questions_failed
 
     # NOT ``or 0``: an ABSENT cell is UNKNOWN, and coercing it would publish a
     # fabricated "measured zero" — the rule ``measurement_posture`` states for
