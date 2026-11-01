@@ -410,48 +410,115 @@ CONFIG_SURFACES: tuple[str, ...] = (
 )
 
 
+#: Values a shipped config can use to switch a flag ON. Compose's own spec
+#: (`container_spec.md` §environment) spells the boolean `true`/`false`/`yes`/
+#: `no`; `1`/`on` are the shell spellings this repo also uses.
+TRUTHY: tuple[str, ...] = ("1", "true", "yes", "on")
+
+
+def _assigned_value(line: str, flag: str) -> str | None:
+    """The value ``line`` ASSIGNS to ``flag``, or `None` when it is a mention.
+
+    ⛔ **An assignment, not a substring.** The previous shape asked "does this
+    line contain the flag, and is the next token truthy?", which reads a line
+    that *documents* the flag as a shipped ON — measured on three shapes this
+    repo's own surfaces contain: plain prose (`Set FLAG=1 to enable`), a
+    workflow step NAME (`- name: verify FLAG=1 takes effect`), and a commented
+    list item (`- # FLAG=1`, where the `#` check ran before the dash strip).
+    That is the one input that can flip bullet 1 to `MET` without measuring
+    (`score_rule_bullet`), so a prose edit must not be able to move it.
+
+    The assignment shapes are the ones a shipped config actually uses —
+    compose map `KEY: value`, compose array `- KEY=value`
+    (<https://github.com/compose-spec/compose-spec> `container_spec.md`
+    §environment), and the shell/Dockerfile `export`/`ENV`/`ARG` prefixes. A
+    bare `KEY` with no separator is a **declaration with no value** (compose
+    spec: "the variable is unset"), so it is not ON.
+
+    Returns the raw value token (quotes stripped, trailing `#` comment
+    dropped), or `None` if the flag is not the KEY of an assignment.
+    """
+    stripped = line.strip()
+    # A whole-line comment, a YAML document marker, or an INI/TOML comment.
+    if not stripped or stripped[0] in "#;" or stripped.startswith("---"):
+        return None
+    # ⛔ `-` starts a YAML LIST ITEM (`- KEY=1`, the compose `environment:`
+    # array form), so it is stripped BEFORE the comment test — otherwise
+    # `- # FLAG=1` passes the comment check and reads ON.
+    stripped = stripped.lstrip("-").lstrip()
+    if not stripped or stripped[0] in "#;":
+        return None
+    for prefix in ("export ", "ENV ", "ARG "):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix):].lstrip()
+            break
+    # The flag must be the KEY: at the start of the line, followed by `=` or
+    # `:` and nothing but the value. `Set FLAG=1 to enable` and
+    # `name: verify FLAG=1 takes effect` fail here, which is the point.
+    if not stripped.startswith(flag):
+        return None
+    rest = stripped[len(flag):]
+    if rest[:1] not in ("=", ":"):
+        return None
+    value = rest[1:].strip()
+    # A genuine assignment's value is ONE token, optionally followed by a
+    # comment (`FLAG=1  # enable`). Words after it mean the line is prose
+    # about the flag, not a setting of it.
+    value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
+    value = value.strip("'\"")
+    if len(value.split()) > 1:
+        return None
+    return value
+
+
 def flag_in_shipped_configs(flag: str) -> dict:
     """Is ``flag`` switched ON by any configuration this repo ships?
 
-    Returns ``{"on": bool, "files": [...], "searched": [paths]}``. A flag set
-    nowhere is a measured `False` — with the list of places that were searched,
-    so a reader can see what "nowhere" covered.
+    Returns ``{"on": bool, "files": [...], "searched": [paths],
+    "mentions": [paths], "unreadable": [paths]}``.
+
+    ⛔ **`searched` is every path the walk READ; `mentions` is the subset whose
+    text contains the flag.** They are different questions and the pre-fix code
+    answered only the second while documenting it as the first — so for the
+    ordinary case this function exists for (a flag set nowhere *and* mentioned
+    nowhere) the promised "what 'nowhere' covered" was `[]`, and a documentation
+    edit that moved the flag's one prose mention red a falsifier claiming the
+    walk had missed a path.
+
+    A flag set nowhere is a measured `False` **only** over the paths actually
+    read; `unreadable` names any path the walk could not read (oversize, I/O
+    error) so "nowhere" cannot silently exclude a file that does set it.
     """
     hits: list[str] = []
     searched: list[str] = []
+    mentions: list[str] = []
+    unreadable: list[str] = []
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
         candidates = ([target] if target.is_file()
                       else sorted(target.rglob("*")) if target.is_dir() else [])
         for path in candidates:
-            if not path.is_file() or path.stat().st_size > 2_000_000:
+            if not path.is_file():
                 continue
+            posix = path.relative_to(REPO_ROOT).as_posix()
             try:
+                if path.stat().st_size > 2_000_000:
+                    unreadable.append(posix)
+                    continue
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
+                unreadable.append(posix)
                 continue
+            searched.append(posix)
             if flag not in text:
                 continue
-            searched.append(path.relative_to(REPO_ROOT).as_posix())
+            mentions.append(posix)
             for line in text.splitlines():
-                stripped = line.lstrip()
-                # ⛔ A COMMENTED-OUT line is not a shipped default, and a line
-                # that merely MENTIONS the flag (`# see TORTOISE_EMBED_GATE`)
-                # is not an assignment. Measured: `# TORTOISE_EMBED_GATE=1`
-                # read as ON — the one input that can flip bullet 1 to MET.
-                # ⛔ `-` starts a YAML LIST ITEM (`- KEY=1`, standard for a
-                # docker-compose `environment:` block), not a comment. Only a
-                # `---` document marker is skipped.
-                if (not stripped or stripped[0] == "#" or stripped.startswith("---")
-                        or stripped.startswith(";") or flag not in stripped):
-                    continue
-                stripped = stripped.lstrip("-").lstrip()
-                value = stripped.split(flag, 1)[1].lstrip("=: \t").strip()
-                value = value.split()[0] if value.split() else ""
-                value = value.strip("'\"").lower()
-                if value in ("1", "true", "yes", "on"):
-                    hits.append(f"{path.relative_to(REPO_ROOT)}: {stripped[:90]}")
+                value = _assigned_value(line, flag)
+                if value is not None and value.lower() in TRUTHY:
+                    hits.append(f"{posix}: {line.strip()[:90]}")
     return {"on": bool(hits), "files": hits, "searched": searched,
+            "mentions": mentions, "unreadable": unreadable,
             "surfaces": list(CONFIG_SURFACES)}
 
 
@@ -516,8 +583,10 @@ def score_rule_bullet() -> Row:
         f"gate enabled by default: {on_by_default} (ambient "
         f"{embed_gate.ENV_FLAG}={os.environ.get(embed_gate.ENV_FLAG, '')!r}; "
         f"shipped config surface walked: {len(shipped['surfaces'])} "
-        f"({', '.join(shipped['surfaces'])}); mentioning it: "
-        f"{shipped['searched'] or 'none'}"
+        f"({', '.join(shipped['surfaces'])}); files read: "
+        f"{len(shipped['searched'])}; unreadable: "
+        f"{shipped['unreadable'] or 'none'}; mentioning it: "
+        f"{shipped['mentions'] or 'none'}"
         f"; set ON in: {shipped['files'] or 'none'})",
         # ⛔ A module that will not parse is a HOLE in the measurement, not a
         # zero: its writers — gated or bypassing — are invisible to every row

@@ -24,6 +24,10 @@ claims:
 | `test_two_package_inits_keep_distinct_writer_identities` | the writer map's exhaustiveness | two writers in one package collapse into one key, so a label bullet 2 compares vanishes |
 | `test_a_duplicate_writer_identity_holds_bullet_two_at_partial` | bullet 2's honesty | a writer whose label could not be resolved stops holding the row, while bullet 1 still reports the same hole |
 | `test_the_tool_parses_under_the_floor` | the `#5128` guard is PROTECTIVE, not documentary | 3.12-only syntax (PEP 701) creeps back in, so the file dies in the tokenizer before its own guard can refuse |
+| `test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default` | bullet 1's `on_by_default` input | a line that *documents* the flag (prose, a workflow step name, a commented list item) is scored as a shipped ON |
+| `test_every_real_assignment_shape_still_reads_as_shipped_ON` | the same input, in the other direction | tightening the test makes a REAL shipped ON (compose map/array, `.env`, Dockerfile, `export`) read as a false `False` |
+| `test_searched_is_the_walk_not_the_list_of_mentions` | the documented `searched` contract | `searched` reports the mentions, so "what 'nowhere' covered" is `[]` for the case the function exists for |
+| `test_an_unreadable_surface_is_named_not_silently_excluded` | the `UNMEASURED` rule, applied to the walk | a file the walk could not read is folded into a measured `False` |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
 measurement-only; the instrument is read-only and its pin must be too.
@@ -683,15 +687,126 @@ def test_the_shipped_default_is_searched_not_assumed(monkeypatch):
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert isinstance(shipped["on"], bool), shipped
-    # The flag is MENTIONED in the shipped tree (this repo's `config/` does), so
-    # the walk returning nothing would mean it searched a path that does not
-    # exist — the silent-`False` shape the round-3 P2 was filed for.
+    # ⛔ `searched` is the WALK (every file this repo's shipped surfaces hold),
+    # `mentions` is the subset that names the flag. The previous version of this
+    # falsifier asserted `shipped["searched"]` was non-empty and justified it as
+    # "the flag is mentioned in the tree, so an empty list means the walk missed
+    # a path" — false, because `searched` then held only the mentions, so an
+    # empty list meant only "nothing mentions it", which is the expected state
+    # for an unset flag. It passed on a prose sentence in
+    # `config/v4-mechanisms.yml`; reflow that sentence and it red with a message
+    # sending the fixer after a non-existent walk bug.
     assert shipped["searched"], shipped
+    assert set(shipped["mentions"]) <= set(shipped["searched"]), shipped
+    assert not set(shipped["unreadable"]) & set(shipped["searched"]), shipped
     for hit in shipped["files"]:  # an ON claim is SOURCED, never asserted
         assert hit.split(":")[0] in shipped["searched"], hit
     row = probe.score_rule_bullet()
     note = next(n for n in row.notes if n.startswith("gate enabled by default:"))
     assert f"gate enabled by default: {shipped['on']}" in note, (note, shipped)
+
+
+@pytest.mark.parametrize("text", [
+    # Plain prose in a `note: >-` folded scalar — the natural documentation
+    # form of the flag this repo's own `config/v4-mechanisms.yml` describes.
+    "note: >-\n  Set TORTOISE_EMBED_GATE=1 to enable the gate.\n",
+    # The same sentence with the flag in backticks (today's shape in
+    # `config/v4-mechanisms.yml:431`).
+    "note: >-\n  Set `TORTOISE_EMBED_GATE=1` to enable the gate.\n",
+    # A GitHub-Actions step NAME. `stripped[0]` is `-`, so the pre-fix guard
+    # did not skip it, `lstrip("-")` left `name: verify …`, and the value
+    # token after the flag was `1`.
+    "jobs:\n  t:\n    steps:\n      - name: verify TORTOISE_EMBED_GATE=1 takes effect\n",
+    # A COMMENTED list item: the `#` test ran BEFORE the dash strip, so the
+    # comment marker was the second character and this read ON.
+    "environment:\n  - # TORTOISE_EMBED_GATE=1\n",
+    # A bare mention with no separator at all.
+    "note: >-\n  (`TORTOISE_EMBED_GATE`), off by default\n",
+    # A compose ARRAY declaration with no value: the spec says the variable is
+    # then unset, so it is not an ON.
+    "environment:\n  - TORTOISE_EMBED_GATE\n",
+    # An explicitly OFF value, including compose's own `false` spelling.
+    "environment:\n  TORTOISE_EMBED_GATE: \"false\"\n",
+])
+def test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default(
+        text, tmp_path, monkeypatch):
+    """Only an ASSIGNMENT of the flag can read as shipped ON.
+
+    Measured on the pre-fix code: `Set TORTOISE_EMBED_GATE=1 to enable`,
+    `- name: verify TORTOISE_EMBED_GATE=1 takes effect` and
+    `- # TORTOISE_EMBED_GATE=1` each returned `on=True`. That is the one input
+    that can move bullet 1 toward `MET` (`score_rule_bullet` → `on_by_default`),
+    so once `#5090`'s stated remainder (turn the flag on, resolve the writers) is
+    done, a DOCUMENTATION edit alone would complete a DoD row — the class
+    `#10465` indicator 1 exists to prevent.
+    """
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "x.yml").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    # It is still RECORDED — a mention is reported, just not scored as a value.
+    assert shipped["mentions"] == ["config/x.yml"], shipped
+
+
+@pytest.mark.parametrize("text", [
+    "environment:\n  - TORTOISE_EMBED_GATE=1\n",            # compose array
+    "environment:\n  TORTOISE_EMBED_GATE: \"true\"\n",      # compose map
+    "TORTOISE_EMBED_GATE=yes\n",                            # .env / dotenv
+    "ENV TORTOISE_EMBED_GATE=on\n",                          # Dockerfile
+    "export TORTOISE_EMBED_GATE=1\n",                        # shell
+    "TORTOISE_EMBED_GATE=1  # enable it\n",                  # trailing comment
+])
+def test_every_real_assignment_shape_still_reads_as_shipped_ON(
+        text, tmp_path, monkeypatch):
+    """The tighter test must not turn a REAL shipped ON into a false `False`.
+
+    These are the shapes `container_spec.md` §environment defines (map and
+    array) plus the shell/Dockerfile spellings; a walk that stopped seeing them
+    would let bullet 1 report `off by default` for a flag that ships ON.
+    """
+    (tmp_path / ".env.example").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is True, shipped
+    assert shipped["files"], shipped
+
+
+def test_searched_is_the_walk_not_the_list_of_mentions(tmp_path, monkeypatch):
+    """`searched` must answer "what did 'nowhere' cover?" — the documented contract.
+
+    Pre-fix, this file (which does not mention the flag) was absent from
+    `searched`, so for the ordinary case the function is built for — a flag set
+    NOWHERE and mentioned NOWHERE — the promised coverage was `[]`. That is the
+    same defect class as the exit-code contract `test_an_unmeasurable_run_exits_two`
+    was added for: a documented promise the code does not implement.
+    """
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "quiet.yml").write_text("nothing here\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    assert shipped["searched"] == ["config/quiet.yml"], shipped
+    assert shipped["mentions"] == [], shipped
+
+
+def test_an_unreadable_surface_is_named_not_silently_excluded(tmp_path, monkeypatch):
+    """A file the walk could not read must not read as a measured `False`."""
+    (tmp_path / ".env.example").write_text("TORTOISE_EMBED_GATE=1\n",
+                                           encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    real_read_text = Path.read_text
+
+    def _boom(self, *a, **kw):
+        if self.name == ".env.example":
+            raise OSError("unreadable")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    assert shipped["unreadable"] == [".env.example"], shipped
+    assert shipped["searched"] == [], shipped
 
 
 def test_a_writer_that_names_an_unserved_label_scores_NOT_MET(tmp_path, monkeypatch):
