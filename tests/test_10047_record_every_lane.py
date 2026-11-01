@@ -304,6 +304,25 @@ _SDK_OPENERS = frozenset({
 })
 #: The openers that install a record tenant on the SDK they return.
 _INSTALLING_OPENERS = frozenset({"_data_sdk", "_data_sdk_offloaded"})
+#: The openers that return an SDK with NO record tenant installed on it. Every
+#: one of these is a real SDK handle, so a write through it without a later
+#: `_TENANT_INSTALLERS` call is exactly the unbound write this file exists to
+#: catch — `None` from `_handle_state` would mean "not an SDK handle at all"
+#: and let the write past.
+#:
+#: `_open_org_graph_sdk` was the #10380 P2.1 finding; the three `_org_sdk*`
+#: spellings are #10180's, and they are the ones the codebase now opens through
+#: BY DESIGN (`_org_sdk`'s own docstring: "the ONE way an org-wide lane opens
+#: it"). They all end in `_make_sdk(...)` and install nothing, so before this
+#: entry every new lane could convert to the canonical opener, be counted as a
+#: site, and write records through an unbound handle with the scan silent —
+#: the false-PASS shape, on the spelling the fleet is migrating TO.
+_UNBOUND_OPENERS = frozenset({
+    "_open_org_graph_sdk",        # the org's DEFAULT graph, opened by name
+    "_org_sdk",                   # #10180: the one default-graph resolver
+    "_org_sdk_from_name",         #   …its already-resolved-name twin (no I/O)
+    "_org_sdk_for_credential",    #   …and its credential-shaped twin
+})
 #: The carriers that install a record tenant on an SDK that already exists.
 _TENANT_INSTALLERS = frozenset({
     "_bind_record_tenant",                # the credential-resolved chokepoint
@@ -417,6 +436,11 @@ def _handle_state(value) -> bool | None:
     returning, a `_bind_*` call returns one), `False` = an org-scoped SDK opened
     with NO tenant, `None` = not an SDK handle at all (`_get_onboarding_projection`
     returns a dict, `_org_proj` a projection — neither is a record carrier).
+
+    `_UNBOUND_OPENERS` is the list that decides `False`, and it is the list that
+    must stay complete: an opener that returns a real SDK and matches NEITHER
+    branch answers `None`, i.e. "not a handle", and the write-detector below
+    then looks straight past it (`handles.get(name) is False` never holds).
     """
     state = None
     for expr in _operand_calls(value):
@@ -425,8 +449,8 @@ def _handle_state(value) -> bool | None:
         name = getattr(expr.func, "id", None)
         if name in _INSTALLING_OPENERS:
             state = True
-        elif name == "_open_org_graph_sdk":
-            # The org's DEFAULT graph, opened by name — never bound.
+        elif name in _UNBOUND_OPENERS:
+            # A real SDK handle, with no tenant installed on it.
             state = False
         elif name == "_make_sdk" and _namespace_is_org_scoped(expr):
             state = False
@@ -690,6 +714,56 @@ def _run_new_job(org_id: str) -> None:
 '''
     flagged = _flagged(source)
     assert flagged and "_run_new_job" in "".join(flagged)
+
+
+@pytest.mark.parametrize("opener", sorted(_UNBOUND_OPENERS))
+def test_every_unbound_opener_is_flagged_on_the_handle_it_returns(opener):
+    """#10180: the canonical opener must not be a blind spot in this scan.
+
+    `_org_sdk` is what the whole fleet is migrating TO, and it installs no
+    tenant (it returns `_make_sdk(...)`; the org's default namespace is not a
+    record tenant). `_handle_state` used to answer `None` for all three
+    `_org_sdk*` spellings — "not an SDK handle at all" — so `handles.get(name)
+    is False` never held and a lane could write through one with the scan
+    silent. That is the false PASS this test exists to prevent, and it is
+    parametrised over the SET so a fourth opener added there cannot arrive
+    uncaught.
+
+    Mutation this reddens on: dropping any `_UNBOUND_OPENERS` member from
+    `_handle_state` (or restoring the `== "_open_org_graph_sdk"` spelling).
+    """
+    source = f'''
+def _run_new_lane(org_id: str) -> None:
+    sdk = {opener}(org_id)
+    try:
+        sdk.create_point("Subject", {{}})
+    finally:
+        sdk.close()
+'''
+    flagged = _flagged(source)
+    assert flagged and "_run_new_lane" in "".join(flagged), (
+        f"a lane writing records through an unbound `{opener}()` handle must be "
+        "flagged — the scan cannot treat the default-graph resolver as a "
+        "non-handle")
+
+
+def test_an_org_sdk_lane_that_binds_is_clean():
+    """The control for the legs above: the SAME opener, bound, is silent.
+
+    Without this, the parametrised cases above could be flagging any `_org_sdk`
+    write at all — which would red every converted lane in the file and say
+    nothing about the tenant.
+    """
+    source = '''
+def _run_bound_org_lane(org_id: str) -> None:
+    sdk = _org_sdk(org_id)
+    _bind_default_graph_record_tenant(sdk, org_id)
+    try:
+        sdk.create_point("Subject", {})
+    finally:
+        sdk.close()
+'''
+    assert _flagged(source) == []
 
 
 def test_an_install_on_another_handle_does_not_cover_the_writing_one():
