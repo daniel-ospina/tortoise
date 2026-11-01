@@ -160,11 +160,11 @@ DOCUMENT_SHA_PIN = "document_sha256"
 #: The status a log carries when no threshold existed to score it against.
 UNSCORED = "UNPREREGISTERED"
 
-#: The record field that says WHICH scored log a `steps` pin postdates (#10215).
-#: `written_before_any_scored_run` describes the record's ORIGINAL freeze; the step
-#: set is the acceptance rule V5 applies, so when it is authored after a scored log
-#: exists the blanket claim cannot cover it and the record must say so by name
-#: (a PROTOCOL DEVIATION under §8 of the argument).
+#: A RETIRED record field (#10215), kept ONLY so a record that still carries it is
+#: reported as a dead key to delete. An earlier fix required it as an attestation of
+#: the `steps` pin's authoring order; that was a gate satisfied by asserting it, so
+#: the rule now dates the block from history instead and reads the deviation from the
+#: argument's `## Deviations` section. No gate reads this field.
 STEPS_PINNED_AFTER = "steps_pinned_after_scored_log"
 
 #: Every ``verdict=``/``result=`` value in an exempt log must be this. A WHITELIST, not a blacklist
@@ -1380,36 +1380,54 @@ def _steps_block_epoch(directory: Path, current: dict | None = None) -> int | No
     return None
 
 
+def _heading_level(line: str) -> int:
+    """ATX heading level (1-6), or 0 for a non-heading. `#` must be followed by
+    space/EOL, so `#123` is not a heading."""
+    hashes = len(line) - len(line.lstrip("#"))
+    if not 0 < hashes <= 6:
+        return 0
+    rest = line[hashes:]
+    return hashes if not rest or rest[0] in " \t" else 0
+
+
 def _document_has_deviations(directory: Path) -> bool:
     """Whether the argument carries a REAL ``## Deviations`` entry (§8).
 
     ⛔ A bare heading is not a disclosure, and accepting one would restore the
-    "add one line to clear the finding" exit this rule was just repaired to close —
-    the same shape, moved from JSON into Markdown. So the section must carry at
-    least one ``### `` entry AND a non-blank body line under it. The §8 prose that
-    MENTIONS ``## Deviations`` cannot satisfy it either, because the match is on a
-    heading line, not a substring.
+    "add one line to clear the finding" exit this rule was repaired to close — the
+    same shape, moved from JSON into Markdown. So an entry (``### D…``) must carry a
+    non-blank body line.
+
+    Two bounds, each a defect a review measured:
+
+    * the body ENDS at the next heading of the entry's own level or SHALLOWER
+      (``<= 3``). A scan to EOF let a bare ``### D1`` above a later section's prose
+      pass; stopping at ANY ``#``-line instead made a properly structured entry —
+      ``#### Original rule`` / text / ``#### New rule`` / text — read as bodiless,
+      so the repair the failure message prescribes could not clear the finding.
+    * EVERY ``### D`` entry is examined, not just the first: an empty ``### D1``
+      above a filled ``### D2`` is a real disclosure, and reading only the first
+      reported it as absent.
     """
     try:
         text = (directory / PREREG_NAME).read_text()
     except (OSError, UnicodeDecodeError):
         return False
     lines = text.splitlines()
-    start = next((i for i, ln in enumerate(lines)
-                  if ln.strip().startswith("## Deviations")), None)
-    if start is None:
+    head = next((i for i, ln in enumerate(lines)
+                 if ln.strip().startswith("## Deviations")), None)
+    if head is None:
         return False
-    body = lines[start + 1:]
-    entry = next((i for i, ln in enumerate(body) if ln.startswith("### D")), None)
-    if entry is None:
-        return False
-    # ⛔ The body is the ENTRY'S OWN section, ending at the next heading. Scanning to
-    # EOF would let a bare `### D1` placed above unrelated prose pass — measured at the
-    # round-7 review, that shape returned True, so the "add one line" exit was still
-    # open one heading down from where it had just been closed.
-    end = next((j for j in range(entry + 1, len(body)) if body[j].startswith("#")),
-               len(body))
-    return any(ln.strip() for ln in body[entry + 1:end])
+    body = lines[head + 1:]
+    for i, line in enumerate(body):
+        if not line.startswith("### D"):
+            continue
+        stop = next((j for j in range(i + 1, len(body))
+                     if 0 < _heading_level(body[j]) <= 3), len(body))
+        # a body line is any non-blank line that is NOT itself a heading
+        if any(ln.strip() and not _heading_level(ln) for ln in body[i + 1:stop]):
+            return True
+    return False
 
 
 def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
@@ -1433,9 +1451,11 @@ def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
     reads, and where git cannot establish it (a shallow checkout) the rule
     returns NO verdict rather than demanding an attestation.
 
-    The field is kept ONLY as a contradiction check: a record that declares both
-    ``written_before_any_scored_run`` and ``steps_pinned_after_scored_log`` is
-    asserting two incompatible facts, and that needs no history to refuse.
+    ⛔ ``steps_pinned_after_scored_log`` is NOT required and NOT an incompatibility.
+    Those two claims describe different things — ``written_before_any_scored_run`` is
+    the record's ORIGINAL freeze, while the field names a log the pin postdates — so
+    a record may honestly carry both, and an earlier arm that refused the pairing was
+    wrong. The field is retired: carrying it is reported as a dead key to delete.
     """
     record = _record_for_steps(directory)
     if "steps" not in record:

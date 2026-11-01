@@ -2879,8 +2879,34 @@ def test_the_deviation_section_is_detected_from_a_REAL_ENTRY_not_a_mention():
         (d / check.PREREG_NAME).write_text(
             "## Deviations\n\n### D1\n\n# Pre-registration\n\nlots of unrelated prose\n")
         assert check._document_has_deviations(d) is False
+        # ⛔ round 8: stopping at ANY `#`-line made a properly structured entry read as
+        # bodiless, so the repair the failure message prescribes could not clear it.
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1 — 2026-11-01\n\n#### Original rule\n\n"
+            "all eight observed.\n\n#### New rule\n\nseven required.\n")
+        assert check._document_has_deviations(d) is True, (
+            "a `####`-structured entry carries its body one heading level down")
+        # ⛔ and only the FIRST `### D` was examined: an empty D1 above a filled D2 is
+        # a real disclosure, and reading one entry reported it as absent.
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1\n\n### D2 — 2026-11-01\n\n- **Original rule**: x\n")
+        assert check._document_has_deviations(d) is True, (
+            "every entry is examined, not only the first")
+        # a `##` section that follows still ends the entry
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1\n\n#### Original rule\n\n## 9. Next\n\nprose\n")
+        assert check._document_has_deviations(d) is False, (
+            "the entry ends at its own level or shallower, not at its own subsections")
 
 
-def test_the_shipped_bundle_satisfies_the_rule_it_is_judged_by():
-    """Reds if the record re-gains a post-scored declaration (a contradiction)."""
+def test_the_shipped_record_carries_no_retired_key():
+    """A SHALLOW-checkout claim only, stated as such.
+
+    On this box (`git rev-parse --is-shallow-repository` → true) the rule abstains at
+    `history_unavailable()` before the order arm runs, so all this test can prove is
+    that the shipped record has not re-gained the RETIRED key. It CANNOT detect a
+    post-scored pin here; the order arm is covered by the `_dev_repo` fixtures above,
+    which build their own non-shallow repository (#10215 round 8).
+    """
     assert check.check_steps_block_is_pre_scored(PREREG.parent) == []
+    assert check.STEPS_PINNED_AFTER not in _record()
