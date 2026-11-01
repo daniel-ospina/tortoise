@@ -4457,8 +4457,19 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
     a supplied value.
 
     ``props`` is returned as a NEW dict in the door's established key order
-    (name, kind?, status, *caller props*) so a caller-supplied ``status`` still
-    overrides the ``"live"`` seed, exactly as before.
+    (name, kind?, *caller props*).
+
+    #9974 R1: the door fabricates NO ``status`` either. It used to write
+    ``out["status"] = "live"`` on every create, so every creation record
+    CLAIMED a birth status nothing derived — and the two rebuild routes then
+    disagreed about the same record: the JSONL replay wrote the fabricated
+    ``'live'`` through ``entities._upsert_object``'s ``coalesce($st, 'live')``
+    while the record-sourced route (``cache_projection``) derives ``status``
+    from the carriers and leaves it absent — the §2.0 two-graphs defect
+    (#9974 R1). ``status`` is a DERIVED cache (§2.6,
+    ``02-identity-and-placement.md``): the caller's value is carried through
+    untouched, and "the caller named none" now reaches the fold as ABSENT —
+    exactly the #9572 rule this function already applies to the kind.
     #9572 review P2: BLANK is not a kind either. ``""`` / ``"   "`` is not
     ``None``, so it survived the ``is not None`` line and reached the fold as a
     real value — ``coalesce("", stored)`` returns ``""``, so a blank re-create
@@ -4472,7 +4483,6 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
     out: dict = {"name": name}
     if kind is not None:
         out[kind_key] = kind
-    out["status"] = "live"
     out.update(props)
     return out
 
@@ -4598,8 +4608,9 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
     #10192. The predicate is the RESULT of the write, not the presence of a
     ``status`` key: ``props['status']`` when the caller supplies one, otherwise
     the node's STORED status (``stored_status`` — probed by the caller; ``None``
-    on the create door, where the fold's ``'live'`` seed is what the write will
-    leave). A carrier is a key the write CARRIES — a present ``None`` is the
+    on the create door, where a status-less birth now leaves the property ABSENT
+    (#9974 R1 — absent reads LIVE under ``live._terminal_excluded``, so a carrier
+    on such a node is still the incoherent write this guard refuses). A carrier is a key the write CARRIES — a present ``None`` is the
     documented CLEAR (``supersededBy=None``), not a carrier, so clearing stays
     writable.
 
@@ -39428,8 +39439,9 @@ class TortoiseSDK:
         # without its status, and it is not merely a shape of its own: the fold
         # behind it (`_upsert_object` / `_upsert_subject`) MERGEs, so an
         # ON-MATCH re-create reaches an EXISTING node too — a guard on
-        # `update_entity` alone is bypassable in one call. `_entity_door_props`
-        # has already seeded `status='live'`, so a caller-supplied carrier is
+        # `update_entity` alone is bypassable in one call. The create door
+        # carries NO stored status for a status-less birth (#9974 R1: `props`
+        # holds only what the caller named), so a caller-supplied carrier is
         # refused here unless the same call supplies `status='superseded'`;
         # there is no stored status to consult (a born-superseded create that
         # names the status stays writable). Nothing is written yet, so the
@@ -40911,8 +40923,10 @@ class TortoiseSDK:
         """Create an entity — consolidated surface (epic #888 W2, PR #912).
 
         ``type`` routes to the right entity kind:
-          - subject  → Subject node (subjectKind, status='live')
-          - object   → Object node (objectKind, status='live')
+          - subject  → Subject node (subjectKind; no stored status — an ABSENT
+            status READS live, `live._terminal_excluded`; #9974 R1)
+          - object   → Object node (objectKind; the same derived-or-absent
+            lifecycle status)
           - event    → Event node (eventKind required) — preserves the legacy
             about* edge wiring: aboutSubject/aboutObject/aboutPoint/
             aboutDocument props are extracted and wired as typed edges
@@ -40978,11 +40992,14 @@ class TortoiseSDK:
                 type(_layer_exc).__name__, _layer_exc)
             _layer_note = None
         if t == "subject":
-            # #1423 (review P1): `status` arrives through `**props` below and
-            # OVERRIDES the `"status": "live"` default, so this surface is a
-            # SECOND door onto an undeclared Subject status. Validate against
-            # ONTOLOGY §4.2's declared lifecycle and fail closed, exactly as
-            # `_update_entity` does.
+            # #1423 (review P1): `status` arrives through `**props` below, so this
+            # surface is a SECOND door onto an undeclared Subject status.
+            # Validate against ONTOLOGY §4.2's declared lifecycle and fail closed,
+            # exactly as `_update_entity` does. #9974 R1: there is no defaulted
+            # `status` to override any more, so the door validates only a value
+            # the caller actually NAMED — an unnamed one is ABSENT on the node
+            # and reads LIVE, which is not a status to validate (hence the
+            # read-only sentinel below: it decides nothing the fold writes).
             _subj_status = props.get("status", "live")
             if (not isinstance(_subj_status, str)
                     or _subj_status not in _SUBJECT_STATUS_VALUES):

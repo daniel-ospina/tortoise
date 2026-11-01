@@ -392,16 +392,16 @@ class TestSubjectStatusWriteIsValidated:
         sid = node_id(sdk, "Subject", "Team Alpha")
         with pytest.raises(ValueError, match="Invalid status"):
             sdk.update_entity(sid, status=bad)
-        # refused BEFORE any write: the stored value is untouched.
+        # refused BEFORE any write: the stored value is untouched — a status-less
+        # birth leaves it ABSENT since #9974 R1 (absent reads LIVE).
         (status,), = _subject_row(proj, "Team Alpha", "status")
-        assert status == "live", status
+        assert status in (None, "live"), status
 
     @pytest.mark.parametrize("bad", ["retracted", "dead"])
     def test_create_entity_refuses_an_undeclared_subject_status(
             self, env, bad):
         """The SECOND door: `status` reaches `_upsert_subject` through
-        `**props`, overriding the `'live'` default — so a guard on
-        `_update_entity` alone leaves this writable."""
+        `**props`, so a guard on `_update_entity` alone leaves this writable."""
         sdk, _proj, _events, _journal_path = env
         with pytest.raises(ValueError, match="Invalid status"):
             sdk.create_entity("subject", "Team New", subjectKind="core:team",
@@ -445,22 +445,36 @@ class TestStatusIsProjectionOwnedOnSubject:
         assert len(terminal) == 1, (
             f"a re-mention must not resurrect a superseded Subject: {live!r}")
         assert terminal[0][1] == "Team Beta", terminal
-        live_rows = [r for r in live if r[0] == "live"]
+        live_rows = [r for r in live if (r[0] or "live") == "live"]
         assert len(live_rows) == 1, (
             "the explicit re-registration must be a NEW incarnation born live "
             f"(D1: the entity set grows only from an explicit registration "
             f"that mints the id), not a mutation of the buried one: {live!r}")
         assert live_rows[0][1] is None, live_rows
 
-    def test_re_created_subject_is_born_live_not_status_less(self, env):
-        """The ON CREATE half of the guard: a NEW incarnation (hard-deleted,
-        then created again) must carry `status='live'` rather than the
-        `status`-less node the extras-only design would leave."""
+    def test_re_created_subject_is_born_live_and_carries_no_fabricated_status(
+            self, env):
+        """The ON CREATE half of the guard, as #9974 R1 narrowed it.
+
+        A NEW incarnation (hard-deleted, then created again) must READ live — and
+        since R1 it carries that by ABSENCE of the fabricated `'live'` seed the
+        fold used to write (the seed is `status=$st`, derived-or-absent; absent
+        reads LIVE under ``live._terminal_excluded``). What the ON CREATE arm must
+        still guarantee is the other direction: a status the caller DID supply
+        lands, so the arm cannot pass by dropping the property entirely.
+        """
         sdk, proj, _events, _journal_path = env
         sdk.delete_entity(node_id(sdk, "Subject", "Team Alpha"))
         sdk.create_entity("subject", "Team Alpha", subjectKind="core:team")
         (status,), = _subject_row(proj, "Team Alpha", "status")
-        assert status == "live", status
+        assert status is None, status
+
+        # anti-vacuity: the ON CREATE arm still writes a caller-supplied status.
+        sdk.delete_entity(node_id(sdk, "Subject", "Team Alpha"))
+        sdk.create_entity("subject", "Team Alpha", subjectKind="core:team",
+                          status="draft")
+        (status,), = _subject_row(proj, "Team Alpha", "status")
+        assert status == "draft", status
 
 
 # ── 5. the consistency projection-owned-status leg ──────────────────────
@@ -543,7 +557,11 @@ def test_provenance_chain_surfaces_the_subject_status(env):
                           authoredBy=sid)
     chain = sdk.provenance(pt["id"])
     assert chain["subject"]["name"] == "Team Alpha", chain
-    assert chain["subject"]["status"] == "live", chain
+    # #9974 R1: a status-less birth leaves the property ABSENT, and this read
+    # renders an absent status as `''` (`coalesce(n.status, '')`) — LIVE, not
+    # terminal. The leg's claim (a since-superseded team is visible here) is
+    # unchanged: the second assertion below is the half that discriminates.
+    assert chain["subject"]["status"] in ("", None, "live"), chain
     _apply(proj, sdk, [RECORD])
     assert sdk.provenance(pt["id"])["subject"]["status"] == "superseded"
 

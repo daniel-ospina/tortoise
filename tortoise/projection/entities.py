@@ -4457,7 +4457,20 @@ class _EntityHandlers:
             # while replay kept the supersession: the #2193 live≠replay class.
             # With status projection-owned, this clause SEEDS a fresh/
             # re-created Subject and ON MATCH never touches it.
-            "            s.status=coalesce($st, 'live'), "
+            #
+            # #9974 R1: the seed is DERIVED-OR-ABSENT, never defaulted. It used
+            # to read ``coalesce($st, 'live')``, which FABRICATED the one value
+            # §2.6 says this projection must COMPUTE: the record-sourced route
+            # (``cache_projection``) derives ``status`` from the carriers and
+            # leaves it ABSENT where they are silent (#10189's no-fabrication
+            # rule, pinned there by mutation), so the fold's fabricated `live`
+            # made the two rebuild routes materialise two different graphs for
+            # the same record — the §2.0 divergence. ``$st`` is the creation
+            # record's own payload (the caller's status, or nothing); a NULL
+            # write leaves the property ABSENT, which ``live._terminal_excluded``
+            # reads as LIVE by its documented legacy rule — so no read surface
+            # changes meaning, and the fabricated claim is gone.
+            "            s.status=$st, "
             "            " + _set_emb + " "
             "ON MATCH SET s.id=coalesce($id, s.id), "
             # #7936: adoption CLEARS the event-stub discriminator the
@@ -4577,7 +4590,10 @@ class _EntityHandlers:
         self.g.query(
             f"MERGE (o:Object {{{merge_key}:$key}}) "
             "ON CREATE SET o.id=$id, o.name=$name, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
-            "            o.status=coalesce($st, 'live'), "
+            # #9974 R1: DERIVED-OR-ABSENT, never defaulted — the Object twin of
+            # the Subject clause above (``$st`` is the creation record's own
+            # payload; NULL leaves the property absent, which reads LIVE).
+            "            o.status=$st, "
             "            " + _set_emb + " "
             "ON MATCH SET o.id=coalesce($id, o.id), "
             # #7936: adoption CLEARS the event-stub discriminator the

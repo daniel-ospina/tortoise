@@ -505,9 +505,18 @@ class TestProjectionFold:
                 "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
                 params={"n": name}).result_set
             assert rows, "the replayed registration must recreate the Object"
-            assert rows[0][0] == "live", (
+            # #9974 R1: the birth status is DERIVED-OR-ABSENT — never the
+            # fabricated `live` the fold used to seed and the door used to write
+            # into the creation record. This leg's claim is unchanged and is what
+            # it must keep saying: an Object the journal never superseded is NOT
+            # `superseded` on replay. An absent status reads LIVE
+            # (`live._terminal_excluded`), so the assertion is on the CONTRACT
+            # (not terminal, no carrier) rather than on a literal the projection
+            # has no derivation for.
+            assert rows[0][0] in (None, "live"), (
                 "an Object the journal never superseded came back "
                 f"`superseded` from replay: {rows!r}")
+            assert rows[0][1] is None, rows
         finally:
             sdk.close()
 
@@ -887,14 +896,29 @@ class TestWorkItemFold:
 # ── Read side (Steps 8-9) ────────────────────────────────────────────
 
 class TestReadSide:
-    def test_object_result_carries_status(self):
+    def test_object_result_carries_the_status_the_graph_holds(self):
+        """#9974 R1: the read carries the status the GRAPH holds.
+
+        For a status-less birth that is now ABSENT (the graph stores no fabricated
+        `live`), and the result omits the key — the graph's own reading of an
+        absent status is LIVE (`live._terminal_excluded`). The anti-vacuity half
+        is the second leg below: a status the caller DID supply is still carried,
+        so this cannot pass by the read dropping `status` altogether.
+        """
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "the strategy", objectKind="core:strategy")
             hits = sdk.tortoise_fts_query("the strategy", kind="core:strategy",
                                           entity_type="object", limit=5)
             assert hits, "seeded object must be retrievable (kind-scoped)"
-            assert hits[0]["status"] == "live"
+            assert hits[0].get("status") in (None, "live"), hits[0]
+
+            sdk.create_entity("object", "the tactic", objectKind="core:strategy",
+                              status="draft")
+            hits = sdk.tortoise_fts_query("the tactic", kind="core:strategy",
+                                          entity_type="object", limit=5)
+            assert hits, "the draft object must be retrievable"
+            assert hits[0]["status"] == "draft", hits[0]
         finally:
             sdk.close()
 
@@ -1336,12 +1360,161 @@ class TestLifecycleCarrierCoherence:
             oid = _make_carrier_entity(sdk, "Object", "epsilon")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
                 sdk.update_entity(oid, supersededBy="v2")
-            assert _carrier_row(sdk, "Object", "epsilon")[1] == "live", (
-                "the graph's reading of the refused node must stay 'live'")
+            assert _carrier_row(sdk, "Object", "epsilon")[1] in (None, "live"), (
+                "the graph's reading of the refused node must stay LIVE "
+                "(#9974 R1: an absent status IS live)")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
                 sdk.update_entity(oid, superseded_by="v2")
-            assert _carrier_row(sdk, "Object", "epsilon")[1] == "live", (
+            assert _carrier_row(sdk, "Object", "epsilon")[1] in (None, "live"), (
                 "a snake-spelled carrier was ACCEPTED on a live node — the "
                 "guard is inert against it (review P1)")
         finally:
             sdk.close()
+
+
+# ── #9974 R1: the BIRTH status is DERIVED-OR-ABSENT, never fabricated ──────
+
+class TestBirthStatusIsDerivedNotFabricated:
+    """The birth seed wrote a status nothing derived (#9974 R1).
+
+    Two writers fabricated it, and both are pinned here because either one alone
+    reproduces the defect:
+
+    * the DOOR — ``sdk._entity_door_props`` put ``out["status"] = "live"`` into
+      every creation record, so the journal itself CLAIMED a birth status;
+    * the FOLD — ``_upsert_object``/``_upsert_subject`` seeded
+      ``status=coalesce($st, 'live')``, so a raw/connector producer that omitted
+      the key was answered with a fabricated ``'live'`` on replay.
+
+    Why it is a defect and not a default: ``status`` is a DERIVED cache (§2.6,
+    ``02-identity-and-placement.md``), and the record-sourced route
+    (``cache_projection``) derives it from the CARRIERS and leaves it ABSENT
+    where they are silent — by deliberate, mutation-verified rule (#10189's
+    no-fabrication leg). Two rebuild routes therefore materialised two different
+    graphs for the same record, which §2.0 forbids. The reader-visible meaning is
+    unchanged: ``live._terminal_excluded`` treats an ABSENT status as LIVE.
+    """
+
+    def test_a_status_less_birth_stores_no_status_on_either_route(self,
+                                                                 tmp_path):
+        """Live write AND a REPLAY of a hand-emitted status-less record.
+
+        The two facts are pinned at their own writers, so neither can mask the
+        other:
+
+        * the LIVE write is the door + fold together (``create_entity``);
+        * the REPLAY half drives a record that never passed through the door at
+          all (``_emit_event("ObjectRegistered", …)`` — the raw/connector
+          producer shape), so the FOLD's own clause is isolated: with the door
+          silenced, a re-instated ``coalesce($st, 'live')`` still reds here.
+        """
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t9974r1.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            sdk.create_entity("object", "eta", objectKind="core:strategy")
+            sdk.create_entity("subject", "team-eta", subjectKind="core:team")
+            # a producer that never goes through `create_entity`: the record
+            # carries an id and a name, and NO status.
+            sdk._emit_event("ObjectRegistered", id="obj-9974-raw",
+                            name="eta-raw")
+            sdk._emit_event("SubjectAdded", id="subj-9974-raw",
+                            name="team-eta-raw")
+
+            def status_of(label, name):
+                rows = proj.g.query(
+                    f"MATCH (n:{label} {{name:$n}}) RETURN n.status",
+                    params={"n": name}).result_set
+                assert rows, f"the fixture did not create {label} {name!r}"
+                return rows[0][0]
+
+            # 1. the LIVE write (door + fold)
+            assert status_of("Object", "eta") is None, (
+                "a status-less Object was born with a status the record never "
+                "derived — #9974 R1")
+            assert status_of("Subject", "team-eta") is None, (
+                "a status-less Subject was born with a fabricated status")
+
+            # 2. the JSONL REPLAY, including the door-less records — the FOLD's
+            #    own clause.
+            proj.rebuild_all(str(events), confirm_destructive=True)
+            assert status_of("Object", "eta") is None, (
+                "rebuild_all materialised a birth status from a record that "
+                "never carried one")
+            assert status_of("Subject", "team-eta") is None
+            assert status_of("Object", "eta-raw") is None, (
+                "the fold fabricated a birth status for a record produced "
+                "outside the create door")
+            assert status_of("Subject", "team-eta-raw") is None
+
+            # 3. …and the record-sourced route derives nothing from a row that
+            #    carries no lifecycle CARRIER, which is the agreement R1 asks
+            #    for (the §2.0 divergence). It uses the cache's OWN instrument —
+            #    `DERIVED_FROM_RECORD` — rather than a second predicate; the row
+            #    is carrier-free by construction, which is exactly the shape the
+            #    record emits for a status-less birth.
+            from tortoise.cache_projection import node_from_row
+            oid = proj.g.query("MATCH (o:Object {name:'eta'}) RETURN o.id"
+                               ).result_set[0][0]
+            cache = node_from_row("Object", {"id": oid, "name": "eta"})
+            assert cache.props.get("status") is None, cache.props
+            assert cache.props.get("status") == status_of("Object", "eta")
+        finally:
+            sdk.close()
+
+    def test_a_caller_supplied_birth_status_still_lands_on_both_routes(
+            self, tmp_path):
+        """Anti-vacuity: DERIVED means the record's value is carried, not lost.
+
+        Without this leg the test above would pass if the birth status were
+        simply dropped — the same fabrication failure in the other direction.
+        """
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t9974r1b.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            sdk.create_entity("object", "theta", objectKind="core:strategy",
+                              status="archived")
+
+            def status_of(name):
+                rows = proj.g.query(
+                    "MATCH (n:Object {name:$n}) RETURN n.status",
+                    params={"n": name}).result_set
+                return rows[0][0] if rows else "<absent>"
+
+            assert status_of("theta") == "archived", status_of("theta")
+            proj.rebuild_all(str(events), confirm_destructive=True)
+            assert status_of("theta") == "archived", (
+                "a caller-supplied birth status was dropped by replay: "
+                f"{status_of('theta')!r}")
+        finally:
+            sdk.close()
+
+    def test_the_door_never_fabricates_a_status(self):
+        """The DOOR half, isolated: no status in, no status key out.
+
+        Pinned on the function because it is the only writer of the creation
+        record's payload — a re-instated ``out["status"] = "live"`` reds this
+        without needing a graph, and a caller-supplied value must survive
+        untouched (``None`` included: a caller's explicit clear is not this
+        function's to rewrite).
+        """
+        from tortoise.sdk import _entity_door_props
+
+        assert "status" not in _entity_door_props("objectKind", "x", {}), (
+            "the door fabricated a birth status (#9974 R1)")
+        assert "status" not in _entity_door_props("subjectKind", "x", {}), (
+            "the door fabricated a birth status for a Subject")
+        assert _entity_door_props(
+            "objectKind", "x", {"status": "archived"})["status"] == "archived"
+        assert _entity_door_props(
+            "objectKind", "x", {"status": None})["status"] is None
+        # the kind rule #9572 landed must be unaffected by this change
+        assert "objectKind" not in _entity_door_props("objectKind", "x", {})
+        assert _entity_door_props(
+            "objectKind", "x", {"objectKind": "core:strategy"}
+        )["objectKind"] == "core:strategy"

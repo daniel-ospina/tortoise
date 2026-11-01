@@ -414,6 +414,15 @@ def test_related_status_survives_the_widening(sdk):
     sdk.create_operator("IMPL", hub, [live_peer, stale_peer, obj_peer])
     sdk.create_direct_edge("NAND", hub, subj_peer)
     sdk.create_direct_edge("IMPL", hub, event_peer)
+    # #9974 R1: a status-less birth stores NO status, so the non-Point peers have
+    # none to look up. Write one explicitly here — this leg is about the lookup
+    # finding `status` under whichever label the peer holds, not about the birth
+    # seed, and an absent value would make the Object/Subject assertions
+    # indistinguishable from the Event's own `""`.
+    _graph(sdk).query(
+        "MATCH (n) WHERE n.id IN $ids SET n.status = 'live'",
+        params={"ids": [obj_peer, subj_peer]},
+    )
 
     statuses = {e["related_id"]: e["related_status"]
                 for e in sdk.expand_relationships(hub)}

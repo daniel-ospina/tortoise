@@ -276,7 +276,8 @@ class TestShapeBDeleteThenRegister:
         s2, _oid = self._build(tmp_path, events)
         proj = s2._get_proj()
         live = _objects(proj)
-        assert live and live[0][2] == "live", live
+        # #9974 R1: an absent status READS live (live._terminal_excluded).
+        assert live and (live[0][2] or "live") == "live", live
         for engine in ENGINES:
             replay = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
             assert _objects(replay) == live, f"{engine} buried shape B: {_objects(replay)}"
@@ -302,7 +303,8 @@ class TestShapeBDeleteThenRegister:
         _sdk, events = env
         s2, oid = self._build(tmp_path, events)
         proj = s2._get_proj()
-        live_ids = [r[0] for r in _objects(proj) if r[2] == "live"]
+        live_ids = [r[0] for r in _objects(proj)
+                    if (r[2] or "live") == "live"]
         assert live_ids and oid not in live_ids, (
             "premise: the re-creation mints a NEW id (the MERGE key is the id), "
             f"so the deleted {oid!r} is not the live carrier: {_objects(proj)}")

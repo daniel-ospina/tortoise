@@ -110,9 +110,10 @@ def _terminal_excluded(clause: str, excluded=None, *,
     ``clause`` is an alias-qualified status reference (``"n.status"``); the
     flag lives on the same alias (``"n.outdated"``). ``outdated=true`` is a
     second, flag-based dead marker (``invalidate_point`` sets the flag and
-    leaves status untouched) so both must be excluded. Legacy nodes without a
-    stored status are LIVE (the entity write path defaults
-    ``coalesce($st, n.status, 'live')``), hence the NULL check.
+    leaves status untouched) so both must be excluded. An ABSENT status is LIVE
+    (the legacy-node rule, and since #9974 R1 also the ordinary birth state: the
+    entity fold seeds ``status=$st`` — derived-or-absent, never a fabricated
+    ``'live'``), hence the NULL check.
 
     ``excluded`` — the vocabulary to exclude. Default ``None`` = the canonical
     ``TERMINAL_EXCLUDED_STATUSES`` (the POINT vocabulary), so the default call
