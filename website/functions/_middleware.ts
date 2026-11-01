@@ -53,11 +53,10 @@ const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains
 //
 // This project serves no OAuth callback on ANY path — the callback moved to the
 // app origin (#4054), which is exactly why the `/auth/*` surface 302s there —
-// so a `code` (or GoTrue's error shape) arriving here is always misdirected. The
-// refusal is therefore keyed to the PARAMETER, not to a path, and it fires
-// before any asset is fetched: a page that renders and discards the credential
-// is the defect, and a page that renders AROUND the refusal is the same defect
-// with nicer words.
+// so a `code` arriving here is always misdirected. The refusal is therefore keyed
+// to the PARAMETER, not to a path, and it fires before any asset is fetched: a
+// page that renders and discards the credential is the defect, and a page that
+// renders AROUND the refusal is the same defect with nicer words.
 //
 // What the refusal deliberately does NOT do:
 //   * no Location — forwarding a code the AS never issued for that origin only
@@ -74,17 +73,32 @@ const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains
 // and a bare `error` (which a marketing link may legitimately carry) are NOT the
 // authorization-response shape and deliberately fall through — an over-block
 // here would fail closed on a real visitor.
+//
+// ⛔ `code` ONLY — GoTrue's ERROR shape (`error` + `error_description` /
+// `error_code`) is deliberately NOT refused, and that is a recorded behaviour,
+// not an oversight. `website/product.html:349-355` documents it and its handler
+// at `:510-535` renders the #1224 banner on exactly this URL:
+//
+//     <!-- OAuth error banner (#1224): Supabase redirects here with
+//          ?error=...&error_code=bad_oauth_state when the OAuth state TTL
+//          expired mid-login — surface it instead of failing silently. -->
+//
+// That shape carries NO credential, so refusing it protects nothing, and it
+// would retire the banner: an expired dashboard-login state would be answered
+// with this page's connector instructions ("start again from your MCP client …
+// ChatGPT: Settings → Connectors"), which are wrong for a plain login and whose
+// retry path leads to the connector, not back to the sign-in. Ask 3 is about a
+// stray `code`; the error shape already did what the ask wants ("surface it
+// instead of failing silently"), so it keeps doing it.
 const STRAY_RETURN_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; " +
   "form-action 'none'; frame-ancestors 'none'";
 
-function isOAuthAuthorizationResponse(url: URL): boolean {
-  if (url.searchParams.has("code")) return true;
-  return (
-    url.searchParams.has("error") &&
-    (url.searchParams.has("error_description") ||
-      url.searchParams.has("error_code"))
-  );
+// `code` ONLY — see the header block above for why GoTrue's `error` shape is
+// left to `website/product.html`'s #1224 banner. `has()` is an exact-key match,
+// so `code_challenge` cannot be mistaken for `code`.
+function isStrayAuthorizationCode(url: URL): boolean {
+  return url.searchParams.has("code");
 }
 
 function strayReturnRefusal(): Response {
@@ -363,7 +377,7 @@ export const onRequest: PagesFunction = async (context) => {
   // so the guard covers every page this project actually SERVES — the class the
   // issue names ("hand the user a marketing page with a stray `code=`"). Placing
   // it after the asset rewrite below would leave `/` rendering the product page.
-  if (isOAuthAuthorizationResponse(url)) {
+  if (isStrayAuthorizationCode(url)) {
     return strayReturnRefusal();
   }
 

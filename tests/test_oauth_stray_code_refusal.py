@@ -212,28 +212,42 @@ def test_the_refusal_is_not_limited_to_the_root_path() -> None:
         _assert_named_refusal(res, f"{where}?code=…")
 
 
-def test_a_provider_ERROR_return_is_refused_too() -> None:
-    """A fallback that FAILS carries `error`/`error_description`, not `code`.
+def test_the_provider_ERROR_shape_keeps_the_1224_banner_reachable() -> None:
+    """The OTHER return shape — GoTrue's `error` — is NOT refused, deliberately.
 
-    GoTrue appends the OAuth error shape to the Site URL when the round trip
-    fails, so the user lands on the marketing page with no explanation either.
-    The named refusal has to cover that shape as well — otherwise the guard is
-    half a guard and the "try again" advice is exactly what the user needs.
+    `website/product.html:349-355` records the behaviour this preserves:
+
+        <!-- OAuth error banner (#1224): Supabase redirects here with
+             ?error=...&error_code=bad_oauth_state when the OAuth state TTL
+             expired mid-login — surface it instead of failing silently. -->
+
+    The handler at `website/product.html:510-535` reads `error` / `error_code` /
+    `error_description` off this exact URL and shows the retry path. That shape
+    carries NO credential, so there is nothing for a refusal to protect — but
+    refusing it DOES retire the banner, and answers an expired plain-dashboard
+    login with a page whose instruction is "start again from your MCP client
+    (ChatGPT: Settings → Connectors)". Ask 3 is about a stray `code`; the error
+    shape already does what the ask asks ("surface it instead of failing
+    silently"). So this pins it as reachable: a re-added error-shape arm reds
+    here, and the reviewer's finding (PR #10514) is `DONE` rather than re-made.
     """
-    path = (f"/?error=server_error&error_description=Unable+to+exchange+external+"
-            f"code&state=st-1")
-    (res,) = _run([_case(path)])
-    _assert_named_refusal(res, "error-shaped return")
-    # BOTH spellings, deliberately: `searchParams.get()` turns `+` into a space,
-    # so an echo written the realistic way (interpolating the parsed value) yields
-    # "Unable to exchange external code", while one written from `url.search`
-    # yields the encoded form. Asserting only one leaves the other live — the
-    # VGATE reviewer measured exactly that (a patched echo passed the encoded
-    # assertion).
-    for echo in ("Unable to exchange", "Unable+to+exchange"):
-        assert echo not in res["body"], (
-            "the refusal reflected the provider's error_description — attacker-"
-            f"supplied text on an OAuth return must not be interpolated ({echo!r})"
+    # Both documented spellings: the #1224 comment's `error_code=bad_oauth_state`
+    # (state TTL expired) and a provider-side failure carrying
+    # `error_description`. Either is a legitimate arrival on this page.
+    paths = [
+        "/?error=access_denied&error_code=bad_oauth_state",
+        "/?error=server_error&error_description=Unable+to+exchange+external+code",
+    ]
+    for where, res in zip(paths, _run([_case(p) for p in paths])):
+        assert res["status"] == 200, (
+            f"{where}: answered {res['status']}, want 200 — the error shape is not the "
+            "authorization-response shape (it carries no code) and `product.html`'s "
+            "#1224 banner is the recorded handler for it; refusing it here leaves the "
+            "documented trigger of that banner unreachable"
+        )
+        assert NAMED_REFUSAL not in res["body"], (
+            f"{where}: rendered the stray-return refusal — the #1224 banner's documented "
+            "trigger (?error=…&error_code=bad_oauth_state) must keep reaching the page"
         )
 
 

@@ -1966,17 +1966,15 @@ surfaces:
   # `manifest drift: ['test_10121_recency_tie.py']`, and `fast_pool()` is
   # manifest-derived, so the pins would run in NO leg.
   - test_10121_recency_tie.py
-  # #10088 ask 3: the marketing Pages project REFUSES a stray OAuth authorization
-  # response instead of rendering the page with a live `code` in its URL. `core`
-  # is the right arm for the same reason the rows above state: the subject
-  # (`website/functions/_middleware.ts`) matches no `SOURCE_PATTERNS` entry and
-  # falls through to `core`, and it is the same file — and the same Node
-  # middleware harness — as `test_admin_origin_redirect.py`. Without this row
-  # `uv run python tools/ci_selection.py --integrity` exits 1 with
-  # `manifest drift: ['test_oauth_stray_code_refusal.py']`, and because the suite
-  # would belong to no surface it would be selected by NO leg, so the guard's
-  # only regression test would never run on a PR that edits that middleware.
-  - test_oauth_stray_code_refusal.py
+  # ⛔ `test_oauth_stray_code_refusal.py` is NOT registered on THIS arm, deliberately.
+  # It was here once, on the false premise that `website/functions/_middleware.ts`
+  # "matches no `SOURCE_PATTERNS` entry and falls through to `core`". It does match:
+  # `tools/ci_selection.py` lists it in `SOURCE_PATTERNS["onboarding"]` (:495), and a
+  # named-surface match REPLACES the `core` fallback (:3084-3085 vs :3172-3179) — so on a
+  # `_middleware.ts`-only diff the selection is `['onboarding']` and a `core`-only row runs
+  # in NO leg, exactly when the guard's subject changes. Measured: with the row here,
+  # `select(["website/functions/_middleware.ts"])` → 145 files, suite ABSENT. It lives on
+  # the `onboarding` arm (see that entry), which is the surface whose source it reads.
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
@@ -5954,6 +5952,18 @@ surfaces:
   # website/functions/_middleware.ts under Node) and the console's move to the
   # app origin. Pure/harness — no wrangler, no network.
   - test_admin_origin_redirect.py
+  # #10088 ask 3: the marketing Pages project REFUSES a stray OAuth authorization
+  # `code` instead of rendering the page with it in the URL. THIS arm, because
+  # `website/functions/_middleware.ts` — the file it drives under Node — is a
+  # `SOURCE_PATTERNS["onboarding"]` entry (tools/ci_selection.py:495) and a
+  # named-surface match REPLACES the `core` fallback, so an onboarding-only diff
+  # (the one diff that can break the refusal) runs no leg containing this suite
+  # if it is registered on `core` alone. Measured with the row on `core`:
+  # `select(["website/functions/_middleware.ts"])` → `['onboarding']`, 145 files,
+  # suite ABSENT. Without the row anywhere `python3 tools/ci_selection.py
+  # --integrity` exits 1 with `manifest drift: ['test_oauth_stray_code_refusal.py']`.
+  # Same file, same Node middleware harness as `test_admin_origin_redirect.py` above.
+  - test_oauth_stray_code_refusal.py
   # #4316: the agent DELETE surface's P1 draft-only guard + ownership/status
   # predicates, executed against website/functions/blog/api/posts/[[path]].ts
   # under Node with a stubbed fetch (no wrangler, no network, no DB). The E2E
