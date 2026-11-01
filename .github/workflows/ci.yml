@@ -1495,9 +1495,60 @@ jobs:
     # cap bounds a hung harness without failing a slow-runner run.
     timeout-minutes: 15
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # #10237 CANARY — the pool answer, for a job that is allowed to have one.
+    #
+    # WHY THIS JOB AND NOT A REQUIRED ONE. `ubuntu-latest` is answered by ZERO of
+    # the pool's 12 runners (measured 2026-11-01T16:41Z: every `pi-runner-*`
+    # carries `self-hosted-x64` or `self-hosted-arm64`, none carries
+    # `ubuntu-latest`), so every `runs-on: ubuntu-latest` job is served ONLY by
+    # GitHub-hosted — measured job queue wait in run 41320964047: 15.3, 17.8,
+    # 19.0, 25.5, 33.7, 34.5, 37.6 and 39.0 MINUTES — while 10 of 12 pool runners
+    # sat idle. The required legs CANNOT be routed here: `python-ci.yml:1891`
+    # and `docs/ops/ci-runner-x64.md:62` REFUSE a `self-hosted` pin for them,
+    # because such a pin removes the GitHub-hosted half of the race and a
+    # hosted outage then leaves the required aggregate pending forever.
+    #
+    # That refusal does NOT reach a job with no branch-protection context. This
+    # job is not in `.mergify.yml`'s `queue_conditions` (pricing-artifact, docs,
+    # test-isolation, license-surface, legal-e2e, ai-review-gate) nor in
+    # `merge_conditions` (python-ci-gate), so a wait here can never hold a merge
+    # — which is exactly the cost the pin exists to avoid. It is the canary the
+    # issue asks for first (`#10237` ask 1: "canary on one non-required job
+    # first"): if the pool cannot carry it, the loss is one slow non-required
+    # check, not a blocked PR.
+    #
+    # THE LABEL SET IS THE RUNNERS' OWN, VERBATIM. Every x64 runner carries
+    # `self-hosted,Linux,X64,self-hosted-x64`; `runs-on` is AND semantics, so
+    # `[self-hosted, self-hosted-x64]` selects every x64 runner and no ARM64 VM.
+    # The job needs no network, no docker, no secrets and no architecture
+    # (stubbed curl/gh/flyctl/aws/date), so the arch sensitivity that put
+    # `test-slow` on `ubuntu-24.04` does not apply — but a label is a scheduling
+    # decision, NOT an image (#9018), so the hosted-provided `jq`/`python3` the
+    # harnesses assume are provisioned below rather than inherited.
+    #
+    # ⚠️ NAMED RESIDUAL (deliberate): while the pool is unreachable this job
+    # waits instead of falling back, because `runs-on` has no OR semantics — an
+    # OR between hosted and the pool is what `scripts/ci_runner_gate.sh`'s label
+    # attachment provides, and this job bypasses it. Accepted here because the
+    # job is non-required; it must NOT be copied onto a required leg.
+    runs-on: [self-hosted, self-hosted-x64]
     steps:
       - uses: actions/checkout@v4
+      # ── THE RUNNER TOOL CONTRACT (#9018) ──────────────────────────────────
+      # `runs-on: [self-hosted, self-hosted-x64]` names a BARE agent, not the
+      # `ubuntu-latest` image this job was written against. Three of its
+      # harnesses shell out to bare `python3` (`registry-cron.test.sh`,
+      # `orphan-bound.test.sh`) and the driver under them invokes real `jq`
+      # (`.github/scripts/registry-cron.sh`), both of which the hosted image
+      # ships and the pool does not. Without these two steps the failure is not
+      # a test failure — it is `exit 127: command not found` that READS as one
+      # (#9018), reddening the SIGPIPE / ai-review-evidence / backup guards for
+      # a reason unrelated to the diff. Same shape as `ci-timing.yml:56-62`.
+      - name: Runner tool contract — provide jq (#9018)
+        run: bash .github/scripts/runner-tools.sh ensure jq
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/checkout@v4
         with:
           repository: daniel-ospina/agent-infra
