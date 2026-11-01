@@ -6183,7 +6183,7 @@ def _scripts(content: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def _identity_differences(a: str, b: str) -> frozenset[str]:
+def _identity_differences(a: str, b: str, absorbed: list[str] | None = None) -> frozenset[str]:
     """Every identity dimension in which ``a`` and ``b`` differ.
 
     Deliberately independent of the value dimensions.  Asking only for the
@@ -6191,6 +6191,10 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     "the deploy succeeded at 3pm" and "the deploy failed at 5pm" differ in a
     number and in the predicate, and returning the number would license
     superseding the predicate — the harm this boundary exists to prevent.
+
+    ``absorbed`` (#5329 out-param, never read by this function's answer): the
+    pair's ONE-SIDED content tokens, which a fold therefore discards.  See the
+    vocabulary-gap census appended at the end of this module.
     """
     out: set[str] = set()
     neg_a, neg_b = _negation_markers(a), _negation_markers(b)
@@ -6205,6 +6209,8 @@ def _identity_differences(a: str, b: str) -> frozenset[str]:
     content_a, content_b = _content_tokens(a), _content_tokens(b)
     only_a, only_b = content_a - content_b, content_b - content_a
     one_sided = only_a | only_b
+    if absorbed is not None:  # #5329: deterministic order; never a decision
+        absorbed.extend(sorted(one_sided))
     named = _proper_nouns(a) | _proper_nouns(b)
     if only_a and only_b:
         out.add("substituted_content")
@@ -6271,13 +6277,18 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
     Total and fail-closed — every input is coerced by ``_norm`` and every
     operation is a string, regex or set operation, so LLM-shaped input cannot
     raise here; if anything does, the sentinel reads as a difference.
+
+    #5329: a FOLD's absorbed one-sided tokens are counted (see the census at
+    the end of this module); the decision itself is unchanged.
     """
+    absorbed: list[str] = []
+    absorbed_fold = False
     try:
         ta, tb = _guard_tokens(a), _guard_tokens(b)
         if not ta or not tb:
             # Nothing to compare: refuse the fold rather than assume agreement.
             return "unreadable", _UNREADABLE
-        identity = _identity_differences(a, b)
+        identity = _identity_differences(a, b, absorbed=absorbed)
         dimension: str | None = None
         # The identity dimensions come first, because they are the ones that
         # constrain BOTH decisions; a value dimension is reported only when no
@@ -6298,9 +6309,14 @@ def _boundary(a: str, b: str) -> tuple[str | None, frozenset[str]]:
                 dimension = "number"
             elif _date_tokens(a) != _date_tokens(b):
                 dimension = "date"
+            if dimension is None:
+                absorbed_fold = True  # #5329: a fold — count what it absorbed
         return dimension, identity
     except Exception:  # noqa: BLE001, RUF100
         return "unreadable", _UNREADABLE
+    finally:
+        if absorbed_fold:
+            _record_vocabulary_gap(absorbed)
 
 
 def distinguishing_difference(a: str, b: str) -> str | None:
@@ -11242,3 +11258,305 @@ def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
         lines += [f"- {cat}: {desc}" for cat, desc in ups.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
     return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# APPENDED AT THE END OF THIS MODULE ON PURPOSE — see the #7949 capstone note:
+# docs/evidence/7949-capstone/ types this module's live `file.py:line` cites, so
+# an insertion ANYWHERE ABOVE them re-stales all of them. New code goes here.
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Vocabulary gap census (#5329) — see the append note above ──────────────────────────────────────────────
+#
+# The boundary refuses a fold on differences read from CLOSED, hand-written
+# word lists: ``_NEGATION_MARKERS``, ``_CONDITION_MARKERS`` /
+# ``_CONDITION_PHRASES``, ``_DATE_WORDS``, ``_CLOCK_UNITS``, ``_SCRIPT_BLOCKS``.
+# Every one is finite, and a marker the lists do not name reaches NO identity
+# dimension — the pair then reads as a one-sided broadening and FOLDS (memory
+# loss: a wrong keep is noise, a wrong drop is a deleted claim).
+#
+# The lists are not the bug: closing the class needs a model, not a longer list
+# (#5329's own recommendation), and failing closed on any unknown token would
+# over-block every legitimate broadening. The bug was that the fold happened
+# SILENTLY — nothing anywhere said "this token reached no identity dimension".
+# This census is that statement: it counts, per token, the fold decisions that
+# absorbed it, so the tokens that fell off the end of the vocabularies are
+# nameable and countable instead of invisible. It never changes a decision.
+#
+# WHAT IT DOES NOT CLAIM (review F2): it does not classify. A token here is
+# "one-sided content that reached no identity dimension" — the population a
+# marker gap HIDES IN, not proof of one. Ordinary dropped details land here too
+# ("the team meets weekly in main office" ← "the team meets weekly" absorbs
+# `main`, `office`). Recurrence is the operator's signal: a genuine marker
+# recurs across many claims, a one-off detail does not.
+#
+# TWO POPULATIONS, reported separately (review cycle 2, ISSUE 2). A token the
+# PAIR-READ vocabularies NAMES (`_CONNECTIVE_MEMBERS`, `_POLARITY_MEMBERS`) is
+# not a missing list entry — but it is also not UNDERSTOOD by a fold that still
+# absorbed it: a one-sided `because` reaches no identity dimension (the swap
+# guard refuses only a SWAP) and a one-sided `off` outside a copula predicate
+# does not fire the state guard, so both are DROPPED, and `because` takes the
+# causal link with it. Subtracting them on token membership hid exactly the
+# load-bearing case; they are counted in their own buckets instead —
+# `one_sided_connective` / `one_sided_state` in ``vocabulary_gap_snapshot()`` —
+# so "named by a closed list" stays distinct from "handled by the guard".
+#
+# Read it with ``vocabulary_gap_report()`` (the UNNAMED tokens) and
+# ``vocabulary_gap_snapshot()`` (the unnamed tokens, the pair-read residual, and
+# the bounds actually hit — the only reading that says whether the sample is
+# complete); reset it with ``reset_vocabulary_gap_census()`` between measurement
+# windows.
+
+#: Distinct absorbed tokens retained (a report is a SAMPLE of the tail, and
+#: says so; the running total is exact regardless).  Bounded so a long-lived
+#: process cannot grow this without limit.
+_VOCABULARY_GAP_CAP = 512
+#: Distinct tokens logged at WARNING on first sight.  Bounded for the same
+#: reason — the census is the durable record, the log line is the alarm.
+_VOCABULARY_GAP_LOG_CAP = 32
+#: Longest token retained, in characters (review F4). A token comes from
+#: ``_content_tokens``, so an unlucky claim can carry a URL or a base64 blob;
+#: un-truncated it would pin claim-sized strings for the process's lifetime and
+#: emit claim-sized log records. Longer ones are counted, not retained.
+_VOCABULARY_GAP_MAX_TOKEN = 64
+#: Tokens a CLOSED pair-read vocabulary already NAMES, so their presence is no
+#: evidence of a *vocabulary* gap: `off`/`because` are in
+#: ``_POLARITY_MEMBERS`` / ``_CONNECTIVE_MEMBERS``, and reading them needs the
+#: PAIR (``_polarity_drop`` / ``_connective_swap``).
+#: ⚠️ NAMED is not UNDERSTOOD. Their presence IS evidence the GUARD did not fire
+#: on this pair — the fold dropped a connective or a state word — so they must
+#: not reach the flat report (that would call a named token unnamed) and must
+#: not vanish either (that would report the pair-read residual as zero). They go
+#: to ``one_sided_connective`` / ``one_sided_state`` in the snapshot.
+_VOCABULARY_GAP_UNDERSTOOD = _CONNECTIVE_MEMBERS | _POLARITY_MEMBERS
+
+
+#: The pair-read families, as the snapshot names them. Disjoint by construction
+#: (no token is in both, and the test suite asserts it), so a token has exactly
+#: one bucket and no precedence rule is needed.
+_PAIR_READ_BUCKETS = ("one_sided_connective", "one_sided_state")
+
+
+def _pair_read_bucket(token: str) -> str | None:
+    """The pair-read family that NAMES ``token``, else ``None`` (#5329).
+
+    A clause CONNECTIVE is what ``_connective_swap`` reads and a STATE word is
+    what ``_polarity_drop`` reads; both read the PAIR, not the token. A token in
+    either set that a FOLD absorbed is the guard not firing on THIS pair — a
+    real drop (`because` removes the causal link, `off` removes the state) that
+    the flat report must not call an unnamed gap and must not swallow.
+    """
+    if token not in _VOCABULARY_GAP_UNDERSTOOD:
+        return None
+    if token in _CONNECTIVE_MEMBERS:
+        return "one_sided_connective"
+    if token in _POLARITY_MEMBERS:
+        return "one_sided_state"
+    return None
+
+
+class _VocabularyGapCensus:
+    """Per-token count of the fold decisions that absorbed a token (#5329).
+
+    Thread-safe (the boundary runs on extractor worker threads), bounded, and
+    never read by any decision — ``_boundary`` calls ``record`` after it has
+    computed its answer, in a ``finally`` that cannot alter the returned value,
+    and ``record`` itself swallows everything (a raising logging handler must
+    not turn a fold into a refusal — review F1).
+    """
+
+    __slots__ = ("_counts", "_folds", "_lock", "_logged", "_oversize",
+                 "_paired", "_truncated")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: Counter[str] = Counter()
+        self._logged = 0
+        self._truncated = 0
+        self._oversize = 0
+        self._folds = 0
+        # The pair-read residual, one Counter per family. Bounded by the
+        # vocabularies themselves (17 + 20 members), so no cap and no
+        # truncation counter is needed here.
+        self._paired: dict[str, Counter[str]] = {
+            name: Counter() for name in _PAIR_READ_BUCKETS}
+
+    def record(self, tokens) -> None:
+        """Count one fold decision and the tokens it absorbed.
+
+        NEVER raises, and the suppress is LOAD-BEARING (review cycle 1): the
+        call sits in ``_boundary``'s ``finally``, OUTSIDE its ``try/except``, so
+        an escaping exception is not swallowed as an "unreadable" pair — it
+        would leave ``fold_allowed`` entirely and abort the capture.
+        ``_boundary`` reaches this through ``_record_vocabulary_gap`` (end of
+        module), which owns the local no-escape guarantee for that call site;
+        this suppress is defence in depth, so a second caller cannot
+        reintroduce the escape. A maintainer who moved the call INSIDE the
+        ``try`` would convert a raising handler into the silent false refusal
+        this suppress exists to prevent.
+        """
+        with contextlib.suppress(Exception):  # observability never decides
+            self._record(tokens)
+
+    def _record(self, tokens) -> None:
+        new: list[str] = []
+        with self._lock:
+            self._folds += 1
+            for t in tokens:
+                bucket = _pair_read_bucket(t)
+                if bucket is not None:
+                    # NAMED by a closed pair-read vocabulary, and still DROPPED
+                    # by this fold — so the guard did not fire on this pair
+                    # (#5134/#5139 residual), not a missing list entry. Counted
+                    # in its own bucket: neither an unnamed gap nor invisible
+                    # (review cycle 2, ISSUE 2), and never alarmed as one.
+                    self._paired[bucket][t] += 1
+                    continue
+                if len(t) > _VOCABULARY_GAP_MAX_TOKEN:
+                    self._oversize += 1
+                    continue
+                if t in self._counts or len(self._counts) < _VOCABULARY_GAP_CAP:
+                    if t not in self._counts and self._logged < _VOCABULARY_GAP_LOG_CAP:
+                        new.append(t)
+                        self._logged += 1
+                    self._counts[t] += 1
+                else:
+                    self._truncated += 1
+        if new:
+            # LOUD, once per newly-seen token: a token the boundary could not
+            # read as identity announces itself the first time it is absorbed.
+            # Guarded: a handler that raises (structured/JSON/Sentry handlers
+            # do) must not reach the boundary's fail-closed branch.
+            #
+            # ⚠️ THE TOKENS THEMSELVES GO TO THE LOG — a DELIBERATE trade, not
+            # an oversight (review cycle 2). They are claim-derived content, so
+            # every configured handler (structured, JSON, Sentry) sees up to
+            # `_VOCABULARY_GAP_LOG_CAP` of them per process; the in-memory
+            # census does not leave the box, this line does. Kept because the
+            # alarm is only actionable WITH the token: "a fold absorbed 3
+            # tokens" names nothing a reader can act on, and #5329's whole
+            # failure was a silent loss that no count alone can localise. The
+            # exposure is bounded by that cap and by
+            # `_VOCABULARY_GAP_MAX_TOKEN`; the durable record (and the full
+            # token set) stays in-process behind `vocabulary_gap_report()`, so
+            # a deployment that cannot ship tenant text off-box can drop this
+            # handler and keep the census.
+            with contextlib.suppress(Exception):  # a raising handler must not decide
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "boundary vocabulary gap (#5329): a fold absorbed "
+                    "one-sided token(s) %s that reached NO identity dimension "
+                    "(read as an added detail, then discarded). A marker among "
+                    "them lost its difference; a recurring token is the "
+                    "signal. Read the counts AND the bounds with "
+                    "extractor_v2.vocabulary_gap_snapshot()", new)
+
+    def report(self) -> dict[str, int]:
+        """``{token: fold decisions absorbing it}``, commonest first."""
+        with self._lock:
+            return dict(sorted(self._counts.items(),
+                               key=lambda kv: (-kv[1], kv[0])))
+
+    def snapshot(self) -> dict[str, Any]:
+        """The report plus the bounds hit and the pair-read residual."""
+        with self._lock:
+            return {
+                "tokens": dict(sorted(self._counts.items(),
+                                      key=lambda kv: (-kv[1], kv[0]))),
+                "distinct_tokens": len(self._counts),
+                # NOT "claims folded": this counts BOUNDARY CALLS that returned
+                # a fold decision. A consumer that asks both `fold_allowed` and
+                # `supersede_allowed` about one pair counts it twice, and a
+                # speculative call counts once (review F3).
+                "fold_decisions": self._folds,
+                # The PAIR-READ RESIDUAL (#5329 review cycle 2, ISSUE 2): tokens
+                # a closed vocabulary NAMES but whose guard did not fire on this
+                # pair, so the fold dropped them. Kept out of ``tokens`` (they
+                # are not unnamed vocabulary gaps) and counted here, because a
+                # dropped `because`/`off` is a real loss and reporting it as
+                # zero was the census being narrower than its own claim.
+                "one_sided_connective": self._sorted_paired(
+                    "one_sided_connective"),
+                "one_sided_state": self._sorted_paired("one_sided_state"),
+                "pair_read_residual": sum(
+                    sum(c.values()) for c in self._paired.values()),
+                "truncated_observations": self._truncated,
+                # OBSERVATIONS, not distinct tokens: the same oversize blob
+                # absorbed by five folds counts 5. Named for what it counts, so
+                # the sibling above reads as an observation count too rather
+                # than as a distinct-vs-occurrences pair.
+                "oversize_observations": self._oversize,
+                "cap": _VOCABULARY_GAP_CAP,
+                "max_token_chars": _VOCABULARY_GAP_MAX_TOKEN,
+            }
+
+    def _sorted_paired(self, bucket: str) -> dict[str, int]:
+        """One pair-read family, commonest first (caller holds the lock)."""
+        return dict(sorted(self._paired[bucket].items(),
+                           key=lambda kv: (-kv[1], kv[0])))
+
+    def reset(self) -> None:
+        with self._lock:
+            self._counts.clear()
+            for counter in self._paired.values():
+                counter.clear()
+            self._logged = 0
+            self._truncated = 0
+            self._oversize = 0
+            self._folds = 0
+
+
+_VOCABULARY_GAPS = _VocabularyGapCensus()
+
+
+def vocabulary_gap_report() -> dict[str, int]:
+    """The UNNAMED one-sided tokens fold decisions absorbed (#5329), counted.
+
+    ``{token: number of fold decisions that absorbed it}``, commonest first.
+    These are the tokens the boundary read as "a detail added to one side" and
+    dropped, minus the tokens a closed vocabulary NAMES
+    (``_VOCABULARY_GAP_UNDERSTOOD``) — the population in which an unlisted
+    negator, condition or date word hides. It also contains ordinary dropped
+    details; the census does not classify (see the section comment above).
+
+    ⚠️ This is the UNNAMED class only, and it is NOT the size of the residual:
+    a token a closed vocabulary names is still dropped by a fold the pair-read
+    guard did not fire on (one-sided `because`, one-sided `off`), and those are
+    counted in ``vocabulary_gap_snapshot()`` under ``one_sided_connective`` /
+    ``one_sided_state`` with the total in ``pair_read_residual``. Read BOTH —
+    this dict alone under-counts what fell off the end of a fold decision.
+
+    ⚠️ It is also NOT complete on its own: at ``_VOCABULARY_GAP_CAP`` distinct
+    tokens it stops GROWING, and oversize tokens are never retained, while this
+    return value carries neither fact. Read ``vocabulary_gap_snapshot()`` when
+    the completeness of the sample matters — it reports ``distinct_tokens``,
+    ``truncated_observations`` and ``oversize_observations`` alongside it.
+    """
+    return _VOCABULARY_GAPS.report()
+
+
+def vocabulary_gap_snapshot() -> dict[str, Any]:
+    """``vocabulary_gap_report()`` plus the census's bounds and call count."""
+    return _VOCABULARY_GAPS.snapshot()
+
+
+def reset_vocabulary_gap_census() -> None:
+    """Clear the census (a measurement window boundary; never a decision)."""
+    _VOCABULARY_GAPS.reset()
+
+
+def _record_vocabulary_gap(absorbed: list[str]) -> None:
+    """Count one FOLD's absorbed tokens, and NEVER raise out of the boundary.
+
+    The guarantee is LOCAL to this call on purpose.  ``_boundary`` invokes this
+    from its ``finally:``, so an escaping exception would leave ``fold_allowed``
+    entirely and abort the capture — strictly worse than the refusal that
+    function's fail-closed branch exists to produce.  ``record()`` swallows
+    everything today; this wrapper keeps the invariant even if a future sink
+    (a per-tenant census, a second destination) stops doing so, without spending
+    a line above `def extract_session_v2(` — the #7949 bundle's cites are typed
+    against those line numbers, and every line added there re-stales them.
+    """
+    with contextlib.suppress(Exception):  # observability never decides
+        _VOCABULARY_GAPS.record(absorbed)
