@@ -75,7 +75,41 @@ def test_the_description_does_not_claim_a_non_redundant_argument_is_safe():
     read as permission for a routing argument the host refuses anyway."""
     head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
     assert "redundant routing argument" not in head, head
-    assert "carries a routing argument at all" in head, head
+    assert "whatever its value" in head, head
+
+
+def test_the_host_observation_names_its_object_and_is_not_a_blanket_rule():
+    """`carries a routing argument at all` was a BLANKET rule whose nearest-noun
+    reading is "never send a routing argument" — the exact drop-the-argument
+    bypass the anti-bypass sentence forbids. The claim is an observation about a
+    WRITE carrying `graph`, so it must name the object and stay value-independent
+    (#10084 review P2; the issue itself records the trigger as NOT established)."""
+    head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
+    assert "a host may refuse a write call that carries `graph` whatever its value" in head, head
+    assert "carries a routing argument at all" not in head, head
+    assert "do not send the redundant" in head, head
+
+
+def test_the_anti_bypass_clause_has_a_stop_condition():
+    """The resend instruction is right (the venue's filter is intermittent), an
+    UNBOUNDED one is not: without a terminal action a model facing a host that
+    keeps refusing has no exit except the one the clause forbids — dropping the
+    argument, which writes to the default graph instead (#10084 review P3)."""
+    head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
+    assert "If the refusal repeats with the graph you were asked for" in head, head
+    assert "never retry with `graph` dropped" in head, head
+
+
+def test_the_omit_rule_is_qualified_for_a_graph_bound_credential():
+    """OMISSION is "the default" only for an UNBOUND credential: on the
+    `plan_graph_target(None) -> None` path `mcp_auth._get_org_sdk` opens a
+    graph-bound key's OWN graph (`gid and ns`), so an unqualified "omission
+    targets the default" tells a bound key's caller to omit its way into the
+    WRONG graph — and the qualification is what the sibling `graph="default"`
+    sentence already carries (#10084 review P3)."""
+    head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
+    assert "for a workspace credential, omission targets the default" in head, head
+    assert "graph-bound credential's omission stays on its own graph" in head, head
 
 
 def test_the_no_op_equivalence_is_qualified_for_a_graph_bound_credential():
@@ -86,7 +120,7 @@ def test_the_no_op_equivalence_is_qualified_for_a_graph_bound_credential():
     head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
     no_op_sentence = head[head.index('graph="default"') :]
     assert "graph-bound credential is refused rather than" in no_op_sentence, no_op_sentence
-    assert "do not send it" in no_op_sentence, no_op_sentence
+    assert "do not send the redundant" in no_op_sentence, no_op_sentence
 
 
 def test_the_description_still_carries_the_forms_that_are_accepted():
