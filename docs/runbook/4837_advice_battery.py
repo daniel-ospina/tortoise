@@ -373,7 +373,7 @@ def _run_item(sdk, al, item: dict, *, replay: bool) -> dict:
 
     evidence = res["evidence"]
     qtype = res["question_type"]
-    shipped = system_prompt_for(qtype)
+    shipped = system_prompt_for(qtype, question=item["question"])
     wire = captured.get("calls") or []
     if len(wire) != 1:
         raise SystemExit(f"{item['question_id']}: expected 1 reader call, captured {len(wire)}")

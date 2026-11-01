@@ -221,7 +221,7 @@ def measure(*, replay: bool) -> dict:
                 al._ask_reader_complete = saved_complete
                 al._reset_ask_reader_cache_for_tests()
             evidence = res["evidence"]
-            system = system_prompt_for(res["question_type"])
+            system = system_prompt_for(res["question_type"], question=q["question"])
             # The stub captured the wire (system, user) the lane actually
             # sent. Re-derive it and assert equality, so "the emitted prompt"
             # is EVIDENCE rather than a parallel re-computation: if the lane
