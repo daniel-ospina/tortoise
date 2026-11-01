@@ -250,6 +250,26 @@ def test_an_empty_value_still_means_an_empty_diff(tmp_path):
     assert _selection(tmp_path, "empty")["changed_files"] == []
 
 
+def test_the_comma_then_space_list_is_unchanged(tmp_path):
+    """The shape a shell produces for a comma list —
+    `--changed-files "tortoise/hosted_api.py, tortoise/sdk.py"` — attaches the comma
+    to the PRECEDING token, so the splitter has to strip an EDGE comma off a token
+    that is still a whole path (the other half of the comma contract: an edge comma
+    is a separator, a comma inside a name is not). Must equal the newline form.
+    """
+    got = _selected(tmp_path,
+                    ["--changed-files", "tortoise/hosted_api.py, tortoise/sdk.py"],
+                    artifact="comma_space")
+    want = _selected(tmp_path, ["--changed-files", "-"],
+                     stdin="tortoise/hosted_api.py\ntortoise/sdk.py\n",
+                     artifact="newline")
+    assert got == want
+    assert _selection(tmp_path, "comma_space")["changed_files"] == [
+        "tortoise/hosted_api.py", "tortoise/sdk.py",
+    ]
+    assert got["full"] is True, got  # tortoise/sdk.py is a SHARED_MODULE
+
+
 # ── the mutation this file exists to catch ───────────────────────────────────
 
 def test_the_pre_fix_parse_would_fail_these_pins():
