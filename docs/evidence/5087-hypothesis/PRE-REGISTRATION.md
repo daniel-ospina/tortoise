@@ -226,6 +226,33 @@ hypothesis_bars:
   cost_ratio_max: 2.00
 falsifier: "ratio ≈ 1.0 (or any ratio > 0.75) falsifies the hypothesis, closes #10463 and changes the epic's plan"
 rerun_policy: "one run of the pair is the measurement; a repeat requires a NEW pre-registration"
+
+# ⛔ The ordering disclosure (#10531). `s3-ablation-a1075dfc.log` and this document entered the
+# repository in ONE commit: `#10468` was merged as a SQUASH, which collapsed the two branch commits
+# (`a1075dfc2` wrote the bars, a later one added the log) into `cfa3de857`. `git log
+# --diff-filter=A` therefore reports the same epoch for both, and no epoch comparison can order
+# them. The disclosure below is BOUND to this document by `document_sha256` in
+# `preregistration.json`, and it is printed on every run as `ATOMIC-ADD declared`.
+atomic_add_ordering:
+  s3-ablation-a1075dfc.log:
+    reason: >
+      The bars were committed BEFORE any arm ran, and the log records that fact itself: it names
+      `prereg=a1075dfc2` — the commit its thresholds were read from, not the worktree — and states
+      `changed files (3, all evidence/tooling)` between `source_sha` and that head. No bar moved
+      between `a1075dfc2` and the merged document (0.75 / 1.00 / 4-of-7 / 14-of-14 / 15 / 0.60 /
+      2.00 are the numbers both commits carry), and `a1075dfc2`'s own message says so. The squash
+      destroyed the COMMIT ordering; it could not touch the content, which is why the ordering
+      claim rests on the content and is disclosed here rather than asserted by a rewritten history.
+    branch_commits:
+      - "a1075dfc2 prereg(10463): amend definitions before any run — the bars do not move (adds PRE-REGISTRATION.md; 00:12:17Z)"
+      - "325f2a1a5 measure(10463): the S3 prior-injection hypothesis is measured and FALSE (adds s3-ablation-a1075dfc.log; 00:26:01Z)"
+    squash_merge: "cfa3de857 measure(10463): ... ratio 0.870 (#10468) — both branch commits, collapsed"
+    verifiable_by: >
+      `git diff --stat a1075dfc2 325f2a1a5 -- docs/evidence/5087-hypothesis/` lists ONLY README.md
+      and the log, so PRE-REGISTRATION.md is byte-identical at the commit that froze the bars and at
+      the commit that added the measurement: no bar moved between them. The pair is therefore
+      ordered by CONTENT, which a squash merge cannot rewrite — it could only destroy the commit
+      ordering, which is what it did.
 ```
 
 ## 6. The source sha

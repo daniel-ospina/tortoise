@@ -363,19 +363,163 @@ def test_ordering_fails_when_the_log_predates_the_registration(tmp_path, monkeyp
     assert "not strictly after" in failures[0], failures
 
 
-def test_ordering_is_not_satisfied_by_the_same_second(tmp_path, monkeypatch):
-    """'Same second' is not 'before' — the two files landing in one commit is not an ordering."""
-    repo = _repo(tmp_path, monkeypatch)
+def _atomic_pins(name: str, **overrides) -> dict:
+    """A complete atomic-add disclosure for ``name``, with fields overridable."""
+    entry = {
+        "reason": "the bars were committed before any arm ran",
+        "branch_commits": ["a1075dfc2 prereg: amend definitions before any run"],
+    }
+    entry.update(overrides)
+    return {check.ATOMIC_ADD_PIN: {name: entry}}
+
+
+def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
+    """The ATOMIC shape: the registration and the log land in the SAME commit.
+
+    This is what a squash merge produces — and it is also what one commit written after the numbers
+    were read produces. The git objects are identical, which is why the arm cannot compare them
+    (#10531).
+    """
     prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
     log = repo / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
     prereg.parent.mkdir(parents=True, exist_ok=True)
     prereg.write_text("x\n")
     log.write_text("x\n")
     _git(repo, "add", ".")
-    _git(repo, "commit", "-q", "-m", "both at once", epoch=1_700_000_000)
+    _git(repo, "commit", "-q", "-m", "both at once", epoch=epoch)
+    return prereg, log
+
+
+def test_an_undisclosed_atomic_add_fails(tmp_path, monkeypatch):
+    """Same commit + no disclosure is still a FAILURE, and it names the ORDINARY cause (#10531).
+
+    The pre-fix message read "not strictly after", which is what made #10468 permanently red: a
+    squash merge can never satisfy it. The verdict must stay a failure — a laundering commit has
+    this exact shape — but the diagnosis must name it.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
     failures = check.check_ordering(prereg, [log])
-    assert len(failures) == 1
-    assert "not strictly after" in failures[0], failures
+    assert len(failures) == 1, failures
+    assert "the SAME commit that added" in failures[0], failures
+    assert check.ATOMIC_ADD_PIN in failures[0], failures
+
+
+def test_a_disclosed_atomic_add_passes_and_is_reported(tmp_path, monkeypatch):
+    """The disclosure is what turns an unprovable pair into a DECLARED one — never a silent pass."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    added: list[str] = []
+    failures = check.check_ordering(prereg, [log], _atomic_pins(log.name), None, added)
+    assert failures == [], failures
+    assert added == [log.name]
+
+
+def test_the_three_argument_form_agrees_with_the_reported_one(tmp_path, monkeypatch):
+    """REGRESSION (#10531 review P1): the verdict must not depend on an OUT-PARAM.
+
+    Deferring the anti-rot rule to `atomic_added` made the same tree and pins green through `run()`
+    and red through the three-argument form every test and any future caller uses. An out-param
+    reports; it may not judge.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    pins = _atomic_pins(log.name)
+    assert check.check_ordering(prereg, [log], pins) == []
+    assert check.check_ordering(prereg, [log], pins, None, []) == []
+
+
+def test_an_atomic_and_unscored_log_may_be_disclosed(tmp_path, monkeypatch):
+    """A log that is BOTH atomic and provably unscored is honestly disclosable (#10531 review P1)."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    assert check.check_ordering(prereg, [log], _atomic_pins(log.name)) == []
+
+
+def test_a_typed_shrug_is_not_a_disclosure(tmp_path, monkeypatch):
+    """REGRESSION (#10531 review P2): `str({})` is truthy, so a truthiness test let a shrug pass."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    assert check.check_ordering(prereg, [log], {check.ATOMIC_ADD_PIN: {
+        log.name: {"reason": {"a": 1}, "branch_commits": ["a1075dfc2 x"]}}}) != []
+    assert check.check_ordering(prereg, [log], {check.ATOMIC_ADD_PIN: {
+        log.name: {"reason": "because", "branch_commits": [{}]}}}) != []
+    # A commit entry that names no commit sha points at nothing a reader can resolve.
+    assert check.check_ordering(prereg, [log], {check.ATOMIC_ADD_PIN: {
+        log.name: {"reason": "because", "branch_commits": ["some commit message"]}}}) != []
+
+
+def test_the_cli_prints_the_declared_atomic_add_and_its_commits(capsys):
+    """A declared atomic add must reach the human path, and name the commits it rests on (#10531)."""
+    if check.history_unavailable():
+        pytest.skip("needs full history — CI test jobs check out at fetch-depth:1")
+    assert check.main(["--dir", "docs/evidence/5087-hypothesis"]) == 0
+    out = capsys.readouterr().out
+    assert "ATOMIC-ADD declared" in out, out
+    assert "a1075dfc2" in out and "325f2a1a5" in out, out
+    # The CLAIM line is qualified — a consumer of `machine record run-order claim` must not read a
+    # disclosed ordering as one the gate compared.
+    assert "verified (atomic-add DECLARED" in out, out
+
+
+def test_the_run_report_carries_the_qualified_ordering_and_the_commits():
+    if check.history_unavailable():
+        pytest.skip("needs full history — CI test jobs check out at fetch-depth:1")
+    report = check.run(PREREG_DIR.parent / "5087-hypothesis", use_corpus=False)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering_atomic_add"] == ["s3-ablation-a1075dfc.log"]
+    assert report["ordering"].startswith("verified (atomic-add DECLARED")
+    assert report["run_order_claim"] == report["ordering"]
+    commits = report["ordering_atomic_add_commits"]["s3-ablation-a1075dfc.log"]
+    assert any(c.startswith("a1075dfc2") for c in commits), commits
+
+
+def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, monkeypatch):
+    """A shrug is not a disclosure — an empty `reason` or an empty `branch_commits` fails closed."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    for entry in ({"reason": "", "branch_commits": ["a1075dfc2 x"]},
+                  {"reason": "because", "branch_commits": []},
+                  {"reason": "because"},):
+        failures = check.check_ordering(prereg, [log], {check.ATOMIC_ADD_PIN: {log.name: entry}})
+        assert failures and "the SAME commit that added" in failures[0], failures
+
+
+def test_a_disclosure_for_a_normally_ordered_log_fails(tmp_path, monkeypatch):
+    """A waiver granted where none is needed is how a waiver set becomes routine (#10531).
+
+    The same anti-rot rule `pins.pre_existing_unscored_logs` applies: an atomic-add disclosure may
+    only be carried by a log whose add-commit IS the registration's, so it cannot be pre-granted to
+    a future log and quietly cover a real ordering failure.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _atomic_pins(log.name))
+    assert len(failures) == 1, failures
+    assert "not one" in failures[0], failures
+
+
+def test_a_disclosure_naming_an_absent_log_fails(tmp_path, monkeypatch):
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    failures = check.check_ordering(prereg, [log], _atomic_pins("gone.log"))
+    assert any("stale waiver" in f for f in failures), failures
+
+
+def test_the_attack_is_still_undeclarable(tmp_path, monkeypatch):
+    """REGRESSION: #10531 must NOT weaken the `log_epoch < prereg_epoch` arm.
+
+    The log added first and the thresholds written afterwards is THE defect the guard exists for.
+    A disclosure must not launder it, and the message must stay the original one.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_000)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _atomic_pins(log.name))
+    assert any("not strictly after" in f for f in failures), failures
+    assert any("not one" in f for f in failures), failures
 
 
 def test_an_uncommitted_registration_cannot_claim_ordering(tmp_path, monkeypatch):

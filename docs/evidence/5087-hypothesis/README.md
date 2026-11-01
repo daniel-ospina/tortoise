@@ -387,8 +387,14 @@ survive because they are parsed out of the **commit**, never this file.
    amendment commit `a1075dfc2` is also the document's only add-commit
    (`git log --diff-filter=A -- docs/evidence/5087-hypothesis/PRE-REGISTRATION.md`), so it *adds* all
    236 lines and changes nothing. The anti-tuning property the sentence reaches for still holds, by
-   a different mechanism: the add-commit (`00:12:17Z`) strictly precedes the measured log's
-   add-commit (`325f2a1a5`, `00:26:01Z`) — which is what `capstone_preregistration_check.py`'s
-   ordering half reads — and the bars are read out of that commit rather than the worktree. **No
+   a different mechanism: the add-commit (`a1075dfc2`, `00:12:17Z`) strictly precedes the measured
+   log's add-commit (`325f2a1a5`, `00:26:01Z`) — and the bars are read out of that commit rather
+   than the worktree. ⚠️ On `main` those two epochs no longer EXIST: `#10468` was merged as a
+   squash (`cfa3de857`), which collapsed both commits into one, so `git log --diff-filter=A`
+   reports the same epoch for the document and for its log and no epoch comparison can order them.
+   The ordering is therefore carried by `pins.atomic_add_ordering` in `PRE-REGISTRATION.md` — and it
+   is still checkable, by CONTENT rather than by position: `git diff --stat a1075dfc2 325f2a1a5 --
+   docs/evidence/5087-hypothesis/` lists only `README.md` and the log, so the pre-registration is
+   byte-identical at the commit that froze the bars and at the commit that added the measurement. **No
    bar, floor, denominator or number moves**; the defect is a process claim, and it is withdrawn
    here.
