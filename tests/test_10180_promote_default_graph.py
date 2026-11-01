@@ -2407,3 +2407,172 @@ def test_the_post_provision_hook_follows_the_prior_promoted_default(sb):
     assert node.get("fork") == "build", (
         "the hook inherited the fork from the DEMOTED graph: the prior org's "
         f"record lives in the promoted default. node={node}")
+
+
+# ── 15. The REGISTRY lane's publish must carry the guard's own predicate ────
+# `_publish_default_namespace` is ORG-WIDE ONLY: it suppresses the publish when
+# the credential carries a `graph_id`, because a graph-bound key's
+# `graph_namespace` is a CUSTOM graph's — and that namespace passes the
+# `org_{org_id}_` shape test, so a consumer of the hint would evaluate and write
+# org-level state into the caller's own graph. `get_current_org`'s registry
+# branch was the one call site that built its own dict and omitted `graph_id`,
+# so the guard could not fire there and the helper silently did not do what its
+# docstring says (every Supabase sibling passes the resolved `org` dict, which
+# carries it). Self-host only, so it cannot misroute a hosted org's state —
+# which is exactly why it survived six review rounds and two CI cycles.
+
+def _registry_with_bound_and_wide_keys(tmp_path, monkeypatch):
+    """A real embedded registry: one org, one custom graph, and the two key
+    shapes `get_current_org` distinguishes (`graph_id` set / NULL)."""
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+    db_path = str(tmp_path / "registry-10180.db")
+    monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+
+    reg = TortoiseSDK(db_path=db_path, namespace="registry")
+    try:
+        org = reg.org_create("org-10180-bound")
+        org_id = org["id"]
+        reg.org_update(org_id, max_points=10_000, max_graphs=10,
+                       max_sessions=10_000)
+        graph = reg._graph_create(org_id, "graph-10180-bound", kind="custom")
+        bound = reg.apikey_create(org_id, "bound-10180",
+                                  graph_id=graph["graph_id"],
+                                  scopes=["graphs:read"], prefix="tk_")
+        wide = reg.apikey_create(org_id, "wide-10180", prefix="tk_")
+        return {
+            "org_id": org_id,
+            "custom_ns": graph["namespace"],
+            "bound_key": bound["api_key"],
+            "wide_key": wide["api_key"],
+        }
+    finally:
+        reg.close()
+
+
+def _registry_request(token: str):
+    """The Request `get_current_org` reads: bearer + path/state, nothing else."""
+    from starlette.requests import Request
+
+    return Request({
+        "type": "http", "http_version": "1.1", "method": "GET",
+        "scheme": "http", "path": "/v1/test-lane-registry",
+        "raw_path": b"/v1/test-lane-registry", "query_string": b"",
+        "root_path": "", "headers": [(b"authorization", f"Bearer {token}".encode())],
+        "client": ("127.0.0.1", 54321), "server": ("testserver", 80),
+        "state": {},
+    })
+
+
+def test_the_registry_lane_publishes_no_default_namespace_for_a_graph_bound_key(
+        tmp_path, monkeypatch):
+    """FAIL-ON: the registry branch of `get_current_org` published
+    `{"org_id", "graph_namespace"}` with no `graph_id`, so
+    `if org_id and not org.get("graph_id")` in `_publish_default_namespace` was
+    vacuously true for a GRAPH-BOUND key and the caller's own graph namespace was
+    published as "the org's default" — the precise thing the guard exists to
+    prevent. The same run also pins the ORG-WIDE leg, so the assertion cannot
+    pass by publishing nothing at all.
+
+    Behavioural, not a source pin: it drives the real auth dependency against a
+    real embedded registry, so a future call site that forgets the field fails
+    here even if it is spelled differently."""
+    import asyncio
+
+    from tortoise import sdk as sdk_mod
+
+    info = _registry_with_bound_and_wide_keys(tmp_path, monkeypatch)
+    # The three post-auth calls this seam does not own (telemetry + abuse
+    # accounting + the actor alias) — stubbed so the lane is exercised for the
+    # publish alone, exactly as the sibling tests patch `_make_sdk`.
+    monkeypatch.setattr(ha, "first_api_call_pending", lambda _org: False)
+    async def _noop(*_a, **_k):  # noqa: E306 - local stub
+        return None
+    monkeypatch.setattr(ha, "_abuse_post_auth", _noop)
+    monkeypatch.setattr(sdk_mod, "_alias_actor_user_id", lambda x: x)
+
+    token = ha._resolved_default_namespace.set(None)
+
+    async def _publish_seen_by(token_: str):
+        """Drive the REAL dependency and read the hint from ITS context.
+
+        `_resolved_default_namespace` is a ContextVar and `asyncio.run` runs the
+        coroutine in a task with a COPY of this context, so a read after the
+        call would always answer the pre-set `None` — vacuously, for every
+        credential. The read has to happen inside the task.
+        """
+        await ha.get_current_org(_registry_request(token_))
+        return ha._resolved_default_namespace.get()
+
+    try:
+        assert asyncio.run(_publish_seen_by(info["bound_key"])) is None, (
+            "a GRAPH-BOUND registry key published a default namespace: the "
+            "publish dict omits `graph_id`, so the helper's ORG-WIDE-ONLY "
+            "guard cannot fire and its custom namespace reaches org-level "
+            "consumers")
+
+        hint = asyncio.run(_publish_seen_by(info["wide_key"]))
+        assert hint is not None, (
+            "an ORG-WIDE registry key must still publish its resolved value — "
+            "otherwise this test proves nothing about the bound leg")
+        assert hint[0] == info["org_id"]
+        assert hint[1] != info["custom_ns"], (
+            "the org-wide leg published a custom graph's namespace")
+    finally:
+        ha._resolved_default_namespace.reset(token)
+
+
+# ── 16. The runbook's `reason` table is the code's own return set ───────────
+
+def test_the_runbook_lists_exactly_the_carry_reasons_the_code_returns():
+    """FAIL-ON: the operator table listed `no_move` — a value
+    `_carry_onboarding_state` only ever holds as an unreachable initial default,
+    because every `return` overrides it — and omitted `no_namespace`, the value
+    a promotion actually reports when the RPC names no target. An operator
+    reading the table to diagnose a promotion would look up a reason that cannot
+    occur and not find the one that can.
+
+    Pinned against the function's RETURN statements (not every `"reason": …`
+    literal), because that is precisely the distinction the defect was: an
+    assigned default is not a reported one."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    tree = ast.parse((root / "tortoise" / "hosted_api.py").read_text(
+        encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "_carry_onboarding_state")
+    returned: set[str] = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        for sub in ast.walk(node.value):
+            if not isinstance(sub, ast.Dict):
+                continue
+            for k, v in zip(sub.keys, sub.values):
+                if (isinstance(k, ast.Constant) and k.value == "reason"
+                        and isinstance(v, ast.Constant)
+                        and isinstance(v.value, str)):
+                    returned.add(v.value)
+    assert returned == {"copied", "absent", "already_present", "no_source",
+                        "no_namespace", "carry_failed"}, returned
+
+    doc = (root / "docs" / "ops" / "multi-graph-migration-runbook.md").read_text(
+        encoding="utf-8")
+    # The table that follows the "Read `reason`" sentence.
+    start = doc.index("Read `reason` on every promotion")
+    table = doc[start:doc.index("\n\n", doc.index("| `carry_failed`", start))]
+    tokens = {tok for line in table.splitlines() if line.startswith("|")
+              for tok in line.replace("`", " \x00").split("\x00")[:-1]
+              if tok and " " not in tok.strip()}
+    documented = {tok.strip() for tok in tokens}
+    assert returned <= documented, (
+        f"returned but undocumented: {sorted(returned - documented)}")
+    assert "no_move" not in documented, (
+        "the runbook documents `no_move`, which the code never returns")

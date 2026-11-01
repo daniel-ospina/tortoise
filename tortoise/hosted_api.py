@@ -6892,8 +6892,19 @@ async def get_current_org(request: Request) -> dict:
         from tortoise.pricing import tier_limits
         request.state.org_id = org_id
         request.state.tier = tier or "free"
+        # `graph_id` MUST ride along: it is the whole of
+        # `_publish_default_namespace`'s ORG-WIDE-ONLY guard. Omit it and the
+        # guard cannot fire, so a GRAPH-BOUND registry key publishes its own
+        # custom namespace — which passes the `org_{org_id}_` shape test — as
+        # the org's default, in direct contradiction of the helper's docstring
+        # and of every Supabase sibling call site (they pass the resolved `org`
+        # dict, which carries it). Inert TODAY only because this lane runs with
+        # `is_supabase_enabled()` false and `moved_default_namespace` answers
+        # `None` off that branch; the shape is still wrong, and the next reader
+        # of the guard would find it not doing what it says (tortoise#10452).
         _publish_default_namespace({"org_id": org_id,
-                                    "graph_namespace": graph_namespace})
+                                    "graph_namespace": graph_namespace,
+                                    "graph_id": graph_id})
         lim = tier_limits(tier or "free")
         # max_orgs removed: multi-org is a USER capability, not a tier field
         # (per-org billing; tier limits come from pricing.json)
