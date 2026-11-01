@@ -486,6 +486,30 @@ def test_an_unreadable_record_does_not_add_a_wrong_instruction(tmp_path, monkeyp
     assert added == [], added
 
 
+def test_a_content_decided_pass_is_not_dressed_as_a_declaration(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-7 P2): the pass is decided by the LOG'S CONTENT, so a disclosure
+    sitting in the same tree decided nothing and must not be reported as the GROUND of it.
+
+    The unscored arm appended to `atomic_added` whenever a disclosure existed, so the CLI claimed
+    `the ordering HOLDS BY DISCLOSURE` for a pass that deleting the disclosure leaves unchanged —
+    and, because `atomic_detail` was never filled on that arm, the ATOMIC-ADD block that followed
+    printed ZERO commit lines. Measured pre-fix: `added == ['e1-e2.log']`, `detail == {}`.
+
+    The waiver stays VISIBLE on the deciding evidence — `ordering_exempt` — so this asserts both
+    halves: nothing claimed as a declaration, and the content waiver still reported.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    added: list[str] = []
+    detail: dict = {}
+    exempted: list[str] = []
+    assert check.check_ordering(prereg, [log], None, exempted, added, _atomic_pins(log.name),
+                                detail) == []
+    assert added == [] and detail == {}, (added, detail)
+    assert exempted == [log.name], exempted
+
+
 def test_a_report_never_claims_a_declaration_the_record_does_not_carry(tmp_path, monkeypatch):
     """An atomic + provably-unscored log with NO disclosure must not be reported as DECLARED."""
     repo = _repo(tmp_path, monkeypatch)
