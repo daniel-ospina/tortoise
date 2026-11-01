@@ -382,9 +382,10 @@ def test_an_unknown_unit_is_a_spelling_not_a_rewrite():
 def test_a_refused_value_over_the_content_cap_cannot_be_minted_either():
     """Review cycle 3, P2: the set was keyed UNCLAMPED while `_mint_endpoint`
     compares the CLAMPED text, so a >`_MAX_CONTENT` refused content was minted
-    anyway. The CLAMPED key is what reds this (cycle 5 verified: deleting it
-    fails here; the reader at `_mint_endpoint` never consults an unclamped key,
-    which is why only the clamped one is recorded)."""
+    anyway. The CLAMPED key reds THIS pin; the refusal records the UNCLAMPED key
+    as well, because a whitespace-heavy >cap content collapses to a short norm
+    that a short prose operator ref carries — see
+    `test_a_whitespace_collapsed_over_cap_refusal_still_blocks_the_mint`."""
     content = "the p95 hit 4.0 seconds " + ("z" * (v2._MAX_CONTENT + 200))
     quote = "the p95 hit 4.2 seconds " + ("z" * (v2._MAX_CONTENT + 200))
     embed = _embed(content, quote)
@@ -399,3 +400,28 @@ def test_a_refused_value_over_the_content_cap_cannot_be_minted_either():
     assert all(p["content"] != clamped and "4.0 seconds" not in p["content"]
                for p in result["payload"]["points"]), (
         [p["content"][:40] for p in result["payload"]["points"]])
+
+
+def test_a_whitespace_collapsed_over_cap_refusal_still_blocks_the_mint():
+    """Review cycle 6, P2: the UNCLAMPED key is load-bearing, not redundant.
+
+    A refused content that exceeds `_MAX_CONTENT` only in WHITESPACE collapses
+    under `_norm`, so a SHORT prose operator ref carries the collapsed full text
+    — and `_mint_endpoint`'s clamped key cannot produce it. With only the clamped
+    key the refused value is re-minted (measured before this pin:
+    `'the p95 hit 4.0 seconds b'` reappeared in `payload["points"]`).
+    """
+    content = "the p95 hit 4.0 seconds" + ("\n" * (v2._MAX_CONTENT + 200)) + "b"
+    embed = {
+        "entities": [],
+        "points": [{"content": content, "pointKind": "statement",
+                    "about_entities": [],
+                    "quote": "the p95 hit 4.2 seconds"}],
+        "events": [], "operators": [{
+            "src": "the p95 hit 4.0 seconds b",
+            "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}],
+        "chain_notes": [], "link_before_create": [],
+    }
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    assert result["payload"]["points"] == [], (
+        [p["content"][:44] for p in result["payload"]["points"]])

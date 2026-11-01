@@ -8223,10 +8223,16 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if _refuse_rewritten_value(str(p.get("content") or ""),
                                    str(p.get("quote") or ""),
                                    warnings=warnings):
+            # ⚠️ BOTH keys are needed, and cycle 5's "only the clamped one"
+            # reading was WRONG (cycle 6 measured it): the clamped key matches a
+            # ref `_mint_endpoint` truncates, while the unclamped key is what it
+            # matches when the refused content exceeds `_MAX_CONTENT` only in
+            # WHITESPACE — a transcript/table dump whose `_norm` collapses — so a
+            # short prose ref carries the collapsed full text and the clamped key
+            # cannot produce it. With only the clamped key, a refused `4.0` was
+            # re-minted as an endpoint Point from exactly such a shape.
             refused_value_contents.add(_norm(content))
-            # ⚠️ The CLAMPED key only: `_mint_endpoint` compares
-            # `str(ref).strip()[:_MAX_CONTENT]`, so an unclamped key could never
-            # match (and an unclamped-only entry would be a silent no-op).
+            refused_value_contents.add(_norm(str(p.get("content") or "")))
             # The point's own `supersedes` ref is dropped WITH the point, and
             # #9906's rule is that none of the drop doors is silent — so the
             # reversal is reported through the same carry helper the other
