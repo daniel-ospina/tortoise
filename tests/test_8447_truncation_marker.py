@@ -405,3 +405,149 @@ class TestAScoreFloorIsNotProofOfCompleteness:
         marker = truncation_field(sink)
         assert marker[TRUNCATED_FIELD] is True
         assert marker[TOTAL_AVAILABLE_FIELD] == 5
+
+
+# ── review round 5: the three gaps the proof still had ───────────────────
+
+def _point_ids(sdk, n: int) -> list[str]:
+    """Real ids from the store, so a driven hit row still fetches its content."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.content CONTAINS 'zebra' RETURN n.id").result_set
+    ids = [row[0] for row in rows]
+    assert len(ids) >= n, f"store holds {len(ids)} points, need {n}"
+    return ids[:n]
+
+
+def _chain(hits, entry):
+    """A ``degradation_chain`` double that answers with ``hits`` and RECORDS.
+
+    The real chain records its per-leg verdicts into the ``leg_trace`` the SDK
+    passes it (``reason="timeout"`` for a leg still running at the collective
+    deadline) — that trace is the only evidence distinguishing "the leg never
+    answered" from "the leg answered that it found nothing", so the double has
+    to produce it too.
+
+    ``TORTOISE_BM25_LEXICAL`` is pinned OFF at the call sites: the shipped BM25
+    arm re-scores the ``fts`` slot AFTER the chain returns, so with it on the
+    double's rows would be replaced by a real lexical read and the test would
+    assert on rows it never controlled.
+    """
+    def _fake(graph, query, kind, query_vec, strategies, **kwargs):
+        trace = kwargs.get("leg_trace")
+        if trace is not None and entry is not None:
+            trace.append(dict(entry))
+        return {"fts": list(hits)} if hits else {}
+    return _fake
+
+
+class TestALegThatNeverAnsweredIsNotComplete:
+    """A leg that was asked and never answered drops rows exactly as a cap does.
+
+    `degradation_chain` only returns the legs that produced rows, so its result
+    dict cannot say whether a missing leg matched nothing or never ran. The leg
+    trace can — and the completeness proof must read it, or a timed-out vector
+    leg leaves a read claiming an EXACT total of a lower bound.
+    """
+
+    def test_a_leg_that_timed_out_withholds_the_total(self, sdk, monkeypatch):
+        _seed(sdk, 20)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        hits = [(pid, 1.0 - i / 100) for i, pid in enumerate(_point_ids(sdk, 10))]
+        monkeypatch.setattr(
+            "tortoise.search_engine.degradation_chain",
+            _chain(hits, {"leg": "structural", "ran": True, "degraded": True,
+                          "reason": "timeout", "count": 0}))
+
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+
+        assert len(rows) == 5
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True
+        assert TOTAL_AVAILABLE_FIELD not in marker, (
+            "the structural leg never answered, so the 10 rows the sparse leg "
+            "returned are a LOWER BOUND on a 20-match store — publishing them "
+            "as an exact total is the defect this marker exists to prevent")
+
+    def test_a_leg_that_ran_and_found_nothing_is_an_ANSWER(self, sdk, monkeypatch):
+        """Control: the fold keys on the leg's VERDICT, never on key-absence.
+
+        A leg that ran and matched nothing leaves no key in ``raw_results``
+        either, and it is a complete answer — withholding the total there would
+        trade one blind spot for a permanent false positive.
+        """
+        _seed(sdk, 20)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        hits = [(pid, 1.0 - i / 100) for i, pid in enumerate(_point_ids(sdk, 10))]
+        monkeypatch.setattr(
+            "tortoise.search_engine.degradation_chain",
+            _chain(hits, {"leg": "structural", "ran": True, "degraded": False,
+                          "reason": "empty_results", "count": 0}))
+
+        sink: dict = {}
+        sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True          # 10 candidates, 5 shipped
+        assert marker[TOTAL_AVAILABLE_FIELD] == 10, (
+            "every asked leg answered — the window is the whole match set this "
+            "read could see, so the total is exact and must be published")
+
+
+class TestAWindowThatFilledItselfIsIncomplete:
+    """Saturation IS the proof; it does not need a filter on top (#8447 r5)."""
+
+    def test_a_pool_smaller_than_the_limit_cannot_report_complete(self, sdk, monkeypatch):
+        """`pool_size` is an EXACT override and may sit BELOW `limit`."""
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        _seed(sdk, 20)
+        sink: dict = {}
+        # pool_size=2 -> str_limit=2 -> every leg is asked for 2 rows and each
+        # leg's window saturates, so the handful of delivered rows are a handful
+        # of the 20 that matched — and the union stays far below `limit`.
+        rows = sdk.tortoise_fts_query("zebra", limit=10, pool_size=2,
+                                      _truncation_out=sink)
+
+        assert 0 < len(rows) < 10
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True
+        assert TOTAL_AVAILABLE_FIELD not in marker
+
+
+class TestTheDegradedArmsMarkACut:
+    """Pin the TF-IDF arms: the round-1 P1 fix was held by inspection only."""
+
+    @staticmethod
+    def _all_legs_failed(monkeypatch):
+        # Every retrieval leg produces nothing while the STORE is reachable —
+        # the state the degraded arms exist for. Before round 5 no test drove it
+        # on a reachable store, so deleting both arms' marker writes kept the
+        # whole file green. The BM25 arm is pinned OFF: it re-scores the ``fts``
+        # slot AFTER the chain returns, so with it on the read never reaches the
+        # TF-IDF arms at all.
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        monkeypatch.setattr("tortoise.search_engine.degradation_chain",
+                            lambda *a, **k: {})
+
+    def test_a_full_page_from_the_fallback_is_never_complete(self, sdk, monkeypatch):
+        self._all_legs_failed(monkeypatch)
+        _seed(sdk, 20)
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+
+        assert len(rows) == 5
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True, (
+            "5 rows out of a 20-match store answered by the TF-IDF fallback is "
+            "the round-1 P1: it must not read COMPLETE")
+        assert TOTAL_AVAILABLE_FIELD not in marker
+
+    def test_a_short_page_from_the_same_fallback_is_complete(self, sdk, monkeypatch):
+        """Control: the same arm, a page that was not full, IS complete."""
+        self._all_legs_failed(monkeypatch)
+        _seed(sdk, 20)
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=50, _truncation_out=sink)
+
+        assert len(rows) == 20
+        assert truncation_field(sink) == {TRUNCATED_FIELD: False}

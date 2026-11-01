@@ -34415,6 +34415,14 @@ class TortoiseSDK:
         # terms of its own.
         from .read_status import (
             STATUS_DEGRADED as _STATUS_DEGRADED,
+            # #8447 (review round 5, P2): the recorded judgment on which leg
+            # reasons PROVE the store ANSWERED. ``_ANSWERED_REASONS`` is the one
+            # home for that fact (it already tells `query_failed` /
+            # `breaker_open` / `timeout` apart from `empty_results` /
+            # `index_missing` / `no_embeddings`), so the completeness proof
+            # CONSUMES it instead of minting a second reason list that would
+            # drift from it.
+            _ANSWERED_REASONS,
             classify_leg_trace as _classify_leg_trace,
         )
         # #7952 (§17.2 / §17.3): the COMPLETENESS MARKER's ONE home. The read
@@ -34474,6 +34482,15 @@ class TortoiseSDK:
             _caller_trace = leg_trace
         else:
             _caller_trace = None
+        # #8447 (review round 5, P2): the truncation marker's proof needs the
+        # SAME per-leg verdicts — a leg that never answered drops rows exactly
+        # as a cap does, and until this the marker could not see it. With a
+        # sink and no other trace, record one here: every consumer of
+        # `status_trace` only APPENDS audit entries (never changes the rows),
+        # and `degradation_chain` gates its per-leg lists on `trace_active`, so
+        # the cost is bounded and the answer is unchanged.
+        if status_trace is None and _truncation_out is not None:
+            status_trace = []
 
         # #7952 (§17.2): the COMPLETENESS MARKER. Declared only AFTER the
         # projection is obtained and the bounded probe has answered, so the
@@ -35172,12 +35189,13 @@ class TortoiseSDK:
         # 4. Fuse via RRF (skip if single strategy or full-scan)
         if is_full_scan or len(raw_results) == 1:
             strat_name, ranked = next(iter(raw_results.items()))
-            # #8447 (review P2): the union the LEG produced, BEFORE the score
-            # floor below narrows it. ``threshold`` is a post-window filter like
-            # every other one, so the completeness proof has to see the set it
-            # started from — a saturated window a floor then shrank is not proof
-            # that no leg filled its own window.
-            _pre_filter_ids = len(ranked)
+            # #8447 (review round 5, P3): the PER-LEG window this leg filled,
+            # BEFORE the score floor below narrows it. Saturation of a leg's own
+            # window is proof that matches beyond it were never read, and it
+            # survives no matter what a filter then does to the visible set —
+            # the single-strategy branch has exactly one leg, so its own length
+            # IS the peak.
+            _leg_peak = len(ranked)
             # Apply threshold filter (score floor)
             fused = {pid: score for pid, score in ranked if score >= threshold}
             match_source = strat_name
@@ -35221,9 +35239,13 @@ class TortoiseSDK:
                 weights=fusion_weights,
                 k=fusion_k,
             )
-            # #8447 (review P2): the fused union BEFORE the score floor below —
-            # same reason as the single-strategy branch above.
-            _pre_filter_ids = len(fused)
+            # #8447 (review round 5, P3): the PER-LEG MAXIMUM, not the fused
+            # union. The union can reach ``str_limit`` with NO leg saturated
+            # (two legs of 60 under a window of 120), and it says nothing about
+            # whether a leg's own window filled — which is the fact that proves
+            # matches beyond it exist. Same reason as the branch above for
+            # taking it BEFORE the score floor.
+            _leg_peak = max((len(_rows) for _rows in ranked_lists), default=0)
             # Apply threshold filter to RRF scores
             if threshold > 0:
                 fused = {pid: score for pid, score in fused.items() if score >= threshold}
@@ -35611,13 +35633,56 @@ class TortoiseSDK:
             # the legs filled their windows — the rows it drops scored below it,
             # so the survivors are not provably the whole match population.
             or threshold > 0)
+        # #8447 (review round 5, P2): DID EVERY ASKED LEG ANSWER? The proof
+        # above only ever looked at the rows the SURVIVING legs returned, so a
+        # leg that raised, hit the 500 ms collective deadline or was refused by
+        # its own circuit breaker was invisible — its rows were never read and
+        # are unreachable, exactly like rows behind the cap. Ask the trace.
+        #
+        # ``_asked_legs`` mirrors ``degradation_chain``'s own submit predicate
+        # (a leg is only asked when the strategy is enabled AND it has a
+        # question: the sparse/structural legs need a query, the dense leg needs
+        # a query VECTOR). A leg that was never asked is a DECLARED capability
+        # gap — no embedder installed, say — not a drop from a set this read
+        # matched; ``status: degraded`` is the field that reports it, and
+        # marking every read on a keyword-only deployment truncated would be
+        # the false positive that trains readers to ignore this marker.
+        _asked_legs = {
+            "fts": bool(strategies.get("fts") and query),
+            "vector": bool(strategies.get("vector") and query_vec),
+            "structural": bool(strategies.get("structural")),
+        }
+        # A LOST leg is one that was asked and whose own verdict is not one of
+        # the recorded ANSWERED reasons: `query_failed` / `breaker_open` /
+        # `timeout` mean the store never answered that leg's question, while
+        # `empty_results` / `index_missing` / `no_embeddings` are ANSWERS ("I
+        # read, and there was nothing") and must NOT withhold a total. Key
+        # ABSENCE from ``raw_results`` cannot make this distinction — a leg that
+        # ran and found nothing leaves no key either — which is why the trace,
+        # not the result dict, is the evidence. A leg emptied by the #4028
+        # relevance floor is likewise an answer (it recorded `degraded=False`),
+        # so it never enters here.
+        _lost_legs = {
+            entry.get("leg") for entry in (status_trace or ())
+            if isinstance(entry, dict)
+            and entry.get("degraded")
+            and _asked_legs.get(entry.get("leg"))
+            and entry.get("reason") not in _ANSWERED_REASONS
+        }
         _trunc["candidates"] = len(result_ids)
-        _trunc["exact"] = (len(result_ids) < str_limit) and not _filters_shrank
-        # A saturated window that a filter then shrank below ``limit`` is
-        # INCOMPLETE even though nothing was cut from the visible set: the
-        # matches beyond the window were never read.
-        _trunc["incomplete"] = bool(
-            _pre_filter_ids >= str_limit and _filters_shrank)
+        _trunc["exact"] = (
+            (len(result_ids) < str_limit)
+            and not _filters_shrank
+            and not _lost_legs)
+        # A read is INCOMPLETE even when nothing was cut from the visible set, in
+        # two cases — both of them "matches this read never saw, reachable by no
+        # follow-up call":
+        #   * a leg filled its own window. Saturation IS the proof; it does not
+        #     need a filter on top, and requiring one let a `pool_size` below
+        #     `limit` (an EXACT override, `retrieve.resolve_pool_size`) launder a
+        #     saturated window into COMPLETE;
+        #   * an asked leg never answered (``_lost_legs`` above).
+        _trunc["incomplete"] = bool(_leg_peak >= str_limit or _lost_legs)
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)

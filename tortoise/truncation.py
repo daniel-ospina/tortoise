@@ -46,21 +46,31 @@ omits the field, so a number that IS present is always exact and needs no
 qualifier.
 
 **What ``truncated: true`` does NOT mean: "only the cap".** A row can be lost at
-the cap (``result_ids[:limit]``) or downstream of it (a ``min_confidence``
-floor, a hit whose entity read came back empty) — and the caller cannot reach
-EITHER: the dropped row is unreachable by any subsequent call, which is the
-whole reason the marker exists. So the verdict is computed from the rows that
-actually SHIP, and it answers *"is the delivered set the whole set this read
-matched?"*, not *"did the cap fire?"*. Narrowing it to the cap would make a
-3-match read whose entity fetch failed answer ``truncated: false`` over 2 rows —
-a positive claim of completeness on an incomplete answer, the defect this module
-exists to make impossible. This is the same distinction Elasticsearch draws by
-signalling partial results at all (``allow_partial_search_results``,
-``timed_out`` / ``_shards.failed``): a partial answer must be MARKED, and the
-marker is not qualified by which stage dropped the row. ``returned`` is
-correspondingly measured at delivery, never at the cut — the two only differ
-when something downstream dropped a row, and that is exactly the case the
-marker must not read as complete.
+three seams, and the caller can reach NONE of them: at the cap
+(``result_ids[:limit]``), downstream of it (a ``min_confidence`` floor, a hit
+whose entity read came back empty), or before it — a retrieval leg that was
+ASKED and never answered (it raised, missed the collective deadline, or was
+refused by its own circuit breaker), so the rows it would have contributed were
+never in the candidate set at all. Every one of those is unreachable by any
+subsequent call, which is the whole reason the marker exists. So the verdict is
+computed from the rows that actually SHIP, and it answers *"is the delivered set
+the whole set this read matched?"*, not *"did the cap fire?"*. Narrowing it to
+the cap would make a 3-match read whose entity fetch failed answer
+``truncated: false`` over 2 rows — a positive claim of completeness on an
+incomplete answer, the defect this module exists to make impossible. This is the
+same distinction Elasticsearch draws by signalling partial results at all
+(``allow_partial_search_results``, ``timed_out`` / ``_shards.failed``): a partial
+answer must be MARKED, and the marker is not qualified by which stage dropped
+the row. ``returned`` is correspondingly measured at delivery, never at the cut
+— the two only differ when something downstream dropped a row, and that is
+exactly the case the marker must not read as complete.
+
+⛔ **A leg that was never ASKED is not one of those three seams.** With no
+embedder installed, the dense leg has no question to ask: nothing this read
+matched was dropped, and the capability gap belongs to ``status: degraded``
+(the recorded vocabulary), not here. The two are deliberately kept apart —
+marking every read of a keyword-only deployment ``truncated`` would make the
+field meaningless and train callers to ignore it.
 
 **How this is told apart from legitimate pagination.** A caller walking pages is
 NOT truncating, and marking every paged response would train readers to ignore
@@ -96,13 +106,15 @@ def mark_truncation(sink: dict | None, *, returned: int,
                     caller must pass True only on that evidence; the default
                     is the conservative answer, never the flattering one.
     ``incomplete``  the producer proved the answer is incomplete EVEN THOUGH
-                    nothing was cut from the visible set — the case where a
-                    retrieval leg filled its own window and a filter then
-                    shrank the result below ``limit``. Without this, a
-                    saturated-then-filtered read reports COMPLETE and the
-                    never-read matches are unreachable: the same defect with
-                    an extra step. Such a read takes the third state (unknown
-                    total), never ``complete``.
+                    nothing was cut from the visible set — a retrieval leg
+                    filled its own window (so matches beyond it were never
+                    read), or an ASKED leg never answered at all. Without
+                    this, a saturated-then-filtered read, or a read whose
+                    vector leg timed out while the sparse leg answered
+                    little, reports COMPLETE and the never-read matches are
+                    unreachable: the same defect with an extra step. Such a
+                    read takes the third state (unknown total), never
+                    ``complete``.
 
     Writes ``truncated`` on EVERY call (so a complete read is positively
     marked complete, not merely un-marked) and ``total_available`` only when
