@@ -4785,16 +4785,19 @@ class PromoteDefaultGraphError(RuntimeError):
     """A refused default-graph move (#10180), carrying the remedy.
 
     Raised ONLY for the refusals the SQL function names — unknown/foreign
-    graph, a tombstoned graph, a non-active status, an unknown org. Anything
-    else (transport, an unexpected Postgres error) propagates as the plain
-    ``RuntimeError`` the ``rpc`` seam raises, so a genuine outage is never
-    dressed up as a caller mistake.
+    graph, a tombstoned graph, a non-active status, an unknown org, an
+    unfollowable target namespace, and an org already holding two active
+    defaults. Anything else (transport, an unexpected Postgres error)
+    propagates as the plain ``RuntimeError`` the ``rpc`` seam raises, so a
+    genuine outage is never dressed up as a caller mistake.
 
-    The 409s are the three states the caller (or an operator) must resolve: the
+    The 409s are the four states the caller (or an operator) must resolve: the
     post-condition's race (``PROMOTE_CONFLICT``, retryable), a target namespace
-    no org-wide resolver can follow (``GRAPH_NAMESPACE_UNFOLLOWABLE``), and an
-    org that already holds two active defaults when the idempotent arm was asked
-    for a repair (``GRAPH_DEFAULT_DRIFT``).
+    no org-wide resolver can follow (``GRAPH_NAMESPACE_UNFOLLOWABLE`` — pick a
+    graph whose namespace derives from this org), an org that already holds two
+    active defaults when the idempotent arm was asked for a repair
+    (``GRAPH_DEFAULT_DRIFT`` — promote the intended graph instead, which DOES
+    converge the drift), and the trash/non-active refusals above.
     """
 
     def __init__(self, message: str, *, status: int, code: str) -> None:
@@ -4819,7 +4822,15 @@ def per_graph_namespace_prefixes(org_id: str) -> tuple[str, ...]:
     mint an ``organizations.graph_name`` its own resolvers cannot follow, and
     every org-wide lane would silently fall back to the graph the promotion just
     DEMOTED. The SQL cannot call this function, so the pair is pinned by
-    `tests/test_10180_promote_default_graph.py`.
+    `tests/test_10180_promote_default_graph.py`, in BOTH directions.
+
+    ⚠️ The BARE org-level spellings are NOT in this list and that asymmetry is
+    deliberate, not an omission: `moved_default_namespace` answers ``None`` for
+    ``org_{org_id}`` (the historical open already resolves it, so no flip is
+    needed) and for ``team_{org_id}`` (a flip would re-home a legacy org's data
+    access without a promotion — the #2023 pin). A promotion target must be a
+    name a resolver actually OPENS, which is why the SQL accepts the bare
+    ``org_{org_id}`` and refuses the bare ``team_{org_id}``.
     """
     return (f"org_{org_id}_", f"team_{org_id}_")
 

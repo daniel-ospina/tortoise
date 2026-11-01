@@ -104,14 +104,20 @@
 -- the one call whose contract is "row and org pointer agree" cannot answer
 -- `ok` to an org where they do not. A refusal is reserved for a state the
 -- caller must resolve: an unknown/foreign graph (404 at the endpoint), a
--- tombstoned one (trash → restore first, 409 at the endpoint), a target whose
--- namespace no org-wide resolver can FOLLOW (409 — the shapes are the two
+-- tombstoned one (trash → restore first, 409 at the endpoint), a MOVE target
+-- whose namespace no org-wide resolver can FOLLOW (409 — the shapes are the two
 -- per-graph prefixes `supabase_control.per_graph_namespace_prefixes` names, plus
--- the org's own bare namespace, which the historical open already resolves;
--- without this the verb would succeed and then route every org-wide lane back
--- to the graph it demoted), or an org that ALREADY holds more than one active
+-- the org's own bare `org_{org_id}`, which the historical open already resolves;
+-- without this the verb would succeed and then route every org-wide lane back to
+-- the graph it demoted), or an org that ALREADY holds more than one active
 -- default when the re-promote asks for a repair (409 — this arm returns before
 -- the demote, so it cannot be the call that converges that drift).
+--
+-- ⚠️ The namespace refusal is scoped to the MOVE arm on purpose. The repair arm
+-- converges whatever namespace the default row already carries (it is the row
+-- §3 pins the pointer to); refusing it there would turn the documented
+-- idempotent 200 into a 409 for an org whose drift is exactly what that arm is
+-- for.
 CREATE OR REPLACE FUNCTION public.promote_default_graph(
     p_org_id text,
     p_graph_id text
@@ -249,15 +255,20 @@ BEGIN
     --
     -- So the verb cannot mint that state. The accepted shapes are exactly the
     -- prefixes in `supabase_control.per_graph_namespace_prefixes`, plus the
-    -- org's own bare `org_{org_id}`/`team_{org_id}`, which the historical open
-    -- already follows correctly (that is what un-promoting back to the original
-    -- graph looks like). Prefix comparison uses `left(...) = ...`, NOT `LIKE`:
+    -- org's OWN bare `org_{org_id}`, which the historical open already follows
+    -- correctly — that is what un-promoting back to the original graph looks
+    -- like. ⛔ The bare `team_{org_id}` is NOT accepted (review round 9, P1): the
+    -- historical open resolves `org_{org_id}`, not `team_{org_id}`, so promoting
+    -- a legacy org-level row would point every lane at a THIRD graph — neither
+    -- the promoted one nor the demoted one. `moved_default_namespace` returning
+    -- None for it is the #2023 pin, not an oversight; a promotion target must be
+    -- a name a resolver actually OPENS.
+    -- Prefix comparison uses `left(...) = ...`, NOT `LIKE`:
     -- `_` is a single-character WILDCARD in a LIKE pattern, so
     -- `namespace LIKE 'org_' || p_org_id || '\_%'` would need an escape and the
     -- unescaped form matches `orgX…` (PostgreSQL 18 §9.7.1).
     IF v_target_ns IS NOT NULL
        AND v_target_ns <> 'org_' || p_org_id
-       AND v_target_ns <> 'team_' || p_org_id
        AND left(v_target_ns, length('org_' || p_org_id || '_'))
            <> 'org_' || p_org_id || '_'
        AND left(v_target_ns, length('team_' || p_org_id || '_'))
@@ -354,6 +365,8 @@ COMMENT ON FUNCTION public.promote_default_graph(text, text) IS
     'uq_graphs_org_default_active) and never zero (checked as a post-condition '
     'that rolls the move back, on BOTH the move and the idempotent arm). '
     'Idempotent on the current default, where it also repairs a drifted org '
-    'namespace. Raises on an unknown/foreign/trashed/non-active target, a target '
-    'whose namespace no org-wide resolver can follow, and an org already holding '
-    'two active defaults, naming which.';
+    'namespace. Raises on an unknown/foreign/trashed/non-active target, a MOVE '
+    'target whose namespace no org-wide resolver can follow, and an org already '
+    'holding two active defaults, naming which. The namespace refusal is scoped '
+    'to the MOVE arm: the repair arm converges whatever namespace the default row '
+    'already carries.';
