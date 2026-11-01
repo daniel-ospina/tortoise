@@ -4160,7 +4160,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 17}
+                             "pi": 18}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4263,12 +4263,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 17`` from
+    Mutation: delete ``// tortoise-hook-version: 18`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 17
+    assert hook_install.read_hook_version(_PI_SRC) == 18
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4299,8 +4299,14 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: the same STRING the Python leg writes (`<name-digest>:<mtime_ns>`; the previous
 #: number could never equal Python's string, so neither leg suppressed a repeat
 #: the other recorded). Behaviour moved, so the generation moved with it.
+#: Generation 18 (capture-loss, #10479 review): the ADMISSION GUARD stopped
+#: `JSON.parse`-ing every meta on every `turn_end`. It now answers a re-observed
+#: refusal at an unchanged spool state, and a spool nowhere near a ceiling, from
+#: one directory listing — measured 1.4 s per refused turn at 20 000 entries, the
+#: ceiling this PR raises 20x. Behaviour moved (the guard's cost, and the two
+#: fast paths' precondition checks), so the generation moved with it.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    17, "f6aa65ab47fd4779fd9b11a055c86be1ad790a88c8bd7cd6c5456c185c809560")
+    18, "55159011b451812d3055f8e0d7264f0ab77a1fc4f6c142e2c3f8f23087400b2b")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4406,6 +4412,8 @@ _GENERATION_DIGESTS = {
     16: "419ca94587d2c2c160d14c93123836a0afacea51ff9ad22352eea39fbe28f52d",
     # Generation 17: the refusal-ledger dedupe (bounded map + one cross-leg key).
     17: "f6aa65ab47fd4779fd9b11a055c86be1ad790a88c8bd7cd6c5456c185c809560",
+    # Generation 18: the admission guard answers without re-parsing every meta.
+    18: "55159011b451812d3055f8e0d7264f0ab77a1fc4f6c142e2c3f8f23087400b2b",
 }
 
 

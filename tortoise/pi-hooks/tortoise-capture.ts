@@ -1,4 +1,4 @@
-// tortoise-hook-version: 17
+// tortoise-hook-version: 18
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -40,6 +40,18 @@
 // shipped bytes move. `session verify`'s "it captures with older logic"
 // wording is imprecise for this one generation; the classification and the
 // repair it prompts are right.
+//
+// Generation 18 (capture-loss, #10479 review): the ADMISSION GUARD stopped
+// re-parsing every meta on every turn. It asked `spoolSaturated` (a `JSON.parse`
+// of every meta) synchronously from `turn_end`, on a population the cap raise
+// took 1000 -> 20 000 — measured 1.4 s per refused turn on a keyless box, the
+// normal state of the cells this PR is about. `admissionSaturated` now answers
+// two hard cases without the parse: a re-observed refusal at an unchanged
+// `<name-digest>:<mtime_ns>` state, through ceilings and a projection no smaller
+// than the one that was refused, and one directory listing when the spool is
+// nowhere near a ceiling. Every other shape still pays the real scan, so the
+// cached verdict cannot outlive its condition. A behavioural edit to the shipped
+// bytes, so an installed generation-17 copy must read as STALE.
 //
 // Generation 17 (capture-loss, #10479 review): the refusal-ledger dedupe became a
 // BOUNDED MAP instead of one stamp, and its key became identical to the Python
@@ -206,6 +218,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -1058,6 +1071,12 @@ export interface RefusalStamp {
   session_id?: string;
   reason?: string;
   entries_stamp?: string;
+  /** The verdict's INPUTS, so the write path can reuse it without a scan
+   *  (`admissionSaturated`). Absent on stamps written before that existed —
+   *  which simply never short-circuits, the safe direction. */
+  bounds?: string;
+  projected_bytes?: number;
+  replaces_session_id?: string | null;
   record?: DiscardRecord;
 }
 
@@ -1628,6 +1647,98 @@ function entriesDirStamp(dir: string): string {
   }
 }
 
+/** The ceilings a refusal was measured against, as ONE string.
+ *
+ * `<maxEntries>:<maxTotalBytes>` — the EXACT string the Python leg's
+ * `_bounds_stamp` produces, because `admissionSaturated` reuses a refusal stamp
+ * and that reuse is only sound for the SAME ceilings. A single string (not a
+ * key/value map) so the two legs do not have to agree on a camelCase spelling
+ * across two languages. */
+function boundsStamp(bounds: SpoolBounds): string {
+  return `${bounds.maxEntries}:${bounds.maxTotalBytes}`;
+}
+
+/** `(meta-name count, bytes)` from ONE directory listing, PARSING no file.
+ *
+ * The write path asks `spoolSaturated` on EVERY turn — synchronously from the
+ * `turn_end` hook — and the real predicate `JSON.parse`s every meta (measured
+ * 1.4 s at 20 000 entries, the ceiling this PR raises 20x). Both numbers here
+ * are UPPER bounds on what `saturatedForMetas` computes (the count is read from
+ * names alone, so it can only over-count a spool carrying corrupt metas, and the
+ * byte total sums EVERY regular file in `entries/`, so it can only over-count
+ * the live entries plus orphans), which makes "under both ceilings here" a proof
+ * of "not saturated there".
+ *
+ * Returns `undefined` — never a guess — for anything it cannot bound: an
+ * unreadable directory, a dirent whose stat fails, or a NON-REGULAR dirent (a
+ * symlinked entry's own size is the length of a path while `spoolEntryBytes`
+ * follows the link, so summing it would UNDER-count — the one direction that
+ * could admit a write the real predicate refuses). `undefined` means "do the
+ * full scan". Mirrors the Python leg's `_cheap_spool_scan`. */
+export function cheapSpoolScan(dir: string): { names: number; total: number } | undefined {
+  try {
+    const base = entriesDir(dir);
+    let names = 0;
+    let total = 0;
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isFile()) return undefined;
+      total += lstatSync(join(base, entry.name)).size;
+      if (entry.name.endsWith(".meta.json")) names += 1;
+    }
+    return { names, total };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Did THIS session already get refused for THIS reason at THIS spool state?
+ *
+ * A refusal writes nothing at all, so the state it was measured against is the
+ * state the next turn sees again — and on a saturated box that state is
+ * re-derived from a full parse of every meta on every single turn. The stamp
+ * `recordRefusal` already keeps for the ledger's dedupe answers it for free.
+ *
+ * SOUND BY CONSTRUCTION, in both directions:
+ *
+ *  - The stamp is `<meta-name digest>:<entries/ mtime_ns>`, and every way
+ *    saturation can change moves one of those: an admission or a reaping changes
+ *    the NAME SET, while a filed/terminal marker, an entry's growth and a
+ *    quarantine all rename a file INSIDE `entries/` and so move its mtime. Same
+ *    stamp therefore means the same metas, bytes, filed set and orphans.
+ *  - A SATURATED verdict is MONOTONE in the projection: the count term is
+ *    identical for the same `replaces` shape, and the byte term only grows with
+ *    `projectedBytes`. So a refusal recorded at a SMALLER-OR-EQUAL projection
+ *    stays true; a write that shrank is re-scanned rather than guessed.
+ *  - The ceilings must MATCH: a stamp written under different `SpoolBounds` (or
+ *    by a leg that did not record them) proves nothing about this call.
+ *
+ * Anything else returns `false` — i.e. pay the real scan. Fails toward WORKING,
+ * never toward a refusal that outlives its own condition. The Python leg's
+ * `_refused_at_current_state` is the twin. */
+function refusedAtCurrentState(
+  dir: string,
+  sessionId: string,
+  reason: string,
+  bounds: SpoolBounds,
+  projectedBytes: number | undefined,
+  replacesSessionId: string | undefined,
+): boolean {
+  const stampNow = entriesDirStamp(dir);
+  const boundsNow = boundsStamp(bounds);
+  for (const stamp of readRefusalStamps(dir)) {
+    if (stamp.session_id !== sessionId) continue;
+    if (stamp.reason !== reason) continue;
+    if (stamp.entries_stamp !== stampNow) continue;
+    if (stamp.bounds !== boundsNow) continue;
+    if ((stamp.replaces_session_id ?? null) !== (replacesSessionId ?? null)) continue;
+    const recorded = stamp.projected_bytes;
+    if (typeof recorded !== "number" || !Number.isFinite(recorded)) continue;
+    if ((projectedBytes ?? 0) < recorded) continue; // the write SHRANK: re-derive
+    return true;
+  }
+  return false;
+}
+
 /** Record a REFUSAL once per (session, reason, spool state).
  *
  * A refusal is not a one-off event: a refused session re-snapshots on EVERY
@@ -1660,11 +1771,28 @@ export function recordRefusal(
     detail?: string;
     retained?: boolean;
   },
+  verdict?: {
+    bounds?: SpoolBounds;
+    projectedBytes?: number;
+    replacesSessionId?: string;
+  },
 ): DiscardRecord {
   const fingerprint = {
     session_id: rec.session_id,
     reason: rec.reason,
     entries_stamp: entriesDirStamp(dir),
+    // The verdict's INPUTS, alongside its key — `admissionSaturated` reuses this
+    // stamp to answer "is this refusal still true?" without a scan, and that
+    // reuse is only sound for the same ceilings and a projection no smaller than
+    // the one that was refused. `null`, never a dropped key, so both legs write
+    // the identical JSON.
+    ...(verdict
+      ? {
+          bounds: verdict.bounds ? boundsStamp(verdict.bounds) : null,
+          projected_bytes: verdict.projectedBytes ?? null,
+          replaces_session_id: verdict.replacesSessionId ?? null,
+        }
+      : {}),
   };
   const history = readRefusalStamps(dir);
   for (const stamp of history) {
@@ -2037,24 +2165,35 @@ export function writeSpoolEntry(
   // EXISTING entry could grow past it with no eviction path at all (measured
   // 3.07x the byte ceiling with an empty ledger — capture-loss residual 6).
   if (
-    spoolSaturated(dir, bounds, {
+    admissionSaturated(dir, bounds, {
       projectedBytes: entryBytes,
       replacesSessionId: prior ? snapshot.sessionId : undefined,
+      sessionId: snapshot.sessionId,
     })
   ) {
     discards.push(
-      recordRefusal(dir, {
-        session_id: snapshot.sessionId,
-        capture_key: meta.capture_key,
-        reason: DISCARD_SPOOL_SATURATED,
-        retained: true,
-        detail:
-          `spool is at its ceiling (maxEntries=${bounds.maxEntries},` +
-          ` maxTotalBytes=${bounds.maxTotalBytes}) with NOTHING evictable —` +
-          ` this ${prior ? "session GROWTH" : "NEW session"} was REFUSED rather` +
-          " than evicting an UNDELIVERED entry; the turns the spool already" +
-          " holds are kept, and any newer turn is still in the harness session log",
-      }),
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: meta.capture_key,
+          reason: DISCARD_SPOOL_SATURATED,
+          retained: true,
+          detail:
+            `spool is at its ceiling (maxEntries=${bounds.maxEntries},` +
+            ` maxTotalBytes=${bounds.maxTotalBytes}) with NOTHING evictable —` +
+            ` this ${prior ? "session GROWTH" : "NEW session"} was REFUSED rather` +
+            " than evicting an UNDELIVERED entry; the turns the spool already" +
+            " holds are kept, and any newer turn is still in the harness session log",
+        },
+        // The verdict's inputs, so the NEXT turn of a refused session can be
+        // answered from this stamp instead of re-parsing every meta.
+        {
+          bounds,
+          projectedBytes: entryBytes,
+          replacesSessionId: prior ? snapshot.sessionId : undefined,
+        },
+      ),
     );
     return {
       written: false,
@@ -2291,6 +2430,56 @@ export function spoolSaturated(
   // `countPendingEntries` follows). The write path keeps the repairing scan.
   const { metas } = listSpoolEntries(dir, opts);
   return saturatedForMetas(dir, metas, bounds, projection);
+}
+
+/** Is THIS write refused? The write path's entry point to `spoolSaturated`.
+ *
+ * Same answer, up to two scans cheaper — which matters because this runs
+ * synchronously on every `turn_end` against a population this PR raises
+ * 1000 -> 20 000 (measured 1.4 s per refused turn at 20 000 entries before these
+ * two exits).
+ *
+ *  1. **The same refusal, again** — a refused session has no `prior`, so it
+ *     re-snapshots into the identical spool state every turn. Asked FIRST: it is
+ *     one name-only directory listing plus a small read, and on the box this PR
+ *     is about it is the answer every turn (`refusedAtCurrentState`).
+ *  2. **Nowhere near a ceiling** — one directory listing with no file PARSED
+ *     (`cheapSpoolScan`): the common case pays a stat per dirent instead of a
+ *     `JSON.parse` per meta.
+ *
+ * Both exits answer only the two HARD cases (provably still saturated, definitely
+ * not saturated). Everything else falls through to the real scan, so neither can
+ * invent or outlive a refusal. The Python leg's `_admission_saturated` is the
+ * twin and answers identically. */
+export function admissionSaturated(
+  dir: string,
+  bounds: SpoolBounds = DEFAULT_BOUNDS,
+  projection: { projectedBytes?: number; replacesSessionId?: string; sessionId?: string } = {},
+): boolean {
+  const { projectedBytes, replacesSessionId, sessionId } = projection;
+  if (
+    sessionId !== undefined &&
+    refusedAtCurrentState(
+      dir,
+      sessionId,
+      DISCARD_SPOOL_SATURATED,
+      bounds,
+      projectedBytes,
+      replacesSessionId,
+    )
+  ) {
+    return true;
+  }
+  const cheap = cheapSpoolScan(dir);
+  if (cheap !== undefined) {
+    const added = replacesSessionId === undefined ? 1 : 0;
+    if (
+      cheap.names + added <= bounds.maxEntries &&
+      cheap.total + (projectedBytes ?? 0) <= bounds.maxTotalBytes
+    )
+      return false;
+  }
+  return spoolSaturated(dir, bounds, { projectedBytes, replacesSessionId });
 }
 
 /** The ceiling arithmetic of `spoolSaturated`, over an ALREADY-READ scan.

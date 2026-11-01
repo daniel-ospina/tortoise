@@ -89,6 +89,8 @@ import {
   truncationMarker,
   warnIfCredentialStoreIsReadable,
   writeSpoolEntry,
+  admissionSaturated,
+  cheapSpoolScan,
 } from "./tortoise-capture.ts";
 import tortoiseCapture from "./tortoise-capture.ts";
 
@@ -2545,6 +2547,158 @@ test("the ONE health scan answers both questions the same way", async () => {
       `the health line and the public predicate must agree: ${JSON.stringify(bounds)}`,
     );
   }
+});
+
+test("the fast admission answer CANNOT outlive its condition", () => {
+  // The stamp short-circuit is a CACHED VERDICT, and a cached verdict that cannot
+  // be invalidated is the exact defect this PR exists to remove (a refusal that
+  // outlives the condition prune is entitled to clear). Two ways it could go
+  // stale, both pinned here:
+  //
+  //  - the spool CHANGES — a reaping frees room, so the next write must be ADMITTED;
+  //  - the write SHRINKS below what was refused — saturation is monotone in the
+  //    projection, so a smaller one is re-derived rather than guessed.
+  //
+  // MUTATION THAT REDS THIS: return the stamped verdict without comparing the
+  // `entries_stamp` / `projected_bytes` → the freed (or smaller) write is refused
+  // forever. Twin of the Python test of the same name.
+
+  // --- (a) the state moves: a reaping makes room for the SAME session again.
+  const countSpool = tmpSpool();
+  const countBounds = { maxEntries: 1, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(countSpool, { ...snapshot("held"), turns: [{ role: "user", content: "h" }] }, countBounds);
+  assert.equal(
+    writeSpoolEntry(countSpool, { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] }, countBounds)
+      .written,
+    false,
+  );
+
+  unlinkSync(join(countSpool, "entries", `${entryKey("held")}.meta.json`));
+  unlinkSync(join(countSpool, "entries", `${entryKey("held")}.turns.jsonl`));
+  const afterReap = writeSpoolEntry(
+    countSpool,
+    { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] },
+    countBounds,
+  );
+  assert.equal(afterReap.written, true, "the condition the refusal was measured against is gone");
+
+  // --- (b) the projection shrinks. A 9 KB NEW session is refused on the BYTE
+  // ceiling (nothing filed, nothing evictable); the next turn of a COMPACTED
+  // transcript is 100 bytes and fits with room to spare.
+  const shrinkSpool = tmpSpool();
+  const byteBounds = { maxEntries: 100, maxTotalBytes: 6_000, maxEntryBytes: 100_000 };
+  writeSpoolEntry(shrinkSpool, { ...snapshot("held"), turns: [{ role: "user", content: "h" }] }, byteBounds);
+  const big = writeSpoolEntry(
+    shrinkSpool,
+    { ...snapshot("grew"), turns: [{ role: "user", content: "x".repeat(9000) }] },
+    byteBounds,
+  );
+  assert.equal(big.written, false);
+  assert.equal(big.discards[big.discards.length - 1].reason, "spool_saturated");
+  const small = writeSpoolEntry(
+    shrinkSpool,
+    { ...snapshot("grew"), turns: [{ role: "user", content: "x".repeat(100) }] },
+    byteBounds,
+  );
+  assert.equal(
+    small.written,
+    true,
+    "a projection SMALLER than the refused one says nothing about this write",
+  );
+});
+
+test("the fast admission answer honours the CEILINGS it was measured against", () => {
+  // A stamp is a verdict about ONE set of ceilings. Reusing it under a larger
+  // `bounds` would refuse a write that now has room — a refusal invented by the
+  // optimisation rather than by the spool. It also records its inputs as ONE
+  // string (`<maxEntries>:<maxTotalBytes>`), the same bytes the Python leg's
+  // `_bounds_stamp` writes, because the two legs share one stamp file.
+  //
+  // MUTATION THAT REDS THIS: drop the `bounds` term from the stamp comparison →
+  // the loose-bounds write is refused from the tight-bounds stamp.
+  const spool = tmpSpool();
+  const tight = { maxEntries: 1, maxTotalBytes: 10_000_000, maxEntryBytes: 10_000 };
+  const loose = { maxEntries: 5, maxTotalBytes: 10_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(spool, { ...snapshot("held"), turns: [{ role: "user", content: "h" }] }, tight);
+  assert.equal(
+    writeSpoolEntry(spool, { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] }, tight)
+      .written,
+    false,
+  );
+  assert.equal(
+    writeSpoolEntry(spool, { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] }, loose)
+      .written,
+    true,
+    "the refusal was measured against maxEntries=1; this spool admits it at maxEntries=5",
+  );
+
+  const stamps = JSON.parse(
+    readFileSync(join(spool, CAPTURE_REFUSAL_STAMP_FILE), "utf8"),
+  ).refusals as Array<Record<string, unknown>>;
+  const refusedStamp = stamps.find((s) => s.reason === "spool_saturated")!;
+  assert.equal(refusedStamp.bounds, "1:10000000", JSON.stringify(refusedStamp));
+  assert.equal(typeof refusedStamp.projected_bytes, "number", JSON.stringify(refusedStamp));
+  assert.equal(refusedStamp.replaces_session_id, null, JSON.stringify(refusedStamp));
+});
+
+test("the cheap admission listing is an UPPER bound, and refuses to bound a symlink", () => {
+  // The directory listing is an UPPER bound on the spool's real size, and the one
+  // direction that could hurt is the other one: an UNDER-count would admit a
+  // write the real predicate refuses. A symlinked entry is exactly that trap —
+  // `spoolEntryBytes` follows the link and counts what `pruneSpool` would free,
+  // while the link's OWN size is the length of a path.
+  //
+  // MUTATION THAT REDS THIS: sum `lstat` sizes without rejecting a non-regular
+  // dirent → the cheap answer says `fits`, the guard admits, and the spool
+  // settles over its ceiling.
+  const spool = tmpSpool();
+  assert.equal(cheapSpoolScan(spool), undefined, "a spool with no entries/ at all");
+
+  const entriesPath = join(spool, "entries");
+  mkdirSync(entriesPath, { recursive: true });
+  const target = join(spool, "outside.jsonl");
+  writeFileSync(target, "x".repeat(50_000));
+  const key = entryKey("linked");
+  symlinkSync(target, join(entriesPath, `${key}.turns.jsonl`));
+  writeFileSync(
+    join(entriesPath, `${key}.meta.json`),
+    JSON.stringify({
+      version: 1,
+      session_id: "linked",
+      capture_key: "k",
+      attempts: 0,
+      next_attempt_at_ms: 0,
+    }),
+  );
+
+  assert.ok(spoolEntryBytes(spool, "linked") >= 50_000, "what prune counts is the link target");
+  assert.equal(
+    cheapSpoolScan(spool),
+    undefined,
+    "a non-regular dirent is not a shape this listing can bound",
+  );
+
+  const bounds = { maxEntries: 100, maxTotalBytes: 20_000, maxEntryBytes: 100_000 };
+  const refused = writeSpoolEntry(
+    spool,
+    { ...snapshot("new"), turns: [{ role: "user", content: "n" }] },
+    bounds,
+  );
+  assert.equal(refused.written, false, "the real predicate still sees the 50 KB behind the link");
+  assert.equal(refused.discards[refused.discards.length - 1].reason, "spool_saturated");
+
+  // …and on a spool it CAN bound, the listing really is an upper bound on the
+  // arithmetic the verdict uses (never a lower one).
+  const healthy = tmpSpool();
+  for (const sid of ["a", "b"]) {
+    writeSpoolEntry(healthy, { ...snapshot(sid), turns: [{ role: "user", content: sid }] }, bounds);
+  }
+  const listing = cheapSpoolScan(healthy)!;
+  const { metas } = listSpoolEntries(healthy, { repair: false });
+  const realBytes = metas.reduce((sum, m) => sum + spoolEntryBytes(healthy, m.session_id), 0);
+  assert.ok(listing.names >= metas.length, `${listing.names} names vs ${metas.length} metas`);
+  assert.ok(listing.total >= realBytes, `${listing.total} bytes vs ${realBytes} real`);
+  assert.equal(admissionSaturated(healthy, bounds, { projectedBytes: 40, sessionId: "c" }), false);
 });
 
 test("the health line NAMES saturation", () => {
