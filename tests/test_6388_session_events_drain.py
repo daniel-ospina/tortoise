@@ -206,14 +206,21 @@ def test_a_plain_file_that_replaces_a_drained_archive_is_not_skipped(
         tmp_path: Path) -> None:
     """P1 (reproduced): the DUAL-SHAPE day silently skipped every new record.
 
-    The cursor's ``consumed`` is an index into a DAY, but a day has two files.
-    Seal the day, drain the archive, then let a later session re-create the
+    ``consumed`` is an index into a FILE, but the cursor used to key one row per
+    DAY. Seal the day, drain the archive, then let a later session re-create the
     plain file for the same day (``tools/seal_session_events.py`` seals on the
     LOCAL clock while the producer names its file in UTC, so a UTC day already
-    behind local ``today`` stays sealable after its settle grace). PLAIN WINS
-    then reads the new file against the ARCHIVE's index space, so its first
-    ``consumed`` records are skipped — neither filed nor dead-lettered, and
-    ``queued`` reports 0, which is the state this module exists to forbid.
+    behind local ``today`` stays sealable after its settle grace). The plain
+    file's records were then read against the ARCHIVE's index space, so its
+    first ``consumed`` records were skipped — neither filed nor dead-lettered,
+    and ``queued`` reported 0, which is the state this module exists to forbid.
+
+    The mechanism that fixes it is now per-FILE: each shape has its own row
+    (``_queue_key``) and each row is bound to its file's identity, so the
+    re-created plain file simply IS a new index space. Both guarantees this case
+    needs are asserted here: the new records are filed, and the archive that was
+    already drained is not re-read (a per-shape row must not turn a seal into a
+    re-POST storm).
 
     Pre-fix this file fails at the first assert: ``filed == 0``, the wire is
     empty, and the LATE records are lost silently and stably across passes.
@@ -243,8 +250,9 @@ def test_a_plain_file_that_replaces_a_drained_archive_is_not_skipped(
     assert second.session_ids == late
     assert summary["queued"] == 0
 
-    # …and the reset does not turn into a re-POST storm on the next pass: the
-    # re-filed day is now the plain file's index space and stays consumed.
+    # …and the new index space does not turn into a re-POST storm on the next
+    # pass: the plain file's row stays consumed, and the archive's row (already
+    # drained) is untouched by the plain file's appearance.
     third = Recorder()
     again = _drain(root, store, third)
     assert third.session_ids == []
@@ -252,12 +260,14 @@ def test_a_plain_file_that_replaces_a_drained_archive_is_not_skipped(
 
 
 def test_the_seal_of_a_drained_plain_day_does_not_re_file_it(tmp_path: Path) -> None:
-    """The OTHER direction of the shape binding: plain → gz is the seal.
+    """The OTHER direction: plain → gz is the seal, not a new index space.
 
-    A fix for the dual-shape skip that reset on ANY shape change would turn the
-    seal into a re-POST of the whole day, so this is the guard against
-    over-correcting: the archive is a gzip of the plain file just drained, so
-    the same indices are already consumed.
+    A fix for the dual-shape skip that gave every SHAPE a fresh row — and then
+    let the seal move the file without moving the row — would turn every seal
+    into a re-POST of the whole day, so this is the guard against
+    over-correcting: ``_carry_sealed_days`` moves the drained day's row into the
+    archive's key (clearing the identity it can no longer claim), so the
+    archive's first records are already consumed.
     """
     import gzip
 
@@ -285,7 +295,7 @@ def test_the_seal_of_a_partly_drained_plain_day_files_only_the_tail(
         tmp_path: Path) -> None:
     """The carry across the seal is an index PREFIX, not "all or nothing".
 
-    Guards the new machinery: with one row per FIGURE the seal has to MOVE the
+    Guards the new machinery: with one row per FILE the seal has to MOVE the
     plain file's row into the archive's key (`_carry_sealed_days`), and it must
     move the state AS IT STANDS — a day sealed while only a prefix had drained
     still owes its tail. A carry that reset instead would re-POST the whole day
