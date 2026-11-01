@@ -143,6 +143,13 @@ def changed_files(source_sha: str, head: str) -> list[str]:
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
+#: The prefixes `is_evidence_or_tool` admits — the pin's allowlist, in ONE place, so the documented
+#: admission command can be checked against the rule instead of against a second copy of it
+#: (review r6 F2: the `## Reproduce` check demanded an EMPTY `source_sha..HEAD` diff, which the pin
+#: never required and which is false at the only head the section declared admissible).
+EVIDENCE_OR_TOOL_PREFIXES = ("docs/", "tools/", "tests/")
+
+
 def is_evidence_or_tool(path: str) -> bool:
     """True when ``path`` is NOT production code under test.
 
@@ -159,7 +166,7 @@ def is_evidence_or_tool(path: str) -> bool:
     computed the number?" — see ``METRIC_ARTIFACT_PREFIXES``, which ``assert_source_sha`` applies
     ON TOP of this one (review r3 P2a).
     """
-    return path.startswith(("docs/", "tools/", "tests/"))
+    return path.startswith(EVIDENCE_OR_TOOL_PREFIXES)
 
 
 #: The artifacts that COMPUTE the reported metrics — pinned exactly, not by the allowlist above.
@@ -749,6 +756,31 @@ def open_log(path: Path) -> tuple[TextIO, Callable[[str], None]]:
     return handle, write_line
 
 
+#: The frozen bars, in the pre-registration's own order. Named once here so the log header can
+#: emit EVERY one of them: the pre-fix line printed five of the seven, so the two that decide the
+#: corroboration qualifier (`corroboration_min_sessions`) and the session count (`sessions_total`)
+#: were invisible in the only record of what a run compared against (#10468 r6 F1).
+BARS_LOG_ORDER = (
+    "primary_ratio_max",
+    "guard_ratio_min",
+    "corroboration_min_sessions",
+    "sessions_total",
+    "arm_integrity_required",
+    "concentration_max",
+    "cost_ratio_max",
+)
+
+
+def bars_log_line(bars: dict) -> str:
+    """The log header that names every frozen bar, so the log pins what it was scored against."""
+    return "bars: " + " ".join(f"{key}={bars[key]}" for key in BARS_LOG_ORDER)
+
+
+def floors_log_line(floors: dict) -> str:
+    """The log header that names every REFUSED floor, round-trippable by ``ast.literal_eval``."""
+    return f"floors: {dict(floors)}"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Two-arm S3 prior-injection ablation (#10463).")
     ap.add_argument("--prereg", required=True,
@@ -860,11 +892,8 @@ def main(argv: list[str] | None = None) -> int:
     log(f"probe_sha256={probe_hash} — the bytes that computed every number below (a `head=` names "
         "a commit; this names the file the run actually executed)")
     log(f"corpus=tests/eval/write_path sessions={len(sessions)} fixtures_hash={corpus_hash}")
-    log(f"bars: primary_ratio_max={bars['primary_ratio_max']} "
-        f"guard_ratio_min={bars['guard_ratio_min']} "
-        f"arm_integrity_required={bars['arm_integrity_required']} "
-        f"concentration_max={bars['concentration_max']} cost_ratio_max={bars['cost_ratio_max']}")
-    log(f"floors: {floors}")
+    log(bars_log_line(bars))
+    log(floors_log_line(floors))
     log("queries_failed: the receipt carries no such field at this head; search_graph degrades "
         "the WHOLE search on the first query failure, so queries_failed==0 is asserted as "
         "degraded==False (stated here, not implied)")

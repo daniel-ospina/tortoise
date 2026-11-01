@@ -215,20 +215,26 @@ registered wording asks for. The measured run predates that defect, so its `14 o
 
 ## Reproduce
 
-⛔ **The command below is admitted only at `a1075dfc2` — the head the measured run was taken at**
-(the commit `--prereg` names, and the `head=` the committed log prints). The pin refuses a head
-whose diff from `source_sha` (`718ee3b49`) touches any file outside `docs/`, `tools/` and `tests/`,
-and `config/` moves on nearly every merge — this PR itself touches two of those files — **so at a
-later head the first command REFUSES at `exit 3`, by design**, naming the offending files. That
-refusal is the pin working, not a broken checkout: it is what stops *"reproduce it at whatever head
-is handy"* from becoming *"reproduce it with code the measurement never ran"*. Reproducing at a
-later head therefore needs a **new pre-registration** (that is the cost of the frozen §6 pin, and
-it is the property that makes the recorded bars untunable).
+⛔ **The command below is admitted only at a head whose diff from `source_sha` (`718ee3b49`)
+touches nothing outside `docs/`, `tools/` and `tests/`** — the head the measured run was taken at is
+`a1075dfc2` (the commit `--prereg` names, and the `head=` the committed log prints), and at that
+head the restricted diff below is empty. `config/` moves on nearly every merge — this PR itself
+touches two of those files — **so at a later head the PROBE RUN REFUSES at `exit 3`, by design**,
+naming the offending files. That refusal is the pin working, not a broken checkout: it is what stops
+*"reproduce it at whatever head is handy"* from becoming *"reproduce it with code the measurement
+never ran"*. Reproducing at a later head therefore needs a **new pre-registration** (that is the
+cost of the frozen §6 pin, and it is the property that makes the recorded bars untunable).
 
-Check the admission first — **empty output means the pin admits this head**:
+Check the admission first. The pathspec is exactly the pin's allowlist — `is_evidence_or_tool`
+admits `docs/`, `tools/` and `tests/` and refuses everything else — so **empty output means the pin
+admits this head**. (The *unrestricted* diff `718ee3b49..a1075dfc2` is not empty: it is the same
+three evidence/tooling files the log's `source_sha..head changed files` line lists, which is the pin
+doing its job, not a violation of it.) This is a `git diff`, not the probe: it exits 0 either way,
+and only the probe refuses — at `exit 3`, further down.
 
 ```bash
-git diff --name-only 718ee3b497539540ea10269e7ccfe9b0867d010f HEAD   # must print nothing
+git diff --name-only 718ee3b497539540ea10269e7ccfe9b0867d010f HEAD \
+    -- ':!docs' ':!tools' ':!tests'          # must print nothing
 ```
 
 The working copy must be clean too — over `tortoise`, `tests/eval/write_path`,

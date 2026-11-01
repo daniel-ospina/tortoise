@@ -480,7 +480,7 @@ jobs:
         # SAYS the half was skipped (`corpus pins NOT checked`), so a partial run can never read as
         # a verified one. The step fails closed: exit 1 on an ordering violation, 2 on an
         # unreadable document/record.
-        run: python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone --no-corpus
+        run: python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis
       - name: Secrets scan (evidence artifacts, #1349)
         # Evidence commits (T8/T15/T16) must never carry live keys. The
         # provenance writer redacts (primary defense); this grep is the

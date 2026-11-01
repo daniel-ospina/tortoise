@@ -30,21 +30,61 @@ def _probe():
     return module
 
 
+_MODULE = _probe()
+
+
 @pytest.fixture(scope="module")
 def probe():
-    return _probe()
+    return _MODULE
 
 
-BARS = {
-    "primary_ratio_max": 0.75,
-    "guard_ratio_min": 1.0,
-    "corroboration_min_sessions": 4,
-    "sessions_total": 7,
-    "arm_integrity_required": 14,
-    "concentration_max": 0.60,
-    "cost_ratio_max": 2.0,
-}
-FLOORS = {"created_nodes_off": 30, "real_facts_off": 20, "sessions": 7}
+#: The frozen thresholds — READ OUT OF `PRE-REGISTRATION.md` with the probe's own parser.
+#:
+#: They used to be a SECOND copy: a `BARS`/`FLOORS` literal here, beside the real pins in the
+#: document. That is the "two copies of a threshold that can disagree" shape the pre-registration
+#: gate names as its reason for existing — and here it was worse than a disagreement, because it
+#: made the guard that was supposed to exist not exist: a docs-only diff (which runs only the
+#: `tier1` slice) could change `primary_ratio_max: 0.75 → 0.90` and `guard_ratio_min: 1.00 → 0.80`
+#: in the pins block, flip the published verdict from `HYPOTHESIS-FALSIFIED` to
+#: `HYPOTHESIS-SUPPORTED` with no reported number moving (`0.8697 <= 0.90`, `40 >= 0.8 × 47`,
+#: `139 >= 0.8 × 171`), and every test in this file would still have passed against its own
+#: private copy (#10468 r6 F1). There is now ONE copy: the document's.
+_PINS = _MODULE.parse_pins((ROOT / _MODULE.PREREG_REL).read_text())
+BARS = _PINS["hypothesis_bars"]
+FLOORS = _PINS["denominator_floors"]
+
+
+def _log_thresholds(log_text: str) -> dict[str, float]:
+    """Every threshold the committed log says the run compared against."""
+    import ast
+    import re
+
+    seen: dict[str, float] = {}
+    for line in log_text.splitlines():
+        if line.startswith("bars:"):
+            seen.update({key: float(value) for key, value in
+                         re.findall(r"(\w+)=(\S+)", line[len("bars:"):])})
+        elif line.startswith("floors:"):
+            seen.update(ast.literal_eval(line.split(":", 1)[1].strip()))
+    return seen
+
+
+def _threshold_mismatches(pins_bars: dict, pins_floors: dict, log_text: str) -> list[str]:
+    """Where the document's frozen thresholds and the measured log's disagree.
+
+    Only the thresholds the LOG names are compared, because a log can only be held to what it
+    recorded — the committed log predates the full-bars emission below and names five of the seven.
+    The document's remaining bars are pinned against the record (`preregistration.json`) by
+    `tools/capstone_preregistration_check.py`, which CI now runs on this bundle.
+    """
+    seen = _log_thresholds(log_text)
+    problems = []
+    for key, value in {**pins_bars, **pins_floors}.items():
+        if key in seen and float(seen[key]) != float(value):
+            problems.append(
+                f"{key}: the measured run compared against {seen[key]}, the pre-registration now "
+                f"says {value} — a threshold moved after the numbers landed")
+    return problems
 
 
 def _arm(proven_per_session: int, created: list[int], facts: int, operator_edges: int,
@@ -181,14 +221,100 @@ def test_only_non_production_paths_count_as_nothing_changed(probe):
 
 
 def test_bars_are_parsed_from_the_pins_block(probe):
-    text = (ROOT / probe.PREREG_REL).read_text()
-    pins = probe.parse_pins(text)
-    assert pins["hypothesis_bars"]["primary_ratio_max"] == 0.75
-    assert pins["denominator_floors"]["created_nodes_off"] == 30
+    pins = probe.parse_pins((ROOT / probe.PREREG_REL).read_text())
+    assert pins["hypothesis_bars"] == BARS
+    assert pins["denominator_floors"] == FLOORS
     assert len(pins["source_sha"]) == 40
     # The bars the probe compares against are these, never literals in the module.
     source = PROBE.read_text()
     assert "primary_ratio_max = 0.75" not in source
+
+
+def test_every_frozen_threshold_is_named_so_none_can_be_dropped_silently(probe):
+    """A pins block that DROPS a key must not disable the comparison that key belongs to.
+
+    `denominator_floors.sessions` was parsed and never checked, and `corroboration_min_sessions`
+    was computed and never emitted — both found by review, both the same shape: the key existed, so
+    the code looked complete. The sets are exact, so a removal is a red here rather than a quieter
+    run.
+    """
+    assert set(BARS) == {
+        "primary_ratio_max", "guard_ratio_min", "corroboration_min_sessions", "sessions_total",
+        "arm_integrity_required", "concentration_max", "cost_ratio_max"}, (
+        "the pre-registration's bar set changed — every key here is compared by `decide()`")
+    assert set(FLOORS) == {"created_nodes_off", "real_facts_off", "sessions"}
+    assert probe.BARS_LOG_ORDER == (
+        "primary_ratio_max", "guard_ratio_min", "corroboration_min_sessions", "sessions_total",
+        "arm_integrity_required", "concentration_max", "cost_ratio_max"), (
+        "the log header must name every frozen bar, in the document's order")
+    assert set(probe.BARS_LOG_ORDER) == set(BARS), (
+        "a bar the log does not name is a bar the log cannot be held to")
+
+
+def test_the_measured_log_agrees_with_the_thresholds_it_names(probe):
+    """The one anti-tuning check that needs no git history: the LOG versus the DOCUMENT.
+
+    Moving a bar in the pins block — the docs-only change that flips the published verdict —
+    now disagrees with the committed measured log, which recorded what the run actually compared
+    against. An edit that also rewrites the log has to keep it a log (the one-measured-log rule,
+    `capstone_preregistration_check`'s ordering rule and the RATIO/VERDICT lines all move with it).
+    """
+    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    seen = _log_thresholds(log_text)
+    assert {"primary_ratio_max", "guard_ratio_min", "arm_integrity_required",
+            "concentration_max", "cost_ratio_max"} <= set(seen), (
+        "the committed log must still name the bars the verdict was computed against")
+    assert _threshold_mismatches(BARS, FLOORS, log_text) == []
+
+
+def test_the_log_and_the_document_check_can_actually_fail(probe):
+    """Non-vacuity: the exact wrong outcome r6 F1 described is a `0.75 -> 0.90` pins edit."""
+    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    moved_bars = {**BARS, "primary_ratio_max": 0.90, "guard_ratio_min": 0.80}
+    moved_floors = {**FLOORS, "sessions": 6}
+    problems = _threshold_mismatches(moved_bars, moved_floors, log_text)
+    assert any("primary_ratio_max" in problem for problem in problems), problems
+    assert any("guard_ratio_min" in problem for problem in problems), problems
+    assert any("sessions" in problem for problem in problems), problems
+    # …and the bars really do flip the published verdict on the measured numbers, which is why the
+    # check has to exist. (`moved_floors` is excluded here: lowering `sessions` makes `decide()`
+    # REFUSE the 7-session arm rather than score it — the floors are a different guard.)
+    off = _arm(14, [45, 51, 43, 42, 34, 42, 27], facts=47, operator_edges=15)
+    on = _arm(14, [39, 36, 34, 41, 35, 35, 27], facts=40, operator_edges=13)
+    assert probe.decide(BARS, FLOORS, off, on)["verdict"] == probe.VERDICT_FALSIFIED
+    assert probe.decide(moved_bars, FLOORS, off, on)["verdict"] == probe.VERDICT_SUPPORTED, (
+        "0.8697 <= 0.90 with both guards held at 0.80 is exactly the verdict flip a two-line "
+        "docs-only edit would buy")
+
+
+def test_the_log_header_names_every_bar_and_floor(probe):
+    """Five of seven bars were emitted before; `corroboration_min_sessions` decides a qualifier."""
+    import ast
+
+    bars_line = probe.bars_log_line(BARS)
+    assert all(f"{key}=" in bars_line for key in BARS), f"missing bars in {bars_line!r}"
+    floors_line = probe.floors_log_line(FLOORS)
+    assert ast.literal_eval(floors_line.split(":", 1)[1].strip()) == FLOORS
+    main_src = PROBE.read_text().split("def main(", 1)[1]
+    assert "log(bars_log_line(bars))" in main_src and "log(floors_log_line(floors))" in main_src, (
+        "the helpers must be what main emits — a helper beside an unchanged f-string pins nothing")
+
+
+def test_ci_checks_this_bundle_not_only_the_capstone_one(probe):
+    """r6 F1: no CI job read this bundle, so its ordering rule never executed anywhere.
+
+    `.github/workflows/python-ci.yml` ran `capstone_preregistration_check.py --dir
+    docs/evidence/7949-capstone` and nothing else, so for THIS bundle the ordering rule and the
+    record↔pins cross-check did not run in any automated path — and a docs-only diff is exactly the
+    change that can move a threshold after the numbers landed.
+    """
+    workflow = (ROOT / ".github/workflows/python-ci.yml").read_text()
+    invocations = [line for line in workflow.splitlines()
+                   if "tools/capstone_preregistration_check.py" in line]
+    assert invocations, "the pre-registration gate must run in CI"
+    assert any("--dir docs/evidence/5087-hypothesis" in line for line in invocations), (
+        "CI must run the gate on THIS bundle: an ordering rule that no job executes is a rule that "
+        f"does not exist. Found: {invocations}")
 
 
 def test_a_missing_pins_block_refuses(probe):
@@ -430,6 +556,34 @@ def test_the_reproduce_section_states_the_head_its_pin_admits(probe):
     assert "config/" in section and "exit 3" in section, (
         "the section must say that a later head where non-evidence files (e.g. `config/`) moved is "
         "REFUSED at exit 3 BY DESIGN — otherwise the refusal reads as a broken checkout")
+
+
+def test_the_admission_check_is_the_pin_itself_not_a_stricter_one(probe):
+    """r6 F2: the section demanded an EMPTY `source_sha..HEAD` diff — the pin never did.
+
+    `is_evidence_or_tool` admits `docs/`, `tools/` and `tests/`, so at `a1075dfc2` — the ONE head
+    the section declared admissible — the unrestricted diff prints three files (the same three the
+    log's `source_sha..head changed files` line records). A reader following the section in order
+    saw non-empty output at the only "admitted" head and concluded the bundle was stale or that
+    reproduction needed a new pre-registration, for a head the probe in fact admits.
+
+    So the check now carries the pin's own allowlist as a pathspec, and this test compares the two
+    instead of asking a reader to. Fixing the prose without the pathspec — or the pathspec without
+    the prose — leaves the section describing a rule the code does not have.
+    """
+    import re
+
+    readme = (probe.EVIDENCE_DIR / "README.md").read_text()
+    section = readme.split("## Reproduce", 1)[1]
+    commands = [line for line in section.splitlines()
+                if line.startswith("git diff --name-only 718ee3b")]
+    assert len(commands) == 1, f"expected exactly ONE admission command, got {commands}"
+    excluded = {name.rstrip("/") for name in re.findall(r"':!([^']+)'", section)}
+    assert excluded == {prefix.rstrip("/") for prefix in probe.EVIDENCE_OR_TOOL_PREFIXES}, (
+        "the admission check's pathspec must be EXACTLY the pin's allowlist "
+        f"({list(probe.EVIDENCE_OR_TOOL_PREFIXES)}): a check excluding more than the pin does "
+        "reports a broken bundle at a head the pin admits, and one excluding less reports a "
+        "refusal the pin will not make")
 
 
 def test_a_later_head_that_moved_a_config_file_refuses_the_pin(probe, monkeypatch, tmp_path):
