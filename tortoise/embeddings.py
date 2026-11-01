@@ -152,6 +152,11 @@ def resolve_embed_threads() -> tuple[int, str]:
     value is REFUSED with a warning and falls back to the default rather than
     silently disabling the pin (a ``set_num_threads(0)`` raises deep inside
     torch and would present as a load failure).
+
+    This is the RESOLVER; what makes the lever reach torch is
+    :func:`ensure_embed_threads` calling it on every encode (it re-pins when the
+    resolved count no longer matches the applied one). Reading the env here and
+    nowhere else would leave the lever load-time only.
     """
     raw = os.environ.get(EMBED_THREADS_ENV)
     if raw is not None and raw.strip():
@@ -168,7 +173,13 @@ def resolve_embed_threads() -> tuple[int, str]:
 
 
 def pin_embed_threads() -> dict:
-    """Pin torch's intra-op pool (and its BLAS env) ONCE, at embedder init.
+    """Pin torch's intra-op pool (and its BLAS env) at embedder init.
+
+    ⛔ Not *once*: this is the INITIAL pin. :func:`ensure_embed_threads`
+    re-pins it on any later encode where ``TORTOISE_EMBED_THREADS`` resolves to
+    a different count, so the operator lever is not load-time only (the
+    docstring that said the lever was per-call while the encode path kept
+    reading a frozen record was the #10010 review's P3-2).
 
     Returns ``{"threads", "source", "previous", "env_vars"}`` (``previous``
     is ``None`` when torch could not be imported, which is the designed
@@ -263,12 +274,39 @@ def ensure_embed_threads() -> None:
     #10296 is about: the forward pass runs on whichever thread calls ``encode``.
 
     So every encode site calls this first. When the count already matches it is
-    two C calls and no-op; it never raises (a pin must never fail a write).
+    an env read plus two C calls and a no-op; when the operator has moved
+    ``TORTOISE_EMBED_THREADS`` since the load it ALSO retargets the applied pin
+    and republishes it (``status()`` reads it) — because a lever that only
+    reaches torch at load time is not the lever this module documents, and an
+    operator who widened it on a slow bulk lane would otherwise watch the
+    observable pin keep reporting the old value. It never raises (a pin must
+    never fail a write).
     """
+    global _embed_thread_pin
     record = _embed_thread_pin
-    threads = record["threads"] if record else resolve_embed_threads()[0]
+    threads, source = resolve_embed_threads()
     try:
         torch = import_torch()
+        if record is not None and record.get("threads") != threads:
+            # The lever moved AFTER the load. Republish the applied pin and
+            # refresh ONLY the env vars this pin owns (``pin_embed_threads``
+            # records the ones it set) — a var the operator set themselves is
+            # deliberately not in that list and is never overwritten.
+            previous = int(torch.get_num_threads())
+            owned = list(record.get("env_vars") or ())
+            for var in owned:
+                os.environ[var] = str(threads)
+            _embed_thread_pin = record = {
+                "threads": threads,
+                "source": source,
+                "previous": previous,
+                "applied": True,
+                "env_vars": owned,
+            }
+            logger.info(
+                "embedder intra-op threads retargeted to %d (was %s, source=%s)"
+                " — %s is re-read on every encode, not only at load (#10296)",
+                threads, previous, source, EMBED_THREADS_ENV)
         if int(torch.get_num_threads()) != threads:
             torch.set_num_threads(threads)
     except Exception as e:  # noqa: BLE001, RUF100 — never fail an encode

@@ -433,8 +433,15 @@ def test_embed_threads_default_is_the_measured_single_thread():
 
 
 def test_embed_threads_env_is_read_per_call_and_refuses_junk():
-    """The operator lever works, is re-read each time, and fails CLOSED to the
-    default rather than to ``nproc`` for an unparseable value."""
+    """The RESOLVER re-reads the lever on every call and fails CLOSED to the
+    default rather than to ``nproc`` for an unparseable value.
+
+    This pins the resolver only. That the resolved value REACHES torch after the
+    embedder has loaded is a different claim — it is
+    ``test_the_operator_lever_retargets_the_encode_path_after_load`` below, and
+    a docstring here that claimed it while asserting no torch reading is how the
+    #10010 review's P3-2 survived.
+    """
     mod = _embed_module()
     saved = _saved_env([mod.EMBED_THREADS_ENV])
     try:
@@ -591,6 +598,63 @@ def test_ensure_embed_threads_rebounds_a_thread_that_set_its_own_count():
     finally:
         torch.set_num_threads(saved_threads)
         _restore_env(saved)
+
+
+def test_the_operator_lever_retargets_the_encode_path_after_load():
+    """#10010 review P3-2: the lever reaches torch AFTER the load, not only at it.
+
+    ``pin_embed_threads()`` runs at embedder load and writes ``_embed_thread_pin``.
+    If ``ensure_embed_threads()`` kept reading that record's ``threads``, the
+    encode path would never consult the environment again — so an operator who
+    widened the pool on a slow bulk lane would watch ``torch.get_num_threads()``
+    and ``EmbeddingModel.status()`` both keep the load-time count. That is the
+    claim this pins, end to end, rather than by reading ``resolve_embed_threads``.
+    """
+    try:
+        import torch
+    except Exception:  # the designed zero-dependency path
+        print("SKIP test_the_operator_lever_retargets_the_encode_path_after_load")
+        return
+    if (os.cpu_count() or 1) < 2:  # nothing to widen TO on a single-cpu host
+        print("SKIP test_the_operator_lever_retargets_the_encode_path_after_load "
+              "(host has one cpu)")
+        return
+    mod = _embed_module()
+    saved = _saved_env([mod.EMBED_THREADS_ENV, *mod._EMBED_THREAD_ENV_VARS])
+    saved_threads = torch.get_num_threads()
+    prior_pin = mod._embed_thread_pin
+    try:
+        for name in [mod.EMBED_THREADS_ENV, *mod._EMBED_THREAD_ENV_VARS]:
+            os.environ.pop(name, None)
+        mod._embed_thread_pin = None
+        mod.pin_embed_threads()  # the load-time pin, at the measured default
+        mod.ensure_embed_threads()
+        assert torch.get_num_threads() == mod.EMBED_DEFAULT_INTRA_OP_THREADS, (
+            "precondition: the load-time pin did not reach this thread")
+
+        os.environ[mod.EMBED_THREADS_ENV] = "2"  # the operator widens it, live
+        mod.ensure_embed_threads()
+        assert torch.get_num_threads() == 2, (
+            "the encode path still reads the LOAD-time record, so the operator "
+            "lever never reaches torch after load (#10296)")
+        pin = mod.embed_thread_pin()
+        assert pin["threads"] == 2 and pin["source"] == "env", pin
+        assert mod.EmbeddingModel.status()["threads"] == pin, (
+            "status() must publish the pin that is actually applied")
+        assert os.environ.get("MKL_NUM_THREADS") == "2", (
+            "the BLAS env vars this pin owns must follow the lever, or a child "
+            "process spawned later inherits the stale count")
+
+        os.environ.pop(mod.EMBED_THREADS_ENV, None)  # and back down again
+        mod.ensure_embed_threads()
+        assert torch.get_num_threads() == mod.EMBED_DEFAULT_INTRA_OP_THREADS, (
+            "removing the lever must restore the measured default, not keep the "
+            "last widened count")
+        assert mod.embed_thread_pin()["threads"] == mod.EMBED_DEFAULT_INTRA_OP_THREADS
+    finally:
+        torch.set_num_threads(saved_threads)
+        _restore_env(saved)
+        mod._embed_thread_pin = prior_pin
 
 
 def test_the_thread_pin_is_not_one_process_wide_scalar():
