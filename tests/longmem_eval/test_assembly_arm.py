@@ -367,6 +367,25 @@ def _nary_gold_admission(handle: dict, text: str) -> list[str]:
     return [s for s, g in handle["golds"].items() if g["marker"] in text]
 
 
+def _nary_gold_positions(handle: dict, text: str) -> dict[str, int]:
+    """Chunk index of each admitted gold inside the reader-visible window.
+
+    DIAGNOSTIC ONLY — never an assertion input. Which tied row lands at which
+    index is the engine's index-time internal order
+    (``tests/_assembly_graph.py`` build_deep_rank_substrate note, #3095/#3273),
+    so nothing may be pinned to a number. Carried in the geometry assertions'
+    messages so a drift reports WHERE the golds sat, not just that a count
+    moved."""
+    chunks = ag.evidence_chunks(text)
+    out: dict[str, int] = {}
+    for subject, g in handle["golds"].items():
+        for i, c in enumerate(chunks):
+            if g["marker"] in c:
+                out[subject] = i
+                break
+    return out
+
+
 def test_nary_ordering_chain_admits_every_gold_vs_legacy(sdk, monkeypatch):
     """#2653 acceptance, end to end on a live graph: a question ordering THREE
     named subjects routes to ORDERING with three terms, the resolver gates on
@@ -377,14 +396,25 @@ def test_nary_ordering_chain_admits_every_gold_vs_legacy(sdk, monkeypatch):
     The A arm is measured on the SAME graph and the SAME question, so the
     comparison is not a strawman. MEASURED (this substrate, 60 crowd rows
     carrying all three question nouns): BOTH arms admit all three golds —
-    legacy's entity-anchored leg already reaches them — so the acceptance
-    indicator "gold admission >= legacy A-arm" holds with EQUALITY, and what
-    the N-ary arm buys at DEFAULT caps is precision, not admission: 5 evidence
-    chunks (header + chain + three golds, ZERO crowd rows) against the legacy
-    window's 41 chunks, 37 of which are crowd rows. That is the measured claim
-    pinned below — admission parity, noise eliminated — NOT a manufactured
-    win: the substrate is not authored to starve legacy, and an arm that
-    improves on parity would keep passing.
+    legacy's pooled window carries them too — so the acceptance indicator "gold
+    admission >= legacy A-arm" holds with EQUALITY, and what the N-ary arm buys
+    at DEFAULT caps is precision, not admission: 5 evidence chunks (header +
+    chain + three golds, ZERO crowd rows) against the legacy window's 41
+    chunks, 37 of which are crowd rows. NOT a manufactured win: the substrate
+    is not authored to starve legacy, and an arm that improves on parity would
+    keep passing.
+
+    ⛔ The legacy arm reaches the golds through the pooled full-text window's
+    internal row order — NOT through an entity/edge leg (the shipped chain has
+    none; see the substrate docstring). That order is index-time and opaque,
+    so the A arm's admission count is REPORTED here and never pinned: the pin
+    that used to assert ``len(a_golds) == 3`` was removed for exactly the
+    reason ``build_deep_rank_substrate`` records — a pin on which tied row
+    falls inside the 40-row window is the assertion that reddened main at
+    #3095/#3273. What IS pinned is order-independent: legacy's window stays
+    non-vacuous (crowd rows admitted, pool filled), the N-ary arm admits every
+    gold structurally, its block carries zero crowd rows, and it is narrower
+    than the legacy window it replaces.
     """
     from tortoise.assembly import AssemblyShape, classify_question, extract_subject_terms
 
@@ -438,22 +468,28 @@ def test_nary_ordering_chain_admits_every_gold_vs_legacy(sdk, monkeypatch):
         f"gold admission regressed against the A arm: B={b_golds} "
         f"A={a_golds}")
 
-    # (5) THE SUBSTRATE'S OWN GEOMETRY, PINNED — the two claims its docstring
-    # makes are checked here rather than narrated, so a future drift in either
-    # direction FAILS instead of leaving two contradictory sentences in the
-    # tree:
-    #   (a) ADMISSION PARITY is the measured geometry: legacy's entity-anchored
-    #       leg reaches all three golds even with the window full of crowd rows.
-    #       This pins a MEASUREMENT, not an engine invariant — if legacy ever
-    #       becomes genuinely starved, this fails and the substrate's docstring
-    #       ("measures PRECISION, not admission") must be revisited with it,
-    #       which is exactly the arbitration the docstring could not do alone.
-    #   (b) PRECISION is what the arm buys: the fired block carries ZERO crowd
-    #       rows, against the A window's crowd-filled one.
-    assert len(a_golds) == 3, (
-        f"the substrate's stated geometry says BOTH arms admit 3/3; legacy "
-        f"admitted {a_golds}. If legacy is now starved, this substrate "
-        f"measures ADMISSION and its docstring must say so.")
+    # (5) THE SUBSTRATE'S OWN GEOMETRY — what is PINNED and what is only
+    #     REPORTED, so a future drift fails instead of leaving two
+    #     contradictory sentences in the tree:
+    #   (a) PRECISION is what the arm buys, and it is STRUCTURAL — the fired
+    #       block carries ZERO crowd rows (crowd rows have no `aboutObject`
+    #       edge, so `_subject_order` cannot admit them into a slice: the half
+    #       of the geometry where the entity link IS load-bearing).
+    #   (b) THE A ARM'S ADMISSION COUNT (measured 3/3) IS DELIBERATELY NOT
+    #       PINNED. Legacy reaches the golds through the pooled full-text
+    #       window's index-time row order, not an entity leg, and which tied
+    #       row lands inside that 40-row window is the assertion
+    #       `build_deep_rank_substrate` forbids ("never a specific gold's
+    #       index") — #3095/#3273 is the recorded cost of pinning it in this
+    #       same module. The count and each gold's chunk index are carried in
+    #       the messages below instead, so a drift is reported, not failed.
+    #       MEASURED (this head, private lane, 2 passed): A window 41 chunks
+    #       with the three golds at chunk indices {couch: 3, dog bed: 1,
+    #       bookshelf: 2} — the HEAD of the window (index 0 is the Current-Date
+    #       header), which is the position they are authored in. That is the
+    #       evidence for reading the parity as an order fact rather than a
+    #       relevance leg; it is a measurement, not a pin.
+    a_pos = _nary_gold_positions(d, a_def["evidence"])
     b_chunks = ag.evidence_chunks(aa.evidence)
     b_crowd = [c for c in b_chunks if d["crowd_marker"] in c]
     assert not b_crowd, (
@@ -461,7 +497,10 @@ def test_nary_ordering_chain_admits_every_gold_vs_legacy(sdk, monkeypatch):
         f"{len(b_crowd)} of {len(b_chunks)}: {b_crowd[:2]}")
     assert len(b_chunks) < len(a_chunks), (
         f"the precision claim needs the fired block smaller than the legacy "
-        f"window: B={len(b_chunks)} A={len(a_chunks)}")
+        f"window: B={len(b_chunks)} A={len(a_chunks)} "
+        f"(A admitted {len(a_golds)}/3 golds, a_golds={a_golds}, at chunk "
+        f"indices {a_pos}; A chunks are order-opaque, so NONE of that is "
+        f"pinned — only the size comparison is)")
 
     # (5) THE CHAIN ITSELF — one line, earliest first, every subject named,
     #     the three dates strictly ascending in the order stated.

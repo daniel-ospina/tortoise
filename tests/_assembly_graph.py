@@ -464,25 +464,36 @@ def build_nary_ordering_substrate(sdk: TortoiseSDK,
       Measured block: **5** evidence chunks (Current-Date header + the chain
       line + the three gold rows), **zero** crowd rows.
     * **A (legacy)** pools ONE result set for the whole question and **admits
-      all three golds too** — its entity-anchored leg (question nouns →
-      Objects → their aboutObject points) reaches them even though the window
-      also fills with crowd rows. Measured block: **41** chunks, **37** of
-      them crowd rows.
+      all three golds too** — MEASURED, and by the mechanism the shipped
+      chain actually has, not by an edge walk. There is **no entity-anchored
+      retrieval leg on this lane**: ``tortoise/search_engine.py`` carries zero
+      ``aboutObject`` references, and ``run_ask_lane`` passes NEITHER
+      ``entity_key_expansion`` (:34121, default ``False``) nor
+      ``structural_hops``, so no edge traversal can fire. Admission here is
+      decided by the pooled full-text window's own row order — the
+      deterministic-but-opaque internal order ``build_deep_rank_substrate``
+      documents above. Measured block: **41** chunks, **37** of them crowd
+      rows.
 
     ⛔ SO THIS SUBSTRATE MEASURES **PRECISION**, NOT ADMISSION. Do not read
     ``crowd_rows`` as starving legacy's gold admission: it does not, and a
     test that pins ``legacy admits fewer than 3`` on THIS geometry would be
     pinning a falsehood. (The measured admission parity is also not an
     EP-rerank artifact — re-measured with the golds' EP neutralised, same
-    3/3.) Authoring order relative to the crowd was NOT controlled for; this
-    module's sibling geometry note (``build_deep_rank_substrate``) is the
-    record that this engine's tied-row order is authoring-dependent, which is
-    exactly why the crowd is not offered here as an admission mechanism.
+    3/3.) Authoring order relative to the crowd was NOT controlled for: the
+    three golds are created BEFORE the crowd loop below, which is the position
+    the module note above says explains WHICH tied row lands where. Treat the
+    parity as a measurement at a head, never as a property of the geometry.
 
-    Both halves of that statement are PINNED, not narrated, in
-    ``test_nary_ordering_chain_admits_every_gold_vs_legacy``: the A arm's 3/3
-    admission and the fired block's zero crowd rows. If either moves, the
-    test fails and this docstring must be revised with it.
+    ⛔ For that reason the A arm's admission COUNT is **reported, not
+    pinned**. ``test_nary_ordering_chain_admits_every_gold_vs_legacy`` pins the
+    order-independent halves — legacy's window stays non-vacuous, the fired
+    block carries zero crowd rows and is narrower — and carries the measured
+    count and each gold's chunk index in its own failure messages. Pinning
+    ``legacy admits exactly 3`` would pin which tied row falls inside a 40-row
+    window, which is exactly what the ``build_deep_rank_substrate`` note
+    forbids ("assert the pool-depth invariant, never a specific gold's
+    index") and what cost main a red at #3095/#3273.
 
     The crowd rows are deliberately NOT aboutObject-linked: they are ordinary
     chatter, so they cannot enter any subject slice and cannot alter the
