@@ -681,6 +681,47 @@ def test_the_health_line_is_not_OK_while_TERMINAL_entries_refuse_everything(tmp_
     assert line.line == "capture: SATURATED (0 queued, refusing new captures)"
 
 
+def test_a_HEALTH_read_never_repairs_the_spool_it_describes(tmp_path):
+    """The health line now calls `spool_saturated`, which scans the metas — and
+    `list_spool_metas` is the DRAIN's *repairing* scanner: it records a
+    `corrupt_entry` line, quarantines the turn log to `.orphan` and unlinks the
+    meta. A health line printed on every drain must not do any of that, which is
+    what `count_pending_captures` states as its own reason for not using it.
+    `repair=False` is the contract, and a `SATURATED` verdict is the state where
+    getting it wrong is worst: the scan that decides "is anything evictable?"
+    would change the answer it is measuring.
+
+    MUTATION THAT REDS THIS: drop `repair=False` from `_spool_health_line`'s
+    `spool_saturated` call -> the corrupt meta is removed, its log becomes an
+    orphan, and a ledger line is appended by a READ.
+    """
+    from tortoise.capture_spool import _log_path, _meta_path, capture_health_line, spool_saturated
+
+    sid = "health-readonly"
+    write_spool_entry(tmp_path, _snapshot(sid))
+    log = _log_path(tmp_path, sid)
+    log.write_bytes(b"z" * 64)
+    meta = _meta_path(tmp_path, sid)
+    meta.write_text("{not json", encoding="utf-8")
+    before = sorted(p.name for p in tmp_path.iterdir())
+
+    # The READ side: no ledger line, no quarantine, no unlink, twice over.
+    spool_saturated(tmp_path, repair=False)
+    capture_health_line(tmp_path, api_key="tt_x")
+
+    assert meta.exists(), "a health read must not unlink the meta it could not parse"
+    assert not log.with_name(log.name + ".orphan").exists(), (
+        "a health read must not quarantine a transcript")
+    assert [d["reason"] for d in read_discards(tmp_path)] == [], (
+        f"a health read must not append to the ledger: {read_discards(tmp_path)}")
+    assert sorted(p.name for p in tmp_path.iterdir()) == before, (
+        "a health read must leave the spool byte-identical")
+
+    # …and the WRITE path still repairs, because the drain needs it to.
+    spool_saturated(tmp_path)
+    assert not meta.exists(), "the write path keeps the repairing scan"
+
+
 def test_the_filed_class_is_reaped_BEFORE_a_quarantined_orphan(tmp_path):
     """#6388 ranking, completed: a FILED entry's content is already on the wire,
     so reclaiming it is a CERTAIN zero-cost choice; an orphan's delivered-ness is
@@ -4131,10 +4172,28 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs(tmp_path):
     assert proc.stdout.strip().splitlines()[-1] == python_line
 
 
+def _ts_health_opts(api_key, bounds) -> dict:
+    """The Pi leg's `captureHealthLine` options for one parity case.
+
+    The ceilings cross the leg boundary in their TS spelling (`SpoolBounds` is
+    camelCase); everything else is shared vocabulary.
+    """
+    opts: dict = {}
+    if api_key is not None:
+        opts["apiKey"] = api_key
+    if bounds is not None:
+        opts["bounds"] = {
+            "maxEntries": bounds.max_entries,
+            "maxTotalBytes": bounds.max_total_bytes,
+            "maxEntryBytes": bounds.max_entry_bytes,
+        }
+    return opts
+
+
 def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_path):
     """The parity test above pins the BLOCKED shape. Every OTHER shape an
-    operator greps for — DRAINING, OK, UNREADABLE, INACTIVE — is just as
-    load-bearing and just as easy to spell differently on one leg.
+    operator greps for — DRAINING, OK, UNREADABLE, INACTIVE, SATURATED — is just
+    as load-bearing and just as easy to spell differently on one leg.
 
     MUTATION THAT REDS THIS: reword any state on one leg (or drop the `, N
     queued` from INACTIVE) → the two strings differ. The store-sync terms are in
@@ -4163,6 +4222,18 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
     unreadable = tmp_path / "unreadable"
     (unreadable / "entries").mkdir(parents=True)
 
+    # The SIXTH state, and the one the whole PR exists to make visible. It is a
+    # statement ABOUT the ceilings, so the case carries its own Bounds: the
+    # default `max_entries` is 20 000 and a parity fixture that had to build
+    # 20 000 entries would never run. One undelivered entry at `max_entries=1`
+    # leaves nothing evictable — which is exactly a refusing box.
+    from tortoise.capture_spool import Bounds as _Bounds
+
+    saturated_bounds = _Bounds(max_entries=1, max_total_bytes=10_000_000,
+                               max_entry_bytes=10_000)
+    saturated = tmp_path / "saturated"
+    write_spool_entry(saturated, _snapshot("sat-1"), saturated_bounds)
+
     # #3515 review (P2, parity-regression): the store-sync terms are part of the
     # SAME pinned spelling, so the state the change was made for has to be in
     # the compared set — otherwise both legs can disagree about a dead-lettered
@@ -4184,11 +4255,16 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
         encoding="utf-8",
     )
 
-    cases = [("draining", draining, None),
-             ("ok", filed, None),
-             ("inactive", inactive, ""),
-             ("unreadable", unreadable, None),
-             ("sibling dead letters + failed sweep", sibling_spool, None)]
+    cases = [("draining", draining, None, None),
+             ("ok", filed, None, None),
+             ("inactive", inactive, "", None),
+             ("unreadable", unreadable, None, None),
+             ("sibling dead letters + failed sweep", sibling_spool, None, None),
+             # Both shapes of SATURATED: the keyless line KEEPS the keyless fact
+             # rather than replacing it, because a keyless box is precisely the
+             # one that saturates — so the two spellings are pinned separately.
+             ("saturated", saturated, "tt_x", saturated_bounds),
+             ("saturated (keyless)", saturated, "", saturated_bounds)]
     unreadable.chmod(0o755)
     (unreadable / "entries").chmod(0o000)
     try:
@@ -4199,8 +4275,8 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
             f'import {{ captureHealthLine }} from "{ext}";\n'
             + "".join(
                 f'console.log(captureHealthLine({json.dumps(str(d))},'
-                f' {json.dumps({} if k is None else {"apiKey": k})}).line);\n'
-                for _, d, k in cases),
+                f' {json.dumps(_ts_health_opts(k, b))}).line);\n'
+                for _, d, k, b in cases),
             encoding="utf-8",
         )
         proc = subprocess.run(
@@ -4209,7 +4285,11 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
         )
         assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
         ts_lines = proc.stdout.strip().splitlines()[-len(cases):]
-        py_lines = [capture_health_line(d, api_key=k).line for _, d, k in cases]
+        from tortoise.capture_spool import DEFAULT_BOUNDS as _DEFAULT_BOUNDS
+
+        py_lines = [capture_health_line(
+            d, api_key=k, bounds=b if b is not None else _DEFAULT_BOUNDS).line
+            for _, d, k, b in cases]
         assert ts_lines == py_lines, f"legs disagree: ts={ts_lines} py={py_lines}"
         assert py_lines == [
             "capture: DRAINING (1 queued)",
@@ -4218,6 +4298,9 @@ def test_the_health_line_is_the_SAME_STRING_on_both_legs_for_every_state(tmp_pat
             f"capture: UNREADABLE (cannot list {unreadable / 'entries'})",
             "capture: OK (0 queued), 2 store-sync dead-lettered, "
             "store-sync FAILED (node_unavailable)",
+            "capture: SATURATED (1 queued, refusing new captures)",
+            "capture: SATURATED (no TORTOISE_API_KEY, 1 queued, "
+            "refusing new captures)",
         ], py_lines
     finally:
         (unreadable / "entries").chmod(stat.S_IRWXU)
