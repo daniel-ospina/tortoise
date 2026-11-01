@@ -3060,7 +3060,7 @@ def test_apply_supersessions_prefers_id_match_over_same_string_name(sdk):
     # the fixture writes this carrier with an explicit `status='live'`, so the
     # honest predicate is "not folded" — a fabricated-vs-derived distinction
     # this leg is not about.
-    assert n and n[0][0] in (None, "live"), \
+    assert n and n[0][0] == "live", \
         f"name-match Object wrongly folded instead of the id match: {n!r}"
 
 

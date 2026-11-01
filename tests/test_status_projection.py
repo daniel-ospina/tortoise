@@ -911,7 +911,10 @@ class TestReadSide:
             hits = sdk.tortoise_fts_query("the strategy", kind="core:strategy",
                                           entity_type="object", limit=5)
             assert hits, "seeded object must be retrievable (kind-scoped)"
-            assert hits[0].get("status") is None, hits[0]
+            # #9974 R1: the hit's `status` is a LIVENESS decoration, rendered
+            # through `live.status_as_reported` — an absent stored status
+            # reports live, so a consumer comparing `== "live"` keeps matching.
+            assert hits[0]["status"] == "live", hits[0]
 
             sdk.create_entity("object", "the tactic", objectKind="core:strategy",
                               status="draft")

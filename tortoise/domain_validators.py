@@ -354,7 +354,7 @@ _PORTFOLIO_DOMAIN = "portfolio"
 #:
 #: ⛔ TWO different reasons carry `live` in this exemption, and they are no longer
 #: the same one (#9974 R1 review P3). The node scan below filters
-#: `o.status IS NOT NULL` (:560), so a node born without an explicit status
+#: `o.status IS NOT NULL` (:569), so a node born without an explicit status
 #: — which since R1 is the ORDINARY shape, the fold seeds `status=$st` rather
 #: than the deleted `coalesce($st, 'live')` — is SKIPPED, not exempted. This set
 #: therefore covers only the LEGACY / caller-supplied shape: a node that already

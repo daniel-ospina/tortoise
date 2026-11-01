@@ -474,7 +474,7 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   accepts one — ⚠️ the SUBJECT door validates it against §4.2, the OBJECT door
 #:   validates nothing (a comment in `sdk._kind_layer_note` says so of the
 #:   document door — `create_entity`'s object branch has no status validation at
-#:   all, unlike the subject branch below it) — so `create_object(name, status='superseded')`
+#:   all, unlike the subject branch above it) — so `create_object(name, status='superseded')`
 #:   writes a terminal status at birth that `never_store` keeps out of the layer
 #:   tables and these two legs do not select (`ObjectRegistered`/`SubjectAdded` are
 #:   not `EventRecorded`). A record-sourced rebuild materializes it with NO status →

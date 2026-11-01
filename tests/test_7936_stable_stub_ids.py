@@ -533,7 +533,7 @@ class TestStubDiscriminatorIsNotCallerWritable:
             assert {k: v for k, v in live.items() if k != "status"} == {
                 k: v for k, v in rebuilt.items() if k != "status"}, (
                 f"live != replay after a refused forge: {live} != {rebuilt}")
-            assert live.get("status") in (None, "live"), live
+            assert live.get("status") == "live", live
             assert rebuilt.get("status") is None, rebuilt
             assert rebuilt.get("objectKind") == "core:task", rebuilt
         finally:

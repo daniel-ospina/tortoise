@@ -390,7 +390,7 @@ def test_ingest_applies_entity_supersession(sdk_factory, monkeypatch):
         params={"n": "gym-plan-B"}).result_set
     # #9974 R1: an absent status READS live, so the query's own `coalesce(…, '')`
     # reports '' for a status-less birth.
-    assert b and b[0][0] in ("", None, "live"), \
+    assert b and b[0][0] == "", \
         f"successor gym-plan-B must stay live: {b!r}"
 
 

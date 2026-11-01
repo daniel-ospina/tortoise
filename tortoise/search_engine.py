@@ -4737,8 +4737,13 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # that row was never absent and this change does not reach it.
             s_id, s_name, s_kind = row[12], row[13], row[14]
             es_id, es_name, es_kind = row[15], row[16], row[17]
-            s_status = row[19] if len(row) > 19 else ""
-            es_status = row[20] if len(row) > 20 else ""
+            # #9974 R1 review: the short-row fallback is ABSENT (None), not
+            # `""` — `status_as_reported("")` reports `""` (a stored empty
+            # value) while `status_as_reported(None)` reports `live`, and these
+            # arms are `:Subject`-anchored, so a short row must not read as
+            # "this team has no lifecycle state".
+            s_status = row[19] if len(row) > 19 else None
+            es_status = row[20] if len(row) > 20 else None
             if st["subject"] is None and s_id:
                 st["subject"] = {"id": s_id, "name": s_name or "",
                                  "kind": s_kind or "",

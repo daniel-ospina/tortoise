@@ -395,7 +395,7 @@ class TestSubjectStatusWriteIsValidated:
         # refused BEFORE any write: the stored value is untouched — a status-less
         # birth leaves it ABSENT since #9974 R1 (absent reads LIVE).
         (status,), = _subject_row(proj, "Team Alpha", "status")
-        assert status in (None, "live"), status
+        assert status is None, status
 
     @pytest.mark.parametrize("bad", ["retracted", "dead"])
     def test_create_entity_refuses_an_undeclared_subject_status(

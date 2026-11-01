@@ -484,7 +484,7 @@ class TestFourNodeChain:
             "RETURN p.c_cal, p.status, p.source_ref, p.quote, p.pointKind, p.is_episodic",
         ).result_set
         assert rows, "Point pt_0 missing"
-        assert rows[0][0] == 0.8 and (rows[0][1] or "live") == "live"
+        assert rows[0][0] == 0.8 and rows[0][1] == "live"
         assert rows[0][2] == "session.md"
         n = g.query(
             "MATCH (p:Point {id:'pt_0000000000000000000000000000000000000000000000000000000000000000'})"
@@ -2011,7 +2011,7 @@ class Test5363InvertedSupersedeWindow:
         old = g.query(
             "MATCH (p:Point {id:$id}) RETURN p.status, p.validTo",
             params={"id": old_pid}).result_set
-        assert old and (old[0][0] or "live") == "live", f"predecessor mutated: {old}"
+        assert old and old[0][0] == "live", f"predecessor mutated: {old}"
         assert old[0][1] is None, f"predecessor validTo stamped: {old}"
 
         # Over-fix guard: a `when` ON/AFTER the predecessor's `validFrom` is a

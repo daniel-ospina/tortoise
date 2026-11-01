@@ -35764,8 +35764,13 @@ class TortoiseSDK:
                         "content": row[1] or "",
                         "kind": row[2] or "",
                         # #1350: projection-owned status + successor (Object
-                        # status fold; absent = honestly absent)
-                        "status": row[3] or "",
+                        # status fold). #9974 R1: the field is a LIVENESS
+                        # decoration, so an absent stored status renders live
+                        # (the same `live.status_as_reported` the three other
+                        # read surfaces use) rather than `""`/omitted — a
+                        # consumer comparing `== "live"` must keep matching a
+                        # live Object whose birth stored nothing.
+                        "status": status_as_reported(row[3]),
                         "superseded_by": row[4] or "",
                     }
             elif entity_type == "operator":
@@ -36337,14 +36342,9 @@ class TortoiseSDK:
         carry their own `status` families (which include `deprecated`), and an
         `:Event` carries NO `status` at all — its lifecycle is `eventStatus`,
         a different vocabulary this field deliberately does not mix in, so an
-        `:Event` peer reports `""`. A `:Point`/`:Object`/`:Subject` peer that
-        STORES no status also reports `""`: since #9974 R1 a status-less birth
-        leaves the property absent (derived-or-absent, never a fabricated
-        `'live'`), and that peer READS live (`live._terminal_excluded`), so `""`
-        over-reports "exposes no `status`" in exactly the way this widening
-        exists to reduce — stated rather than left to be rediscovered. `""`
-        therefore also means "this peer stores no `status`", and it is now
-        reached by LOOKING at the peer's label rather than by never asking.
+        `:Event` peer reports `""`. `""` therefore means "this peer's layer
+        exposes no `status`", and it is now reached by LOOKING at the peer's
+        label rather than by never asking.
 
         A THIRD meaning is `""`: the sweep leg for that peer's label FAILED
         (a raise is logged and skipped, so the other labels' statuses survive —
