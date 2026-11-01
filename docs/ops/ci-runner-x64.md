@@ -59,8 +59,8 @@ and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`
   bare `runs-on: self-hosted-x64` DOES select this box. What the repo refuses **as a default** is
   not a spelling but a CLASS — any POOL-ONLY label: `self-hosted`, and equally the bare custom
   `self-hosted-x64` above, since no GitHub-hosted runner carries either. The `test-slow` pin's
-  header in `.github/workflows/python-ci.yml:1891` is "Do NOT change it back to `ubuntu-latest`, and
-  never to `self-hosted`", and the reason is recorded at `:1863-1865` — a `self-hosted` pin removes
+  header in `.github/workflows/python-ci.yml:1903` is "Do NOT change it back to `ubuntu-latest`, and
+  never to `self-hosted`", and the reason is recorded at `:1875-1877` — a `self-hosted` pin removes
   the GitHub-hosted half of the race, so during a hosted outage the required leg WAITS and "the
   aggregate stays pending — not answered yet" instead of being answered by the pool.
   **One opt-in departure exists and is recorded below** — `CI_SHARD_ROUTING=pool-split` names
@@ -296,7 +296,7 @@ surface, reported green.
 
 ⛔ **On THIS tree that read refuses — `exit 4`, and ZERO `<label> = <n> of <m>` rows — and that is
 the instrument working, not a broken check.** The no-verdict arms run BEFORE any per-label verdict,
-so `.github/workflows/python-ci.yml:716`'s `runs-on: ${{ fromJSON(matrix.runner) }}` (#10186 — the
+so `.github/workflows/python-ci.yml:728`'s `runs-on: ${{ fromJSON(matrix.runner) }}` (#10186 — the
 selector emits the per-row label array) makes the whole block no-verdict here: it prints
 `⛔ label-coverage could not read 1 runs-on: block(s) as a STATIC label set`, then exits `4`. The
 inventory above is therefore a HAND measurement, never this read's transcript, and a `--status && …`
