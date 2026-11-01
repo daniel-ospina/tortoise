@@ -84,8 +84,45 @@ by any subsequent call — so that is the only place the marker is written.
 """
 from __future__ import annotations
 
+#: The recorded judgment on which leg verdicts prove the store ANSWERED —
+#: imported, never re-declared, so the completeness proof cannot drift from the
+#: read path's own vocabulary. ⚠️ IT ANSWERS A DIFFERENT QUESTION than the proof
+#: below: ``read_status`` asks whether the store was REACHABLE, where
+#: ``index_missing`` is legitimately an answer ("the server replied: no such
+#: index"). The completeness proof asks whether a leg that was ASKED dropped
+#: matches this read would otherwise have delivered, and for the LEXICAL leg
+#: ``index_missing`` is the opposite answer — see
+#: :data:`LEG_ANSWERED_REASONS`.
+from .read_status import _ANSWERED_REASONS
+
 #: The response field naming incompleteness. Always present on a marked read.
 TRUNCATED_FIELD = "truncated"
+
+#: Which verdicts prove an ASKED leg ANSWERED, keyed on ``(leg, reason)`` — the
+#: keyed form is required because one reason means different things per leg.
+#:
+#: ``fts`` — ``index_missing`` is **NOT** an answer. `run_fts_query` raises the
+#: fulltext index call, records ``index_missing`` and returns `[]`
+#: (``search_engine.py:1741``). The rows exist and that index is the ONLY way to
+#: match them, so they are unreachable by any follow-up call — exactly the class
+#: this module forbids (see the three seams above). Publishing the survivors'
+#: length as an exact total over that read is a lower bound wearing a total's
+#: clothes: 20 Points matching a term, no fulltext index, a dense leg answering 3
+#: -> ``total_available: 3``, 17 short.
+#:
+#: Every other leg keeps the recorded set. Their ``index_missing`` means
+#: something else: the structural leg is a plain `MATCH` scan, so an index error
+#: there means the label is absent (nothing to lose), and the dense leg records
+#: ``index_missing`` only on its brute-force scan path — the vector index is not
+#: the only route, and ``no_embeddings`` (no vectors exist) is an answer by
+#: construction. No measurement covers narrowing those, so they are not narrowed
+#: here.
+LEG_ANSWERED_REASONS: dict[str, frozenset[str]] = {
+    "fts": _ANSWERED_REASONS - {"index_missing"},
+}
+
+#: The fallback for a leg the keyed table above does not name.
+DEFAULT_LEG_ANSWERED_REASONS: frozenset[str] = _ANSWERED_REASONS
 
 #: The response field naming the EXACT number of matches the read could see.
 #: Present ONLY when it is exact — absence means "unknown", never "zero".
@@ -132,6 +169,51 @@ def mark_truncation(sink: dict | None, *, returned: int,
     sink.pop(TOTAL_AVAILABLE_FIELD, None)
     if truncated and exact:
         sink[TOTAL_AVAILABLE_FIELD] = candidates
+
+
+def lost_leg_owners(asked_legs: dict[str, bool], status_trace, *,
+                    skip_from: int | None = None) -> set[str]:
+    """The ASKED legs whose own verdict proves they never ANSWERED the read.
+
+    A leg that was asked and never answered (it raised, missed the collective
+    deadline, or was refused by its circuit breaker) contributed no rows at all,
+    so the matches it would have found are unreachable — the third seam in this
+    module's docstring. Key ABSENCE cannot prove that (a leg that ran and found
+    nothing leaves no key either), which is why the trace, not the result dict,
+    is the evidence.
+
+    ``asked_legs``     ``{leg: was it asked?}``, from the SAME predicate the
+                       retrieval chain uses to submit it. A leg that was never
+                       asked is a declared capability gap, not a drop.
+    ``status_trace``   the leg-trace entries recorded so far.
+    ``skip_from``      ignore entries at or after this index. The trace carries
+                       ONE slot per leg but the lexical slot can be written by a
+                       SECOND scorer (the #8488 in-process BM25 arm, which
+                       records under ``leg="fts"``); its entries are appended
+                       after the chain returns, and its contract is *"the leg
+                       DEGRADES, never fails a read"* — the shipped leg's rows
+                       survive untouched, so its failure must not be judged as
+                       the shipped leg's. Provenance (where the entry was
+                       appended), not a marker key, is the discriminator: the
+                       arm's ``breaker_open`` branch writes no ``mechanism`` and
+                       no ``declined`` key at all, so key-based attribution
+                       would leave exactly that branch mis-read.
+    """
+    lost: set[str] = set()
+    for index, entry in enumerate(status_trace or ()):
+        if skip_from is not None and index >= skip_from:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        leg = entry.get("leg")
+        if not asked_legs.get(leg):
+            continue
+        if not entry.get("degraded"):
+            continue
+        answered = LEG_ANSWERED_REASONS.get(leg, DEFAULT_LEG_ANSWERED_REASONS)
+        if entry.get("reason") not in answered:
+            lost.add(leg)
+    return lost
 
 
 def truncation_field(sink: dict | None) -> dict:

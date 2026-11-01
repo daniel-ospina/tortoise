@@ -551,3 +551,260 @@ class TestTheDegradedArmsMarkACut:
 
         assert len(rows) == 20
         assert truncation_field(sink) == {TRUNCATED_FIELD: False}
+
+
+# ── review round 6: which verdicts ANSWER, who OWNS an entry, and WHERE the
+# fold is consulted ───────────────────────────────────────────────────────
+
+def _chain_on(leg, hits, entry):
+    """A ``degradation_chain`` double putting ``hits`` on ``leg``.
+
+    ``_chain`` (round 5) hard-codes the ``fts`` slot; these tests need the rows
+    to survive while a DIFFERENT verdict is recorded, which is the whole point —
+    the shape under test is "rows arrived, and a leg's own trace says it never
+    answered".
+    """
+    def _fake(graph, query, kind, query_vec, strategies, **kwargs):
+        trace = kwargs.get("leg_trace")
+        if trace is not None and entry is not None:
+            trace.append(dict(entry))
+        return {leg: list(hits)} if hits else {}
+    return _fake
+
+
+class TestTheAnsweredVerdictIsKeyedOnTheLeg:
+    """``index_missing`` answers REACHABILITY; it does not answer COMPLETENESS.
+
+    ``read_status._ANSWERED_REASONS`` is correct where it lives ("the server
+    replied: no such index" proves the store was reached). The completeness
+    proof asks a different question — did this leg DROP matches the read would
+    otherwise have delivered? — and for the LEXICAL leg the answer is yes: the
+    rows exist and that index is the only route to them.
+    """
+
+    @staticmethod
+    def _entry(reason, leg="fts"):
+        return {"leg": leg, "ran": True, "degraded": True,
+                "reason": reason, "count": 0}
+
+    def test_a_missing_lexical_index_is_not_an_answer(self):
+        from tortoise.truncation import lost_leg_owners
+
+        assert lost_leg_owners(
+            {"fts": True}, [self._entry("index_missing")]) == {"fts"}, (
+            "the lexical leg raised and returned nothing while the rows it "
+            "would have matched still exist — the read never searched them")
+
+    def test_the_recorded_answer_set_is_not_rewritten(self):
+        """The narrowing is in the PROOF, not in read_status's own list."""
+        from tortoise.read_status import _ANSWERED_REASONS
+
+        assert "index_missing" in _ANSWERED_REASONS, (
+            "read_status still needs index_missing as an answer to ITS question"
+            " (was the store reached?) — narrowing that list would be the fix "
+            "applied in the wrong home")
+
+    def test_a_leg_that_was_not_asked_is_never_lost(self):
+        """A declared capability gap is not a drop (the #8447 docstring rule)."""
+        from tortoise.truncation import lost_leg_owners
+
+        assert lost_leg_owners(
+            {"fts": False}, [self._entry("query_failed")]) == set()
+        assert lost_leg_owners(
+            {"vector": True}, [self._entry("no_embeddings", "vector")]) == set(), (
+            "no vectors exist, so the dense leg lost nothing by finding none")
+
+    def test_the_answer_reasons_are_still_answers(self):
+        from tortoise.truncation import lost_leg_owners
+
+        for reason in ("ok", "empty_results"):
+            assert lost_leg_owners({"fts": True}, [self._entry(reason)]) == set()
+
+    def test_the_arms_entries_are_attributed_to_the_arm_not_the_slot(self):
+        """Provenance, not the slot name both lexical scorers share.
+
+        The #8488 arm records under ``leg="fts"`` too. Its ``breaker_open``
+        branch writes NO ``mechanism`` and NO ``declined`` key, so a key-based
+        filter would leave exactly that branch mis-read as the shipped leg
+        failing.
+        """
+        from tortoise.truncation import lost_leg_owners
+
+        shipped = self._entry("breaker_open")
+        arm = self._entry("breaker_open")
+        assert lost_leg_owners({"fts": True}, [shipped, arm], skip_from=1) == {
+            "fts"}, "the SHIPPED leg never answered; the arm's entry after the "\
+                     "mark says nothing about it"
+        assert lost_leg_owners({"fts": True}, [arm], skip_from=0) == set(), (
+            "the shipped leg answered and every row shipped — the arm's own "
+            "failure is not a drop")
+
+
+class TestAMissingLexicalIndexPublishesNoTotal:
+    """P2-a, end to end: the read's lexical half never searched."""
+
+    def test_a_dense_only_read_over_an_absent_index_is_not_complete(
+            self, sdk, monkeypatch):
+        _seed(sdk, 20)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        hits = [(pid, 1.0 - i / 100) for i, pid in enumerate(_point_ids(sdk, 3))]
+        monkeypatch.setattr(
+            "tortoise.search_engine.degradation_chain",
+            _chain_on("vector", hits,
+                      {"leg": "fts", "ran": True, "degraded": True,
+                       "reason": "index_missing", "count": 0}))
+
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+
+        assert len(rows) == 3
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True, (
+            "3 rows over a 20-match store whose fulltext index is absent is NOT "
+            "a complete answer: the lexical leg never searched")
+        assert TOTAL_AVAILABLE_FIELD not in marker, (
+            "publishing 3 as the exact total would be the lower bound wearing a "
+            "total's clothes that truncation.py forbids")
+
+    def test_the_healthy_seam_still_proves_an_exact_total(self, sdk, monkeypatch):
+        """Control: the same double, an answered lexical leg — total published."""
+        _seed(sdk, 20)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        hits = [(pid, 1.0 - i / 100) for i, pid in enumerate(_point_ids(sdk, 10))]
+        monkeypatch.setattr(
+            "tortoise.search_engine.degradation_chain",
+            _chain_on("fts", hits,
+                      {"leg": "fts", "ran": True, "degraded": False,
+                       "reason": "ok", "count": len(hits)}))
+
+        sink: dict = {}
+        sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink)
+
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True
+        assert marker[TOTAL_AVAILABLE_FIELD] == 10
+
+
+class TestTheLexicalArmsOwnFailureIsNotTheShippedLegs:
+    """P2-b, end to end: the #8488 arm DEGRADES; it never fails a read.
+
+    ``run_bm25_query`` records under the same ``leg="fts"`` slot and its
+    contract is "the leg degrades, never fails a read" — it returns `[]` and the
+    shipped leg's rows survive untouched. Both of its failure branches are
+    driven here: a breaker refusal (writes neither ``mechanism`` nor
+    ``declined``) and an internal raise (writes ``mechanism="bm25"``).
+    """
+
+    def test_the_arm_tripping_its_breaker_does_not_mark_a_complete_read(
+            self, sdk, monkeypatch):
+        _seed(sdk, 3)
+        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)  # default ON
+        import tortoise.search_engine as _se
+
+        _real_allow = _se._breaker_allow
+        monkeypatch.setattr(
+            _se, "_breaker_allow",
+            lambda name: False if name == "bm25" else _real_allow(name))
+
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+
+        assert len(rows) == 3, "the shipped lexical leg's rows must survive"
+        assert truncation_field(sink) == {TRUNCATED_FIELD: False}, (
+            "every row the read matched was delivered; marking it truncated is "
+            "the false positive that makes the field meaningless")
+
+    def test_the_arm_raising_does_not_mark_a_complete_read(self, sdk, monkeypatch):
+        _seed(sdk, 3)
+        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)  # default ON
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("bm25 exploded")
+
+        monkeypatch.setattr("tortoise.bm25.bm25_rank", _boom)
+
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+
+        assert len(rows) == 3
+        assert truncation_field(sink) == {TRUNCATED_FIELD: False}
+
+    def test_a_shipped_leg_failure_alongside_the_arm_is_still_lost(
+            self, sdk, monkeypatch):
+        """The exclusion is by PROVENANCE — it must not swallow the real one."""
+        _seed(sdk, 20)
+        monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)  # default ON
+        import tortoise.search_engine as _se
+
+        _real_allow = _se._breaker_allow
+        monkeypatch.setattr(
+            _se, "_breaker_allow",
+            lambda name: False if name == "bm25" else _real_allow(name))
+        hits = [(pid, 1.0 - i / 100) for i, pid in enumerate(_point_ids(sdk, 5))]
+        monkeypatch.setattr(
+            "tortoise.search_engine.degradation_chain",
+            _chain_on("vector", hits,
+                      {"leg": "fts", "ran": True, "degraded": True,
+                       "reason": "query_failed", "count": 0}))
+
+        sink: dict = {}
+        sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True, (
+            "the SHIPPED lexical leg raised and returned nothing — excluding "
+            "the arm's entry must not exclude the leg's own")
+        assert TOTAL_AVAILABLE_FIELD not in marker
+
+
+class TestAnEarlyReturnStillConsultsTheFold:
+    """P3: two returns leave the read BEFORE the exactness proof.
+
+    Both shipped ``truncated: false`` over a read whose sparse leg never
+    answered — 0 rows marked COMPLETE over a store that was only half read.
+    """
+
+    def test_a_floored_dense_leg_over_a_failed_sparse_leg_is_not_complete(
+            self, sdk, monkeypatch):
+        _seed(sdk, 20)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        # The #4028 floor is the only way this arm floors the dense leg, and
+        # `floored_legs` is only handed to the chain when it is active.
+        monkeypatch.setenv("TORTOISE_VECTOR_MIN_SIMILARITY", "0.9")
+
+        def _fake(graph, query, kind, query_vec, strategies, **kwargs):
+            floored = kwargs.get("floored_legs")
+            if floored is not None:
+                floored.add("vector")
+            trace = kwargs.get("leg_trace")
+            if trace is not None:
+                trace.append({"leg": "fts", "ran": True, "degraded": True,
+                              "reason": "query_failed", "count": 0})
+            return {}
+
+        monkeypatch.setattr("tortoise.search_engine.degradation_chain", _fake)
+
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+
+        assert rows == []
+        assert truncation_field(sink)[TRUNCATED_FIELD] is True, (
+            "an EMPTY answer over a read whose sparse leg never answered is a "
+            "completeness claim over a store that was only half read")
+
+    def test_no_fallback_applicable_still_consults_the_fold(
+            self, sdk, monkeypatch):
+        _seed(sdk, 20)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        monkeypatch.setattr(
+            "tortoise.search_engine.degradation_chain",
+            _chain_on("fts", [],
+                      {"leg": "fts", "ran": True, "degraded": True,
+                       "reason": "breaker_open", "count": 0}))
+
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=10, entity_type="document",
+                                      _truncation_out=sink)
+
+        assert rows == []
+        assert truncation_field(sink)[TRUNCATED_FIELD] is True
