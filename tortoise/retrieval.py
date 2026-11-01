@@ -1148,8 +1148,25 @@ def _validity_marker(h: dict) -> str:
     # absent bound's silence.
     raw_vf = h.get("valid_from")
     vf = _display_bound(raw_vf, "valid_from", h)
-    vt = _display_bound(h.get("valid_to"), "valid_to", h)
+    raw_vt = h.get("valid_to")
+    vt = _display_bound(raw_vt, "valid_to", h)
     ex = _display_bound(h.get("expired_at"), "expired_at", h)
+    # ⛔ The SAME distinction, one field over: an END that was STORED but could
+    # not be stated is not an ABSENT end. ``_bound_present`` already keeps them
+    # apart for a start; without it here the unreadable end falls through to the
+    # open arm below and the reader is told ``[valid since <from>]`` — "still
+    # true" — which is the fabricated-coverage hazard #2350's 3-state end exists
+    # to prevent (the #9202 owner ruling: an end column carrying a value is an
+    # ASSERTED end, so its un-datable spelling is END_UNKNOWN, never END_OPEN).
+    # It renders that vocabulary's own END_UNKNOWN form, the same one a
+    # ``"TBD"`` end renders — no new spelling, and nothing asserted about the
+    # instant. This is the residual ``validity.end_state`` does not model: it
+    # short-circuits EVERY numeric to ``known`` (``_names_an_instant``), and the
+    # home for that question stays ``validity``, not this renderer.
+    # (Same class as #9741 review P2's start/end asymmetry, found in the same
+    # read of the same arm — a PRESENT unstatable bound must never be relabelled
+    # as the absence of one.)
+    end_unreadable = _bound_present(raw_vt) and not vt
     # #9741 review P2: the arm is gated on whether a start was STORED, not on
     # whether it produced display text. Gating on the display string made an
     # unreadable start indistinguishable from an absent one, so it discarded a
@@ -1170,13 +1187,17 @@ def _validity_marker(h: dict) -> str:
         # only a present-but-unorderable STRING renders no start clause.
         vfd = vf if _bounds_an_instant(raw_vf) else ""
         since = f" since {vfd}" if vfd else ""
-        if _end_state_is_unknown(h):
+        if _end_state_is_unknown(h) or end_unreadable:
             # #2350/#9202/#9741: ENDED but un-datable. Both spellings of that
             # one state land here — the declared marker AND a stored end that
             # names no instant — so the stored text is never interpolated as a
             # date and the window is never relabelled as still-true. Checked
             # BEFORE the ``vt`` arm: a stored un-datable end is TRUTHY, so it
             # used to take the bounded-window arm and print itself verbatim.
+            # ``end_unreadable`` is the third spelling of the same fact: an end
+            # that is STORED (``_bound_present``) but that the display
+            # normaliser cannot state at all, so it reaches neither of the arms
+            # above.
             if ex:
                 marks.append(f"[valid{since}; expired {ex}; end unknown]")
             else:
@@ -1489,7 +1510,7 @@ def _safe_marker(h: dict) -> str:
     """
     try:
         return _one_line(_validity_marker(h))
-    except Exception:  # noqa: BLE001 — containment, see the docstring
+    except Exception:
         BOUND_RENDER_OUTCOMES["marker_failed"] += 1
         _log.warning(
             "validity marker skipped for point %r — it could not be built; "

@@ -1054,6 +1054,62 @@ def test_an_unreadable_start_does_not_discard_a_readable_end():
     # an ABSENT start is still no marker at all — the distinction this keeps
     assert _validity_marker({"valid_from": ""}) == ""
     assert _validity_marker({"valid_from": None}) == ""
+def test_an_unreadable_end_never_reads_as_an_open_window():
+    """#9741 — the MIRROR of the start/end asymmetry, same arm, same reading.
+
+    ``_bound_present`` kept an unreadable START from being read as an absent
+    one; an END that is STORED but unstatable fell through to the open arm, so
+    the reader was told ``[valid since <from>]`` — the "still true" reading —
+    for a window whose END the record asserts. That is the fabricated-coverage
+    hazard #2350's 3-state end exists to prevent, and the #9202 owner ruling
+    settles its answer: an end column carrying a value is an ASSERTED end, so
+    its un-datable spelling is ``END_UNKNOWN``, never ``END_OPEN``.
+
+    ``validity.end_state`` cannot cover this residual — it short-circuits EVERY
+    numeric to ``known`` (``_names_an_instant``), so a ``nan`` or an out-of-span
+    numeric end arrives already labelled known. The marker's answer for it is
+    the vocabulary's own END_UNKNOWN form, the same text a ``"TBD"`` end renders,
+    so no new spelling and no instant is asserted.
+
+    Fails pre-fix: the junk-end shapes rendered ``[valid since 2024-06-01]`` —
+    an open window the stored end contradicts.
+    """
+    from tortoise.retrieval import _validity_marker
+
+    # the real read path's control: ``validity.end_state("TBD", None)`` is
+    # END_UNKNOWN, so this is the form an unstatable stored end must join.
+    tbd_end = _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                                "valid_to": "TBD",
+                                "end_state": "unknown"})
+    assert tbd_end == "[valid since 2024-06-01; end unknown]"
+    for unstatable in ({"nested": 1}, ["x"], float("nan"), 1719792000000,
+                       10 ** 20):
+        got = _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                                "valid_to": unstatable,
+                                "end_state": "known"})
+        assert got == tbd_end, (unstatable, got)
+    # the expired decoration still renders beside it
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                             "valid_to": {"nested": 1},
+                             "expired_at": "2026-01-02",
+                             "end_state": "known"}) == \
+        "[valid since 2024-06-01; expired 2026-01-02; end unknown]"
+    # an ABSENT / blank end is untouched: still the open reading
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                             "end_state": "known"}) == \
+        "[valid since 2024-06-01]"
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                             "valid_to": "  ",
+                             "end_state": "known"}) == \
+        "[valid since 2024-06-01]"
+    # and a STATABLE end keeps the state's own reading (no re-decision):
+    # a ``"TBD"`` end declared ``known`` still prints the stored text.
+    assert _validity_marker({"id": "p", "valid_from": "2024-06-01",
+                             "valid_to": "TBD",
+                             "end_state": "known"}) == \
+        "[valid 2024-06-01 → TBD]"
+
+
 
 
 
