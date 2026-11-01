@@ -764,7 +764,7 @@ def _age_seconds(value) -> float | None:
     """How old an ISO-8601 timestamp is, or `None` when it is not one."""
     if not isinstance(value, str) or not value.strip():
         return None
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
     text = value.strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
@@ -773,8 +773,8 @@ def _age_seconds(value) -> float | None:
     except ValueError:
         return None
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - stamp).total_seconds()
+        stamp = stamp.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - stamp).total_seconds()
 
 
 def _evidence_identity(artifact) -> dict:

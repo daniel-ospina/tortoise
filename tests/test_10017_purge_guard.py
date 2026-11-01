@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -86,7 +86,7 @@ def _clean_with_ids(session: str, ids: list[str], record_rows=None):
 def _ts(age_seconds: float = 60) -> str:
     """An ISO-8601 stamp `age_seconds` old — every caller-supplied artefact now
     has to state WHEN it was read (a file with no age describes any run)."""
-    stamp = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    stamp = datetime.now(UTC) - timedelta(seconds=age_seconds)
     return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -718,7 +718,6 @@ def test_execute_wiring_refuses_a_record_behind_target_before_any_delete(
 
 def test_execute_wiring_refuses_a_live_census_off_by_one_before_any_delete(
         tmp_path, monkeypatch, capsys):
-    plan = _plan([_clean_with_ids("s1", ["s1_t0", "s1_t1"])])
     rc, called = _cli_execute(
         tmp_path, monkeypatch,
         report=_report(clean=[_clean_with_ids("s1", ["s1_t0", "s1_t1", "s1_t2"])]),
@@ -1024,8 +1023,8 @@ def test_an_edited_plan_cannot_borrow_the_approval_of_the_original():
 # ── evidence has an AGE and an ADDRESS ──────────────────────────────────
 
 @pytest.mark.parametrize("age,code", [
-    (purge._HEALTH_MAX_AGE_SECONDS + 60, purge.REFUSE_ARMED_EVIDENCE_STALE),
-    (60, ""),
+    (25 * 3600, "armed-evidence-stale"),              # beyond the 24h bound
+    (60, ""),                                          # inside it
 ])
 def test_armed_evidence_is_bounded_in_time(age, code):
     plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
@@ -1066,7 +1065,7 @@ def test_a_plan_without_armed_evidence_cannot_authorise_a_delete():
 
 
 @pytest.mark.parametrize("overrides,fragment", [
-    ({"age": purge._RESTORE_PROOF_MAX_AGE_SECONDS + 60}, "day(s) ago"),
+    ({"age": 8 * 86400}, "day(s) ago"),        # beyond the 7-day bound
     ({"org": "other-org"}, "DIFFERENT deployment"),
     ({"graph_id": "other-graph"}, "DIFFERENT deployment"),
     ({"graph": "other-graph"}, "DIFFERENT deployment"),
