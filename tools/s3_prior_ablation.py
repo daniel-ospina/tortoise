@@ -760,6 +760,11 @@ def open_log(path: Path) -> tuple[TextIO, Callable[[str], None]]:
 #: emit EVERY one of them: the pre-fix line printed five of the seven, so the two that decide the
 #: corroboration qualifier (`corroboration_min_sessions`) and the session count (`sessions_total`)
 #: were invisible in the only record of what a run compared against (#10468 r6 F1).
+#: ⛔ Emitted is not the same as COMPARED: `decide()` reads six of these, and the session count it
+#: actually gates on comes from `denominator_floors.sessions` — `sessions_total` is here because the
+#: log must name every frozen number it was scored against, not because a verdict branches on it.
+#: `tests/test_s3_prior_ablation.py::test_every_frozen_threshold_is_named_so_none_can_be_dropped_silently`
+#: decides which is which from `decide()`'s own source, so this stays true without a second copy.
 BARS_LOG_ORDER = (
     "primary_ratio_max",
     "guard_ratio_min",

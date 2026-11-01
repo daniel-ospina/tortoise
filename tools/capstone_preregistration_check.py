@@ -1428,14 +1428,18 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"ok": False, "error": errors[0][1]} if errors else reports[0],
                              indent=2, sort_keys=True))
         else:
+            # Each error carries its OWN directory (#10468 review: the human path prints
+            # `ERROR: {directory}: {message}`, but the JSON emitted only the message — so a
+            # consumer of a two-bundle `--json` run could see THAT one failed and not WHICH).
             print(json.dumps({"ok": exit_code == 0, "reports": reports,
-                              "errors": [str(exc) for _, exc in errors]},
+                              "errors": [{"directory": str(directory), "error": message}
+                                         for directory, message in errors]},
                              indent=2, sort_keys=True))
         return exit_code
 
     for directory, message in errors:
         print(f"ERROR: {directory}: {message}", file=sys.stderr)
-    for index, report in enumerate(reports):
+    for report in reports:
         if len(directories) > 1:
             print(f"=== {report['document']} ===")
         print(f"pre-registration: {report['document']}")

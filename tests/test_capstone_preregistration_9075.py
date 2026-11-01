@@ -2488,3 +2488,24 @@ def test_an_exempted_log_is_named_in_the_report_not_waived_silently(tmp_path, mo
     exempted: list[str] = []
     assert check.check_ordering(prereg, [log], None, exempted) == []
     assert exempted == ["capstone.log"], exempted
+
+# ── the multi-bundle CLI: `--dir` is repeatable, a failure names its bundle (#10468) ────────
+
+def test_a_multi_bundle_json_error_names_the_bundle_it_came_from(tmp_path, capsys):
+    """REGRESSION (#10468 review, obs 1): the multi-bundle JSON dropped the directory.
+
+    The human path prints `ERROR: {directory}: {message}`; the JSON branch emitted bare strings,
+    so a consumer of a two-bundle run could see *that* one failed and not *which*. Not cosmetic —
+    the only CI invocation of this tool now passes `--dir` twice (`#10468` r6 F1), and exit 2
+    ("could not check this subject") deliberately outranks the readable bundle's green.
+    """
+    empty = tmp_path / "not-a-bundle"
+    empty.mkdir()
+    code = check.main(["--dir", str(PREREG_DIR), "--dir", str(empty),
+                       "--no-git", "--no-corpus", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2, "an unreadable subject must outrank the other bundle's green"
+    assert payload["ok"] is False
+    assert payload["reports"], "the readable bundle's report must survive the other's error"
+    assert [e["directory"] for e in payload["errors"]] == [str(empty)]
+    assert f"no {check.PREREG_NAME}" in payload["errors"][0]["error"]

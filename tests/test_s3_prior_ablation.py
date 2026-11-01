@@ -11,6 +11,7 @@ keyless in CI, and a test that needed the key would be a test that never runs.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import subprocess
 import sys
 from pathlib import Path
@@ -237,11 +238,17 @@ def test_every_frozen_threshold_is_named_so_none_can_be_dropped_silently(probe):
     was computed and never emitted — both found by review, both the same shape: the key existed, so
     the code looked complete. The sets are exact, so a removal is a red here rather than a quieter
     run.
+
+    ⛔ EMITTED is not the same as COMPARED (#10468 review, obs 2). This docstring used to say every
+    key here is compared by `decide()`; it is not — `sessions_total` is written into the log header
+    and never branched on, because the session count a verdict gates on is
+    `denominator_floors.sessions`. The partition below is read from `decide()`'s OWN SOURCE, so the
+    claim cannot re-stale: a bar that starts, or stops, being compared reds here.
     """
     assert set(BARS) == {
         "primary_ratio_max", "guard_ratio_min", "corroboration_min_sessions", "sessions_total",
         "arm_integrity_required", "concentration_max", "cost_ratio_max"}, (
-        "the pre-registration's bar set changed — every key here is compared by `decide()`")
+        "the pre-registration's bar set changed — classify every new key COMPARED or EMITTED-ONLY")
     assert set(FLOORS) == {"created_nodes_off", "real_facts_off", "sessions"}
     assert probe.BARS_LOG_ORDER == (
         "primary_ratio_max", "guard_ratio_min", "corroboration_min_sessions", "sessions_total",
@@ -249,6 +256,10 @@ def test_every_frozen_threshold_is_named_so_none_can_be_dropped_silently(probe):
         "the log header must name every frozen bar, in the document's order")
     assert set(probe.BARS_LOG_ORDER) == set(BARS), (
         "a bar the log does not name is a bar the log cannot be held to")
+    compared = {key for key in probe.BARS_LOG_ORDER if key in inspect.getsource(probe.decide)}
+    assert compared == set(probe.BARS_LOG_ORDER) - {"sessions_total"}, (
+        "`decide()` reads exactly six of the seven bars; `sessions_total` is emitted-only because "
+        f"the session gate is `denominator_floors.sessions`. Found compared: {sorted(compared)}")
 
 
 def test_the_measured_log_agrees_with_the_thresholds_it_names(probe):

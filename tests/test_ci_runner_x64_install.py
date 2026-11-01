@@ -4599,8 +4599,10 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
             r"from tortoise\.commit_schema import Point, point_content_id",
         # the reference-surface relay that drifted: the runbook sentence naming the test
         ("docs/ops/ci-runner-x64.md", 866): r"test_the_changes_job_carries_no_job_scope_env",
-        # the capstone pin's re-cut history, which names it too
-        ("tests/test_capstone_preregistration_9075.py", 1590):
+        # the capstone pin's re-cut history, which names it too (re-derived at #10468's head: the
+        # re-cut comments this PR added to that file pushed it 1590 → 1596 — the pin landing rather
+        # than drifting, because a plausible offset is what it exists to refuse)
+        ("tests/test_capstone_preregistration_9075.py", 1596):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
