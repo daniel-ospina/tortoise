@@ -590,19 +590,6 @@ surfaces:
   # arm covers the `record_projection.py` migration resolver the same pin reads.
   - test_health_build_identity_10447.py
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
-  # build served `status: ok` and every other block happily. The pin holds the
-  # commit the DEPLOY was told to build (not a constant, not the checkout), that
-  # `/health` and `/v1/version` cannot disagree (one resolver), that a stale
-  # stamp is reported VERBATIM rather than coerced to HEAD, and that an unstamped
-  # or unrecognised stamp reads as such instead of as current. DB-free.
-  # DUAL registration (api+core), and the `api` arm is the one that matters: the
-  # file it guards is `tortoise/hosted_api.py`, an exact `api` SOURCE_PATTERN that
-  # REPLACES the `core` fallback (`tools/ci_selection.py::select`) — so a
-  # hosted_api.py-only diff would otherwise run no guard at all. The comment on
-  # the `core` row asserts this; `--integrity` cannot (it only asks "is the file
-  # classified?", and `core` alone satisfies that).
-  - test_health_build_identity_10447.py
-
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match
   # that REPLACES the `core` fallback — so a hosted_api.py-only change to its
