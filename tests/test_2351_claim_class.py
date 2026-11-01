@@ -1302,9 +1302,11 @@ def test_supersede_repoint_survives_a_unhashable_stored_direction(lane):
     ``live.direction_flows`` tests membership in a frozenset, so an unhashable
     property value (a list/map) raises ``TypeError`` — a traceback aborting a
     supersede the guard is not about. ⛔ The value is judged BOTH ways, NOT as
-    the edge type's default: ``live.direction_flows`` reads an unknown token as
-    both ways, so a present junk value is a two-leg wiring and judging NAND's
-    ``unidirectional`` would judge one leg of it (see
+    the edge type's default: a HASHABLE unknown token is read as both ways by
+    ``live.direction_flows`` (an UNHASHABLE one raises ``TypeError`` there, so
+    both ways is the fail-closed stand-in), i.e. a present junk value is a
+    two-leg wiring, and judging NAND's ``unidirectional`` would judge one leg of
+    it (see
     ``test_supersede_repoint_reads_a_junk_direction_as_both_ways``). This test
     pins only the no-``TypeError`` half, on a same-class fixture.
     """
@@ -1455,6 +1457,36 @@ def test_supersede_repoint_carries_an_absent_NAND_forward_leg(lane):
         lane, new)
 
 
+def test_supersede_repoint_deletes_a_self_loop_onto_an_op_type_successor(lane):
+    """The operator filter must not hide a DELETE-only row (#9727).
+
+    A self-loop ``(old)-[IMPL]->(old)`` is consumed between the two transfer
+    passes: the ``out`` pass mints ``(new)-[IMPL]->(old)`` and the ``in`` pass
+    then deletes it as its ``tid == new_id`` row. That only works if the row
+    REACHES the ``in`` pass — and the canonical-operator filter dropped it
+    whenever the successor is an operator by ``op_type`` alone (a legacy /
+    migrated node: ``live.LIFECYCLE_FANOUT_QUERY`` -- the lifecycle guard --
+    reads ``is_operator`` only, so such a successor passes the guard while
+    being filtered out of the edge population). MEASURED pre-fix: the supersede
+    returned ``edges_transferred=1`` with no refusal and left
+    ``new(asserted) -[IMPL {bidirectional}]-> old(derived)`` stranded on the
+    superseded point, its ``derived -> asserted`` leg flowing — the E2E-11.6
+    "zero direct edges remain incident" contract broken.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    lane._get_proj().g.query(
+        "MATCH (o:Point {id:$old}) "
+        "CREATE (o)-[:IMPL {direction: 'bidirectional'}]->(o)",
+        params={"old": old})
+    lane._get_proj().g.query(
+        "CREATE (n:Point {id: 777}) SET n.op_type = 'IMPL'")
+
+    lane.supersede_point(old, 777)  # must not raise
+
+    assert _direct_rows(lane, old) == [], _direct_rows(lane, old)
+
+
 def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
     """A resolvable NON-STRING id must still be judged, not skipped.
 
@@ -1484,8 +1516,11 @@ def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
 def test_supersede_repoint_reads_a_junk_direction_as_both_ways(lane):
     """A PRESENT non-string ``direction`` is judged as BOTH ways (fail-closed).
 
-    ⛔ It is NOT the edge type's default. ``live.direction_flows`` reads an
-    unknown token as both ways, and ``ep.py`` sees the same leg set — so judging
+    ⛔ It is NOT the edge type's default. A HASHABLE unknown token (``3``,
+    ``True``) is read as both ways by ``live.direction_flows`` and ``ep.py``;
+    an UNHASHABLE one (this fixture's list) makes ``direction_flows`` raise
+    ``TypeError``, so both ways is the fail-closed stand-in there — either way
+    judging
     NAND's ``unidirectional`` here would judge ONE leg of a two-leg wiring and
     let a supersede write ``asserted -[NAND {junk}]-> derived``, whose backward
     leg is the override ``create_direct_edge(NAND, …, 'bidirectional')``

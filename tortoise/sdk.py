@@ -18723,7 +18723,20 @@ class TortoiseSDK:
                 params={"ids": _other_ids},
             ).result_set
             _op_set = {r[0] for r in _op_rows}
-            return [row for row in _rows if row[2] not in _op_set]
+            # ⛔ The operator filter must not hide a row that is DELETED rather
+            # than re-pointed (#9727). ``tid == new_id`` only ever deletes (the
+            # phantom self-edge branch), and a successor that is an operator by
+            # the CANONICAL population but not by the lifecycle guard's
+            # narrower ``is_operator`` test (an ``op_type``-only node —
+            # ``live.LIFECYCLE_FANOUT_QUERY`` reads the flag alone) would
+            # otherwise be filtered HERE, so the ``in`` pass never saw the
+            # transient ``(new)-[T]->(old)`` edge the ``out`` pass had just
+            # minted and left it stranded on the superseded point — with its
+            # ``derived -> asserted`` leg flowing. MEASURED (raw self-loop +
+            # an ``op_type``-only successor): the supersede returned
+            # ``edges_transferred=1`` with no refusal and that edge survived.
+            return [row for row in _rows
+                    if row[2] not in _op_set or row[2] == new_id]
 
         def _epistemic_label(node_id: str) -> str | None:
             """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
@@ -18790,9 +18803,11 @@ class TortoiseSDK:
                     # phantom self-edge case) — nothing is re-pointed.
                     # ``tid == old_id``: a SELF-LOOP at the predecessor, which
                     # the out/in passes consume between them (see the
-                    # ``_direct_incident_edges`` note) — no surviving wiring to
-                    # judge, and judging the ``in`` copy of it would refuse a
-                    # supersede over an edge that ends up deleted.
+                    # ``_direct_incident_edges`` note) PROVIDED the transient
+                    # row reaches the ``in`` pass — which is what that helper's
+                    # ``or row[2] == new_id`` exception guarantees. Judging the
+                    # ``in`` copy of it would refuse a supersede over an edge
+                    # that ends up deleted.
                     continue
                 _row_labels = set(_row[4] or ()) if len(_row) > 4 else set()
                 # The transfer writes an edge only when BOTH endpoints resolve
@@ -18821,16 +18836,25 @@ class TortoiseSDK:
                 # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
                 # and ``direction_flows`` tests membership in a frozenset — so
                 # handing it over aborts the supersede with a ``TypeError`` the
-                # guard is not about. ⚠️ The three cases below are DIFFERENT
-                # and each is read the way the load side reads it: a *string*
+                # guard is not about. ⚠️ The three cases below are DIFFERENT,
+                # and each is read the way the CREATION DOOR reads it
+                # (``create_direct_edge``) — NOT the way the load side does: a
+                # *string*
                 # token passes through verbatim (one outside the vocabulary is
                 # read by ``direction_flows`` as both ways — the leg set the EP
                 # backstop sees, so a door reading it more narrowly would keep
                 # a factor the load side drops); an ABSENT token takes the
                 # edge TYPE's default (what ``create_direct_edge``
-                # canonicalizes it to before judging); a PRESENT non-string
-                # token is judged BOTH ways, because that is what
-                # ``direction_flows`` and ``ep.py`` read for it.
+                # canonicalizes it to before judging — deliberately NOT
+                # ``ep.py``'s ``coalesce(r.direction, 'bidirectional')``, which
+                # would be the over-refusal the directionless-NAND pin exists to
+                # prevent); a PRESENT non-string token is judged BOTH ways: a
+                # HASHABLE one (``3``, ``True``) is read as both ways by
+                # ``direction_flows`` and ``ep.py``, so both ways matches the
+                # leg set they see, while an UNHASHABLE one (list/map) makes
+                # ``direction_flows`` raise ``TypeError`` — there is no reader
+                # verdict to mirror, so both ways is the fail-closed stand-in
+                # (and keeps that value out of a frozenset membership test).
                 _raw_dir = _rdict.get("direction")
                 if isinstance(_raw_dir, str):
                     _eff_dir = self._canonical_direction(_rtype, _raw_dir)
