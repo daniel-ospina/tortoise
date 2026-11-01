@@ -284,30 +284,6 @@ def test_the_instrument_is_selected_by_its_own_subjects():
 # ── The falsifiers the review asked for ────────────────────────────────────
 
 
-def test_a_writer_that_names_an_unserved_label_reads_NOT_MET(tmp_path, monkeypatch):
-    """Bullet 2's `NOT MET` branch must be reachable (review P1 #3).
-
-    A writer whose own Cypher names `:Document` — a label `run_vector_query`
-    does not serve — is the stored-and-unqueryable class the bullet forbids. A
-    label map drawn from the query vocabulary itself can never produce it.
-    """
-    (tmp_path / "tortoise").mkdir()
-    (tmp_path / "tortoise" / "embeddings.py").write_text(
-        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
-    (tmp_path / "tortoise" / "writer.py").write_text(
-        "from .embeddings import encode_for_row\n"
-        "def _upsert_document(ev):\n"
-        "    emb = encode_for_row('x', 3)\n"
-        "    q = 'MERGE (n:Document {id: 1}) SET n.embedding = $emb'\n"
-        "    return q, emb\n", encoding="utf-8")
-    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
-    written = probe.written_labels()
-    assert written == {"_upsert_document": "Document"}, written
-    served = probe.served_labels()
-    assert "Document" not in served, served
-    assert set(written.values()) - served == {"Document"}
-
-
 def test_a_write_path_outside_the_gate_is_counted(tmp_path, monkeypatch):
     """Bullet 1 must SEE an ungated writer (review P1 #4) — a map that only
     looks for the gated call cannot report the bypass it is meant to catch."""
@@ -381,10 +357,10 @@ class _CensusGraph:
         elif "db.labels()" in cypher:
             rows = [[lab] for lab in self._labels]
         elif "RETURN count(n)" in cypher:
-            label = cypher.split("MATCH (n:")[1].split(")")[0]
+            label = cypher.split("MATCH (n:")[1].split(")")[0].strip("`")
             rows = [[self._vectors.get(label, (0, None))[0]]]
         elif "RETURN n.embedding" in cypher:
-            label = cypher.split("MATCH (n:")[1].split(")")[0]
+            label = cypher.split("MATCH (n:")[1].split(")")[0].strip("`")
             rows = [[self._vectors.get(label, (0, None))[1]]]
         else:
             rows = []
@@ -584,3 +560,51 @@ def test_a_writer_that_names_an_unserved_label_scores_NOT_MET(tmp_path, monkeypa
         encoding="utf-8")
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
     assert probe.score_path_bullet().verdict == "NOT MET"
+
+
+def test_a_commented_or_blank_flag_line_is_not_a_shipped_default(tmp_path, monkeypatch):
+    """`# TORTOISE_EMBED_GATE=1` is not a default; `FLAG=` is not an IndexError.
+
+    Measured before this pin: the commented line read ON (the one input that can
+    flip bullet 1 to MET without measuring), and a blank value raised
+    `IndexError` out of the whole instrument.
+    """
+    (tmp_path / ".env.example").write_text(
+        "# TORTOISE_EMBED_GATE=1  # not shipped yet\n"
+        "TORTOISE_EMBED_GATE=\n"
+        "# see TORTOISE_EMBED_GATE\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")["on"] is False
+    (tmp_path / ".env.example").write_text("TORTOISE_EMBED_GATE=true\n",
+                                           encoding="utf-8")
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")["on"] is True
+
+
+def test_a_flag_at_end_of_line_does_not_raise(tmp_path, monkeypatch):
+    (tmp_path / ".env.example").write_text("see TORTOISE_EMBED_GATE\n",
+                                           encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")["on"] is False
+
+
+def test_a_collection_of_patterns_is_a_second_rule_set(tmp_path, monkeypatch):
+    """`_PATS = [re.compile(…), re.compile(…)]` is the most natural second list."""
+    t = tmp_path / "tortoise"
+    t.mkdir()
+    (t / "value_gate.py").write_text(
+        "import re\n_V = re.compile(r'#\\d+')\nRULES = ('r',)\n", encoding="utf-8")
+    (t / "embed_gate.py").write_text(
+        "import re\n_PATS = [re.compile(r'\\d{4}'), re.compile(r'\\bID\\b')]\n"
+        "from . import value_gate\nRULE_SET = value_gate.RULES\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 2, counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_served_labels_are_the_RUNNERS_declaration():
+    """`VALID_ENTITY_TYPES` + `entity_label`, not a second lookup table."""
+    from tortoise.security import VALID_ENTITY_TYPES, entity_label
+
+    assert probe.served_labels() == {entity_label(t) for t in VALID_ENTITY_TYPES}
+

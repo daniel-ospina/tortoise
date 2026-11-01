@@ -343,11 +343,18 @@ def flag_in_shipped_configs(flag: str) -> dict:
                 continue
             searched.append(path.relative_to(REPO_ROOT).as_posix())
             for line in text.splitlines():
-                if flag not in line:
+                stripped = line.lstrip()
+                # ⛔ A COMMENTED-OUT line is not a shipped default, and a line
+                # that merely MENTIONS the flag (`# see TORTOISE_EMBED_GATE`)
+                # is not an assignment. Measured: `# TORTOISE_EMBED_GATE=1`
+                # read as ON — the one input that can flip bullet 1 to MET.
+                if not stripped or stripped[0] in "#;-" or flag not in stripped:
                     continue
-                value = line.split(flag, 1)[1].lstrip("=: ").strip().strip("'\"")
-                if value.split()[0].lower() in ("1", "true", "yes", "on"):
-                    hits.append(f"{path.relative_to(REPO_ROOT)}: {line.strip()[:90]}")
+                value = stripped.split(flag, 1)[1].lstrip("=: \t").strip()
+                value = value.split()[0] if value.split() else ""
+                value = value.strip("'\"").lower()
+                if value in ("1", "true", "yes", "on"):
+                    hits.append(f"{path.relative_to(REPO_ROOT)}: {stripped[:90]}")
     return {"on": bool(hits), "files": hits, "searched": searched,
             "surfaces": list(CONFIG_SURFACES)}
 
@@ -457,9 +464,14 @@ def served_labels() -> set[str]:
     from the Cypher literals, the served side from the query vocabulary, so the
     two can disagree — which is the bullet.
     """
-    from tortoise.security import ENTITY_TYPE_LABELS
+    from tortoise.security import VALID_ENTITY_TYPES, entity_label
 
-    return set(ENTITY_TYPE_LABELS.values())
+    # ⛔ The labels the RUNNER actually serves — `run_vector_query` validates
+    # against `VALID_ENTITY_TYPES` and then labels the query via `entity_label`.
+    # `ENTITY_TYPE_LABELS.values()` is a SECOND, independently maintained
+    # declaration: a type added to one and not the other would make this row
+    # claim a query path that does not exist (or miss one that does).
+    return {entity_label(t) for t in VALID_ENTITY_TYPES}
 
 
 def score_path_bullet() -> Row:
@@ -479,6 +491,12 @@ def score_path_bullet() -> Row:
         notes.append(f"unresolved writers (hold this row at PARTIAL): {sorted(unknown)}")
     if unparsed:
         notes.append(f"unparseable modules (hold this row at PARTIAL): {unparsed}")
+    overridden = sorted(w for w in written if w in WRITER_LABEL_OVERRIDES)
+    if overridden:
+        notes.append(
+            f"labels assigned by the DOCUMENTED override, not derived from "
+            f"Cypher (reported, as that comment promises): {overridden}"
+        )
     # A stored-and-unqueryable class is the bullet's failure; an UNRESOLVED
     # writer is not proof either way, so it can at most hold the row at PARTIAL.
     verdict = "NOT MET" if orphans else ("PARTIAL" if (unknown or unparsed) else "MET")
@@ -665,10 +683,20 @@ def score_v1_bullet() -> Row:
         "creates the follow-up work; this row can only see the record)",
     ]
     notes += [f"open: {ln}" for ln in open_lines[:3]]
+    # The bullet is "decided AND implemented": with the implementation half
+    # unmeasurable, a record can only carry the row to PARTIAL — never MET — and
+    # a surface that still says OPEN holds it there (a doc QUOTING the bullet
+    # must not flip the row).
+    if not decided:
+        verdict = "NOT MET"
+    elif open_lines:
+        verdict = "PARTIAL"
+    else:
+        verdict = "PARTIAL"
     return Row(
         bullet=4,
         text=BULLETS[3],
-        verdict="MET" if decided else "NOT MET",
+        verdict=verdict,
         command="uv run python tools/dod_5090_probe.py --json",
         observed="; ".join(notes),
         notes=notes,
@@ -686,16 +714,6 @@ EMBED_PATH_ROOTS: tuple[str, ...] = (
     # A predicate has to be imported BY the gate to be reachable from it.
     "tortoise/embed_gate.py",
     "tortoise/value_gate.py",
-)
-
-#: Every in-package import shape, because the walk is only as good as its
-#: edges: `from . import pkg` (a SUBPACKAGE), `from .mod import x`,
-#: `from .pkg.mod import x`, and the absolute `from tortoise.pkg.mod import x`
-#: — 858 of the last exist in this tree, so a walk that ignores it reports
-#: `count: 1` on a tree with two predicates (this tool's own review, P1).
-_LOCAL_IMPORT = re.compile(
-    r"^\s*from\s+(\.{1,2}(?:[\w.]*)|tortoise(?:\.[\w.]+)?)\s+import\s+(.*)$",
-    re.M,
 )
 
 
@@ -806,12 +824,22 @@ def count_embed_predicates() -> dict:
             tree = ast.parse(src)
         except SyntaxError:
             continue
+        # ANY module-scope expression that calls `.compile(` owns a pattern —
+        # a single assignment AND a collection (`_PATS = [re.compile(…), …]`),
+        # which is the most natural shape for "a second pattern LIST" and read
+        # `count: 1 / MET` when only the single-assignment form was matched.
+        # ⚠️ Deliberate asymmetry, documented: an unrelated pattern-owning
+        # helper imported by the gate also counts as an owner (a false DRIFT).
+        # Over-reporting drift is the safe direction here; a false `MET` is the
+        # failure this whole instrument exists to remove.
         for node in ast.walk(tree):
-            value = getattr(node, "value", None)
-            if (isinstance(node, (ast.Assign, ast.AnnAssign))
-                    and isinstance(value, ast.Call)
-                    and isinstance(value.func, ast.Attribute)
-                    and value.func.attr == "compile"):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Expr)) and any(
+                isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                and c.func.attr == "compile"
+                for c in ast.walk(node)
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+                or c is not None
+            ):
                 owners.append(rel)
                 break
     return {
@@ -876,15 +904,18 @@ def vector_census(graph, graph_name: str, at: str | None = None,
     # by construction (this tool's own review, P1 — a `:Chunk` with 2 stored
     # embeddings never appeared). The graph's own labels are the population.
     indexed: dict[str, list[dict]] = {}
-    unreadable: list[str] = []
+    #: (label-or-None, reason) — matched by LABEL, so a short row (`['Point']`)
+    #: is still attached to its label instead of being lost in a repr.
+    unreadable: list[tuple[str | None, str]] = []
     for row in rows or []:
         try:
             label, types = row[0], row[2]
         except (IndexError, TypeError):
-            unreadable.append(repr(row)[:80])
+            row_label = row[0] if isinstance(row, (list, tuple)) and row else None
+            unreadable.append((row_label, f"short row {repr(row)[:60]}"))
             continue
         if not isinstance(types, dict):
-            unreadable.append(f"{label!r}: types cell is {type(types).__name__}")
+            unreadable.append((label, f"types cell is {type(types).__name__}"))
             continue
         for fld, kinds in types.items():
             if isinstance(kinds, (list, tuple, set)) and any(
@@ -934,13 +965,12 @@ def vector_census(graph, graph_name: str, at: str | None = None,
     for label in sorted(set(graph_labels) | set(indexed) | served_labels()):
         try:
             res = graph.query(
-                f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL RETURN count(n)"
+                f"MATCH (n:`{label}`) WHERE n.embedding IS NOT NULL RETURN count(n)"
             ).result_set
             stored = int(res[0][0])
         except Exception as e:
             stored = f"UNMEASURED({type(e).__name__}: {e})"
-        unreadable_here = [u for u in unreadable if u.startswith(repr(label))
-                           or u.startswith(f"{label!r}")]
+        unreadable_here = [f"{lab}: {why}" for lab, why in unreadable if lab == label]
         found = indexed.get(label) or []
         # ⛔ An index on the LABEL is not an index on the COLUMN counted here.
         # `field` was already read and used to be ignored: a `(Source:vec)`
@@ -960,7 +990,7 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 # vector is fetched and measured here (measured: every payload
                 # read UNMEASURED before this).
                 probe = graph.query(
-                    f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
+                    f"MATCH (n:`{label}`) WHERE n.embedding IS NOT NULL "
                     f"RETURN n.embedding LIMIT 1"
                 ).result_set
                 if probe and probe[0] and probe[0][0] is not None:
@@ -1162,6 +1192,10 @@ def main(argv: list[str] | None = None) -> int:
         c = report["census"]
         print(f"\nCensus — graph `{c.get('graph')}` at {c.get('at')} "
               f"({c.get('catalogue', '')}):")
+        # A figure quoted into an epic body must carry the way it was produced
+        # (`#10465` target 1) — the docstring says so, and the text path was
+        # the one place that did not.
+        print(f"  command: {c.get('command', CENSUS_COMMAND)}")
         for label, d in (c.get("labels") or {}).items():
             print(f"  {label:10s} stored={d['stored']!s:12s} "
                   f"indexed={d['indexed']!s:6s} unindexed={d['unindexed']!s:12s} "
@@ -1176,5 +1210,23 @@ def main(argv: list[str] | None = None) -> int:
     return 2 if unmeasured else 0
 
 
+def cli(argv: list[str] | None = None) -> int:
+    """`main`, with the documented exit contract enforced for every route.
+
+    The docstring promises `2` when the instrument could not measure. A raised
+    `ImportError`, a row scorer that throws, or an unreachable engine must all
+    land there — not on `1` with a traceback, which a caller cannot tell from a
+    red row.
+    """
+    try:
+        return main(argv)
+    except SystemExit as e:  # `_connect` refuses an embedded engine this way
+        return int(e.code or 2) if e.code not in (0, None) else 0
+    except Exception as e:
+        print(f"dod-5090-probe: UNMEASURED({type(e).__name__}: {e})",
+              file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())
