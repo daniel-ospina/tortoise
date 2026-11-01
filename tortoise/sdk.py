@@ -34406,7 +34406,7 @@ class TortoiseSDK:
         # ``truncated: False`` — a positive claim of completeness on an empty
         # answer. Seeding ``candidates=0`` means every early return (nothing was
         # cut) is positively marked COMPLETE rather than left un-marked.
-        _trunc: dict = {"candidates": 0, "exact": False}
+        _trunc: dict = {"candidates": 0, "exact": False, "incomplete": False}
 
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
@@ -34423,7 +34423,8 @@ class TortoiseSDK:
                 # survived the cut — the difference is the downstream filters.
                 _mark_truncation(
                     _truncation_out, returned=len(rows),
-                    candidates=_trunc["candidates"], exact=_trunc["exact"])
+                    candidates=_trunc["candidates"], exact=_trunc["exact"],
+                    incomplete=_trunc.get("incomplete", False))
             if read_status_out is not None:
                 status = _classify_leg_trace(
                     status_trace or (), hit_count=len(rows),
@@ -35116,6 +35117,16 @@ class TortoiseSDK:
 
         # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
         result_ids = list(fused.keys())
+        # #8447 (review round 3, P2): the union BEFORE the post-window filters
+        # below shrink it. A leg that filled its own window proves there is more
+        # than the window holds — and a filter that then drops the set BELOW
+        # ``limit`` must not launder that into "complete". Measured on the review
+        # case: 500 eligible matches, window saturated at ``str_limit``, a filter
+        # removing 115 leaves 5, ``limit=10`` → the read reported COMPLETE while
+        # ~380 eligible matches were never read and are unreachable (no offset,
+        # no cursor). This is the size the completeness proof needs, not the
+        # post-filter one.
+        _pre_filter_ids = len(result_ids)
         # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source resolving by
         # `url` (#149's canonical key), not by `id` — the same three-way
         # id_field search_engine's legs use.
@@ -35484,6 +35495,11 @@ class TortoiseSDK:
             or traversal_path is not None)
         _trunc["candidates"] = len(result_ids)
         _trunc["exact"] = (len(result_ids) < str_limit) and not _filters_shrank
+        # A saturated window that a filter then shrank below ``limit`` is
+        # INCOMPLETE even though nothing was cut from the visible set: the
+        # matches beyond the window were never read.
+        _trunc["incomplete"] = bool(
+            _pre_filter_ids >= str_limit and _filters_shrank)
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)

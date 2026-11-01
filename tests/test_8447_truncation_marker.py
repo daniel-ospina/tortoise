@@ -96,6 +96,11 @@ class TestMarkerVocabulary:
 @pytest.fixture()
 def sdk(tmp_path, monkeypatch):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    # #8447 (review round 3, P3): `exact` needs the candidate set to be SHORTER
+    # than the retrieval window, and the window is `max(limit*2,
+    # TORTOISE_POOL_FLOOR)`. A box exporting a small floor would silently turn
+    # the "detectable" test RED for an unrelated shell variable.
+    monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "trunc.db"))
     from tortoise.sdk import TortoiseSDK
 
@@ -242,3 +247,80 @@ class TestHostedResponseCarriesIt:
         hosted_api = self._patch(monkeypatch, {})
         with pytest.raises(RuntimeError, match="truncation marker missing"):
             asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
+
+
+# ── round-3 findings: the fixes must be PINNED, not merely present ────────
+
+class TestTheIncompleteThirdState:
+    """A saturated-then-filtered read is INCOMPLETE, not complete (#8447 r3)."""
+
+    def test_saturation_plus_a_filter_is_never_complete(self, sdk):
+        """500 eligible, window saturated, filter leaves 5, limit=10."""
+        _seed(sdk, 12)
+        sink: dict = {}
+        # str_limit = max(limit*2, floor) = 4 here, so the window is saturated;
+        # excluding the statuses of most Points then shrinks the visible set.
+        sdk.tortoise_fts_query("zebra", limit=10, pool_size=4,
+                               exclude_status=["statement"], _truncation_out=sink)
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True, (
+            "a saturated window a filter shrank must not launder into COMPLETE")
+        assert TOTAL_AVAILABLE_FIELD not in marker
+
+    def test_incomplete_is_its_own_input_to_the_marker(self):
+        sink: dict = {}
+        mark_truncation(sink, returned=0, candidates=0, incomplete=True)
+        assert truncation_field(sink) == {"truncated": True}
+
+
+class TestMarkerHygiene:
+    """A reused caller-owned sink must not carry a stale total."""
+
+    def test_a_complete_verdict_clears_the_previous_total(self):
+        sink: dict = {}
+        mark_truncation(sink, returned=5, candidates=20, exact=True)
+        assert truncation_field(sink) == {"truncated": True, "total_available": 20}
+        mark_truncation(sink, returned=3, candidates=3, exact=True)
+        assert truncation_field(sink) == {"truncated": False}
+
+    def test_an_unprovable_verdict_clears_the_previous_total(self):
+        sink: dict = {}
+        mark_truncation(sink, returned=5, candidates=20, exact=True)
+        mark_truncation(sink, returned=5, candidates=20, exact=False)
+        assert truncation_field(sink) == {"truncated": True}
+
+
+class TestUnreadStoreIsNeverComplete:
+    """0 rows over a store that never answered is the THIRD state, not the first."""
+
+    def test_store_that_will_not_open_is_marked_incomplete(self, sdk, monkeypatch):
+        def _boom():
+            raise RuntimeError("DB health check failed on open")
+
+        monkeypatch.setattr(sdk, "_get_proj", _boom)
+        sink: dict = {}
+        # Both sinks, exactly as the hosted route wires them: the store-failure
+        # arm abstains (rather than raising) only when a status sink asked for
+        # the abstention, so a marker-only caller still sees the exception.
+        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
+                                      read_status_out={})
+        assert rows == []
+        assert truncation_field(sink)[TRUNCATED_FIELD] is True
+
+
+class TestThePaginationControlIsLive:
+    """Pair the control: paged reads are unmarked, cut reads ARE marked.
+
+    The reachable-vs-unreachable rule fails in TWO directions, so it is asserted
+    in both: if the marker starts firing on paginated reads, or stops firing on
+    a cut search, one of these goes RED.
+    """
+
+    def test_paged_walk_is_unmarked_and_the_same_shape_cut_IS_marked(self, sdk):
+        _seed(sdk, 5)
+        paged = sdk.paginated_query(limit=2, skip=0)
+        assert TRUNCATED_FIELD not in paged        # reachable -> never marked
+
+        sink: dict = {}
+        sdk.tortoise_fts_query("zebra", limit=2, _truncation_out=sink)
+        assert truncation_field(sink)[TRUNCATED_FIELD] is True   # cut -> marked

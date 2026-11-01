@@ -66,7 +66,8 @@ TOTAL_AVAILABLE_FIELD = "total_available"
 
 
 def mark_truncation(sink: dict | None, *, returned: int,
-                    candidates: int, exact: bool = False) -> None:
+                    candidates: int, exact: bool = False,
+                    incomplete: bool = False) -> None:
     """Record whether a read DROPPED rows at its cap, on the caller's sink.
 
     ``candidates``  rows the read held after every filter and BEFORE the
@@ -77,6 +78,14 @@ def mark_truncation(sink: dict | None, *, returned: int,
                     population (no retrieval leg filled its own window). The
                     caller must pass True only on that evidence; the default
                     is the conservative answer, never the flattering one.
+    ``incomplete``  the producer proved the answer is incomplete EVEN THOUGH
+                    nothing was cut from the visible set — the case where a
+                    retrieval leg filled its own window and a filter then
+                    shrank the result below ``limit``. Without this, a
+                    saturated-then-filtered read reports COMPLETE and the
+                    never-read matches are unreachable: the same defect with
+                    an extra step. Such a read takes the third state (unknown
+                    total), never ``complete``.
 
     Writes ``truncated`` on EVERY call (so a complete read is positively
     marked complete, not merely un-marked) and ``total_available`` only when
@@ -85,8 +94,13 @@ def mark_truncation(sink: dict | None, *, returned: int,
     """
     if sink is None:
         return
-    truncated = candidates > returned
+    truncated = (candidates > returned) or incomplete
     sink[TRUNCATED_FIELD] = truncated
+    # Hygiene, not decoration: a sink is CALLER-OWNED and may be REUSED, so a
+    # stale ``total_available`` from an earlier call would ride a later verdict —
+    # a complete (or unprovable) answer advertising an exact total, which is the
+    # defect one level down. Clear it unconditionally before the conditional set.
+    sink.pop(TOTAL_AVAILABLE_FIELD, None)
     if truncated and exact:
         sink[TOTAL_AVAILABLE_FIELD] = candidates
 
