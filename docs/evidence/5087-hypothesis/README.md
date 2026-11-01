@@ -151,9 +151,10 @@ one *observed* fact **machine-enforced**:
    path the pin exists to close. They are now pinned **explicitly** (`METRIC_ARTIFACT_PREFIXES`): a
    run whose metric-definition code differs from `source_sha` is **REFUSED**, so the pinned sha is the
    code that computed the numbers and not merely the code that ran. **No number moves** — the measured
-   run's own changed-file line lists three files
-   (`PRE-REGISTRATION.md`, `preregistration.json`, `tools/s3_prior_ablation.py`) and none of them is a
-   metric artifact, so this run would still be admitted.
+   run's own changed-file line lists three files (`PRE-REGISTRATION.md`, `preregistration.json`,
+   `tools/s3_prior_ablation.py`) and none of them is a metric artifact, so the run **as recorded**
+   would still be admitted by the new pin; it is a later re-run at a later head that the pin now
+   holds to the same metric code.
 7. **The log did not say which probe revision produced it** — the log's `head=a1075dfc` names the
    commit the bars were read from, not the tool revision; this README now states it (`325f2a1a5`).
 
