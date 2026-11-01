@@ -93,6 +93,27 @@ response_fields:
   unchanged_when_off: n/a — not flag-gated; the key is absent on every non-outdated hit, so those responses stay
     byte-identical
 - response: tortoise_search
+  field: truncated
+  emitted_when: 'ALWAYS on the hosted GET /v1/search body — the #8447 truncation marker: true when `limit` cut the
+    result, false when the read returned everything it matched. Not flag-gated (unlike status / residency): it costs
+    two len() calls over lists the read already holds, so a default-off marker would preserve the defect it fixes.
+    Its ONE home is tortoise/truncation.py; it is its OWN field and never a fifth read-status term (#7952 §17.2
+    forbids one). OVERRIDES: the #1745 fail-safe default-OFF convention — there is no retrieval delta to measure on a
+    response marker, and a default-off marker is the silent-subset bug itself (precedent: #8487). The MCP tool
+    `tortoise_search` returns a bare list, so it does not carry the field; wrapping a list in an object is a declared
+    return-type change and therefore an MCP Surface Approval decision, not a consequence of this row'
+  unchanged_when_off: 'n/a — always emitted; the flag is never consulted, so it cannot be off. `results` and `count`
+    keep their exact prior values and the parameter set is unchanged'
+- response: tortoise_search
+  field: total_available
+  emitted_when: 'the hosted GET /v1/search body, ONLY when `truncated` is true AND the count is EXACT — i.e. no
+    retrieval leg filled its own window (len(candidates) < str_limit), so the population behind the cut is the whole
+    match set. ABSENT means the exact total is UNKNOWN, never zero: a candidate pool is itself bounded, so publishing
+    a saturated count would render a lower bound as a total — the same defect one level down (Elasticsearch carries
+    `hits.total.relation: eq|gte` for exactly this; Google documents `totalResults` as an estimate)'
+  unchanged_when_off: n/a — not flag-gated; the key is absent on every complete or unprovable read, so those
+    responses are byte-identical to their pre-#8447 form
+- response: tortoise_search
   field: provenance.source
   emitted_when: 'TORTOISE_SEARCH_PROVENANCE is truthy (1/true/yes/on; unset or 0 means off) AND the hit is a Point
     carrying `extractedFrom` — the Source/document ref (#3837, objectives 5/9). Recorded here because the #3986

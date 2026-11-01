@@ -34029,6 +34029,15 @@ class TortoiseSDK:
         # (the wall-clock date for §5e) and is the byte-identical path.
         query_date: str | None = None,
         time_aware: bool = False,
+        # #8447: PRIVATE — the TRUNCATION marker's caller-owned sink, the same
+        # pattern ``read_status_out`` uses (and ``_record_reads`` /
+        # ``_residency_key`` for the other private read switches). The read
+        # path records whether it DROPPED rows at ``limit`` so the caller can
+        # tell a complete result from a subset; ``tortoise/truncation.py`` is
+        # the marker's ONE home and mints its own field rather than a fifth
+        # read-status term. Default None = not computed, so every existing
+        # caller is byte-identical (and pays nothing).
+        _truncation_out: dict | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -34337,6 +34346,16 @@ class TortoiseSDK:
         if claim_class is not None:
             claim_class = _claim_class.validate(claim_class)
 
+        # #8447: the TRUNCATION marker starts COMPLETE and is only ever flipped
+        # by a seam that actually drops rows. Seeding it here (rather than at
+        # the cut) is what makes every early return below a POSITIVE claim of
+        # completeness instead of an un-marked response the caller must guess
+        # about — the distinction the issue's contract turns on. A missing
+        # marker at the consumer is therefore a producer bug, not "complete"
+        # (``truncation.truncation_field`` refuses to guess).
+        if _truncation_out is not None:
+            _truncation_out["truncated"] = False
+
         # B6 (#3892): the status sink and the trace used to classify it. When
         # no status is requested this is exactly today's ``leg_trace`` (None
         # unless the caller passed one) — byte-identical behavior. When a
@@ -34377,6 +34396,18 @@ class TortoiseSDK:
                 _read_ledger = None
                 _read_ledger_enabled = False
 
+        # #8447: the TRUNCATION marker's state, written by the seam that DROPS
+        # rows and read by ``_with_read_status`` below — so the marker is
+        # recorded at the ONE place every return passes through, with the rows
+        # that actually SHIP. Before this, a cap applied downstream of the cut
+        # (``min_confidence``, a hit whose entity fetch came back empty) made
+        # the delivered count disagree with what the marker claimed: a 3-match
+        # pool whose 3 rows ``min_confidence`` filtered out answered 0 rows and
+        # ``truncated: False`` — a positive claim of completeness on an empty
+        # answer. Seeding ``candidates=0`` means every early return (nothing was
+        # cut) is positively marked COMPLETE rather than left un-marked.
+        _trunc: dict = {"candidates": 0, "exact": False}
+
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it.
 
@@ -34386,6 +34417,13 @@ class TortoiseSDK:
             store is known to be DECLARED and to have ANSWERED, and
             ``configured=True`` / ``reached=True`` are facts, not defaults.
             """
+            if _truncation_out is not None:
+                from .truncation import mark_truncation as _mark_truncation
+                # ``returned`` is the rows about to SHIP, not the rows that
+                # survived the cut — the difference is the downstream filters.
+                _mark_truncation(
+                    _truncation_out, returned=len(rows),
+                    candidates=_trunc["candidates"], exact=_trunc["exact"])
             if read_status_out is not None:
                 status = _classify_leg_trace(
                     status_trace or (), hit_count=len(rows),
@@ -34849,6 +34887,18 @@ class TortoiseSDK:
                         status_trace.append(_trace_entry(
                             "fallback", ran=True, degraded=True,
                             reason="tfidf_snapshot", count=len(snap_hits)))
+                    # #8447 (review P1): this arm DROPS rows — ``search_snapshot``
+                    # caps at ``limit`` — and it skipped the marker entirely, so a
+                    # 20-match store answered 5 rows marked COMPLETE. The pre-cap
+                    # population is not knowable here (the snapshot ranks in
+                    # place), so a FULL page is treated as what it is: proof that
+                    # more MAY exist, never proof that it does not. Conservative
+                    # in the safe direction, and this arm already reports
+                    # ``status: degraded`` (a leg did not run), so over-marking
+                    # incompleteness cannot turn a HEALTHY read into a partial.
+                    _trunc["candidates"] = len(snap_hits) + (
+                        1 if len(snap_hits) >= limit else 0)
+                    _trunc["exact"] = False
                     return _with_read_status(
                         _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
@@ -34886,6 +34936,12 @@ class TortoiseSDK:
                         points = [p for p in points
                                   if p.get("id") in allowed_ids]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
+                # #8447 (review P1): same hole as the snapshot arm, but here the
+                # pre-cap population IS known — ``points`` is an unbounded
+                # ``self.query()`` scan and every filter above ran on it before
+                # ``fallback_tfidf`` capped at ``limit``. So the count is exact.
+                _trunc["candidates"] = len(points)
+                _trunc["exact"] = True
                 if allowed_ids is not None:
                     # The ANNOTATION has to be re-applied: ``fallback_tfidf``
                     # rebuilds every row through ``SearchResult.to_dict()``,
@@ -35380,7 +35436,26 @@ class TortoiseSDK:
                                     else _vt_reason),
                             count=len(_vt_stats["demoted"])))
 
-        # Truncate AFTER filtering
+        # #8447: THIS is the seam where results are lost, and until now the read
+        # said nothing about it — ``limit`` above the candidate count returned a
+        # bare list, so "exactly 5 matches" and "20 matches, you got 5"
+        # serialized identically. Record the population the cap is applied to;
+        # ``_with_read_status`` publishes the verdict with the rows that ship.
+        #
+        # ``exact`` is a CLAIM, so it is only made on evidence: ``result_ids`` is
+        # the union of the retrieval legs, each asked for ``str_limit`` rows, so a
+        # set SHORTER than that window proves no leg filled its own limit. That
+        # proof does NOT survive a post-retrieval filter, though — the filters at
+        # the seams above (``exclude_status`` / ``claim_class`` /
+        # ``exclude_turn_echo_session``) SHRINK the union after the legs filled
+        # their windows, so a short set over a filtered read proves nothing. Both
+        # conditions must hold, or the count is withheld rather than published as
+        # a floor wearing a total's clothes.
+        _filters_shrank = bool(
+            exclude_status or claim_class is not None
+            or exclude_turn_echo_session)
+        _trunc["candidates"] = len(result_ids)
+        _trunc["exact"] = (len(result_ids) < str_limit) and not _filters_shrank
         result_ids = result_ids[:limit]
 
         # 6. EP annotation (Point only)
