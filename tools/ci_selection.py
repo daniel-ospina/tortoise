@@ -2172,6 +2172,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_turn_parity_census_guard_runs_on_a_tools_only_change.
              "tools/turn_parity_census.py",
+             # #10017/#10483: `tools/purge_legacy_turns.py` is the DESTRUCTIVE
+             # half of the same purge — the tool that DELETES the pre-#10000
+             # turn nodes, guarded by `tests/test_10017_purge_guard.py`
+             # (registered `core`). Same hole, worse direction: `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry and the tool matches no
+             # SOURCE_PATTERNS row, so a purge-tool-only diff selected NO
+             # surface at all — measured `select(["tools/purge_legacy_turns.py"])
+             # -> surfaces=[]`, the guard suite absent from `test_files`
+             # — and the change it does not guard is a delete (the
+             # #1349/#3332/#3616 silent-drop class). Pinned by
+             # tests/test_ci_selection.py::
+             # test_purge_legacy_turns_guard_runs_on_a_tools_only_change.
+             "tools/purge_legacy_turns.py",
              # #8491: the meeting→CRM bridge. `integrations/` is a flat
              # NON_PYTHON_PREFIXES entry and bridge.py matches no
              # SOURCE_PATTERNS row, so a bridge.py-only change was filtered out
