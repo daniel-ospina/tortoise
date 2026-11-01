@@ -329,6 +329,37 @@ def test_the_log_and_the_document_check_can_actually_fail(probe):
         "docs-only edit would buy")
 
 
+def test_the_withdrawn_log_still_hashes_to_the_digest_its_note_publishes(probe):
+    """The withdrawal publishes a digest and NOTHING read it back — the note could go stale.
+
+    `withdrawn/WITHDRAWN.md` states *"Contents are untouched (sha256 `bba52c90…`)"*, and the ruling
+    on #10463 (item 3) is *"do not delete it, and do not edit its contents"*. The log is still a
+    tracked file, so it is still editable — and an edit would leave the published digest
+    describing bytes that no longer exist, i.e. a FALSE evidence record on the one artifact whose
+    whole purpose is that these numbers were measured once. Nothing else looks: the guard globs
+    `*.log` non-recursively, so `withdrawn/` is invisible to it (`evidence logs: 0`), which is
+    exactly why the ruling is enforced here and nowhere else.
+
+    Prose versus BYTES, not a third copy of the constant: the expectation is parsed out of the note
+    so a re-cut note and a re-cut log have to move together (the two-copies-that-can-disagree
+    shape this file already refuses for the bars).
+    """
+    import hashlib
+    import re
+
+    note = (probe.EVIDENCE_DIR / "withdrawn" / "WITHDRAWN.md").read_text()
+    published = re.findall(r"\b[0-9a-f]{64}\b", note)
+    assert len(published) == 1, (
+        "the note must publish exactly one digest — the withdrawn log's — so the next reader knows "
+        f"what was measured; found {published}")
+    actual = hashlib.sha256((probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_bytes()).hexdigest()
+    assert published[0] == actual, (
+        "the withdrawn log's bytes no longer match the digest its note publishes: the note claims "
+        f"{published[0]} and the file is {actual}. A withdrawal may retract PROVENANCE, never the "
+        "measured bytes (#10463 item 3: do not edit its contents) — if the log really has to "
+        "change, the note and this test move with it and the retraction is recorded, not silent")
+
+
 def test_the_log_header_names_every_bar_and_floor(probe):
     """Five of seven bars were emitted before; `corroboration_min_sessions` decides a qualifier."""
     import ast
