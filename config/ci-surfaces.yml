@@ -618,6 +618,15 @@ surfaces:
   # run no guard for the field it emits. The `core` arm (below) is the primary
   # one — it pins tortoise/residency.py (no SOURCE_PATTERN) and tortoise/sdk.py.
   - test_residency_marker.py
+  # #8447: the TRUNCATION marker — the `truncated` / `total_available` fields
+  # on the shipped GET /v1/search response (a limit-capped read says so, and an
+  # exact total is published only when it is exact). Registered here for the
+  # same reason as the two rows above: the route that serves the fields lives
+  # in tortoise/hosted_api.py, an EXACT `api` SOURCE_PATTERN match, so without
+  # this arm a hosted_api.py-only change would run no guard for the fields it
+  # emits. The `core` arm (below) is the primary one — it pins
+  # tortoise/truncation.py (no SOURCE_PATTERN) and tortoise/sdk.py.
+  - test_8447_truncation_marker.py
   - test_hosted_aboutobject_journal_4240.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous
   # FalkorDB I/O on the event loop. Same dual registration as the three guards
@@ -4934,6 +4943,16 @@ surfaces:
   # DUAL-REGISTERED with `api` (above) for the hosted /v1/search field.
   - test_residency_marker.py
   - test_reconciliation.py
+  # #8447: the TRUNCATION marker's ONE home. `core` is the primary arm:
+  # neither tortoise/truncation.py nor tortoise/sdk.py's marker seam matches an
+  # `api` SOURCE_PATTERN, so a change to `truncation.py` alone falls through to
+  # `core`. What it pins is the CONTRACT the marker turns on — a cut read is
+  # marked and a complete one is positively marked complete, a total is
+  # published only when it is exact, and an absent verdict is a refusal, never
+  # a defaulted `False` (that default IS the silent-subset bug). The fields' own
+  # surface is DUAL-REGISTERED with `api` (above) for the hosted /v1/search
+  # response.
+  - test_8447_truncation_marker.py
   # #9189 (§17.2): the reconciler's PRODUCTION TRIGGER. `tortoise/reconciliation.py`
   # had a comparison and no production caller (measured at `f96a18da1` and
   # re-derived for #9189), so "continuous reconciliation" had a mechanism and no
