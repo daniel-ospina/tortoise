@@ -1459,8 +1459,14 @@ def test_a_skipped_corpus_half_is_reported_not_hidden(capsys):
 
 #: The CI invocation of the ordering half, verbatim — the whole command, not a substring of it.
 ORDERING_HALF_INVOCATION = (
+    # Re-cut 2026-11 (#10468 r6 F1): a SECOND pre-registered bundle was added to this one step,
+    # because no CI job read `docs/evidence/5087-hypothesis/` at all — its ordering rule and its
+    # record↔pins cross-check never executed, and a docs-only diff (which runs only the `tier1`
+    # slice) is exactly the change that can move a threshold after the numbers landed. `--dir` is
+    # repeatable, so this stays ONE command on ONE line with no shell operator between two runs
+    # (an `&&` chain would be a second command, and the pin refuses to describe two).
     "python3 tools/capstone_preregistration_check.py "
-    "--dir docs/evidence/7949-capstone --no-corpus"
+    "--dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis"
 )
 
 #: The only `if:` forms that do not drop enforcement. Judged on its own (`_SAFE_STEP_KEYS`

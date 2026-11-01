@@ -5086,6 +5086,17 @@ surfaces:
   # said "One file read", the pre-#10117 shape — the file reads FIVE artifacts and builds two
   # full requests since; the index is read because its `#5087` row publishes the same §7 pair).
   - test_s2_decision_record_5087.py
+  # #10463: the two-arm S3 prior-injection ablation probe (`tools/s3_prior_ablation.py`) — the
+  # verdict mapping (E3 → REFUSED floors → primary bar → guards, in that precedence), the
+  # concentration statistic, the evidence-path refusal and the `--prereg` pins parse. `core` is
+  # also the lane a diff to the new probe falls through to (it matches no SOURCE_PATTERNS entry),
+  # so this membership is what makes `--integrity` able to classify the file at all. DB-free,
+  # graph-free and key-free: the run itself needs a live graph and a model key and is NOT
+  # exercised here, so what this file pins is the arithmetic and the refusals, never a run.
+  # ALSO `tier1`, because half of what it guards lives under `docs/` (the pre-registration's pins
+  # block and the measured log) and a docs-only diff runs `tier1` only — which is exactly the
+  # change class that could edit a bar after the numbers landed.
+  - test_s3_prior_ablation.py
   # #5008: the S5 EMBED gate — `tortoise/embed_gate.py` (the predicate, whose
   # rule set IS `tortoise/value_gate.py`'s: one rule set, two questions,
   # `STORAGE-ARCHITECTURE.md` §12.2a) plus its submission seam
@@ -6803,6 +6814,7 @@ tier1:
 - test_batch_integration_doctrine.py  # #10399 review: the batch-integration doctrine's commands must RUN (marker filter, lane-before-suite, `git revert -m 1`, the landing-time `origin/main == $PINNED` assertion) — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_9664_premise_census.py  # #9664 review P2: the capstone census measures the clause it prints (two-clause premises, all three completion gates, the corrected tool names) — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_s2_decision_record_5087.py  # #10072 review round 17 P2: S2-DECISION-SEAM.md §8's tables must be tables (GFM ends a table at a blank line and markdownlint cannot see it) and must cite siblings by name, not ordinal — a docs-only diff runs `tier1` only; dual-registered with `core`
+- test_s3_prior_ablation.py  # #10463: the S3 prior-injection ablation's pre-registered bars and measured log live under `docs/evidence/5087-hypothesis/`, so a docs-only diff (which runs `tier1` only) is exactly the change that can move a threshold after the numbers landed — dual-registered with `core`
 - test_7818_ontology_record.py  # #7818: docs/ONTOLOGY.md §4.7 coverage-boundary record vs `_covers` (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_8474_ontology_record.py  # #8474: docs/ONTOLOGY.md §4.6 rawState/rawStateAt availability record vs the declared write surface (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_7818_plan_record_5362.py  # #7818/#5362: the #5362 plan's RES-1 / out-of-scope read-path record vs the shipped reply contract (hermetic doc pin; a docs-only plan edit runs only tier1) — dual-registered with `core`

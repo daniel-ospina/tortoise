@@ -141,6 +141,12 @@ SCORED_LOG_GLOB = "capstone-measured-*.log"
 MACHINE_RECORD = "preregistration.json"
 PREREG_SCHEMA = "capstone-preregistration/v1"
 
+#: The bundle CI has always checked. A second pre-registered bundle (#10463's ablation) is added by
+#: repeating ``--dir``: before that, no CI job read it at all, so its ordering rule and its
+#: record↔pins cross-check never executed — and a docs-only diff (which runs only the ``tier1``
+#: slice) is exactly the change that can move a threshold after the numbers landed (#10468 r6 F1).
+DEFAULT_PREREG_DIR = "docs/evidence/7949-capstone"
+
 #: The document's own sha256, restated in the record and REQUIRED there. ``git log`` bounds the
 #: document only where history is available (a shallow checkout has none) and ``--diff-filter=A``
 #: takes the OLDEST add-epoch, so a delete-and-re-add rewrite of the argument keeps the old epoch
@@ -1389,8 +1395,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Verify the extractor-v4 capstone pre-registration (#9075)."
     )
-    ap.add_argument("--dir", default="docs/evidence/7949-capstone",
-                    help="directory holding PRE-REGISTRATION.md and its evidence logs")
+    ap.add_argument("--dir", action="append", default=None,
+                    help="directory holding PRE-REGISTRATION.md and its evidence logs; REPEAT to "
+                         f"check several bundles in one run (default: {DEFAULT_PREREG_DIR})")
     ap.add_argument("--no-git", action="store_true",
                     help="skip the commit-ordering check (pre-commit authoring)")
     ap.add_argument("--no-corpus", action="store_true",
@@ -1398,21 +1405,39 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit the report as JSON")
     args = ap.parse_args(argv)
 
-    directory = Path(args.dir)
-    if not directory.is_absolute():
-        directory = REPO_ROOT / directory
-    try:
-        report = run(directory, use_git=not args.no_git, use_corpus=not args.no_corpus)
-    except CheckError as exc:
-        if args.json:
-            print(json.dumps({"ok": False, "error": str(exc)}))
-        else:
-            print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
+    directories = []
+    for entry in args.dir or [DEFAULT_PREREG_DIR]:
+        directory = Path(entry)
+        directories.append(directory if directory.is_absolute() else REPO_ROOT / directory)
+
+    reports: list[dict] = []
+    errors: list[tuple[Path, str]] = []
+    for directory in directories:
+        try:
+            reports.append(run(directory, use_git=not args.no_git,
+                               use_corpus=not args.no_corpus))
+        except CheckError as exc:
+            errors.append((directory, str(exc)))
+    # 2 outranks 1 on purpose: "I could not check this subject" is a different answer from "I
+    # checked it and found problems", and a run that cannot read ONE of the bundles it was given
+    # must never report the other bundles' green as the verdict.
+    exit_code = 2 if errors else (0 if all(r["ok"] for r in reports) else 1)
 
     if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
-    else:
+        if len(directories) == 1:
+            print(json.dumps({"ok": False, "error": errors[0][1]} if errors else reports[0],
+                             indent=2, sort_keys=True))
+        else:
+            print(json.dumps({"ok": exit_code == 0, "reports": reports,
+                              "errors": [str(exc) for _, exc in errors]},
+                             indent=2, sort_keys=True))
+        return exit_code
+
+    for directory, message in errors:
+        print(f"ERROR: {directory}: {message}", file=sys.stderr)
+    for index, report in enumerate(reports):
+        if len(directories) > 1:
+            print(f"=== {report['document']} ===")
         print(f"pre-registration: {report['document']}")
         print(f"criteria rows: {', '.join(r['id'] for r in report['rows']) or '(none)'}")
         print(f"evidence logs: {len(report['evidence_logs'])}"
@@ -1447,7 +1472,7 @@ def main(argv: list[str] | None = None) -> int:
             exempt_note = (f" (exempt by CONTENT, measured nothing: "
                            f"{', '.join(report['ordering_exempt'])})")
         print(f"machine record run-order claim: {report['run_order_claim']}{exempt_note}")
-    return 0 if report["ok"] else 1
+    return exit_code
 
 
 if __name__ == "__main__":
