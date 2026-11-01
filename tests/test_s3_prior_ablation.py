@@ -629,3 +629,33 @@ def test_the_bundle_says_the_measured_run_came_from_an_uncommitted_probe(probe):
         "the measured run's log prints a line its `head=` commit does not contain: the producing "
         "working copy was uncommitted")
     assert "uncommitted" in readme, "the bundle must say plainly that the probe was uncommitted"
+
+
+# ── `--prereg` mistakes are exit 3, not 2 (r5 P3) ─────────────────────────
+#
+# The module header and README item 4 said 3; `refuse()`'s own docstring said `--prereg` mistakes
+# "are the exception: they are invocation errors and exit 2". They are not: every `--prereg` failure
+# goes through `refuse()`, and the only exit-2s in the module are the `--out` checks. A docstring
+# that names the wrong branch is how a caller ends up treating an unmeasurable run as a retryable
+# usage error, so both the behaviour and the sentence are pinned here.
+
+
+def test_every_prereg_failure_is_exit_3_never_2(probe):
+    bad_texts = {
+        "no pins fence at all": "no pins here",
+        "unterminated fence": "```yaml prereregistration-pins\nhypothesis_bars: {}\n",
+        "not a mapping": "```yaml prereregistration-pins\n- a list\n```",
+        "missing pinned keys": "```yaml prereregistration-pins\nhypothesis_bars: {}\n```",
+    }
+    for label, text in bad_texts.items():
+        with pytest.raises(SystemExit) as refusal:
+            probe.parse_pins(text)
+        assert refusal.value.code == 3, f"{label} is an unmeasurable run, not an invocation error"
+
+    with pytest.raises(SystemExit) as refusal:
+        probe.show("0" * 40, probe.PREREG_REL)  # no such commit
+    assert refusal.value.code == 3, "an unreadable --prereg commit is a refusal, not exit 2"
+
+    doc = probe.refuse.__doc__ or ""
+    assert "--prereg" not in doc or "not 2" in doc, (
+        "refuse()'s docstring must not call --prereg failures exit 2 — they are exit 3")
