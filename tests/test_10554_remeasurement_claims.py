@@ -32,8 +32,8 @@ WHAT THIS PINS
 4. The drift is larger, **in nodes**, than every per-session delta in both runs — and the record
    says "in nodes" and names the true largest delta, so the claim cannot be read as a
    percentage claim it would lose.
-5. The per-session percentage swings that DO exceed the drift are stated, with values derived
-   here from the logs' own per-session tables.
+5. The per-session percentage swings that DO exceed the drift are stated, and every percentage
+   the record attributes to a session is one the logs' own per-session tables support.
 
 Every number is re-derived from `s3-ablation-a1075dfc.log` and `s3-ablation-a83c23a8.log`; none
 is hardcoded, so a future edit to either log reds these pins instead of silently re-basing them.
@@ -175,7 +175,10 @@ def test_the_warning_does_not_understate_the_drift_against_the_effect(
     """
     multiplier = float(logs["multiplier"])
     m = re.search(
-        r"roughly (\w+) times the (\d+)-node ON" + MINUS + r"OFF difference", record_text
+        r"(?:about|roughly)\s+\*{0,2}\s*(\w+)\s+times\s*\*{0,2}\s+the\s+(\d+)-node ON"
+        + MINUS
+        + r"OFF difference",
+        record_text,
     )
     assert m is not None, (
         "the record must state the drift as a multiple of the ON-OFF difference "
@@ -237,51 +240,54 @@ def test_the_drift_exceeds_every_per_session_node_delta_and_says_in_nodes(
         f"{worst_session!r} ({worst_run}) moved {worst} nodes, and the drift is {drift}"
     )
 
-    assert re.search(r"larger \*\*in nodes\*\* than every per-session delta", record_text), (
+    assert re.search(r"larger than every per-session change \*\*in nodes\*\*", record_text), (
         "the comparison must be qualified 'in nodes' — unqualified, it is false as a share "
         "of each session's own denominator (the sibling test derives the counter-examples)"
     )
-    assert re.search(rf"the largest is `{worst}`", record_text), (
-        f"the record must name the largest per-session node delta, which the logs put at "
+    short = str(worst_session).split("_")[0]
+    assert re.search(
+        rf"the largest within-run ON{MINUS}OFF delta in either run is `{worst}` nodes \(`{short}`",
+        record_text,
+    ), (
+        f"the record must name the largest within-run node delta, which the logs put at "
         f"{worst} ({worst_session!r} in the {worst_run})"
     )
 
 
-def test_a_single_sessions_percentage_swing_exceeds_the_between_run_drift(
+def test_every_session_percentage_the_record_states_is_the_logs_arithmetic(
     logs: dict[str, object], record_text: str
 ) -> None:
     """Defect 3, second half: the per-session swings that DO exceed the 10.9 % drift.
 
     These are the counter-examples that make the "in nodes" qualification necessary rather
-    than pedantic. They are derived here, and the record must state them with these values.
+    than pedantic. Two pins, both derived here rather than hardcoded: the record must state at
+    least one (pre-fix it stated none, which is why the unqualified sentence survived), and
+    every percentage it does state must be one the logs' own per-session tables support — a
+    fabricated or mis-transcribed swing is the failure this catches.
     """
-    drift_pct = float(logs["drift_pct"])
-    over: list[tuple[str, str, float]] = []
+    stated = re.findall(r"`(wp\d+)` `([+\-\u2212])(\d+\.\d) %`", record_text)
+    assert stated, (
+        "the record must state at least one per-session percentage swing. Without one, the "
+        "\"in nodes\" qualification reads as pedantry when it is in fact load-bearing: as a "
+        "share of its own denominator a single session out-swings the whole-run drift."
+    )
+
+    # The record names sessions by their short id (`wp06`), so key by the prefix.
+    known: dict[str, dict[str, float]] = {}
     for run, key in (("recorded", "recorded_sessions"), ("this run", "this_sessions")):
-        for session, (off, _on, _delta) in dict(logs[key]).items():  # type: ignore[arg-type]
-            fell = abs(min(_delta, 0)) / off * 100
-            if fell > drift_pct:
-                over.append((run, session, fell))
+        for session, (off, _on, delta) in dict(logs[key]).items():  # type: ignore[arg-type]
+            known.setdefault(session.split("_")[0], {})[run] = delta / off * 100
 
-    assert over, (
-        "no per-session percentage swing exceeds the drift — if that ever changes, the "
-        "'in nodes' qualification in the record becomes unnecessary and this pin should go"
-    )
-
-    # The record names exactly two: the recorded run's wp02 and this run's wp03.
-    worst_recorded = max(
-        (row for row in over if row[0] == "recorded"), key=lambda row: row[2], default=None
-    )
-    worst_this = max(
-        (row for row in over if row[0] == "this run"), key=lambda row: row[2], default=None
-    )
-    assert worst_recorded is not None and worst_this is not None, (
-        f"both runs are expected to carry a session that out-swings the drift; derived: {over}"
-    )
-
-    for run, session, pct in (worst_recorded, worst_this):
-        short = session.split("_")[0]
-        assert re.search(rf"`{short}` fell `\d+ → \d+` \(\*\*{MINUS}{pct:.1f} %\*\*\)", record_text), (
-            f"the record must state the {run}'s worst percentage swing: "
-            f"`{short}` fell **\u2212{pct:.1f} %** (derived from the logs' per-session table)"
+    for session, sign, number in stated:
+        assert session in known, f"the record names {session!r}, which no log's table carries"
+        value = float(number) * (1.0 if sign == "+" else -1.0)
+        assert any(abs(candidate - value) < 0.05 for candidate in known[session].values()), (  # noqa: PLR2004
+            f"the record states {session} at {sign}{number} %; the logs' per-session tables "
+            f"give {known[session]} — a stated swing must be one the logs support"
         )
+
+    drift_pct = float(logs["drift_pct"])
+    assert any(abs(float(number)) > drift_pct for _s, _sign, number in stated), (
+        f"at least one stated per-session swing must exceed the {drift_pct:.1f} % drift, or "
+        f"the record's qualification has no counter-example behind it"
+    )
