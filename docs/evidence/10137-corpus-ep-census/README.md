@@ -38,6 +38,7 @@ score    = PARTIAL(24 of 500) — a complete sample of a sample, never presented
 
 | cell | value |
 |---|---|
+| `questions_in_run` / `questions_failed` | 24 / **0** (the denominator the ratio covers is `questions`; a crashed run makes these three disagree, and the gap IS the disclosure) |
 | `questions` / `questions_with_ep` | 24 / **24** |
 | `questions_inert` (`inert_by_reason`) | **0** (`{}`) |
 | `questions_neutral` | **0** |
@@ -49,6 +50,7 @@ score    = PARTIAL(24 of 500) — a complete sample of a sample, never presented
 | `points_with_ep_unread` / `points_unmeasured_unread` | **0 / 0** (every question's census was read — the sum is complete, not partial) |
 | `points_off_neutral` = `points_moved_off_neutral` | 185 |
 | `points_off_neutral_unread` / `points_moved_off_neutral_unread` | **0 / 0** (same disclosure for the two contribution sums — a partial 185 is not read as a complete one) |
+| `point_coverage` | `2,696 / 27,608 = 0.0977` — a **floor** on claim coverage (see the two limits below), never quoted as claim coverage |
 
 ### Per question type
 
@@ -82,7 +84,9 @@ Two honest limits on that 10%:
 1. It is a **floor**, not a claim-coverage figure. `_COUNT_POINTS_TOTAL` counts every non-operator
    `Point`, and the v2 ingest also writes *episodic turn points* and *session-transcript chunks*,
    which are not claims and can never carry EP state. A claim-only denominator does not exist as a
-   cell today.
+   cell today — which is why the probe publishes the ratio as **`point_coverage`**, never
+   `claim_coverage`: a key named for a denominator nobody measured is how 9.77% gets quoted as
+   "claim coverage" one lane later (#10137 review, P2).
 2. `factor_edges = 0` while `operators = 1,710`: operators are minted, but none is a **direct
    claim↔claim IMPL/NAND**. Which point pairs the operators do connect is not measured here.
 
@@ -98,7 +102,7 @@ Two honest limits on that 10%:
 - **Not `SAMPLING` of the question population.** On this sample there is no zero-operator population
   to sample.
 - **The residue is within-question coverage**, and it is a *reporting* risk, not an arming bug:
-  `questions_with_ep / questions` can read 1.00 at 9.77% claim coverage. The cells that expose it
+  `questions_with_ep / questions` can read 1.00 at 9.77% point coverage. The cells that expose it
   already exist and are published beside the ratio (`points_with_ep`, `points_unmeasured`,
   `points_off_neutral`, `points_moved_off_neutral`). Indicator (a) is satisfied by publishing the
   ratio **with** those cells — which is what this artifact does.
@@ -162,14 +166,41 @@ null `ep_ran` / `points_with_ep` in such a block is indistinguishable from a mea
   `per_question: null` with `per_question_source` naming why, instead of one null row per
   question — including the empty-population boundary, where an input with *no* outcomes must not
   claim a source it never read. A *partial* population still publishes its rows, and
-  `per_question_unread` says how many questions inside them were never measured — the same
-  disclosure the summed cells already make with `<key>_unread`, and the `*_unread` companions of
-  `points_with_ep` / `points_unmeasured` / `points_off_neutral` / `points_moved_off_neutral` now
-  ride `cells` too. These branches are pinned by
+  `per_question_unread` says how many questions inside them have an **unread** census — the same
+  rule, and the same predicate (`measurement_posture._UNKNOWN_PER_MANIFEST_KEYS`, coerced through
+  the module's own `_optional_int`, which refuses a `bool` or any non-numeric cell), the summed
+  cells use for `<key>_unread`, so the two disclosures can never disagree (#10137 review, P2/P3: a
+  manifest PRESENT is not a census READ — the producer's fail-open shape
+  `{"ep_ran": false, "error": …}` carries a manifest and no cells, and used to count as read; and
+  `operators: true` is not a count).
+  Each row also carries that manifest's `error`, so the reason a census is missing is readable per
+  question instead of inferred from nulls.
+
+  ⛔ **The failures behind the ratio are read, never left implicit** (#10137 review, P2).
+  `summarize_belief_activation` only ever sees `outcomes`, so a checkpoint from a *crashed* run —
+  the normal case, and the case this very bundle came from — would publish
+  `questions_with_ep / questions = N/N = 1.00` over its survivors with the ablation invisible. The
+  probe therefore reads the input's own failure list (`run.py:2797` writes `failures`; a report
+  carries both the list and `n_failed`, `report.py:2792-2798`) and publishes `questions_failed`
+  beside `questions_in_run` — **the ratio's own denominator plus the questions it excludes**, which
+  is what makes `questions_in_run − questions == questions_failed` hold by construction rather
+  than by luck. The failure ids are counted as **distinct ids over both lists**, never
+  `len(outcomes) + len(failures)`: a qid completed by one worker and failed by another lands in
+  both (`report.py:1407-1410`), and summing the lengths published a 2-question population as a
+  3-question run. And the total is never a *second* count of the population: the runner's own
+  denominator counts rows while the ids are distinct, so a duplicate-`question_id` input published a
+  total smaller than the denominator it described. On a clean run all three agree; on a crash the
+  gap is the disclosure. A question that
+  failed and then produced an outcome counts once, as an outcome — it was recovered, and it is in
+  the ratio's denominator. ⛔ The report arm does **not** take its total from `n_questions`: that is
+  `len(outcomes)` (`report.py:1106`), so overriding with it silently dropped the failure population
+  in the arm that publishes the ordinary artifact. This artifact: `questions_in_run = 24`,
+  `questions_failed = 0`. These branches are pinned by
   `tests/longmem_eval/test_ep_census_10137.py::test_census_probe_*`.
 
 `census.json` below was written by the *checkpoint* path, so it carries `per_question_source:
 "outcome.belief_activation"` and `per_question_unread: 0` — measured on every one of the 24
 questions, which is verifiable from the rows themselves (no `null` in any of the seven COUNT cells
 across the 24 questions; the eighth cell, `no_op_reason`, is `null` in all 24 because no question
-no-op'd — that null is the measured value, not a missing one).
+no-op'd — that null is the measured value, not a missing one; the ninth, `error`, is `null` for the
+same reason).
