@@ -36226,6 +36226,7 @@ class TortoiseSDK:
                 ranked, consulted=_consulted, answered=_answered))
         belief_consulted = False
         read = None
+        answered: frozenset | None = None
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
             # that ep.confidence_mean carries. GraphRanker reads the
@@ -36243,11 +36244,14 @@ class TortoiseSDK:
                 key=lambda r: signals.get(r.id, {}).get("confidence", 0.5),
                 reverse=True,
             )
-            # #10137 review P1: the label describes the READ, not the config —
-            # a failed fetch answers None and every key stays at the neutral
-            # 0.5, leaving the list in RRF order. That is NOT a consulted order.
-            belief_consulted = bool(read) and any(
-                r.id in read for r in results[:limit])
+            # #10137 review P1 / round 7 P1: the label describes the READ and
+            # the read must have supplied a MEASUREMENT — a failed fetch answers
+            # None (every key stays at the neutral 0.5, leaving the list in RRF
+            # order), and a row with no persisted α/β answered 0.5 too. Neither
+            # is a consulted order. Same predicate the rankers use.
+            answered = frozenset(
+                pid for pid, sig in (read or {}).items() if sig.get("has_prior"))
+            belief_consulted = bool(answered)
         # Default: RRF relevance order (already in fused order)
 
         # #10137: `order_by="confidence"` above sorts on the belief mean — so
@@ -36265,8 +36269,11 @@ class TortoiseSDK:
         if _claim_class_applies and _claim_classes_ok:
             out = _with_claim_class(out, claim_classes)
         from .ranking import annotate_belief_order as _belief_label
+        # `answered` is only meaningful on the confidence path, which is the
+        # only one that reads (`read` stays None on the relevance path).
         return _with_read_status(_belief_label(
-            out, consulted=belief_consulted, answered=frozenset(read or ())))
+            out, consulted=belief_consulted,
+            answered=answered if order_by == "confidence" else None))
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
 
