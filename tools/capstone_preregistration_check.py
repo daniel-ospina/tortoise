@@ -1498,6 +1498,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL — {len(report['failures'])} problem(s):")
             for f in report["failures"]:
                 print(f"  - {f}")
+                # The rail compares failures by IDENTITY, not by check name
+                # (``scripts/admin-merge.sh``: "make the failing step print a
+                # parseable identity — a '::error::<message>' annotation or a
+                # 'FAILED <nodeid>' line — then re-run the rail"). A bare
+                # ``FAIL — N problem(s)`` block is not parseable, so a red that
+                # is main's OWN pre-existing red cannot be exempted and blocks
+                # every PR — a false block, not a gate. The annotation does not
+                # change the verdict (exit code unchanged); it makes the refusal
+                # ATTRIBUTABLE.
+                print(f"::error::capstone-preregistration: {f}")
         exempt_note = ""
         if report.get("ordering_exempt"):
             exempt_note = (f" (exempt by CONTENT, measured nothing: "
