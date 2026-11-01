@@ -73,7 +73,7 @@ GOLD_TURN_HEAD = (
 )
 
 #: Candidate prompt variants for ``--replay``. Keyed by a stable label so the
-#: receipt is auditable. ``shipped_generic`` is ``system_prompt_for(None)`` —
+#: receipt is auditable. ``shipped_for_question`` is ``system_prompt_for(None)`` —
 #: what the lane actually emitted for this question. The others are the two
 #: hypotheses #4107 names: route to the preference fragment, or add a
 #: targeted advice sentence (the option (b) candidate).
@@ -290,7 +290,7 @@ def _replay(sdk, al, evidence, q, shipped_system) -> dict:
     from tortoise.reader import _looks_abstained, build_reader_user_message
 
     variants = {
-        "shipped_generic": shipped_system,
+        "shipped_for_question": shipped_system,
         "with_preference_fragment": system_prompt_for("single-session-preference"),
         "with_advice_sentence": shipped_system + ADVICE_SENTENCE,
     }

@@ -35,7 +35,7 @@ the SAME pinned reader and the SAME call shape (temperature 0, max_tokens
 500), so a variant difference is a prompt difference, not a budget or
 retrieval difference:
 
-  V1 ``v1_shipped``          — ``system_prompt_for(resolved question_type)``.
+  V1 ``v1_shipped``          — ``system_prompt_for(resolved question_type, question=item["question"])``.
   V2 ``v2_universal_advice`` — V1 + the #4107 ``ADVICE_SENTENCE`` verbatim.
   V3 ``v3_gated_fragment``   — a DETECTOR-GATED bidirectional advice fragment:
                                 the fragment is emitted only when

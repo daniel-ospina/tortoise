@@ -302,6 +302,78 @@ def test_n6_lane_call_sends_the_shipped_system_prompt(monkeypatch):
         al._reset_ask_reader_cache_for_tests()
 
 
+def test_10539_lane_sends_counting_discipline_for_an_aggregative_question(monkeypatch):
+    """The WIRING half of #10539 — the half that is actually the fix.
+
+    `system_prompt_for` gaining an aggregation clause is worthless if the ask
+    lane stops passing the question, and that is exactly the failure this issue
+    closes: #2521 shipped an aggregative detector whose only consumer was the
+    eval lane, so no reader ever saw counting discipline. A unit test on
+    `system_prompt_for` cannot see that — deleting `question=question` from
+    `ask_lane.py` leaves every one of them green.
+
+    RED mutation: drop `question=question` from the lane's reader call → the
+    captured wire system prompt no longer carries `_AGGREGATION_FRAGMENT`,
+    while the non-aggregative control question still matches exactly.
+    """
+    import tortoise.ask_lane as al
+    import tortoise.reader as reader
+    from tests.test_ask_sdk import _new_sdk
+
+    sdk = _new_sdk()
+    cap = _CapturingReader()
+    al._reset_ask_reader_cache_for_tests()
+    try:
+        _seed(sdk)
+        monkeypatch.setattr(al, "_default_ask_reader_factory", lambda: cap)
+        # aggregative: this resolves to `multi-session`, the DOMINANT affected
+        # class (multi-session AND aggregative), so the lane sends the
+        # aggregation clause stacked on `_MULTI_SESSION_FRAGMENT`. Exercising it
+        # here through the real lane is deliberate — that combination is what a
+        # fresh review found unmeasured, and it is the case where the two
+        # fragments must be coherent rather than contradictory.
+        q = "How many gym sessions did I have on Monday?"
+        result = al.run_ask_lane(sdk, q, question_date="2026-08-29")
+        assert cap.calls == 1
+        assert reader.detect_question_type(q) == "multi-session"
+        assert cap.last_system == reader.system_prompt_for(
+            result["question_type"], question=q)
+        assert reader._AGGREGATION_FRAGMENT in (cap.last_system or ""), \
+            "the lane sent an aggregative question without counting discipline"
+        # the combined prompt carries BOTH clauses and the precedence rule that
+        # reconciles them (a later mention is the same event only if it refers
+        # back to the same occurrence)
+        assert reader._MULTI_SESSION_FRAGMENT in (cap.last_system or "")
+        assert "refers back to the same occurrence" in (cap.last_system or "")
+    finally:
+        sdk.close()
+        al._reset_ask_reader_cache_for_tests()
+
+
+def test_10539_lane_sends_no_counting_discipline_for_a_non_aggregative_question(monkeypatch):
+    """The control: the conditional clause must not leak into ordinary
+    questions, or the change would buy its two red cases by making every
+    prompt aggregative."""
+    import tortoise.ask_lane as al
+    import tortoise.reader as reader
+    from tests.test_ask_sdk import _new_sdk
+
+    sdk = _new_sdk()
+    cap = _CapturingReader()
+    al._reset_ask_reader_cache_for_tests()
+    try:
+        _seed(sdk)
+        monkeypatch.setattr(al, "_default_ask_reader_factory", lambda: cap)
+        result = al.run_ask_lane(sdk, "what is the gym schedule?",
+                                 question_date="2026-08-29")
+        assert cap.calls == 1
+        assert reader._AGGREGATION_FRAGMENT not in (cap.last_system or "")
+        assert cap.last_system == reader.system_prompt_for(result["question_type"])
+    finally:
+        sdk.close()
+        al._reset_ask_reader_cache_for_tests()
+
+
 # ── N7: the lane's hosted-mode refusal (the one semantic change in the move) ─
 
 def test_n7_lane_refuses_a_hosted_client(monkeypatch):

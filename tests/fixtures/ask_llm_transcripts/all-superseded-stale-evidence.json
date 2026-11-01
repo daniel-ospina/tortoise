@@ -3,7 +3,7 @@
   "expect_superseded_markers": true,
   "expected_abstained": false,
   "fixture": "all-superseded-stale-evidence",
-  "prompt_hash": "dc4dc5e705030db076657f725b59c3ab227fe6b5ebdb932a626fecb0fdd5c7e2",
+  "prompt_hash": "77cb724a95df567528948ef0216d813440301b2bf0e56abaa99dba3b662dfea7",
   "qtype": null,
   "question": "what is the current gym schedule?",
   "question_date": "2026-08-29",
