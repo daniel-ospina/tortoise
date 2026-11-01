@@ -230,6 +230,7 @@ import json
 import os
 import re
 import struct
+from collections.abc import Iterable
 from pathlib import Path
 
 #: The all-decimal suffix rule (`sdk._capture_turn_ids` — `isdecimal`, never
@@ -271,6 +272,26 @@ _GRAPH_EPISODIC_CYPHER = (
 #: set than the read.
 _GRAPH_EPISODIC_COUNT_CYPHER = (
     "MATCH (t:Point) WHERE t.is_episodic = true "
+    "RETURN count(t)"
+)
+
+#: The NARROWED read: the SAME row shape and the same `is_episodic` predicate,
+#: selected by an exact `t.id` set. Exists so a destructive caller re-compares a
+#: session's parity FIELDS at the moment of its delete (#10483 review, P2-1)
+#: through this module's own read and comparison. Unpaged because its id set is
+#: the caller's approved plan — and the store's own count is still compared
+#: against the rows seen, because an unpaged narrow read is subject to
+#: RESULTSET_SIZE exactly as a page is: a silently short one would report a
+#: drifted turn as absent from the graph, or as never having drifted.
+_GRAPH_EPISODIC_IDS_CYPHER = (
+    "MATCH (t:Point) WHERE t.id IN $ids AND t.is_episodic = true "
+    "OPTIONAL MATCH (s:Session)-[:CONTAINS]->(t) "
+    "RETURN id(t), t.id, t.content, t.speaker, t.status, t.createdAt, "
+    "       t.pointKind, t.embedding, t.is_operator, collect(DISTINCT s.id) "
+    "ORDER BY id(t)"
+)
+_GRAPH_EPISODIC_IDS_COUNT_CYPHER = (
+    "MATCH (t:Point) WHERE t.id IN $ids AND t.is_episodic = true "
     "RETURN count(t)"
 )
 
@@ -417,7 +438,9 @@ def _graph_rows(g) -> list:
 
 
 def read_graph_turns(uri: str | None, db_path: str | None,
-                     graph_name: str | None) -> dict:
+                     graph_name: str | None, *,
+                     node_ids: Iterable[str] | None = None,
+                     g=None) -> dict:
     """The graph leg: every EPISODIC node (the delete set), classified.
 
     READ-ONLY. Returns ``{"nodes": {id: node-dict}, "unidentifiable": [...]}``.
@@ -429,24 +452,62 @@ def read_graph_turns(uri: str | None, db_path: str | None,
     store's own aggregate count (RESULTSET_SIZE truncation — an absence would
     not be established), or when a row cannot be classified (an unparseable
     vector is a refusal, never a silent "no vector").
+
+    ``node_ids`` narrows the read to an exact `t.id` set, the same shape and the
+    same predicate, and exists so a DESTRUCTIVE caller can re-compare a
+    session's parity FIELDS at the moment of its delete (#10483 review, P2-1)
+    — through this module's one read and one comparison, never a second
+    spelling of either. `read_record_turns(node_keys=…)` is the mirror on the
+    record side; a re-verify that only re-checked KEY PRESENCE left the class
+    this gate refuses at plan time (a field rewritten after the census) open at
+    delete time. An empty `node_ids` reads nothing and answers nothing.
+
+    ``g`` is an already-bound guarded write handle to read through, so a caller
+    that is about to DELETE from a graph compares the store it deletes from
+    (the `FalkorProjection` it already holds) rather than a second connection
+    it hopes addresses the same one. `None` derives it from
+    `uri`/`db_path`/`graph_name` exactly as before.
     """
+    ids: list[str] | None = None
+    if node_ids is not None:
+        ids = [str(i) for i in node_ids]
+        if not ids:
+            return {"nodes": {}, "unidentifiable": []}
+    if g is None:
+        try:
+            from tortoise.projection import FalkorProjection
+        except Exception as exc:  # pragma: no cover - import env problem
+            raise CensusError(
+                f"tortoise import failed ({type(exc).__name__}: {exc})") from exc
+        try:
+            if uri:
+                proj = FalkorProjection.from_uri(uri, graph_name=graph_name)
+            else:
+                # `--graph-name` is a TARGET selector, not a URI-only flag: the
+                # embedded store selects the graph by name too. Dropping it
+                # here censused the default `tortoise` graph while the operator
+                # asked for another — a wrong-target read that still reported a
+                # verdict.
+                proj = FalkorProjection(db_path,
+                                        graph_name=graph_name or "tortoise")
+        except Exception as exc:
+            raise CensusError(
+                f"the graph could not be read ({type(exc).__name__}: {exc}) — "
+                "an absence is NOT established") from exc
+        g = proj.g
     try:
-        from tortoise.projection import FalkorProjection
-    except Exception as exc:  # pragma: no cover - import env problem
-        raise CensusError(
-            f"tortoise import failed ({type(exc).__name__}: {exc})") from exc
-    try:
-        if uri:
-            proj = FalkorProjection.from_uri(uri, graph_name=graph_name)
+        if ids is None:
+            rows = _graph_rows(g)
+            total = int(g.query(_GRAPH_EPISODIC_COUNT_CYPHER).result_set[0][0])
         else:
-            # `--graph-name` is a TARGET selector, not a URI-only flag: the
-            # embedded store selects the graph by name too. Dropping it here
-            # censused the default `tortoise` graph while the operator asked
-            # for another — a wrong-target read that still reported a verdict.
-            proj = FalkorProjection(db_path,
-                                    graph_name=graph_name or "tortoise")
-        rows = _graph_rows(proj.g)
-        total = int(proj.g.query(_GRAPH_EPISODIC_COUNT_CYPHER).result_set[0][0])
+            rows = g.query(_GRAPH_EPISODIC_IDS_CYPHER,
+                           params={"ids": ids}).result_set
+            # The same aggregate cross-check the paged read gets: a narrowed
+            # read is still subject to RESULTSET_SIZE, and a silently short one
+            # would report a turn as ABSENT FROM THE GRAPH (or as never having
+            # drifted) on a truncated read.
+            total = int(g.query(_GRAPH_EPISODIC_IDS_COUNT_CYPHER,
+                                params={"ids": ids}).result_set[0][0])
     except CensusError:
         raise
     except Exception as exc:
@@ -454,6 +515,27 @@ def read_graph_turns(uri: str | None, db_path: str | None,
             f"the graph could not be read ({type(exc).__name__}: {exc}) — "
             "an absence is NOT established") from exc
 
+    nodes, unidentifiable = _classify_graph_rows(rows)
+
+    # Every node the store counts is either classified or reported as
+    # unidentifiable; a shortfall beyond that is a torn/truncated read.
+    seen = len(nodes) + len(unidentifiable)
+    if seen < total:
+        raise CensusError(
+            f"the graph read returned {seen} but the store counts {total} "
+            "episodic node(s) — the read was TRUNCATED (RESULTSET_SIZE) or "
+            "torn. Refusing to certify parity over a population it did not "
+            "see: an absence is NOT established")
+    return {"nodes": nodes, "unidentifiable": unidentifiable}
+
+
+def _classify_graph_rows(rows) -> tuple[dict, list[dict]]:
+    """The graph rows as `{id: node-dict}` plus the unkeyable ones.
+
+    ONE spelling of the row shape, shared by the full and the narrowed read: a
+    second copy would drift from `_GRAPH_EPISODIC_CYPHER`'s column order and
+    silently compare a session against the wrong fields.
+    """
     nodes: dict[str, dict] = {}
     unidentifiable: list[dict] = []
     for row in rows or []:
@@ -490,21 +572,13 @@ def read_graph_turns(uri: str | None, db_path: str | None,
         else:
             prior["sessions"] |= entry["sessions"]
 
-    # Every node the store counts is either classified or reported as
-    # unidentifiable; a shortfall beyond that is a torn/truncated read.
-    seen = len(nodes) + len(unidentifiable)
-    if seen < total:
-        raise CensusError(
-            f"the graph read returned {seen} but the store counts {total} "
-            "episodic node(s) — the read was TRUNCATED (RESULTSET_SIZE) or "
-            "torn. Refusing to certify parity over a population it did not "
-            "see: an absence is NOT established")
-    return {"nodes": nodes, "unidentifiable": unidentifiable}
+    return nodes, unidentifiable
 
 
 def read_record_turns(record_dsn: str, org_id: str,
-                      graph_id: str) -> dict[str, dict]:
-    """The record leg: every turn row for the tenant, grouped by session.
+                      graph_id: str,
+                      node_keys: Iterable[str] | None = None) -> dict[str, dict]:
+    """The record leg: turn rows for the tenant, keyed by `node_key`.
 
     The connection goes through the repo's own doors — ``record_serve.
     open_record`` (bounded, statement_timeout) then ``record_projection.
@@ -512,7 +586,27 @@ def read_record_turns(record_dsn: str, org_id: str,
     REFUSES a role that can bypass RLS). An unscoped read is the #10024 P0:
     it returns zero rows and would certify vacuously; this leg cannot take
     that shape — the scope either holds or the census exits 3.
+
+    ``node_keys`` narrows the read to an exact key set, and exists so a
+    destructive caller can re-verify a SESSION's rows immediately before it
+    deletes that session (#10483 review, P0 TOCTOU) **through this leg**
+    rather than through a second statement of the record query. `None` (the
+    census's own call) reads the whole tenant, unchanged.
     """
+    # ⛔ AN EMPTY KEY SET IS AN EMPTY READ, AND IT COSTS NOTHING — not even a
+    # connection. This decision sat BELOW `open_record` and returned past the
+    # `try/finally` that closes it, so the one supported input that reads
+    # nothing leaked a bounded record connection every time it was called
+    # (#10483 review round 4, P2). Hoisted above the open it needs: with no
+    # connection there is nothing to close, nothing to tenant-scope, and no
+    # schema to assert about a page of rows that will never be fetched.
+    # Normalised ONCE here, so a generator argument cannot be consumed by the
+    # emptiness test and then read back as empty by the query.
+    keys: list[str] | None = None
+    if node_keys is not None:
+        keys = [str(k) for k in node_keys]
+        if not keys:
+            return {"rows_by_key": {}, "non_turn_shaped": 0}
     try:
         import psycopg2  # noqa: F401 - availability probe, record's own driver
     except ImportError as exc:
@@ -533,9 +627,13 @@ def read_record_turns(record_dsn: str, org_id: str,
         raise CensusError(
             f"the record could not be opened ({type(exc).__name__}: {exc}) — "
             "an absence is NOT established") from exc
+    sql, params = _RECORD_TURNS_SQL, (org_id, graph_id)
+    if keys is not None:
+        sql = _RECORD_TURNS_SQL + " AND node_key = ANY(%s)"
+        params = (org_id, graph_id, keys)
     try:
         cursor = record_projection.scope_connection(conn, org_id)
-        cursor.execute(_RECORD_TURNS_SQL, (org_id, graph_id))
+        cursor.execute(sql, params)
         columns = [d[0] for d in cursor.description]
         rows = cursor.fetchall()
     except Exception as exc:

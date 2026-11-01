@@ -1751,6 +1751,7 @@ surfaces:
   core:
   - test_10000_narrative_record_home.py
   - test_10017_cache_tier.py
+  - test_10017_purge_guard.py
   # #10017 R1/R2: the carrier + journaled removal. It drives the capture writer,
   # both replay engines and `record_projection`, so a change to any of
   # `sdk.py`/`projection/`/`record_projection.py`/`log.py` must run it.

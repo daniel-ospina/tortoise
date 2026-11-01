@@ -12783,6 +12783,24 @@ def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     assert "test_10017_turn_parity_census.py" in r["test_files"], r
 
 
+def test_purge_legacy_turns_guard_runs_on_a_tools_only_change():
+    # #10017/#10483: `tests/test_10017_purge_guard.py` (registered `core`)
+    # pins the refusal arms of `tools/purge_legacy_turns.py` — the tool that
+    # DELETES the pre-#10000 turn nodes. `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and the tool matches no SOURCE_PATTERNS row, so
+    # before the CORE_ALSO entry a purge-tool-only diff was filtered out BEFORE
+    # the "not matched -> core" fallback and selected NO surface at all: the
+    # guard's own refusal pins never ran on the file they hold — on the
+    # destructive tool, whose unguarded change is a delete (the
+    # #1349/#3332/#3616 silent-drop class).
+    # Mutation check: removing the CORE_ALSO entry fails the arm below
+    # (surfaces == [] and the guard absent from test_files).
+    r = _sel(["tools/purge_legacy_turns.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_10017_purge_guard.py" in r["test_files"], r
+
+
 def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
     # #5612: `tests/test_journal_growth.py` (registered `core`) pins the
     # accounting of `tools/journal_growth.py` — the measurement §5.1 recorded as
