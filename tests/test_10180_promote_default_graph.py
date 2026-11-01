@@ -1030,9 +1030,14 @@ _OTHER_FILE_ALLOWLIST = {
     # cannot import it.
     "tortoise/quota.py": {"_count_resource": 1},
     # Provisioning: the default row is MINTED by the flow these run in, so no
-    # promotion can predate them.
+    # promotion can predate them. ⚠️ `_ensure_onboarding_node_after_provision`
+    # used to be counted as 2 on that reason, and it was FALSE of the fork read
+    # (#10452 review, P3, the RPC-side twin of the hosted P3): the `namespace=`
+    # site that read a PRIOR org's `:OnboardingState` — an org a promotion CAN
+    # predate — now resolves through `hosted_api._org_sdk`, leaving only the
+    # mint for the org being CREATED historical.
     "tortoise/supabase_control.py": {"provision_org": 1,
-                                     "_ensure_onboarding_node_after_provision": 2},
+                                     "_ensure_onboarding_node_after_provision": 1},
 }
 
 
@@ -2361,3 +2366,44 @@ def test_a_new_org_inherits_the_fork_from_the_prior_promoted_default(sb):
     assert node["fork"] == "build", (
         "the new org did not inherit the creator's prior fork — the prior-org "
         f"read opened the DEMOTED graph: {node}")
+
+
+# ── 14. The SAME prior-org fork read on the RPC-side provisioning hook ─────
+# The hosted conversion above fixes `_eager_provision_org_graph`, but the
+# signup / register arms initialize `:OnboardingState` through
+# `supabase_control._ensure_onboarding_node_after_provision` instead, and it
+# read the prior org the same historical way — so the same promotion made the
+# same fork silently wrong on a lane the hosted fix does not reach.
+
+def test_the_post_provision_hook_follows_the_prior_promoted_default(sb):
+    """FAIL-ON: the hook reads `org_{prior}` (the DEMOTED graph), so a prior org
+    that onboarded after its move inherits `fork='self'` instead of the
+    creator's choice — on the signup/register arms, which never go through
+    `_eager_provision_org_graph`."""
+    import tortoise.supabase_control as sc
+
+    tc, fake, _ = sb
+    _seed_onboarding(_NEW_NS, steps=_COMPLETE_STEPS, status="complete",
+                     fork="build")
+    _as_session()
+    promoted = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert promoted.status_code == 200, promoted.text
+    assert fake.tables["organizations"][0]["graph_name"] == _NEW_NS
+    # The post-RPC hook runs in a worker with no request credential in scope.
+    ha._resolved_default_namespace.set(None)
+
+    new_org = "team-10180-rpc-heir"
+    sc._ensure_onboarding_node_after_provision(
+        fake, new_org, {"p_org_id": new_org, "p_user_id": OWNER},
+        prior_org_ids=[TEAM])
+
+    _os = _onboarding_state()
+    sdk = ha._make_sdk(namespace=new_org)
+    try:
+        node = _os.read_onboarding_node(sdk._get_proj(), new_org)
+    finally:
+        sdk.close()
+    assert node is not None, "the hook wrote no OnboardingState"
+    assert node.get("fork") == "build", (
+        "the hook inherited the fork from the DEMOTED graph: the prior org's "
+        f"record lives in the promoted default. node={node}")

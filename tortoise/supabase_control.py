@@ -3311,8 +3311,24 @@ def _ensure_onboarding_node_after_provision(cp, org_id: str,
         prior_fork = None
         if prior_ids:
             try:
+                # #10452 review P3 (the RPC-side twin of the hosted lane's
+                # P3): `prior_ids[0]` is a PRE-EXISTING org, so a #10180
+                # promotion of it can predate this hook and its
+                # `:OnboardingState` then lives in the PROMOTED default graph.
+                # The historical `namespace=prior_ids[0]` open reads the graph
+                # the promotion DEMOTED, where the node no longer is —
+                # `read_prior_org_fork` answers None and
+                # `resolve_init_fork_compact(True, None)` silently starts the
+                # NEW org in `fork='self'`, a different onboarding mode than
+                # the creator chose. `_org_sdk` is the one resolver: fail-soft
+                # (an unreadable control plane answers the historical open,
+                # byte-identical for an org that never promoted), and it
+                # CONSTRUCTS on this thread from an already-resolved name
+                # (#7500's split), so it adds no listing probe to a
+                # best-effort hook whose contract is "never block
+                # provisioning".
                 prior_fork = _os.read_prior_org_fork(
-                    _ha._make_sdk(namespace=prior_ids[0])._get_proj(),
+                    _ha._org_sdk(prior_ids[0])._get_proj(),
                     prior_ids[0])
             except Exception:
                 prior_fork = None
