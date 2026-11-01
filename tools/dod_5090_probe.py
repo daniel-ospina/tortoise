@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import functools
 import json
 import os
@@ -199,9 +200,6 @@ WRITER_LABEL_OVERRIDES: dict[str, str] = {
     # journal; its Cypher carries no `MERGE (:Label`. It feeds the `:Point`
     # write (`api.py:318` -> projection's point clause).
     "_point": "Point",
-    # `sdk._session_embedding` computes the session vector that the `:Event`
-    # session write stores (`sdk.py:43320`); its Cypher names no label either.
-    "_session_embedding": "Event",
 }
 
 
@@ -308,6 +306,7 @@ def score_rule_bullet() -> Row:
     writers = embedding_writers()
     gated = {w: d for w, d in writers.items() if d["kind"] == "gated"}
     ungated = {w: d for w, d in writers.items() if d["kind"] == "ungated"}
+    unparsed = [w for w, d in writers.items() if d["kind"] == "unparsed"]
     on_by_default = embed_gate.embed_gate_enabled()  # env-cleared by measure()
     notes = [
         f"stated: {stated} ({SEAM.rsplit('::', 1)[-1]} asks the predicate)",
@@ -321,10 +320,14 @@ def score_rule_bullet() -> Row:
            if ungated else ""),
         f"gate enabled by default: {on_by_default} "
         f"(TORTOISE_EMBED_GATE={os.environ.get(embed_gate.ENV_FLAG, '')!r})",
+        # ⛔ A module that will not parse is a HOLE in the measurement, not a
+        # zero: its writers — gated or bypassing — are invisible to every row
+        # (this tool's own review, P2).
+        f"unparseable modules (hold this row): {sorted(unparsed) or 'none'}",
     ]
     if not stated or not shared or not gated:
         verdict = "NOT MET"
-    elif not on_by_default or ungated:
+    elif not on_by_default or ungated or unparsed:
         # EITHER condition alone means the rule is not the write path's
         # operative rule: the flag is the operator's, and an ungated writer is
         # a path the rule never sees. Turning the flag ON does not fix the
@@ -359,6 +362,12 @@ def written_labels(writers: dict[str, dict] | None = None) -> dict[str, str]:
             if d["kind"] in ("gated", "ungated")}
 
 
+def unparsed_modules(writers: dict[str, dict] | None = None) -> list[str]:
+    """Modules whose writers could not be enumerated — a hole, never a zero."""
+    writers = embedding_writers() if writers is None else writers
+    return sorted(w for w, d in writers.items() if d["kind"] == "unparsed")
+
+
 def served_labels() -> set[str]:
     """The labels `run_vector_query` can query — its declared vocabulary.
 
@@ -377,6 +386,7 @@ def score_path_bullet() -> Row:
     served = served_labels()
     labels = {label for label in written.values() if not label.startswith("UNKNOWN")}
     unknown = {fn: label for fn, label in written.items() if label.startswith("UNKNOWN")}
+    unparsed = unparsed_modules()
     orphans = labels - served
     notes = [
         f"written labels: {sorted(labels)}",
@@ -385,9 +395,11 @@ def score_path_bullet() -> Row:
     ]
     if unknown:
         notes.append(f"unresolved writers (hold this row at PARTIAL): {sorted(unknown)}")
+    if unparsed:
+        notes.append(f"unparseable modules (hold this row at PARTIAL): {unparsed}")
     # A stored-and-unqueryable class is the bullet's failure; an UNRESOLVED
     # writer is not proof either way, so it can at most hold the row at PARTIAL.
-    verdict = "NOT MET" if orphans else ("PARTIAL" if unknown else "MET")
+    verdict = "NOT MET" if orphans else ("PARTIAL" if (unknown or unparsed) else "MET")
     return Row(
         bullet=2,
         text=BULLETS[1],
@@ -434,18 +446,60 @@ def fallback_probe() -> dict[str, str]:
     only when a caller can tell a full scan from an indexed read WITHOUT
     reading `search_engine.py` — which is `#4999`'s contract.
     """
+    # The breakers are module state: snapshot and restore them, because a
+    # "read-only" instrument must not un-trip the vector breaker in whatever
+    # process imports it (this tool's own review, P2 — `measure()` already does
+    # this for the gate flags). ⛔ NOT `deepcopy`: `_CircuitBreaker` holds a
+    # `threading.Lock` (`search_engine.py:167`), so a deepcopy raises
+    # `TypeError: cannot pickle '_thread.lock' object` — measured, and it fired
+    # the moment a real search had registered a breaker, which is exactly the
+    # state this restore exists to protect. The SLOT values are primitives.
+    import tortoise.search_engine as _se
     from tortoise.search_engine import (
         VECTOR_MECHANISM_KEY,
         reset_circuit_breakers,
         run_vector_query,
     )
 
-    reset_circuit_breakers()
+    _SLOTS = ("fail_threshold", "cooldown_seconds", "_fails", "_open_until", "_probing")
+
+    def _snapshot() -> dict[str, dict]:
+        return {
+            name: {slot: getattr(b, slot) for slot in _SLOTS if hasattr(b, slot)}
+            for name, b in (getattr(_se, "_BREAKERS", {}) or {}).items()
+        }
+
+    snapshot = _snapshot()
+
+    def _restore() -> None:
+        breakers = getattr(_se, "_BREAKERS", None)
+        if not isinstance(breakers, dict):
+            return
+        for name, state in snapshot.items():
+            b = breakers.get(name)
+            if b is None:
+                continue
+            for slot, value in state.items():
+                # A slot we cannot restore is reported by the state it leaves,
+                # not fatal to a measurement.
+                with contextlib.suppress(Exception):
+                    setattr(b, slot, value)
+
     out: dict[str, str] = {}
 
     def _entry(trace):
         return next((e for e in trace if e.get("leg") == "vector"), {})
 
+    try:
+        return _probe_mechanisms(out, _entry, run_vector_query,
+                                 VECTOR_MECHANISM_KEY, reset_circuit_breakers)
+    finally:
+        _restore()
+
+
+def _probe_mechanisms(out, _entry, run_vector_query, VECTOR_MECHANISM_KEY,
+                      reset_circuit_breakers) -> dict[str, str]:
+    reset_circuit_breakers()
     # (a) the index path: signature A answers with rows.
     trace: list = []
     run_vector_query(_Catalogue([([("a",), ("b",)], None)]), VEC,
@@ -472,7 +526,6 @@ def fallback_probe() -> dict[str, str]:
         VEC, entity_type="point", is_embedded=False, leg_trace=trace,
     )
     out["scan_fallback"] = str(_entry(trace).get(VECTOR_MECHANISM_KEY, "<key absent>"))
-    reset_circuit_breakers()
     return out
 
 
@@ -497,7 +550,10 @@ def score_fallback_bullet() -> Row:
 
 #: The phrases a DECIDED V1 would carry. Absence of all of them is the finding,
 #: not a guess: V1 is `#5090`'s owner gate and only a ruling can satisfy it.
-V1_DECIDED_MARKERS = ("V1: DECIDED", "V1 is DECIDED", "V1 DECIDED —")
+#: Case-insensitive, because a real ruling is prose ("V1: decided — Point-only,
+#: 2026-11-…") and a spelling-sensitive search is a false negative with no way
+#: to correct it but editing this tool (this tool's own review, P2).
+V1_DECIDED_MARKERS = ("v1: decided", "v1 is decided", "v1 decided")
 #: Where a ruling would land, so an undecided read says what it looked at.
 V1_SURFACES = (
     "docs/architecture/STORAGE-ARCHITECTURE.md",
@@ -516,7 +572,7 @@ def score_v1_bullet() -> Row:
         for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if not re.search(r"\bV1\b", line):
                 continue
-            if any(m in line for m in V1_DECIDED_MARKERS):
+            if any(m in line.lower() for m in V1_DECIDED_MARKERS):
                 decided.append(f"{rel}:{i}: {line.strip()}")
             elif re.search(r"\bOPEN\b|\bopen decision\b|human gate|owner decision",
                            line) or "never spends that decision" in line:
@@ -539,15 +595,36 @@ def score_v1_bullet() -> Row:
 #: The modules a predicate can live in without being a second RULE SET: the
 #: embed seam's own module graph, walked rather than listed.
 EMBED_PATH_ROOTS: tuple[str, ...] = (
-    "tortoise/embeddings.py",
+    # NOT `tortoise/embeddings.py`: it is the CALLER, and it imports half the
+    # tree, so walking it counted 47 unrelated pattern owners as predicates.
+    # A predicate has to be imported BY the gate to be reachable from it.
     "tortoise/embed_gate.py",
     "tortoise/value_gate.py",
 )
 
-#: Both local-import shapes: `from .mod import x` AND `from . import mod`
-#: (measured: handling only the first made a third pattern-owning module
-#: invisible to the count — the whitelist bug wearing a different hat).
-_LOCAL_IMPORT = re.compile(r"^\s*from\s+\.(\w*)\s+import\s+(.*)$", re.M)
+#: Every in-package import shape, because the walk is only as good as its
+#: edges: `from . import pkg` (a SUBPACKAGE), `from .mod import x`,
+#: `from .pkg.mod import x`, and the absolute `from tortoise.pkg.mod import x`
+#: — 858 of the last exist in this tree, so a walk that ignores it reports
+#: `count: 1` on a tree with two predicates (this tool's own review, P1).
+_LOCAL_IMPORT = re.compile(
+    r"^\s*from\s+(\.{1,2}(?:[\w.]*)|tortoise(?:\.[\w.]+)?)\s+import\s+(.*)$",
+    re.M,
+)
+
+
+def _resolve(root: Path, parts: list[str]) -> set[str]:
+    """The in-tree module file(s) a dotted import path names."""
+    out: set[str] = set()
+    if not parts:
+        return out
+    base = root / "tortoise"
+    for i in range(1, len(parts) + 1):
+        pkg = base.joinpath(*parts[:i])
+        for cand in (pkg.with_suffix(".py"), pkg / "__init__.py"):
+            if cand.exists():
+                out.add(cand.relative_to(root).as_posix())
+    return out
 
 
 def embed_path_modules() -> set[str]:
@@ -573,14 +650,26 @@ def _embed_path_modules(root: Path) -> frozenset[str]:
         mod = path.relative_to(root).as_posix()
         targets: set[str] = set()
         for m in _LOCAL_IMPORT.finditer(src):
-            names = [m.group(1)] if m.group(1) else []
-            if not m.group(1):  # `from . import a, b`
-                names = [n.strip().split(" as ")[0]
-                         for n in m.group(2).split(",") if n.strip()]
-            for name in names:
-                cand = root / "tortoise" / f"{name}.py"
-                if cand.exists():
-                    targets.add(cand.relative_to(root).as_posix())
+            dotted, imported = m.group(1), m.group(2)
+            names = [n.strip().split(" as ")[0].split(".")[0]
+                     for n in imported.split(",") if n.strip()]
+            if dotted.startswith("."):
+                parts = [x for x in dotted.lstrip(".").split(".") if x]
+                # `from . import a, b` — the imported NAMES are modules.
+                if not parts:
+                    for name in names:
+                        targets |= _resolve(root, [name])
+                    continue
+                # `from .pkg.mod import x` — the DOTTED path is the module; an
+                # imported name may still be a submodule of it.
+                targets |= _resolve(root, parts)
+                for name in names:
+                    targets |= _resolve(root, [*parts, name])
+            else:  # absolute `from tortoise.pkg.mod import x`
+                parts = dotted.split(".")[1:]
+                targets |= _resolve(root, parts)
+                for name in names:
+                    targets |= _resolve(root, [*parts, name])
         edges[mod] = targets
     seen: set[str] = set()
     queue = [r for r in EMBED_PATH_ROOTS if (root / r).exists()]
@@ -679,7 +768,12 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 "catalogue": f"UNMEASURED({type(e).__name__}: {e})",
                 "command": CENSUS_COMMAND}
 
-    indexed: dict[str, dict] = {}
+    # ⛔ `{indexed} | {served}` is NOT the population: a label that stores
+    # vectors, has no index AND no query path is the worst class this census is
+    # for, and drawing the population from the two things it compares omits it
+    # by construction (this tool's own review, P1 — a `:Chunk` with 2 stored
+    # embeddings never appeared). The graph's own labels are the population.
+    indexed: dict[str, list[dict]] = {}
     unreadable: list[str] = []
     for row in rows or []:
         try:
@@ -701,27 +795,33 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 except AttributeError:
                     dim = None
                 stats = row[8] if len(row) > 8 and isinstance(row[8], dict) else {}
-                # The engine's own per-index counters. §12.1a measured
-                # GRAPH.MEMORY USAGE's index share 21.6× under the true cost,
-                # so these are REPORTED and labelled blind — never summed into
-                # a "total bytes" claim.
                 # ⛔ These counters describe the row's FULLTEXT bookkeeping
                 # (measured: docTableSize / docTrieSize / invertedSize / …),
                 # NOT the vector index — a live HNSW holding 76,800 B of
-                # payload reported 5,150 B, all of it fulltext. Reported with
-                # the key names so the figure cannot be read as a vector size.
+                # payload reported 5,150 B, all of it fulltext. Reported under
+                # their real name so the figure cannot be read as a vector size.
                 engine_bytes = {k: v for k, v in stats.items()
                                 if isinstance(v, int) and k.endswith("Size")} or None
-                indexed[label] = {
+                # A LIST per label: a label with vector indexes on two fields
+                # must not have one silently overwrite the other.
+                indexed.setdefault(label, []).append({
                     "field": fld,
                     "dimension": dim if dim is not None else "UNMEASURED(no dimension in options)",
                     "engine_catalogue_counters_FULLTEXT_NOT_VECTOR": engine_bytes
                     if engine_bytes is not None
                     else "UNMEASURED(no size counters in the catalogue row)",
-                }
+                })
+
+    try:
+        graph_labels = [r[0] for r in (graph.query("CALL db.labels()").result_set or [])]
+        population_source = "CALL db.labels()"
+    except Exception as e:
+        graph_labels = []
+        population_source = (f"UNMEASURED({type(e).__name__}: {e}) — population "
+                            f"falls back to the catalogue's labels")
 
     labels: dict[str, dict] = {}
-    for label in sorted(set(indexed) | set(served_labels())):
+    for label in sorted(set(graph_labels) | set(indexed) | served_labels()):
         try:
             res = graph.query(
                 f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL RETURN count(n)"
@@ -729,28 +829,66 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             stored = int(res[0][0])
         except Exception as e:
             stored = f"UNMEASURED({type(e).__name__}: {e})"
-        idx = indexed.get(label)
-        dim = idx["dimension"] if idx and isinstance(idx["dimension"], int) else None
-        if isinstance(stored, int) and dim:
-            # A vecf32 component is 4 bytes; the payload is DERIVED, and said so.
-            payload = {"derived_payload_B": stored * dim * 4,
-                       "how": f"stored {stored} x {dim} dims x 4 B (vecf32)"}
+        found = indexed.get(label) or []
+        # ⛔ An index on the LABEL is not an index on the COLUMN counted here.
+        # `field` was already read and used to be ignored: a `(Source:vec)`
+        # index made a `Source.embedding` vector report `indexed=True`
+        # (this tool's own review, P1 — measured on a live engine).
+        covering = [ix for ix in found if ix["field"] == "embedding"]
+        idx = covering[0] if covering else (found[0] if found else None)
+        dim = idx["dimension"] if covering and isinstance(idx["dimension"], int) else None
+        if isinstance(stored, str):
+            unindexed = "UNMEASURED(stored count unreadable)"
+        elif covering:
+            unindexed = 0
         else:
-            payload = {"derived_payload_B": "UNMEASURED(no stored count or no indexed dim)",
-                       "how": "needs both a stored count and an indexed dimension"}
+            unindexed = stored
+        # The payload is DERIVED (a vecf32 component is 4 bytes) and needs BOTH
+        # a covering index dimension AND a width probe that agrees with it —
+        # otherwise it would multiply the stored count by a number that
+        # describes a different field or a different vector (review P2).
+        width = None
+        if isinstance(stored, int) and stored > 0:
+            try:
+                # `size(n.embedding)` is REJECTED on a vecf32 column, so the
+                # vector is fetched and measured here (measured: every payload
+                # read UNMEASURED before this).
+                probe = graph.query(
+                    f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
+                    f"RETURN n.embedding LIMIT 1"
+                ).result_set
+                if probe and probe[0] and probe[0][0] is not None:
+                    width = len(probe[0][0])
+            except Exception:
+                width = None
+        if isinstance(stored, int) and stored == 0:
+            payload = {"derived_payload_B": 0, "how": "no stored vectors on this label"}
+        elif dim is None:
+            payload = {"derived_payload_B": "UNMEASURED(no VECTOR index on "
+                                            "`embedding` — nothing to derive from)",
+                       "how": "needs a covering index dimension"}
+        elif width is None:
+            payload = {"derived_payload_B": "UNMEASURED(stored width not probeable)",
+                       "how": "needs a width probe agreeing with the index"}
+        elif width != dim:
+            payload = {"derived_payload_B": "UNMEASURED(stored width "
+                                            f"{width} != index dimension {dim})",
+                       "how": "the index and the stored vectors disagree (#4280 class)"}
+        else:
+            payload = {"derived_payload_B": stored * dim * 4,
+                       "how": f"stored {stored} x {dim} dims x 4 B (vecf32), "
+                              f"probed width {width} agrees"}
         labels[label] = {
             "stored": stored,
-            "indexed": bool(idx),
-            "unindexed": (
-                (0 if stored == 0 else "UNMEASURED(stored count unreadable — an "
-                                      "arithmetic shortcut must not stand in for it)")
-                if isinstance(stored, str) else (stored if not idx else 0)
-            ),
+            "indexed": bool(covering),
+            "unindexed": unindexed,
+            "vector_indexes_on_label": found or "none",
             "index": idx or "none",
             "payload": payload,
         }
     return {"graph": graph_name, "at": at, "labels": labels,
-            "catalogue": "CALL db.indexes()", "command": CENSUS_COMMAND,
+            "catalogue": "CALL db.indexes()", "population": population_source,
+            "command": CENSUS_COMMAND,
             "uri_path_graph": uri_graph_name,
             "unreadable_catalogue_rows": unreadable}
 
@@ -873,7 +1011,9 @@ def main(argv: list[str] | None = None) -> int:
             report["census"] = vector_census(
                 graph, graph_name, graph_names=names,
                 uri_graph_name=uri_name)
-            unmeasured = unmeasured or not report["census"]["labels"]
+            census = report["census"]
+            unmeasured = unmeasured or str(census.get("catalogue", "")).startswith(
+                "UNMEASURED") or "error" in census
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))

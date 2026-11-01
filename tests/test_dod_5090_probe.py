@@ -291,3 +291,157 @@ def test_measure_restores_the_gate_flags(monkeypatch):
     probe.measure()
     assert os.environ["TORTOISE_EMBED_GATE"] == "1"
     assert os.environ["TORTOISE_VALUE_GATE"] == "1"
+
+
+# ── The census, on its POSITIVE path (all three tests above were negative) ──
+
+
+class _CensusGraph:
+    """A fake engine: a catalogue, a label list, and per-label vector counts.
+
+    Exists because every census test before it asserted a FAILURE path, which
+    is how three false-`MET` shapes survived a review (the `unindexed` column,
+    the population, and the payload arithmetic had no positive coverage).
+    """
+
+    def __init__(self, catalogue, labels, vectors, dim=None):
+        self._catalogue = catalogue
+        self._labels = labels
+        self._vectors = vectors  # {label: (count, [1.0]*width | None)}
+        self._dim = dim
+
+    def query(self, cypher, params=None, timeout=None):
+        if "db.indexes()" in cypher:
+            rows = self._catalogue
+        elif "db.labels()" in cypher:
+            rows = [[lab] for lab in self._labels]
+        elif "RETURN count(n)" in cypher:
+            label = cypher.split("MATCH (n:")[1].split(")")[0]
+            rows = [[self._vectors.get(label, (0, None))[0]]]
+        elif "RETURN n.embedding" in cypher:
+            label = cypher.split("MATCH (n:")[1].split(")")[0]
+            rows = [[self._vectors.get(label, (0, None))[1]]]
+        else:
+            rows = []
+        return type("_R", (), {"result_set": rows})()
+
+
+def _index_row(label, field, dim):
+    return [label, [field], {field: ["VECTOR"]},
+            {field: {"dimension": dim}}, "english", [], "NODE", "OPERATIONAL", {}]
+
+
+def test_the_census_reports_an_index_on_ANOTHER_field_as_unindexed():
+    """An index on the LABEL is not an index on `embedding` (review P1-1).
+
+    Measured failure this pins: a `(Source, vec)` index made a stored
+    `Source.embedding` vector report `indexed=True, unindexed=0`.
+    """
+    graph = _CensusGraph(
+        catalogue=[_index_row("Source", "vec", 384)],
+        labels=["Source", "Chunk"],
+        vectors={"Source": (1, [0.0] * 384), "Chunk": (2, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                                graph_names=["g"])
+    assert census["labels"]["Source"]["indexed"] is False
+    assert census["labels"]["Source"]["unindexed"] == 1
+    # …and the population comes from the GRAPH's labels, so a stored-and-
+    # neither-indexed-nor-served label is REPORTED, not omitted (review P1-2).
+    assert "Chunk" in census["labels"], sorted(census["labels"])
+    assert census["labels"]["Chunk"]["unindexed"] == 2
+
+
+def test_the_census_payload_needs_the_probe_and_the_index_to_agree():
+    """The byte figure is derived, so it must not multiply a different width."""
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"],
+        vectors={"Point": (2, [0.0] * 4)},  # stored width 4, index dim 384
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                                graph_names=["g"])
+    payload = census["labels"]["Point"]["payload"]["derived_payload_B"]
+    assert isinstance(payload, str) and payload.startswith("UNMEASURED"), payload
+    # Agreeing width/dim DOES derive it.
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"],
+        vectors={"Point": (2, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                                graph_names=["g"])
+    assert census["labels"]["Point"]["payload"]["derived_payload_B"] == 2 * 384 * 4
+
+
+def test_the_census_measures_the_graph_its_row_NAMES(monkeypatch):
+    """`--graph B` with a `--uri …/A` must query B (review P1, no falsifier)."""
+    selected: list[str] = []
+
+    class _Db:
+        def select_graph(self, name):
+            selected.append(name)
+            return _CensusGraph([], [name], {})
+
+    monkeypatch.setattr(probe, "_connect", lambda uri: (_Db(), ["A", "B"]))
+    rc = probe.main(["--census", "--json",
+                     "--uri", "docker://:@127.0.0.1:1/A", "--graph", "B"])
+    assert rc == 0, rc
+    assert selected == ["B"], selected
+
+
+def test_an_unparseable_module_holds_the_rows(tmp_path, monkeypatch):
+    """A tree that will not fully parse must not read as clean (review P2-1)."""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "writer.py").write_text(
+        "from .embeddings import encode_for_row\n"
+        "def _upsert_point(ev):\n"
+        "    return 'MERGE (n:Point {id: 1}) SET n.embedding = $e'\n",
+        encoding="utf-8")
+    (tmp_path / "tortoise" / "broken.py").write_text(
+        "def oops(:\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert probe.unparsed_modules() == ["UNPARSEABLE"], probe.unparsed_modules()
+    assert probe.score_path_bullet().verdict == "PARTIAL"
+
+
+def test_the_predicate_walk_follows_subpackages_and_absolute_imports(
+        tmp_path, monkeypatch):
+    """The two import shapes that made a second predicate read MET (review P1-3)."""
+    t = tmp_path / "tortoise"
+    (t / "pkg").mkdir(parents=True)
+    (t / "pkg" / "__init__.py").write_text(
+        "import re\n_P = re.compile(r'x')\n", encoding="utf-8")
+    (t / "abs_rules.py").write_text("import re\n_A = re.compile(r'y')\n",
+                                    encoding="utf-8")
+    (t / "value_gate.py").write_text(
+        "import re\n_V = re.compile(r'#\\d+')\nRULES = ('r',)\n", encoding="utf-8")
+    (t / "embed_gate.py").write_text(
+        "from . import value_gate, pkg\n"
+        "from tortoise.abs_rules import _A\n"
+        "RULE_SET = value_gate.RULES\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 3, counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_the_fallback_probe_restores_the_circuit_breakers():
+    """A read-only probe must not un-trip a breaker a live process opened.
+
+    Pinned because the FIRST attempt at this restore (`deepcopy` of
+    `_BREAKERS`) raised `TypeError: cannot pickle '_thread.lock' object` the
+    moment a breaker was registered — i.e. in exactly the state it existed to
+    protect, and only in a process that had already run a real search. A fresh
+    pytest process hid it.
+    """
+    from tortoise.search_engine import _breaker
+
+    b = _breaker("vector")
+    b.record_failure()
+    before = (b._fails, b._open_until, b._probing)
+    probe.fallback_probe()
+    after = (b._fails, b._open_until, b._probing)
+    assert after == before, (before, after)
