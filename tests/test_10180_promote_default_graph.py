@@ -1013,12 +1013,17 @@ _ORG_WIDE_OPENER_ALLOWLIST = {
     #   (`namespace=org_id`, materialized on purpose). Its SECOND site used to
     #   read the PRIOR org — a pre-existing org a promotion CAN predate — and
     #   was converted (review P3 at `93697f51e895`), so the count is 1 and the
-    #   reason now covers only the mint. ⚠️ That prior-org open went through
-    #   `_open_org_graph_sdk` first, which cost a listing probe AND a
-    #   control-plane read ON THE EVENT LOOP (the helper is sync and the
-    #   org-create lane calls it directly); it now opens the resolved name with
-    #   `_org_sdk_from_name`, and the name is resolved in the caller's
-    #   `_cp_offload` worker (review P2 at `50f0a9c53`).
+    #   reason now covers only the mint. ⚠️ That prior-org open goes through
+    #   `_open_org_graph_sdk` — NOT `_org_sdk_from_name`, whose single arm is
+    #   the name-less one this door exists to replace: the door is the only
+    #   place that gates EVERY arm (promoted namespace, canonical `org_{id}`,
+    #   pre-#3543 `team_{id}`, and "neither listed") on the server's LISTING
+    #   (#10510, round 7 — the name-only open minted the absent `org_{prior}`
+    #   and lost the creator's fork). What the earlier round removed is not the
+    #   gate: it is the COST. The listing probe and the control-plane name read
+    #   now run in the caller's `_cp_offload` worker and reach the open as
+    #   `prior_listed` / `prior_moved` (review P2 at `50f0a9c53`); the closure
+    #   still CONSTRUCTS on the loop (tortoise#7500).
     "provision_tenant": 1,
     "register_user": 3,
     "_eager_provision_org_graph": 1,
@@ -1133,6 +1138,58 @@ def test_every_org_wide_opener_is_converted_or_accounted_for():
         assert wide == expected, (
             f"the org-wide opener class changed in {rel} — see "
             f"_OTHER_FILE_ALLOWLIST. Found: {wide}")
+
+
+def test_the_provisioning_reason_names_the_door_the_code_opens():
+    """The `provision_tenant` reason is the RECORDED justification for an
+    allowlisted count, so it is an artifact a lane acts on — not prose. A
+    reason naming the name-only opener as the CURRENT door does not merely
+    read wrong: it tells the next lane that the shape round 7 blocked (#10510)
+    is the reviewed one, and "restoring consistency" reverts the listing gate —
+    the absent `org_{prior}` gets minted (read-path write pin 4) and the new
+    org silently starts `fork='self'`.
+
+    FAIL-ON, two independent reds: open the prior org with
+    `_org_sdk_from_name(prior, moved)` again → the AST half reds; put the
+    name-only door back in the reason WITHOUT marking it rejected (the pre-fix
+    wording: "it now opens the resolved name with `_org_sdk_from_name`") → the
+    reason half reds.
+    """
+    import ast
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().read_text(encoding="utf-8")
+    start = src.index("# → provisioning/creation:")
+    block = src[start:src.index('"provision_tenant": 1,', start)]
+
+    assert "_open_org_graph_sdk" in block, (
+        "the `provision_tenant` reason no longer names the door the prior-org "
+        "open actually uses — a reader then has to re-derive it, which is how "
+        f"the #10510 shape got mistaken for the current one: {block!r}")
+    for sentence in re.split(r"[;\n]|(?<=\.)\s", block):
+        if "_org_sdk_from_name" not in sentence:
+            continue
+        assert re.search(r"\b(NOT|never|rejected)\b", sentence), (
+            "the `provision_tenant` reason presents `_org_sdk_from_name` as the "
+            "CURRENT prior-org door (#10510, the shape round 7 blocked) — mark "
+            f"it rejected or drop it: {sentence.strip()!r}")
+
+    hosted = ast.parse((Path(__file__).resolve().parent.parent / "tortoise"
+                        / "hosted_api.py").read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(hosted)
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "_eager_provision_org_graph")
+    called = {getattr(c.func, "id", None) or getattr(c.func, "attr", None)
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert "_open_org_graph_sdk" in called, (
+        "`_eager_provision_org_graph` no longer opens the prior org through "
+        f"`_open_org_graph_sdk` (calls: {sorted(c for c in called if c)})")
+    assert "_org_sdk_from_name" not in called, (
+        "`_eager_provision_org_graph` opens with the name-only "
+        "`_org_sdk_from_name` again — that is #10510: no listing gate, so an "
+        "absent or pre-#3543 prior graph is opened, and so MINTED, and the fork "
+        "read comes back empty")
 
 
 # ── 10. The two holes a review found in the first cut of this verb ────────
