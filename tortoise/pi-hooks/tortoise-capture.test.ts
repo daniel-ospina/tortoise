@@ -2205,7 +2205,12 @@ test("an over-bound GROWTH leaves a FILEABLE entry fileable", async () => {
   // branch) → `terminal_failure` is set, `countPendingEntries` is 0, and the
   // drain files nothing.
   const spool = tmpSpool();
-  const roomy = { maxTotalBytes: 1_000_000, maxEntryBytes: 1_000_000 };
+  // The ceiling set is COMPLETE on purpose: `spoolSaturated` compares against
+  // `bounds.maxEntries`, and an absent field makes `metas.length < undefined`
+  // false — i.e. a partial bounds object silently reads as SATURATED and the
+  // write under test never happens. `SpoolBounds` requires all three; strip-types
+  // does not enforce it, so the test states it.
+  const roomy = { maxEntries: 20_000, maxTotalBytes: 1_000_000, maxEntryBytes: 1_000_000 };
   writeSpoolEntry(spool, snapshot("legal"), roomy);
   const onDisk = spoolEntryBytes(spool, "legal");
   const tight = { maxEntries: 100, maxTotalBytes: 1_000_000, maxEntryBytes: onDisk + 50 };
@@ -2252,7 +2257,12 @@ test("the terminal arm is decided by the ON-DISK size, and the fresh arm is a lo
   // of `onDisk` → a bound one byte under the stored size leaves it filable
   // forever; and drop `retained: false` → the fresh arm reads as a retention.
   const spool = tmpSpool();
-  const roomy = { maxTotalBytes: 1_000_000, maxEntryBytes: 1_000_000 };
+  // The ceiling set is COMPLETE on purpose: `spoolSaturated` compares against
+  // `bounds.maxEntries`, and an absent field makes `metas.length < undefined`
+  // false — i.e. a partial bounds object silently reads as SATURATED and the
+  // write under test never happens. `SpoolBounds` requires all three; strip-types
+  // does not enforce it, so the test states it.
+  const roomy = { maxEntries: 20_000, maxTotalBytes: 1_000_000, maxEntryBytes: 1_000_000 };
   writeSpoolEntry(spool, snapshot("stuck"), roomy);
   const onDisk = spoolEntryBytes(spool, "stuck");
   const tight = { maxEntries: 100, maxTotalBytes: 1_000_000, maxEntryBytes: onDisk - 1 };
