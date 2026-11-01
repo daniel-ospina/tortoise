@@ -88,6 +88,15 @@ It verifies six things, and it fails on each of them for a specific reason:
      measurement had landed two days BEFORE the record (#9738). The field is therefore held to
      ``prior_measurements`` in BOTH directions: ``false`` with a citation is the falsified claim, and
      ``true`` with none is a claim no artefact backs.
+   * **A ``false`` must carry its BASES** (``measurement_visible_to_author_basis``). A citation is
+     only one of the two ways a ``false`` can be wrong: the other is that the measurement exists
+     but no citation names it, and then NO arm can see it — ``prior_measurements`` is the only table
+     this gate reads. E4 shipped in exactly that shape (#10525 review): the field was right
+     (its receipt ran 2026-10-19, before the record, but landed at ``d50217273`` on 2026-10-22,
+     after it, so nothing was in the tree the author read) and the reason was stated NOWHERE, while
+     the §0 row beside it said "no measurement existed" — which the measurement's own date refutes.
+     A bare ``false`` cannot be told apart from a stale one, by a reader or by a rule, so the ground
+     is required.
    * **E3's class set** is re-derived from ``_DERIVATION_REFERENCES_LABELS`` in
      ``tortoise/projection/edges.py`` (plus ``Point``, which carries the anchor on the node). Naming
      ``:Object`` counts a class the model leaves unanchored BY DESIGN (#5199 option A), so ``= 1.000``
@@ -897,6 +906,23 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
                 f"criterion {cid} declares measurement_visible_to_author=true and names no "
                 "prior_measurements entry — an undisclosed disclosure is uncheckable, and this "
                 "field's whole value is that a reader can follow it to the artefact"
+            )
+        #: A bare `false` is UNFALSIFIABLE — the #10525 review's E4 shape. `prior_measurements`
+        #: is the only table this gate reads, so a `false` for a metric whose measurement exists
+        #: but is NOT cited is invisible to every arm here; and to a reader it is
+        #: indistinguishable from a `false` nobody has revalidated. E4 was that `false`: right
+        #: (the measurement ran before the record but its artifact landed after it, so nothing was
+        #: in the tree the author read) with the reason stated nowhere, beside a §0 row asserting
+        #: "no measurement existed". The ground is therefore required, not merely encouraged.
+        if visible is False and not str(
+                crit.get("measurement_visible_to_author_basis") or "").strip():
+            failures.append(
+                f"criterion {cid} declares measurement_visible_to_author=false and carries no "
+                "measurement_visible_to_author_basis — a `false` with no stated ground cannot be "
+                "told apart from a stale one, and it hides a measurement that exists but is not "
+                "cited. State when the measurement ran relative to the registration and whether "
+                "its artefact was in the tree (E4: ran 2026-10-19, artifact landed d50217273 on "
+                "2026-10-22, AFTER a6085af84 — right, and previously unstated)"
             )
 
     pins_prior = _pins_mapping(pins, "prior_measurements")

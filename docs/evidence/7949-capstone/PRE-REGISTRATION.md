@@ -70,7 +70,8 @@ argument should treat E1's bar as **unconfirmed**, which is exactly how `#9110` 
 | **E1**, **E1b** | **yes** — `e1-e2.log` | a threshold for the **re-run**, disclosed as post-visible (§0 above) |
 | **E2a**, **E2b** | **yes** — `e1-e2.log` | same |
 | ~~**E3**, **E4**, **E5**~~ | ~~**no** — no measurement exists anywhere~~ | ~~a genuine pre-registration, prior to its first run~~ |
-| **E3**, **E4** | **no at registration** — no measurement existed when this record was written (§10.1, §10.3: a POST-registration run measures both) | a genuine pre-registration, prior to its first run; E3's class set re-registered to follow #5199 (§10.1) |
+| **E3** | **no at registration** — no measurement existed when this record was written (§10.1, §10.3: a POST-registration run measures it) | a genuine pre-registration, prior to its first run; E3's class set re-registered to follow #5199 (§10.1) |
+| **E4** | **no measurement was *visible* at registration** — ⛔ not "no measurement existed": the operator audit **ran** `2026-10-19T01:39:26Z`, two days BEFORE this record, and its **artefact** landed after it (`d50217273`, 2026-10-22), so nothing it measured was in the tree this row's author wrote (§10.3, §10.4) | a genuine pre-registration, prior to its first run — and the visibility claim states WHICH of the two facts makes it `false` |
 | **E5** | **yes** — `#7947`: `EXTRACTOR-V4-ARCHITECTURE.md` §10, committed `ecc7bc8ca` (2026-10-19) | a threshold for the **re-run**, disclosed as post-visible (§10.2): the measurement predates this record and sits BELOW the bar |
 
 **⇒ §0's table was wrong about E5, and had been since this file was written.** The struck row above
@@ -708,12 +709,15 @@ disclosure that names what was known and when.** A fresh registration would have
 untouched criteria's frozen bars to correct one class set and one history claim, which buys nothing a
 preserved original plus this section does not already buy, and loses the E1–E4 provenance.
 
-**Ordering, stated once and binding on both entries.** This registration was added by `a6085af84`
+**Ordering, stated once and binding on all three entries.** This registration was added by `a6085af84`
 (**2026-10-21**, #9507). **A scored evidence log already exists**: `capstone-measured-e0fc940b.log`
 (head `e0fc940b`, generated **2026-10-23T23:16:55Z**, landed by `260903907`) — so §8's **protocol
 deviation** rule is the one that governs this section, not the pre-scored revision rule. That is why
 the original values are quoted and struck rather than overwritten, and why the dates below run
-*registration (10-21) → measurement (10-23) → amendment (11-01)*.
+*registration (10-21) → measurement (10-23) → amendment (11-01)*. **§10.4 is the exception to that
+chain and says so in its own first sentence:** it corrects a DISCLOSURE about E4 rather than a value,
+no bar moves, and its ordering runs *measurement (10-19) → registration (10-21) → artefact (10-22) →
+disclosure corrected (11-01)*.
 
 **⇒ And the disclosure that ordering forces, stated plainly and not softened: the author of these
 two amendments had SEEN both numbers before writing them.** The E3 census (`148/433`, RED) and the E5
@@ -842,10 +846,13 @@ finding about S2.3 idling on the pre-registered corpus; it is not a revision of 
 
 **What enforces both, mechanically.** `tools/capstone_preregistration_check.py` → §7 item 6: a
 `measurement_visible_to_author: false` contradicted by a cited `prior_measurements` entry **fails**; a
-`true` with nothing cited **fails**; and E3's metric/denominator must name exactly the classes derived
+`true` with nothing cited **fails**; a `false` that states **no** `measurement_visible_to_author_basis`
+**fails** (§10.4: the ground a `false` rests on cannot be checked, so an unstated one is refused rather
+than trusted); and E3's metric/denominator must name exactly the classes derived
 from `_DERIVATION_REFERENCES_LABELS` plus `Point`. Mutation-checked in
 `tests/test_capstone_preregistration_9075.py`, including the node `#9738` names — flip E5's field back
-to `false` and the gate goes red.
+to `false` and the gate goes red — and the `false`-without-a-ground arm, where deleting E4's basis (or
+blanking it to whitespace) reds the same way.
 
 ### 10.3 The post-registration measurements — disclosed, NOT re-scored
 
@@ -866,9 +873,42 @@ bar that fails on a non-frozen corpus is a reason to re-run, never a reason to r
 figure is recorded in the record's `post_registration_measurement` for E4 so a machine consumer meets it
 too.
 
-**Neither `measurement_visible_to_author` field changes for this.** The field asks whether the
-measurement was visible to the **registration's** author at `a6085af84` (2026-10-21). This run postdates
-it by two days, so both fields stay as they were — `E4: false`, `E3: false` — while the existence of a
-later measurement is stated here and in the record. §7 item 6 enforces exactly that separation: it
-refuses a `false` contradicted by a **pre-registration** citation, and does not demand that a
-post-registration run retroactively rewrite a historical claim about what the author could see.
+**Neither `measurement_visible_to_author` field changes for this**, but they stay `false` for **two
+DIFFERENT reasons**, and conflating them is the defect §10.4 fixes. The field asks whether the
+measurement was visible to the **registration's** author at `a6085af84` (2026-10-21). **The 2026-10-23
+run** postdates it by two days, so the existence of a later measurement is stated here and in the
+record, and neither field is retroactively rewritten. But that run is not what makes E4's field
+`false`: **E4's measurement ran on 2026-10-19**, before the record — its *artefact* landed after it — so
+E4's `false` rests on the artefact's absence from the tree at `a6085af84`, not on the run's date. §7
+item 6 enforces that separation in both directions: it refuses a `false` contradicted by a
+**pre-registration** citation, and it now also refuses a `false` that states **no ground at all**,
+because a bare `false` cannot be told apart from a stale one.
+
+### 10.4 E4 — the `false` was right and its ground was stated NOWHERE (#10525 review)
+
+**What was wrong, stated as the contradiction it was.** §0's replacement row read
+`**E3**, **E4** | **no at registration** — no measurement existed when this record was written`, and
+§10.3 — ten lines after quoting the log's own caveat — kept E4 `false` on the ground that *"this run
+postdates it by two days"*. Both cannot be true of E4: its **measurement** (`operator_audit` on
+`tests/eval/write_path/receipts/w2b-operator-2026-10-19.json`: `edge_correct=2`, `planted=15`) carries
+the receipt's own `date=2026-10-19T01:39:26Z`, **two days BEFORE** `a6085af84` (2026-10-21T21:49:11Z).
+What is true is narrower and was stated nowhere: the **artefact** landed at **`d50217273`
+(2026-10-22T05:34Z)**, *after* the registration, so no number from that row was in the tree its author
+wrote. `false` is therefore correct — as a claim about **visibility**, which is what the field is
+named — and it was unfalsifiable, because `prior_measurements` is the only table the gate reads and E4
+was not cited in it.
+
+**What changed, and what did NOT.** *Changed:* E4's `false` now carries a
+`measurement_visible_to_author_basis` naming all three facts (when the measurement ran, when its
+artefact landed, when this record was added), and §0's row was corrected from *"no measurement
+existed"* to *"no measurement was **visible**"* — the sentence, not the verdict. *Not changed:* E4's
+metric, its **15**-edge denominator, its `= 15 of 15` threshold, its `post_registration_measurement`,
+and the field itself. **No bar moved and no measurement is re-scored**; the amendment is to the
+DISCLOSURE of a claim that was already there, which is why it is a correction and not a re-registration.
+
+**⇒ The general rule this leaves behind.** §7 item 6 now refuses *any* `false` that states no ground.
+The reason is measurable rather than stylistic: E4's field was **right**, and it took a fresh-context
+reviewer reading three files to establish that — with the reason unstated, no reader and no arm could
+tell it from a `false` nobody had revalidated. A claim about history has to carry its evidence in the
+place a machine reads it.
+

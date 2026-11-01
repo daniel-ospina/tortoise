@@ -2617,6 +2617,51 @@ def test_the_real_record_discloses_every_visible_measurement():
     assert _crit(rec, "E3")["measurement_visible_to_author"] is False
     assert "E3" not in rec["prior_measurements"]
     assert _crit(rec, "E3")["post_registration_measurement"]
+    # E4's `false` is RIGHT and, until #10525's review, unexplained — the shape that made it
+    # indistinguishable from a stale one. It stays false (its receipt ran 2026-10-19, before the
+    # record, but landed at `d50217273` on 2026-10-22, AFTER it, so nothing measured by the row was
+    # in the tree its author wrote), and it now has to say so.
+    e4 = _crit(rec, "E4")
+    assert e4["measurement_visible_to_author"] is False
+    assert "E4" not in rec["prior_measurements"]
+    basis = e4["measurement_visible_to_author_basis"]
+    assert "2026-10-19" in basis and "d50217273" in basis, basis
+    assert "a6085af84" in basis, basis
+
+
+def test_a_false_with_no_stated_ground_is_refused(tmp_path):
+    """THE MUTATION PROOF for the #10525 review's E4 finding.
+
+    `measurement_visible_to_author: false` was held to `prior_measurements` only, so a `false`
+    for a measurement that EXISTS but is not cited was invisible to every arm: E4 shipped exactly
+    that way — the field right, the reason nowhere, and the §0 row beside it asserting "no
+    measurement existed", which the receipt's own `date` (2026-10-19T01:39:26Z, two days before
+    the registration) refutes. A bare `false` is therefore refused, in both directions of the
+    reader's question (when did it run, and was the artefact in the tree).
+    """
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    _crit(rec, "E4").pop("measurement_visible_to_author_basis")
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("E4" in f and "measurement_visible_to_author_basis" in f for f in failures), failures
+    # the ground is asked of the `false` direction ONLY: a `true` is already held to a citation,
+    # so removing E5's basis must not red anything (it never had one).
+    assert not any("E5" in f for f in failures), failures
+
+
+def test_an_empty_basis_is_not_a_basis(tmp_path):
+    """Whitespace is the shape a field takes when a lane fills it in to pass the rule."""
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    _crit(rec, "E3")["measurement_visible_to_author_basis"] = "   "
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("E3" in f and "measurement_visible_to_author_basis" in f for f in failures), failures
 
 
 def test_e5_flipped_back_to_false_is_refused(tmp_path):
