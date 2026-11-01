@@ -215,3 +215,47 @@ def test_a_projectionless_ranker_is_not_labelled_consulted(sdk):
     for r in rows:
         assert r["ep"].get("informed_order") == "not_consulted"
         assert r["graph_ranking"]["graph_boost"] == 0.0
+
+
+def test_recall_state_relabels_the_order_it_re_ranked(sdk):
+    """Review round 3, P1 — the label belongs to the LAST re-order.
+
+    `recall_state` builds its candidate pool with `tortoise_fts_query` at the
+    default (belief-blind) ordering, so every pool row is stamped
+    ``not_consulted`` — and then `StateRanker` scores
+    ``relevance ** a × confidence ** b`` over the EP belief mean, so the order
+    the caller receives DID consult the layer. Pre-fix, the shipped rows kept
+    the pool's ``not_consulted``: a FALSE label on a public MCP surface, minted
+    by the field added to remove exactly that ambiguity.
+    """
+    believed = sdk.create_point("statement", "unicorn deploy", status="live")["id"]
+    relevant = sdk.create_point(
+        "statement", "the deploy pipeline pushes the release", status="live")["id"]
+    sdk.set_point_baseline(believed, 10.0, 1.0)
+    sdk.set_point_baseline(relevant, 1.0, 1.0)
+
+    rows = sdk.recall_state(query=_QUERY, limit=10)
+    assert rows
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[believed]["ep"]["informed_order"] == "consulted", (
+        "recall_state re-ordered by the belief mean — the row must not keep "
+        "the pool's not_consulted label")
+    assert by_id[relevant]["ep"]["informed_order"] == "consulted"
+
+
+def test_an_unobservable_ranker_makes_no_claim(sdk):
+    """A duck-typed ranker's read cannot be observed — so no label at all.
+
+    ``consulted=None`` leaves the key ABSENT rather than guessing ``False``:
+    the same rule that keeps an ``ep``-less row from carrying a claim.
+    """
+    class _OpaqueRanker:
+        def rerank(self, rows, *, entity_type="point", query=None):
+            return list(reversed(rows))
+
+    _seed(sdk)
+    rows = sdk.tortoise_fts_query(_QUERY, order_by="graph", limit=10,
+                                  graph_ranker=_OpaqueRanker())
+    assert rows
+    for r in rows:
+        assert "informed_order" not in r["ep"]

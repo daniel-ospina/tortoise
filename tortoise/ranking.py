@@ -87,19 +87,44 @@ BELIEF_ORDER_CONSULTED = "consulted"
 BELIEF_ORDER_NOT_CONSULTED = "not_consulted"
 
 
-def annotate_belief_order(rows: list[dict], *, consulted: bool) -> list[dict]:
+def annotate_belief_order(rows: list[dict], *,
+                          consulted: bool | None) -> list[dict]:
     """Label each hit's ``ep`` block with whether the ORDER read the belief.
 
     Additive and in-place (the read path builds these dicts per call): only a
     row that already carries an ``ep`` block is labelled, so a surface that
-    ships no belief ships no claim about one. Idempotent.
+    ships no belief ships no claim about one. Idempotent. ``consulted=None``
+    means the caller cannot observe the ranker's read — it makes NO claim and
+    the key is left absent, which is the honest answer, not ``False``.
     """
+    if consulted is None:
+        return rows
     value = BELIEF_ORDER_CONSULTED if consulted else BELIEF_ORDER_NOT_CONSULTED
     for row in rows:
         ep = row.get("ep")
         if isinstance(ep, dict):
             ep["informed_order"] = value
     return rows
+
+
+def belief_consulted_for(ranker, rows: list[dict]) -> bool | None:
+    """Did `ranker`'s order for `rows` actually READ the belief layer?
+
+    Three states, and the distinction is the point (#10137 review):
+      * ``None``  — the ranker is not one whose read we can observe (a
+        duck-typed or caller-supplied object): make NO claim.
+      * ``False`` — the read failed or was never attempted (``signals_read``
+        is set only by a rerank whose fetch ANSWERED), so every score came
+        from neutral fallbacks.
+      * ``True``  — the read answered for at least one of THESE rows. A fetch
+        that answered ids absent from this page certifies nothing about them.
+    """
+    if not isinstance(ranker, (GraphRanker, StateRanker)):
+        return None
+    if not getattr(ranker, "signals_read", False):
+        return False
+    answered = getattr(ranker, "signals_answered", frozenset())
+    return any(r.get("id") in answered for r in rows)
 
 
 # Default signal weights — must sum to 1.0.
@@ -546,6 +571,7 @@ class GraphRanker:
         # actually ANSWERED (see `_fetch_signals`). Read by the caller to label
         # the order honestly; ``False`` until a rerank has run.
         self.signals_read = False
+        self.signals_answered: frozenset = frozenset()
         # #2952: recency decay is INTENTIONAL product behaviour (γ·e^(-λ·age),
         # 30-day half-life), so the fix is not to delete it but to make the
         # reference time it measures against EXPLICIT and injectable. A caller
@@ -578,6 +604,8 @@ class GraphRanker:
         (``w4_contested_boost``) — flag-off or no-query runs are
         byte-identical to the pre-W4-b ranking (R11 golden-ordering
         regression)."""
+        self.signals_read = False
+        self.signals_answered = frozenset()
         if not results:
             return results
 
@@ -592,6 +620,7 @@ class GraphRanker:
         signals = self._fetch_signals(ids, entity_type) if self.projection is not None else {}
         self.signals_read = bool(signals)
         signals = signals or {}
+        self.signals_answered = frozenset(signals)
         contested_boosts: dict[str, float] = {}
         if query and self.projection is not None and _w4_flag_on():
             contested_boosts = resolve_contested_relevance(
@@ -698,7 +727,7 @@ class GraphRanker:
         """Batch-fetch graph signals for the given ids. Returns {id: {…}}.
 
         Returns ``None`` (never ``{}``) when the read FAILED — the caller must
-        be able to telling "the read answered, and it answered empty" from
+        be able to tell "the read answered, and it answered empty" from
         "the read did not answer", because #10137's ``ep.informed_order``
         label is derived from exactly that difference. An empty batch (no ids)
         is a successful read of nothing and still answers ``{}``.
@@ -939,6 +968,8 @@ class StateRanker:
         (``w4_contested_boost``) — flag-off or no-query runs are
         byte-identical to the pre-W4-b ranking (R11 golden-ordering
         regression)."""
+        self.signals_read = False
+        self.signals_answered: frozenset = frozenset()
         if not results:
             return results
 
@@ -949,6 +980,11 @@ class StateRanker:
             by_entity.setdefault(et, []).append(r)
         ids_by_entity = {et: [r.get("id") for r in rs if r.get("id")] for et, rs in by_entity.items()}
         signals: dict[str, dict] = {}
+        # #10137: the same read-outcome bookkeeping as GraphRanker, because
+        # recall_state re-orders this pool by `confidence ** b` and must be able
+        # to say whether that order read the belief or a neutral default.
+        self.signals_read = False
+        self.signals_answered: frozenset = frozenset()
         if self.projection is not None:
             for et, ids in ids_by_entity.items():
                 try:
@@ -958,6 +994,8 @@ class StateRanker:
                         signals.update(self._fetch_point_signals(ids))
                 except Exception as e:  # pragma: no cover — defensive
                     logger.warning("StateRanker signal fetch failed (%s): %s", et, e)
+            self.signals_read = bool(signals)
+            self.signals_answered = frozenset(signals)
         else:
             signals = self._embedded_signals(results)
         # W4-b contested-relevance resolution (ONE batch read, S8): only
