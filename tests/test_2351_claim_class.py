@@ -1373,7 +1373,25 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
     # …and the creation door ACCEPTS the pair the re-point left behind, so the
     # re-point mints nothing that door would refuse — the invariant the P2
     # said was broken.
-    lane.create_direct_edge("NAND", new, t)
+    res = lane.create_direct_edge("NAND", new, t)
+    # The door accepted the edge the transfer already wrote — not a fresh one
+    # beside it (an accept that silently created a second edge would otherwise
+    # be indistinguishable here).
+    assert res.get("deduped") is True or res.get("created") is False, res
+
+    # …and the one-way leg that DOES cross the boundary is refused by BOTH
+    # doors, so "the two doors agree" is pinned in the REFUSE direction too —
+    # without this the test passes if the re-point arm skips the row entirely
+    # or reads an absent direction as `-` (no leg flows ⇒ no refusal).
+    b_old = lane.create_point("statement", "computed v3",
+                              claim_class="derived")["id"]
+    b_t = lane.create_point("statement", "computed peer 2",
+                            claim_class="derived")["id"]
+    lane.create_direct_edge("NAND", b_old, b_t, direction="<-")
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.supersede_point(b_old, new)  # '<-' flows b_t(derived) -> new(asserted)
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.create_direct_edge("NAND", new, b_t, direction="<-")
 
 
 def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
