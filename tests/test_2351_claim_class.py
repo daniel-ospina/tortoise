@@ -1388,10 +1388,31 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
     b_t = lane.create_point("statement", "computed peer 2",
                             claim_class="derived")["id"]
     lane.create_direct_edge("NAND", b_old, b_t, direction="<-")
-    with pytest.raises(ValueError, match="DERIVED"):
+    with pytest.raises(ValueError, match="re-pointing the NAND edge"):
         lane.supersede_point(b_old, new)  # '<-' flows b_t(derived) -> new(asserted)
     with pytest.raises(ValueError, match="DERIVED"):
+        # The CREATION door's own refusal (its message names the surface it is,
+        # ``create_direct_edge(NAND)`` — not the re-point's).
         lane.create_direct_edge("NAND", new, b_t, direction="<-")
+
+    # …and an ABSENT direction is judged as the edge TYPE's default (NAND ->
+    # ``unidirectional``, ONE leg), never as "no leg flows": a raw/pre-guard
+    # direction-less NAND whose forward leg crosses the boundary must be
+    # refused too (``-`` here is the fail-open this pins — measured green on a
+    # mutant that maps absent to ``-``).
+    c_old = lane.create_point("statement", "computed v4",
+                              claim_class="derived")["id"]
+    c_new = lane.create_point("statement", "computed v5",
+                              claim_class="derived")["id"]
+    c_t = lane.create_point("statement", "authored target 2")["id"]
+    lane._get_proj().g.query(
+        "MATCH (a:Point {id:$a}), (b:Point {id:$b}) MERGE (a)-[r:NAND]->(b)",
+        params={"a": c_old, "b": c_t})  # NO direction property on disk
+    assert _direct_rows(lane, c_old)[0][2] == ""
+    with pytest.raises(ValueError, match="re-pointing the NAND edge"):
+        lane.supersede_point(c_old, c_new)
+    assert _direct_rows(lane, c_new) == []
+    assert _direct_rows(lane, c_old)[0][2] == ""
 
 
 def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
