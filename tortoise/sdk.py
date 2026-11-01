@@ -2554,8 +2554,12 @@ def _record_prior_vectors(sdk, session_id: str,
     this capture encoded — journalling ``None`` tells the replay the vector is
     genuinely gone and CLEARS it. With the turns in the record there is no node
     to read back, so the prior value is read from the record, and the caller
-    applies the same content-unchanged rule the Cypher applies — which is why
-    the stored CONTENT comes back with the vector. The rule's left-hand side is
+    applies the same text-unchanged rule the Cypher applies — which is why
+    the stored CONTENT comes back with the vector, and (since #8488) the stored
+    ``embeddingText`` too: the Cypher's preserve arm compares BOTH halves, so a
+    record read that returned only content let a re-capture whose rewrite moved
+    keep a vector computed from text the row no longer holds. The rule's
+    left-hand side is
     what the RECORD holds, never this capture's own ``turn_texts[i]`` — `_row["c"]`
     is computed FROM that value, so a comparison against it is the text with
     itself: every row would look unchanged and a vector for replaced text would
@@ -3095,13 +3099,27 @@ def _write_capture_turns(
             _emb = turn_embs[_i]
             if _emb is None and _held is not None:
                 # The SAME rule the Cypher applies: a preserved vector survives
-                # only when the content did not change — a vector for text no
-                # longer stored is the dense-leg lie #5004 exists to remove. The
-                # comparison is against what the RECORD holds (`_held.content`),
-                # never against this capture's own `turn_texts[i]`: `_row["c"]`
-                # is computed FROM that value, so that comparison is the text
-                # with itself.
-                _unchanged = _held.content == _row["c"]
+                # only when the text it DESCRIBES is unchanged — a vector for text
+                # no longer stored is the dense-leg lie #5004 exists to remove. The
+                # comparison is against what the RECORD holds (`_held.content` /
+                # `_held.embedding_text`), never against this capture's own
+                # `turn_texts[i]`: `_row["c"]` is computed FROM that value, so
+                # that comparison is the text with itself.
+                #
+                # ⛔ BOTH HALVES, or the store of record keeps the #4194 lie the
+                # graph lane refuses (#10523 review round 3, P1). Since #8488 the
+                # vector is a function of ``embeddingText`` when the row holds one
+                # (schema A′), so comparing content alone preserved a vector for a
+                # turn whose REWRITE changed under identical content — reachable
+                # with the embedder unavailable on a re-capture and a
+                # non-deterministic/changed rewrite, and invisible afterwards
+                # because `embedding_preserved` withholds the identity stamps and
+                # `_record_embedding_identity` returns early on a missing hash.
+                # The `coalesce(…, '')` spelling is the Cypher's: an empty
+                # enrichment is never produced, so '' unambiguously means "none".
+                _unchanged = (
+                    _held.content == _row["c"]
+                    and (_held.embedding_text or "") == (_row["et"] or ""))
                 _emb = _held.embedding if (
                     _held.embedding is not None and _unchanged) else None
             if _held is not None:

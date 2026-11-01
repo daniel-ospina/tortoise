@@ -219,6 +219,16 @@ class PriorTurn:
     embedding: Any = None
     created_at: str | None = None
     status: str | None = None
+    #: #8488 scope 1 (schema A′): the ENRICHED text the stored vector describes,
+    #: or ``None`` when the turn carries none (the flag is off, or the row
+    #: predates it). ⛔ It is HERE because it is the second half of the
+    #: vector-preserve rule: `_TURN_WRITE_CYPHER` compares ``coalesce(prior_et,'')``
+    #: as well as ``prior_ch``, and without this field the record lane could only
+    #: compare content — so a re-capture whose rewrite CHANGED under an unchanged
+    #: content kept a vector computed from text the row no longer holds (exactly
+    #: the #4194 lie the graph lane refuses). Read from the record's ``props``
+    #: tail, which is where `_split_properties` puts a non-column property.
+    embedding_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -737,7 +747,10 @@ def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
     record there is no node to read back, so the prior value is read from the
     record instead, through the same three rules the Cypher applies: the vector
     survives only when the stored CONTENT is unchanged (a preserved vector for
-    changed text ranks the turn by text no longer stored).
+    changed text ranks the turn by text no longer stored) — and, since #8488,
+    only when the ``embeddingText`` the vector was computed from is unchanged
+    too (``coalesce(prior_et,'')``; a rewrite that moved under identical content
+    leaves a vector describing text the row no longer holds).
 
     ``embedding`` is the record's jsonb column, returned as PostgreSQL hands it
     back (a list of floats, or ``None``). A read that fails must not be mistaken
@@ -757,8 +770,15 @@ def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
         return {}
     scope_connection(conn, org_id)
     cursor = _cursor(conn)
+    # ⛔ ``props->>'embeddingText'`` (#8488 scope 1): the ENRICHED text rides the
+    # record's open-set ``props`` tail — `_split_properties` puts it there because
+    # ``embedding_text`` is not a `public.point` column — and it is the other half
+    # of the preserve rule this read exists to serve. Read in the SAME statement
+    # as the vector it describes: a second round trip could see a row a concurrent
+    # capture rewrote between the two reads, and the pair would then disagree.
     cursor.execute(
-        f"SELECT node_key, content, embedding, created_at, status "
+        f"SELECT node_key, content, embedding, created_at, status, "
+        f"       props->>'embeddingText' "
         f"FROM public.{POINT_TABLE} "
         f"WHERE org_id = %s AND graph_id = %s AND node_key IN %s",
         (org_id, graph_id, ids),
@@ -771,11 +791,14 @@ def turn_prior_vectors(conn: Any, *, org_id: str, graph_id: str,
         content = row[1]
         created_at = row[3] if len(row) > 3 else None
         status = row[4] if len(row) > 4 else None
+        embedding_text = row[5] if len(row) > 5 else None
         out[node_key] = PriorTurn(
             content=content if isinstance(content, str) else "",
             embedding=row[2],
             created_at=created_at if isinstance(created_at, str) else None,
             status=status if isinstance(status, str) else None,
+            embedding_text=(embedding_text
+                            if isinstance(embedding_text, str) else None),
         )
     return out
 
