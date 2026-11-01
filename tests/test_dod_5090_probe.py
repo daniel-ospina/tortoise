@@ -159,8 +159,9 @@ def test_every_embedding_write_path_reaches_the_gate_seam():
     # nothing about TODAY's unresolved set: `#5090`'s remaining work is to
     # resolve those writers, so `assert unresolved` would red on a CORRECT
     # change and its cheapest-looking repair would be to delete it (review, P2).
-    # The BYPASS direction is bullet 1's own `OUTSIDE the gate` count
-    # (`score_rule_bullet`), and the "an unresolved writer is REPORTED, never
+    # The BYPASS direction is bullet 1's own `OUTSIDE the gate` population
+    # (`score_rule_bullet` counts it and holds bullet 1 at `PARTIAL` for it),
+    # and the "an unresolved writer is REPORTED, never
     # dropped" property is pinned on an injected map in
     # `test_an_unresolved_writer_is_reported_and_holds_bullet_two_at_partial`
     # and `test_a_duplicate_writer_identity_holds_bullet_two_at_partial`.
