@@ -1206,6 +1206,78 @@ def test_the_mcp_capture_lane_resolves_the_default_namespace_itself(monkeypatch)
         "`_hydrate_default_namespace` instead.")
 
 
+def test_the_mcp_capture_data_half_and_its_record_tenant_are_one_snapshot(monkeypatch):
+    """A capture admitted BEFORE a promotion writes the graph it resolved AND
+    files its rows under that same graph.
+
+    On this lane the two halves come from two carriers: the DATA half from
+    `_hydrate_default_namespace`, the RECORD half from the ambient tenant scope
+    `mcp_auth.OrgResolutionMiddleware` installs out of the credential it resolved
+    (`record_tenant_for` gives that scope PRECEDENCE over any SDK). A fresh
+    control-plane read for the data half is therefore a SECOND instant: inside
+    the resolver cache's 60 s TTL it answers the PROMOTED namespace while the
+    tenant still names the DEMOTED graph — so the capture writes one graph and
+    files every Object / Event / `-closed` row under the other, the
+    `derived != measured` split #10025 exists to remove, on the lane agents
+    write through.
+
+    FAIL-ON: hydrate from a fresh read (the shape this test was written
+    against) and the WRITE half names `org_{TEAM}_{NEW_ID}` while the FILED
+    half names OLD_ID — the two assertions below disagree.
+    """
+    import asyncio
+
+    from tortoise import mcp_auth, record_writer
+
+    _hosted(monkeypatch)
+    fake = _fake_org_row(monkeypatch, f"org_{TEAM}")       # NOT promoted yet
+    # What the request was ADMITTED with: ONE resolved credential dict, whose
+    # two halves the MCP middleware stamps together (`_current_graph_namespace`
+    # and the #9192 tenant scope).
+    admitted = {"org_id": TEAM, "graph_id": None,
+                "graph_namespace": f"org_{TEAM}", "default_graph_id": OLD_ID}
+    graphs_by_namespace = {f"org_{TEAM}": OLD_ID,
+                           f"org_{TEAM}_{NEW_ID}": NEW_ID}
+
+    token = mcp_auth._current_graph_namespace.set(admitted["graph_namespace"])
+    try:
+        # The promotion commits NOW — inside the resolver's 60 s TTL.
+        fake.rpc("promote_default_graph",
+                 {"p_org_id": TEAM, "p_graph_id": NEW_ID},
+                 representation=True)
+        # A FRESH read sees the move. That is the second instant the fix must
+        # not straddle, and the reason the assertion below is not vacuous.
+        assert ha._org_default_namespace(TEAM) == f"org_{TEAM}_{NEW_ID}"
+
+        hydrated = asyncio.run(ha._hydrate_default_namespace({"org_id": TEAM}))
+        tenant = record_writer.record_tenant_for(admitted,
+                                                control_plane_ids=True)
+    finally:
+        mcp_auth._current_graph_namespace.reset(token)
+
+    assert tenant == (TEAM, OLD_ID), "the ambient tenant is the admitted one"
+    data_ns = ha._data_graph_name(hydrated)
+    assert graphs_by_namespace[data_ns] == tenant[1], (
+        "the graph the capture WRITES and the graph its record rows are FILED "
+        f"under must be ONE graph: write={data_ns!r} "
+        f"({graphs_by_namespace[data_ns]!r}) vs filed-under={tenant[1]!r}")
+
+    # ── …and the same rule the other way: once the credential is re-resolved
+    # (after the TTL) BOTH halves move together. The fix must not pin the
+    # capture to the demoted graph.
+    refreshed = {**admitted, "graph_namespace": f"org_{TEAM}_{NEW_ID}",
+                 "default_graph_id": NEW_ID}
+    token = mcp_auth._current_graph_namespace.set(refreshed["graph_namespace"])
+    try:
+        hydrated = asyncio.run(ha._hydrate_default_namespace({"org_id": TEAM}))
+        tenant = record_writer.record_tenant_for(refreshed,
+                                                control_plane_ids=True)
+    finally:
+        mcp_auth._current_graph_namespace.reset(token)
+    assert graphs_by_namespace[ha._data_graph_name(hydrated)] == tenant[1] \
+        == NEW_ID
+
+
 # ── 13. The org-id-only lanes reuse the credential — no read, one answer ────
 # Round 2 of the review found the request lanes still reaching the READ form:
 # `_maybe_apply_completion` (every capture) and the onboarding projection/PATCH
@@ -1440,3 +1512,63 @@ def test_every_default_graph_lane_resolves_both_answers_once():
         assert any(k.arg == "default_graph_id" for k in binds[0].keywords), (
             f"{lane} binds without handing over the tenant it just read — the "
             "bind then READS again, which is the split")
+
+
+# ── 15. No SDK is constructed inside a CONTROL-PLANE worker pool (#7500) ────
+# `_cp_offload` submits to a POOLED worker (`control_plane_worker(pool).submit`)
+# WITHOUT copying the caller's context (cpython#78195), so an `_make_sdk` built
+# there resolves its store path from the thread's stale INHERITED stamp once the
+# pool reuses it — the job then writes a store the test's reader never looks at
+# (tortoise#7500, measured as 3 reds under #4645). The READ may ride the worker;
+# the CONSTRUCTION stays on the loop. `_graph_offload` and `asyncio.to_thread`
+# DO copy the caller's context (`contextvars.copy_context()`), which is why
+# `_data_sdk`'s construction is legitimately off-loaded through them.
+
+_CP_WORKER_SDK_BUILDERS = ("_make_sdk", "_org_sdk", "_org_sdk_from_name",
+                           "_org_sdk_for_credential", "_data_sdk")
+
+
+def test_no_sdk_is_constructed_inside_a_control_plane_worker():
+    """AST pin over EVERY `_cp_offload` call in `hosted_api`.
+
+    FAIL-ON: `sdk = await _cp_offload(lambda: _org_sdk(org_id), op="org_sdk")`
+    — the spelling this PR shipped in `import_org` — builds `_make_sdk` inside
+    a pooled worker, i.e. the #7500 shape whose measured signature is a job
+    writing a store its reader never reads, and it is precisely the placement
+    `_org_sdk_from_name`'s docstring forbids while the other lanes (the
+    indexing runners) get it right. The fix off-loads only the READ
+    (`_org_default_namespace`) and builds with `_org_sdk_from_name` on the loop.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).resolve().parent.parent / "tortoise"
+                      / "hosted_api.py").read_text(encoding="utf-8"))
+
+    def _callee(node):
+        return getattr(node, "id", None) or getattr(node, "attr", None)
+
+    scanned = 0
+    offenders: list[tuple[str, str]] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for call in ast.walk(fn):
+            if not isinstance(call, ast.Call) \
+                    or _callee(call.func) != "_cp_offload":
+                continue
+            scanned += 1
+            built = sorted({_callee(n.func) for n in ast.walk(call)
+                            if isinstance(n, ast.Call)}
+                           & set(_CP_WORKER_SDK_BUILDERS))
+            if built:
+                offenders.append((fn.name, ",".join(built)))
+    assert scanned >= 40, (
+        f"only {scanned} `_cp_offload` calls were scanned — this pin is not "
+        "seeing the surface it guards (an empty/vacuous match would pass)")
+    assert not offenders, (
+        f"{offenders} construct an SDK inside `_cp_offload`'s POOLED worker. "
+        "That pool does not copy the context, so `_make_sdk` resolves its store "
+        "path from the thread's stale stamp and the job writes a store its "
+        "reader never reads (#7500). Off-load the READ and build on the loop "
+        "with `_org_sdk_from_name`.")

@@ -897,11 +897,42 @@ async def _hydrate_default_namespace(org: dict) -> dict:
     A GRAPH-BOUND dict is returned UNTOUCHED: its ``graph_namespace`` is a CUSTOM
     graph's, and "the default graph" is not the question it asks (the same
     reason `_default_graph_name` refuses it). A dict that already carries the
-    field is untouched too — the REST lanes are unaffected. ONE primary-key read,
-    only on the branch that needs it, and OFF the loop.
+    field is untouched too — the REST lanes are unaffected.
+
+    ⛔ THE ANSWER COMES FROM THE CREDENTIAL THIS REQUEST WAS ADMITTED WITH, not
+    from a fresh control-plane read, and that is a correctness requirement — not
+    an optimization. The DATA half (which graph the nodes go to) and the RECORD
+    half (which graph the rows are filed under, #10025) must describe ONE graph.
+    On this lane the record half is installed per request by
+    ``mcp_auth.OrgResolutionMiddleware`` from the credential it resolved
+    (``_record_tenant_scope`` → ``record_tenant_for``, which gives the ambient
+    scope PRECEDENCE over anything an SDK carries). A fresh read here would
+    therefore be a SECOND instant: inside the resolver cache's 60 s TTL after a
+    promotion it answers the PROMOTED namespace while the ambient tenant still
+    names the DEMOTED graph, so the capture writes one graph and files every
+    row under the other — the ``derived != measured`` split #10025 exists to
+    remove, in the other direction.
+
+    The middleware stamped the admitted credential's own namespace on
+    ``mcp_auth._current_graph_namespace`` (set beside the tenant scope, from the
+    same dict), so taking it makes both halves one snapshot by construction —
+    and matches what the runbook promises operators: a capture admitted before a
+    promotion keeps the graph it resolved. It cannot route the data to a graph
+    the tenant is not: a CUSTOM graph target always sets ``_current_graph_id``
+    beside that namespace (``mcp_auth.use_graph_target``), so a graph-bound
+    request carries ``graph_id`` and never reaches this branch.
+
+    The control-plane read remains only for a request that resolved NO default
+    namespace at all (a transport with no credential resolution — self-host
+    static/none) — the pre-#10180 behaviour for exactly those lanes, and the
+    read is the only source that can answer there. One primary-key read at most,
+    only on that branch, and OFF the loop.
     """
     if org.get("org_id") and not org.get("graph_id") \
             and not org.get("graph_namespace"):
+        carried = _mcp_auth._current_graph_namespace.get()
+        if carried:
+            return {**org, "graph_namespace": carried}
         resolved = await _cp_offload(
             lambda: _org_default_namespace(org["org_id"]),
             op="org_default_ns")
@@ -27628,7 +27659,14 @@ async def import_org(org_id: str, request: Request,
             get_control_plane,
             is_supabase_enabled,
         )
-        sdk = await _cp_offload(lambda: _org_sdk(org_id), op="org_sdk")
+        # #7500: the READ rides the worker, the CONSTRUCTION stays on the loop.
+        # `_org_sdk` builds the SDK, and built inside a POOLED worker thread
+        # `_make_sdk`'s store-path resolution picks up the thread's stale
+        # inherited stamp once the pool reuses it — the job then writes a store
+        # the reader never looks at (the reason `_run_indexing` /
+        # `_run_docs_indexing` use this same split).
+        sdk = _org_sdk_from_name(org_id, await _cp_offload(
+            lambda: _org_default_namespace(org_id), op="org_sdk"))
         registry_sdk = None
         try:
             if is_supabase_enabled():
