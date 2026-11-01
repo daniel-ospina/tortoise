@@ -45,6 +45,23 @@ to say which one a total is, and Google's Custom Search API documents its
 omits the field, so a number that IS present is always exact and needs no
 qualifier.
 
+**What ``truncated: true`` does NOT mean: "only the cap".** A row can be lost at
+the cap (``result_ids[:limit]``) or downstream of it (a ``min_confidence``
+floor, a hit whose entity read came back empty) — and the caller cannot reach
+EITHER: the dropped row is unreachable by any subsequent call, which is the
+whole reason the marker exists. So the verdict is computed from the rows that
+actually SHIP, and it answers *"is the delivered set the whole set this read
+matched?"*, not *"did the cap fire?"*. Narrowing it to the cap would make a
+3-match read whose entity fetch failed answer ``truncated: false`` over 2 rows —
+a positive claim of completeness on an incomplete answer, the defect this module
+exists to make impossible. This is the same distinction Elasticsearch draws by
+signalling partial results at all (``allow_partial_search_results``,
+``timed_out`` / ``_shards.failed``): a partial answer must be MARKED, and the
+marker is not qualified by which stage dropped the row. ``returned`` is
+correspondingly measured at delivery, never at the cut — the two only differ
+when something downstream dropped a row, and that is exactly the case the
+marker must not read as complete.
+
 **How this is told apart from legitimate pagination.** A caller walking pages is
 NOT truncating, and marking every paged response would train readers to ignore
 the marker. The distinguishing property is not the shape of the response, it is

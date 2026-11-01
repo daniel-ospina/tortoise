@@ -321,3 +321,87 @@ class TestThePaginationControlIsLive:
         sink: dict = {}
         sdk.tortoise_fts_query("zebra", limit=2, _truncation_out=sink)
         assert truncation_field(sink)[TRUNCATED_FIELD] is True   # cut -> marked
+
+
+# ── the marker's scope: "the CAP only" is the wrong reading ──────────────
+
+class TestADownstreamDropIsNotComplete:
+    """``truncated`` answers "did I get everything this read matched?" (#8447).
+
+    Round 3 left this as a P3 on the field's DOCUMENTED meaning ("true when
+    ``limit`` cut the result"). The behaviour is the conservative one and must
+    stay: a row lost DOWNSTREAM of the cap — a ``min_confidence`` floor, a hit
+    whose entity read came back empty — is exactly as unreachable as one lost at
+    the cap, so narrowing the flag to the cap would answer a 3-match read with
+    ``truncated: False`` over 0 delivered rows: a positive claim of completeness
+    on an incomplete answer, the defect this module exists to prevent. The fix
+    is therefore in the CONTRACT (module docstring, surface manifest, PR body),
+    and this test pins the behaviour that contract now describes — so the
+    tempting "make the flag cap-only" repair goes RED here instead of shipping.
+    """
+
+    def test_a_row_dropped_after_the_cap_is_never_reported_complete(self, sdk):
+        _seed(sdk, 5)
+        # limit=10 over 5 matches: the cap cuts NOTHING. `min_confidence=1.0`
+        # then drops every row at delivery time — the reviewer's construction
+        # ("a 3-match store, limit=10, one hit's entity fetch failing").
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=10, min_confidence=1.0,
+                                      _truncation_out=sink)
+        assert rows == []
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True, (
+            "0 rows over a 5-match store is INCOMPLETE, whichever stage dropped "
+            "them — a cap-only reading would call this COMPLETE")
+        # ... and the count it could see is still published, because nothing
+        # narrowed the candidate window: the population was the whole match set.
+        assert marker[TOTAL_AVAILABLE_FIELD] == 5
+
+    def test_the_cap_alone_is_not_the_only_cause_that_marks(self, sdk):
+        """Control: the same store, nothing dropped, is positively COMPLETE."""
+        _seed(sdk, 5)
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=10, _truncation_out=sink)
+        assert len(rows) == 5
+        assert truncation_field(sink) == {TRUNCATED_FIELD: False}
+
+
+class TestAScoreFloorIsNotProofOfCompleteness:
+    """``threshold`` narrows the union post-window, so ``exact`` must know (#8447).
+
+    Review P2 named ``threshold > 0`` among the shrinkers the completeness proof
+    omitted. A score floor discards fused rows AFTER the legs filled their
+    ``str_limit`` windows, so a surviving set SHORTER than the window proves
+    nothing about the match population — and the count it leaves is a FLOOR.
+    """
+
+    def test_a_read_with_a_score_floor_never_publishes_a_total(self, sdk):
+        _seed(sdk, 5)
+        # Derive the floor from the scores this store ACTUALLY produces, so the
+        # test drops a provable strict subset instead of hard-coding a magic
+        # number that a fusion tweak would silently turn vacuous.
+        probe = sdk.tortoise_fts_query("zebra", limit=10)
+        rrf = sorted((r["scores"]["rrf"] for r in probe), reverse=True)
+        assert len(rrf) == 5
+        assert rrf[2] > rrf[3], "no strict band to place the floor in"
+        floor = (rrf[2] + rrf[3]) / 2      # keeps the top 3 of 5, drops 2
+
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=2, threshold=floor,
+                                      _truncation_out=sink)
+        assert len(rows) == 2              # the cap cuts one of the 3 survivors
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True
+        assert TOTAL_AVAILABLE_FIELD not in marker, (
+            "the score floor discarded 2 of the 5 matches before the window was "
+            "measured, so the 3 survivors are a FLOOR — publishing them as an "
+            "exact total is the defect one level down")
+
+    def test_the_same_read_without_a_floor_still_proves_its_total(self, sdk):
+        """Control: the proof is withheld because of the FLOOR, not by default."""
+        _seed(sdk, 5)
+        sink: dict = {}
+        sdk.tortoise_fts_query("zebra", limit=2, _truncation_out=sink)
+        marker = truncation_field(sink)
+        assert marker[TRUNCATED_FIELD] is True
+        assert marker[TOTAL_AVAILABLE_FIELD] == 5

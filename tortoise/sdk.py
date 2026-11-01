@@ -35067,6 +35067,12 @@ class TortoiseSDK:
         # 4. Fuse via RRF (skip if single strategy or full-scan)
         if is_full_scan or len(raw_results) == 1:
             strat_name, ranked = next(iter(raw_results.items()))
+            # #8447 (review P2): the union the LEG produced, BEFORE the score
+            # floor below narrows it. ``threshold`` is a post-window filter like
+            # every other one, so the completeness proof has to see the set it
+            # started from — a saturated window a floor then shrank is not proof
+            # that no leg filled its own window.
+            _pre_filter_ids = len(ranked)
             # Apply threshold filter (score floor)
             fused = {pid: score for pid, score in ranked if score >= threshold}
             match_source = strat_name
@@ -35110,6 +35116,9 @@ class TortoiseSDK:
                 weights=fusion_weights,
                 k=fusion_k,
             )
+            # #8447 (review P2): the fused union BEFORE the score floor below —
+            # same reason as the single-strategy branch above.
+            _pre_filter_ids = len(fused)
             # Apply threshold filter to RRF scores
             if threshold > 0:
                 fused = {pid: score for pid, score in fused.items() if score >= threshold}
@@ -35117,16 +35126,16 @@ class TortoiseSDK:
 
         # 5. Apply kind filter BEFORE truncating (skip if structural-only already filtered)
         result_ids = list(fused.keys())
-        # #8447 (review round 3, P2): the union BEFORE the post-window filters
-        # below shrink it. A leg that filled its own window proves there is more
-        # than the window holds — and a filter that then drops the set BELOW
-        # ``limit`` must not launder that into "complete". Measured on the review
-        # case: 500 eligible matches, window saturated at ``str_limit``, a filter
+        # #8447 (review round 3, P2): ``_pre_filter_ids`` — captured above, in
+        # each fusion branch, BEFORE the score floor — is the union the legs
+        # produced. A leg that filled its own window proves there is more than
+        # the window holds, and a filter that then drops the set BELOW ``limit``
+        # must not launder that into "complete". Measured on the review case:
+        # 500 eligible matches, window saturated at ``str_limit``, a filter
         # removing 115 leaves 5, ``limit=10`` → the read reported COMPLETE while
         # ~380 eligible matches were never read and are unreachable (no offset,
         # no cursor). This is the size the completeness proof needs, not the
         # post-filter one.
-        _pre_filter_ids = len(result_ids)
         # D10 (ONTOLOGY v3.15 §4.4): a document is a :Source resolving by
         # `url` (#149's canonical key), not by `id` — the same three-way
         # id_field search_engine's legs use.
@@ -35492,7 +35501,11 @@ class TortoiseSDK:
             # above break.
             or (kind is not None and query is not None)
             or relationship_filter is not None
-            or traversal_path is not None)
+            or traversal_path is not None
+            # #8447 (review P2): the SCORE FLOOR narrows the fused union after
+            # the legs filled their windows — the rows it drops scored below it,
+            # so the survivors are not provably the whole match population.
+            or threshold > 0)
         _trunc["candidates"] = len(result_ids)
         _trunc["exact"] = (len(result_ids) < str_limit) and not _filters_shrank
         # A saturated window that a filter then shrank below ``limit`` is

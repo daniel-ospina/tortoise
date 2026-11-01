@@ -10652,7 +10652,9 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
             props["kind"] = "statement"
         out.append(props)
     response = {"results": out, "count": len(out)}
-    # #8447: say so when ``limit`` cut the result, so ``count: 5`` on a 20-match
+    # #8447: say so when this read did not deliver everything it MATCHED — the
+    # ``limit`` cap cut rows, or a downstream stage dropped them — so
+    # ``count: 5`` on a 20-match
     # query is never indistinguishable from a complete 5-match answer. Lives on
     # the response because that is where the caller is — a log line would only
     # tell a developer. This path has no offset and no cursor, so a dropped row
