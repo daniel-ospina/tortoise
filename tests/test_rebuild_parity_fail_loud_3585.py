@@ -99,8 +99,31 @@ def _objects(proj):
 
 
 def _fresh(tmp_path, tag: str) -> FalkorProjection:
+    """A throwaway EMPTY embedded graph for one replay engine.
+
+    ⛔ ``skip_health_check=True`` is deliberate, not a shortcut (#10437). This
+    file's verdicts are about the REPLAY (``rebuild_all`` / ``rebuild`` /
+    ``recover_from_log``); the auto-health gate on open is a different subject,
+    owned by ``tests/test_ops_safety.py``. Gating these fixtures on it made the
+    verdict depend on ambient machine state: MEASURED on CI run 41236504180
+    (``test-slow (c)``), the probe in ``_auto_health_recover`` timed out twice
+    against the daemon redislite had JUST spawned for this fixture (2 ×
+    ``_DB_SOCKET_TIMEOUT_DEFAULT`` = 10 s each, i.e. the 20.23 s ``call`` the
+    junit records), so the open raised *"DB health check failed on open and no
+    adjacent JSONL event log was found"* — a CORRUPTION verdict for a store
+    this helper had created empty a moment earlier — and
+    ``test_recover_from_log_reports_not_recovered`` redded with an error about
+    a graph it never touched (#5049 rule 1: a deadline expiry is a non-answer,
+    not a FAIL of the property under test).
+
+    It is also what this file's discriminator needs: ``_auto_health_recover``
+    itself calls ``recover_from_log(sibling_dir, proj)`` when an adjacent JSONL
+    log exists, which would PRE-RECOVER the journal these tests are about to
+    replay by hand.
+    """
     proj = FalkorProjection(str(tmp_path / f"{tag}.db"),
-                            graph_name=_unique(tag))
+                            graph_name=_unique(tag),
+                            skip_health_check=True)
     # A freshly opened graph carries a `:Meta` FTS marker node; wipe it so
     # `recover_from_log`'s "graph already has nodes" discriminator sees a
     # genuinely empty graph (the same pre-wipe the other replay engines apply).
@@ -120,6 +143,33 @@ def _drive(engine, tmp_path, events, proj):
     else:  # pragma: no cover - guard against a typo'd engine
         raise AssertionError(engine)
     return proj
+
+
+def test_10437_the_replay_fixture_does_not_depend_on_the_health_probe(
+        monkeypatch, tmp_path):
+    """``_fresh`` must not gate a brand-new store on the ambient health probe.
+
+    FAILS IF: ``_fresh`` opens without ``skip_health_check=True`` — on that
+    code this raises ``RuntimeError`` (*"DB health check failed on open and no
+    adjacent JSONL event log was found for recovery"*) for a store the helper
+    itself just created empty, which is how a machine-load probe timeout became
+    a FAIL of the replay property this file asserts.
+    REACHABLE: the measured CI shape — ``_probe_ok`` returning False after two
+    10 s socket timeouts against the daemon redislite had just spawned for the
+    fixture (run 41236504180, ``test-slow (c)``; the junit's 20.23 s ``call``
+    for ``test_recover_from_log_reports_not_recovered``). The probe is reported
+    failed here, so the fixture's own verdict cannot come from it (#5049 rule
+    1: a deadline expiry is a non-answer, not a FAIL).
+    """
+    monkeypatch.setattr(FalkorProjection, "_probe_ok", lambda self: False)
+
+    proj = _fresh(tmp_path, "noprobe")
+    try:
+        # Opened, wiped and answerable — the graph the replay needs.
+        rows = proj.g.query("MATCH (n) RETURN count(n)").result_set
+        assert rows[0][0] == 0, rows
+    finally:
+        proj.close()
 
 
 ENGINES = ("rebuild_all", "rebuild", "recover_from_log")
