@@ -43,9 +43,52 @@ def _health() -> dict:
     return result
 
 
-def _git(*args: str) -> str:
-    return subprocess.run(["git", *args], cwd=str(REPO), capture_output=True,
-                          text=True, check=True).stdout.strip()
+def _git_env() -> dict[str, str]:
+    """Environment for the fixture's git calls **and** for the measured one.
+
+    Every `GIT_*` variable is stripped: `GIT_DIR`, `GIT_WORK_TREE` and
+    `GIT_INDEX_FILE` would otherwise aim git at a different repository or index
+    than `cwd` — and a hook-invoked run (or a lane that exports them) would then
+    `git init` / `git commit` into THAT repo instead of `tmp_path/history`.
+    Global and system config are redirected to `/dev/null` so the runner's
+    `core.autocrlf` / `core.fsmonitor` / `core.excludesFile` cannot decide what
+    the pin sees.
+
+    This is the #4203 shape, documented and fixed in
+    `tests/test_embedded_evidence.py::_git_env`. It is unrolled here rather than
+    imported: importing a test module for a helper drags its whole import cost
+    into this file's collection.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    })
+    return env
+
+
+def _stub_health_dependencies(monkeypatch) -> None:
+    """Neutralise the three blocks that DECIDE `status` (db / watcher / record).
+
+    The DB verdict is a snapshot from the background refresher (#2850), so a cold
+    probe reports `{"ok": False, "error": "probe has not produced a result"}` and
+    would degrade `status` for a reason that has nothing to do with the build
+    block. Same rationale, same shape, as
+    `tests/test_9548_record_arming_health.py::_stub_health_dependencies`.
+    """
+    verdict = {"ok": True, "latency_ms": 0.1, "error": None}
+    monkeypatch.setattr(hosted_api, "_probe_db", lambda: dict(verdict))
+    health_probe = getattr(hosted_api, "_HEALTH_PROBE", None)
+    if health_probe is not None:
+        monkeypatch.setattr(health_probe, "snapshot", lambda: dict(verdict))
+    monkeypatch.setattr(hosted_api, "_WATCHER", None)
+    monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None)
+    monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False)
+    monkeypatch.setattr(
+        hosted_api, "_record_health",
+        lambda: {"armed": True, "dsn": None, "ok": True, "error": None},
+    )
 
 
 def _scratch_repo_with_two_commits(tmp_path: Path) -> tuple[str, str]:
@@ -60,7 +103,7 @@ def _scratch_repo_with_two_commits(tmp_path: Path) -> tuple[str, str]:
     """
     repo = tmp_path / "history"
     repo.mkdir()
-    env = {**os.environ,
+    env = {**_git_env(),
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
 
@@ -137,8 +180,35 @@ def test_a_stale_build_is_readable_as_stale(sha_env, tmp_path):
     assert build["commit_sha"] == previous, build
     assert build["commit_sha"] != head, "the published commit must not be coerced to HEAD"
     behind = subprocess.run(["git", "merge-base", "--is-ancestor", previous, head],
-                            cwd=str(tmp_path / "history"))
+                            cwd=str(tmp_path / "history"), env=_git_env())
     assert behind.returncode == 0, "a lagging deployment's commit IS an ancestor of HEAD"
+
+
+def test_the_scratch_history_ignores_an_ambient_git_dir(tmp_path, monkeypatch):
+    """NON-VACUITY for `_git_env()` (#4203): the sanitisation must be LOAD-BEARING.
+
+    A decoy repo is placed at the ambient `GIT_DIR` and the fixture is then run.
+    With `_git_env()` in place the commits land in `tmp_path/history` and the
+    decoy stays empty; without it, git aims at the decoy and this pin fails. The
+    decoy is throwaway, so the failure mode can be demonstrated without ever
+    being able to point git at a real checkout.
+    """
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=str(decoy), env=_git_env(),
+                   check=True, capture_output=True)
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+
+    previous, head = _scratch_repo_with_two_commits(tmp_path)
+    assert previous != head, "the scratch history must be built despite GIT_DIR"
+
+    decoy_head = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+                                cwd=str(decoy), env=_git_env(),
+                                capture_output=True, text=True)
+    assert decoy_head.returncode != 0, (
+        "the ambient GIT_DIR redirected the scratch commits into the decoy — "
+        "the fixture is inheriting GIT_* and cannot prove anything about cwd"
+    )
 
 
 def test_an_unstamped_deployment_is_readable_as_unstamped(sha_env):
@@ -198,14 +268,25 @@ def test_a_non_migration_sql_file_is_not_the_head(monkeypatch, tmp_path):
     from tortoise import record_projection
     d = tmp_path / "migrations"
     d.mkdir()
-    for name in ("0001_a.sql", "9999_b.sql", "seed.sql", "_seed.sql"):
+    # The fixture defeats BOTH halves of the docstring's claim (review P2):
+    #   * `seed` / `_seed` sort AFTER every digit-prefixed stem — they catch an
+    #     implementation that drops the `\d+_` filter;
+    #   * `999_b` sorts AFTER `1000_a` as a STRING — it catches an implementation
+    #     that keeps the filter but drops `int()`, which the round-2 fixture (all
+    #     digit prefixes of equal width) could not distinguish.
+    for name in ("0001_first.sql", "999_b.sql", "1000_a.sql", "seed.sql", "_seed.sql"):
         (d / name).write_text("-- x\n")
     monkeypatch.setattr(record_projection, "_migrations_dir", lambda: d)
     monkeypatch.setattr(record_projection, "PACKAGED_MIGRATIONS", tmp_path / "nowhere")
     head, source = api._migrations_head()
-    assert head == "9999_b", head
-    lexicographic = max(p.stem for p in d.glob("*.sql"))
-    assert lexicographic != head, "the pinned fixture must defeat a lexicographic sort"
+    assert head == "1000_a", head
+    assert max(p.stem for p in d.glob("*.sql")) == "seed", (
+        "the fixture must defeat an implementation with NO `\\d+_` filter"
+    )
+    assert max(p.stem for p in d.glob("*.sql") if p.stem[:1].isdigit()) == "999_b", (
+        "the fixture must defeat an implementation that sorts the filtered stems "
+        "as STRINGS (999_b > 1000_a lexicographically)"
+    )
     assert source == "checkout", source
 
 
@@ -230,15 +311,27 @@ def test_the_migrations_head_is_resolved_once_not_per_request(sha_env, monkeypat
     `.github/scripts/deploy-health-gate.sh`): the resolver is memoised at import,
     so a burst of checks cannot stat 13 paths and glob 77 files each time.
 
-    THE PIN IS THE BOOBY TRAP (review P3). A counter that nothing installs asserts
-    `0 == 0` and would pass even if `_build_identity()` re-resolved per request.
-    Replacing the resolver with one that RAISES fails the moment the payload
-    calls it, and passes only while the payload reads the constants.
+    THE PIN IS A BOOBY TRAP, NOT A COUNTER (review P3). The round-2 version built a
+    counting wrapper and never installed it, so it asserted `0 == 0` under every
+    implementation — including the per-request `_migrations_head()[0]` regression
+    it is named after. pytest's own rule is that a patch is applied to the name the
+    code under test LOOKS UP, before it runs
+    (docs.pytest.org `how-to/monkeypatch.html`), so substituting a resolver that
+    RAISES fails the moment the payload calls it and passes only while the payload
+    reads the module constants.
     """
     sha_env("f" * 40)
     from tortoise import hosted_api as api
 
-    assert api._MIGRATIONS_HEAD is not None
+    assert api._MIGRATIONS_HEAD is not None, "the real tree carries migrations"
+
+    # The memoised value is a real resolve of the population on disk, so the pin
+    # below cannot be satisfied by an import-time constant nobody ever read.
+    fresh_head, _source = api._migrations_head()
+    assert fresh_head == api._MIGRATIONS_HEAD, (
+        "the module constant drifted from a fresh resolve — `/health` would "
+        "publish a build identity that is not this image's"
+    )
 
     def boom(*_a, **_k):
         raise AssertionError("the migrations head was resolved per request")
@@ -251,15 +344,28 @@ def test_the_migrations_head_is_resolved_once_not_per_request(sha_env, monkeypat
 
 # ── a stale deploy is UP: currency must not be folded into `status` ──────────
 
-def test_a_stale_build_does_not_degrade_status(sha_env):
+def test_a_stale_build_does_not_degrade_status(sha_env, monkeypatch):
     """If staleness degraded `status`, Fly would restart a healthy process
     forever. Currency is a COMPARISON the reader makes; this block supplies the
-    datum and must not make the liveness claim itself."""
+    datum and must not make the liveness claim itself.
+
+    THE ASSERTION MUST BE ABLE TO FAIL (review P2). `status`'s entire codomain is
+    `"ok" | "degraded"` (`health()`: `"ok" if (db.ok and watcher.ok and
+    record.ok) else "degraded"`), so `status in ("ok", "degraded")` held for
+    every reachable payload — including the one the docstring refuses, where a
+    stale build published `"degraded"` and Fly restarted the process forever.
+    The three blocks that DECIDE `status` are therefore pinned healthy first, and
+    the stamp is stale (`e`*40 is not this checkout's HEAD): holding all of that
+    fixed, a staleness fold is the only thing left that can make this "degraded".
+    """
     sha_env("e" * 40)
+    _stub_health_dependencies(monkeypatch)
     payload = _health()
-    assert "build" in payload
-    # status is decided by db/watcher/record only (docs in the handler)
-    assert payload["status"] in ("ok", "degraded")
+    assert payload["build"]["commit_sha"] == "e" * 40, payload["build"]
+    assert payload["status"] == "ok", (
+        f"a stale-but-healthy build must not degrade liveness: {payload['status']!r} — "
+        "currency is the reader's comparison, not this endpoint's claim"
+    )
 
 
 def test_the_published_build_block_is_json_serialisable(sha_env):
