@@ -163,39 +163,73 @@ def test_reproduction_a_DCR_client_naming_itself_Claude_is_not_rendered_as_Claud
 # 2. The invariant, measured as a COUNT over the identity SOURCES
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _oauth_client_writers() -> set[str]:
-    """Every function in the PACKAGE that INSERTS an `oauth_clients` row.
+def _functions_touching(needle: str) -> dict[str, list[str]]:
+    """Every function in the PACKAGE that mentions ``needle``, by module.
 
-    Derived from the AST over every module under `tortoise/` (review finding 2):
-    a writer added in `hosted_api.py`, `cimd.py` or anywhere else is a new
-    identity source, and scoping this to `oauth.py` would let it pass unseen —
-    the failure mode the enumeration exists to prevent.
+    Total on purpose (review round 2, findings 1+2). The earlier shape matched a
+    single `ast.Call` carrying the table, a `method` kwarg AND `"POST"` in one
+    node — which missed `TABLE = "oauth_clients"`, helper indirection, lowercase
+    verbs, and every PATCH/PUT. Worse, it only enumerated WRITERS, so a SECOND
+    RENDER SITE (a page, email or notification printing a registry name) reddend
+    nothing. Enumerating by mention instead means any new function that reads or
+    writes either the table or the column fails this suite until someone
+    classifies it — the failure mode the invariant exists for.
     """
-    writers: set[str] = set()
+    found: dict[str, list[str]] = {}
     for path in sorted((REPO_ROOT / "tortoise").rglob("*.py")):
         tree = ast.parse(path.read_text())
-        funcs = {n.name: n for n in ast.walk(tree)
-                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-        for name, fn in funcs.items():
-            for node in ast.walk(fn):
-                if not isinstance(node, ast.Call):
-                    continue
-                src = ast.dump(node)
-                if "'oauth_clients'" in src and "method" in src and "POST" in src:
-                    writers.add(name)
-    return writers
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if needle in ast.dump(node):
+                found.setdefault(path.name, []).append(node.name)
+    return {k: sorted(set(v)) for k, v in found.items()}
+
+
+#: CLASSIFIED. Every function that names the `oauth_clients` table. The two
+#: WRITERS are the identity sources; the rest are readers/counters that never
+#: render a name. A new entry here is a decision, not a formality.
+_CLASSIFIED_TABLE_TOUCHERS = {
+    "hosted_api.py": ["_cp_offload", "_read_count", "oauth_clients_count"],
+    "oauth.py": ["_client_row", "_persist_cimd_client", "register_client",
+                 "resolve_client"],
+}
+
+#: CLASSIFIED. Every function that names `client_name`. `client_identity.py` IS
+#: the renderer, and `consent_page_html`/`oauth_authorize` must reach a name only
+#: THROUGH it — so a new consumer outside this set is a second identity source
+#: until proven otherwise.
+_CLASSIFIED_NAME_CONSUMERS = {
+    "cimd.py": ["validate_document"],
+    "client_identity.py": ["_cimd_host", "consent_client_line",
+                           "resolve_client_identity"],
+    "hosted_api.py": ["oauth_authorize"],
+    "oauth.py": ["_client_row", "_persist_cimd_client", "consent_page_html",
+                 "register_client"],
+}
 
 
 def test_the_identity_sources_are_exactly_the_known_writers():
-    """A third writer would be a third identity source with no classification.
+    """A new table toucher — writer OR reader — must be classified here first.
 
-    Two exist and each is classified: DCR (`register_client`, self-asserted
-    until an operator attests it) and CIMD (`_persist_cimd_client`, the host of
-    an origin the client demonstrably controls).
+    Two writers exist and each is classified: DCR (`register_client`,
+    self-asserted until an operator attests it) and CIMD (`_persist_cimd_client`,
+    the host of an origin the client demonstrably controls).
     """
-    assert _oauth_client_writers() == {"register_client", "_persist_cimd_client"}, (
-        "an `oauth_clients` writer was added or removed — classify the new "
-        "identity source against SCOPE §9 class 4(i) before landing it")
+    assert _functions_touching("oauth_clients") == _CLASSIFIED_TABLE_TOUCHERS, (
+        "a function that names the `oauth_clients` table was added or removed — "
+        "classify it against SCOPE §9 class 4(i) before landing it")
+
+
+def test_every_consumer_of_the_column_is_classified():
+    """The RENDER-SIDE half (review round 2, finding 1): a second render site — a
+    page, an email, a notification — that prints a registry `client_name`
+    without going through `client_identity` is a second identity source, and it
+    used to redden nothing."""
+    assert _functions_touching("client_name") == _CLASSIFIED_NAME_CONSUMERS, (
+        "a function that reads `client_name` is outside the classified set — it "
+        "must route through `client_identity.resolve_client_identity` or be "
+        "classified here with a reason")
 
 
 def test_the_invariant_counts_ZERO_unbacked_rendered_identities(
@@ -292,6 +326,25 @@ def test_a_CIMD_client_renders_its_HOST_and_never_its_document_name():
     assert tampered_identity.backed_by == SELF_DECLARED, (
         "a stored name that is not the client_id host did not come from the "
         "metadata fetch and must not be rendered")
+
+
+def test_a_cimd_row_with_no_stored_name_is_NOT_backed():
+    """Review round 2, finding 3 — the `claimed is None` arm FAILED OPEN.
+
+    `oauth_clients.client_name` is `NOT NULL` and both writers always set it, so
+    a row with no name did not come from the metadata fetch. Treating it as a
+    CIMD origin rendered whatever host the id string claimed, with nothing
+    proving the fetch happened.
+    """
+    for row in ({"id": "https://claude.ai/oauth/mcp-client"},
+                {"id": "https://claude.ai/oauth/mcp-client", "client_name": ""}):
+        identity = resolve_client_identity(row)
+        assert identity.backed_by == SELF_DECLARED, identity
+        # The handle is the full client_id URL, so the host appears there by
+        # design — what must not happen is the host being presented as the
+        # client's NAME (the sentence subject before "wants to access").
+        assert identity.display_name is None
+        assert consent_client_line(identity).startswith("An unverified app (")
 
 
 def test_a_cimd_looking_client_id_registered_by_DCR_is_not_backed():

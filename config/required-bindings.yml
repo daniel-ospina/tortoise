@@ -413,3 +413,31 @@ projects:
           A preview deployment must set it to its OWN origin so the AS it talks
           to accepts the mint; the value must match CONSENT_TOKEN_ISSUER on
           that API or every redemption is `401 invalid_token`.
+
+      # #8218 — the CLIENT-IDENTITY ALLOWLIST, the only path by which a
+      # human-authored display name reaches the consent screen. Declared here
+      # because an undeclared knob is a capability the deployment cannot
+      # exercise: `tests/test_oauth_consent_client_identity_8218.py` proves a
+      # first-party client still renders AS ITSELF, and that proof is empty on
+      # the hosted AS unless an operator can find and set this.
+      #
+      # ABSENCE IS THE SAFE DEFAULT (`recommended`, not `required`): with it
+      # unset, `tortoise/client_identity.py` attests nobody and EVERY client
+      # renders as "An unverified app (<client_id>)" — a labelling outcome, not
+      # an outage, so reding a deploy over it would buy nothing. A MALFORMED
+      # value is also fail-closed (it logs and attests nobody); it never falls
+      # back to trusting the registry.
+      - name: TORTOISE_OAUTH_ATTESTED_CLIENTS
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          JSON object mapping a registered client_id to the canonical display
+          name the consent screen may print for it:
+          {"<client_id>": "<canonical name>"}. Read as the AS (the hosted API),
+          per request, so a change needs no restart. Entries are keyed by
+          client_id and NOT by the name a client claims, so a different client
+          registering the same name stays unverified. Non-secret and
+          human-authored — treat a PR landing an entry with the same scrutiny as
+          a code change, because it IS one: it is the only way a name reaches
+          the screen. See docs/engineering/auth/consent-identity-bridge.md §2.4.

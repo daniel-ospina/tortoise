@@ -185,14 +185,15 @@ def attested_clients() -> dict[str, str]:
 def _cimd_host(client_id: object) -> str | None:
     """The host a CIMD ``client_id`` is bound to, or ``None`` if it is not one.
 
-    Deliberately narrow. This function answers "is the name we would render
-    *derived from* the client_id URL", not "is this a well-formed CIMD URL" —
-    that heavier predicate is ``cimd.is_cimd_client_id`` and it runs on the
-    fetch path. Here the only question is whether the rendered name can be
-    traced to an origin the client controls, so the test is: the client_id
-    parses as an https URL with a host, and the registered name IS that host
-    (or absent). A row whose stored name differs from the host was not written
-    by ``_persist_cimd_client`` and is therefore not backed.
+    Deliberately narrow, and NARROWER than an equality on the parsed host: it
+    answers "is the rendered name *derived from* the client_id URL", not "is
+    this a well-formed CIMD URL". ``claimed == host`` is REQUIRED and there is
+    no "absent" arm (review round 2, finding 3): a NULL/blank ``client_name``
+    can never be written by ``_persist_cimd_client``, so a row carrying one did
+    not come from the metadata fetch, and treating it as backed would fail
+    OPEN on any future backfill, PATCH or RPC insert. Same reason the userinfo
+    and ASCII checks below exist — this predicate must never be LOOSER than the
+    gate the persister passed.
     """
     if not isinstance(client_id, str):
         return None
@@ -237,7 +238,7 @@ def resolve_client_identity(client: dict | None) -> ClientIdentity:
                               backed_by=BACKED_BY_ALLOWLIST)
 
     host = _cimd_host(client_id)
-    if host is not None and (claimed is None or claimed == host):
+    if host is not None and claimed == host:
         return ClientIdentity(client_id=client_id, claimed_name=claimed,
                               display_name=host,
                               backed_by=BACKED_BY_CIMD_ORIGIN)
