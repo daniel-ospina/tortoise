@@ -735,7 +735,7 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
     # the guard's refusals are NAMES (#10483 review, P3-1).
     try:
         classified = classify_sessions(live_report)
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
         return (REFUSE_CENSUS_UNREADABLE,
                 f"the live census report cannot be turned into a purge set "
                 f"({exc}) — its per-session counts and id lists do not "
@@ -1127,6 +1127,44 @@ def _report_problem(report) -> str:
     for key in ("clean_sessions", "failed_sessions"):
         if not isinstance(report["parity"].get(key), list):
             return f"parity.{key} is missing or is not a list"
+    # ⛔ AN ENTRY'S TYPE, NOT ONLY THE CONTAINER'S. `isinstance(…, list)` said
+    # nothing about what is IN the list, so `clean_sessions: [1]` reached
+    # `verdict["session"]` (TypeError), `session: ["s1"]` reached an unhashable
+    # dict lookup (TypeError), and `problems: ["boom"]` reached `p.get(…)`
+    # (AttributeError) — the preview arm exited 1 as a Python traceback on the
+    # two it did not catch, and the destructive arm's `AttributeError` escaped
+    # BOTH arms (#10483 review round 9, P3). The shape gate answers here, before
+    # ANY dereference, so the two arms cannot disagree about the same artefact.
+    # Kubernetes states the comparable rule (`api-conventions.md`, "Validation"):
+    # "API objects are validated upon receipt by the apiserver … Validation
+    # errors are flagged and returned to the caller in a `Failure` status" —
+    # invalid input is a NAMED reason (`Invalid`, 422), never an internal error.
+    for key in ("clean_sessions", "failed_sessions"):
+        for index, entry in enumerate(report["parity"][key]):
+            if not isinstance(entry, dict):
+                return (f"parity.{key}[{index}] is a "
+                        f"{type(entry).__name__}, not a census entry object")
+            session = entry.get("session")
+            if not isinstance(session, str) or not session:
+                return (f"parity.{key}[{index}].session is "
+                        f"{type(session).__name__}, not a session id")
+            problems = entry.get("problems")
+            if problems is None:
+                continue
+            if not isinstance(problems, list):
+                return (f"parity.{key}[{index}].problems is a "
+                        f"{type(problems).__name__}, not a list of problems")
+            for pindex, problem in enumerate(problems):
+                if not isinstance(problem, dict):
+                    return (f"parity.{key}[{index}].problems[{pindex}] is a "
+                            f"{type(problem).__name__}, not a problem object")
+    # `build_plan` calls `.items()` on this one; a list there was an
+    # `AttributeError` traceback AND, at the destructive arm, a report that
+    # walked through the whole gate to "every precondition asserted".
+    anomalies = report.get("anomalies")
+    if anomalies is not None and not isinstance(anomalies, dict):
+        return (f"its `anomalies` block is a {type(anomalies).__name__}, not "
+                f"an object of anomaly classes")
     if not isinstance(report["dry_run"].get("would_delete_ids"), list):
         return ("dry_run.would_delete_ids is missing — the purge set has ONE "
                 "derivation, and a report without it describes no set")
@@ -1627,10 +1665,19 @@ def main(argv: list[str] | None = None) -> int:
                                "uri_host": _uri_host(args.uri),
                                "db_path": args.db_path,
                                "graph_name": args.graph_name}))
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
         # A census report whose counts and id lists disagree cannot describe a
         # purge set. Named refusal, never an uncaught traceback (`main`'s own
         # contract: the guard's refusals are names).
+        #
+        # ⛔ THE SAME EXCEPTION SET AS THE DESTRUCTIVE ARM (`evaluate_gate`
+        # catches `KeyError`/`TypeError`/`ValueError`). This arm caught only
+        # `(ValueError, KeyError)`, so a census ENTRY of the wrong type —
+        # `clean_sessions: [1]`, a `session` that is a list — escaped as a
+        # traceback with exit 1 ("usage error") where the two arms owe the
+        # operator ONE answer (#10483 review round 9, P3). `AttributeError` is
+        # here as the net under the shape gate above: a dereference we have not
+        # anticipated still fails closed with a name, never a crash.
         sys.stderr.write(f"purge_legacy_turns: REFUSED "
                          f"{REFUSE_CENSUS_NOT_CLEAN}: the census report cannot "
                          f"be turned into a purge set ({exc}).\n")

@@ -1228,6 +1228,84 @@ def test_cli_refuses_a_missing_census_file_with_a_named_refusal(
     assert purge.REFUSE_CENSUS_UNREADABLE in capsys.readouterr().err
 
 
+# ── a malformed census ENTRY is a named refusal, in BOTH arms ────────────
+
+#: Each of these is a census REPORT whose containers are the right type and
+#: whose ENTRIES are not — the shape `_report_problem` used to wave through
+#: because it validated `isinstance(report["parity"][key], list)` and never the
+#: elements. Every one of them reaches a dereference `classify_sessions` makes
+#: (`verdict["session"]`, `per_session_ids.get(sid)`, `p.get("problem")`).
+_MALFORMED_CENSUS_ENTRIES = [
+    # a clean session that is not an object at all → `(1)["session"]` TypeError
+    pytest.param(lambda r: r["parity"].__setitem__("clean_sessions", [1]),
+                 "not a census entry object", id="clean-entry-is-an-int"),
+    # `session` is a LIST → unhashable in `per_session_ids.get(sid, [])`
+    pytest.param(lambda r: r["parity"].__setitem__(
+        "clean_sessions", [{"session": ["s1"], "graph_turn_nodes": 0,
+                            "record_turn_rows": 0}]),
+        "not a session id", id="clean-session-is-a-list"),
+    # `problems` is a list of STRINGS → `p.get(...)` AttributeError
+    pytest.param(lambda r: r["parity"].__setitem__(
+        "failed_sessions", [{"session": "s9", "graph_turn_nodes": 1,
+                             "record_turn_rows": 1,
+                             "problems": ["boom"]}]),
+        "not a problem object", id="problem-is-a-string"),
+    # `problems` is not a list at all → iterating it hits a `str`
+    pytest.param(lambda r: r["parity"].__setitem__(
+        "failed_sessions", [{"session": "s9", "graph_turn_nodes": 1,
+                             "record_turn_rows": 1, "problems": "boom"}]),
+        "not a list of problems", id="problems-is-a-string"),
+    # `anomalies` must be the object `build_plan` calls `.items()` on
+    pytest.param(lambda r: r.__setitem__("anomalies", ["orphan"]),
+                 "anomalies", id="anomalies-is-a-list"),
+]
+
+
+def _malformed_census(mutate) -> dict:
+    report = _report(clean=[_clean_with_ids("s1", ["s1_t0"])])
+    mutate(report)
+    return report
+
+
+@pytest.mark.parametrize("mutate, needle", _MALFORMED_CENSUS_ENTRIES)
+def test_cli_refuses_a_malformed_census_entry_with_a_named_refusal(
+        tmp_path, capsys, mutate, needle):
+    """#10483 review round 9 (P3): the PREVIEW arm caught only
+    `(ValueError, KeyError)` around `build_plan`, while the destructive arm
+    caught `(KeyError, TypeError, ValueError)` — so a census file with a
+    malformed ENTRY died as a Python traceback with exit 1 ("usage error")
+    from `main`, and an `AttributeError` out of `p.get(...)` escaped BOTH.
+
+    An operator who trims or hand-edits a census file is entitled to the same
+    named `census-unreadable` (exit 3) the tool gives every other unreadable
+    census: an absence is NOT established. Fail-closed either way (no plan, no
+    delete), which is why this is a P3 and not a delete-path defect.
+    """
+    census_path = _write(tmp_path, "census.json", _malformed_census(mutate))
+    plan_path = tmp_path / "plan.json"
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t", "--census-json",
+                     census_path, "--plan-out", str(plan_path)])
+    assert rc == 3
+    assert not plan_path.exists()          # no signable plan was written
+    err = capsys.readouterr().err
+    assert purge.REFUSE_CENSUS_UNREADABLE in err
+    assert needle in err                   # NAMES the defect, not just a code
+    assert "Traceback" not in err
+
+
+@pytest.mark.parametrize("mutate, needle", _MALFORMED_CENSUS_ENTRIES)
+def test_the_destructive_gate_refuses_a_malformed_census_entry(
+        mutate, needle):
+    """The mirror, so the two arms cannot disagree about the same artefact:
+    one question, asked by both (the rule `_armed_evidence_gap` and
+    `_restore_proof_problem` were shared for). `(1)["session"]` was already a
+    named refusal here; a `problems` list of strings was a traceback."""
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    code, message = _gate(plan, live=_malformed_census(mutate))
+    assert code == purge.REFUSE_CENSUS_UNREADABLE, message
+    assert needle in message
+
+
 def test_the_plan_records_where_its_population_came_from(tmp_path, capsys):
     """P3-4: the plan summarised a census without saying which census.
 
