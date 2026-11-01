@@ -1012,6 +1012,16 @@ def _stated_iso_day(text: str) -> str | None:
     the same helper's rule for a zone-less input, and needs no zone at all:
     ``20240101T1200`` states the first of January wherever it is read.
 
+    ⚠️ That rule is applied to EVERY spelling, which is why
+    :func:`_display_bound` hands a DASHED value here too (#9741 review P2).
+    An offset-bearing timestamp denotes ONE instant (RFC 3339 §1: "Date and
+    time expressions indicate an instant in time"), so it has no calendar day
+    of its own — a day for it can only be chosen against some zone, and this
+    module chooses UTC. Slicing the dashed spelling at position 10 instead
+    would let one stored instant state two days depending on how the writer
+    spelled it: ``20240101T020000+0500`` and ``2024-01-01T02:00:00+05:00`` are
+    the same moment, and both state ``2023-12-31``.
+
     Never raises — a read path must not acquire a failure mode from stored
     data: unparseable text, a non-``str`` shape and an unrepresentable value
     all return ``None`` (the caller then keeps the stored text).
@@ -1040,13 +1050,17 @@ def _display_bound(value: object, field: str, hit: dict) -> str:
         what an open window renders as);
       * ISO text → trimmed and stated as a CALENDAR DAY (the reader-context
         rule: no full timestamps in reader text). The day is read from the
-        string's own spelling, never sliced out of it by POSITION: a dashed
-        ``YYYY-MM-DD…`` prefix is cut to that day, and a bound that spells its
-        day in ISO 8601 BASIC form (``20240101T1200``) is parsed for it
-        (:func:`_stated_iso_day`). The blind ten-character slice this replaced
-        produced ``20240101T1`` for that bound — a truncated fragment presented
-        as a calendar day (#9741 review P3-1). Text that names no day is
-        returned as stored;
+        string's own spelling, never sliced out of it by POSITION: a bound
+        that spells an instant — ISO 8601 basic (``20240101T1200``) or dashed
+        (``2026-06-10T09:30:00Z``) — is parsed for its day
+        (:func:`_stated_iso_day`), so an offset-bearing value truncates in UTC
+        whichever spelling it uses. The blind ten-character slice this
+        replaced produced ``20240101T1`` for the basic form — a truncated
+        fragment presented as a calendar day (#9741 review P3-1). Only text
+        that names no instant at all falls back to its spelling: a dashed
+        ``YYYY-MM-DD…`` prefix is its own day (``2026-06-10Tgarbage`` →
+        ``2026-06-10``, byte-identical to the pre-#9741 render), and anything
+        else is returned as stored;
       * a NUMBER → the UTC calendar day of that epoch in SECONDS, and only
         inside the authored span (:data:`_EPOCH_AUTHORED_SECONDS_SPAN`).
 
@@ -1079,11 +1093,16 @@ def _display_bound(value: object, field: str, hit: dict) -> str:
         if len(text) <= 10:
             return text
         if _DASHED_DAY_PREFIX.match(text):
-            # The RFC 3339 extended profile: the separators are MANDATORY
-            # there, so the first ten characters ARE the day
-            # (``2026-06-10T09:30:00Z`` → ``2026-06-10``) — byte-identical to
-            # every dashed bound the pre-#9741 slice rendered.
-            return text[:10]
+            # The RFC 3339 extended profile spells its day in the first ten
+            # characters, and that IS the fallback when the text names no
+            # instant (``2026-06-10Tgarbage`` → ``2026-06-10``, byte-identical
+            # to the pre-#9741 slice). But a dashed value that DOES name an
+            # instant is read like every other spelling, not cut by position:
+            # an offset-bearing value truncates in UTC, so one stored instant
+            # cannot state two days because of how it was written (#9741
+            # review P2). ``2024-06-01T12:00:00Z`` is unchanged by this.
+            day = _stated_iso_day(text)
+            return day if day is not None else text[:10]
         # Any other spelling of a day (ISO basic) is read, not cut (#9741
         # review P3-1); text that names no day survives whole rather than as
         # a fragment.
@@ -1163,9 +1182,10 @@ def _validity_marker(h: dict) -> str:
         window ENDED, but at a time we cannot pin" (``validity.py:23``) — so
         an expiry this renderer cannot STATE can never render as "still true".
         ⚠️ "STATE" is narrower than "date" here, and the difference IS the
-        residual below: ``_display_bound`` returns a stored STRING verbatim
-        (trimmed, cut to 10 chars), so a STRING always produces display text
-        and never reaches this arm — however un-datable the text it produces.
+        residual below: a stored STRING always yields display text — verbatim
+        for text that names no day, its parsed ``YYYY-MM-DD`` for a day it
+        does spell, the first ten characters for a dashed prefix — so a
+        STRING never reaches this arm, however un-datable the text it produces.
         The shapes above are the ones that produced NO text at all.
         ⚠️ ``time_aware.is_stale_entry`` answers a DIFFERENT question (which
         version ranks first) and is corroboration ONLY for the spellings
@@ -1181,8 +1201,9 @@ def _validity_marker(h: dict) -> str:
         and is never relabelled by an unstatable expiry beside it. And it
         reaches only what ``_display_bound`` SKIPS — the expiry that produced
         NO text, so ``not ex`` fires. ⛔ It does NOT cover a present
-        ``expired_at`` that DID produce text: because a stored STRING comes
-        back verbatim, ``expired_at="TBD"`` and ``expired_at="2026-01-02"``
+        ``expired_at`` that DID produce text: because a stored STRING always
+        comes back with display text, ``expired_at="TBD"`` and
+        ``expired_at="2026-01-02"``
         behave ALIKE — both reach the ``else`` arm below, which states
         ``[valid…]`` (the open reading) with the expiry clause DROPPED and NOT
         counted. That is the recorded #9741 residual: pre-existing on
@@ -1684,8 +1705,9 @@ def _hit_prefix(h: dict, marker: Any = _UNRESOLVED_MARKER) -> str:
         prefix = f"{prefix} [{spk}]"
     # The marker carries the SAME free-text class as the two values above: the
     # superseded/supersedes snippets are stored Point content, and the
-    # valid/expired window fields are too (truncated to 10 chars only when
-    # LONGER than 10, so a short payload carrying a newline survives intact).
+    # valid/expired window fields are too (a dashed value keeps its first ten
+    # characters, any other value its parsed day or its own text, so a payload
+    # carrying a newline survives intact).
     # Collapsed here rather than field by field inside _validity_marker — one
     # choke point covers every present and future free-text field the marker
     # interpolates.

@@ -1131,6 +1131,10 @@ def test_a_basic_format_bound_states_its_own_day_not_a_sliced_fragment():
     # wall clock it spells.
     assert _display_bound("20240101T020000+0500", "valid_from", {}) == \
         "2023-12-31"
+    # ... and the DASHED spelling of that same instant states the same day
+    # (#9741 review P2): the rule is about the value, not how it was written.
+    assert _display_bound("2024-01-01T02:00:00+05:00", "valid_from", {}) == \
+        "2023-12-31"
 
     # The rule the slice was MEANT to implement still holds, byte-identically
     # for the dashed profile (RFC 3339 §5.6 makes those separators mandatory).
@@ -1147,6 +1151,76 @@ def test_a_basic_format_bound_states_its_own_day_not_a_sliced_fragment():
     assert _display_bound("not a date, sorry", "valid_from", {}) == \
         "not a date, sorry"
     assert _display_bound("1719792000", "valid_from", {}) == "1719792000"
+
+
+def test_one_instant_states_one_day_whichever_spelling_it_uses():
+    """#9741 review P2 — one instant, one day: the UTC rule covers BOTH spellings.
+
+    ``_display_bound`` read the day out of an ISO 8601 BASIC bound
+    (``20240101T1200``) but still SLICED the dashed one at position 10, so the
+    same stored moment stated two different days depending on how the writer
+    spelled it:
+
+        20240101T020000+0500        (basic)  -> 2023-12-31   (UTC)
+        2024-01-01T02:00:00+05:00  (dashed) -> 2024-01-01   (writer's wall clock)
+
+    That is not stylistic. RFC 3339 §1 — "Date and time expressions indicate
+    an instant in time" — means an offset-bearing value has no calendar day of
+    its own; a day for it can only be chosen against a zone, and this module
+    chooses UTC (``assembly._norm_date`` / ``_epoch_utc_day``). The ordering
+    measure every temporal query uses agrees with the HEAD spelling, not the
+    dashed one: ``_created_sort_key`` parses both to ONE instant, so a window
+    query "as of 2023-12-31" matches the hit while the marker printed beside it
+    used to claim ``[valid since 2024-01-01]``.
+
+    Discriminating: the dashed assertion below is red on ``4d0aed645`` (the
+    commit that rewrote this normaliser), where the slice returns
+    ``2024-01-01``. The no-regression shapes (a ``Z``/``+00:00``/naive dashed
+    bound) are unaffected by the fix, so they stay pinned byte-for-byte above.
+    """
+    from tortoise.retrieval import (
+        _bounds_an_instant,
+        _display_bound,
+        _validity_marker,
+    )
+    from tortoise.search_engine import _created_sort_key
+
+    basic = "20240101T020000+0500"
+    dashed = "2024-01-01T02:00:00+05:00"
+    # the two spellings are ONE stored instant, and both are orderable — so the
+    # start clause IS rendered for either (this is not the unorderable arm).
+    assert _created_sort_key(basic) == _created_sort_key(dashed)
+    assert _bounds_an_instant(basic) is True
+    assert _bounds_an_instant(dashed) is True
+
+    assert _display_bound(basic, "valid_from", {}) == "2023-12-31"
+    assert _display_bound(dashed, "valid_from", {}) == "2023-12-31"
+    # ... and the marker the reader sees states the same day either way.
+    assert _validity_marker({"valid_from": basic, "end_state": "open"}) == \
+        "[valid since 2023-12-31]"
+    assert _validity_marker({"valid_from": dashed, "end_state": "open"}) == \
+        "[valid since 2023-12-31]"
+    # the END columns go through the same normaliser.
+    assert _validity_marker({"valid_from": "2024-06-01",
+                             "valid_to": dashed}) == \
+        "[valid 2024-06-01 → 2023-12-31]"
+
+    # A dashed bound whose UTC day COINCIDES with the wall clock it spells, and
+    # a naive one that names no zone at all, keep the day they always stated.
+    for stored, day in [
+        ("2024-06-01T12:00:00Z", "2024-06-01"),
+        ("2024-06-01T12:00:00+00:00", "2024-06-01"),
+        ("2024-06-01T09:30:00", "2024-06-01"),
+        ("2024-01-01T02:00:00-08:00", "2024-01-01"),
+    ]:
+        assert _display_bound(stored, "valid_from", {}) == day, stored
+
+    # A dashed PREFIX that names no instant at all is still its own day — the
+    # pre-#9741 render, kept byte-identically rather than lost to the fix.
+    assert _display_bound("2026-06-10Tgarbage", "valid_from", {}) == \
+        "2026-06-10"
+    assert _display_bound("2026-06-10T25:00:00+00:00", "valid_from", {}) == \
+        "2026-06-10"
 
 
 def test_an_unreadable_start_does_not_discard_a_readable_end():
