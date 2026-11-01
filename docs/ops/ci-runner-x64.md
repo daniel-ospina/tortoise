@@ -939,17 +939,20 @@ wait, and a required leg's failure costs the merge. It also bypasses the label a
 
 ### Scope of the #10237 canary's proof — scheduling only; the ask's proof list is NOT discharged
 
-#10237's ask 1 is two-part: a canary on one NON-required job, **and** a proof list taken on it —
+Ask 1 of #10237 is two-part: a canary on one NON-required job, **and** a proof list taken on it —
 *"docker available, the FalkorDB image pullable, `uv sync --extra embeddings --extra parity`
 working, and a representative test file green"*. `repo-harnesses` runs STUBBED shell harnesses: no
-docker, no `uv`, no pytest, no DB, no network. So its `success` on `pi-runner-cmux-x64-8` (run
-`41328630369`) discharges:
+docker, no `uv`, no pytest, no DB, and they make no network calls themselves. So its `success` on
+`pi-runner-cmux-x64-8` (run `41328630369`) discharges:
 
 - the job **schedules** on the pool's own labels with no GitHub-hosted queue wait; and
 - the **minimal-`PATH` shell contract** holds on the pool — `python3` and the `agent-infra-guard`
   checkout are provisioned ahead of the harnesses, and both provisioners now carry
   `if: ${{ !cancelled() }}` so one upstream red cannot SKIP them while the harnesses below (which
   all run under `!cancelled()`) still execute against a missing interpreter and a missing guard tree.
+  Note what that costs honesty-wise: the JOB does need **egress** on a bare pool box, because
+  `actions/setup-python` fetches a toolchain when the tool cache has none and the guard checkout
+  fetches from GitHub — "needs no network" is true of the HARNESSES, not of the job.
 
 It does **NOT** discharge ask 1's proof list (docker / image pull / `uv sync` / a real test file
 green). Ask 2 — *"Only then the five `python-ci-gate` legs"* — rests on that proof list, so its

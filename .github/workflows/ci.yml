@@ -1520,11 +1520,11 @@ jobs:
     # THE LABEL SET IS THE RUNNERS' OWN, VERBATIM. Every x64 runner carries
     # `self-hosted,Linux,X64,self-hosted-x64`; `runs-on` is AND semantics, so
     # `[self-hosted, self-hosted-x64]` selects every x64 runner and no ARM64 VM.
-    # The job needs no network, no docker, no secrets and no architecture
-    # (stubbed curl/gh/flyctl/aws/date), so the arch sensitivity that put
-    # `test-slow` on `ubuntu-24.04` does not apply — but a label is a scheduling
-    # decision, NOT an image (#9018): `python3` is provisioned below by
-    # actions/setup-python, and `jq` is ASSERTED — see the tool contract below.
+    # The HARNESSES need no network, no docker, no secrets and no architecture (stubbed
+    # curl/gh/flyctl/aws/date), so the arch sensitivity that put `test-slow` on
+    # `ubuntu-24.04` does not apply. But a label is a scheduling decision, NOT an image
+    # (#9018): `python3` is provisioned below and `jq` ASSERTED, and the provisioners
+    # FETCH (a toolchain, the guard checkout), so a bare pool box needs EGRESS.
     #
     # ⚠️ NAMED RESIDUAL (deliberate): while the pool is unreachable this job
     # waits instead of falling back, because `runs-on` has no OR semantics — an

@@ -9036,24 +9036,30 @@ def _undeclared_custom_labels(
 ) -> set[str]:
     """The labels actionlint would REJECT, in their original spelling.
 
-    CASE-FOLDED, because actionlint is: `rule_runner_label.go::verifyRunnerLabel`
-    matches hosted labels through `defaultRunnerOSCompats[strings.ToLower(l)]`
-    and the preset self-hosted labels through `strings.EqualFold` (over
-    `self-hosted, x64, arm, arm64`), so `runs-on: [self-hosted, Linux, X64,
-    self-hosted-x64]` — the spelling #10237's ask 1 prescribes, and the label set
-    `ci.yml`'s own comment quotes as the runners' VERBATIM labels — is ACCEPTED by
-    the linter. An exact set difference answered `{Linux, X64}` for it and sent
-    the author to declare two labels that are not custom at all (a claim that they
-    do not exist), while reddening a spelling the gate accepts.
+    CASE-FOLDED FOR THE PRESETS ONLY, because actionlint folds only those.
+    `rule_runner_label.go::verifyRunnerLabel` (1.7.12) matches hosted labels through
+    `defaultRunnerOSCompats[strings.ToLower(l)]` and the preset self-hosted labels
+    through `strings.EqualFold` (over `self-hosted, x64, arm, arm64`), so
+    `runs-on: [self-hosted, Linux, X64, self-hosted-x64]` — the spelling #10237's
+    ask 1 prescribes, and the label set `ci.yml`'s own comment quotes as the
+    runners' VERBATIM labels — is ACCEPTED by the linter. An exact set difference
+    answered `{Linux, X64}` for it and sent the author to declare two labels that
+    are not custom at all (a claim that they do not exist), while reddening a
+    spelling the gate accepts.
 
-    The asymmetry is stated so it is not "fixed" later: only names declared in
-    `actionlint.yaml` are matched case-SENSITIVELY (Go `path.Match`). Folding is
-    therefore the safe direction here — it can only ever admit a name the linter
-    admits, and a genuinely custom label still reds (see the converse assertion in
-    the test below).
+    The asymmetry is the whole point, and it was taken from the primary source:
+    after the preset loop, `verifyRunnerLabel` runs `path.Match(k, l)` over the
+    names declared in `actionlint.yaml` against the UNFOLDED `l`. A custom name is
+    therefore matched case-SENSITIVELY, and folding the DECLARED set here would
+    report `runs-on: [self-hosted, Self-Hosted-X64]` CLEAN while the linter
+    REJECTS it — a false PASS that reds the REQUIRED `workflow-lint` leg instead
+    of this test, the exact inversion this check exists to prevent. Fold the
+    preset arm; compare the declared arm exactly.
     """
-    folded = {name.lower() for name in known} | {name.lower() for name in declared}
-    return {label for label in used if label.lower() not in folded}
+    known_folded = {name.lower() for name in known}
+    declared_exact = set(declared)
+    return {label for label in used
+            if label.lower() not in known_folded and label not in declared_exact}
 
 
 def test_every_custom_runs_on_label_is_declared_to_actionlint():
@@ -9077,7 +9083,9 @@ def test_every_custom_runs_on_label_is_declared_to_actionlint():
     RED on the positive control below, which requires the canary's custom label
     to be found. Mutation: a declared glob (`self-hosted-*`) -> RED, because a
     glob would silently accept the typo (`self-hosted-x65`) that this whole
-    check exists to catch.
+    check exists to catch. Mutation: fold the DECLARED names like the presets
+    (`Self-Hosted-X64` against declared `self-hosted-x64`) -> RED on the
+    false-PASS arm below, because actionlint folds only its own presets.
     """
     wf_dir = REPO / ".github" / "workflows"
     workflows = _workflow_files(wf_dir)
@@ -9110,6 +9118,18 @@ def test_every_custom_runs_on_label_is_declared_to_actionlint():
     ) == {"self-hosted-x65"}, (
         "the case fold must not swallow a genuinely custom label (`self-hosted-x65` "
         "is the typo this whole check exists to catch)"
+    )
+    # NON-VACUITY for the DECLARED half's case sensitivity: actionlint matches a
+    # custom name with `path.Match` against the UNFOLDED label, so folding this
+    # side reported `Self-Hosted-X64` clean and let the linter reject it at gate
+    # time (`workflow-lint` reds a REQUIRED leg) — the false-PASS inversion of
+    # the check's purpose. Declared `self-hosted-x64` does NOT admit this case.
+    assert _undeclared_custom_labels(
+        {"self-hosted", "Self-Hosted-X64"}, declared={"self-hosted-x64"}
+    ) == {"Self-Hosted-X64"}, (
+        "a declared label must be matched case-SENSITIVELY: actionlint's own "
+        "`path.Match(k, l)` runs against the unfolded `runs-on:` value, so "
+        "`Self-Hosted-X64` is REJECTED there and must red HERE, not on the gate"
     )
 
     config_path = REPO / ".github" / "actionlint.yaml"
