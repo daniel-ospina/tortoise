@@ -52,8 +52,9 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, NoReturn, TextIO
+from typing import NoReturn, TextIO
 
 ROOT = Path(__file__).resolve().parent.parent
 # The corpus package is imported from the repo root, so the root must be on sys.path when this
