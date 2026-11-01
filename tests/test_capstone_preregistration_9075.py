@@ -499,6 +499,34 @@ def test_a_report_never_claims_a_declaration_the_record_does_not_carry(tmp_path,
     assert exempted == [log.name]            # and the waiver is still visible
 
 
+def test_an_atomic_disclosure_does_not_cover_a_later_in_place_edit(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-8 P1): the add-commit is immutable, so it cannot see an edit.
+
+    A log re-committed with a rewritten number AFTER the bars passed green with
+    `verified (atomic-add DECLARED: …)` — a NEW silent-green path, invisible to every other check
+    (`document_sha256` covers only the registration). The disclosure covers the content that
+    entered WITH the registration, and nothing else.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo, epoch=1_700_000_000)
+    log.write_text("x\nthe number is now 0.100\n")           # an in-place edit, later
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "rewrite the number", epoch=1_700_086_400)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("MODIFIED at" in f for f in failures), failures
+
+
+def test_a_valid_json_non_object_record_is_a_parse_error_not_a_traceback(tmp_path):
+    """`record.get("schema")` on a list/str/int escaped run()/main() as AttributeError (cycle-8 P2)."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / check.PREREG_NAME).write_text("x\n")
+    for body in ("[]", '"hello"', "42"):
+        (bundle / check.MACHINE_RECORD).write_text(body)
+        with pytest.raises(check.CheckError):
+            check.check_machine_record(bundle, {})
+
+
 def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
     """The ATOMIC shape: the registration and the log land in the SAME commit.
 

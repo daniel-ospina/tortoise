@@ -1041,7 +1041,8 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                    atomic_added: list[str] | None = None,
                    atomic_disclosures: dict | None = None,
                    atomic_detail: dict | None = None,
-                   record_unreadable: bool = False) -> list[str]:
+                   record_unreadable: bool = False,
+                   unreadable_atomic: list[str] | None = None) -> list[str]:
     """``[]`` when every log is either after the registration or provably unscored.
 
     ``atomic_disclosures`` is the machine record's ``atomic_add_ordering`` block — the record, NOT
@@ -1113,6 +1114,11 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     prereg_epoch, prereg_sha = prereg_adds[0]
     #: Logs whose add-commit was actually read — the only ones whose atomic state is KNOWN.
     sha_known: set[str] = set()
+    #: Logs with an add-commit that IS the registration's but whose OLDEST add predates it (a
+    #: delete-and-re-add beside the registration). The disclosure's claim is TRUE for these, so the
+    #: anti-rot message "but it is not one" would be false — the predating-add failure already
+    #: reports the real defect (#10531 review cycle 8, P2).
+    atomic_no_matter: set[str] = set()
     # ⛔ EVERY present disclosure is TYPE-CHECKED once, here, before the per-log arms (#10531 review
     # cycle 2, P2). The arms previously validated only the SCORED atomic path, so a disclosure on an
     # atomic-and-unscored log was never checked (`reason: {a: 1}` was accepted), and the field rules
@@ -1136,6 +1142,8 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             continue  # untracked log: it cannot predate a commit that already exists
         log_epoch, log_sha = log_adds[0]
         sha_known.add(log.name)
+        if prereg_sha in {sha for _, sha in log_adds}:
+            atomic_no_matter.add(log.name)
         if log.name in exempt:
             if log_epoch > prereg_epoch:
                 failures.append(
@@ -1251,6 +1259,10 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     # `atomic[log.name]` below raised KeyError straight out of run()/main(),
                     # printing a traceback and NO findings, on exactly the state this flag exists
                     # for. `check_machine_record` owns the diagnosis.
+                    # It is REPORTED (#10531 review cycle 8, P2): the ordering half decided nothing
+                    # here, so `run_order_claim` must not read `verified`.
+                    if unreadable_atomic is not None:
+                        unreadable_atomic.append(log.name)
                     continue
                 failures.append(
                     f"{log.name}: added at {log_epoch} by the SAME commit that added "
@@ -1261,6 +1273,22 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 )
                 continue
             # `log.name` is provably in `atomic` from here on.
+            # ⛔ THE ADD-COMMIT IS IMMUTABLE, WHICH IS WHY IT CANNOT SEE AN EDIT (#10531 review
+            # cycle 8, P1). The pins-exempt arm has always bound this (`_touch_epochs`), and the
+            # atomic arm did not: a log re-committed with a rewritten number AFTER the bars passed
+            # green with `verified (atomic-add DECLARED: …)`, invisible to every other check —
+            # `document_sha256` covers only the registration, nothing pins the log's bytes. That is
+            # a NEW silent-green path, which is the one thing this change may never add. The
+            # disclosure can only cover the content that entered WITH the registration.
+            touches = _touch_epochs(log)
+            if touches and max(touches) > prereg_epoch:
+                failures.append(
+                    f"{log.name}: the pair is atomic, but the log was MODIFIED at {max(touches)}, "
+                    f"after the pre-registration's add-commit {prereg_epoch} — the disclosure can "
+                    "only cover the content that entered with the registration, and an in-place "
+                    "edit can move a number after the thresholds were written"
+                )
+                continue
             # ⛔ The STATE is derived HERE, never read back from the caller's out-param (#10531
             # review P1). Deciding the anti-rot rule from `atomic_added` made the verdict depend on
             # whether a caller happened to pass a list: the same tree and pins gave `[]` via
@@ -1297,7 +1325,8 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         # "but it is not one" would be FALSE, since it is (#10531 review cycle 3, P2). The same
         # applies to a log whose add-commit could not be read AT ALL: its state is UNKNOWN, and a
         # claim about it would be a guess (#10531 review cycle 6, P2).
-        if name in disclosure_failed or name in atomic_seen or name not in sha_known:
+        if (name in disclosure_failed or name in atomic_seen
+                or name not in sha_known or name in atomic_no_matter):
             continue
         failures.append(
             f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY} discloses {name!r} as an atomic add, but it is "
@@ -1322,6 +1351,14 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
         record = json.loads(raw)
     except (json.JSONDecodeError, RecursionError) as exc:
         return [f"{MACHINE_RECORD} is not JSON: {exc}"]
+    if not isinstance(record, dict):
+        # `record.get("schema")` on a list/str/int raised AttributeError straight out of main() with
+        # NO verdict and no exit code (#10531 review cycle 8, P2). A check that cannot read its
+        # subject is exit 2, never a traceback.
+        raise CheckError(
+            f"{MACHINE_RECORD} parses to a {type(record).__name__}, expected a JSON object — it is "
+            "unparseable for this check"
+        )
     if record.get("schema") != PREREG_SCHEMA:
         failures.append(
             f"{MACHINE_RECORD} declares schema {record.get('schema')!r}, expected {PREREG_SCHEMA!r}"
@@ -1709,9 +1746,10 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
             # ONE read: the block that was JUDGED and the block that is PRINTED must be the same
             # value (#10531 review cycle 3, P2) — two reads could differ under a concurrent edit.
             disclosures = _record_atomic_add(directory)
+            unreadable_atomic: list[str] = []
             ordering_findings = check_ordering(
                 prereg, logs, pins, content_exempt, atomic_added, disclosures, atomic_detail,
-                record_unreadable=disclosures is None,
+                record_unreadable=disclosures is None, unreadable_atomic=unreadable_atomic,
             )
             failures += ordering_findings
             report["ordering_exempt"] = sorted(content_exempt)
@@ -1733,6 +1771,11 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
             # pass; it may never dress a failure.
             if ordering_findings:
                 ordering = "FAILED"
+            elif unreadable_atomic:
+                ordering = (
+                    "UNPROVEN (the machine record is unreadable, so the atomic add of "
+                    + ", ".join(sorted(unreadable_atomic)) + " cannot be disclosed)"
+                )
             elif atomic_added:
                 ordering = ("verified (atomic-add DECLARED: "
                             + ", ".join(sorted(atomic_added)) + ")")
