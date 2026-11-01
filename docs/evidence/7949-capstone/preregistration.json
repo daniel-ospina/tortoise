@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:a415b3baa21cbf5c678d73d3c53944a4e6a9ef60de0ff6a8aba5a43e57404548",
+  "document_sha256": "sha256:83fe661186b57205354688a69a34cfbd9f3c22bc365ca464738b1136992304d1",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -109,7 +109,7 @@
     "conditional": [
       {
         "step": "S2.3",
-        "condition": "the S2 map left at least one candidate's kind missing or `unclassified`, so `_collect_classify_items` (tortoise/extractor_v2.py:8078) had an item to hand the classifier; when the map types every candidate the pass has no work and neither classify pass runs",
+        "condition": "the S2 map left at least one candidate's kind missing or `unclassified`, so `_collect_classify_items` (tortoise/extractor_v2.py:8666, `def _collect_classify_items`) had an item to hand the classifier; when the map types every candidate the pass has no work and neither classify pass runs",
         "idle_evidence": "the run's own classify surface reads enabled=true with empty s2/union AND the receipt's error/warning surfaces carry no `classify(S2) failed` / `classify(union) failed` / `classify-later init failed` — the fail-open path leaves the SAME empty counters, so the absence of a failure marker is what separates 'nothing to do' from 'crashed'",
         "evidence_issue": 10215
       }
