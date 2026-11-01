@@ -1018,24 +1018,29 @@ def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
     ``proxy.matching == 0``. The witness can therefore never be armed on a
     missing target, which is why this assertion is the POST-fix one and the
     pre-fix ``>= 2`` ("the aborted statement was re-issued") can no longer
-    hold: there is no first attempt to abort and retry. Do NOT "restore" a
-    write attempt here to make the count non-zero — that would re-open
-    #10119 (an absent id journalling a revision, advancing the EP epoch and
-    stranding a dirty root).
+    hold: there is no first attempt to abort and retry. The ONE statement an
+    absent id still issues is the guard's own read (`RETURN n.is_operator,
+    n.status, coalesce(n.outdated, false)`) — this proxy counts the WRITE
+    needle, which is zero. Do NOT "restore" a write attempt here to make the
+    count non-zero — that would re-open #10119 (an absent id journalling a
+    revision, advancing the EP epoch and stranding a dirty root).
 
     ⚠️ COVERAGE OF THE ARMING DIRECTION IS NOW UNREACHABLE THROUGH THIS DOOR,
     and that is stated rather than papered over. The #8854 P1 property is that
     a state-independent abort (the write-slot arm) must not ARM the witness.
-    The witness only changes an outcome where a write LEGITIMATELY matches zero
-    rows — and after #10119 this door has no such path: an absent target
-    returns before the write, and a present target matches. A PRESENT-target
-    test therefore passes on BOTH trees and proves nothing (measured: with the
-    arming gate mutated to `if keep:` it stays green), so none was added. The
-    gate itself is unchanged, and the direction it CAN show here — a slot abort
-    must not DISARM a graph-abort latch — is pinned by the mixed
-    graph-abort-then-slot-abort test below. A future regression arming the
-    witness would have to be caught through a door that can still issue a
-    zero-row write.
+    A PRESENT target does have ONE legitimate zero-row shape — the refused
+    promote (`update_point(<retracted>, status='live')`, whose guarded `SET`
+    matches nothing, the door's documented exception) — but
+    `_promote_witness` CONSUMES that result by raising its own documented
+    refusal, so it never returns `False` and the witness's verdict is never
+    consulted. A PRESENT-target test therefore passes on BOTH trees and proves
+    nothing (measured: with the arming gate mutated to `if keep:` the suite
+    stays green), so none was added here. The gate itself is unchanged and
+    still pinned at the shared instrument — the same mutation reddens
+    `tests/test_7405_remaining_writes.py::
+    test_a_write_slot_exhaustion_pays_no_graph_presence_probe` and
+    `tests/test_7951_delete_point_outbox.py::
+    test_a_state_independent_refusal_is_never_read_as_a_landed_destroy`.
     """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
