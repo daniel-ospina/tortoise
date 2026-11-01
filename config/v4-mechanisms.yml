@@ -527,15 +527,21 @@ mechanisms:
       SIGN and its UNIT kept, so ``1200``/``1,200``, ``4.20``/``4.2``,
       ``20%``/``20 percent``, ``.5``/``0.5`` and ``800ms``/``800 milliseconds``
       are one value while ``20 minutes``/``20 hours`` and ``20 km``/``20 mi`` are
-      rewrites; (ii) clock forms (a CLOCK-VALID colon token — `HH:MM` with hours
-      0-23, plus the engine's own `clocka0300`/`meridiem-pm` placeholders) and ISO
+      rewrites — and the minus may be spelled ASCII `-`, U+2212 `\u2212`, or a
+      LEADING en/em dash (`-5`/`\u20135`/`\u20145` are one value; an INNER dash is
+      a range, not a sign); (ii) clock forms (a CLOCK-VALID colon token — `HH:MM` with hours
+      0-23, ending the token, plus a zone-prefixed one such as `UTC+03:00`, and
+      the engine's own `clocka0300`/`meridiem-pm` placeholders) and ISO
       dates are OUTSIDE the judged set — a strict containment rule refuses 16 of
       the 101 truthful census spans and every one of the 16 is a normalised FORM,
       catching zero rewrites. ⛔ The exclusion is CLOCK-VALID, not "any colon":
       an any-colon arm put `27:12` — this carve-out's OWN worked example —
       outside the judged set (measured: `27:00` for `27:12` was written with no
       warning), and narrowing it changes the census result not at all (62 judged
-      / 0 refused, re-derived); (iii) a
+      / 0 refused, re-derived). The clockable start is what keeps `27:12`
+      judged (`27` is no hour); a BARE-shape-only arm judged `UTC+03:00`, whose
+      core is the two colon runs joined, and so REFUSED `UTC+3` against
+      `UTC+03:00` — one offset spelled two ways (measured, cycle 10); (iii) a
       value is judged only where both sides bind the SAME anchor sequence, so a
       quote that fragments, drops, reorders or adds a value fails OPEN.
       ⚠️ EVERY tolerance above is measured against OVER-REFUSAL on a truthful
@@ -633,6 +639,27 @@ mechanisms:
       and by the battery's `magnitude prefix vs unit` / `magnitude prefix vs
       scaled` / `magnitude rewritten` / `magnitude number moved` / `magnitude
       number moved 2` / `magnitude sign dropped` rows.
+      ⛔ **OVERRIDES (the recorded decision this row departs from, stated so the
+      next reader does not tidy it away):** `tortoise/value_normalizer.py`'s
+      #2817 ruling that NO magnitude table ships — `k`/`M`/`MM`/`mil`/`milhão`
+      dropped as a class, on the ground that "a second interpretation of the same
+      token is how a third opinion gets invented". This row reads `k` as x1000
+      (`_MAGNITUDE_FACTORS`) IN THIS SEAM ONLY, because #2817 governs the money
+      DERIVATION — a magnitude word must not silently scale an amount — while
+      here `k` is already a unit identity in `_UNIT_EQUIV`, and without the
+      factor the rule refuses `5k QPS` against `5,000 QPS`: a truthful point
+      withheld over a spelling, the false-accusation direction this rule must
+      never take. `value_normalizer`'s money path is untouched and keeps its
+      ruling pinned. Recorded as a comment on #10360 so the departure is
+      findable where the decision lives, and reversible by the owner.
+      (j) A VERSION'S TRAILING ZERO IS FORM, not value — `2.10`/`2.1` and
+      `1.10.0`/`1.1.0` fold, because the same unconditional strip is what makes
+      `4.20`/`4.2` one value, and splitting it by "does this look like a
+      version" would re-open that false refusal on every two-group decimal. For
+      a release number this is a real difference that passes, so it is stated
+      rather than implied; a version's NON-zero groups are still judged
+      (`2.10`/`2.11` refuses). Pinned by
+      `test_a_version_trailing_zero_is_FORM_today_and_that_is_stated`.
       THE RENDER HALF is unchanged and stays pinned where #9775 left it.
       `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered into S1
       (`_granularity_text`), S2/S4 (`_render_master_core_only`,

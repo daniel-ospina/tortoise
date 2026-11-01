@@ -211,6 +211,24 @@ def test_the_one_classifier_is_the_production_value_engine(monkeypatch):
     engine = [v for _a, v in v2._value_bindings("the freeze starts 03:00")]
     assert engine and v2._value_slots("the freeze starts 03:00") == ()
     assert calls["n"] == 4, calls["n"]
+    # ⛔ THE COUNTER ALONE IS NOT ENOUGH (#10513 review cycle 10 P2, measured):
+    # it observes a REPLACEMENT or a second call, so a SUPPLEMENTARY classifier
+    # added BESIDE the engine — the `_REWRITE_QUANTITY_RE` shape that killed the
+    # previous attempt — left the whole file green (62 passed, mutated, measured).
+    # The guard that catches it is DERIVABILITY: every slot the rule returns must
+    # be re-derivable from a binding the engine produced. A parallel classifier's
+    # slot has no binding behind it and this equality reds.
+    for text in ("the TTL is twenty minutes",
+                 "we waited 3 turns for the 5k rollout",
+                 "the freeze starts 03:00",
+                 "my personal best 5K time is 27:12",
+                 "the team prefers intervals 7"):
+        assert v2._value_slots(text) == tuple(
+            (str(a), c)
+            for a, v in v2._value_bindings(text)
+            if not v2._value_form_outside_judged(v)
+            and (c := v2._value_core(v)) is not None
+        ), text
 
 
 def test_a_clock_valid_colon_form_is_excluded_but_a_duration_is_judged():
@@ -241,6 +259,17 @@ def test_a_clock_valid_colon_form_is_excluded_but_a_duration_is_judged():
     result = _write("my personal best 5K time is 27:00",
                     "my personal best 5K time is 27:12")
     assert result["payload"]["points"] == [], result["warnings"]
+    # ⛔ A ZONE-QUALIFIED clock is still a clock (#10513 review cycle 10 P2,
+    # measured): a bare-shape-only arm judged `UTC+03:00`, whose core is the two
+    # colon runs joined (`3/0`), so `UTC+3` against `UTC+03:00` — one offset
+    # spelled two ways — was REFUSED. That is the over-refusal direction.
+    assert v2._value_form_outside_judged("UTC+03:00")
+    assert v2._value_form_outside_judged("UTC-03:00")
+    assert not v2._value_slot_divergence("the offset is UTC+3",
+                                         "the offset is UTC+03:00")
+    # …and the boundary that keeps a duration judged is still there: `27` is no
+    # hour, so `27:12` has NO clockable start.
+    assert not v2._value_form_outside_judged("27:12")
 
 
 def test_a_typographic_minus_is_a_sign_not_decoration():
@@ -251,6 +280,12 @@ def test_a_typographic_minus_is_a_sign_not_decoration():
     still refuse" was true of one spelling of the minus and false of the other.
     ``value_normalizer.py`` already reads U+2212 as a sign; this pins that the
     value rule joins it.
+
+    ⛔ AND THE DASH FAMILY (#10513 review cycle 10 P2), which is the OVER-refusal
+    direction and so the worse one: ``_strip_edges`` removed an en/em dash as
+    decoration, so a quote writing its minus that way read as NO sign and a
+    truthful ``-5`` point was DROPPED, with a warning that misreported the quote
+    as ``5``. A LEADING dash is now part of the numeral in every spelling.
     """
     assert v2._value_slot_divergence("the delta is \u22124 percent",
                                      "the delta is 4 percent")
@@ -259,7 +294,18 @@ def test_a_typographic_minus_is_a_sign_not_decoration():
     # positive control: both spellings of the SAME signed value agree
     assert not v2._value_slot_divergence("the delta is \u22124 percent",
                                          "the delta is -4 percent")
-
+    # the dash family: one minus, three spellings, all equal to each other
+    assert not v2._value_slot_divergence("the temperature was -5 degrees",
+                                         "the temperature was \u20135 degrees")
+    assert not v2._value_slot_divergence("the temperature was -5 degrees",
+                                         "the temperature was \u20145 degrees")
+    # …and a dash does not hide a real sign change
+    assert v2._value_slot_divergence("the temperature was -5 degrees",
+                                     "the temperature was 5 degrees")
+    # the positive control for the OTHER direction: an INNER dash is a range or a
+    # compound, never a sign, so `5–10` is still two numbers and not `5` minus
+    # `10`. Keeping only the LEADING case is what makes this safe.
+    assert v2._value_slots("we ran 5\u201310 km") == (("ran", ("", "5/10", "km")),)
 
 # ── 2. the enforcement, in the write path ───────────────────────────────────
 
@@ -702,3 +748,30 @@ def test_a_leading_currency_symbol_is_FORM_today_and_that_is_stated():
     # the positive control: a symbol does not hide a numeric rewrite
     assert v2._value_slot_divergence("the invoice was $12",
                                      "the invoice was $60")
+
+
+def test_a_version_trailing_zero_is_FORM_today_and_that_is_stated():
+    """The residual the cycle-10 review called out, PINNED so it cannot drift.
+
+    `_value_core` drops a trailing fractional zero UNCONDITIONALLY, because that
+    is what makes `4.20`/`4.2` one value — the false refusal that rejected the
+    first attempt at this issue. The same strip also folds `2.10` into `2.1`,
+    and for a VERSION that is a semantic change, not a form: `2.10` and `2.1`
+    are different releases, and `versions` is a class `STATE_VALUE_CARVE_OUT`
+    names explicitly.
+
+    It stays, and the registry row names it as residual (j) instead: splitting
+    the strip by "does this token look like a version" would re-open the
+    `4.20`/`4.2` false refusal on any two-group decimal, which is the direction
+    this rule must never take. If a future lane tightens it, this test reds and
+    the row has to move with it.
+    """
+    assert v2._value_core("2.10") == ("", "2.1", None)
+    assert not v2._value_slot_divergence("the release is 2.10",
+                                         "the release is 2.1")
+    # the positive control: a version's NON-zero groups are still judged, so this
+    # residual is a trailing-zero tolerance and not a hole in version comparison.
+    assert v2._value_slot_divergence("the release is 2.10",
+                                     "the release is 2.11")
+    assert v2._value_slot_divergence("the SDK version is 2026.10",
+                                     "the SDK version is 2025.10")

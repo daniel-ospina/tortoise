@@ -4069,7 +4069,15 @@ _ISO_DATE_TOKEN = re.compile(r"\d{4}-\d{2}-\d{2}")
 #: headline case was the one case the rule could never see, and a race time
 #: rewritten 27:12 -> 27:00 was written with no warning. Hour 27 is not a clock,
 #: so the shape below judges it while `9:30`/`03:00` stay excluded.
-_CLOCK_FORM = re.compile(r"(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?")
+#: ⛔ And it matches a clock that ENDS the token behind a zone/range prefix
+#: (`UTC+03:00`, `UTC-03:00`): a bare-shape-only arm judged those, and because
+#: `_value_core` reads each colon run separately their core came out as `3/0`,
+#: so `UTC+3` against `UTC+03:00` — one offset spelled two ways — was REFUSED
+#: (measured, #10513 review cycle 10 P2). The `(?<=\D)` boundary is what keeps
+#: `27:12` judged: the only clockable start there is index 0, and `27` is no
+#: hour.
+_CLOCK_FORM = re.compile(
+    r"(?:^|(?<=\D))(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
 
 
 def _value_form_outside_judged(token: str) -> bool:
@@ -4101,7 +4109,7 @@ def _value_form_outside_judged(token: str) -> bool:
     t = str(token or "").lower()
     return (t.startswith("clock") or t.startswith("meridiem-")
             or bool(_ISO_DATE_TOKEN.search(t))
-            or bool(_CLOCK_FORM.fullmatch(t)))
+            or bool(_CLOCK_FORM.search(t)))
 
 
 #: Spelling equivalents of one UNIT — the tolerance is SPELLING, never the
@@ -4172,8 +4180,10 @@ _MAGNITUDE_PREFIXES = frozenset({"k"})
 #: `5,000 QPS` — a truthful point withheld over a spelling, which is the
 #: false-accusation direction this carve-out must never take (#10513 review P1).
 #: It re-admits nothing into `value_normalizer`'s money path, which keeps its
-#: ruling unchanged and pinned. Recorded on #10360 as a departure the owner can
-#: reverse; the gauge is #10513 review cycle 8, P1-3.
+#: ruling unchanged and pinned. RECORDED on #10360 as comment 6563672665 and
+#: mirrored in the registry row's residual (i), so the departure is findable
+#: where the decision lives and reversible by the owner; raised by #10513
+#: review cycles 8 and 10.
 _MAGNITUDE_FACTORS = {"k": 1000}
 
 #: The longest side the #10360 rule will JUDGE, in characters. The quote a point
@@ -4207,12 +4217,16 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     matches = list(_VALUE_DECIMALS.finditer(raw))
     if not matches:
         return None
-    # U+2212 MINUS SIGN is a sign, not decoration (#10513 review P1, measured):
-    # the ASCII-only read made `\u22124` and `4` one value and let `\u221220k`
-    # through where the ASCII `-20k` is refused — the very "dropped sign" row the
-    # registry promises is still judged. `value_normalizer.py` already reads the
+    # U+2212 MINUS SIGN and the dash family are signs, not decoration (#10513
+    # review P1/P2, measured): the ASCII-only read made `\u22124` and `4` one
+    # value and let `\u221220k` through where the ASCII `-20k` is refused, and an
+    # en/em dash a quote writes its minus with was stripped upstream, so `-5`
+    # against `\u20135` DIVERGED and a truthful point was refused. Now that
+    # `_keeps_numeric_edge` keeps a LEADING `Pd`, the dash reaches here and has
+    # to be read as the sign it is. `value_normalizer.py` already reads the
     # typographic minus as a sign, so this is this module JOINING that reading.
-    sign = "-" if raw.lstrip().startswith(("-", "\u2212")) else ""
+    sign = "-" if raw.lstrip().startswith(
+        ("-", "\u2212", "\u2013", "\u2014")) else ""
     out: list[str] = []
     for m in matches:
         run = m.group(0)
@@ -5513,6 +5527,16 @@ def _keeps_numeric_edge(ch: str, leading: bool) -> bool:
     value.
     """
     if unicodedata.category(ch) in ("Sc", "Sm") or _is_percent_like(ch):
+        return True
+    # A LEADING dash in any of its spellings is a MINUS, not decoration (#10513
+    # review cycle 10 P2, measured): `_strip_edges` removed the en/em dash a
+    # quote writes its minus with, so `-5` against `–5` diverged and a TRUTHFUL
+    # point was dropped — the "withholds a durable memory" direction this rule
+    # must never take — with a warning that misreported the quote as `5`. Only
+    # LEADING: an inner dash is a range or a compound (`5–10`, `32-byte`), and a
+    # lone dash token is still stripped as decoration (`_is_numeric_sign_token`
+    # does not accept it), so this cannot turn punctuation into a quantity.
+    if leading and unicodedata.category(ch) == "Pd":
         return True
     return ch in (_NUMERIC_LEAD if leading else _NUMERIC_TRAIL)
 
@@ -8669,7 +8693,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # "refused" (review cycle 5 measured both branches: the edge drops the
         # same way, one misleading warning fewer).
         _refused_here = _norm(content) in refused_value_contents
-        if not _refused_here:
+        if not _refused_here and refused_value_slots:
             # …and the SLOT key (#10513 review P2, measured): `_norm` equality is
             # EXACT, so re-naming the refused ref `the p95 hit 4.0 seconds.` (one
             # trailing period) or `… 4.0 second` re-minted the rewritten value —
