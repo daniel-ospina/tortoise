@@ -31,7 +31,7 @@ narrower claim than "they pass on the pre-fix tree": two of them name
 ``MAX_PAGE``, which does not exist at ``7df48ec7c``, so against that tree they
 ERROR.
 """
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -72,7 +72,7 @@ def _seed(proj, n: int) -> None:
         "event_id: 'e' + toString(i), type: 'PointAdded', "
         "ts: $ts, payload: '{}'})",
         params={"n": int(n),
-                "ts": datetime.now(timezone.utc).isoformat()},
+                "ts": datetime.now(UTC).isoformat()},
     )
 
 

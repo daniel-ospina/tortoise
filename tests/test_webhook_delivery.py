@@ -29,6 +29,8 @@ import pytest
 
 pytest.importorskip("cryptography")  # the at-rest encryption dependency
 
+from datetime import UTC
+
 from tortoise import webhook_delivery as wd
 from tortoise.security import validate_webhook_url
 
@@ -1266,14 +1268,14 @@ def test_more_pending_compares_against_the_page_that_was_read(sdk_factory):
     # LIVE ts, not a fixed stamp: `poll_events` purges rows older than the
     # retention window, and a fixed date would make the seed retention bait
     # (see tests/test_8447_read_after_page_bound.py's `_seed`).
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     proj.g.query(
         "UNWIND range(1, $n) AS i CREATE (:GraphEvent {seq: i, "
         "event_id: 'e' + toString(i), type: 'PointAdded', "
         "ts: $ts, payload: '{}'})",
         params={"n": event_store.MAX_PAGE + 1,
-                "ts": datetime.now(timezone.utc).isoformat()},
+                "ts": datetime.now(UTC).isoformat()},
     )
     wd.create_subscription(proj, url="https://hooks.example.com/cb",
                            types=["PointAdded"])

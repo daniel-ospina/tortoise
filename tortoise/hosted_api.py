@@ -60,14 +60,6 @@ from tortoise import (
 from tortoise import embed_metering as _embed_metering  # #4488 encode measurement
 from tortoise import mcp_auth as _mcp_auth
 from tortoise import monitoring as _monitoring  # #2924: call-time bound read
-# #8447 row #6: the ONE page bound `event_store.read_after` REFUSES outside of.
-# Imported here (module level, not lazily like this file's other event_store
-# reaches) because `Query(..., le=…)` is evaluated once at import: deriving the
-# route's declared maximum from the enforcing seam is what keeps the two from
-# drifting into "the validator accepts 1000, the seam raises" (#1178 — one
-# instrument, not two literals). `event_store` imports stdlib only, so this
-# adds no cycle and no DSN cost.
-from tortoise.event_store import MAX_PAGE as _MAX_EVENT_PAGE
 
 # #10000: the record's turn read (lazy-imported at the call site so every
 # deployment without a record DSN pays nothing)
@@ -115,6 +107,15 @@ from tortoise.env_truthy import (  # #4097: the declared truthy contract
     env_flag,
     is_truthy,
 )
+
+# #8447 row #6: the ONE page bound `event_store.read_after` REFUSES outside of.
+# Imported here (module level, not lazily like this file's other event_store
+# reaches) because `Query(..., le=…)` is evaluated once at import: deriving the
+# route's declared maximum from the enforcing seam is what keeps the two from
+# drifting into "the validator accepts 1000, the seam raises" (#1178 — one
+# instrument, not two literals). `event_store` imports stdlib only, so this
+# adds no cycle and no DSN cost.
+from tortoise.event_store import MAX_PAGE as _MAX_EVENT_PAGE
 from tortoise.file_indexer import (  # #4005 shared identity primitives
     derive_session_source_url,
     provenance_basename,
