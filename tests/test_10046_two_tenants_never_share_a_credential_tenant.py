@@ -25,12 +25,16 @@ HALF, and it differs per carrier. A module-level cache and a first-membership
 default are visible from ANY read, so the alternation alone catches them. A
 ``contextvars.ContextVar`` is visible only WITHIN ONE ``contextvars.Context``,
 and ``asyncio.run`` — which the session lane needs, ``_session_user_org`` is a
-coroutine — creates a FRESH context per call: "runs the awaitable … The loop
-is closed at the end" (`https://docs.python.org/3/library/asyncio-runner.html`;
-sharing one context across top-level functions is what ``asyncio.Runner``
-exists FOR). So a tenant cached in a ContextVar and never reset is INVISIBLE to
-a test that gives each resolution its own ``asyncio.run``, and that — not the
-alternation — is why a second shape is pinned per lane:
+coroutine — builds a NEW ``asyncio.Runner`` per call, whose ``_lazy_init`` takes
+``contextvars.copy_context()`` and hands that one context to the task it
+creates (``Lib/asyncio/runners.py``; the docs say the loop "is closed at the
+end", and ``Runner`` exists so that "several top-level async functions should
+be called in the same event loop and ``contextvars.Context``" —
+`https://docs.python.org/3/library/asyncio-runner.html`). A ``set()`` made
+inside one call therefore dies with its runner. So a tenant cached in a
+ContextVar and never reset is INVISIBLE to a test that gives each resolution
+its own ``asyncio.run``, and that — not the alternation — is why a second shape
+is pinned per lane:
 
 * the SESSION lane resolves all three reads in ONE ``asyncio.run``
   (``test_two_credentials_resolved_in_one_event_loop_never_share_a_tenant``),
@@ -168,11 +172,11 @@ def _session_orgs_in_one_run(monkeypatch, cp, pins) -> list[dict]:
     """Resolve SEVERAL session credentials inside ONE ``asyncio.run``.
 
     The whole point of this helper over ``_session_org``: ``asyncio.run`` gives
-    each call its own ``contextvars.Context``, so a ContextVar a resolver leaves
-    set is discarded before the next call. One run means ONE context, so a
-    tenant cached there without its ``reset()`` is still set when the next
-    credential resolves — the leak named in this module's docstring, made
-    observable.
+    each call its own context (a fresh ``contextvars.copy_context()`` whose task
+    dies with the runner), so a ContextVar a resolver leaves set is discarded
+    before the next call. One run means ONE context, so a tenant cached there
+    without its ``reset()`` is still set when the next credential resolves — the
+    leak named in this module's docstring, made observable.
     """
     from tortoise import hosted_api as ha
 
