@@ -5011,3 +5011,144 @@ def test_embedded_start_refuses_a_db_directory_that_is_gone(tmp_path, capfd):
     assert "FATAL CONFIG FILE ERROR" not in captured, (
         "redis-server was spawned into a missing db dir — the unattributable "
         "FATAL this guard exists to prevent")
+
+
+# ── the BOOT WINDOW: a REFUSED connect while the server is starting ────────
+#
+# Measured red (run 41269839713, job 124746933422, `test-slow (a)`, PR #10467):
+#
+#     redis.exceptions.ConnectionError: Error 111 connecting to
+#     /tmp/tt_bb_3f48q/tmpp7l87lx_/redis.socket. Connection refused.
+#
+# raised from `client.py:471 -> _wait_for_server_start -> ping -> _connect` on a
+# test file that PR does not touch, after 676 tests had passed in the same leg,
+# on a host whose own orphan gate counted 476 redislite servers from 2 OTHER
+# concurrent suites. `_wait_for_server_start` tolerates exactly one
+# not-ready-yet arm (`BusyLoadingError`), so the first REFUSED connect — bind()
+# done, listen() not yet, or a momentarily full listen backlog — killed the
+# construction outright instead of being waited out inside the budget the wait
+# loop exists to spend.
+#
+# The pins below hold BOTH halves: a refusal inside the boot window is waited
+# out, and every other outcome still fails exactly as it did before.
+
+import redis.exceptions as _rex  # noqa: E402
+import redislite.client as _redislite_client  # noqa: E402
+
+from tortoise.embedded_lifecycle import (  # noqa: E402
+    _ORIGINAL_WAIT_FOR_SERVER_START,
+)
+
+
+class _FakeBootClient:
+    """The two attributes `_wait_for_server_start` actually reads."""
+
+    def __init__(self, refusals: int, start_timeout: float):
+        self.start_timeout = start_timeout
+        self.refusals = refusals
+        self.pings = 0
+
+    def ping(self):
+        self.pings += 1
+        if self.refusals < 0 or self.pings <= self.refusals:
+            raise _rex.ConnectionError(
+                "Error 111 connecting to /tmp/x/redis.socket. "
+                "Connection refused.")
+        return True
+
+
+def _refused_connect_error() -> _rex.ConnectionError:
+    return _rex.ConnectionError(
+        "Error 111 connecting to /tmp/x/redis.socket. Connection refused.")
+
+
+def test_a_refused_connect_during_the_boot_window_is_waited_out():
+    """The unpatched wait DIES on the first refusal; the guard waits it out.
+
+    Both halves run against the SAME fake client shape (two refusals, then the
+    server answers), so the first assertion is the pre-fix tree's behaviour — a
+    non-vacuity proof, not a restatement of the patch.
+    """
+    assert _ORIGINAL_WAIT_FOR_SERVER_START is not None, (
+        "the guard installer never captured the pre-patch seam, so the "
+        "non-vacuity half below would be the patch measured against itself")
+
+    pre_fix = _FakeBootClient(refusals=2, start_timeout=2)
+    with pytest.raises(_rex.ConnectionError) as excinfo:
+        _ORIGINAL_WAIT_FOR_SERVER_START(pre_fix)
+    assert "Connection refused" in str(excinfo.value), (
+        "the pre-fix seam must die on the refused connect this guard is about")
+    assert pre_fix.pings == 1, (
+        "the pre-fix wait retried a refusal — then there is no defect to fix")
+
+    patched = _FakeBootClient(refusals=2, start_timeout=2)
+    _redislite_client.RedisMixin._wait_for_server_start(patched)
+    assert patched.pings == 3, (
+        "the guard must re-enter the wait until the server answers")
+
+
+def test_the_boot_window_guard_still_fails_loudly_once_the_budget_is_spent():
+    """Fail CLOSED: a server that never answers still raises, bounded.
+
+    The ceiling is the server's OWN `start_timeout` (the guard adds no knob),
+    and the error the caller sees is the raw connection error — not a swallow,
+    not a re-wrap.
+    """
+    stuck = _FakeBootClient(refusals=-1, start_timeout=1)
+    started = time.monotonic()
+    with pytest.raises(_rex.ConnectionError) as excinfo:
+        _redislite_client.RedisMixin._wait_for_server_start(stuck)
+    elapsed = time.monotonic() - started
+
+    assert "Connection refused" in str(excinfo.value), (
+        "the exhausted budget must re-raise the refused connect unchanged")
+    assert elapsed >= 0.9, (
+        f"the guard gave up after {elapsed:.2f}s, before the declared "
+        f"start_timeout budget")
+    assert elapsed < 5.0, (
+        f"the guard kept retrying for {elapsed:.2f}s — the bound is the "
+        f"server's own start_timeout, not an unbounded wait")
+
+
+def test_a_missing_socket_file_still_fails_immediately():
+    """ENOENT is NOT the boot window — it must not be waited out (#3653/#4961).
+
+    A missing socket file means the socket is GONE, which no amount of waiting
+    repairs; slowing it down would also blunt the loud signature #4879's
+    docstring relies on.
+    """
+
+    class _GoneSocketClient(_FakeBootClient):
+        def ping(self):
+            self.pings += 1
+            raise _rex.ConnectionError(
+                "Error 2 connecting to /tmp/x/redis.socket. "
+                "No such file or directory.")
+
+    gone = _GoneSocketClient(refusals=-1, start_timeout=5)
+    started = time.monotonic()
+    with pytest.raises(_rex.ConnectionError) as excinfo:
+        _redislite_client.RedisMixin._wait_for_server_start(gone)
+    elapsed = time.monotonic() - started
+
+    assert "No such file or directory" in str(excinfo.value)
+    assert gone.pings == 1, (
+        "a missing socket file was retried — the guard is catching more than "
+        "a refused connect")
+    assert elapsed < 1.0, (
+        f"a missing socket file waited {elapsed:.2f}s — ENOENT is not the "
+        f"boot window")
+
+
+def test_the_boot_window_guard_leaves_the_busy_loading_verdict_alone():
+    """The other not-ready-yet arm is untouched: redislite's own verdict.
+
+    A server that answers -LOADING for the whole budget is redislite's
+    `RedisLiteServerStartError`; the guard must not convert that into a
+    connection error, nor retry it beyond the original wait.
+    """
+    busy = _FakeBootClient(refusals=-1, start_timeout=1)
+    busy.ping = lambda: (_ for _ in ()).throw(
+        _rex.BusyLoadingError("LOADING Redis is loading the dataset"))
+    with pytest.raises(_redislite_client.RedisLiteServerStartError):
+        _redislite_client.RedisMixin._wait_for_server_start(busy)

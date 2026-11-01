@@ -3317,11 +3317,122 @@ def _install_dead_socket_guard() -> None:
     RedisMixin._tortoise_dead_socket_guard = True
 
 
+# ── the BOOT WINDOW: a refused connect is "not up yet", not a fatal start ──
+#
+# `_wait_for_server_start` (client.py:282-303) exists precisely to WAIT for a
+# just-spawned server, and it loops for `start_timeout` x 0.1 s — but it
+# tolerates exactly ONE arm of "not ready yet": `redis.BusyLoadingError`,
+# the reply a server that is loading its RDB gives AFTER it is accepting
+# connections. A connect that is REFUSED — the server has bound its unix
+# socket but is not listening yet (bind()/listen() are separate syscalls and
+# the file exists at bind), or its listen backlog is momentarily full — is a
+# DIFFERENT "not ready yet", and it propagates out of `ping()` on the FIRST
+# attempt, so the whole construction dies instantly.
+#
+# MEASURED, and why this is not theoretical: `test-slow (a)` on PR #10467
+# (run 41269839713, job 124746933422, 2026-11-01) redded at
+# `tests/test_mcp_http.py::TestContextVarNoLeak` setup with
+#     redis.exceptions.ConnectionError: Error 111 connecting to
+#     /tmp/tt_bb_3f48q/tmpp7l87lx_/redis.socket. Connection refused.
+# raised from `client.py:471 -> _wait_for_server_start -> ping -> _connect`,
+# AFTER 676 tests had passed in the same leg. The file is untouched by that
+# PR and passed 123/123 locally on the same tree; the leg's own orphan gate
+# recorded the host carrying 476 redislite servers from 2 OTHER concurrent
+# suites (`other_suites=2`). A loaded host is exactly when bind->listen (and
+# backlog) stops being instantaneous.
+#
+# WHAT THIS PATCH DOES, and its two limits: it re-runs the ORIGINAL wait while
+# the failure is a REFUSED connect and the total wall time is still inside the
+# server's OWN declared `start_timeout` budget, then re-raises the last
+# connection error unchanged. So (a) it can never turn a real failure into a
+# pass — a dead server, a missing socket file (ENOENT, the #3653/#4961
+# signature; "Connection refused" is not in that message) and an exhausted
+# budget all raise exactly what they raise today, and (b) it adds no new knob
+# and no new bound: the ceiling is redislite's own `start_timeout`.
+
+#: Bounded pause between refused-connect attempts; the same 0.1 s redislite's
+#: own wait loop sleeps between pings.
+_REFUSED_CONNECT_RETRY_S = 0.1
+
+#: Captured ONLY so the guard's non-vacuity can be proved against the
+#: unpatched seam (a test constructs a client whose first ping is refused and
+#: asserts THIS raises while the patched one survives).
+_ORIGINAL_WAIT_FOR_SERVER_START = None
+
+
+def _is_refused_connect(exc: BaseException) -> bool:
+    """True only for a REFUSED connect — socket present, nothing listening.
+
+    Deliberately narrow. `ECONNREFUSED` is read from `errno` when redis-py
+    preserves it, and otherwise from the message redis-py actually builds
+    (`"Error 111 connecting to <path>. Connection refused."` — the C strerror
+    text, stable on Linux and macOS). A missing socket file (ENOENT) and every
+    other connection failure answer False, so they keep failing immediately
+    and unslowed. Never raises.
+    """
+    if getattr(exc, "errno", None) == errno.ECONNREFUSED:
+        return True
+    try:
+        return "Connection refused" in str(exc)
+    except Exception:  # a `__str__` that blows up is not a refusal
+        return False
+
+
+def _install_boot_window_guard() -> None:
+    """Tolerate a REFUSED connect DURING the boot wait, within redislite's
+    own `start_timeout` budget (once).
+
+    Wraps `RedisMixin._wait_for_server_start` (client.py:282-303). Every
+    non-refused outcome — success, `BusyLoadingError` exhaustion, ENOENT, any
+    other transport error — is delegated to the ORIGINAL wait unchanged, so
+    this patch cannot make a start look healthier than it is. Idempotent, and
+    never raises at install time: a patch that broke construction would be
+    worse than the flake it removes.
+    """
+    global _ORIGINAL_WAIT_FOR_SERVER_START
+    try:
+        from redislite.client import RedisMixin
+    except Exception:  # redislite absent — nothing to patch
+        return
+    if getattr(RedisMixin, "_tortoise_boot_window_guard", False):
+        return
+    try:
+        from redis.exceptions import ConnectionError as RedisConnectionError
+    except Exception:  # pragma: no cover — redis is redislite's own dep
+        return
+    original = RedisMixin._wait_for_server_start
+    _ORIGINAL_WAIT_FOR_SERVER_START = original
+
+    def _wait_for_server_start(self, *args, **kwargs):
+        # The budget is measured from the FIRST attempt, not per attempt, so
+        # the ceiling stays the server's declared start_timeout even if the
+        # original wait returns instantly on every refusal.
+        try:
+            budget = float(getattr(self, "start_timeout", 10) or 10)
+        except (TypeError, ValueError):  # pragma: no cover — a broken override
+            budget = 10.0
+        deadline = time.monotonic() + budget
+        while True:
+            try:
+                return original(self, *args, **kwargs)
+            except RedisConnectionError as exc:
+                # `raise` (never a re-wrapped error) keeps the caller's
+                # signature: the #4879 docstring cites the raw
+                # "ConnectionError: Error 2 ... No such file or directory"
+                # that this must keep producing.
+                if not _is_refused_connect(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(_REFUSED_CONNECT_RETRY_S)
+
+    RedisMixin._wait_for_server_start = _wait_for_server_start
+    RedisMixin._tortoise_boot_window_guard = True
+
+
 _REDISLITE_GUARDS_INSTALLED = False
 
 
 def install_redislite_guards() -> None:
-    """Install all five redislite patches, once (#5386).
+    """Install all six redislite patches, once (#5386).
 
     Order is NOT arbitrary: `_install_construct_lock_guard` and
     `_install_owner_record_patch` both wrap `RedisMixin.__init__`, so the last
@@ -3350,6 +3461,7 @@ def install_redislite_guards() -> None:
     _install_owner_record_patch()
     _install_dead_socket_guard()
     _install_missing_dbdir_guard()
+    _install_boot_window_guard()
 
 
 class _RedisliteGuardInstaller:
