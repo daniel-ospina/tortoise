@@ -1403,8 +1403,13 @@ def _document_has_deviations(directory: Path) -> bool:
     entry = next((i for i, ln in enumerate(body) if ln.startswith("### D")), None)
     if entry is None:
         return False
-    # at least one non-blank, non-heading line after the entry marker
-    return any(ln.strip() and not ln.startswith("#") for ln in body[entry + 1:])
+    # ⛔ The body is the ENTRY'S OWN section, ending at the next heading. Scanning to
+    # EOF would let a bare `### D1` placed above unrelated prose pass — measured at the
+    # round-7 review, that shape returned True, so the "add one line" exit was still
+    # open one heading down from where it had just been closed.
+    end = next((j for j in range(entry + 1, len(body)) if body[j].startswith("#")),
+               len(body))
+    return any(ln.strip() for ln in body[entry + 1:end])
 
 
 def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
@@ -1440,16 +1445,22 @@ def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
         return []
 
     failures: list[str] = []
-    declared = str(record.get(STEPS_PINNED_AFTER) or "").strip()
-    if declared and record.get("written_before_any_scored_run"):
+    # ⛔ `steps_pinned_after_scored_log` is RETIRED (#10215). Round 5 REQUIRED it, which
+    # was wrong in both directions; this branch then began REFUSING it, on the premise
+    # that it contradicts `written_before_any_scored_run`. It does not — that field
+    # describes the record's ORIGINAL freeze, so naming the log the pin postdates is the
+    # honest pairing, and the repair this branch prescribed ("record the deviation") could
+    # never clear it because the return preceded the document read. The gate dates the
+    # block itself now, so the key is dead weight: its presence is reported as exactly
+    # that — a retired key to delete — and nothing else.
+    if record.get(STEPS_PINNED_AFTER) not in (None, ""):
         failures.append(
-            f"{MACHINE_RECORD} declares {STEPS_PINNED_AFTER}={declared!r} AND "
-            "written_before_any_scored_run=true — those cannot both hold: the step set is "
-            "the acceptance rule V5 applies, so a `steps` block authored after a scored log "
-            "is a PROTOCOL DEVIATION (§8), not a pre-registration edit. Record the deviation "
-            "in the argument's `## Deviations` section and drop whichever claim is false"
+            f"{MACHINE_RECORD} carries {STEPS_PINNED_AFTER}, a RETIRED field (#10215): it was "
+            "the earlier fix's self-declaration, and no gate reads it — the step rule dates the "
+            "record's CURRENT `steps` block from history instead and takes the deviation from "
+            "the argument's `## Deviations` section. Delete the field; nothing needs it"
         )
-        return failures          # the contradiction is the finding; order adds nothing
+        return failures
 
     if history_unavailable():
         return failures          # UNPROVABLE — never demand an attestation instead

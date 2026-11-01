@@ -2713,20 +2713,25 @@ DEV_DOC_WITH = ("# Pre-registration\n\n## Deviations\n\n"
                 "- **Reason**: the old rule was unsatisfiable.\n")
 
 
-def _dev_repo(tmp_path, monkeypatch, *, steps_first: bool, doc: str = DEV_DOC_WITHOUT):
+def _dev_repo(tmp_path, monkeypatch, *, steps_first: bool, doc: str = DEV_DOC_WITHOUT,
+              already_pinned: bool = False, null_first: bool = False):
     """A throwaway repo holding a record, a scored log, and the argument."""
     repo = _repo(tmp_path, monkeypatch)
     bundle = repo / "docs" / "evidence" / "7949-capstone"
     bundle.mkdir(parents=True)
 
-    def write_record(*, with_steps: bool) -> None:
+    def write_record(*, with_steps: bool, null_steps: bool = False,
+                     unconditional: list[str] | None = None) -> None:
         record = {"schema": check.PREREG_SCHEMA,
                   "written_before_any_scored_run": True,
                   "written_before_any_scored_run_basis": f"no SCORED run; {check.UNSCORED}",
                   "document": "PRE-REGISTRATION.md"}
-        if with_steps:
-            record["steps"] = {"unconditional": ["S0"],
-                               "conditional": [{"step": "S2.3", "condition": "c"}]}
+        if null_steps:
+            record["steps"] = None
+        elif with_steps:
+            record["steps"] = {
+                "unconditional": unconditional or ["S0"],
+                "conditional": [{"step": "S2.3", "condition": "c"}]}
         (bundle / check.MACHINE_RECORD).write_text(json.dumps(record, indent=2) + "\n")
 
     def commit(paths, message: str, epoch: int) -> None:
@@ -2739,7 +2744,24 @@ def _dev_repo(tmp_path, monkeypatch, *, steps_first: bool, doc: str = DEV_DOC_WI
     log_path = bundle / "capstone-measured-e0fc940b.log"
     log_path.write_text("# generated: 2026-10-23T23:16:55Z\n# result: COMPLETED\n")
 
-    if steps_first:
+    if already_pinned:
+        # The block was pinned BEFORE the run and EDITED after it: a key-presence
+        # test dates this to the first commit and stays silent, which is the shape
+        # round 6 filed and round 7 found untested.
+        write_record(with_steps=True)
+        commit([bundle / check.PREREG_NAME, record_path], "freeze the step set", 1_700_000_000)
+        commit([log_path], "the scored measurement", 1_700_000_100)
+        write_record(with_steps=True, unconditional=["S0", "S1"])
+        commit([record_path], "widen the rule after the number", 1_700_000_200)
+    elif null_first:
+        # `"steps": null` in the definitionally pre-scored commit, filled in later:
+        # `"steps" in record` is True at commit 1, so a key test stays green forever.
+        write_record(with_steps=False, null_steps=True)
+        commit([bundle / check.PREREG_NAME, record_path], "freeze the record", 1_700_000_000)
+        commit([log_path], "the scored measurement", 1_700_000_100)
+        write_record(with_steps=True)
+        commit([record_path], "fill the step set after the number", 1_700_000_200)
+    elif steps_first:
         write_record(with_steps=True)
         commit([bundle / check.PREREG_NAME, record_path], "freeze the step set", 1_700_000_000)
         commit([log_path], "the scored measurement", 1_700_000_100)
@@ -2780,24 +2802,37 @@ def test_a_bare_deviations_HEADING_does_not_clear_the_finding(tmp_path, monkeypa
     assert failures, "an empty Deviations section must not satisfy §8"
 
 
-def test_an_EDITED_pin_after_the_number_moves_the_epoch(tmp_path, monkeypatch):
-    """The second false negative a key-presence test has: the block EXISTED first and
-    was EDITED after the scored log, so a key test dates it to the first commit."""
-    bundle = _dev_repo(tmp_path, monkeypatch, steps_first=False)
-    repo = check.REPO_ROOT
-    record_path = bundle / check.MACHINE_RECORD
-    record = json.loads(record_path.read_text())
-    record["steps"]["unconditional"] = ["S0", "S1"]      # the rule changed, post-number
-    record_path.write_text(json.dumps(record, indent=2) + "\n")
-    _git(repo, "add", str(record_path.relative_to(repo)))
-    _git(repo, "commit", "-q", "-m", "widen the rule after the number", epoch=1_700_000_300)
+def test_an_EDITED_pin_reports_the_EDIT_epoch_not_the_pin_epoch(tmp_path, monkeypatch):
+    """The shape round 6 filed and round 7 found untested.
+
+    The block was pinned BEFORE the run and EDITED after it. A key-presence test
+    (`"steps" in record`) dates it to the first commit and stays green; the content
+    compare must return the EDIT's epoch, so the failure must quote the gap to the
+    scored-log epoch (100s), not to the original pin (200s).
+    """
+    bundle = _dev_repo(tmp_path, monkeypatch, steps_first=True, already_pinned=True)
     failures = check.check_steps_block_is_pre_scored(bundle)
-    assert failures, "the operative rule's own commit must be the one dated"
+    assert failures, "an edited rule after the number must not pass silently"
     assert "were added" in failures[0], failures
+    assert "100s AFTER" in failures[0], failures
 
 
-def test_a_record_asserting_BOTH_a_pre_scored_freeze_and_a_post_scored_pin_reds(tmp_path):
-    """The contradiction needs no history, so it is checked first and always."""
+def test_a_null_steps_key_filled_in_after_the_number_reds(tmp_path, monkeypatch):
+    """The other key-presence false negative: the KEY is present from the start."""
+    bundle = _dev_repo(tmp_path, monkeypatch, steps_first=False, null_first=True)
+    failures = check.check_steps_block_is_pre_scored(bundle)
+    assert failures and "were added" in failures[0], failures
+
+
+def test_the_RETIRED_declaration_field_is_reported_as_retired(tmp_path):
+    """`steps_pinned_after_scored_log` is dead weight now, and the message says so.
+
+    Round 5 required the field; this branch then refused it on the false premise
+    that it contradicts `written_before_any_scored_run` (it does not — that field
+    describes the record's ORIGINAL freeze, so naming the log the pin postdates is
+    the honest pairing). The message must name the retirement, not accuse the
+    record of an incompatibility that does not exist.
+    """
     record = {"schema": check.PREREG_SCHEMA,
               "written_before_any_scored_run": True,
               "written_before_any_scored_run_basis": f"no SCORED run; {check.UNSCORED}",
@@ -2806,7 +2841,8 @@ def test_a_record_asserting_BOTH_a_pre_scored_freeze_and_a_post_scored_pin_reds(
     (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(record))
     (tmp_path / "capstone-measured-e0fc940b.log").write_text("# result: COMPLETED\n")
     failures = check.check_steps_block_is_pre_scored(tmp_path)
-    assert failures and "cannot both hold" in failures[0], failures
+    assert failures and "RETIRED" in failures[0], failures
+    assert "Delete the field" in failures[0], failures
 
 
 def test_no_steps_block_means_no_deviation(tmp_path):
@@ -2834,6 +2870,15 @@ def test_the_deviation_section_is_detected_from_a_REAL_ENTRY_not_a_mention():
         (d / check.PREREG_NAME).write_text(
             "## Deviations\n\n### D1 — 2026-11-01\n\n- **Original rule**: x\n")
         assert check._document_has_deviations(d) is True
+        # ⛔ round 7: the body scan ran to EOF, so a bare `### D1` above UNRELATED
+        # prose passed. Both shapes below returned True before the fix.
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1\n\n## 9. Next\n\nunrelated prose\n")
+        assert check._document_has_deviations(d) is False, (
+            "prose in a LATER section is not this entry's body")
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1\n\n# Pre-registration\n\nlots of unrelated prose\n")
+        assert check._document_has_deviations(d) is False
 
 
 def test_the_shipped_bundle_satisfies_the_rule_it_is_judged_by():
