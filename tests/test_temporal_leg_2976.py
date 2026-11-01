@@ -522,6 +522,22 @@ def test_empty_reason_taxonomy_is_exhaustive():
             budget=budget) == expected
 
 
+def test_empty_reason_window_and_weight_precedence():
+    """#10538 (review cycle 2): a windowed, anchor-less miss must NOT launder
+    itself as ``no_anchors``, and a weight-disabled arm must NOT launder itself
+    as a window miss — the ON/OFF reconstruction surface reads this string."""
+    assert temporal_leg_empty_reason(
+        dated=5, anchors=0, weight=1.0, budget=2,
+        date_window=True) == "no_window_candidates"
+    # weight-0 wins over the window branch (the arm ran and dropped its picks)
+    assert temporal_leg_empty_reason(
+        dated=5, anchors=0, weight=0.0, budget=2,
+        date_window=True) == "weight_disabled"
+    # no window supplied → the pre-#10538 reason is unchanged
+    assert temporal_leg_empty_reason(
+        dated=5, anchors=0, weight=1.0, budget=2) == "no_anchors"
+
+
 def test_effective_promotion_budget_is_clamped():
     # window 12: at most a third of the window. This asserts the PURE rule;
     # the caller's telemetry (``temporal_leg_stats``) is NOT covered here —

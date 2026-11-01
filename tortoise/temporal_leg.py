@@ -170,24 +170,44 @@ def _in_date_window(value: object, date_window: tuple[str, str]) -> bool:
     return lo <= day <= hi
 
 
-def _session_clustered(candidates: list[dict], head: int, limit: int) -> bool:
+def _session_clustered(candidates: list[dict], head: int, limit: int,
+                       window: int = 0) -> bool:
     """#10538: does ONE session own half or more of the visible slots?
 
     This is the defect's OWN condition, not a second gate: the issue defines
     the failure as retrieval that "clusters on the single most-similar session
     and starves the others". Without it, a window-targeted spread is
-    UNTARGETED — after ``_apply_time_window`` every remaining hit is in-window,
-    so the window selects the whole pool and the pick can displace a correct
-    rank-(k-1) gold on a question that was never clustered. That is the shape
-    #2976 measured at -3.3 pts (see the module docstring), so the spread must
-    fire only where the evidence really is starved.
+    UNTARGETED — and the pick can displace a correct rank-(k-1) gold on a
+    question that was never starved. That is the shape #2976 measured at -3.3
+    pts (see the module docstring), so the spread must fire only where the
+    evidence really is starved.
+
+    ⚠️ HONEST SCOPE (review cycle 2, #10549): the window does NOT do the
+    targeting work, and could not — the wired caller derives the very bounds
+    ``_apply_time_window`` already filtered on, so every surviving hit is
+    in-window and the window keeps 100% of the promotable set. THIS clustering
+    condition is the sole targeting signal; ``date_window`` only scopes which
+    sessions are eligible when the caller passes a span the filter has not
+    already applied. Stated plainly so the next reader does not credit the
+    window with a selection it cannot perform.
 
     The visible prefix is ``head`` (the reader-visible slice the caller
-    excludes from promotion); ``head == 0`` is the unguarded test mode, where
-    the first ``limit`` candidates stand in for it.
+    excludes from promotion). ``head == 0`` is the unguarded test mode AND the
+    ``placement="head"`` counterfactual, where ``window`` (the real reader
+    window the caller holds) stands in for it — never ``limit``, which is the
+    promotion BUDGET: on a 2-slot sample ``max(counts) * 2 >= len(visible)``
+    is a tautology, so a budget-sized sample made this guard inert and let the
+    four-distinct-session pool promote (review cycle 2, #10549).
     """
-    visible = candidates[:head] if head > 0 else candidates[:max(limit, 1)]
-    if len(visible) < 2:
+    if head > 0:
+        visible = candidates[:head]
+    elif window > 0:
+        visible = candidates[:window]
+    else:
+        visible = candidates[:max(limit, 1)]
+    # A sample below three slots cannot distinguish clustered from spread:
+    # with two, `max >= 1` makes the test vacuously true.
+    if len(visible) < 3:
         return False
     counts: dict[str, int] = {}
     for c in visible:
@@ -204,6 +224,7 @@ def temporal_leg_order(
     bucket_cap: int = DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
     head: int = 0,
     date_window: tuple[str, str] | None = None,
+    window: int = 0,
 ) -> list[str]:
     """Rank a temporal leg over already-ranked candidates → list of ids.
 
@@ -380,7 +401,7 @@ no candidate is dated, which the caller treats as "leg inert".
     # condition the window selects the whole pool and the pick can displace a
     # correct rank-(k-1) gold on a question that was never starved.
     if not relevant:
-        if date_window and _session_clustered(candidates, head, limit):
+        if date_window and _session_clustered(candidates, head, limit, window):
             relevant = {c["id"] for c in promotable
                         if _in_date_window(c.get("session_date"),
                                            date_window)}
@@ -455,12 +476,15 @@ def temporal_leg_empty_reason(*, dated: int, anchors: int, weight: float,
         return "budget_disabled"
     if dated <= 0:
         return "no_dated_candidates"
+    # ``weight_disabled`` is checked BEFORE the window/anchor branches: a
+    # windowed question on a weight-0 arm must not report a window miss
+    # (review cycle 2, #10549).
+    if weight <= 0:
+        return "weight_disabled"
     if anchors <= 0 and date_window:
         return "no_window_candidates"
     if anchors <= 0:
         return "no_anchors"
-    if weight <= 0:
-        return "weight_disabled"
     return "no_promotable_anchor_match"
 
 
@@ -516,7 +540,7 @@ def temporal_leg_fusion_order(
     head_excl = 0 if placement == "head" else ceiling
     picks = temporal_leg_order(
         candidates, anchors=anchors, limit=limit, bucket_cap=bucket_cap,
-        head=head_excl, date_window=date_window)
+        head=head_excl, date_window=date_window, window=window)
     if not picks or weight <= 0:
         return order_ids, []
     if placement == "head":

@@ -1981,11 +1981,19 @@ def retrieve_for_question(
         _tl_limit = effective_promotion_budget(effective_top_k, _tl_limit)
         # #10538: a question that names a DATE RANGE instead of comparison
         # anchors targets the pool by that range. Resolve the SAME inclusive
-        # ISO bounds the filter above resolved (one arithmetic, one
-        # resolver), then hand them to the leg so the spread runs inside the
-        # question's own window rather than not at all. ``ordering`` has no
-        # computable bound (`facet_window_bounds` returns ``None``) → ``None``
-        # → behaviour byte-identical to the pre-#10538 leg.
+        # ISO bounds the filter above resolved (one arithmetic, one resolver),
+        # and hand them to the leg, which then promotes on session clustering
+        # inside the range.
+        #
+        # ⚠️ HONEST NOTE (review cycle 2): because these bounds are the ones
+        # ``_apply_time_window`` already filtered on, every surviving hit is
+        # in-window, so this window does NOT select a subset here — the
+        # clustering condition inside ``temporal_leg_order`` is the sole
+        # targeting signal on the wired path. The window still matters for the
+        # ``tr_window_fallback`` pool (unfiltered because the filter emptied
+        # it) and for any caller passing a span the filter has not applied.
+        # ``ordering`` has no computable bound (`facet_window_bounds` returns
+        # ``None``) → ``None`` → byte-identical to the pre-#10538 leg.
         _tl_date_window = None
         if tr_constraint.kind in ("interval", "recency"):
             _tl_date_window = facet_window_bounds(

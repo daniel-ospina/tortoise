@@ -18,7 +18,7 @@ runs inside it. Without a window the leg stays inert exactly as before.
 
 from __future__ import annotations
 
-from tortoise.temporal_leg import temporal_leg_order
+from tortoise.temporal_leg import temporal_leg_fusion_order, temporal_leg_order
 
 #: Session A is the semantically nearest one and supplies SIX consecutive top
 #: ranks; sessions B and C hold the rest of the evidence further down. This is
@@ -119,6 +119,64 @@ def test_the_producer_slash_date_shape_compares_correctly():
     assert "slash" in order, (
         "a slash-shaped session date must be resolved to its calendar day and "
         f"proven in-window, got picks {order}")
+
+
+def test_a_two_slot_sample_cannot_claim_clustering():
+    """Review cycle 2 (#10549): with a 2-slot visible sample, ``max(counts)*2 >=
+    len(visible)`` is VACUOUSLY true, so a budget-sized sample made the guard
+    inert and a four-distinct-session pool promoted — the untargeted promotion
+    #2976 measured. A sample below three slots cannot distinguish clustered
+    from spread and must decline."""
+    pool = [
+        {"id": "y1", "session_id": "sA", "session_date": "2023-04-11",
+         "content": "alpha"},
+        {"id": "y2", "session_id": "sB", "session_date": "2023-04-12",
+         "content": "alpha"},
+        {"id": "y3", "session_id": "sC", "session_date": "2023-04-13",
+         "content": "alpha"},
+        {"id": "y4", "session_id": "sD", "session_date": "2023-04-14",
+         "content": "alpha"},
+    ]
+    # default limit is 2 (the promotion budget) — the degenerate sample
+    assert temporal_leg_order(
+        pool, anchors=(), date_window=("2023-04-10", "2023-04-20")) == []
+
+
+def test_the_fused_caller_places_window_picks_in_the_tail():
+    """The PRODUCTION geometry (review cycle 2): ``ceiling = window - limit``
+    and the picks fuse AFTER ``candidates[:ceiling]``, so they land in the
+    reader-window tail — which is why this arm cannot move top-5 membership by
+    construction (declared, not measured, in the PR body). Pinned here so the
+    placement contract is not silently credited with an @5 effect."""
+    pool = [
+        {"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
+         "content": "alpha"} for i in range(10)
+    ] + [
+        {"id": "b1", "session_id": "sB", "session_date": "2023-04-14",
+         "content": "alpha"},
+        {"id": "c1", "session_id": "sC", "session_date": "2023-04-18",
+         "content": "alpha"},
+    ]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=12, date_window=("2023-04-10", "2023-04-20"))
+    assert picks, "a clustered in-window pool must produce picks"
+    for pid in picks:
+        assert order.index(pid) >= 10, (
+            f"a window pick must land in the window tail, not at rank "
+            f"{order.index(pid)}: {order}")
+
+
+def test_the_fused_caller_declines_on_an_unclustered_window():
+    """Same production geometry, but the visible window already spans distinct
+    sessions — the spread must not fire and the fused order must be untouched."""
+    pool = [
+        {"id": f"x{i}", "session_id": f"s{i}", "session_date": "2023-04-11",
+         "content": "alpha"} for i in range(12)
+    ]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=12, date_window=("2023-04-10", "2023-04-20"))
+    assert picks == []
+    assert order == [c["id"] for c in pool]
 
 
 def test_no_anchors_and_no_window_stays_inert():
