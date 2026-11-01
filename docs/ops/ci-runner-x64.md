@@ -914,3 +914,24 @@ new literal custom label in any workflow reds at TEST time instead of on the gat
 pins a pool label. And declaring a label is **not** a schedule: it changes the linter only, so
 everything this runbook says about a pool PIN — WAITS instead of degrading, no hosted half — still
 holds for a label named there. Re-measure `actions/runners` before pinning anything to one.
+
+### Residual: the #10237 canary is a POOL-ONLY pin — and it is non-required on purpose
+
+**OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `repo-harnesses`
+(`ci.yml:1473`) now reads `runs-on: [self-hosted, self-hosted-x64]`. The rule's cost is a WAIT with
+no hosted half, so it is a cost of BLOCKING A MERGE; this job is in neither `.mergify.yml`
+`queue_conditions` (`pricing-artifact`, `docs`, `test-isolation`, `license-surface`, `legal-e2e`,
+`ai-review-gate`) nor `merge_conditions` (`python-ci-gate`), and `needs: repo-harnesses` appears
+nowhere. When the pool is unreachable the loss is one slow non-required check — which is the
+measurement the #10237 canary exists to take.
+
+Why it was taken: `ubuntu-latest` is answered by **0 of the pool's 12 runners** (measured
+2026-11-01T16:41Z, `actions/runners`), so every `ubuntu-latest` job is served only by GitHub-hosted,
+and job queue waits in run `41320964047` were 15.3, 17.8, 19.0, 25.5, 33.7, 34.5, 37.6 and 39.0
+**minutes** while 10 of 12 pool runners sat idle. The required legs cannot absorb that fix: a
+`self-hosted` pin on them removes the GitHub-hosted half of the race, which the refusal recorded at
+`python-ci.yml:1891` and above forbids.
+
+⛔ **Do not copy this pin onto a required leg.** The override is scoped to a job whose failure costs a
+wait, and a required leg's failure costs the merge. It also bypasses the label attachment
+`scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
