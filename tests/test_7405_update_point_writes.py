@@ -1266,6 +1266,25 @@ def test_a_journal_known_point_absent_from_the_live_graph_reports_the_loss(
         assert not any("will not be replayed" in r.getMessage()
                        for r in caplog.records), (
             "a typo must not produce the revision-loss warning")
+
+        # ── the third shape: a point the lane DELETED is gone, not lost ──
+        # (review B1) A hard delete journals `EntityMutated {op: delete}` with the
+        # SAME id, so a "does any record carry this id" test reported a lost
+        # revision on a healthy lane for every write-after-delete — and a counter
+        # that fires there can never be alerted on. Presence is folded
+        # last-record-wins, so a deleted point is NOT known.
+        gone = _pid(sdk)
+        sdk.delete_point(gone)
+        deleted_before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(gone, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == deleted_before, (
+            "a deliberately DELETED point must not be counted as a lost "
+            "revision — the counter has to stay alertable on a healthy lane")
+        assert not any("will not be replayed" in r.getMessage()
+                       for r in caplog.records), (
+            "a write after a hard delete must not warn about a lost revision")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

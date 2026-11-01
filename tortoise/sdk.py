@@ -4124,6 +4124,73 @@ def _rec_point_id(rec: dict):
     return pid
 
 
+#: The chunk a journal presence scan reads at a time (#10515). Bounded so the
+#: scan's peak memory is the chunk, not the journal: a full-parsed
+#: ``EventLog.read_all()`` was measured at 681 ms and a 136 MB spike on 100k
+#: records, which is not a price a TYPO may pay.
+_JOURNAL_SCAN_CHUNK = 1 << 20
+
+
+def _apply_journal_presence(line: bytes, point_id: str,
+                            state: dict[str, bool]) -> None:
+    """Fold ONE journal line into *state* for *point_id* (#10515 review B1).
+
+    Presence is LAST-RECORD-WINS per id, and only the record types that change
+    it are applied — see :meth:`TortoiseSDK._journal_knows_point` for why a bare
+    "does the journal mention this id" is the wrong question (a hard delete
+    journals the id too, and would make every write-after-delete look lost).
+    """
+    try:
+        rec = _json.loads(line.decode('utf-8', 'replace'))
+    except ValueError:
+        return
+    if not isinstance(rec, dict) or _rec_point_id(rec) != point_id:
+        return
+    kind = rec.get('type')
+    if kind == 'EntityMutated' and rec.get('op') == 'delete':
+        state[point_id] = False
+    elif kind == 'PointRetracted' and rec.get('deleted'):
+        # The HARD delete (`_deleted_point_payload` writes `deleted`
+        # unconditionally). A `retract_point` TOMBSTONE keeps the node, so it is
+        # presence, not absence.
+        state[point_id] = False
+    else:
+        state[point_id] = True
+
+
+def _journal_presence_mentions(path, point_id: str) -> dict[str, bool]:
+    """Presence state for *point_id* from the journal at *path* (#10515).
+
+    One bounded-memory pass over the file, JSON-parsing ONLY the lines that
+    contain the id at all — a journal with 100k records about other points costs
+    a byte scan, not 100k object constructions. The id is the needle rather than
+    the ``"id": "…"`` form so a writer's separator choice cannot defeat it; a
+    false positive is filtered by the parse (:func:`_apply_journal_presence`
+    requires the record's OWN id to match).
+
+    Returns a ``{point_id: present}`` dict — ``{}`` when the journal never names
+    it (the typo shape). A record naming the id that no rule can classify leaves
+    it absent, which is the same answer as today.
+    """
+    needle = str(point_id).encode('utf-8')
+    state: dict[str, bool] = {}
+    tail = b''
+    with open(path, 'rb') as fh:
+        while True:
+            chunk = fh.read(_JOURNAL_SCAN_CHUNK)
+            if not chunk:
+                break
+            buf = tail + chunk
+            lines = buf.split(b'\n')
+            tail = lines.pop()          # a partial line — carried, never parsed
+            for line in lines:
+                if needle in line:
+                    _apply_journal_presence(line, point_id, state)
+    if needle in tail:
+        _apply_journal_presence(tail, point_id, state)
+    return state
+
+
 def _change_feed_enabled() -> bool:
     """Is the #2353 semantic change feed (and its PointRevised store half) on?
 
@@ -9561,36 +9628,59 @@ class TortoiseSDK:
         return self._graph_presence(proj) is True
 
     def _journal_knows_point(self, point_id: str) -> bool | None:
-        """Does the JOURNAL carry *point_id*? ``None`` when there is no journal.
+        """Is *point_id* a point the JOURNAL still holds? ``None`` = no journal.
 
         The second half of #10515's discriminator. ``update_point``'s ABSENT arm
         reads the LIVE graph; an id the journal knows but the projection does not
         hold is a rebuild in flight (#7405), not a typo, and the two are the same
-        read at that door. The journal is read through the same fold-free scan the
-        recovery path uses (``EventLog.read_all``, keyed on record ``id``), not a
-        second index — no new oracle, one source of truth.
+        read at that door.
 
-        COST, stated because absent ids are the common typo path: a full scan per
-        call would make a typo'd write pay for the whole journal. The scan is
-        therefore MEMOISED on ``EventLog.position()`` (the record count — cheap,
-        and it moves exactly when the journal gains a record), so a stream of
-        absent writes re-folds only when the journal actually changed. A journal
-        whose position cannot be read is not memoised (a stale answer here would
-        report a loss that did not happen, or hide one that did).
+        ⛔ PRESENCE, NOT MENTION (review B1). The first cut answered "does any
+        record carry this id", which is WRONG on a healthy lane: a hard delete
+        journals ``EntityMutated {op: 'delete'}``, so ``delete_point(p)`` then
+        ``update_point(p, …)`` reported a lost revision for a point that is
+        intentionally gone — and a counter that fires on every write-after-delete
+        can never be alerted on. The state is therefore folded LAST-RECORD-WINS
+        per id, over the record types that change presence:
+
+        * ``EntityMutated {op: 'delete'}`` and a HARD-delete ``PointRetracted``
+          (its payload carries ``deleted`` unconditionally, ``_deleted_point_payload``)
+          → the point is gone;
+        * any record naming the id as a POINT id (``PointAdded`` under ``point``,
+          ``PointRevised`` at top level) → the point exists;
+        * a ``retract_point`` TOMBSTONE keeps the node (``status='retracted'``), so
+          it is not a delete.
+
+        ⛔ COST — the issue's own target (#10515 indicator 4), MEASURED before
+        landing (review B4). ``EventLog.read_all()`` parses every record; on a
+        synthetic 100k-record (23.7 MB) journal it measured **631.7 ms** and a
+        **136 MB** RSS spike. This scan measured **97.5 ms** for a miss (the typo
+        shape) and **115.5 ms** for a hit, with a **4.6 MB** peak — 6.5x faster
+        and 30x lighter, and linear in journal size (~0.4 ms per 1k records). The
+        result is memoised on the journal file's ``os.stat`` identity (inode +
+        size + mtime_ns), so a stream of absent writes pays it once, and the memo
+        is not invalidated until the journal actually changes.
+
+        ⛔ NOT ``EventLog.position()`` (review B2). That read takes the
+        process-wide append lock AND the cross-process ``flock``, opens the
+        journal for WRITING, can recount the whole file, and on a lock timeout
+        stamps the path ``_FLOCK_UNHEALTHY`` for 30 s — whereupon every concurrent
+        ``append`` proceeds unserialised. Measured by the reviewer with a peer
+        holding the lock: a plain TYPO'd ``update_point`` went from 1.8 ms to
+        5006 ms and degraded every writer on that journal. ``os.stat`` is O(1),
+        takes no lock, needs no write permission, and its inode+mtime_ns also
+        closes the same-length-replacement hole a record COUNT has (review B3).
         """
         log = self._get_event_log()
         if log is None:
             return None
-        try:
-            stamp = log.position()
-        except Exception:  # noqa: BLE001, RUF100 — unmemoised, not unanswerable
-            stamp = None
+        stat_key = self._journal_stat_key(log)
         cache = getattr(self, '_journal_known_ids_cache', None)
-        if cache is not None and stamp is not None and cache[0] == stamp \
+        if cache is not None and stat_key is not None and cache[0] == stat_key \
                 and cache[2] is log:
-            return point_id in cache[1]
+            return cache[1].get(point_id, False)
         try:
-            records = log.read_all()
+            seen = _journal_presence_mentions(log.path, point_id)
         except Exception:  # noqa: BLE001, RUF100 — reported below, never fatal
             _logger.warning(
                 "journal could not be read to check whether %r is a known "
@@ -9598,13 +9688,25 @@ class TortoiseSDK:
                 "than asserted to be a typo (#10515)",
                 point_id, exc_info=True)
             return None
-        known = {
-            str(_rec_point_id(rec)) for rec in records
-            if isinstance(rec, dict) and _rec_point_id(rec) is not None
-        }
-        if stamp is not None:
-            self._journal_known_ids_cache = (stamp, known, log)
-        return point_id in known
+        if stat_key is not None:
+            self._journal_known_ids_cache = (stat_key, seen, log)
+        return seen.get(point_id, False)
+
+    @staticmethod
+    def _journal_stat_key(log):
+        """O(1) identity of the journal FILE — the memo key (no locks, no read).
+
+        ``None`` when the path cannot be stat'd (an in-memory log, a scratch
+        lane): the answer is then simply not memoised, never guessed.
+        """
+        path = getattr(log, 'path', None)
+        if not path:
+            return None
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
     def _report_absent_revision(self, point_id: str) -> None:
         """Make a LEGITIMATE revision refused by the ABSENT arm VISIBLE (#10515).
@@ -16707,8 +16809,13 @@ class TortoiseSDK:
             # (no row, no epoch delta, no dirty root, no line, no counter). The
             # reply stays `{}`; the loss is now REPORTED — a warning plus
             # `metrics()["silent_revision_losses"]` — when the graph key cannot be
-            # confirmed or the journal still carries the id, and stays silent for
+            # confirmed or the journal still HOLDS the id, and stays silent for
             # an id absent from both. It reports the loss; it does not prevent it.
+            # "Zero side effects" still holds for the GRAPH and the journal (no
+            # row, no epoch, no dirty root); the report READS the journal file,
+            # and it is deliberately a chunked read of `os.stat` + a byte scan,
+            # never `EventLog.position()` — that one takes the append flock and
+            # can cost a typo 5 s (review B2).
             self._report_absent_revision(id)
             return {}
         # ⛔ ORDERING (#10495 review P3). This block runs AFTER the ABSENT
