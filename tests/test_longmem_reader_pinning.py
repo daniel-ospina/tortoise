@@ -17,7 +17,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.ingest import _PROVIDERS
 from tools.longmem_eval.reader import (
     _ABSTRACTION_FRAGMENT,
     _AGGREGATION_FRAGMENT,
@@ -25,6 +24,7 @@ from tools.longmem_eval.reader import (
     LLMReader,
     build_reader,
 )
+from tortoise.ingest import _PROVIDERS
 
 
 def test_reader_model_is_pinned_constant():
