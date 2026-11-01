@@ -1327,18 +1327,21 @@ def test_the_restatus_fold_matches_on_the_id_and_never_the_name():
     that matched on `name` would move a `:Subject` of the same name. The label is
     carried for exactly that reason.
     """
-    obj = cp.node_from_row("Object", {"id": "o-3", "name": "acme"})
-    subj = cp.node_from_row("Subject", {"id": "s-3", "name": "acme"})
+    obj = cp.node_from_row("Object", {"id": "x-3", "name": "acme"})
+    # ⛔ The SAME id on both labels. With distinct ids, `by_id.get(node.key)` is
+    # already None for the Subject and deleting the label filter leaves this test
+    # green — the filter would be decoration. Ids are per-label, so a collision is
+    # exactly the shape it exists for.
+    subj = cp.node_from_row("Subject", {"id": "x-3", "name": "acme"})
     event = cp.LifecycleEvent(seq=1, event_kind="", restatus_status="archived",
-                              target_id="o-3", target_label="Object")
+                              target_id="x-3", target_label="Object")
     folded = cp.apply_event_stream_folds((obj, subj), (event,))
     by_label = {n.label: n for n in folded}
     assert by_label["Object"].props.get("status") == "archived"
     # ⚠️ This assertion is only reachable because `Subject` is an
-    # EVENT_STREAM_FOLDS member (it joined at #9974). While it was Object-only
-    # the fold returned early for the Subject and this line could not fail —
-    # deleting the label filter left the whole test green. It is now the pin on
-    # the filter, not decoration.
+    # EVENT_STREAM_FOLDS member (it joined at #9974), AND the fixture gives both
+    # labels the same id — with distinct ids the `by_id` lookup is already empty
+    # for the Subject and deleting the label filter would leave this green.
     assert "status" not in by_label["Subject"].props, (
         "the restatus leaked onto the :Subject of the same name — the fold "
         "matched on name or ignored the label"
@@ -1347,7 +1350,7 @@ def test_the_restatus_fold_matches_on_the_id_and_never_the_name():
     absent = cp.apply_event_stream_folds(
         (subj,),
         (cp.LifecycleEvent(seq=1, event_kind="", restatus_status="archived",
-                           target_id="o-999", target_label="Object"),))
+                           target_id="x-999", target_label="Object"),))
     assert "status" not in absent[0].props
 
 
@@ -2059,3 +2062,31 @@ def test_the_read_door_folds_a_restatus_it_reads_by_id():
     view = cp.read_record_view(conn, org_id="o", graph_id="g")
     obj = next(n for n in view.nodes if n.label == "Object")
     assert obj.props.get("status") == props.get("status")
+
+
+def test_the_connector_fold_never_writes_a_subject_status():
+    """The built-in/pack lifecycle leg is `:Object`-only, as the live fold is.
+
+    `_fold_object_status` issues `MATCH (o:Object {id:$n})` and resolves
+    `about_entities` against `"Object"`, so it can never write a lifecycle word
+    onto a `:Subject`. This reader is keyed on a NAME, and names collide across
+    labels — so without the label gate, adding `Subject` to
+    `EVENT_STREAM_FOLDS` fabricated `:Subject.status='completed'` from a
+    `github.issue.closed` that named the Object. That value is written by every
+    `rebuild_from_record`, is answered by the single-row door, and is INVISIBLE
+    to `record_reconcile` (both sides read this same fold).
+    """
+    obj = cp.node_from_row("Object", {"id": "x-1", "name": "acme"})
+    subj = cp.node_from_row("Subject", {"id": "s-1", "name": "acme"})
+    folded = cp.apply_event_stream_folds(
+        (obj, subj),
+        (cp.LifecycleEvent(seq=1, event_kind="github.issue.closed",
+                           object_name="acme"),),
+    )
+    by_label = {n.label: n for n in folded}
+    assert by_label["Object"].props.get("status") == "completed"
+    assert "status" not in by_label["Subject"].props, (
+        "the connector fold wrote a lifecycle word onto the :Subject of the same "
+        "name — the live fold cannot produce that value, and reconciliation "
+        "cannot see it because it reads the same fold"
+    )

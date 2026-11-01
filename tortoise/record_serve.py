@@ -715,11 +715,17 @@ def read_node(conn: Any, *, org_id: str, graph_id: str, label: str,
     if row is None:
         return None
     node = node_from_row(label, row)
-    # #10198: the connector/pack lifecycle half of the same `status` cache is
-    # derived from the record's EVENT STREAM, which no row carries — so a read
-    # that stopped at `node_from_row` would answer a connector-tracked Object
-    # without the status a `rebuild_from_record` materializes, breaking this
-    # function's own "the same map" contract. Narrowed to the events that can
+    # #10198 / #9974: the event-stream half of the same `status` cache is
+    # derived from the record's HISTORY, which no layer row carries — so a read
+    # that stopped at `node_from_row` would answer without the status a
+    # `rebuild_from_record` materializes, breaking this function's own "the same
+    # map" contract. TWO legs reach that stream and both are applied here:
+    #   * the connector/pack lifecycle (#10198) — an `EventRecorded` whose
+    #     `eventKind` a fold maps onto `Object.status` (`:Object` only, as the
+    #     live fold is);
+    #   * an explicit `EntityMutated` `state.status` (#9974) — the caller's own
+    #     lifecycle write for an `:Object` OR a `:Subject`, whose only carrier is
+    #     `public.journal_event.payload`. Narrowed to the events that can
     # name THIS Object: a single-row read folds only the events that could
     # possibly name it. ⚠️ That narrows the FOLD, not the read — the table's
     # only index is keyed on the event's own subject, so the predicate filters

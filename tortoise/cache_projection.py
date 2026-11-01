@@ -550,18 +550,22 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #:   rebuild of an event-sourced projection is (Microsoft Learn, *Event Sourcing
 #:   pattern*: rehydration = *"replaying all the events in its stream"*).
 #:
-#: ⚠️ **BOUND — a TERMINAL `restatus` (`deprecated`/`archived`/`retracted`) is
-#: not honoured**, because the record carries no signal for it (see
-#: :data:`DERIVED_FROM_RECORD`'s NOT-DERIVED bullet). Measured consequence: an
-#: Object the graph holds `archived` and that later receives a
-#: `github.issue.closed` is folded to `completed` here where the live fold
-#: refused. That does NOT make it newly visible — an ABSENT status already reads
-#: LIVE to `_terminal_excluded`, so the pre-#10198 rebuild showed it too. The
-#: converse cannot happen either: a terminal value this fold produces is one a
-#: PACK fold declared and the live fold wrote too (`archive → archived`), so a
-#: rebuild hides only Objects the live graph presents as terminal as well.
-#: Closing the `restatus` gap needs a record carrier for it, which is #9974's
-#: ownership decision, not this table's.
+#: ✅ **A TERMINAL `restatus` IS honoured now (#9974).** This bullet used to
+#: state the opposite — *"the record carries no signal for it"* — and that was
+#: true of the LAYER tables only: the value's carrier is the record's own layer-1
+#: history (`public.journal_event.payload -> 'state' -> 'status'`), which this
+#: reader now folds in `seq` order. So an Object held `archived` and then
+#: receiving a `github.issue.closed` keeps `archived` here, matching the live
+#: fold's refusal (measured: the terminal guard latches on the replayed value).
+#: ⚠️ **BOUND, stated so it is not rediscovered as a bug** — the guard is
+#: ORDER-BLIND against the supersession CARRIER: `LifecycleEvent` carries no
+#: `ts`, and `superseded_at` has no `seq`, so a *status-only* un-terminate
+#: (`update_entity(status='live')`, which leaves both carriers in place and is a
+#: record no-op — see :data:`DERIVED_FROM_RECORD`'s NOT-MONOTONE bullet) rebuilds
+#: as `superseded` where the live graph reads LIVE. That divergence PRE-EXISTS
+#: this change (#10189's carrier derivation) and closing it needs the carrier's
+#: position in the stream, which the record does not carry. It is recorded on
+#: #9974 rather than papered over with a temporal guess.
 #: ⚠️ **BOUND — the fold's AUDIT emission is not reproduced.**
 #: `_fold_object_status` emits `status_fold_unapplied` (#1934) when a declared
 #: fold's explicit target is absent. That is a warning about a WRITE, not graph
@@ -607,10 +611,16 @@ class LifecycleEvent:
 
     ``object_name`` is the event's declared target (the record's `object`
     column); ``about_names`` is the loose list the extraction pipeline emits
-    instead. Both are graph NAME keys, not ids — the live fold matches
-    `MATCH (o:Object {name:$n})`, and a rebuild must fold onto exactly the rows
-    that MATCH would have hit. ``target_id`` is the opposite coordinate: the
-    stable `id` a state op names, which is what `state`-op writes match on.
+    instead. Both are graph NAME keys, not ids. ⚠️ NAME-keyed is how this reader
+    finds the ROWS, not how the live fold finds the NODE: since #3590
+    `_fold_object_status` issues `MATCH (o:Object {id:$n})` after
+    `resolve_fold_name` resolves the name to ONE id, because a name-keyed write
+    would move every carrier's status — the harm class the identity change
+    exists to remove. The name is the record's join key and the id is the
+    graph's, so a name that resolves to two carriers is resolved here too
+    (and a collision across LABELS is why the connector leg below is
+    `:Object`-only). ``target_id`` is the opposite coordinate: the stable `id` a
+    state op names, which is what `state`-op writes match on.
     """
 
     seq: int
@@ -1424,14 +1434,22 @@ def apply_event_stream_folds(
         # event in either temporal order — so refusing to fold here is exact for
         # that value rather than an approximation of a timeline the carrier does
         # not date.
-        # ⛔ The carrier is the row's FINAL state (it is derived from
-        # `superseded_by`/`superseded_at` as they stand NOW), so it is not a seed
-        # the stream may replay on top of: a `restatus` earlier in `seq` would
-        # overwrite it, and the rebuild would answer LIVE for an entity the graph
-        # holds superseded. A stream `supersede` needs no exception either — it
-        # carries `state.status='superseded'`, the same value the carrier already
-        # supplied. `update_entity(status='live')` still un-terminates, because
-        # that write CLEARS the carriers and the row then derives nothing.
+        # The carrier is the row's FINAL state (derived from `superseded_by`/
+        # `superseded_at` as they stand NOW), so it is not a seed the stream may
+        # replay on top of: a `restatus` earlier in `seq` would overwrite it and
+        # the rebuild would answer LIVE for an entity the graph holds superseded.
+        # A stream `supersede` needs no exception — it carries
+        # `state.status='superseded'`, the same value the carrier supplied.
+        # ⛔ ORDER-BLIND, and stated rather than hidden: `LifecycleEvent` carries
+        # no `ts` and `superseded_at` has no `seq`, so a `restatus` that comes
+        # AFTER the supersession cannot be placed behind it. A STATUS-ONLY
+        # un-terminate (`update_entity(status='live')`) therefore rebuilds as
+        # `superseded` while the graph reads LIVE — because that write does NOT
+        # clear the carriers (it is `SET n += {status}$props`), it is a record
+        # no-op, and `DERIVED_FROM_RECORD` still derives from the retained pair.
+        # That divergence PRE-EXISTS this change (#10189) and is recorded on
+        # #9974; a temporal guess here would manufacture a rule the record cannot
+        # support.
         if _is_terminal_status(current):
             out.append(node)
             continue
@@ -1441,18 +1459,34 @@ def apply_event_stream_folds(
         # NULL` in the clone's guard); a declared lifecycle kind owns its state
         # and suppresses it (#2725).
         owns = bool(kind_key) and index.owns_state(kind_key)
-        # The replay: `events_for` is in `seq` order, and EVERY write is guarded
-        # the way the live `SET` is — `AND (o.status IS NULL OR NOT (o.status IN
-        # $excluded))`. So a terminal word written by one event latches: the
-        # later events are refused instead of resurrecting the Object.
+        # ⛔ THE CONNECTOR/PACK LEG IS `:Object` ONLY. `_fold_object_status` emits
+        # `MATCH (o:Object {id:$n})` and resolves `about_entities` against
+        # `"Object"`, so the live fold can NEVER write a lifecycle word onto a
+        # `:Subject` — while this leg is keyed on a NAME, and names collide across
+        # labels (an `:Object` and a `:Subject` both called `acme` is ordinary).
+        # Without this gate, adding `Subject` to EVENT_STREAM_FOLDS fabricated
+        # `:Subject.status='completed'` from a `github.issue.closed` that named
+        # the Object — a value the live fold cannot produce, written by every
+        # `rebuild_from_record` AND answered by the read door, and INVISIBLE to
+        # `record_reconcile` because both sides read this same fold. The
+        # `restatus` leg needs no such gate: it is id-keyed and already
+        # label-matched, which is exactly how the live state op matches.
+        object_side = node.label == "Object"
+
+        # The replay: `evs` is in `seq` order, and EVERY connector/pack write is
+        # guarded the way the live `SET` is — `AND (o.status IS NULL OR NOT
+        # (o.status IN $excluded))`. So a terminal word written by one event
+        # latches: the later events are refused instead of resurrecting it.
         status: str | None = current
         for event in evs:
             # #9974: a `restatus` is the caller's explicit write, applied the way
             # the live fold applies it — `SET n += $state`, unguarded, so it can
-            # move a terminal node and it beats any earlier fold. It carries no
-            # `eventKind`, so it can never match a connector/pack key.
+            # move a terminal node and it beats any earlier in-stream fold. It
+            # carries no `eventKind`, so it can never match a connector/pack key.
             if event.target_id is not None:
                 status = event.restatus_status
+                continue
+            if not object_side:
                 continue
             if kind_key:
                 for target_kind, fold_status in index.folds_for_event(
