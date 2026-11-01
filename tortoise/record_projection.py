@@ -4508,8 +4508,10 @@ NARRATIVE_TABLE = "session_narrative"
 _SESSION_COORDINATE_KEYS: tuple[str, ...] = ("sessionId", "session_id")
 
 #: The payload key carrying §9.1's narrative — the commit's own name for the
-#: "connected prose form of a captured session", written onto the transcript
-#: `:Source`/`:Event` by the layer-1 commit.
+#: "connected prose form of a captured session". ⛔ No node carries it (#10000):
+#: the layer-1 commit used to write it onto the transcript `:Source`/`:Event` and
+#: no longer does — this carrier is its only writer, into
+#: `public.session_narrative`.
 _NARRATIVE_KEY = "story_arc"
 
 #: The INTEGER fields the narrative home reproduces beside the text.

@@ -264,19 +264,29 @@ def override_refusal(*, source_id: str, target_ids: Sequence[str],
                      surface: str) -> str:
     """The refusal a write surface raises for a derived-over-asserted wiring.
 
-    Names both endpoints and the two ways out, because a refusal that does not
-    say how to proceed gets worked around (the caller's real options are: the
-    target is itself computed — mark it ``derived``; or the claim genuinely
-    needs to sit above an authored belief, and then the AUTHORED claim is what
-    must carry the edge).
+    Names both endpoints and the ways out, because a refusal that does not say
+    how to proceed gets worked around (the caller's real options are: the
+    computed side is marked ``derived``; or the direction is restated so only
+    the corroboration leg flows; or the edge is wired FROM an asserted claim).
+
+    ⛔ DIRECTION-AGNOSTIC ON PURPOSE. :func:`direction_blocks_create` is fed the
+    requested direction and also blocks on its BACKWARD leg
+    (``blocks_override(target, source)`` — a DERIVED *target* under an ASSERTED
+    *source*), so a message asserting that ``source_id`` is the derived one
+    names the wrong claim in that arm and exonerates the claim that actually
+    triggers the refusal (#10195 review P3). This names the pair and the rule,
+    which is true on both legs.
     """
     return (
-        f"{surface}: claim {source_id!r} is DERIVED and cannot be wired above "
-        f"the ASSERTED claim(s) {list(target_ids)!r} (#2351). A computed claim "
-        f"never overrides an authored one — through IMPL, or as a NAND attack, "
-        f"which lowers the target's belief. Either mark the target "
-        f"claim_class='derived' (if it too is computed), or wire the edge from "
-        f"an asserted claim."
+        f"{surface}: the claims {source_id!r} and {list(target_ids)!r} cannot "
+        f"be wired this way — on a leg this wiring FLOWS, a DERIVED claim would "
+        f"override an ASSERTED one (#2351). A computed claim never overrides an "
+        f"authored one — through IMPL, or as a NAND attack, which lowers the "
+        f"target's belief. Either give BOTH sides the same class (mark every claim "
+        f"on the COMPUTED side 'derived' — the marker lives only on claims that "
+        f"are computed, and its absence IS 'asserted'), or restate the direction "
+        f"so the only leg that flows is the corroboration one, asserted -> "
+        f"derived."
     )
 
 
@@ -291,9 +301,36 @@ def supersede_refusal(*, old_id: str, new_id: str) -> str:
     )
 
 
+#: The three ways the caller can know (or not know) which slot is the SOURCE.
+#: A closed vocabulary rather than a bool because the CANDIDATE arm is entered by
+#: two layouts with two DIFFERENT causes, and a single "not proven" phrase named
+#: the wrong one (#10418 review P3).
+_SLOT_ORDER_PHRASES: dict[str, str] = {
+    # ``ep.py`` orders ``coalesce(r.idx, 0), c.id`` — position is proven.
+    "proven": "at the SOURCE position",
+    # Cross-type comparison is the ENGINE's inter-type hierarchy (``STRING``
+    # groups ahead of numeric, ``null`` last), which this door deliberately does
+    # not re-implement — so no numeric reading of a mixed layout names the
+    # source the loader reads.
+    "mixed": (
+        "at a position the load side may read as the SOURCE (the slots' idx "
+        "values are of MIXED types, and this door does not re-derive the "
+        "engine's cross-type slot order)"),
+    # One type group IS ordered by the engine (comparison inside a group is
+    # type-local), but the door still declines to re-implement that per-type
+    # order — so the slots ARE orderable and saying otherwise is false.
+    "uniform-non-int": (
+        "at a position the load side may read as the SOURCE (the slots' idx "
+        "values are non-integer, and this door does not re-derive the "
+        "engine's per-type slot order)"),
+}
+
+
 def repoint_refusal(*, operator_id: str, op_type: str, old_id: str,
                     new_id: str, source_id: str,
-                    target_ids: Sequence[str]) -> str:
+                    target_ids: Sequence[str],
+                    direction: str,
+                    slot_order: str) -> str:
     """The refusal ``supersede_point``'s OPERATOR re-point raises (#10195).
 
     A separate message from :func:`override_refusal` because the caller's ways
@@ -304,19 +341,51 @@ def repoint_refusal(*, operator_id: str, op_type: str, old_id: str,
 
     It also states the ORDER, because a refusal that lands after the transfer
     would be the #329/#4021 partial-mutation defect regardless of what it says.
+
+    ⛔ DIRECTION-AGNOSTIC ON PURPOSE, and it names the operator's DIRECTION as
+    well as its slots. ``direction_blocks_create`` blocks on either leg, so a
+    message that hardcoded "``source_id`` is DERIVED … above the ASSERTED
+    ``target_ids``" was backwards on the backward leg (a DERIVED *target* under
+    an ASSERTED *source*) — exonerating the very claim that triggered it, in the
+    message a caller reads to decide what to do (#10195 review P3).
+
+    ``direction`` is REQUIRED: the only caller feeds
+    ``_canonical_direction``'s result, which is never ``None``, and a default
+    here would be a SECOND copy of the absent->default rule (and would mislabel
+    a NAND, whose absent default is ``unidirectional``).
+
+    ``slot_order`` is one of :data:`_SLOT_ORDER_PHRASES`' keys and states WHY
+    the source position is (or is not) provable — ``proven``, ``mixed`` (a
+    cross-type layout), or ``uniform-non-int`` (one non-``int`` type group).
+    ⛔ It is REQUIRED, for the same reason ``direction`` is: a default of
+    ``proven`` would assert a proof no caller made, and the only caller always
+    knows the answer (``supersede_point`` derives it beside the layout it read),
+    so a default here is a silent "at the SOURCE position" for any future caller
+    that forgot to pass it — the false cause this parameter exists to end.
+    ⛔ It is NOT a bool, and the candidate arm's phrase is NOT "cannot be
+    ordered": a uniform non-``int`` layout IS ordered by the engine (comparison
+    inside one type group is type-local) — the door declines to re-derive that
+    order, which is a different thing, and a refusal that names the wrong cause
+    sends the caller looking for a defect in their own graph (#10418 review P3).
     """
+    _source_phrase = _SLOT_ORDER_PHRASES[slot_order]
     return (
-        f"supersede_point: re-pointing the OPERATOR {operator_id!r} ({op_type}) "
-        f"from {old_id!r} onto {new_id!r} would leave the claim {source_id!r} "
-        f"DERIVED in the factor's SOURCE slot above the ASSERTED claim(s) "
-        f"{list(target_ids)!r} (#2351). A supersede moves the predecessor's "
-        f"whole edge set, so the successor inherits the factor with its slots "
-        f"rebuilt — and that rebuilt wiring is one create_operator refuses to "
-        f"write. Either create the successor with the class that keeps the "
-        f"factor's slots on one side of the boundary (`claim_class` is a "
-        f"CREATE-time marker — see the supersede refusal above for the "
-        f"override rule itself), or rebuild the operator on the successor "
-        f"before superseding. The supersede was refused BEFORE any mutation."
+        f"supersede_point: re-pointing the OPERATOR {operator_id!r} ({op_type}, "
+        f"direction {direction!r}) from {old_id!r} onto {new_id!r} would leave a "
+        f"DERIVED claim overriding an ASSERTED one on a leg this operator FLOWS "
+        f"(#2351) — the rebuilt factor's slots are {source_id!r} "
+        f"{_source_phrase} and {list(target_ids)!r} at the target position(s), "
+        f"and one side of that wiring is DERIVED while the other is ASSERTED. A "
+        f"computed claim never overrides an authored one — through IMPL, or as a "
+        f"NAND attack, which lowers the target's belief. A supersede moves the "
+        f"predecessor's whole edge set, so the successor inherits the factor "
+        f"with its slots rebuilt — and that rebuilt wiring is one "
+        f"create_operator refuses to write. Either create the successor with the "
+        f"class that keeps the factor's slots on one side of the boundary "
+        f"(`claim_class` is a CREATE-time marker — see the supersede refusal "
+        f"above for the override rule itself), or rebuild the operator on the "
+        f"successor before superseding. The supersede was refused BEFORE any "
+        f"mutation."
     )
 
 

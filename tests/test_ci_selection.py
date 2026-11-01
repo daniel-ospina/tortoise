@@ -580,6 +580,48 @@ def test_the_end_customer_credential_design_guard_runs_on_its_doc_only_diff():
     )
 
 
+def test_the_archive_writer_selects_the_surface_that_guards_it():
+    """#10423 review: the ARCHIVE WRITER's own diff must select its guards.
+
+    #10423 made `tools/build_skill_archives.py` load-bearing beyond its own CLI:
+    `served_skills_parity.sync()` now calls `write_stale_archives()`, so this
+    tool decides the bytes of a committed artifact (`website/skills/*.skill`).
+    `tools/` is in NON_PYTHON_PREFIXES, so before the `onboarding`
+    SOURCE_PATTERNS entry an edit to this file ALONE — widening what `--sync`
+    re-cuts, or silently narrowing it back — selected no surface of its own.
+
+    MEASURED, both arms (the mutation is the entry itself):
+
+    - without the entry: `surfaces == []`, the docs-only tier-1 early return,
+      68 test files — coverage that HOLDS by accident, because both guards are
+      in `tier1`, and would vanish the moment either left it;
+    - with it: `surfaces == ['onboarding']`, 143 test files, the guards reached
+      by the surface that owns the served-skill mirror.
+
+    Asserted on the SURFACE and on both guard files, not merely "non-empty":
+    `tests/` falls through to `core` on its own, so a bare non-emptiness check
+    can pass with the wiring absent. Same #1349/#2938/#3332 silent-drop class as
+    the sibling `tools/served_skills_parity.py` entry (#4643).
+    """
+    changed = "tools/build_skill_archives.py"
+    assert (REPO / changed).exists(), f"the archive writer is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False, (changed, r["full"])
+    assert r["surfaces"] == ["onboarding"], (
+        f"{changed} selects {r['surfaces']} — without the SOURCE_PATTERNS entry "
+        "it falls to the docs-only early return, so the surfaces that grade the "
+        "derived archive only run by tier-1 accident (#1349 silent-drop class)"
+    )
+    assert r["slow_run"] is False, "the archive writer must not pull a slow leg"
+    assert "test_served_skills_parity.py" in r["test_files"], (
+        f"{changed} does not select the parity gate that calls it"
+    )
+    assert "test_onboarding_variants.py" in r["test_files"], (
+        f"{changed} does not select the 9660 test that compares the archive "
+        "payload to the served copy byte-for-byte"
+    )
+
+
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """#3332: a public *site surface* change selects `onboarding`.
 
@@ -2586,6 +2628,36 @@ def test_worktree_report_tool_change_selects_core_not_tier1():
     r = _sel(["tools/worktree_report.py"])
     assert "core" in r["surfaces"], r
     assert "test_worktree_report.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_ci_catch_history_tool_change_selects_core_not_tier1():
+    """A change to the catch-history instrument must run the rules it pins (#10131 review P1).
+
+    `tests/test_ci_catch_history.py` is registered on the `core` surface and owns the
+    instrument's whole answer column — `NEVER` licensed only by a per-FILE PR-head
+    attestation, every read gap landing on `UNKNOWN`, the cleared-red accounting, the
+    wall bound, the lane split. That registration is INERT for a tool-only diff: `tools/`
+    is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/ci_catch_history.py`, so `select()` returned NO surface, took the docs-only
+    early return and fell to the tier-1 smoke set, which does not contain the file. The
+    most likely follow-up to this instrument IS a change to the instrument, so the diff
+    that can weaken the rule that decides "never caught anything" would have been the one
+    diff that ran none of the cases pinning it — the #1349/#3332/#3616 silent-drop
+    class.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields
+    `full: False` with no pin, so the later asserts pass unexercised. MEASURED both ways
+    at the #10359 fix head (in-process `select(...)`, not by editing the tuple): without
+    the entry `surfaces=[]  full=False  n=68  guard=ABSENT`; with it
+    `surfaces=['core']  full=False  n=706  guard=PRESENT`. No count is stated in the
+    CORE_ALSO comment or here on purpose — the pin set moves with the file, and a literal
+    would rot the way the `durations` note's count did.
+    """
+    r = _sel(["tools/ci_catch_history.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_ci_catch_history.py" in r["test_files"], r
     assert r["full"] is False, r
 
 

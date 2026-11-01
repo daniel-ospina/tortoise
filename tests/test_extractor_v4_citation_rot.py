@@ -52,7 +52,13 @@ NOT promised:
   carried a line per reader because it was re-derived at a pin); `#7948`
   symbol-keyed it, because a pinned line reds every unrelated code move in six
   large files and its test could not tell a correct line from a wrong one that
-  stayed inside the span.
+  stayed inside the span. **`#10410` adds a second, narrower exception** —
+  `_PIN_RELATIVE_CITES` below pins the ten numbers whose passage declares a
+  revision pin, and it exists for the one failure this file's design cannot
+  see (see that test's docstring): a number relative to a *pin* is wrong the
+  moment it is swept with the `main→head` line delta, and the symbol it names
+  is still resolvable at HEAD the whole time, so every symbol-keyed check here
+  stays green over a citation that lands on a docstring.
 - Citations whose passage quotes no symbol are out of scope (the document
   carries ~30 of those); this pins the class the issue described.
 - Issue-state claims (`#NNNN` open/closed) are NOT resolved over the network —
@@ -595,18 +601,54 @@ _SECTION_13_8 = ("### 13.8 What this does to our design", "## 14. Not establishe
 
 #: A `module.py::symbol` citation — the form §13 and §13.8 both use, and the one
 #: that survives any code move. `_Symbol` allows a dotted `Class.attr`.
-_SECTION_13_8_SYMBOL = re.compile(r"`([A-Za-z0-9_./-]+\.py)::([A-Za-z_][\w.]*)`")
+#: ONE definition, because two guards read it (§13.8's and §9.1's): two copies
+#: would be two contracts, and the one that drifts is the one that stops being true.
+_SYMBOL_CITATION = re.compile(r"`([A-Za-z0-9_./-]+\.py)::([A-Za-z_][\w.]*)`")
 
 #: A stale `file.py:NNNN` line citation. §13.8 carries none.
-_LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.py:[0-9]+")
+#: ⚠️ `.md` is included (#10389 review P3-3): a line in a MARKDOWN table rots
+#: exactly like a line in a module — §9.1(b) cited the placement table's
+#: `story_arc` rows as `02-identity-and-placement.md:368`, a figure nothing
+#: re-derives and any edit above it invalidates. The `.py`-only pattern could not
+#: see the one citation shape the section was still carrying.
+_LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.(?:py|md):[0-9]+")
 
 
 def _symbol_span(path: Path, base: str) -> tuple[int, int] | None:
-    """The line span of `base`'s definition in `path`, or None if it is absent."""
+    """The line span of `base`'s BINDING in `path`, or None if it is absent.
+
+    A binding is a `def`/`class`, a module- or class-level ASSIGNMENT
+    (`ast.Assign` / `ast.AnnAssign`, including a tuple/list unpack), or a
+    `with … as` / `for` target. Assignments are the half this resolver was
+    missing (#10389 review P3-2): §9.1 cites the deny SETS this change is about
+    (`_SOURCE_SERVER_MANAGED_PROPS`, `_EVENT_SERVER_MANAGED_PROPS`, …), which are
+    frozenset literals, so the section used to fall back to a WORD-regex over the
+    module source — and `entities.py` names both of those symbols in its own
+    COMMENTS. Measured: renaming either left §9.1 citing a dead symbol with a
+    green guard, because a comment mention is not a binding. The fallback is
+    deleted rather than widened: a guard that accepts prose cannot tell a live
+    citation from a rotted one, which is the whole failure mode it exists for.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if getattr(node, "name", None) == base:
             return node.lineno, node.end_lineno or node.lineno
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.For, ast.AugAssign)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [i.optional_vars for i in node.items
+                       if i.optional_vars is not None]
+        else:
+            targets = []
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id == base:
+                return node.lineno, node.end_lineno or node.lineno
+            if isinstance(target, (ast.Tuple, ast.List)) and any(
+                    isinstance(e, ast.Name) and e.id == base
+                    for e in target.elts):
+                return node.lineno, node.end_lineno or node.lineno
     return None
 
 
@@ -653,7 +695,7 @@ def test_section_13_8_carries_no_line_citations_and_its_symbols_resolve():
 
     found = [
         (text.count("\n", 0, start + match.start()) + 1, match.group(1), match.group(2))
-        for match in _SECTION_13_8_SYMBOL.finditer(section)
+        for match in _SYMBOL_CITATION.finditer(section)
     ]
     assert len(found) >= 10, (
         f"only {len(found)} `module.py::symbol` citations parsed in §13.8 — the "
@@ -677,6 +719,93 @@ def test_section_13_8_carries_no_line_citations_and_its_symbols_resolve():
 
     assert not unresolved, (
         "§13.8 cites these readers as living in these modules, and they do not "
+        "— the citation has rotted (re-verify the passage, or re-point it to "
+        "the symbol that replaced it):\n  - "
+        + "\n  - ".join(
+            f"doc line {line}: `{cited_file}::{sym}` ({why})"
+            for line, sym, cited_file, why in unresolved
+        )
+    )
+
+
+#: §9.1 of `STORAGE` is the placement ruling this change enforces, and §9.1(b)
+#: names the four routes that can still put the prose back on a node. Its
+#: citations were `file.py:NNNN` — the same form §13.8 retired in `#7948` — and
+#: they rotted INSIDE one integration: `#10389`'s review measured
+#: `_SOURCE_SERVER_MANAGED_PROPS` at `entities.py:6766-6773`, and merging
+#: `origin/main` moved that same declaration to 6757 with `story_arc` at 6797.
+#: No code was wrong and no symbol changed; only the line. A reader who cannot
+#: follow a citation cannot check the closure, so §9.1 is symbol-keyed now for
+#: the same reason §13.8 is, and guarded the same way.
+_SECTION_9_1 = "### 9.1 The narrative lives in"
+
+
+def test_section_9_1_cites_symbols_not_lines_and_its_symbols_resolve():
+    """§9.1 pins a SYMBOL per route, never a line — and every symbol resolves.
+
+    Two arms, both measured on the pre-fix text:
+
+    * NO `file.py:NNNN` survives in the section — reverting any one of the four
+      citations this PR converted reds it and names the line (measured);
+    * every `` `module.py::symbol` `` resolves in that module at HEAD, so the
+      symbol-keyed form cannot rot into a name that no longer exists.
+
+    §9.1 cites module/class CONSTANTS (`_SOURCE_EXTRA_PROPS`,
+    `_SOURCE_SERVER_MANAGED_PROPS`) as well as functions, so `_symbol_span`
+    resolves ASSIGNMENT bindings too (#10389 review P3-2) — and the symbol arm
+    has NO prose fallback: a word-regex over the module source accepted a
+    COMMENT mention, and `entities.py` names the managed sets in its own
+    comments, so a rename left this section citing a dead symbol with a green
+    guard. The floor stops the symbol arm going vacuous if the section's
+    citation shape changes.
+    """
+    text = STORAGE.read_text(encoding="utf-8")
+    heading = text.index(_SECTION_9_1)
+    section = _section_body(STORAGE, "9.1")
+    body_start = text.index(section, heading)
+
+    surplus = [
+        (text.count("\n", 0, body_start + match.start()) + 1, match.group(0))
+        for match in _LINE_CITATION.finditer(section)
+    ]
+    assert not surplus, (
+        "§9.1 carries line citations again, and a line in a design document "
+        "rots: it reds every unrelated code move in a large file while being "
+        "unable to tell a correct line from a wrong one. Symbol-key them "
+        "(`module.py::symbol`) — the form §13 and §13.8 use:\n  - "
+        + "\n  - ".join(f"line {line}: `{cite}`" for line, cite in surplus)
+    )
+
+    found = [
+        (text.count("\n", 0, body_start + match.start()) + 1, match.group(1), match.group(2))
+        for match in _SYMBOL_CITATION.finditer(section)
+    ]
+    assert len(found) >= 10, (
+        f"only {len(found)} `module.py::symbol` citations parsed in §9.1 — the "
+        "section's citation shape changed (or the extractor broke) and this "
+        "guard would otherwise pass vacuously. TEN is the measured count: the "
+        "six test/pin citations §9.1 already carried, plus the four the "
+        "`entities.py` line ranges became."
+    )
+
+    unresolved = []
+    for doc_line, cited_file, symbol in found:
+        path = ROOT / cited_file
+        if not path.exists():
+            path = ROOT / "tortoise" / cited_file
+        if not path.exists():
+            unresolved.append((doc_line, symbol, cited_file, "file not found"))
+            continue
+        base = re.sub(r"\(\)$", "", symbol).rsplit(".", 1)[-1]
+        # NO word-regex fallback (#10389 review P3-2): a prose MENTION in a
+        # comment resolved a dead citation. `_symbol_span` knows assignments now.
+        if _symbol_span(path, base) is None:
+            unresolved.append(
+                (doc_line, symbol, cited_file, "symbol does not resolve at HEAD")
+            )
+
+    assert not unresolved, (
+        "§9.1 cites these symbols as living in these modules, and they do not "
         "— the citation has rotted (re-verify the passage, or re-point it to "
         "the symbol that replaced it):\n  - "
         + "\n  - ".join(
@@ -1174,6 +1303,87 @@ def test_the_changelog_entry_names_the_section_the_stamp_actually_left():
     )
 
 
+#: An `#issuecomment-N` citation. It is the ONE citation shape this file cannot
+#: RESOLVE: `_LINE_CITATION` reads `file.py:NNNN`, `_SYMBOL_CITATION` reads
+#: `module.py::symbol`, and a comment id can only be dereferenced over the
+#: network — which this file is offline by design, so no resolver is possible.
+_COMMENT_CITATION = re.compile(r"#issuecomment-(\d+)")
+
+
+def test_every_overrides_marker_the_design_documents_cite_is_the_one_the_code_cites():
+    """An `OVERRIDES:` marker is an issue COMMENT, so cite the code's own comment id.
+
+    THE DEFECT THIS PINS, measured at `#10389`'s review head. The §9.1 carrier
+    entry told a reader the `:Event` departure is *"marked there with an
+    `OVERRIDES:` line"* and cited `#issuecomment-6544603121` — which is not a
+    marker at all but a 13-byte shell artefact on `#228` whose body is literally
+    `@/tmp/o228.md` (a botched `-F` invocation, posted 53 s before the real
+    comment; the stub was deleted in this same pass, so it can no longer be
+    opened — the pre-fix citation is quoted here and preserved in the
+    changelog's own git history). The genuine marker is `#issuecomment-6544613785`, and the code that
+    implements the departure already cited it (`projection/entities.py`). So the
+    doc and the code disagreed about WHICH comment governs, and nothing in this
+    repo could see it: the citation guards resolve paths and symbols, and a
+    comment id is outside both.
+
+    Why a dead id is not a typo (`AGENTS.md`): the marker exists so a later
+    reader weighing `#228`'s passthrough against this code can FIND the ruling —
+    *"a marker that lives only in a ledger is invisible to the lane holding the
+    vendor page"*. A reader who follows this citation lands on garbage and cannot
+    tell a deliberate one-key departure from an accident, which is the failure the
+    marker was introduced to prevent. The changelog is the document that must keep
+    the record, so a dead id there is rot, not cosmetics.
+
+    WHAT IS ASSERTED, and why it is the right offline proxy: every comment id the
+    entry cites must also be cited by the implementation under `tortoise/`. That
+    is the cross-reference the repo CAN check without the network, and it is
+    exactly the relation that broke — the code said `6544613785`, the doc said
+    `6544603121`. Non-vacuity MEASURED: before this PR's fix the entry carries
+    `6544603121`, which appears in no module, so this test reds naming it; after
+    it, both ids (`6540959107` for the document fold, `6544613785` for the
+    `:Event` pair) resolve to the code comments that record the same ruling.
+
+    NOT promised: that the cited comment still EXISTS or still carries an
+    `OVERRIDES:` line — that needs the GitHub API, and a static guard that
+    silently skips when a token is unset is worse than none. Nothing here asserts
+    the marker's text either; it asserts that the doc and the code name the SAME
+    comment, which is the half a repo can hold itself to.
+
+    BOTH artifacts are read, because the rule places the marker where a reader
+    MEETS the departure and this PR meets it twice: §9.1(b) of the design doc
+    states the two `:Event` denies in prose, and the changelog entry records how
+    they landed. §9.1(b) carried the document fold's marker and NOT the `:Event`
+    one until this pass — the same invisibility one document over — so the two
+    are checked together rather than the changelog alone.
+    """
+    entry = _changelog_entry("carrier paragraph")
+    section_9_1 = _section_body(STORAGE, "9.1")
+    cited = sorted({*_COMMENT_CITATION.findall(entry), *_COMMENT_CITATION.findall(section_9_1)})
+    assert len(cited) >= 2, (
+        "the design documents no longer cite the two `OVERRIDES:` markers the "
+        "§9.1 departures are recorded on (the document fold's and the `:Event` "
+        "pair's), so this guard would pass vacuously — it parsed "
+        f"{cited} across §9.1 and the carrier changelog entry"
+    )
+
+    implementation = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "tortoise").rglob("*.py"))
+    )
+    orphaned = [f"#{cid}" for cid in cited if cid not in implementation]
+    assert not orphaned, (
+        "§9.1 or its changelog entry cites an `OVERRIDES:` comment id that NO "
+        f"module under `tortoise/` cites: {', '.join(orphaned)}. A marker is only "
+        "findable if it points at the real comment, and the code that implements "
+        "the departure already names it — cite THAT id. Two ways this goes "
+        "wrong, both measured on `#10389`: a botched `gh issue comment -F` leaves "
+        "a stub comment (`@/tmp/o228.md`) whose id is not a marker, and a doc and "
+        "its code drift onto DIFFERENT comments for the same ruling. If the id "
+        "is genuinely not cited from the implementation, state why in this "
+        "assertion rather than widening the guard to accept prose."
+    )
+
+
 # The two statements the entry once attributed to §9.1 *"in that place"* and that
 # `STORAGE-ARCHITECTURE.md` does NOT carry: the torn-tail TOLERATED decision (its
 # home is `tortoise/log.py:204`) and the tenant precedence the store decision asks
@@ -1342,4 +1552,257 @@ def test_the_carrier_entry_claims_91_only_for_what_91_carries():
     assert not missing, (
         f"the entry no longer reports {missing} at all — the repair is to say "
         "WHERE those statements live, not to stop recording them"
+    )
+
+
+#: The passages that justify `hosted_api._report_narrative_home` cite
+#: `sdk._emit_event`'s best-effort contract as their AUTHORITY: the reporter
+#: exists because the emit can answer "committed" while the narrative reached no
+#: store, so a reader following that citation is checking the change's whole
+#: premise. All three cited `sdk.py` by LINE, and at `#10389`'s review head every
+#: one was wrong — `9705-9712` landed on `record_degraded`'s `#9208` remedy
+#: comment, `9889-9894` on the `record_sink` docstring paragraph, `10027` on the
+#: event-store handler's `record_degraded` import block.
+#:
+#: ⛔ NOT merge drift, which is the part that makes this a rule rather than
+#: bad luck: `git diff` on `tortoise/sdk.py` between that head and its merge base
+#: is EMPTY. No integration moved those lines — they were never right. `sdk.py`
+#: is 44k lines, so no line in it survives an unrelated commit; that is the same
+#: rot `#7948` retired from `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 and the §9.1
+#: guard above retires from `STORAGE-ARCHITECTURE.md`.
+#:
+#: SCOPE, deliberately narrow: `sdk.py` line citations inside these three
+#: passages. `_execute_commit_writes` also carries a PRE-EXISTING
+#: `projection/entities.py:4896` citation that this change neither introduced nor
+#: measured, and a guard over every `file.py:NNNN` there would red on that
+#: unrelated line — a citation-shape rule is not allowed to become a backlog item
+#: for debt it did not find.
+_NARRATIVE_HOME_CITATIONS = (
+    ("tortoise/hosted_api.py",
+     ("_report_narrative_home", "_execute_commit_writes")),
+    ("tests/test_9555_narrative_carrier.py",
+     ("test_the_commit_path_READS_the_record_outcome_it_cannot_assume",)),
+)
+
+#: The authority the narrative-home reasoning must name, symbol-keyed: the CLASS
+#: and the METHOD, because `_emit_event` alone resolves off any module's private
+#: helper and a bare `sdk._emit_event` is the form that rotted.
+_NARRATIVE_HOME_SYMBOL = "sdk.py::TortoiseSDK._emit_event"
+
+
+def _citation_path(cited_file: str) -> Path | None:
+    """The module a `module.py` citation names, or None when the tree has no such file.
+
+    The passages cite the SHORT form the repo's comments use (`entities.py::
+    _upsert_document`, `edges.py::_DERIVATION_REFERENCES_LABELS`) as well as a
+    repo-relative path, so the citation is resolved the way a READER resolves it
+    — by the module file's name under `tortoise/` — instead of by guessing one
+    prefix. A name that matches more than one module is ambiguous, and this
+    returns the first in sorted order rather than silently picking by walk order.
+    """
+    direct = ROOT / cited_file
+    if direct.exists():
+        return direct
+    prefixed = ROOT / "tortoise" / cited_file
+    if prefixed.exists():
+        return prefixed
+    matches = sorted((ROOT / "tortoise").rglob(Path(cited_file).name))
+    return matches[0] if matches else None
+
+
+def _function_texts(path: Path, names: tuple[str, ...]) -> dict[str, str]:
+    """`name -> its own source text` for each named `def` in `path`.
+
+    Read through `ast` so the scope is the FUNCTION and not a line window: this
+    guard's whole premise is that a line number is not a stable address, so a
+    guard that found its own scope by line number would be the same mistake it
+    exists to catch.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    found: dict[str, str] = {}
+    for node in ast.walk(ast.parse("\n".join(lines))):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in names):
+            found[node.name] = "\n".join(lines[node.lineno - 1:node.end_lineno])
+    return found
+
+
+def test_the_narrative_home_citations_are_symbol_keyed_and_resolve():
+    """The narrative-home reasoning cites `_emit_event` by SYMBOL, never a line.
+
+    Three arms, each measured on the pre-fix text of `bb6197375`:
+
+    * NO `sdk.py:NNNN` in any of the three passages — the pre-fix text carries
+      all three (all wrong), so this arm is red on it and names each one;
+    * the authority is cited symbol-keyed (`sdk.py::TortoiseSDK._emit_event`)
+      somewhere in those passages, so removing the line citations cannot be
+      "fixed" by deleting the justification altogether;
+    * EVERY `` `module.py::symbol` `` written in those passages RESOLVES at HEAD,
+      and a dotted one resolves as a member of ITS CLASS — a rename, or a move
+      out of `TortoiseSDK`, reds instead of leaving a citation naming something
+      that is not there (measured both ways: `sdk.py::TortoiseSDK._emit_events`
+      in `hosted_api.py` reds naming that citation, and
+      `sdk.py::TortoiseSDX._emit_event` reds as a different authority wearing
+      the same method name).
+    """
+    sources: dict[str, dict[str, str]] = {}
+    for rel, names in _NARRATIVE_HOME_CITATIONS:
+        texts = _function_texts(ROOT / rel, names)
+        absent = [name for name in names if name not in texts]
+        assert not absent, (
+            f"`{rel}` no longer defines {absent} — the narrative-home reasoning "
+            "moved, so re-point this guard at its new home rather than letting "
+            "it scan nothing and pass"
+        )
+        sources[rel] = texts
+
+    surplus = [
+        (rel, name, match.group(0))
+        for rel, texts in sources.items()
+        for name, text in texts.items()
+        for match in _LINE_CITATION.finditer(text)
+        if match.group(0).split(":", 1)[0].endswith("sdk.py")
+    ]
+    assert not surplus, (
+        "the passages that justify `_report_narrative_home` cite `sdk.py` by "
+        "LINE again. That citation IS the change's premise — the emit is "
+        "best-effort, so the commit door must read its outcome — and a line in "
+        "a 44k-line module cannot survive an unrelated commit: at `#10389`'s "
+        "review head all three were wrong, and they were wrong at the merge "
+        "base too. Name the symbol and the behaviour instead "
+        f"(`{_NARRATIVE_HOME_SYMBOL}` plus its `if log is None:` arm and its "
+        "per-call `return False`):\n  - "
+        + "\n  - ".join(f"`{rel}::{fn}` cites `{cite}`"
+                        for rel, fn, cite in surplus)
+    )
+
+    citing = [f"{rel}::{name}" for rel, texts in sources.items()
+              for name, text in texts.items()
+              if _NARRATIVE_HOME_SYMBOL in text]
+    assert citing, (
+        "none of the narrative-home passages names `"
+        + _NARRATIVE_HOME_SYMBOL
+        + "` any more — the rationale's authority is then uncited, which reads "
+        "exactly like a claim nobody can check. Cite the symbol that carries the "
+        "best-effort contract, not just the module: " + ", ".join(sorted(sources))
+    )
+
+    citations = [
+        (rel, name, match.group(1), match.group(2))
+        for rel, texts in sources.items()
+        for name, text in texts.items()
+        for match in _SYMBOL_CITATION.finditer(text)
+    ]
+    assert citations, (
+        "no `module.py::symbol` citation parses in the narrative-home passages "
+        "at all — this guard's resolution arm would otherwise pass vacuously "
+        "while the passages cite nothing a reader can open"
+    )
+
+    unresolved = []
+    for rel, fn, cited_file, symbol in citations:
+        path = _citation_path(cited_file)
+        if path is None:
+            unresolved.append((rel, fn, cited_file, symbol, "file not found"))
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        holder, _, leaf = symbol.rpartition(".")
+        if holder:
+            # Dotted: the LEAF must be a method OF THAT CLASS. `_emit_event` on
+            # another class, or at module level, is a different authority.
+            resolved = any(
+                isinstance(node, ast.ClassDef)
+                and node.name == holder.rsplit(".", 1)[-1]
+                and any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and child.name == leaf for child in node.body)
+                for node in ast.walk(tree)
+            )
+        else:
+            # Bare: any definition, or a word occurrence (modules/consts).
+            resolved = any(
+                getattr(node, "name", None) == leaf for node in ast.walk(tree)
+            ) or bool(re.search(rf"\b{re.escape(leaf)}\b",
+                                path.read_text(encoding="utf-8")))
+        if not resolved:
+            unresolved.append((rel, fn, cited_file, symbol,
+                               "symbol does not resolve at HEAD"))
+
+    assert not unresolved, (
+        "the narrative-home passages cite these symbols as living in these "
+        "modules, and they do not — the citation has rotted (re-verify the "
+        "best-effort contract and re-point it at the symbol that now carries "
+        "it, never at a line):\n  - "
+        + "\n  - ".join(
+            f"`{rel}::{fn}` cites `{cited_file}::{sym}` ({why})"
+            for rel, fn, cited_file, sym, why in unresolved
+        )
+    )
+
+
+# ── the numbers a `main→head` delta sweep must never touch (#10410) ──────────
+
+#: `(the pin the passage declares, the number as the document spells it, a
+#: phrase the SAME line must carry)`. The third field is what stops a row being
+#: satisfied by the number landing on some unrelated line.
+#:
+#: Every number here was verified **against the pin blob**, not against `main`:
+#: `git show <pin>:tortoise/extractor_v2.py | sed -n '<N>p'` names the symbol
+#: the passage names, at the pin the passage declares. That is the whole point —
+#: these are the values the document's own header rule promises, and the third
+#: field is the symbol they resolve to there.
+#:
+#: ⚠️ **Re-pinning the document means re-deriving this table**, with the same
+#: command. Do not "fix" a red here by copying the number out of the document:
+#: the document is what is being checked.
+_PIN_RELATIVE_CITES = (
+    # §4.4's `_render_search_results` — the string the renderer actually emits.
+    ("7d348d351", "extractor_v2.py:2353", "`_render_search_results`"),
+    # §10's transcript citations, all three at the same `653980445` pin.
+    ("653980445", "extractor_v2.py:1755", "the `render_s2_prompt` call"),
+    ("653980445", ":1775", 'the `+ ("\\n\\n" + transcript)` tail'),
+    ("653980445", ":1738", 'the over-cap `return ""`'),
+    # Default-pin (`c79ba1cf2`) numbers under the header's base rule.
+    ("c79ba1cf2", "extractor_v2.py:4845", "`merge_embed_lists(embed_list, s4)` runs at"),
+    ("c79ba1cf2", "extractor_v2.py:4467", "`_collect_classify_items(embed_list)`"),
+    ("c79ba1cf2", "extractor_v2.py:3967-3969", "`execute_embed`"),
+    ("c79ba1cf2", "extractor_v2.py:3021+", "`classify_consolidation`"),
+    ("c79ba1cf2", "extractor_v2.py:1744-1778", "`_derive_queries`"),
+    ("c79ba1cf2", "extractor_v2.py:2284", "`merge_embed_lists` (def"),
+)
+
+
+def test_the_pin_relative_cites_are_not_swept_with_a_main_to_head_delta():
+    """The one failure this file's symbol-keyed design cannot see (#10410).
+
+    A number relative to a **pin** is not a `main` number, so sweeping it with
+    this branch's own `main→head` line delta corrupts it — and nothing else here
+    notices, because the symbol each passage quotes still resolves at HEAD (it
+    is `extractor_v2.py` that moved, not the doc). Measured on `4bbdbb710`: all
+    ten pin-relative numbers had been shifted by the branch's insertion delta,
+    landing the §4.4 and §10 promises on docstrings, the §D table's rows on a
+    comment and a blank line, and leaving §5 saying a call `runs at :4930` while
+    the table said it is `called at :4845`.
+
+    The domain, not the delta, is the discriminator: these passages declare a
+    revision pin, so their numbers belong to that revision. `:555`'s
+    `run_s2(...)` cite is deliberately NOT here — its own passage says it is
+    cited *HEAD-relative*, and `tests/test_7949_capstone_measure.py` sweeps it.
+
+    Non-vacuity: on `4bbdbb710` eight of these ten rows fail (the two
+    `653980445` rows below were never touched, and are pinned so the next sweep
+    of that group is visible too).
+    """
+    lines = _doc_text().splitlines()
+    moved = [
+        f"`{cite}` (exact at `{pin}`) is gone from every line that also names "
+        f"{anchor} — a pin-relative number swept with a `main→head` delta"
+        for pin, cite, anchor in _PIN_RELATIVE_CITES
+        if not any(cite in line and anchor in line for line in lines)
+    ]
+    assert not moved, (
+        "the document's pin-relative citations were re-derived against the wrong "
+        "revision. Restore the value that is exact at the pin each passage "
+        "declares, or re-pin the document and re-derive this table — do not "
+        "carry a `main` number into a passage that names a pin:\n  "
+        + "\n  ".join(moved)
     )

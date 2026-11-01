@@ -143,8 +143,14 @@ from .projection import _graph_metadata_write_scope
 # projection package (one home), not in a second copy at this call site.
 from .projection import _stored_prop_value, _UNSTORED
 from .projection.entities import (  # #3998: the declared :Source surface
+    # #10389 review P2 (#3860 one-table rule): the label → server-managed set
+    # table is read by BOTH this live tenant route AND the replay fold
+    # (`projection._fold_entity_mutation`). Two copies of the contract is how the
+    # copy that drifts stops being true — and a set read by one arm is exactly
+    # the asymmetry that left an `EntityMutated {label: "Event"}` line replaying
+    # the narrative onto the anchor §9.1(b) calls prose-free.
+    _SERVER_MANAGED_PROPS_BY_LABEL,
     _SOURCE_NODE_PROP_NAMES,
-    _SOURCE_SERVER_MANAGED_PROPS,
     filter_source_props,
 )
 # #8006: the `search_keys` flatten rule has ONE home — the projection module that
@@ -5412,6 +5418,176 @@ _RESERVED_ACTOR_PROPS = frozenset(
     {"actor_user_id", "owner", "initiated_by", "agent_id"})
 
 
+from tortoise.record_projection import (  # noqa: E402
+    _SESSION_COORDINATE_KEYS as _NARRATIVE_SESSION_COORDINATE_KEYS,
+)
+
+#: §9.1's narrative key, and the SESSION it must name — read from the record's
+#: own projection (`_SESSION_COORDINATE_KEYS`) rather than re-typed (#10389 review
+#: cycle 2 P3): a spelling this door accepts and the projection no longer
+#: recognises would file nothing, silently, which is the defect being closed.
+_NARRATIVE_PROP = "story_arc"
+_NARRATIVE_SESSION_KEYS: tuple[str, ...] = _NARRATIVE_SESSION_COORDINATE_KEYS
+
+
+def _refuse_unpaired_narrative(props: dict, *, door: str,
+                              label: str | None = None,
+                              journal_armed: bool = True) -> None:
+    """§9.1's narrative must NAME its session, or it has no home at all (#10000).
+
+    THE RULE, verbatim (`docs/architecture/STORAGE-ARCHITECTURE.md` §9.1/D1):
+    "The S1 narrative (the connected prose form of a captured session) is stored
+    as **text in Postgres, together with the raw agent-session transcript it was
+    derived from** — not in the graph, not a `Document` node, not a `Point`."
+    The PAIRING is the session: `record_projection._narrative_statements` is
+    shape-keyed and files a narrative under `_session_coordinate(record)`
+    (`sessionId`/`session_id`). A narrative that names no session therefore
+    matches nothing, and the graph refuses the key on BOTH folds (§9.1's other
+    half, `projection.entities._EVENT_HANDLED` /
+    `_DOC_PASSTHROUGH_HANDLED`) — so the call stores §9.1's text NOWHERE its own
+    readers look.
+
+    MEASURED, Arm B (`tortoise_record_app`, so the record ACCEPTS the write),
+    same prose, one variable — the session coordinate:
+
+        create_event(..., story_arc=<prose>, sessionId='nstory-door-session-1')
+          journal : EventRecorded carries story_arc + sessionId
+          Postgres: public.session_narrative = (session_id, 91 chars, the prose)
+          graph   : prose hits 0 (fingerprint Event 2 + Meta 1 — not empty)
+
+        create_event(..., story_arc=<prose>)            # the unpaired call
+          journal : EventRecorded carries story_arc, sessionId NULL
+          Postgres: NO row (the shape rule has no coordinate to key on)
+          graph   : dropped by the fold — one warning, no error, no store
+
+    ⇒ The unpaired shape is the ONLY one with nowhere to go, and before this
+    guard it was accepted and dropped (silent in effect: the caller's 2xx says
+    nothing about §9.1's home). It is REFUSED here instead.
+
+    ⛔ AT THE DOOR, NEVER IN THE FOLD. The fold that drops the key is also the
+    REPLAY fold (`rebuild_all`, `recover_from_log`, `backup.restore`), so a
+    refusal there would redden every rebuild of a journal holding a legacy
+    `story_arc` line. A legacy line replays to the fold's named warning, which
+    is the declared trade; a NEW write is refused before anything is written.
+
+    ⚠️ Scope: it refuses `story_arc` on every shape that would NOT land in
+    §9.1's home, and accepts only the one that does. Three refusals, one rule —
+    the prose must be in Postgres-with-its-session and on NO node:
+
+      * an UPDATE door (`label is None`) — an update writes caller props straight
+        onto the node (`SET n += $props`), so on `:Point`/`:Object`/`:Subject` it
+        would carry the prose into the graph AND, once the record names the
+        session, file the row as well: two drifting homes, the duplicate
+        §9.1(b)/R7 exists to remove. Measured at #10389's head:
+        `update_entity(<object>, story_arc=…, sessionId=…)` wrote the prose onto
+        the `:Object` node and into `public.session_narrative`. ⛔ THIS ARM NEVER
+        SEES `:Event`/`:Source`: `_update_entity` calls it AFTER their
+        `_SERVER_MANAGED_PROPS_BY_LABEL` blocks, which own those refusals and
+        their messages (#10389 review cycle 2 — placed first it shadowed them and
+        made the table's entries dead code).
+      * a label whose fold does NOT refuse the key (`:Point`, `:Object`,
+        `:Subject`) — the open `#228` passthrough persists it, so a PAIRED write
+        would put the prose on a node while the record files it, and an UNPAIRED
+        one would store a graph copy of §9.1's text. `_NARRATIVE_LABELS` is the
+        closed set whose folds DO refuse it (measured: `create_object(...)`, and
+        `create_point("statement", "a claim", story_arc=…)` which persisted
+        `(:Point {story_arc: <the prose>})`).
+      * a create with NO JOURNAL — `sdk._emit_event` returns before the record
+        leg when no log is configured, so the record home is unreachable and the
+        prose is in no store, with a 2xx and no advisory (the exact class this
+        change closes; the commit path already reports it via
+        `hosted_api._report_narrative_home`, the tenant doors have no receipt
+        channel).
+
+    ⚠️ THE POINT DOORS CALL IT TOO (#10389 review cycle 3): `create_point` and
+    `update_point` have their own funnels, and NEITHER could be left to the fold
+    — the `:Point` fold does not refuse the key, and `update_point` writes raw
+    `SET n += $props` and journals `PointRevised`, so a fold-only deny would make
+    a rebuild DELETE a property the live write accepted (live ≠ replay). Both
+    pass `label="Point"`, which is outside `_NARRATIVE_LABELS`.
+    The residual that REMAINS is a LEGACY one and is #10429's: a journal that
+    already carries `story_arc` for a Point replays through `_upsert_point_props`,
+    which this helper never sees (it is the fold). No new write lands the key
+    on any node after this change.
+    """
+    if not isinstance(props, dict):
+        return
+    value = props.get(_NARRATIVE_PROP)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return
+    if not isinstance(value, str):
+        # ⛔ A NON-STRING narrative is the same silent loss in a different
+        # costume (#10389 review cycle 2 P2, measured): the fold drops the key
+        # and `record_projection._narrative_statements` projects only a
+        # non-empty `str`, so `story_arc={"a": …}` / `[<prose>]` / `42` all
+        # answered 2xx with the narrative in NO store. Refused here rather than
+        # coerced: `_jsonb_or_scalar` would put a dict in a TEXT column, which is
+        # a false claim about §9.1's prose, not a narrative.
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} must be the narrative TEXT (§9.1/D1, #10000): "
+            f"got {type(value).__name__}. The record projects only a non-empty "
+            f"string into `public.session_narrative.narrative` and the graph "
+            f"refuses the key, so this value would be stored in no store at "
+            f"all. Pass the prose as a string, together with "
+            f"{' or '.join(_NARRATIVE_SESSION_KEYS)!r}."
+        )
+    if label is None:
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} cannot be written through {door}: §9.1/D1 puts "
+            f"the S1 narrative in `public.session_narrative` (filed by its "
+            f"session), and an update writes caller props straight onto the "
+            f"node — so this call puts the prose on the graph and, once the "
+            f"record names the session, in the table too: two homes drifting "
+            f"apart, and §9.1's row is not filed BY the update either way. "
+            f"Write the narrative through the capture / commit path (it carries "
+            f"its own session), or create the carrier with `sessionId=`."
+        )
+    if label not in _NARRATIVE_LABELS:
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} cannot be written on a {label} (#10000): "
+            f"§9.1/D1 puts the S1 narrative in `public.session_narrative` and "
+            f"NOT on a node, but the {label} fold does not refuse the key — its "
+            f"open passthrough would persist the prose on the node, so this "
+            f"write would store §9.1's text in the graph whether or not it also "
+            f"reached the record. The labels whose folds refuse it are "
+            f"{sorted(_NARRATIVE_LABELS)}; for anything else, keep the prose out "
+            f"of a node payload and file it through the capture / commit path."
+        )
+    if not any(isinstance(props.get(k), str) and props[k].strip()
+               for k in _NARRATIVE_SESSION_KEYS):
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} names no session, so §9.1's narrative has "
+            f"nowhere to go (#10000): the record files it under its session "
+            f"(`public.session_narrative`, keyed by session_id) and the graph "
+            f"refuses the key on the {label} fold, so {door} would store the "
+            f"prose in no store at all. Pass {' or '.join(_NARRATIVE_SESSION_KEYS)!r} "
+            f"naming the session this narrative was distilled from (that is the "
+            f"transcript it is paired with, §9.1), or write the narrative through "
+            f"the capture / commit path that carries its own session."
+        )
+    if not journal_armed:
+        raise ValueError(
+            f"{_NARRATIVE_PROP!r} has no record to be filed in (#10000): this "
+            f"SDK was built without an `event_log_path` (no journal), so the "
+            f"record leg is unreachable — `sdk._emit_event` returns before it — "
+            f"and §9.1's narrative would be stored NOWHERE while {door} answered "
+            f"success. Configure `event_log_path` (and `TORTOISE_RECORD_DSN`) so "
+            f"the record can hold it, or write the narrative through the capture "
+            f"/ commit path."
+        )
+
+
+#: The labels whose projection fold REFUSES `story_arc` (`_EVENT_HANDLED`,
+#: `_DOC_PASSTHROUGH_HANDLED`, `_SOURCE_SERVER_MANAGED_PROPS`) — i.e. the only
+#: labels on which a paired narrative is guaranteed to land in the RECORD and
+#: on NO node. Closed set, not a denylist: a label that grows a refusal belongs
+#: here deliberately, and one that does not (`:Point`, `:Object`, `:Subject`)
+#: stays out — measured, `create_object`/`create_subject`/`create_point` all
+#: persist the key through the open `#228` passthrough.
+_NARRATIVE_LABELS: frozenset = frozenset({"Event", "Source", "Document"})
+
+
+
 def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_belief_props: bool = False,
                     reject_claim_class: bool = False) -> dict:
@@ -6200,6 +6376,46 @@ def _coerce_props(props: dict) -> dict:
         # Scalar 'props' value — restore as a literal property.
         props["props"] = nested
     return props
+
+
+def _distinct_preserving_order(items) -> list:
+    """``items`` with repeated entries dropped, the FIRST occurrence kept (#9750).
+
+    The operator write path's input list is a SET, not a bag. `create_operator`
+    writes its typed edges and their ``INPUT`` mirrors BY LIST POSITION (``idx``
+    positions the EP source slot at 0 and the targets after it), so one edge per
+    DISTINCT endpoint is the invariant the graph has to hold — a caller that
+    repeats a target must not be given two weighted edges over the same claim.
+    `ep.py` builds the factor from the EDGE list, so a repeat appends the same
+    claim twice to the input list: it double-counts that claim's EP
+    contribution and defeats the "<2 inputs" unary path (measured on this head:
+    ``to: ["p2", "p2"]`` → 3 IMPL + 3 INPUT edges for a one-target operator).
+
+    ⛔ Do NOT reach for ``set()`` directly. Order is load-bearing: ``idx`` is
+    positional, so re-ordering the list would re-index the factor. First
+    occurrence wins, which is the set-union answer without the re-ordering.
+
+    ⛔ Do NOT widen this to the SOURCE slot. ``create_operator(op, a, [a])`` is
+    a DELIBERATE shape (the self-support operator, ``idx: 0`` + ``idx: 1`` over
+    one id — pinned behaviourally by ``tests/test_6871_operator_input_set.py``),
+    so the caller collapses ``target_ids`` among THEMSELVES and never against
+    ``source_id``.
+
+    An unhashable entry (a malformed target that another guard owns and names)
+    is kept verbatim: this helper decides MULTIPLICITY, never shape, and must
+    not turn a later, better-worded refusal into a ``TypeError`` raised here.
+    """
+    seen: set = set()
+    out: list = []
+    for item in items:
+        try:
+            if item in seen:
+                continue
+            seen.add(item)
+        except TypeError:
+            pass  # unhashable: kept verbatim for the shape guard to refuse
+        out.append(item)
+    return out
 
 
 def _item_dedup_key(item: dict) -> str | None:
@@ -10845,6 +11061,13 @@ class TortoiseSDK:
         # as the entity funnel (`_refuse_unapproved_kind`).
         self._refuse_unapproved_kind("pointKind", kind)
         _coerce_props(props)
+        # #10000 / §9.1: the POINT door is closed too (#10389 review cycle 3).
+        # The Point fold does not refuse `story_arc`, so this door persisted
+        # §9.1's prose on a node (measured: `create_point("statement",
+        # "a claim", story_arc=<prose>)` → `(:Point {story_arc: <the prose>})`).
+        # `"Point"` is outside `_NARRATIVE_LABELS`, so this refuses on the label.
+        _refuse_unpaired_narrative(props, door="create_point", label="Point",
+                                   journal_armed=bool(self._event_log_path))
         # #9287: the props passthrough can carry `pointKind` itself and it WINS
         # over the positional kind (measured: `create_point("statement", …,
         # pointKind="\u2003statement\u2003")` stored the padded value), so the same
@@ -15774,6 +15997,13 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #10000 / §9.1: `update_point` writes with a raw `SET n += $props` and
+        # consults no point deny-set, so it accepted the narrative and journalled
+        # it as `PointRevised` — measured at #10389 review cycle 3, which is also
+        # why this cannot be left to the fold's `_POINT_DENY` alone: a rebuild
+        # would then DELETE a property the live write accepted (live ≠ replay).
+        _refuse_unpaired_narrative(props, door="update_point", label="Point",
+                                   journal_armed=bool(self._event_log_path))
         # #9287: an UPDATE is a WRITE, and ``pointKind`` is writable through it
         # (measured: ``update_point(id, pointKind='\u2003observation\u2003')``
         # stored the padded value and the gate never demanded it) — the same
@@ -17699,8 +17929,25 @@ class TortoiseSDK:
         #    Cypher injection primitive AND would cause a partial transfer.
         #    Validation strictly precedes the outdated-flag/CORRECTS writes so
         #    a failure leaves the graph untouched.
+        # ⛔ The operator POPULATION is the CANONICAL one, not ``is_operator``
+        # alone (#10418 review P2). EP's Batch-1 predicate — the one the #2351
+        # backstop runs under — is
+        # ``(o.is_operator = true OR o.op_type IS NOT NULL)`` (``ep.py``: a
+        # legacy / migrated operator carries ``op_type`` and may have lost the
+        # boolean flag), and the repo spells that same disjunction at five other
+        # sites (``_is_operator_point``, :27460, :27487, :28464, :28522).
+        # A narrow predicate here is not an under-report — it is the fail-open:
+        # 2a-DIRECT's "is the far endpoint an operator?" set was the same narrow
+        # form, so the node this query missed was re-pointed THERE as an
+        # operator-LESS direct edge (``idx`` dropped — it is not in
+        # ``DIRECT_EDGE_ATTR_KEYS`` — plus a ``DirectEdgeRepoint`` for a factor
+        # the loader builds as an OPERATOR factor). That is #10195's harm,
+        # reached by REMOVING a property instead of writing a hostile one. So
+        # this query, the slot query below, 2a-INPUT and 2a-DIRECT's ``op_set``
+        # all read the ONE canonical form.
         edges_result = proj.g.query(
-            "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
+            "MATCH (op:Point)-[r]->(old:Point {id:$old_id}) "
+            "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
             "RETURN op.id, type(r), r.idx, op.label, ID(r)",
             params={"old_id": old_id},
         )
@@ -17709,8 +17956,9 @@ class TortoiseSDK:
             validate_rel_type(row[1])  # raises ValueError before any mutation
 
         # ── #10195: the 2a OPERATOR re-point's override pre-flight (#2351) ──
-        # The 2a arm below re-points every ``(op:Point {is_operator:true})
-        # -[IMPL|NAND {idx}]->(old)`` edge onto the successor with a raw edge
+        # The 2a arm below re-points every canonically-operator
+        # ``(op:Point)-[IMPL|NAND {idx}]->(old)`` edge onto the successor with
+        # a raw edge
         # MERGE + delete, without ever consulting the claim classes of the
         # operator's OTHER inputs — so a supersede could mint the
         # ``derived --IMPL--> asserted`` factor ``create_operator`` refuses
@@ -17743,11 +17991,23 @@ class TortoiseSDK:
         # and BEFORE the ``PointSuperseded`` append and every other mutation — a
         # refusal that lands after the transfer is the #329/#4021
         # partial-mutation defect no matter how good its message is.
-        _repoint_ops: dict[str, str] = {}
+        # ⛔ EVERY mechanism, not one per operator (#10418 review P2). An
+        # earlier cut kept ONE rel type per operator id —
+        # ``_repoint_ops.setdefault(op_id, type(r))`` over a statement with no
+        # ``ORDER BY`` — so which mechanism got judged was SERVER ROW ORDER,
+        # and the two picks are not equivalent: ``_canonical_direction``'s
+        # absent default is ``bidirectional`` for IMPL (both legs) and
+        # ``unidirectional`` for NAND (forward only), so a NAND pick could pass
+        # a wiring the IMPL pick refuses. That is a verdict (and a refusal
+        # message) that flips between runs — the one property the slot query's
+        # ``ORDER BY op.id, inp.id`` was added to guarantee. 2a re-points BOTH
+        # rel types, so BOTH mechanisms reach the rebuilt factor and both are
+        # judged; a set makes the collection order-independent by construction.
+        _repoint_rels: dict[str, set[str]] = {}
         for row in edges_result.result_set:
             if row[1] in ("IMPL", "NAND") and row[3] != "alreadyDecided":
-                _repoint_ops.setdefault(row[0], row[1])
-        if _repoint_ops:
+                _repoint_rels.setdefault(row[0], set()).add(row[1])
+        if _repoint_rels:
             # ONE statement for every affected operator's slots. ``op.op_type``
             # / ``op.direction`` are the node's own record; ``sr.idx`` is the
             # slot position EP reads (``ORDER BY coalesce(r.idx, 0)``).
@@ -17758,77 +18018,242 @@ class TortoiseSDK:
             # operators' points (#6976; ``test_no_query_loses_its_id_predicate``).
             _slot_rows = proj.g.query(
                 "MATCH (op:Point) WHERE op.id IN $op_ids "
-                "AND coalesce(op.is_operator, false) = true "
+                "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                 "WITH op "
                 "MATCH (op)-[sr:IMPL|NAND]->(inp) "
-                "RETURN op.id, op.op_type, op.direction, sr.idx, inp.id",
-                params={"op_ids": sorted(_repoint_ops)},
+                "RETURN op.id, op.op_type, op.direction, sr.idx, inp.id "
+                # Deterministic row order, so a DUPLICATED operator id (raw-write
+                # only — ids are ULIDs) cannot make the verdict, or the refusal
+                # message, depend on server row order (#10195 review P3).
+                # ⛔ ``sr.idx`` is deliberately NOT in this ORDER BY: it is the
+                # one property that may hold MIXED types, and cross-type ordering
+                # is engine-defined — the door orders slots in Python instead.
+                "ORDER BY op.id, inp.id",
+                params={"op_ids": sorted(_repoint_rels)},
             ).result_set
             _slot_map: dict[str, list] = {}
-            _op_meta: dict[str, tuple] = {}
+            _op_meta: dict[str, list] = {}
             for _srow in _slot_rows:
                 _sid, _sop_type = _srow[0], _srow[1]
                 _sdir, _sidx, _sinp = _srow[2], _srow[3], _srow[4]
-                _op_meta.setdefault(_sid, (_sop_type, _sdir))
+                _op_meta.setdefault(_sid, []).append((_sop_type, _sdir))
                 _slot_map.setdefault(_sid, []).append((_sidx, _sinp))
-            for _oid in sorted(_repoint_ops):
+            for _oid in sorted(_repoint_rels):
                 _srows = _slot_map.get(_oid) or []
-                # An UNPROVABLE layout is not judged. A slot edge carrying no
-                # ``idx`` (legacy/migrated operator), one ``idx`` that is not an
-                # ``int`` (a schemaless graph accepts ``r.idx='1'`` from any
-                # hand/foreign writer, and the keys are sorted below), or one
-                # ``idx`` carried by two different inputs, means position 0 is
-                # not provably the SOURCE — and EP's backstop stands down on
-                # exactly that evidence (``op_idx_known``, #943-review). A door
-                # refusing a shape the load side keeps is the divergence this
-                # module warns against, so the same evidence silences both. The
-                # type leg is part of the SAME stand-down, not a separate rule:
-                # ``sorted({0: …, '1': …})`` raises ``TypeError`` and would turn
-                # "cannot prove it" into a traceback that aborts a supersede
-                # this guard is not even about.
-                if not _srows or any(
-                        not isinstance(_sidx, int) for _sidx, _ in _srows):
+                if not _srows:
+                    # No slot rows at all: this operator has no ``IMPL|NAND``
+                    # edge reaching a point, so there is no rebuilt factor to
+                    # judge.
                     continue
-                _rebuilt: dict[int, set] = {}
-                for _sidx, _sinp in _srows:
-                    _rebuilt.setdefault(_sidx, set()).add(
-                        new_id if _sinp == old_id else _sinp)
-                if any(len(_ids) > 1 for _ids in _rebuilt.values()):
-                    continue
-                _slot_ids = [next(iter(_rebuilt[_i])) for _i in sorted(_rebuilt)]
-                _slot_source, _slot_targets = _slot_ids[0], _slot_ids[1:]
-                if not _slot_targets:
-                    continue  # a unary factor overrides nobody
-                # The slots are judged AS WRITTEN — every input, in idx order —
-                # which is how ``create_operator`` reads a caller's request. EP's
-                # load side additionally strips draft/terminal inputs and takes
-                # the first SURVIVING one as the source, but that is a reading of
-                # a factor after the fact, not the wiring the caller asked to
-                # write: a draft input can be promoted later, and the factor is
-                # then exactly the one this door refuses.
+                # ⛔ NO STAND-DOWN ON, OR FOR, A NULL ``idx`` (#10195 review P2;
+                # #10364/#10404). An earlier cut skipped the whole operator
+                # whenever a slot edge carried no ``idx``, justified by "``ep.py``
+                # clears ``op_idx_known[op_id]`` under ``if idx is None`` and that
+                # flag gates its #2351 backstop". That was true at this branch's
+                # base and is FALSE on main: ``#10404`` removed the gate, so the
+                # load side now runs ``factor_direction_over_claims``
+                # UNCONDITIONALLY (``ep.py`` — "⛔ NOT gated on ``op_idx_known``
+                # (#10364)"), and ``op_idx_known`` survives only for the
+                # SOURCE-STRIP guard, which asks a different question and is
+                # correctly gated. So the door skipping killed the supersede's
+                # only verdict while the loader still judged the factor it built.
+                # ⛔ And the layout was never even unorderable: ``ep.py`` orders
+                # ``coalesce(r.idx, 0), c.id``, so a NULL slot IS position 0 — the
+                # very shape the duplicated-``idx`` arm below already reads (one
+                # candidate, tie-broken by claim id). NULL is therefore COERCED to
+                # 0 here, exactly as ``coalesce`` does, and judged. The skip was
+                # the ONE remaining fail-open of this arm: a supersede minting
+                # ``derived --IMPL--> asserted`` with no verdict, no warning and no
+                # record, reachable by REMOVING a property rather than by writing a
+                # hostile one.
+                # ⛔ NOTHING ELSE stands down either. A non-``int`` ``idx`` and one
+                # ``idx`` carried by two inputs are JUDGED too — the load side
+                # builds and judges those factors, so a door that skipped them
+                # would be the same divergence in the FAIL-OPEN direction (#10195
+                # review P2 — this arm's earlier "the same evidence silences both"
+                # claim was false for two of its legs).
+                # The rebuilt layout: ``old`` becomes ``new`` AT ITS SLOT, so what
+                # is judged below is the wiring the graph holds AFTER the write.
+                # A NULL ``idx`` enters the layout as the 0 ``coalesce`` reads it.
+                _slots: list[tuple[object, str]] = [
+                    (0 if _sidx is None else _sidx,
+                     new_id if _sinp == old_id else _sinp)
+                    for _sidx, _sinp in _srows]
+                _slot_ids = [i for _, i in _slots]
+                # ⛔ ORDERABILITY IS NOT A NUMERIC PROPERTY, and this was MEASURED
+                # on the engine rather than assumed (#10195 review round 2).
+                # ``ep.py`` reads the factor with
+                # ``ORDER BY coalesce(r.idx, 0), c.id``, and on FalkorDB that
+                # ordering GROUPS BY TYPE before comparing values: a STRING slot
+                # sorts AHEAD of a numeric one (``'1'`` before ``0``), and a
+                # BOOLEAN sorts neither as 0 nor as 1. A total numeric order over a
+                # MIXED layout therefore names a DIFFERENT source than the loader:
+                # measured fail-open in one direction (source DERIVED at ``'1'``,
+                # predecessor at ``0`` — the door passed the supersede and the load
+                # side immediately reported ``derived_over_asserted``) and
+                # over-refusal in the mirror. So the layout is ordered ONLY when
+                # EVERY slot idx is a real ``int`` (``bool`` excluded — it is an
+                # ``int`` SUBCLASS in Python yet a separate type to the engine); every
+                # other layout takes the candidate arm below, which is engine-agnostic
+                # and fail-CLOSED. Modelling the engine's type-group order instead
+                # would be a second copy of engine-defined behaviour, wrong the day
+                # that engine changes.
+                # ⚠️ WHAT THAT COSTS, recorded rather than left to be discovered: a
+                # layout whose idx are ALL one NON-``int`` type (every slot written
+                # ``'0'`` / ``'1'``) IS ordered by the engine — inside one type group
+                # the comparison is type-local — yet this door takes the candidate arm
+                # for it too, because it does not re-implement that per-type order. So
+                # it can refuse a supersede the loader would keep. That is the SAFE
+                # direction (a false refusal, never an exemption), the shape is
+                # reachable only by a raw write (``create_operator`` stamps ints), and
+                # the refusal names a real remedy — while a stand-down here is exactly
+                # the #10195 fail-open one property of a schemaless graph defeated.
+                # ⚠️ A NULL ``idx`` was coerced to 0 above, so it joins the ORDERED
+                # arm rather than the candidate one — which is the loader's own
+                # reading (``coalesce(r.idx, 0)``), not a leniency: an all-NULL
+                # layout is exactly the duplicated-``idx`` shape handled below.
+                # ⛔ ONE pass decides orderability AND collects the positions as
+                # ``int``. ``_slots`` is typed ``tuple[object, str]`` ON PURPOSE
+                # (a raw-written ``idx`` may hold any type), so the ordered arm
+                # below needs a list it can prove orderable — ``min()`` over
+                # ``object`` is a mypy ``type-var`` error (#10418 typecheck), and
+                # a ``cast()`` after an ``all()`` would ASSERT exactly what this
+                # loop PROVES: ``_ordered_slot_idxs`` is complete precisely when
+                # ``_uniform_int`` holds, which is the only branch that reads it.
+                _ordered_slot_idxs: list[int] = []
+                _uniform_int = True
+                # Whether the candidate arm's cause is a CROSS-TYPE layout or ONE
+                # non-``int`` type group — the refusal states which, because they
+                # are two different facts (#10418 review P3): the engine orders
+                # within a type group (type-local comparison) and groups ACROSS
+                # them, so only the mixed layout's slots are genuinely unordered.
+                _slot_idx_types: set[type] = set()
+                for _slot_idx, _ in _slots:
+                    if isinstance(_slot_idx, int) and not isinstance(
+                            _slot_idx, bool):
+                        _ordered_slot_idxs.append(_slot_idx)
+                        _slot_idx_types.add(int)
+                    else:
+                        _uniform_int = False
+                        _slot_idx_types.add(type(_slot_idx))
+                _slot_order = "proven" if _uniform_int else (
+                    "mixed" if len(_slot_idx_types) > 1 else "uniform-non-int")
+                if _uniform_int:
+                    # The load side's own rule: the source is the input at the
+                    # LOWEST slot idx, and a slot idx carried by TWO inputs is
+                    # tie-broken there by the claim ID (``c.id``). The door takes
+                    # the SAME single candidate rather than judging every tied one —
+                    # judging them all would refuse a shape the load side keeps,
+                    # the divergence `claim_class` warns against (#10195 review P3).
+                    _low = min(_ordered_slot_idxs)
+                    _candidate_sources = [min(
+                        {i for _sidx, i in _slots if _sidx == _low}, key=str)]
+                else:
+                    # UNORDERABLE, not unjudgeable: the door can NAME no SOURCE
+                    # position here (a mixed layout has no provable order, and a
+                    # uniformly non-int one it declines to re-order — see above), so
+                    # EVERY input is a candidate source and the wiring is refused if
+                    # ANY candidate would override. Fail CLOSED, because
+                    # the load side keeps judging this factor — the fallback belongs
+                    # to the load side's strictness, never to a silent exemption.
+                    _candidate_sources = [i for _, i in _slots]
+                # The slots are judged AS WRITTEN — every input, in the row's id
+                # order (position is decided above, never by this list) — which is
+                # how ``create_operator`` reads a caller's request. EP's load side
+                # additionally strips draft/terminal inputs and takes the first
+                # SURVIVING one as the source, but that is a reading of a factor
+                # after the fact, not the wiring the caller asked to write: a draft
+                # input can be promoted later, and the factor is then exactly the one
+                # this door refuses.
                 # ⛔ ``classes_for_ids`` is ``:Point``-anchored: an id ABSENT
                 # from it is not a claim at all (:Subject/:Object/:Event —
                 # #7902), and its absence must not read as the ASSERTED
                 # default. Same parity as the ingest partial-absorb door.
                 _slot_classes = _claim_class.classes_for_ids(proj.g, _slot_ids)
-                _slot_target_classes = set().union(
-                    *(_slot_classes.get(_t, set()) for _t in _slot_targets))
-                _node_op_type, _node_dir = _op_meta.get(_oid, (None, None))
-                # A node with no ``op_type`` is pre-v3.6 legacy; the rel type
-                # that carried it into this set IS its mechanism then.
-                _op_type = _node_op_type or _repoint_ops[_oid]
-                if (_op_type in ("IMPL", "NAND")
-                        and _slot_source in _slot_classes
-                        and _slot_target_classes
-                        and _claim_class.direction_blocks_create(
-                            self._canonical_direction(_op_type, _node_dir),
-                            _slot_classes.get(_slot_source),
-                            _slot_target_classes)):
-                    raise ValueError(_claim_class.repoint_refusal(
-                        operator_id=_oid, op_type=_op_type,
-                        old_id=old_id, new_id=new_id,
-                        source_id=_slot_source,
-                        target_ids=_slot_targets))
+                _meta_rows = _op_meta.get(_oid) or []
+                # Conservative on BOTH axes when a duplicated operator id leaves
+                # the stored record ambiguous (ids are not unique — #7822 — so
+                # this is a raw-write shape, reachable the same way the
+                # mixed-``idx`` arm is): judge EVERY stored ``op_type`` and EVERY
+                # stored ``direction``. Collapsing the directions to ONE stored
+                # row picks an arbitrary one, and collapsing them to the per-type
+                # default is NOT the conservative reading — a NAND's absent
+                # default is ``unidirectional`` (one leg), so a ``<-`` row's
+                # BACKWARD leg would go unjudged and a derived target under an
+                # asserted source could be re-pointed into a factor the load side
+                # reports ``derived_over_asserted`` (#10195 — the same fail-open
+                # this arm's mixed-``idx`` sibling closes, on the direction axis).
+                # A node with no ``op_type`` is pre-v3.6 legacy; the rel type that
+                # carried it into this set IS its mechanism then.
+                _dirs = {_d for _, _d in _meta_rows}
+                # ⛔ A stored ``op_type`` OUTSIDE the pair is no exemption
+                # (#10418 review P3). ``create_operator`` routes every other
+                # ``op_type`` to a ``hasPart`` edge (``:20244``), so
+                # ``op_type='hasPart'`` with ``IMPL`` edges into the
+                # predecessor is a RAW-WRITE shape — and EP's Batch-1 predicate
+                # filters on ``op_type IS NOT NULL``, not on its VALUE, so the
+                # loader still builds this factor and runs the #2351 backstop on
+                # it. A door that skipped it here was that backstop's only
+                # absent verdict. The mechanism to judge is therefore the REL
+                # TYPE that carried the operator into this set.
+                # ⛔ And the REL TYPES are UNION'd in, not used as a fallback
+                # (#10418 review P2): these are the mechanisms 2a will actually
+                # re-point, so they are judged WHATEVER the stored record says.
+                # The stored value can be the WEAKER of the two (``NAND``'s
+                # absent default is forward-only, ``IMPL``'s is both ways), and
+                # a fallback that trusts it would pass a wiring the edge it is
+                # re-pointing refuses. Union is the conservative direction and
+                # costs nothing: when a ``direction`` IS stored,
+                # ``_canonical_direction`` returns it verbatim for every type,
+                # so the extra mechanism adds no distinct leg.
+                _op_types = sorted({
+                    t for t, _ in _meta_rows
+                    if t in ("IMPL", "NAND")} | _repoint_rels[_oid])
+                for _slot_source in _candidate_sources:
+                    _slot_targets = list(_slot_ids)
+                    _slot_targets.remove(_slot_source)
+                    if not _slot_targets:
+                        continue  # a unary factor overrides nobody
+                    _slot_target_classes = set().union(
+                        *(_slot_classes.get(_t, set()) for _t in _slot_targets))
+                    for _op_type in _op_types:
+                        # ``_op_types`` is provably within ``IMPL|NAND`` at this
+                        # point (the stored value is filtered above and the
+                        # union member is the rel type this query matched).
+                        if (_slot_source not in _slot_classes
+                                or not _slot_target_classes):
+                            continue
+                        # Every stored direction, canonicalized per ``op_type``
+                        # (absent ⇒ that type's own default). ``_meta_rows`` is
+                        # non-empty whenever ``_srows`` is, so ``_dirs`` always
+                        # holds at least one row's value; a ``None`` in it is
+                        # canonicalized here, never skipped.
+                        # ⛔ Sorted for a STABLE refusal message, and by a
+                        # TYPE-AWARE key: ``_canonical_direction`` returns a
+                        # stored value verbatim, so a raw-written non-string
+                        # ``direction`` beside a token on another node makes a
+                        # bare ``sorted({1, "->"})`` raise ``TypeError`` — a
+                        # traceback aborting a supersede this guard is not even
+                        # about (#10418 review P3). The key is total over the
+                        # scalar types a property can hold, and the verdict
+                        # never depends on it (the loop raises on the FIRST
+                        # blocking direction).
+                        _effective_dirs = sorted({
+                            self._canonical_direction(_op_type, _d)
+                            for _d in _dirs},
+                            key=lambda _d: (type(_d).__name__, str(_d)))
+                        for _effective_dir in _effective_dirs:
+                            if _claim_class.direction_blocks_create(
+                                    _effective_dir,
+                                    _slot_classes.get(_slot_source),
+                                    _slot_target_classes):
+                                raise ValueError(_claim_class.repoint_refusal(
+                                    operator_id=_oid, op_type=_op_type,
+                                    direction=_effective_dir,
+                                    slot_order=_slot_order,
+                                    old_id=old_id, new_id=new_id,
+                                    source_id=_slot_source,
+                                    target_ids=_slot_targets))
 
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
@@ -18033,10 +18458,14 @@ class TortoiseSDK:
         # exerting influence through the operator. Driven by the INPUT edges
         # themselves (not by the typed-edge loop) so an operator whose
         # op_type carries no typed edge still transfers its support source,
-        # and the rebuild pass-2b leg can mirror this query exactly.
+        # and the rebuild pass-2b leg mirrors this query exactly — SAME
+        # canonical operator population since #10418 review P3, which widened
+        # the replay's two pass-2b predicates to this disjunction (a replay
+        # reading the narrower ``is_operator:true`` would have left a flag-less
+        # operator's INPUT mirror stranded on the superseded prior).
         input_rows = proj.g.query(
-            "MATCH (old:Point {id:$old_id})-[ri:INPUT]->"
-            "(op:Point {is_operator:true}) "
+            "MATCH (old:Point {id:$old_id})-[ri:INPUT]->(op:Point) "
+            "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
             "RETURN op.id, ri.idx, ID(ri), op.label",
             params={"old_id": old_id},
         ).result_set
@@ -18182,14 +18611,20 @@ class TortoiseSDK:
             # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
             # an operator target; 2a owns op->input edges and runs first;
             # repointing an operator target would create a topology
-            # create_direct_edge itself rejects). Operators carry
-            # is_operator=true.
+            # create_direct_edge itself rejects). Operators are the CANONICAL
+            # set — ``is_operator = true OR op_type IS NOT NULL``, the same
+            # population 2a and the #10195 pre-flight read (#10418 review P2):
+            # with a narrower set here, an ``op_type``-only operator's edge
+            # fell through to this leg as an operator-LESS direct edge, losing
+            # its ``idx`` slot position and emitting a ``DirectEdgeRepoint``
+            # for a factor the loader builds as an operator factor.
             plain = []
             if rows:
                 other_ids = [row[2] for row in rows]
                 op_rows = proj.g.query(
                     "MATCH (p:Point) WHERE p.id IN $ids AND "
-                    "coalesce(p.is_operator, false) = true RETURN p.id",
+                    "(p.is_operator = true OR p.op_type IS NOT NULL) "
+                    "RETURN p.id",
                     params={"ids": other_ids},
                 ).result_set
                 op_set = {r[0] for r in op_rows}
@@ -19741,6 +20176,32 @@ class TortoiseSDK:
                         semantics: str | None = None) -> dict:
         """Create an operator Point with optional semantic label.
 
+        ``target_ids`` is a SET, not a bag (#9750): the typed edges and their
+        ``INPUT`` mirrors are written by list POSITION (``idx: 0`` is the
+        source slot ``ep.py`` reads the forward message from, ``idx >= 1`` the
+        targets), so a repeated id would be written as two edges over one
+        claim and `ep.py`'s factor — built from the edge list — would count
+        that claim twice. A repeated entry is therefore collapsed here, first
+        occurrence winning, and the ``OperatorAdded`` payload carries the
+        collapsed list so a rebuild reproduces the same graph. A target that
+        repeats the SOURCE is NOT collapsed: ``create_operator(op, a, [a])``
+        is the deliberate self-support shape (``idx`` 0 and 1 over one id).
+
+        ⚠️ A self-support target list that ALSO carries another target —
+        ``create_operator(op, a, [a, b])`` — writes THREE slots over TWO
+        distinct endpoints. `ingest`'s dedup key requires the request's ARITY
+        to match that slot count (#10305), so a request for the same endpoint
+        set with FEWER slots (``{"from": a, "to": [b]}``, 2 slots) does NOT
+        adopt this operator: it misses and mints its own 2-slot operator, which
+        is what the caller asserted. A request that DOES spell three slots for
+        the same endpoint set (a target resolving onto the source, plus another
+        target) exact-matches it and is reused unchanged. ⛔ The arity leg is
+        why a request is no longer answered by a **self-support-widened**
+        factor; the one remaining width tolerance is the pre-#9750
+        duplicate-TARGET shape (``idx`` 1 and 2 over one id), whose extra slots
+        no request can spell, so it is adopted at any request width (see
+        ``_find_operator``'s arity block).
+
         Semantic-epistemic edge model (#7801):
           - op_type: IMPL or NAND (epistemic mechanism). ⛔ ``MITIGATES`` is
             NOT an operator kind (#4937 — the F1 ruling recorded on #2552):
@@ -20065,6 +20526,33 @@ class TortoiseSDK:
                 f"{', '.join(sorted(ACCEPTED_DIRECTION_VALUES))}, got {direction!r}"
             )
         pid = ulid()
+        # ── #9750: the operator's input set is a SET ────────────────────────
+        # Every edge BELOW is written per list position (idx 0 = the source,
+        # idx >= 1 = the targets, the slot `ep.py` reads the forward message's
+        # belief from), so a repeated id in `target_ids` was written TWICE —
+        # `CREATE (o)-[:IMPL {idx:i}]->(s)` AND `CREATE (s)-[:INPUT {idx:i}]->(o)`
+        # per list ENTRY, not per distinct target. `ep.py` builds the factor
+        # from the edge list, so that repeat appended the same claim twice: a
+        # one-target operator acquired a 3-input factor, double-counting the
+        # target's EP contribution with no diagnostic. Measured before this
+        # fix: `to: ["p2", "p2"]` → 3 IMPL + 3 INPUT edges; `to: ["p2"]` → 2/2.
+        #
+        # Collapse the list HERE, in the writer that owns endpoint identity, and
+        # NOT in Cypher: the operator route cannot use a MERGE (idx positions
+        # the EP source and the CREATE gives replay parity with
+        # `projection/edges.py::_create_edges`), so the dedup has to happen in
+        # the input list — which is what makes the PRIMITIVE incapable of
+        # double-writing, so every door that goes THROUGH it is fixed at once
+        # (ingest, `decide`/`decide_wiring`, extraction's write pass, MCP
+        # `tortoise_create_operator`, the direct SDK call) rather than only the
+        # ingest spelling. ⛔ NOT every door in the codebase: `EventAPI.add_operator`
+        # (`tortoise/api.py`) hands its `inputs` list to the fold
+        # (`projection/edges.py::_create_edges`), which MERGEs one edge per list
+        # POSITION — the same defect, on a door this writer cannot reach (#10306).
+        # Do not read this collapse as covering it.
+        # `OperatorAdded` below carries this same list, so a rebuild reproduces
+        # the deduped graph (replay parity, not a live-only repair).
+        target_ids = _distinct_preserving_order(target_ids)
         inputs = [source_id] + list(target_ids)  # noqa: RUF005
         proj = self._get_proj()
 
@@ -21705,12 +22193,24 @@ class TortoiseSDK:
         return SEMANTICS_DIRECTIONS.get(semantics)
 
     @staticmethod
-    def _canonical_direction(op_type: str, direction: str | None) -> str | None:
+    def _canonical_direction(op_type: str, direction: str | None) -> str:
         """CYCLE-25 per-op_type absent↔default canonicalization (ontology v3.6
         #5): direction-ABSENT canonicalizes per op_type — IMPL → "bidirectional",
         NAND → "unidirectional" (the extraction default); other operator types
         keep create_operator's bidirectional default. Absent is NOT a distinct
-        value in the §5.2.7 comparison."""
+        value in the §5.2.7 comparison.
+
+        The return is TOTAL — never ``None``: an absent direction is replaced by
+        ``op_type``'s own default, which is what makes "absent" indistinguishable
+        from that default in the comparison (the whole point of the cycle-25
+        rule). The annotation says so because callers RELY on it: the #10195
+        re-point door sorts the canonicalized directions to iterate them in a
+        stable order, and an earlier ``str | None`` annotation made that read as
+        a comparison of possibly-``None`` values (a ``type-var`` failure on
+        ``sorted``) rather than as the true statement that every element is a
+        token. ⚠️ A stored value is returned VERBATIM, so a raw-written
+        non-string ``direction`` reaches the caller as-is — which is why that
+        ``sorted`` carries a type-aware key rather than comparing raw values."""
         if direction is not None:
             return direction
         return "unidirectional" if op_type == "NAND" else "bidirectional"
@@ -21841,8 +22341,21 @@ class TortoiseSDK:
             # committed (the #8623 residual arm).
             write_route = (route if effective_route is None
                            else effective_route)
+            # (#9750) judge the DISTINCT ref list, not the raw one: the rule
+            # exists because `create_direct_edge` takes ONE target, and two
+            # identical spellings are ONE target — the write below reads
+            # `dsts[0]` either way. Refusing `["o2", "o2"]` while accepting
+            # `"o2"` refused a caller over a spelling the write path already
+            # collapses (the same collapse the operator route gets from
+            # `create_operator`'s input set), which is indicator 1's
+            # "identical graphs, not one accepted and one refused".
+            # Non-string entries are excluded here: their SHAPE violation is
+            # reported above, and this arm must not raise on an unhashable one.
+            _distinct_tos = ([t for t in _distinct_preserving_order(tos)
+                              if isinstance(t, str)]
+                             if isinstance(tos, list) else [])
             if write_route == "direct" and isinstance(tos, list) \
-                    and len(tos) > 1:
+                    and len(_distinct_tos) > 1:
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] multi-item 'to' "
@@ -24042,9 +24555,10 @@ class TortoiseSDK:
         created = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         deduped = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         results = [] if granularity == "granular" else None
-        # A3 warnings contract (cycle-23): the TWELVE-key enumeration lives in
-        # INGEST_CONTRACT §3.2 (extended from eleven by #8499 — the set is
-        # CLOSED, so a new key is a contract amendment, not a drive-by list)
+        # A3 warnings contract (cycle-23): the THIRTEEN-key enumeration lives
+        # in INGEST_CONTRACT §3.2 (extended from eleven by #8499, and from
+        # twelve by #9750's `duplicate_target_deduped` — the set is CLOSED, so
+        # a new key is a contract amendment, not a drive-by list)
         # E2E-6.2; this accumulator carries the operator-absorb / residue /
         # drift warnings appended during the connection loop.
         warnings: list[str] = []
@@ -24396,6 +24910,33 @@ class TortoiseSDK:
             to_list = conn["to"] if isinstance(conn["to"], list) else [conn["to"]]
             dsts = [refs.get(x, x) for x in to_list]
             if "operator" in conn:
+                # ── #9750: de-duplicate the RESOLVED targets, by id ─────────
+                # Two different spellings can name ONE node (a bundle-local ref
+                # and the id it minted, or two items `create_point`'s content
+                # dedup folded onto one id), so this cannot be a Phase-1
+                # ref-level comparison — Phase 1 has no ids (`_check_connection`
+                # says so itself). The dedup therefore belongs HERE, at the seam
+                # that has just turned the caller's spellings into identities,
+                # and it must run BEFORE `_find_operator` below: that query's
+                # dedup key is `size(targets) = size($inputs)`, so handing it
+                # the caller's multiplicity computes the key over a list the
+                # graph no longer holds — and a re-ingest would stop matching
+                # its own run-1 operator and mint a duplicate.
+                #
+                # ⛔ Scoped to the OPERATOR route on purpose. The relation route
+                # fans out over `dsts` (`extractedFrom`) and its response
+                # `to` shape is a stable contract field; de-duplicating there
+                # would change a documented shape, which this issue is not.
+                _distinct_dsts = _distinct_preserving_order(dsts)
+                # (#9750 review round 1, P2) THE WARNING IS EMITTED AFTER THE
+                # ROUTE IS KNOWN, further down: on the operator-less DIRECT
+                # route nothing is "collapsed" into a per-target edge (that
+                # writer reads `dsts[0]` and writes ONE direct edge, no operator
+                # and no `INPUT` mirror), so the operator wording would describe
+                # a graph that route never produces.
+                _collapsed = [
+                    str(d) for d in _distinct_dsts if dsts.count(d) > 1]
+                dsts = _distinct_dsts
                 op_type = conn["operator"]
                 label = conn.get("label")
                 direction = conn.get("direction")
@@ -24428,6 +24969,46 @@ class TortoiseSDK:
                 _request_route = self._connection_route(conn)
                 _route = (_eff if _eff is not None
                           else self._effective_route(conn, [src, *dsts]))
+                if _collapsed:
+                    # Warn-not-block (#1934's ruling, this issue's §3.2 key 13):
+                    # the caller asked for N list entries and the write produces
+                    # one edge per DISTINCT target, so name what collapsed
+                    # rather than silently answering a different question — and
+                    # describe the graph THIS route actually writes (the direct
+                    # route takes one target and has no operator and no INPUT
+                    # mirror, so the operator sentence would be false there).
+                    # (review round 2, P3) The WHOLE sentence is branched: the
+                    # operator route's tail about a preserved positional `idx`
+                    # is false on the direct route, which writes no `idx` at all
+                    # — and a warning that contradicts itself is worse than no
+                    # warning.
+                    # (#10305, text P2) …and the edge-count promise must not
+                    # READ as one-edge-per-target when the collapsed target IS
+                    # the source: `{from: q1, to: ["q2", "q2"]}` where `q2`
+                    # folds onto `q1` writes TWO typed + TWO INPUT edges over
+                    # ONE id (`idx` 0 and 1 — the deliberate self-support slot,
+                    # §5.5), so the sentence names that slot instead of leaving
+                    # a reader to infer a count the graph does not hold.
+                    _effect = (
+                        "one connection writes ONE typed edge and ONE INPUT "
+                        "edge per DISTINCT target (the operator's input set "
+                        "is a set, #9750); the repeated spelling was collapsed "
+                        "with the order preserved, so the positional idx is "
+                        "unchanged. One exception: a target that resolves onto "
+                        "the SOURCE keeps its OWN slot, so that self-support "
+                        "shape writes two typed and two INPUT edges over that "
+                        "one id (idx 0 and 1)"
+                        if _route != "direct" else
+                        "a direct edge takes ONE target, so the repeated "
+                        "spelling was ignored and the write is identical to "
+                        "the singular spelling (#9750)"
+                    )
+                    self._append_warning(
+                        "duplicate_target_deduped:"
+                        + ",".join(_collapsed)
+                        + f":{op_type} — the connection's 'to' list named the "
+                        f"same target more than once; {_effect}."
+                    )
                 if _request_route == "direct" and _route == "operator":
                     self._append_warning(
                         f"point_mediated_route:{src}->{dsts[0]}:{op_type} — a "
@@ -24476,8 +25057,20 @@ class TortoiseSDK:
                                         "result": conn_result,
                                         "deduped": bool(conn_result.get("deduped"))})
                     continue
-                existing = self._find_operator(op_type, [src] + dsts,  # noqa: RUF005
-                                               label=label, direction=direction)
+                # (#9750 review round 1, P2) the REQUEST is handed over as its
+                # real SLOT list, `[src, *dsts]` — `_find_operator` normalizes
+                # `$inputs` to the DISTINCT set itself (one place, every caller),
+                # so both sides of `size(DISTINCT targets) = size($inputs)` count
+                # the same thing even when a target resolved onto the source's
+                # own node. ⛔ Do NOT pre-dedupe here: the repeat is exactly what
+                # tells that query the request is INEXPRESSIBLE as an edge
+                # completion (`written` is an id set), and pre-deduping hid it
+                # into a partial-absorb that landed an `idx` GAP.
+                # The EDGE SHAPE is untouched — `create_operator` writes its own
+                # `inputs`, which keep the deliberate self-support slot.
+                existing = self._find_operator(
+                    op_type, [src, *dsts],
+                    label=label, direction=direction)
                 if existing is not None and existing.get("kind") == "exact":
                     oid = existing["id"]
                     # k=N boundary (cycle-15): re-apply promotion when the
@@ -24538,6 +25131,7 @@ class TortoiseSDK:
                         raise ValueError(_claim_class.override_refusal(
                             source_id=src, target_ids=list(dsts),
                             surface=f"ingest({op_type}) partial-absorb"))
+                    _completed = 0
                     for _i, _inp in enumerate([src] + dsts):  # noqa: RUF005
                         if _inp in written:
                             continue
@@ -24565,7 +25159,14 @@ class TortoiseSDK:
                             f"MERGE (t)-[:INPUT {{idx:$idx}}]->(o)",
                             params={"oid": oid, "inp": _inp, "idx": _i},
                         )
-                    completed = len([src] + dsts) - len(written)  # noqa: RUF005
+                        _completed += 1
+                    # (#9750 review round 2, P3) COUNT THE WRITES, do not derive
+                    # them: `len([src] + dsts) - len(written)` subtracts an id SET
+                    # from a SLOT count, so a request that repeats an id (a target
+                    # that resolved onto the source's own node) over-reports the
+                    # completions in the §3.2 key-8 payload — it claimed 2 while
+                    # exactly one edge had been written.
+                    completed = _completed
                     if promotion_policy == "auto" and existing.get("status") is None:
                         try:  # noqa: SIM105
                             self._reapply_operator_promotion(oid)
@@ -25216,14 +25817,27 @@ class TortoiseSDK:
         """§5.5 OPERATOR-DEDUP (A3): richer return — exact-hit | partial-absorb
         | miss.
 
-        Exact-hit: an operator with the SAME (op_type, input set) — returns
+        Exact-hit: an operator with the SAME (op_type, input set) AND the same
+        input ARITY — the operator's typed-edge count must equal the length of
+        the raw ``inputs`` list it was handed (a repeated SOURCE slot is a real
+        slot, and ``ep.py`` reads arity from the edge list, #10305), with one
+        documented carve-out: a pre-#9750 operator that carries excess slots
+        which are a duplicate of a TARGET (never of its own source slot) is
+        matched on the endpoint set alone, at ANY request width — no request can
+        spell that shape, so its endpoint set is all it can answer for. Returns
         {"id", "status", "kind": "exact"}. Condition builders apply the
         CYCLE-25 per-op_type absent↔default canonicalization (IMPL
         direction-absent → stored "bidirectional"; NAND direction-absent →
         stored "unidirectional" — the extraction default) so a
         direction-omitting retry dedups its own run-1 operator (exactly-once);
         label-absent appends `o.label IS NULL` (no-label requests match only
-        unlabeled operators).
+        unlabeled operators). When SEVERAL operators satisfy the key, the
+        binding is an ORDER, never a filter: the operator whose SOURCE-slot
+        multiplicity matches the request's wins first (#10305 — two shapes can
+        share one endpoint set and one arity), then the one whose edge count
+        equals its distinct endpoint count (the clean twin of a legacy
+        duplicate), then the lowest id — so the answer never depends on row
+        order.
 
         Partial-absorb: on an exact miss, a PARTIAL operator
         (`status IS NULL`, `'draft'`, or `'live'` — the promoting posture writes
@@ -25247,10 +25861,116 @@ class TortoiseSDK:
         proj = self._get_proj()
         edge_rel = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         canonical_dir = self._canonical_direction(op_type, direction)
-        params: dict = {"op": op_type, "inputs": list(inputs)}
+        # ── #9750: BOTH SIDES OF THE KEY ARE SETS ──────────────────────────
+        # (#10305: …and the request's ARITY is the third leg of the key — see
+        # the arity block below. Sets alone were not enough.)
+        # The graph side collects `DISTINCT t.id` below, so `$inputs` is
+        # normalized to the same DISTINCT set HERE — once, for EVERY caller, so
+        # no caller can make the key unsatisfiable by handing it a SLOT list
+        # (`[src, src]`, which a target that resolves onto the source's own node
+        # legitimately produces): that shape read `size(1) = size(2)`, fell into
+        # the PARTIAL-ABSORB arm and reported a completion that never happened.
+        # Sets on both sides is what "the same input set" means; the WRITE keeps
+        # its slots (the self-support operator is written with `idx` 0 and 1 over
+        # one id) — the KEY is a lookup, not the edge shape.
+        _inputs_distinct = _distinct_preserving_order(inputs)
+        # ── #10305: the REQUEST's own slot MULTIPLICITY is part of the key ──
+        # A set key alone made multiplicity free, and multiplicity IS the EP
+        # factor arity: `ep.py` builds the factor from the operator's EDGE
+        # list, so `create_operator("IMPL", a, [a, b])` is a THREE-input
+        # factor (slots `[(0,a),(1,a),(2,b)]` — the self-support shape, where
+        # `idx` 0 and 1 land on one id) while a request that asserts TWO
+        # inputs resolves to the same distinct endpoint set `{a, b}`. Under the
+        # set-only key that request EXACT-hit the 3-slot operator and was
+        # answered `deduped` — the caller asserted a 2-input `IMPL` and
+        # silently got a 3-input factor, so EP propagated a different model
+        # than the one written (measured twice by review at 8ac927908; on
+        # pre-#9750 `7ff42c0d5` the same sequence minted the 2-slot operator).
+        #
+        # So the exact arm ALSO requires the operator's slot count to equal the
+        # RAW request arity (`inputs` BEFORE the DISTINCT normalization above —
+        # a repeat of the SOURCE slot is a real slot, so it counts). What
+        # #9750 was actually about is untouched: a request whose slots are a
+        # REPEAT of one endpoint set still carries the same arity as the
+        # operator the collapse wrote (`to: [b, b]` → 2 slots, operator → 2
+        # slots; a target that folds onto the source → `[a, a]` → 2 slots,
+        # self-support operator → 2 slots), so it still exact-dedups.
+        #
+        # ⛔ The legacy carve-out is NOT slack, it is the reason this is an OR —
+        # and it is bounded to an operator that ACTUALLY CARRIES an excess slot
+        # (`n_edges > size(targets)`). Without that bound the disjunct below is
+        # true for every CLEAN operator and forgives the mismatch in the
+        # WIDENING direction too (measured by review: a 3-slot request
+        # `[q1, q1, q3]` adopted a clean 2-slot operator over `{q1, q3}` and
+        # kept the 2-slot factor the caller never asserted — the same silent
+        # wrong-width defect, mirrored).
+        #
+        # A pre-#9750 operator carries duplicate TARGET slots (`idx` 1 and 2
+        # over one id, vs `create_operator`'s `idx` 0 and 1 over one id): 3
+        # edges, 2 distinct endpoints — the SAME counts as a self-support
+        # extra-target operator, so `n_edges = arity` alone cannot tell them
+        # apart, and applying it to both re-opens #9750 on every legacy graph
+        # (the retry misses, and the miss MINTS the duplicate operator the
+        # issue is about — pinned by `test_legacy_duplicate_graph_still_dedups`
+        # and `test_reingest_repeated_ref_is_an_exact_dedup`). The two shapes
+        # differ in ONE thing: WHICH slot is the duplicate. A legacy duplicate
+        # repeats a TARGET (`from_slots` — the `idx` 0 slot — occurs exactly
+        # once), a self-support duplicate repeats the SOURCE (it occurs twice).
+        # A legacy shape is also UNSPELLABLE as a request (the writer collapses
+        # repeated targets, so no request can ask for 3 slots over 2 endpoints
+        # that way) while the self-support shape IS spellable — a target
+        # resolving onto the source plus another target. So: an operator that
+        # carries excess slots which are NOT a duplicate of its own source slot
+        # → the excess is a pre-fix artifact. ⚠️ That carve-out is
+        # WIDTH-UNBOUNDED ON PURPOSE: a pre-#9750 operator with SEVERAL excess
+        # duplicate-target slots (`to: [b, b, b]` leaves `idx` 1, 2 and 3 over
+        # one id) is adopted by any same-set request of ANY width, because no
+        # request can spell its widths and tightening that would re-mint the
+        # duplicate operator #9750 is about. An arity mismatch WITHOUT such an
+        # excess (a clean operator, or one whose duplicate is the source) →
+        # arity is a real difference and the request falls through to the
+        # partial arm (a MISS for equal-size sets, i.e. the caller gets the
+        # operator width it asked for).
+        # ⚠️ Residual, deliberate and disclosed rather than papered over: a
+        # pre-#9750 operator whose duplicated target IS its own source (3 slots
+        # all on one id, written by `to: [a, a]` before this fix) is
+        # shape-identical to the self-support case, so it is NOT forgiven — it
+        # misses and the retry mints its own arity. Bounded to that pre-fix
+        # shape, and the retry THEN exact-matches the clean operator it minted.
+        _slots = list(inputs)
+        # ── #10305 (tie-break): WHICH id repeats is part of the SHAPE ────────
+        # The arity leg above compares COUNTS, and two shapes over one endpoint
+        # set can share a count: a pre-#9750 duplicate-TARGET operator
+        # (`[a, b, b]`) and the SELF-SUPPORT shape a caller can spell
+        # (`[a, a, b]`) are both 3 slots / 2 endpoints, so both satisfy
+        # `n_edges = size($slots)` and `ORDER BY n_edges ASC, o.id` then bound
+        # the request to the OLDER one — the legacy operator, because it was
+        # written first. Measured (round 6,
+        # `test_exact_arm_prefers_the_SHAPE_the_request_spelled`): a request
+        # `[a, a, b]` was answered with the `[a, b, b]` operator, so EP
+        # propagated a factor whose source slot occurs ONCE where the caller
+        # asserted it twice — the same "a model the caller never asserted" class
+        # this PR exists to close, one shape over.
+        # The two shapes differ in exactly one observable: how many slots carry
+        # the REQUEST's source id (`$src` = `inputs[0]`, the caller's `from`).
+        # The exact arm's set conditions already guarantee `$src` is one of the
+        # operator's `targets`, so it is always a member of `slot_ids` —
+        # `src_slots` counts those slots on the graph side, `$src_count` counts
+        # them on the request side, and the ORDER preference is their distance.
+        # ⛔ This is an ORDER, never a CONDITION: nothing that
+        # matches today stops matching, so it cannot resurrect #9750's hazard (a
+        # miss would MINT the duplicate operator). `n_edges ASC, o.id` still
+        # break every remaining tie, so the binding stays deterministic.
+        _src = _slots[0] if _slots else None
+        params: dict = {"op": op_type, "inputs": _inputs_distinct,
+                        "slots": _slots, "src": _src,
+                        "src_count": _slots.count(_src)}
         conds = [
             "size(targets) = size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
+            "(n_edges = size($slots) OR (n_edges > size(targets) AND "
+            "size(from_slots) > 0 AND "
+            "size([x IN slot_ids WHERE x IN from_slots]) <= 1))",
         ]
         if label is not None:
             conds.append("o.label = $label")
@@ -25270,18 +25990,66 @@ class TortoiseSDK:
             # `unidirectional` re-ingest (a silent duplicate).
             conds.append("o.direction IN $directions")
             params["directions"] = sorted(direction_spellings(canonical_dir))
+        # ── #9750: DISTINCT, because the KEY is a set ─────────────────────
+        # `targets` is the LEFT side of `size(targets) = size($inputs)`, and
+        # `$inputs` is normalized to that same DISTINCT set by THIS function
+        # (`_inputs_distinct`, above) — ⛔ NOT by the caller, which deliberately
+        # passes the raw SLOT list so a repeated id stays visible to the
+        # inexpressible-request decline. Both sides therefore count the same
+        # thing: DISTINCT endpoints. A graph written BEFORE #9750 can
+        # still carry the duplicate edges the old writer produced (`idx` 1 and
+        # 2 over one id), whose `collect(t.id)` yields the same id twice —
+        # reading that as TWO targets made the exact-hit miss on a request that
+        # IS the operator's input set, and the retry MINTED A SECOND OPERATOR:
+        # the very duplicate this issue is about, on every legacy graph.
+        #
+        # ⛔ `count(r) AS n_edges` is not decoration — it is the TIE-BREAK, and
+        # the reason is the population DISTINCT widens. On a legacy graph the
+        # old key separated a duplicate-edge operator from its clean twin by
+        # EDGE COUNT (`size(targets)` 3 vs 2); under DISTINCT both satisfy the
+        # set key, and the query's `LIMIT 1` with no ordering would then bind
+        # the resubmission to whichever row came back first — making
+        # `ids["connections"]` unstable across runs for the same bundle (the
+        # #7822 row-order-dependence class). Ordering by edge count ASC prefers
+        # the operator whose edges EQUAL its distinct endpoints (the clean one)
+        # and is deterministic on the tie. ⚠️ Edge count alone cannot separate
+        # two SAME-width shapes (`[a, b, b]` legacy vs `[a, a, b]` self-support —
+        # both 3/2), so the ORDER's FIRST key is the source-slot multiplicity
+        # distance described above, and `n_edges` is the second.
+        # `slot_ids` (NOT DISTINCT — one entry per typed edge) and
+        # `from_slots` (the `idx` 0 target, i.e. the operator's SOURCE slot)
+        # exist for the #10305 arity condition above; both are counted from the
+        # same rows as `n_edges`, so no extra pattern multiplies them.
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
             f"WHERE {epistemic_disjunction('t')} "
-            f"WITH o, collect(t.id) AS targets, collect(r) AS _ "
+            f"WITH o, collect(DISTINCT t.id) AS targets, "
+            f"collect(t.id) AS slot_ids, count(r) AS n_edges, "
+            f"collect(CASE WHEN r.idx = 0 THEN t.id ELSE null END) "
+            f"AS from_slots "
             f"WHERE {' AND '.join(conds)} "
-            f"RETURN o.id, o.status LIMIT 1",
+            f"WITH o, n_edges, "
+            f"size([x IN slot_ids WHERE x = $src]) AS src_slots "
+            f"RETURN o.id, o.status "
+            f"ORDER BY abs(src_slots - $src_count) ASC, n_edges ASC, o.id "
+            f"LIMIT 1",
             params=params,
         ).result_set
         if rows:
             return {"id": rows[0][0], "status": rows[0][1],
                     "kind": "exact", "written": list(inputs)}
+        # ── #9750 (review round 2, P3): an INEXPRESSIBLE request is a MISS ──
+        # `written` (below) is a set of IDS, so the completion loop cannot
+        # reproduce a request whose OWN slot list repeats an id — it skips the
+        # second occurrence and lands an `idx` GAP (measured: a crash remnant of
+        # `[src, src, b]` was "completed" to `[(0,src),(2,b)]`, a shape no writer
+        # produces and every later resubmission then exact-matches). Declining
+        # here makes the worst case a MISS — the caller mints a complete operator
+        # for its input set — instead of a silently slot-less one, and it stops
+        # `operator_absorb_completed` reporting writes that cannot happen.
+        if len(_inputs_distinct) != len(list(inputs)):
+            return None
         # ── partial-absorb (cycle-11/12/13): on an exact miss, look for a
         # PARTIAL operator (any non-terminal status — see the status clause in
         # pcond below) whose written set is a PROPER SUBSET of the
@@ -25307,6 +26075,38 @@ class TortoiseSDK:
             "size(targets) < size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
             "size(targets) > 0",
+            # ── #9750 (review round 1, P2): NO OPERATOR CARRYING DUPLICATE
+            # EDGES IS EVER "COMPLETED" BY POSITION. `create_operator` deliberately lets a
+            # target repeat the SOURCE (the self-support shape, `idx` 0 and 1
+            # over one id), so an operator can hold FEWER distinct endpoints
+            # than edges. The completion below writes each missing input at ITS
+            # REQUEST POSITION (`idx: _i`), which for such an operator collides
+            # with a slot that already exists — measured: a `composedOf`
+            # self-support operator plus `to: [p2]` left TWO typed edges at
+            # `idx 1`, and `ep.py` reads the factor positionally, so the
+            # operator became malformed and then permanently adopted by a
+            # resubmission. Requiring the edge count to EQUAL the distinct count
+            # excludes every operator whose edges EXCEED its distinct endpoints
+            # from this arm (it is not partial — it is complete in a shape this
+            # arm cannot express), so the worst case becomes a MISS (a new
+            # operator for a genuinely different input set) instead of a corrupted
+            # factor.
+            # ⛔ It does NOT make the arm POSITIONALLY safe: a duplicate-free
+            # partial whose written set is not a positional PREFIX still writes its
+            # missing input onto an occupied `idx` (measured: `{a,c}` + `to: [b, c]`
+            # leaves two `IMPL` edges at `idx 1`). That defect is PRE-EXISTING and
+            # tracked in #10307 — do not read this guard as covering it. The INCOMPLETE
+            # window (a crash that landed before the duplicate slot) is closed
+            # above, by declining a request whose own slot list repeats an id —
+            # and `completed` is COUNTED from the writes the loop performs, not
+            # derived from a SLOT count minus an id SET.
+            # ⛔ Referenced through the WITH alias (`n_edges`), never as a bare
+            # `count(r)` in the WHERE: an aggregate written there makes FalkorDB
+            # fail the whole query with `_AR_EXP_UpdateEntityIdx: Unable to
+            # locate a value with alias r` on the EMBEDDED and the SERVER build
+            # alike (measured), i.e. the absorb arm would raise instead of
+            # matching.
+            "n_edges = size(targets)",
             _current_status_clause("o.status"),
         ]
         if label is not None:
@@ -25319,9 +26119,9 @@ class TortoiseSDK:
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
             f"WHERE {epistemic_disjunction('t')} "
-            f"WITH o, collect(t.id) AS targets "
+            f"WITH o, collect(DISTINCT t.id) AS targets, count(r) AS n_edges "
             f"WHERE {' AND '.join(pcond)} "
-            f"RETURN o.id, o.status, targets",
+            f"RETURN o.id, o.status, targets ORDER BY n_edges ASC, o.id",
             params=params,
         ).result_set
         if len(prows) == 1:
@@ -38035,6 +38835,14 @@ class TortoiseSDK:
         # closes open under another name; and it runs BEFORE any write, so a
         # refusal leaves the graph untouched.
         self._refuse_unapproved_kinds_in_props(props)
+        # #10000 / §9.1: a narrative must NAME its session or it is stored
+        # nowhere — see `_refuse_unpaired_narrative`. This funnel is where every
+        # create door MEETS (`create_entity`, `create_event`, `create_document`,
+        # `create_source`), and the refusal runs BEFORE any write, so nothing is
+        # applied and nothing is journalled.
+        _refuse_unpaired_narrative(props, door=f"create_{label.lower()}",
+                                   label=label,
+                                   journal_armed=bool(self._event_log_path))
         # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
         # funnel only ever creates Subject/Object/Event/Document/Source —
         # ``create_entity("Point", …)`` raises `unknown type`
@@ -38463,6 +39271,36 @@ class TortoiseSDK:
         """
         return stored_source_document_kinds(g, id_val)
 
+    def _label_reachable_by(self, g, label: str, id_val: str) -> int:
+        """Count the `:<label>` nodes the WRITE below would reach for `id_val`.
+
+        ONE implementation of the key discipline, because a guard whose
+        predicate differs from the write's is decoration: the write resolves a
+        canonical label by its PRIMARY key then its SECONDARY
+        (`secondary_entity_id_props`), so a stub keyed only by the secondary one
+        (a url-only `:Source` minted by `_link_source`) IS writable — and a
+        guard that matched only the primary would report itself satisfied while
+        that write landed.
+
+        The order mirrors the write's own: the PRIMARY key first (byte-identical
+        MATCH text and #327 index plan), the secondary only on a miss. The key
+        set is DERIVED from the same declarations the write and the fold use
+        (#3860's one-table rule) rather than hardcoded, so a future secondary
+        key cannot reopen the bypass silently (#5196 review round 3, P2).
+        """
+        from tortoise.projection import secondary_entity_id_props
+
+        _keys = (_ENTITY_ID_PROP.get(label, "id"),
+                 *secondary_entity_id_props(label))
+        for _k in _keys:
+            _hit = g.query(
+                f"MATCH (n:{label} {{{_k}:$id}}) RETURN count(n)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if _hit:
+                return _hit
+        return 0
+
     def _source_reachable_by(self, g, id_val: str) -> int:
         """Count the `:Source` nodes the WRITE below would reach for `id_val`.
 
@@ -38476,25 +39314,11 @@ class TortoiseSDK:
 
         The order mirrors the write's own discipline: the PRIMARY key is tried
         first (byte-identical MATCH text and #327 index plan) and the secondary
-        only on a miss.
+        only on a miss. The resolution itself lives in `_label_reachable_by`
+        (#10389 review P2): one predicate for every label, so the `:Event`
+        guard added beside it cannot drift from the `:Source` one.
         """
-        # #5196 review round 3, P2: derive the key set from the SAME declaration
-        # the write and the fold use (#3860's one-table rule), not a hardcoded
-        # `url`. Today `_CANONICAL_ENTITY_SECONDARY_ID_PROPS` yields exactly
-        # `("url",)`, so this is a drift guard rather than a live hole: a future
-        # secondary key would otherwise reopen the url-stub bypass silently.
-        from tortoise.projection import secondary_entity_id_props
-
-        _keys = (_ENTITY_ID_PROP.get("Source", "id"),
-                 *secondary_entity_id_props("Source"))
-        for _k in _keys:
-            _hit = g.query(
-                f"MATCH (n:Source {{{_k}:$id}}) RETURN count(n)",
-                params={"id": id_val},
-            ).result_set[0][0]
-            if _hit:
-                return _hit
-        return 0
+        return self._label_reachable_by(g, "Source", id_val)
 
     def _journal_entity_mutation(self, label: str, id_val: str, op: str, *,
                                  state: dict | None = None,
@@ -38810,6 +39634,14 @@ class TortoiseSDK:
         # ``['dev','marketing']``. Same rule, same funnel, same refusal as the
         # create doors because it is the SAME helper.
         self._refuse_unapproved_kinds_in_props(props)
+        # #10000 / §9.1: the UPDATE door has the same hole as the create doors —
+        # measured at #10389's head, `update_entity(<object>, story_arc=<prose>,
+        # sessionId=…)` writes caller props straight onto the node (`SET n +=
+        # $props`), so the prose lands in the GRAPH as well as the record, and on
+        # a `:Point`/`:Object`/`:Subject` nothing refuses it. ⛔ It runs AFTER the
+        # `:Event`/`:Source` server-managed blocks BELOW (they own their own
+        # refusal, and their message is what two pins assert) — see the call
+        # there, not here.
         # #9287: ``update_entity`` is the SECOND documented UPDATE door onto a
         # ``:Point`` (``commit_schema`` lists the pair: ``update_point`` /
         # ``_update_entity``) and it writes caller props with a live
@@ -38843,6 +39675,33 @@ class TortoiseSDK:
             # stub ACCEPTED `update_entity(text=<2 KB>)`, persisting the payload
             # live and into the EntityMutated journal, while the guard reported
             # itself satisfied.
+            # ── #10000 (D1, §9.1): the :Event anchor, same gate ──
+            # The narrative's prose-free state on the AgentSession `:Event` is a
+            # PINNED property of this change (`tests/test_commit_endpoint.py`
+            # ::TestFourNodeChain) and the commit writer's `e.story_arc` SET is
+            # deleted. `_EVENT_HANDLED` closes the `EventRecorded` fold, but this
+            # route writes caller props straight through `SET n += $props` in the
+            # non-Point label loop below and NEVER consults a label skip-set — so
+            # without this refusal the generic tenant surface
+            # (`tortoise_update_entity`) puts the prose back on that very node,
+            # JOURNALLED into an `EntityMutated` record a `rebuild_all` restores:
+            # the `__runId` hole (#5196 round 3) one property and one label over.
+            # Resolved with the SAME predicate the write uses
+            # (`_label_reachable_by`), and only when a managed key is actually
+            # supplied, so an ordinary `update_entity(<eventId>, status=…)` pays
+            # no extra round trip.
+            _event_managed = sorted(
+                k for k in props
+                if k in _SERVER_MANAGED_PROPS_BY_LABEL["Event"])
+            if _event_managed and self._label_reachable_by(
+                    self._get_proj().g, "Event", id_val):
+                raise ValueError(
+                    f"{_event_managed!r} is not a caller-settable property on "
+                    f"an :Event — the S1 narrative lives in "
+                    f"`public.session_narrative`, never on a node (§9.1/D1, "
+                    f"#10000). The key is READ back from a legacy node that "
+                    f"still carries it, and refused on every write door."
+                )
             _is_source = self._source_reachable_by(self._get_proj().g, id_val)
             if _is_source:
                 # #5140 P1: the `documents` METER KEY (#1726 predicate) cannot
@@ -38856,7 +39715,9 @@ class TortoiseSDK:
                         self._stored_source_document_kinds(
                             self._get_proj().g, id_val),
                         props, surface="update_entity", none_demotes=True)
-                _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
+                _managed = sorted(
+                    k for k in props
+                    if k in _SERVER_MANAGED_PROPS_BY_LABEL["Source"])
                 if _managed:
                     # #3998: the STATE and the merge TOKEN are refused through the
                     # generic surface.
@@ -38917,6 +39778,19 @@ class TortoiseSDK:
                         f"(D30/#3919, #3998). Declared :Source properties: "
                         f"{sorted(_SOURCE_NODE_PROP_NAMES)}."
                     )
+        # #10000 / §9.1: the UPDATE door, AFTER the label-owned refusals above
+        # (#10389 review cycle 1 P1). A narrative cannot be FILED by an update —
+        # the write is `SET n += $props` on whatever label `id_val` resolves to,
+        # so on `:Point`/`:Object`/`:Subject` it puts §9.1's prose on the node
+        # (measured: `update_entity(<object>, story_arc=…, sessionId=…)` left the
+        # prose on the `:Object` AND filed the record row — two drifting homes),
+        # and on `:Event`/`:Source` it is refused by their own server-managed
+        # blocks above. Ordered HERE so those two keep their own message: placed
+        # before them this guard shadowed `_SERVER_MANAGED_PROPS_BY_LABEL` and
+        # turned the table's `story_arc` entry into dead code (measured, review
+        # cycle 2). The call is unconditional on label because the label is only
+        # resolved inside this method; it runs only when the key is present.
+        _refuse_unpaired_narrative(props, door="update_entity", label=None)
         # #5482: `search_keys` must reach the graph FLAT, exactly as it does on
         # `create_point` and `update_point` — both flatten immediately after
         # `_sanitize_props`, and this surface did not. It wrote caller props
