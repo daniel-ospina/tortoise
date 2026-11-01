@@ -25,6 +25,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "check-fly-secret-drift.py"
 
@@ -1690,8 +1692,8 @@ def _fly_toml_env_value(name: str) -> str:
     return value
 
 
-def _client_identity_default(monkeypatch) -> dict[str, str]:
-    """What `tortoise/client_identity.py` resolves with the knob UNSET.
+def _client_identity_module():
+    """`tortoise/client_identity.py`, loaded by path.
 
     Loaded by path (not `import tortoise.client_identity`) so this infra suite
     keeps its zero-tortoise-package import shape; the module itself is stdlib
@@ -1707,8 +1709,59 @@ def _client_identity_default(monkeypatch) -> dict[str, str]:
     # dataclasses resolves `cls.__module__` through sys.modules during exec.
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    monkeypatch.delenv(module.ATTESTED_CLIENTS_ENV, raising=False)
+    return module
+
+
+def _client_identity_resolution(monkeypatch, value: str) -> dict[str, str]:
+    """What `tortoise/client_identity.py` resolves for a GIVEN `[env]` value.
+
+    The knob is set to the shipped value, so this is the code's own verdict on
+    the exact string the deployed machine will carry — the only comparison that
+    can catch BOTH drift directions without forbidding the documented one.
+    """
+    module = _client_identity_module()
+    monkeypatch.setenv(module.ATTESTED_CLIENTS_ENV, value)
     return module.attested_clients()
+
+
+def _assert_allowlist_is_the_value_the_code_acts_on(value: str, monkeypatch) -> dict[str, str]:
+    """The shipped allowlist must be one the CODE ACTS ON, not one it drops.
+
+    Two properties, and deliberately no equality against the empty default
+    (#10472 review, F1 — the earlier `== attested_clients()` form was *always*
+    `{}`, i.e. a hard prohibition on the activation `fly.toml` documents, and it
+    could not tell a deliberate attestation from a typo).
+
+    1. **Shape** — a JSON object of non-empty string keys to non-empty names. A
+       truncated edit, a list, a bare string or a blank name reds here.
+    2. **The code's own resolution equals the shipped value** — if the module
+       would DROP or REWRITE an entry (a blank name, a non-string), the operator
+       attested a client the server silently renders \"unverified\" for, which
+       is precisely the divergence this assertion exists to catch.
+
+    Empty `{}` (attest nobody, the shipped default) satisfies both; so does a
+    deliberate `{\"ct_…\": \"Claude\"}` entry. A malformed value satisfies
+    neither.
+    """
+    shipped = json.loads(value)
+    assert isinstance(shipped, dict), (
+        f"the versioned allowlist in fly.toml [env] must be a JSON OBJECT of "
+        f"{{client_id: display name}}; it parses as {type(shipped).__name__}")
+    for client_id, display_name in shipped.items():
+        assert isinstance(client_id, str) and client_id.strip(), (
+            f"fly.toml [env] allowlist key {client_id!r} is not a non-empty "
+            f"client_id")
+        assert isinstance(display_name, str) and display_name.strip(), (
+            f"fly.toml [env] allowlist entry for {client_id!r} has no display "
+            f"name — `tortoise/client_identity.py` DROPS such an entry, so the "
+            f"client it means to attest would render unverified")
+    resolved = _client_identity_resolution(monkeypatch, value)
+    assert resolved == shipped, (
+        "the versioned allowlist in fly.toml [env] is not the set "
+        "`tortoise/client_identity.py` resolves from it: it attests "
+        f"{sorted(shipped)} but the code applies {sorted(resolved)} — the entry "
+        "is malformed, or the module's parsing rules changed under it")
+    return shipped
 
 
 def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatch):
@@ -1824,13 +1877,17 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     attested = "TORTOISE_OAUTH_ATTESTED_CLIENTS"
     assert declared[attested] == "fly-toml-env", declared[attested]
     assert attested in env_keys, f"{attested} is not an assigned key in fly.toml [env]"
-    # ... and the DECLARED value is the code's own default, so the versioned
-    # config and `tortoise/client_identity.py` cannot silently diverge: attest
-    # nobody. A value added only here would attest a client the code never sees;
-    # a value added only in code would never reach the deployed machine.
-    assert json.loads(_fly_toml_env_value(attested)) == _client_identity_default(monkeypatch), (
-        "the versioned allowlist in fly.toml [env] diverges from the default "
-        "`tortoise/client_identity.py` resolves")
+    # ... and the DECLARED value is one the code ACTS ON, so the versioned config
+    # and `tortoise/client_identity.py` cannot silently diverge. A value added
+    # only here but malformed would attest a client the code drops; a value
+    # added only in code would never reach the deployed machine (the
+    # `fly-toml-env` declaration above is what closes that direction).
+    # ⛔ NOT `== attested_clients()` with the knob UNSET: that right-hand side is
+    # always `{}`, which forbids the very activation `fly.toml [env]` documents
+    # and cannot distinguish a reviewed attestation from a typo (#10472 review F1).
+    shipped_allowlist = _assert_allowlist_is_the_value_the_code_acts_on(
+        _fly_toml_env_value(attested), monkeypatch)
+    assert isinstance(shipped_allowlist, dict)  # shape pinned by the helper above
     for name in ("TORTOISE_AUDIT_DSN", "TORTOISE_LINK_INTENT_SECRET", "SENTRY_DSN"):
         assert declared[name] == f"gh-secret:{name}", declared[name]
         assert name in workflow_refs, f"deploy-hosted.yml never references secrets.{name}"
@@ -1843,6 +1900,51 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     )
     assert debt == set(), f"recorded debt remains: {sorted(debt)}"
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# ── The allowlist shape predicate, on its own (#10472 review F1) ─────────────
+# The shipped-artifact test above runs the predicate once, against whatever
+# `fly.toml` holds today (an empty allowlist). That alone cannot show the
+# predicate is a PROPERTY rather than the prohibition it replaced: an assertion
+# of the form `== {}` is green on today's file and red the moment an operator
+# does what `fly.toml:305-312` documents. Pinned here so the two arms the
+# predicate exists for are both exercised — the deliberate attestation it must
+# ACCEPT, and the malformed values it must REFUSE.
+
+def test_the_allowlist_predicate_accepts_the_activation_fly_toml_documents(monkeypatch):
+    """A reviewed first-party attestation is the ACTIVATION, not drift.
+
+    `fly.toml [env]` tells the operator "attesting a real first-party client
+    means adding its minted `ct_…` client_id here". Under the previous
+    `json.loads(value) == attested_clients()` form this input red the gating
+    suite on `main` — the one edit that makes the discrimination half of #8218
+    reachable was forbidden by the guard that shipped with it.
+    """
+    attestation = '{"ct_a1b2c3": "Claude"}'
+    assert _assert_allowlist_is_the_value_the_code_acts_on(
+        attestation, monkeypatch) == {"ct_a1b2c3": "Claude"}
+
+
+def test_the_allowlist_predicate_refuses_a_value_the_code_would_drop(monkeypatch):
+    """Every shape `tortoise/client_identity.py` silently narrows reds HERE.
+
+    A blank name is the case that matters: the module drops the entry and
+    fail-closes, so the deploy is still SAFE — but the operator attested a
+    client that then renders "An unverified app (…)", which is the divergence
+    the assertion exists to report. The empty-object default is included as the
+    control: it must keep passing.
+    """
+    assert _assert_allowlist_is_the_value_the_code_acts_on("{}", monkeypatch) == {}
+    for malformed in (
+            '{"ct_abc": ""}',           # blank name: the module DROPS the entry
+            '{"ct_abc": "   "}',        # whitespace-only name: same
+            '{"ct_abc": 7}',             # non-string name: same
+    ):
+        with pytest.raises(AssertionError):
+            _assert_allowlist_is_the_value_the_code_acts_on(malformed, monkeypatch)
+    for not_an_object in ('["ct_abc"]', '"ct_abc"', 'null'):
+        with pytest.raises(AssertionError):
+            _assert_allowlist_is_the_value_the_code_acts_on(not_an_object, monkeypatch)
 
 
 # ── The probe ↔ manifest lockstep (#4411 residual 1) ─────────────────────────
