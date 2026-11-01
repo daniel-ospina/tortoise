@@ -19,9 +19,11 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   statSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -2099,9 +2101,14 @@ test("#8531: a quarantined orphan is COUNTED under the byte ceiling, not invisib
     reaped.some((d) => d.reason === "spool_total_bytes_exceeded"),
     "the eviction must be recorded",
   );
-  // #6388: the orphan record names its class too. It goes FIRST among the three
-  // classes (unreachable to every surface — a corrupt meta moved it out of every
-  // scan), so an operator must not have to infer that from the order.
+  // #6388: the orphan record names its class too. It goes AFTER the filed class
+  // and BEFORE any unfiled live entry — the unknowable loss is spent before the
+  // only copy of a conversation, never before a certain zero-cost reclaim
+  // (unreachable to every surface: a corrupt meta moved it out of every scan) —
+  // so an operator must not have to infer that from the order. The ORDER itself
+  // is pinned by "the FILED class is reaped BEFORE a quarantined orphan", which
+  // this direct-prune call cannot see (there is no filed entry here, so both
+  // orders reap the orphan and stay green).
   assert.ok(
     reaped[0].detail.includes("UNREACHABLE"),
     `the ledger must say which class of loss a quarantined log is: ${reaped[0].detail}`,
@@ -2111,6 +2118,311 @@ test("#8531: a quarantined orphan is COUNTED under the byte ceiling, not invisib
   // over-reporting irreversible loss is what teaches an operator to stop reading it.
   assert.equal(reaped[0].detail.includes("never filed"), false, reaped[0].detail);
   assert.ok(reaped[0].detail.includes("unknown"), reaped[0].detail);
+});
+
+// ── (3b) #10479 review round 4 — the refusal must agree with the prune it
+//         relies on, and it must be VISIBLE where the operator looks ───────
+
+test("a reclaimable orphan does not make the spool SATURATED", () => {
+  // `spoolSaturated` counted a quarantined `.orphan`'s bytes in `total` and then
+  // answered the evictability question from LIVE metas only — "is anything
+  // FILED?". `pruneSpool` DOES reap orphans under the byte ceiling, so a spool
+  // pushed over its byte ceiling BY AN ORPHAN reported SATURATED, which refused
+  // the write — and the refusal's only path to prune is the very write it
+  // refuses, so the orphan was never reclaimed and every later capture was
+  // refused for a reason prune could have cleared. The refusal OUTLIVED its
+  // own condition, permanently. Mirrors the Python leg's
+  // `test_a_reclaimable_orphan_does_not_make_the_spool_SATURATED`.
+  //
+  // MUTATION THAT REDS THIS: drop the `reclaimableOrphanBytes` credit from
+  // `spoolSaturated`'s byte tests → `written` is false, a `spool_saturated`
+  // line is recorded, and the orphan is still on disk.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 10, maxTotalBytes: 6000, maxEntryBytes: 20_000 };
+  writeSpoolEntry(spool, { ...snapshot("live"), turns: [{ role: "user", content: "a" }] }, bounds);
+  const log = join(spool, "entries", `${entryKey("quarantined")}.turns.jsonl`);
+  writeFileSync(log, "z".repeat(9000));
+  const orphan = `${log}.orphan`;
+  renameSync(log, orphan);
+
+  const written = writeSpoolEntry(
+    spool,
+    { ...snapshot("fresh"), turns: [{ role: "user", content: "b" }] },
+    bounds,
+  );
+
+  assert.equal(
+    written.written,
+    true,
+    "a spool over its byte ceiling BY RECLAIMABLE ORPHAN BYTES is not saturated",
+  );
+  assert.equal(
+    readDiscards(spool).filter((d) => d.reason === "spool_saturated").length,
+    0,
+  );
+  assert.equal(existsSync(orphan), false, "prune ran, so the orphan it may delete is gone");
+  assert.ok(readSpoolEntry(spool, "live"), "the backlog is still whole");
+});
+
+test("an orphan cannot relieve a COUNT ceiling", () => {
+  // The orphan credit is BYTE-ONLY, and it has to be: `pruneSpool`'s orphan pass
+  // is gated on `total > maxTotalBytes`, so an orphan never reduces the ENTRY
+  // COUNT. Treating "an orphan exists" as room for a count overage would admit a
+  // write into a ceiling nothing can clear.
+  //
+  // MUTATION THAT REDS THIS: `return !orphans.length` instead of the byte-gated
+  // test → the third entry is written into a spool over `maxEntries`.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 2, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  for (const sid of ["c1", "c2"]) {
+    writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: sid }] }, bounds);
+  }
+  const log = join(spool, "entries", `${entryKey("orphaned")}.turns.jsonl`);
+  writeFileSync(log, "z".repeat(64));
+  renameSync(log, `${log}.orphan`);
+
+  const refused = writeSpoolEntry(
+    spool,
+    { ...snapshot("c3"), turns: [{ role: "user", content: "c3" }] },
+    bounds,
+  );
+
+  assert.equal(refused.written, false, "an orphan cannot make COUNT room");
+  assert.equal(readSpoolEntry(spool, "c3"), undefined);
+  assert.ok(readDiscards(spool).some((d) => d.reason === "spool_saturated"));
+});
+
+test("an over-bound GROWTH leaves a FILEABLE entry fileable", async () => {
+  // The per-entry bound is asked twice, about two different things: what THIS
+  // WRITE would store, and what is ALREADY on disk (what the drain would POST).
+  // Marking the entry terminal abandons delivery FOREVER — `flushSpool` skips it,
+  // `countPendingEntries` excludes it — so it is only correct when the STORED
+  // content is itself over the bound. When the stored content is under it the
+  // write must simply be REFUSED: the capture is legal and the server would have
+  // accepted it.
+  //
+  // MUTATION THAT REDS THIS: mark terminal whenever `prior` exists (the pre-fix
+  // branch) → `terminal_failure` is set, `countPendingEntries` is 0, and the
+  // drain files nothing.
+  const spool = tmpSpool();
+  const roomy = { maxTotalBytes: 1_000_000, maxEntryBytes: 1_000_000 };
+  writeSpoolEntry(spool, snapshot("legal"), roomy);
+  const onDisk = spoolEntryBytes(spool, "legal");
+  const tight = { maxEntries: 100, maxTotalBytes: 1_000_000, maxEntryBytes: onDisk + 50 };
+
+  const result = writeSpoolEntry(
+    spool,
+    {
+      ...snapshot("legal"),
+      turns: [...SPOOL_TURNS, { role: "user", content: "y".repeat(20_000) }],
+    },
+    tight,
+  );
+
+  assert.equal(result.written, false, "the growth is refused");
+  assert.equal(result.bytes, onDisk, "and it names what is actually on disk");
+  const meta = readSpoolEntry(spool, "legal");
+  assert.ok(meta);
+  assert.equal(
+    meta.terminal_failure,
+    undefined,
+    "a FILEABLE entry must not be marked terminal — that abandons delivery",
+  );
+  assert.deepEqual(readSpoolTurns(spool, "legal"), SPOOL_TURNS, "the stored content is untouched");
+  const recorded = readDiscards(spool).at(-1);
+  assert.equal(recorded?.reason, "entry_growth_refused");
+  assert.equal(recorded?.retained, true, "the RECORD says the capture was kept");
+  assert.equal(countPendingEntries(spool), 1, "it is still pending work");
+
+  // …and the drain actually delivers it, which is the whole point.
+  const server = recordingServer();
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 10_000 });
+  assert.equal(summary.filed, 1);
+  assert.equal(server.posts(), 1);
+});
+
+test("the terminal arm is decided by the ON-DISK size, and the fresh arm is a loss", () => {
+  // Two arms of the SAME reason with OPPOSITE outcomes, so `retained` rides on
+  // the RECORD rather than on the reason: the stored entry that can never be
+  // filed is kept (retained), while a FRESH oversized snapshot never reached the
+  // disk at all (not retained). The Python leg's `is_lost_discard` reads this
+  // flag, and both legs append to ONE `discarded.jsonl`.
+  //
+  // MUTATION THAT REDS THIS: branch on `entryBytes` (the refused write) instead
+  // of `onDisk` → a bound one byte under the stored size leaves it filable
+  // forever; and drop `retained: false` → the fresh arm reads as a retention.
+  const spool = tmpSpool();
+  const roomy = { maxTotalBytes: 1_000_000, maxEntryBytes: 1_000_000 };
+  writeSpoolEntry(spool, snapshot("stuck"), roomy);
+  const onDisk = spoolEntryBytes(spool, "stuck");
+  const tight = { maxEntries: 100, maxTotalBytes: 1_000_000, maxEntryBytes: onDisk - 1 };
+
+  writeSpoolEntry(
+    spool,
+    { ...snapshot("stuck"), turns: [...SPOOL_TURNS, { role: "user", content: "more" }] },
+    tight,
+  );
+
+  const meta = readSpoolEntry(spool, "stuck");
+  assert.ok(meta);
+  assert.equal(meta.terminal_failure?.reason, "entry_too_large", "unfilable on disk is terminal");
+  assert.equal(countPendingEntries(spool), 0, "terminal is never retried");
+  assert.deepEqual(readSpoolTurns(spool, "stuck"), SPOOL_TURNS, "and never deleted");
+
+  const fresh = writeSpoolEntry(
+    tmpSpool(),
+    { ...snapshot("never-stored"), turns: [{ role: "user", content: "y".repeat(4000) }] },
+    { maxEntryBytes: 10 },
+  );
+  const freshRecord = fresh.discards.at(-1);
+  assert.equal(freshRecord?.reason, "entry_too_large");
+  assert.equal(freshRecord?.retained, false, "nothing reached the disk, so nothing was kept");
+});
+
+test("a REFUSED session records once per spool state", () => {
+  // A refused session re-snapshots on EVERY turn and has no entry to carry a
+  // dedupe marker, so an unconditional record appends one ledger line per turn
+  // for its whole life — into `discarded.jsonl`, which lives in the spool ROOT
+  // and is counted against no ceiling. Same event, one line; a different
+  // session, or any change in the spool, is a new event and is recorded.
+  //
+  // MUTATION THAT REDS THIS: record the refusal unconditionally (the pre-fix
+  // `recordDiscard`) → four refusals of one session produce four lines.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 1, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(spool, { ...snapshot("held"), turns: [{ role: "user", content: "h" }] }, bounds);
+
+  for (const size of [1, 2, 3, 4]) {
+    const refused = writeSpoolEntry(
+      spool,
+      { ...snapshot("refused"), turns: [{ role: "user", content: "r".repeat(size) }] },
+      bounds,
+    );
+    assert.equal(refused.written, false);
+  }
+  const lines = () => readDiscards(spool).filter((d) => d.reason === "spool_saturated");
+  assert.equal(lines().length, 1, `one refusal, one line: ${lines().length}`);
+
+  // A DIFFERENT session is a different event.
+  writeSpoolEntry(
+    spool,
+    { ...snapshot("refused-too"), turns: [{ role: "user", content: "x" }] },
+    bounds,
+  );
+  assert.equal(lines().length, 2);
+
+  // …and so is a refusal measured against a CHANGED spool.
+  unlinkSync(join(spool, "entries", `${entryKey("held")}.meta.json`));
+  unlinkSync(join(spool, "entries", `${entryKey("held")}.turns.jsonl`));
+  writeSpoolEntry(spool, { ...snapshot("held-2"), turns: [{ role: "user", content: "h" }] }, bounds);
+  writeSpoolEntry(spool, { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] }, bounds);
+  assert.equal(lines().length, 3);
+});
+
+test("the health line NAMES saturation", () => {
+  // `spoolSaturated`'s own docstring calls the state "first-class, reported", but
+  // none of the five health states could say it: a REFUSING box printed
+  // `DRAINING (n queued)`, byte-identical to a healthy working backlog.
+  //
+  // MUTATION THAT REDS THIS: drop the SATURATED branch → `draining`.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 2, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  for (const sid of ["h1", "h2"]) {
+    writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: sid }] }, bounds);
+  }
+  writeSpoolEntry(spool, { ...snapshot("h3"), turns: [{ role: "user", content: "h3" }] }, bounds);
+
+  const full = captureHealthLine(spool, { apiKey: "tt_x", bounds });
+  assert.equal(full.state, "saturated");
+  assert.equal(full.line, "capture: SATURATED (2 queued, refusing new captures)");
+  assert.equal(full.queued, 2);
+
+  // A KEYLESS box is the one that saturates; the cause is kept, not replaced.
+  const keyless = captureHealthLine(spool, { apiKey: "", bounds });
+  assert.equal(keyless.state, "saturated");
+  assert.equal(
+    keyless.line,
+    "capture: SATURATED (no TORTOISE_API_KEY, 2 queued, refusing new captures)",
+  );
+
+  // Under a roomier ceiling the SAME spool is merely draining: the state is the
+  // CEILING's, not the backlog's.
+  const roomy = captureHealthLine(spool, { apiKey: "tt_x" });
+  assert.equal(roomy.state, "draining");
+  assert.equal(roomy.line, "capture: DRAINING (2 queued)");
+});
+
+test("the health line is not OK while TERMINAL entries refuse everything", () => {
+  // The silent-failure case, exactly as the reviewer reproduced it: terminal
+  // entries are never retried AND never counted, so when they fill the ceiling
+  // the box refuses every new capture while printing `capture: OK (0 queued)` —
+  // byte-identical to a healthy box.
+  //
+  // MUTATION THAT REDS THIS: drop the SATURATED branch (or count only pending) →
+  // the line reads `capture: OK (0 queued)`.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 2, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  for (const sid of ["t1", "t2"]) {
+    writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: sid }] }, bounds);
+    const path = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+    const meta = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    meta.terminal_failure = { reason: "http_rejected", detail: "422", at: "now" };
+    writeFileSync(path, JSON.stringify(meta));
+  }
+
+  const refused = writeSpoolEntry(
+    spool,
+    { ...snapshot("t3"), turns: [{ role: "user", content: "t3" }] },
+    bounds,
+  );
+  assert.equal(refused.written, false, "the ceiling is full of terminal entries");
+  assert.equal(countPendingEntries(spool), 0, "and none of them is pending");
+
+  const line = captureHealthLine(spool, { apiKey: "tt_x", bounds });
+  assert.equal(line.state, "saturated", "a box refusing every capture is not healthy");
+  assert.equal(line.line, "capture: SATURATED (0 queued, refusing new captures)");
+});
+
+test("the FILED class is reaped BEFORE a quarantined orphan", async () => {
+  // #6388 ranking, completed: a FILED entry's content is already on the wire, so
+  // reclaiming it is a CERTAIN zero-cost choice; an orphan's delivered-ness is
+  // unknowable (`quarantineLog` removed the corrupt meta, the only copy of
+  // `filed_key`). The orphan pass therefore runs AFTER the filed pass — and this
+  // test builds the one shape that can tell the two orders apart: a ceiling that
+  // ONE eviction satisfies. Mirrors the Python leg's
+  // `test_the_filed_class_is_reaped_BEFORE_a_quarantined_orphan`.
+  //
+  // MUTATION THAT REDS THIS: move the orphan pass above the filed pass → the
+  // orphan is reaped and the filed entry survives.
+  const spool = tmpSpool();
+  const roomy = { maxEntries: 1000, maxTotalBytes: 1 << 30, maxEntryBytes: 1 << 20 };
+  writeSpoolEntry(spool, snapshot("delivered"), roomy);
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  const filed = readSpoolEntry(spool, "delivered");
+  assert.ok(filed?.filed_key, "the premise: it is on the wire");
+  const filedBytes = spoolEntryBytes(spool, "delivered");
+
+  const log = join(spool, "entries", `${entryKey("quarantined")}.turns.jsonl`);
+  writeFileSync(log, "z".repeat(4096));
+  const orphan = `${log}.orphan`;
+  renameSync(log, orphan);
+
+  // Exactly one eviction is needed to get under the ceiling, and EITHER class
+  // could supply it.
+  const tight = { maxEntries: 1000, maxTotalBytes: 4096 + filedBytes - 1, maxEntryBytes: 1 << 20 };
+  const reaped = pruneSpool(spool, null, tight);
+
+  assert.equal(
+    readSpoolEntry(spool, "delivered"),
+    undefined,
+    "the CERTAIN zero-cost reclaim goes first",
+  );
+  assert.ok(existsSync(orphan), "the unknowable one is spared while a filed entry remains");
+  assert.deepEqual(
+    reaped.map((d) => d.reason),
+    ["spool_total_bytes_exceeded"],
+  );
 });
 
 // ── (4) Endpoint unreachable → retry with backoff, never a loss ────────────
