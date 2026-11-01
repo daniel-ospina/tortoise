@@ -524,12 +524,26 @@ Exit 0 only when **all** of these hold:
 
    **E3's class set is re-derived, not read from this prose.** The same rule parses
    `tortoise/projection/edges.py`'s `_DERIVATION_REFERENCES_LABELS` and requires E3's metric and
-   denominator to name **exactly** `{Point} ∪ that set`. A denominator naming a class the model
+   denominator — **each cell on its own, not their union** — to name **exactly** `{Point} ∪ that set`.
+   A denominator naming a class the model
    leaves unanchored by design (`:Object`, #5199 option A) **fails** — that is an unreachable
    `= 1.000`, and it would report the decision as a defect (§10.1) — and a denominator that *omits*
    a class the model does anchor fails too, because it would score with a numerator that cannot reach
    its own denominator. The rule reads the constant with `ast`, so it runs in every job including the
    one that does not install the package; a constant it cannot find is exit `2`, never a pass.
+
+   **Both arms are asked only of a bundle that makes the claim.** The step that runs this gate
+   checks TWO bundles in one invocation (`--dir docs/evidence/7949-capstone --dir
+   docs/evidence/5087-hypothesis`, #10468), and these two arms were written for this one. Applied
+   unconditionally they red-ed the sibling for seven things it never said (measured at the merged
+   head, #10525): its record predates `measurement_visible_to_author` entirely — no field on any
+   criterion and no `prior_measurements` block — so it makes no visibility claim to contradict, and
+   its E3 is a session-arm receipt check that names no graph class at all, which the anchor model
+   never scored. So the visibility arm is asked of a record that carries the schema (and such a
+   record still owes the field on **every** criterion, so deleting one does not opt out), the
+   class-set arm of an E3 row that names at least one graph class, and an arm that is not applied is
+   **printed** (`registry arm NOT applied — …`) and carried in the JSON as `registry_scopes`. An
+   undeclared skip would be the silent-green shape this very section exists to refuse.
 
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.

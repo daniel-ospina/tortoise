@@ -35,6 +35,11 @@ from tools import capstone_preregistration_check as check  # noqa: E402
 PREREG_DIR = REPO_ROOT / "docs" / "evidence" / "7949-capstone"
 PREREG = PREREG_DIR / "PRE-REGISTRATION.md"
 
+#: The SECOND bundle the gate's own CI step checks (`--dir … --dir …`, #10468). It is measured here
+#: because the two #9736/#9738 arms were written for the capstone bundle and, applied
+#: unconditionally, red-ed this one for seven things it never said (#10525).
+SIBLING_DIR = REPO_ROOT / "docs" / "evidence" / "5087-hypothesis"
+
 #: The ordering half reads COMMIT HISTORY, and CI test jobs check out at `fetch-depth: 1` — a
 #: settled, documented property of this repo (`tests/test_lint_tripwire.py`: *"CI test jobs use
 #: shallow fetch-depth:1"*). In a depth-1 clone git grafts the tip, so every path reports as added by
@@ -2579,11 +2584,13 @@ def test_an_exempted_log_is_named_in_the_report_not_waived_silently(tmp_path, mo
 # ── the registry may not contradict the history or the model (#9736, #9738) ──
 
 
-def _record_copy(tmp_path: Path, **patches) -> Path:
+def _record_copy(tmp_path: Path, drop: tuple[str, ...] = (), **patches) -> Path:
     """A throwaway evidence directory: the REAL document + a MUTATED copy of the real record."""
     (tmp_path / check.PREREG_NAME).write_text(PREREG.read_text())
     rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
     rec.update(patches)
+    for key in drop:
+        rec.pop(key, None)
     (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
     return tmp_path
 
@@ -2592,10 +2599,10 @@ def _crit(rec: dict, cid: str) -> dict:
     return next(c for c in rec["criteria"] if c["id"] == cid)
 
 
-def _contradictions(directory: Path) -> list[str]:
+def _contradictions(directory: Path, scopes: list[str] | None = None) -> list[str]:
     text = (directory / check.PREREG_NAME).read_text()
     return check.check_registry_contradictions(
-        directory, check.parse_criteria_rows(text), check.parse_pins(text)
+        directory, check.parse_criteria_rows(text), check.parse_pins(text), scopes
     )
 
 
@@ -2662,12 +2669,136 @@ def test_the_e3_class_set_is_derived_from_the_writer_constant():
 
 
 def test_the_real_e3_row_names_exactly_the_anchored_classes():
+    """EVERY cell, not their union (#10525 review P1) — the union is what let a narrower numerator by."""
     rows = {r["id"]: r for r in check.parse_criteria_rows(PREREG.read_text())}
     anchored = set(check.SELF_ANCHORED_CLASSES) | check.derivation_label_classes()
-    named = check._classes_named(rows["E3"]["metric"]) | check._classes_named(
-        rows["E3"]["denominator"]
+    for cell in check.E3_CLASS_CELLS:
+        named = check._classes_named(rows["E3"][cell])
+        assert named == anchored, (cell, sorted(named), sorted(anchored))
+
+
+def test_an_e3_numerator_narrower_than_its_denominator_is_refused():
+    """THE MUTATION PROOF for #10525 P1, measured on the pre-fix code.
+
+    With `metric` naming `Point` + `Event` and the shipped `denominator` still naming `Point` +
+    `Event` + `Document`, the union test returned `[]` — a numerator that cannot reach its own
+    denominator, which is #9736 one level down, passed the rule written to refuse it.
+    """
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event`) carrying a version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` + `Document` "
+                       "(the classes the model anchors; floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
     )
-    assert named == anchored, (sorted(named), sorted(anchored))
+    assert any(
+        "E3" in f and "omits" in f and "from its metric" in f and "Document" in f for f in failures
+    ), failures
+    # The denominator IS complete: the rule must name the cell that is short, not both.
+    assert not any("from its denominator" in f for f in failures), failures
+
+
+def test_an_e3_denominator_missing_an_anchored_class_is_refused():
+    """Symmetric arm: a complete numerator does not excuse a denominator that scores a subset."""
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event` + `Document`) carrying a "
+                  "version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` (floor ≥ 30)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
+    )
+    assert any("omits" in f and "from its denominator" in f and "Document" in f for f in failures), \
+        failures
+    assert not any("from its metric" in f for f in failures), failures
+
+
+def test_the_two_arms_are_asked_of_the_capstone_bundle():
+    """Non-vacuity for the scope: the bundle they were WRITTEN for is asked both, and skips none."""
+    scopes: list[str] = []
+    assert _contradictions(PREREG_DIR, scopes) == []
+    assert scopes == [], scopes
+
+
+def test_the_sibling_bundle_is_not_failed_by_the_arms_it_never_declared():
+    """REGRESSION, measured: 7 failures on the merged tree before the scope existed (#10525).
+
+    `docs/evidence/5087-hypothesis` lands in the SAME CI invocation as the capstone bundle
+    (#10468). Its record predates `measurement_visible_to_author` entirely — no field on any
+    criterion, no `prior_measurements` block — so it makes no visibility claim to contradict; and
+    its E3 is a SESSION-ARM receipt check naming no graph class at all, so the anchor model, which
+    never scored it, is not its subject. Six non-boolean failures plus one "omits every class" is
+    what an unconditional rule says about a bundle that said none of it.
+    """
+    text = (SIBLING_DIR / check.PREREG_NAME).read_text()
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(
+        SIBLING_DIR, check.parse_criteria_rows(text), check.parse_pins(text), scopes
+    )
+    assert failures == [], failures
+    assert len(scopes) == 2, scopes
+    assert any("#9738" in s for s in scopes), scopes
+    assert any("names no graph class" in s for s in scopes), scopes
+
+
+def test_a_record_that_carries_no_visibility_field_is_not_asked_the_9738_rule(tmp_path):
+    """A record that predates the field makes no claim, so there is nothing to contradict."""
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    (directory / check.MACHINE_RECORD).write_text(json.dumps({
+        "schema": "capstone-prereg-v1",
+        "criteria": [{"id": "E5", "metric": "m", "denominator": "d"}],
+    }))
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(
+        directory, check.parse_criteria_rows(PREREG.read_text()), {}, scopes
+    )
+    assert failures == [], failures
+    assert any("#9738" in s for s in scopes), scopes
+
+
+def test_dropping_one_visibility_field_does_not_opt_out_of_the_rule(tmp_path):
+    """The scope is a schema declaration, NOT a per-criterion escape hatch.
+
+    A record that declares the field anywhere still owes it EVERYWHERE: otherwise deleting the one
+    criterion you would have had to disclose would be the way past a rule about disclosure.
+    """
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    _crit(rec, "E3").pop("measurement_visible_to_author")
+    directory = _record_copy(tmp_path, criteria=rec["criteria"])
+    scopes: list[str] = []
+    failures = _contradictions(directory, scopes)
+    assert any("E3" in f and "not a boolean" in f for f in failures), failures
+    assert not any("#9738" in s for s in scopes), scopes  # the arm APPLIED, it was not skipped
+
+
+def test_a_skipped_arm_is_declared_in_the_report_and_on_the_human_path(tmp_path, capsys):
+    """A skip that is not declared is the silent-green shape this tool exists to refuse."""
+    code = check.main(["--dir", str(SIBLING_DIR), "--no-git", "--no-corpus", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload["failures"]
+    assert payload["ok"] is True
+    assert len(payload.get("registry_scopes") or []) == 2, payload.get("registry_scopes")
+
+    code = check.main(["--dir", str(SIBLING_DIR), "--no-git", "--no-corpus"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "registry arm NOT applied" in out
+
+    # …and the capstone bundle, which both arms ARE asked of, says nothing.
+    code = check.main(["--dir", str(PREREG_DIR), "--no-git", "--no-corpus"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "registry arm NOT applied" not in out
 
 
 def test_e3_counting_an_unanchored_class_is_refused(tmp_path):
