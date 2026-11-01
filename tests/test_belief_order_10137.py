@@ -119,6 +119,7 @@ def test_the_default_order_says_belief_was_not_consulted(sdk):
     assert [r.get("scores", {}).get("rrf") for r in on] == [
         r.get("scores", {}).get("rrf") for r in off]
 
+    assert on and off, "fixture must return hits — an empty page proves nothing"
     assert all("ep" in r for r in on), "fixture must ship the ep block"
     for r in on:
         assert r["ep"].get("informed_order") == "not_consulted", (
@@ -303,3 +304,38 @@ def test_a_projectionless_state_ranker_still_labels_its_embedded_read(sdk):
     from tortoise.ranking import belief_read_for
     consulted, answered = belief_read_for(ranker, ranked)
     assert consulted is True and answered == frozenset({"a", "b"})
+
+
+def test_an_unobservable_re_ranker_cannot_inherit_the_pool_label(sdk):
+    """Review round 5, P1 — the LAST re-order owns the claim, so it must CLEAR.
+
+    `recall_state`'s pool is labelled `not_consulted` before `StateRanker`
+    runs. When the caller passes a ranker whose read cannot be observed, the
+    annotation makes NO claim — which must be an ABSENT key, not the pool's
+    stale `not_consulted` left in place. Otherwise an unobservable re-rank
+    ships a false `not_consulted` on a belief-ranked order.
+    """
+    sdk.create_point("statement", "unicorn deploy", status="live")
+    sdk.create_point("statement", "the deploy pipeline pushes the release",
+                     status="live")
+
+    from tortoise.ranking import StateRanker
+
+    class _OpaqueStateRanker:
+        """Delegates to a real StateRanker — but is not one, so its read is
+        unobservable to `belief_read_for` (a decorating wrapper's shape)."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        def rerank(self, rows, *, entity_type="point", query=None):
+            return self.inner.rerank(rows, entity_type=entity_type, query=query)
+
+    rows = sdk.recall_state(
+        query=_QUERY, limit=10,
+        state_ranker=_OpaqueStateRanker(StateRanker(sdk._get_proj())))
+    assert rows
+    for r in rows:
+        assert "informed_order" not in r["ep"], (
+            "the unobservable re-rank must clear the pool's claim, not inherit "
+            "it")

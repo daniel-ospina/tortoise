@@ -97,17 +97,21 @@ def annotate_belief_order(rows: list[dict], *, consulted: bool | None,
     means the caller cannot observe the ranker's read — it makes NO claim and
     the key is left absent, which is the honest answer, not ``False``.
     """
-    if consulted is None:
-        return rows
     value = BELIEF_ORDER_CONSULTED if consulted else BELIEF_ORDER_NOT_CONSULTED
     for row in rows:
         ep = row.get("ep")
         if not isinstance(ep, dict):
             continue
+        # The LAST re-order owns the claim: a label set by an earlier stage (the
+        # belief-blind pool that `recall_state` re-ranks) is REMOVED before this
+        # stage decides, so no predecessor can leak a verdict and "no claim" is
+        # represented by an ABSENT key on every path, not by an inherited one.
+        ep.pop("informed_order", None)
+        if consulted is None:
+            continue
         if consulted and answered is not None and row.get("id") not in answered:
             # The read answered for other rows but not this one: its own score
-            # came from a neutral default, so it makes NO claim (the key stays
-            # absent) rather than borrowing the page's verdict.
+            # came from a neutral default, so it makes NO claim.
             continue
         ep["informed_order"] = value
     return rows
@@ -120,7 +124,8 @@ def belief_read_for(ranker, rows: list[dict]) -> tuple[bool | None, frozenset]:
     (#10137 review rounds 3-4):
 
       * ``None``  — the ranker is not one whose read we can observe (a
-        duck-typed or caller-supplied object): make NO claim.
+        duck-typed or caller-supplied object), or no rerank has run yet: make
+        NO claim.
       * ``False`` — the read failed or was never attempted (``signals_read``
         is set only by a rerank whose fetch ANSWERED), so every score came
         from a neutral fallback.
@@ -133,7 +138,11 @@ def belief_read_for(ranker, rows: list[dict]) -> tuple[bool | None, frozenset]:
     """
     if not isinstance(ranker, (GraphRanker, StateRanker)):
         return None, frozenset()
-    if not getattr(ranker, "signals_read", False):
+    read = getattr(ranker, "signals_read", None)
+    if read is None:
+        # never attempted — the honest third state, not "consulted=False"
+        return None, frozenset()
+    if read is False:
         return False, frozenset()
     answered = frozenset(getattr(ranker, "signals_answered", frozenset()))
     page = frozenset(r.get("id") for r in rows if r.get("id") in answered)
@@ -582,8 +591,9 @@ class GraphRanker:
         self.use_degree = use_degree
         # #10137: set by every `rerank` call — whether the graph signal read
         # actually ANSWERED (see `_fetch_signals`). Read by the caller to label
-        # the order honestly; ``False`` until a rerank has run.
-        self.signals_read = False
+        # the order honestly; ``None`` until a rerank has run, which
+        # `belief_read_for` reports as "no claim".
+        self.signals_read: bool | None = None
         self.signals_answered: frozenset = frozenset()
         # #2952: recency decay is INTENTIONAL product behaviour (γ·e^(-λ·age),
         # 30-day half-life), so the fix is not to delete it but to make the
@@ -927,7 +937,7 @@ class StateRanker:
         self.projection = projection
         # #10137: same observation surface as GraphRanker, so an un-reranked
         # instance ABSTAINS (see `belief_read_for`) instead of claiming.
-        self.signals_read = False
+        self.signals_read: bool | None = None
         self.signals_answered: frozenset = frozenset()
         self.relevance_exp = relevance_exp
         self.confidence_exp = confidence_exp
