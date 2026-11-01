@@ -514,6 +514,22 @@ mechanisms:
       guard therefore also matches the refused point's own `_value_slots` — a
       variant stating the SAME value in the SAME slot is the same resurrection.
       An endpoint carrying no value has no slots and is unaffected.
+      ⚠️ (1b-i) THAT KEY IS COARSE, AND THE COST IS STATED RATHER THAN ABSORBED
+      (#10513 review cycle-11 P3, measured): it keys the VALUE —
+      `(anchor, sign, core, unit)` per slot — and carries NO identity for the
+      CLAIM, so an endpoint that is a DIFFERENT claim sharing an anchor word and
+      a value is suppressed as well. Refusing `the TTL is 20 minutes` (against a
+      `20 hours` quote) also drops the operator endpoint `the cache TTL is 20
+      minutes`; on `main` that endpoint is minted, so in this narrow shape an
+      operator edge is lost — REPORTED, never silent, and under the variant
+      wording rather than a false accusation of a rewrite. ⛔ Not narrowed, and
+      the reason is the classifier rule: telling that endpoint apart from a
+      variant means judging the claim's NON-value words, i.e. a second
+      classifier beside `_value_bindings` — the P2 that killed the previous
+      attempt at this issue — and the shape only arises in a batch that already
+      contains a refusal (0 refusals on the committed census). Pinned by
+      `test_a_DIFFERENT_claim_sharing_an_anchor_and_value_is_suppressed_too`, so
+      a future lane that narrows the key has to move this row.
       ⚠️ That is not RETENTION: a refused point loses its value entirely, so what
       is enforced is "the graph never records a rewritten value as verbatim",
       not "every value survives".

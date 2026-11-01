@@ -1147,6 +1147,13 @@ def test_the_state_value_carve_out_row_records_what_is_enforced_and_what_is_not(
     # once false on (#9775), so a reader is sent to the render the compaction
     # rule lives in rather than to a prose assurance.
     assert "_render_master_compact" in row["note"], row["note"]
+    # And the mint guard's COARSE KEY is stated as a residual (#10513 review
+    # cycle-11 P3): the slot key carries the value and no identity for the
+    # claim, so a distinct endpoint sharing an anchor+value is dropped too. The
+    # claim this row makes is "nothing is silently absorbed", so the cost has to
+    # stay readable in the artifact a lane acts on.
+    assert "THAT KEY IS COARSE" in row["note"], row["note"]
+    assert "sharing an anchor word and" in row["note"], row["note"]
 
 
 #: Number words the registry prose may spell, keyed by the count they name. A

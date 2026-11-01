@@ -600,6 +600,52 @@ def test_a_refused_value_cannot_re_enter_the_graph_under_a_VARIANT_name(variant)
     assert "the nightly rebuild window" in contents, contents
 
 
+def test_a_DIFFERENT_claim_sharing_an_anchor_and_value_is_suppressed_too():
+    """Residual (1b-i), PINNED so narrowing the key has to move the row.
+
+    #10513 review cycle-11 P3, measured: the mint guard's slot key is
+    ``(anchor, sign, core, unit)`` per slot, so it carries NO identity for the
+    CLAIM. Refusing ``the TTL is 20 minutes`` (its quote says ``20 hours``)
+    therefore also suppresses the operator endpoint ``the cache TTL is 20
+    minutes`` — a DIFFERENT claim that merely shares the anchor word and the
+    value. On ``main`` that endpoint is minted, so in this narrow shape one
+    operator edge is lost; the loss is reported (``operator_endpoints_minted``
+    and the edge's own dangling-edge warning), never silent, and it is reported
+    as a VARIANT of the refusal rather than as an accusation that this claim
+    rewrote its quote — which is false of it.
+
+    The behaviour STAYS: separating that endpoint from a genuine variant means
+    judging the claim's non-value words, i.e. a second value classifier beside
+    the production engine — the P2 that killed the previous attempt at this
+    issue. It is stated as residual (1b-i) in ``config/v4-mechanisms.yml``
+    instead. The positive control below is the load-bearing half: with NO
+    refusal in the batch the same endpoint IS minted, so the drop is caused by
+    the refusal and not by the mint path.
+    """
+    refusal = _embed("the TTL is 20 minutes", "the TTL is 20 hours")
+    refusal["operators"] = [{
+        "src": "the cache TTL is 20 minutes",
+        "dst": "the nightly rebuild window", "op_type": "IMPL"}]
+    result = v2.execute_embed(refusal, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the cache TTL is 20 minutes" not in contents, contents
+    assert any("value matches a point refused" in w for w in result["warnings"]), (
+        result["warnings"])
+    # …and it does NOT inherit the exact-content arm's wording, which would be a
+    # false accusation against a claim that never rewrote anything.
+    assert not any("whose point was refused" in w for w in result["warnings"]), (
+        result["warnings"])
+
+    # positive control: the SAME endpoint, in a batch with no refusal, mints.
+    control = _embed("the TTL is 20 minutes", "the TTL is 20 minutes")
+    control["operators"] = [{
+        "src": "the cache TTL is 20 minutes",
+        "dst": "the nightly rebuild window", "op_type": "IMPL"}]
+    result = v2.execute_embed(control, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the cache TTL is 20 minutes" in contents, contents
+
+
 # ── 7. pins for the cycle-3 findings ──────────────────────────────────────
 
 def test_the_unit_table_covers_every_unit_the_engine_can_fuse():

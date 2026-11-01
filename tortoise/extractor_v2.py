@@ -8693,6 +8693,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # "refused" (review cycle 5 measured both branches: the edge drops the
         # same way, one misleading warning fewer).
         _refused_here = _norm(content) in refused_value_contents
+        _matched_on_slots = False
         if not _refused_here and refused_value_slots:
             # …and the SLOT key (#10513 review P2, measured): `_norm` equality is
             # EXACT, so re-naming the refused ref `the p95 hit 4.0 seconds.` (one
@@ -8702,7 +8703,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # bytes differ. An endpoint carrying NO value has no slots and can
             # never match, so a plain ref is unaffected.
             _slots = _value_slots(content)
-            _refused_here = bool(_slots) and _slots in refused_value_slots
+            _matched_on_slots = bool(_slots) and _slots in refused_value_slots
+            _refused_here = _matched_on_slots
         if _refused_here and _norm(content) not in point_ids:
             # #10360: mint-before-wire must not resurrect what the
             # value-fidelity rule refused. Minting here would build a
@@ -8710,11 +8712,29 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # with no verbatim anchor, so the refusal would hold for the payload
             # point and be undone one step later. The operator edge drops with
             # this warning instead (its own dangling-edge guard reports that).
-            warnings.append(
-                f"operator endpoint ({where}) named {content[:60]!r}, whose "
-                "point was refused for rewriting its own verbatim quote "
-                "(#10360) — not minted, so the rewritten value cannot enter "
-                "the graph through this path")
+            # ⛔ TWO messages, because the two keys do not know the same thing
+            # (#10513 review cycle-11 P3, measured): the slot key is
+            # `(anchor, sign, core, unit)` per slot, so it carries NO identity
+            # for the CLAIM. `the TTL is 20 minutes` refused against
+            # `the TTL is 20 hours` and an endpoint `the cache TTL is 20 minutes`
+            # share that whole tuple while being a DIFFERENT claim — the endpoint
+            # is suppressed too (this is residual (1b-i), stated in the row), and
+            # telling its author the claim 'was refused for rewriting its own
+            # verbatim quote' would be false of it. The exact-content arm keeps
+            # that wording because for it the claim IS the refused one.
+            if _matched_on_slots:
+                warnings.append(
+                    f"operator endpoint ({where}) named {content[:60]!r}, whose "
+                    "value matches a point refused for rewriting its own "
+                    "verbatim quote (#10360) in the same slot — treated as a "
+                    "variant of that refusal and not minted, so the rewritten "
+                    "value cannot enter the graph through this path")
+            else:
+                warnings.append(
+                    f"operator endpoint ({where}) named {content[:60]!r}, whose "
+                    "point was refused for rewriting its own verbatim quote "
+                    "(#10360) — not minted, so the rewritten value cannot enter "
+                    "the graph through this path")
             return ""
         # `n` is the RESOLUTION key (`point_ids`/`event_ids` are keyed on the
         # minted content). The ENTITY guard is the same key-set transform the
