@@ -484,7 +484,7 @@ class TestFourNodeChain:
             "RETURN p.c_cal, p.status, p.source_ref, p.quote, p.pointKind, p.is_episodic",
         ).result_set
         assert rows, "Point pt_0 missing"
-        assert rows[0][0] == 0.8 and rows[0][1] == "live"
+        assert rows[0][0] == 0.8 and (rows[0][1] or "live") == "live"
         assert rows[0][2] == "session.md"
         n = g.query(
             "MATCH (p:Point {id:'pt_0000000000000000000000000000000000000000000000000000000000000000'})"
@@ -2011,7 +2011,7 @@ class Test5363InvertedSupersedeWindow:
         old = g.query(
             "MATCH (p:Point {id:$id}) RETURN p.status, p.validTo",
             params={"id": old_pid}).result_set
-        assert old and old[0][0] == "live", f"predecessor mutated: {old}"
+        assert old and (old[0][0] or "live") == "live", f"predecessor mutated: {old}"
         assert old[0][1] is None, f"predecessor validTo stamped: {old}"
 
         # Over-fix guard: a `when` ON/AFTER the predecessor's `validFrom` is a
@@ -2140,7 +2140,8 @@ class Test6bEntitySupersessionGuards:
         assert old[0][0] == "superseded", old
         assert old[0][1] == "a-new", old
         new = _object_row("a-new")
-        assert new and new[0][0] == "live", new
+        # #9974 R1: a status-less birth stores NO status (absent READS live).
+        assert new and (new[0][0] or "live") == "live", new
 
     def test_divergent_successor_keep_first(self, client):
         """(b) keep-first — after A→B folded, a record A→C must NOT clobber:
@@ -2160,7 +2161,7 @@ class Test6bEntitySupersessionGuards:
         assert old[0][1] == "b-succ-1", \
             "terminal target must keep its FIRST successor (keep-first)"
         succ2 = _object_row("b-succ-2")
-        assert succ2 and succ2[0][0] == "live", succ2
+        assert succ2 and (succ2[0][0] or "live") == "live", succ2
 
     def test_same_successor_rededup_single_journal(self, client):
         """(c) dedup — A→B twice with DIFFERENT evidence is NOT an L1 replay
@@ -2206,7 +2207,9 @@ class Test6bEntitySupersessionGuards:
         assert r.status_code == 200, r.text
         rows = _object_row("d-old")
         assert len(rows) == 2, rows
-        assert [row[0] for row in rows] == ["live", "live"], \
+        # #9974 R1: neither carrier is folded; the canonical one was born
+        # status-less (absent READS live) and the raw one carries its own.
+        assert [(row[0] or "live") for row in rows] == ["live", "live"], \
             f"duplicate-name ref must fold NEITHER carrier: {rows!r}"
 
     def test_self_supersession_id_name_alias_stays_live(self, client):
@@ -2231,7 +2234,7 @@ class Test6bEntitySupersessionGuards:
                               entities=[])
         assert r.status_code == 200, r.text
         old = _object_row("e-old")
-        assert old and old[0][0] == "live", \
+        assert old and (old[0][0] or "live") == "live", \
             f"self-supersession must NOT fold the target: {old!r}"
 
     def test_dangling_successor_skipped(self, client):
@@ -2244,7 +2247,7 @@ class Test6bEntitySupersessionGuards:
                               entities=[])
         assert r.status_code == 200, r.text
         old = _object_row("f-old")
-        assert old and old[0][0] == "live", \
+        assert old and (old[0][0] or "live") == "live", \
             f"dangling successor must NOT fold the target: {old!r}"
 
     def test_entity_fold_journals_session_id_in_graph_event(self, client):
@@ -2293,12 +2296,12 @@ class Test6bEntitySupersessionGuards:
                                entities=[])
         assert r2.status_code == 200, r2.text
         a = _object_row("h-a")
-        assert a and a[0][0] == "live", \
+        assert a and (a[0][0] or "live") == "live", \
             f"fold onto a terminal successor must be SKIPPED: {a!r}"
         b = _object_row("h-b")
         assert b and b[0][0] == "superseded" and b[0][1] == "h-c", b
         c = _object_row("h-c")
-        assert c and c[0][0] == "live", c
+        assert c and (c[0][0] or "live") == "live", c
 
 
 

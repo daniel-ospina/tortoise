@@ -109,11 +109,14 @@ def _legacy_stub(sdk: TortoiseSDK, label: str, name: str) -> str:
     file's other legacy pins build a pre-change graph out of a raw record.
     """
     kind = "subjectKind" if label == "Subject" else "objectKind"
-    # `title`/`status` are part of the shape, not decoration: the projection's
-    # own MERGE chain writes them on CREATE (`… o.title=coalesce($title,''),
-    # o.status=coalesce($st,'live')`), so a persisted stub carries them. Omit
-    # them and the adoption assertion below reports live != replay for a reason
-    # the forge had nothing to do with.
+    # `title`/`status` are part of the shape, not decoration: the RELEASED
+    # projection's MERGE chain wrote both on CREATE (`… o.title=coalesce($title,''),
+    # o.status=coalesce($st,'live')`), so a stub a PERSISTED pre-#9974-R1 graph
+    # carries them — which is the legacy shape this fixture exists to reproduce.
+    # (#9974 R1 removed the `status` half: a status-less birth now stores
+    # nothing. A legacy stub already holds `'live'`, and no replay can erase it,
+    # because the new registration record states no status — see the adoption
+    # leg below, which names that asymmetry instead of comparing it away.)
     sdk._get_proj().g.query(
         f"MERGE (n:{label} {{name:$n}}) "
         f"ON CREATE SET n.id=$n, n._stub=true, n.{kind}='other', "
@@ -519,8 +522,19 @@ class TestStubDiscriminatorIsNotCallerWritable:
             live = _node_props(sdk, "Object", "probe-object")
             _rebuild(sdk, events)
             rebuilt = _node_props(sdk, "Object", "probe-object")
-            assert rebuilt == live, (
+            # #9974 R1 STATED ASYMMETRY: the LEGACY stub above already stores
+            # `status='live'` (the released projection minted it), and the
+            # post-fix registration record states NO status, so the live node
+            # keeps the stored value while replay leaves the property ABSENT.
+            # Both READ live (`live._terminal_excluded` treats an absent status
+            # as live), and no fold may CLEAR a stored status on adoption — that
+            # would erase a legacy `archived`/`superseded` the record cannot
+            # restate. So the comparison is on everything the record decides.
+            assert {k: v for k, v in live.items() if k != "status"} == {
+                k: v for k, v in rebuilt.items() if k != "status"}, (
                 f"live != replay after a refused forge: {live} != {rebuilt}")
+            assert live.get("status") in (None, "live"), live
+            assert rebuilt.get("status") is None, rebuilt
             assert rebuilt.get("objectKind") == "core:task", rebuilt
         finally:
             sdk.close()

@@ -2630,7 +2630,9 @@ def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
     rows = sdk._get_proj().g.query(
         "MATCH (o:Object {name:$n}) RETURN o.status",
         params={"n": "approach-A"}).result_set
-    assert rows and rows[0][0] == "live", \
+    # #9974 R1: no fold fired, so no status was written at all (an absent
+    # status READS live) — `is None` is the precise form.
+    assert rows and rows[0][0] is None, \
         (f"fold must never fire for a dangling successor: {rows!r}")
 
 
@@ -2887,7 +2889,7 @@ def test_extract_session_v2_pt_ref_meta_warnings(sdk, monkeypatch):
         params={"old": old}).result_set
     assert rows and rows[0][0] == "live", \
         ("old point must stay live — a CORRECTS edge to a nonexistent "
-         f"successor would be dangling: {rows!r}")
+         f"successor would be dangling: {rows!r}")  # :Point keeps its seed
 
 
 def test_apply_supersessions_legacy_idless_object_is_refused_not_folded(sdk):
@@ -2941,7 +2943,8 @@ def test_apply_supersessions_legacy_idless_object_is_refused_not_folded(sdk):
         session_id="sess_legacy", warn=warns.append)
     assert applied == 0, \
         "an id-less target has no id to address — the record is refused"
-    assert _entity_fold_state(proj, "legacy-X") == ("live", None), \
+    _legacy_state = _entity_fold_state(proj, "legacy-X")
+    assert (_legacy_state[0] or "live", _legacy_state[1]) == ("live", None), \
         ("the target must be left untouched: a fold with no journal line is "
          "not restorable by a rebuild")
     assert _object_superseded_events(proj) == 0, \
@@ -3054,7 +3057,10 @@ def test_apply_supersessions_prefers_id_match_over_same_string_name(sdk):
     n = proj.g.query(
         "MATCH (o:Object {name:$n}) RETURN o.status",
         params={"n": oid}).result_set
-    assert n and n[0][0] == "live", \
+    # the fixture writes this carrier with an explicit `status='live'`, so the
+    # honest predicate is "not folded" — a fabricated-vs-derived distinction
+    # this leg is not about.
+    assert n and n[0][0] in (None, "live"), \
         f"name-match Object wrongly folded instead of the id match: {n!r}"
 
 
@@ -3672,7 +3678,7 @@ def test_apply_supersessions_chain_idless_target_is_refused(sdk):
     assert len(warns) == 1 and "it-mid" in warns[0] and "#3590" in warns[0], \
         warns
     # the refusal is LOCAL: the id-less head is untouched...
-    assert _entity_fold_state(proj, "it-mid") == ("live", None), \
+    assert _entity_fold_state(proj, "it-mid")[0] in (None, "live"), \
         _entity_fold_state(proj, "it-mid")
     # ...and the addressable link in the same chain still lands.
     assert _entity_fold_state(proj, "it-C") == ("superseded", "it-D")
@@ -3821,7 +3827,7 @@ def test_apply_supersessions_self_supersession_skipped(sdk):
     assert applied == 0, "self-supersession must never apply"
     assert any("self-supersession" in w for w in warns), warns
     state = _entity_fold_state(proj, "plan-X")
-    assert state == ("live", None), \
+    assert (state[0] or "live", state[1]) == ("live", None), \
         f"self-supersession folded plan-X onto itself: {state!r}"
     assert _object_superseded_events(proj) == 0, \
         "no ObjectSuperseded may be journaled for a self-supersession"
@@ -3853,7 +3859,7 @@ def test_apply_supersessions_pt_self_supersession_skipped(sdk):
         "MATCH (p:Point {id:$id}) RETURN p.status",
         params={"id": pid}).result_set
     assert rows and rows[0][0] == "live", \
-        "the self-referencing point must stay live"
+        "the self-referencing point must stay live"  # :Point keeps its seed
 
 
 def test_apply_supersessions_mixed_id_name_self_alias_skipped(sdk):
@@ -3886,7 +3892,7 @@ def test_apply_supersessions_mixed_id_name_self_alias_skipped(sdk):
     assert applied == 0, "id/name-aliased self-supersession must never apply"
     assert any("self-supersession" in w for w in warns), warns
     state = _entity_fold_state(proj, "plan-X")
-    assert state == ("live", None), \
+    assert (state[0] or "live", state[1]) == ("live", None), \
         f"mixed alias folded plan-X onto itself: {state!r}"
 
 
@@ -3932,7 +3938,7 @@ def test_apply_supersessions_dup_name_successor_not_self(sdk):
     by_id = {r[0]: (r[1], r[2]) for r in rows}
     assert by_id[id_a] == ("superseded", "plan-X"), \
         f"A must fold to superseded by plan-X: {by_id}"
-    assert by_id["obj-planx-dup-b"] == ("live", None), \
+    assert (by_id["obj-planx-dup-b"][0] or "live", by_id["obj-planx-dup-b"][1]) == ("live", None), \
         f"B (the distinct successor) must stay live: {by_id}"
 
 
@@ -3968,7 +3974,7 @@ def test_apply_supersessions_dead_dup_candidate_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    assert by_id[id_a] == "live", \
+    assert by_id[id_a] is None, \
         f"A must stay live — its only successor carrier is dead: {by_id}"
     assert by_id["obj-planx-dead"] == "superseded", by_id
 
@@ -4002,7 +4008,7 @@ def test_apply_supersessions_deprecated_carrier_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    assert by_id[id_a] == "live", \
+    assert by_id[id_a] is None, \
         f"A must stay live — its only other carrier is deprecated: {by_id}"
 
 
@@ -4035,7 +4041,7 @@ def test_apply_supersessions_idless_live_carrier_skipped(sdk):
     rows = proj.g.query(
         "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
     by_id = {r[0]: r[1] for r in rows}
-    assert by_id[id_a] == "live", \
+    assert by_id[id_a] is None, \
         f"A must stay live — its only other carrier is id-less: {by_id}"
 
 
