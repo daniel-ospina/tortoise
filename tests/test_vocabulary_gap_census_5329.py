@@ -69,19 +69,81 @@ def test_the_census_counts_each_occurrence():
     assert snap["truncated_observations"] == 0
 
 
-def test_a_token_the_pair_read_vocabularies_understand_is_not_a_gap():
-    """Review F2: the report must not claim a token is unnamed when a
-    vocabulary DOES name it.
+def test_a_named_pair_read_token_is_reported_in_its_own_bucket_not_as_a_gap():
+    """Review F2 + cycle-2 ISSUE 2: named by a list is not UNDERSTOOD by a fold.
 
     ``off`` is in ``_POLARITY_MEMBERS`` and ``because`` in
-    ``_CONNECTIVE_MEMBERS``; both are read from the PAIR (#5134/#5139), so a
-    fold carrying one is not a vocabulary gap and must not be reported as one.
+    ``_CONNECTIVE_MEMBERS``; both are read from the PAIR (#5134/#5139), so
+    neither is an unnamed vocabulary gap and the flat report must not claim one
+    (review F2).
+
+    But the guard fires only on a SWAP (``_connective_swap``) or on a copula
+    whose whole complement is the state (``_polarity_drop``) — so a one-sided
+    `because` / `off` reaches no identity dimension and the fold DROPS it. That
+    drop is the pair-read guard's residual, and it used to be subtracted on
+    token membership, which reported the residual as zero (review cycle 2,
+    ISSUE 2: "the subtraction suppresses exactly the one-sided case the census
+    exists to surface"). It is now COUNTED, in its own bucket.
+
+    Non-vacuity: on the pre-fix census the snapshot had no such keys at all, so
+    this leg errors rather than passing; the flat-report half is unchanged and
+    still pins F2.
     """
     assert v2.fold_allowed("we turn it off please", "we turn it please")
     assert v2.fold_allowed("we ship because tests pass", "we ship tests pass")
     report = v2.vocabulary_gap_report()
     assert "off" not in report
     assert "because" not in report
+    snap = v2.vocabulary_gap_snapshot()
+    assert snap["one_sided_state"] == {"off": 1}
+    assert snap["one_sided_connective"] == {"because": 1}
+    assert snap["pair_read_residual"] == 2
+    # The narrow claim is the one that was wrong: the residual is NOT zero.
+    assert sum(snap["tokens"].values()) == 0, (
+        "a pair-read family token leaked into the UNNAMED report — the flat "
+        f"report now calls a named token a vocabulary gap: {snap['tokens']}")
+
+
+def test_a_pair_read_guard_that_FIRES_is_not_residual():
+    """The other half of ISSUE 2: residual means the guard did NOT fire.
+
+    A `because`/`but` swap fills the same slot on both sides, so
+    ``_connective_swap`` refuses the pair — the boundary DID understand that
+    difference, and a refusal is not a fold, so nothing is recorded anywhere.
+    Without this leg, the buckets could be fed by token membership alone and
+    would report a loss on every pair that carries a connective.
+    """
+    assert v2.distinguishing_difference(
+        "we ship because tests pass", "we ship but tests pass") \
+        == "substituted_content"
+    assert not v2.fold_allowed("we ship because tests pass",
+                               "we ship but tests pass")
+    snap = v2.vocabulary_gap_snapshot()
+    assert snap["one_sided_connective"] == {}
+    assert snap["one_sided_state"] == {}
+    assert snap["pair_read_residual"] == 0
+    assert snap["fold_decisions"] == 0, (
+        "a refused pair was counted as a fold decision — the census records "
+        "FOLDS, and a guard that fires is not one")
+    assert snap["tokens"] == {}
+
+
+def test_the_pair_read_families_are_disjoint_so_a_token_has_one_bucket():
+    """``_pair_read_bucket`` needs no precedence rule only while this holds.
+
+    A token in BOTH families would be counted in one bucket by list order, and
+    a reader sizing the residual could not tell which guard owns it.
+    """
+    assert not (v2._CONNECTIVE_MEMBERS & v2._POLARITY_MEMBERS)
+    assert v2._VOCABULARY_GAP_UNDERSTOOD == (v2._CONNECTIVE_MEMBERS
+                                             | v2._POLARITY_MEMBERS)
+    for tok in sorted(v2._CONNECTIVE_MEMBERS):
+        assert v2._pair_read_bucket(tok) == "one_sided_connective"
+    for tok in sorted(v2._POLARITY_MEMBERS):
+        assert v2._pair_read_bucket(tok) == "one_sided_state"
+    assert v2._pair_read_bucket("hardly") is None, (
+        "an UNLISTED token was bucketed as pair-read — the two populations "
+        "must stay separable")
 
 
 def test_a_raising_log_handler_cannot_change_the_decision():
