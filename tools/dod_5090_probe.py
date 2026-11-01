@@ -184,10 +184,22 @@ UNGATED_CALLS: tuple[str, ...] = ("encode_for_store", "compute_session_embedding
 #: `MERGE (n:Label …)` / `CREATE (p:Label …)` — the label the Cypher names.
 _NODE_LABEL = re.compile(r"(?:MERGE|CREATE|MATCH)\s*\(\s*(\w+)\s*:\s*(\w+)")
 
-#: An embedding WRITE — a Cypher property assignment or the clause helper.
-_EMBED_WRITE = re.compile(
-    r"(?:\w+\.embedding|(?<![\w.])embedding)\s*=|set_embedding_clause\("
-)
+#: A Cypher ``<alias>.embedding = …`` property assignment. Applied to a
+#: function's CYPHER STRING LITERALS only — never to its raw source (see
+#: `_writes_embedding` for why that distinction is load-bearing).
+#:
+#: ⛔ The target MUST be a PROPERTY access (``n.embedding``). The bare
+#: ``embedding\s*=`` alternative is deliberately absent: in Cypher an embedding
+#: property assignment always names its alias, while in Python the bare form is
+#: a parameter default (``def f(embedding=None)``), a keyword argument
+#: (``_read(embedding=row[2])``) or an error string
+#: (``"indexed with embedding=None"``) — the three shapes this tool's review
+#: measured as FALSE writers.
+_EMBED_PROP_ASSIGN = re.compile(r"\w+\.embedding\s*=")
+
+#: The canonical clause BUILDER. A function that only CALLS it writes through
+#: it; the function that DEFINES it returns a template.
+EMBED_CLAUSE_BUILDER = "set_embedding_clause"
 
 
 def _strings(node) -> str:
@@ -198,6 +210,84 @@ def _strings(node) -> str:
         s.value for s in ast.walk(node)
         if isinstance(s, ast.Constant) and isinstance(s.value, str)
     )
+
+
+def _docstring_ids(node) -> set[int]:
+    """The ``id()``s of a function's docstring constant nodes."""
+    import ast
+
+    body = getattr(node, "body", None) or []
+    if body:
+        first = body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            return {id(first.value)}
+    return set()
+
+
+def _returned_template_ids(node) -> set[int]:
+    """Constants belonging to a clause TEMPLATE the function merely RETURNS.
+
+    `vector_write.set_embedding_clause` is a BUILDERS: it returns the
+    ``<alias>.embedding = …`` string and never issues it, so its own template
+    is not an embedding write. Counting it as one made the builder a
+    PERMANENT `unresolved_write` entry — and a set that no real code can empty
+    pins bullets 1 and 2 at `PARTIAL` at every head, which is the mirror of
+    "a row that cannot come back red". This is narrowed to a `Return` whose
+    value IS the template, so a writer that returns ``graph.query(f"…")``
+    (the string nested in a Call) is untouched.
+    """
+    import ast
+
+    ids: set[int] = set()
+    for r in ast.walk(node):
+        if not isinstance(r, ast.Return) or r.value is None:
+            continue
+        if isinstance(r.value, ast.Constant) and isinstance(r.value.value, str):
+            ids.add(id(r.value))
+        elif isinstance(r.value, ast.JoinedStr):
+            for sub in ast.walk(r.value):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    ids.add(id(sub))
+    return ids
+
+
+def _cypher_strings(node) -> str:
+    """The function's Cypher — string literals that are neither its docstring
+    nor a clause TEMPLATE it only returns."""
+    import ast
+
+    skip = _docstring_ids(node) | _returned_template_ids(node)
+    return "\n".join(
+        s.value for s in ast.walk(node)
+        if isinstance(s, ast.Constant) and isinstance(s.value, str)
+        and id(s) not in skip
+    )
+
+
+def _writes_embedding(node) -> bool:
+    r"""True when ``node`` really WRITES an embedding.
+
+    ⛔ AST-based, and deliberately NOT a search over the function's raw source.
+    A source regex cannot tell a write from a mention, and this tool's own
+    review measured what that cost: `set_embedding_clause(` matched the clause
+    builder's own ``def`` line (a permanent self-match), ``embedding\s*=``
+    matched a PARAMETER declaration, a KEYWORD ARGUMENT in a read, an
+    ERROR-MESSAGE string and a COMMENT — 7 of the 14 names published into
+    `#5090`'s body were not writers at all, and the clause builder's entry
+    could never leave the set, so bullets 1 and 2 could never reach `MET`.
+
+    A real write is one of exactly two things, both visible in the AST:
+
+    * a CALL to :data:`EMBED_CLAUSE_BUILDER` (``set_embedding_clause("n")``) —
+      a `Call` node, so a ``def`` line and a comment cannot match; or
+    * a ``.embedding =`` property assignment in the Cypher the function ISSUES
+      (its string literals, less its docstring and any template it returns).
+    """
+    if EMBED_CLAUSE_BUILDER in _callees(node):
+        return True
+    return bool(_EMBED_PROP_ASSIGN.search(_cypher_strings(node)))
 
 
 def _callees(node) -> set[str]:
@@ -304,15 +394,14 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             })
             continue
         module_labels = {lab for _v, lab in _NODE_LABEL.findall(_strings(tree))}
-        file_src = path.read_text(encoding="utf-8")
-        lines = file_src.splitlines()
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             called = _callees(node)
-            # The function's own text by LINE RANGE — `ast.get_source_segment`
-            # re-splits the whole file per call, which cost 90 s on this tree.
-            source = "\n".join(lines[node.lineno - 1:node.end_lineno])
+            # ⛔ No per-function SOURCE slice any more: the write test reads the
+            # AST (`_writes_embedding`), so `ast.get_source_segment` — which
+            # re-splits the whole file per call and cost 90 s on this tree — and
+            # the line-range slice that replaced it are both unnecessary.
             kind: str | None = None
             if SEAM_CALL in called:
                 callee, kind = SEAM_CALL, "gated"
@@ -324,7 +413,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # measured: reading only literals classed
                 # `session_indexer.main` (which does write) as a producer and
                 # hid a real ungated write path.
-                if not _EMBED_WRITE.search(source):
+                if not _writes_embedding(node):
                     kind = "producer"  # computes it; another function writes it
             else:
                 # No recognised producer call: if it still WRITES an embedding,
@@ -332,7 +421,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # otherwise report `OUTSIDE the gate: 1` for a tree with three
                 # (review round 5, P2 — measured: 17 functions carry an
                 # embedding-write clause, 9 of them were absent from this map).
-                if kind is None and _EMBED_WRITE.search(source):
+                if kind is None and _writes_embedding(node):
                     writers[f"{module}::{node.name}"] = {
                         "callee": "unrecognised",
                         "at": f"{rel}:{node.lineno}",
@@ -1073,16 +1162,24 @@ def count_embed_predicates() -> dict:
         # helper imported by the gate also counts as an owner (a false DRIFT).
         # Over-reporting drift is the safe direction here; a false `MET` is the
         # failure this whole instrument exists to remove.
-        module_level = [n for n in tree.body]
-        for node in (m for top in module_level for m in ast.walk(top)
-                     if top is not None):
-            if isinstance(node, (ast.Assign, ast.AnnAssign)) and any(
-                isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
-                and c.func.attr == "compile"
-                for c in ast.walk(node)
-            ):
-                owners.append(rel)
-                break
+        # ⛔ ANY reference to `.compile` anywhere in the module — whether CALLED
+        # (`re.compile(…)`) or merely PASSED (`map(re.compile, _SRC)`,
+        # `functools.partial(re.compile, …)`, a comprehension builder). The
+        # narrower forms were measured (this tool's review, P2) to read
+        # `count: 1 / MET` for two shapes that DO own a second rule set:
+        # `_A = list(map(re.compile, _SRC))` (the `.compile` there is an
+        # ARGUMENT, so it is an `Attribute` and never a `Call` — a Call-only
+        # walk, module-level or not, misses it) and a builder function assigned
+        # at module scope. Both were LESS sensitive than the substring scan this
+        # replaced, on the one shape a launderer would choose. The over-inclusion
+        # this costs — an unrelated pattern-owning helper — is the documented
+        # safe direction: a false DRIFT is recoverable, a false `MET` on §12.2a's
+        # predicate count is not.
+        if any(
+            isinstance(n, ast.Attribute) and n.attr == "compile"
+            for n in ast.walk(tree)
+        ):
+            owners.append(rel)
     return {
         "count": len(owners),
         "target": 1,
