@@ -4094,6 +4094,11 @@ _UNIT_EQUIV = {
     "min": "min", "mins": "min", "minute": "min", "minutes": "min",
     "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
     "%": "%", "percent": "%", "pct": "%",
+    # every unit `_value_bindings` can FUSE (`_UNIT_WORDS`) is spelled here, so
+    # no fused unit falls through to the unmapped branch and is read as "no
+    # unit" — the review-2 finding: `20 km` vs `20 mi` folded because the table
+    # covered 8 of the engine's 14 units and the miss became a WILDCARD.
+    "k": "k", "km": "km", "mi": "mi", "m": "m", "kg": "kg", "lb": "lb",
 }
 
 #: A leading-dot decimal: ``.5`` is a legitimate written form of ``0.5``, and
@@ -4116,12 +4121,13 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     table rather than discarded (#10360 review, P2s 3–4).
     """
     raw = _LEADING_DOT.sub(r"0.\1", str(token or "").replace(",", ""))
-    runs = _VALUE_DECIMALS.findall(raw)
-    if not runs:
+    matches = list(_VALUE_DECIMALS.finditer(raw))
+    if not matches:
         return None
     sign = "-" if raw.lstrip().startswith("-") else ""
     out: list[str] = []
-    for run in runs:
+    for m in matches:
+        run = m.group(0)
         if "." in run:
             whole, frac = run.split(".", 1)
             whole = whole.lstrip("0") or "0"
@@ -4130,9 +4136,15 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
         else:
             run = run.lstrip("0") or "0"
         out.append(run)
-    tail = raw[runs[-1].__len__() + raw.find(runs[-1]):]
-    suffix = re.sub(r"[^a-z%]+", "", tail.lower())
-    return (sign, "/".join(out), _UNIT_EQUIV.get(suffix))
+    # ⚠️ From the LAST match's own `end()`, not from `raw.find(...)`: a token with
+    # repeated runs (``12.3ms/1``, ``24h/7d/4w``) read its suffix from the FIRST
+    # occurrence of the last run and produced a nonsense unit (review cycle 2, P3
+    # — 1044 such tokens over a docs corpus, 13 of them mapped).
+    suffix = re.sub(r"[^a-z%]+", "", raw[matches[-1].end():].lower())
+    # An UNMAPPED suffix is returned AS ITSELF rather than dropped: dropping it
+    # makes "a unit I have not seen" compare equal to "no unit", i.e. a
+    # wildcard over exactly the units this table does not know.
+    return (sign, "/".join(out), _UNIT_EQUIV.get(suffix, suffix or None))
 
 
 def _value_identity_matches(a: tuple[str, str, str | None],
@@ -4224,9 +4236,16 @@ def _refuse_rewritten_value(content: object, quote: object, *,
     """#10360: True when this point must NOT be written — its value was rewritten.
 
     The ENFORCEMENT half of the carve-out, in the write path rather than in
-    prompt text. Called at every emit site that can put a value-bearing point
-    into the payload (the S1/S2 model path and the S5 minted-endpoint path), so
+    prompt text. Called on ``execute_embed``'s S1/S2 model path — where the
+    MODEL authors the quote, which is the only place a rewrite can exist — so
     the guarantee is a fact about the write, not about the instruction.
+
+    ⛔ **Deliberately NOT wired at the S5 minted-endpoint site.** There the
+    point's ``quote`` is ``content[:_MAX_QUOTE]`` — its OWN text — so a rewrite
+    is impossible by construction and the only reachable divergence would be
+    that site's own clamp, i.e. a false accusation. What that site DOES need,
+    and has, is the ``refused_value_contents`` check inside ``_mint_endpoint``:
+    a refused value must not re-enter the graph as a minted endpoint Point.
 
     ⛔ **What this rule CANNOT do, stated so the row cannot overclaim.** It
     cannot drop a state value that IS carried verbatim: it fires only when the
@@ -8034,6 +8053,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # ── points (dependency order 3) ───────────────────────────────────────
     payload_points: list[dict] = []
     point_ids: dict[str, str] = {}   # norm content → point id
+    #: #10360: the CONTENTS the value-fidelity rule refused. `_mint_endpoint`
+    #: reads it so a refused value cannot re-enter the graph through the
+    #: operator path — measured: without this, an operator naming a refused
+    #: point's text re-materialised it as a minted `statement` Point with no
+    #: verbatim anchor, i.e. the refusal held only for the payload point it was
+    #: refusing and the rewritten value was written anyway (review cycle 2, P2).
+    refused_value_contents: set[str] = set()
     tier_a_points = 0                # E2 (#1534): Tier-A state-value count
     noops: list[dict] = []           # E7 (D4): folded duplicates — result-level
     # #5006 (D12/O4): the FUSIONS — near-duplicate pairs merged onto ONE
@@ -8174,6 +8200,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if _refuse_rewritten_value(str(p.get("content") or ""),
                                    str(p.get("quote") or ""),
                                    warnings=warnings):
+            refused_value_contents.add(_norm(str(p.get("content") or "")))
+            # The point's own `supersedes` ref is dropped WITH the point, and
+            # #9906's rule is that none of the drop doors is silent — so the
+            # reversal is reported through the same carry helper the other
+            # doors use, rather than vanishing with the refused point (review
+            # cycle 2, P2).
+            _carry_fold_supersede(p, "", "the #10360 value-fidelity refusal")
             continue
         search_keys = _clean_search_keys(p.get("search_keys"), warnings,
                                          f"point '{content[:60]}'")
@@ -8424,6 +8457,19 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     def _mint_endpoint(ref: str, where: str) -> str:
         content = str(ref or "").strip()[:_MAX_CONTENT]
         if not content:
+            return ""
+        if _norm(content) in refused_value_contents:
+            # #10360: mint-before-wire must not resurrect what the
+            # value-fidelity rule refused. Minting here would build a
+            # `statement` Point out of the MODEL's text — the rewritten value —
+            # with no verbatim anchor, so the refusal would hold for the payload
+            # point and be undone one step later. The operator edge drops with
+            # this warning instead (its own dangling-edge guard reports that).
+            warnings.append(
+                f"operator endpoint ({where}) named {content[:60]!r}, whose "
+                "point was refused for rewriting its own verbatim quote "
+                "(#10360) — not minted, so the rewritten value cannot enter "
+                "the graph through this path")
             return ""
         # `n` is the RESOLUTION key (`point_ids`/`event_ids` are keyed on the
         # minted content). The ENTITY guard is the same key-set transform the

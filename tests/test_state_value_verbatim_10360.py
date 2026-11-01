@@ -87,6 +87,10 @@ BATTERY = (
     ("the p95 is 0.5 seconds", "the p95 is .5 seconds", False, "leading dot"),
     ("the delta is -4 percent", "the delta is -4 percent", False, "identical sign"),
     ("the delta is 4 percent", "the delta is -4 percent", True, "sign dropped"),
+    # units the ENGINE can fuse but the first table did not spell (review 2, P2)
+    ("the drive is 20 km", "the drive is 20 mi", True, "unit rewritten 3"),
+    ("the weight is 20 kg", "the weight is 20 lb", True, "unit rewritten 4"),
+    ("the TTL is 20 min", "the TTL is 20 m", True, "unit rewritten 5"),
 )
 
 
@@ -211,10 +215,34 @@ def test_the_residual_is_measured_on_the_committed_census_corpus():
 
     `#10360`'s second indicator: the survival/residual figure must be PRODUCED
     by a lane, not copied from a comment. Re-running this test reproduces the
-    row's numbers from the same sealed receipts the span census reads, with the
-    caps production clamps with — so a change to the rule's reach moves this
-    test, and the row cannot cite a measurement nothing can reproduce.
+    row's numbers from the same sealed receipts the span census reads — so a
+    change to the rule's reach moves this test, and the row cannot cite a
+    measurement nothing can reproduce.
+
+    ⚠️ The inputs here are the CLAMPED pair (the caps production truncates the
+    STORED point with), while the write path now judges the UNCLAMPED pair — a
+    deliberate difference, since a value straddling the clamp must not read as a
+    rewrite. Both readings give the same `(62, 0)` on this corpus (asserted
+    below), so the pin is not sensitive to which one it feeds; if they ever
+    diverge, the clamp is cutting a value and the write-path reading is the
+    correct one.
     """
+    unclamped_judged = unclamped_refused = 0
+    for session in SESSIONS:
+        blob = json.loads((RECEIPTS / f"{session}.arms.json").read_text())
+        for arm in ARMS:
+            for point in blob["embed_list"][arm]["points"]:
+                raw_content = str(point.get("content") or "").strip()
+                raw_quote = str(point.get("quote") or "").strip()
+                if not v2._carries_value(raw_content, raw_quote):
+                    continue
+                c = v2._value_slots(raw_content)
+                q = v2._value_slots(raw_quote)
+                if c and q and tuple(a for a, _ in c) == tuple(a for a, _ in q):
+                    unclamped_judged += 1
+                if v2._value_slot_divergence(raw_content, raw_quote):
+                    unclamped_refused += 1
+
     points = value_bearing = judged = refused = 0
     for session in SESSIONS:
         blob = json.loads((RECEIPTS / f"{session}.arms.json").read_text())
@@ -247,6 +275,8 @@ def test_the_residual_is_measured_on_the_committed_census_corpus():
     # would be a false accusation against a sealed truthful extraction — the
     # exact failure the previous attempt at this issue was rejected for.
     assert (judged, refused) == (62, 0), (judged, refused)
+    assert (unclamped_judged, unclamped_refused) == (62, 0), (
+        unclamped_judged, unclamped_refused)
 
 
 # ── 6. the two review findings this rule must never repeat ─────────────────
@@ -259,10 +289,16 @@ def test_a_value_that_straddles_the_quote_clamp_is_not_a_rewrite():
     therefore fed the UNCLAMPED texts; a truthful point over a long quote is
     written.
     """
-    filler = "the release notes say a lot of things about the rollout "
-    content = "the TTL is 1200 seconds"
-    quote = (filler * 4) + content
+    # The cut must land INSIDE the digits: "1200" -> "12" with the anchor
+    # ("ttl") surviving, so a clamped read is a DIVERGENT read. Putting the
+    # whole value past the cut binds no value at all and fails open for an
+    # unrelated reason — a test that cannot fail (review cycle 2, P2).
+    content = "the ttl is 1200"
+    quote = ("x" * (v2._MAX_QUOTE - 7)) + " ttl 1200 seconds"
     assert len(quote) > v2._MAX_QUOTE
+    assert v2._value_slot_divergence(content, quote[:v2._MAX_QUOTE]), (
+        "the clamped pair no longer diverges — this test would not pin the fix")
+    assert not v2._value_slot_divergence(content, quote)
     result = _write(content, quote)
     assert len(result["payload"]["points"]) == 1, result["warnings"]
 
@@ -282,3 +318,32 @@ def test_a_refused_point_leaves_no_supersession_naming_it():
     assert result["payload"]["points"] == []
     assert result["payload"].get("supersessions") in (None, []), (
         result["payload"].get("supersessions"))
+    # …and the reversal the refused point carried is not dropped SILENTLY
+    # (#9906: none of the drop doors is silent).
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["points"][0]["supersedes"] = "pt_prior_claim"
+    result = v2.execute_embed(embed, {"points": [], "entities": []},
+                              session_id="s_10360")
+    assert result["payload"]["points"] == []
+    assert any("pt_prior_claim" in w for w in result["warnings"]), (
+        result["warnings"])
+
+
+def test_a_refused_value_cannot_re_enter_the_graph_through_an_operator():
+    """Review cycle 2, P2: mint-before-wire must not resurrect a refused value.
+
+    `_mint_endpoint` builds a `statement` Point out of the MODEL's text, so an
+    operator naming the refused point's content used to write the rewritten value
+    anyway — the refusal held for the payload point and was undone one step
+    later. Measured before the fix: the payload held two points, one of them
+    exactly `'the p95 hit 4.0 seconds'`.
+    """
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["operators"] = [{
+        "src": "the p95 hit 4.0 seconds",
+        "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the p95 hit 4.0 seconds" not in contents, contents
+    assert any("refused for rewriting its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
