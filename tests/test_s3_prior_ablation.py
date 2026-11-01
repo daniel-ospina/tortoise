@@ -54,6 +54,17 @@ _PINS = _MODULE.parse_pins((ROOT / _MODULE.PREREG_REL).read_text())
 BARS = _PINS["hypothesis_bars"]
 FLOORS = _PINS["denominator_floors"]
 
+#: Where the measured log lives, RELATIVE to the bundle (`probe.EVIDENCE_DIR`) — one constant, so the
+#: next move is one edit rather than four.
+#: ⛔ It is under `withdrawn/` on purpose (#10463): the pre-registration guard
+#: (`tools/capstone_preregistration_check.py`) globs `*.log` NON-recursively in the registration's own
+#: directory, and the squash merge #10468 collapsed the registration and this log into ONE commit, so
+#: its strict-ordering claim could not be shown from the merged history. The move is a WITHDRAWAL of
+#: the ordering provenance, NOT of the measurement: the bytes are identical (sha256
+#: `bba52c90d005ae728dc7c3cc7d25c232e322d0abe5bffc6873a6e74fa5960b4d`), which is why every assertion
+#: below still measures the run that shipped.
+MEASURED_LOG_REL = Path("withdrawn") / "s3-ablation-a1075dfc.log"
+
 
 def _log_thresholds(log_text: str) -> dict[str, float]:
     """Every threshold the committed log says the run compared against."""
@@ -290,7 +301,7 @@ def test_the_measured_log_agrees_with_the_thresholds_it_names(probe):
     against. An edit that also rewrites the log has to keep it a log (the one-measured-log rule,
     `capstone_preregistration_check`'s ordering rule and the RATIO/VERDICT lines all move with it).
     """
-    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    log_text = (probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_text()
     seen = _log_thresholds(log_text)
     assert {"primary_ratio_max", "guard_ratio_min", "arm_integrity_required",
             "concentration_max", "cost_ratio_max"} <= set(seen), (
@@ -300,7 +311,7 @@ def test_the_measured_log_agrees_with_the_thresholds_it_names(probe):
 
 def test_the_log_and_the_document_check_can_actually_fail(probe):
     """Non-vacuity: the exact wrong outcome r6 F1 described is a `0.75 -> 0.90` pins edit."""
-    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    log_text = (probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_text()
     moved_bars = {**BARS, "primary_ratio_max": 0.90, "guard_ratio_min": 0.80}
     moved_floors = {**FLOORS, "sessions": 6}
     problems = _threshold_mismatches(moved_bars, moved_floors, log_text)
@@ -562,7 +573,7 @@ def test_the_code_that_computes_the_numbers_is_pinned_too(probe):
     for rel in (
         "tools/s3_prior_ablation.py",
         "docs/evidence/5087-hypothesis/README.md",
-        "docs/evidence/5087-hypothesis/s3-ablation-a1075dfc.log",
+        "docs/evidence/5087-hypothesis/withdrawn/s3-ablation-a1075dfc.log",
         "tests/test_s3_prior_ablation.py",
         "tortoise/extractor_v2.py",
     ):
@@ -1499,7 +1510,7 @@ def test_the_bundle_discloses_the_fresh_graph_refusal_and_what_the_log_cannot_sh
         "and it must say what the measured run does NOT establish: its arm headers name fresh "
         "graphs, which is consistency, not proof")
 
-    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    log_text = (probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_text()
     assert "graph baseline" not in log_text, (
         "the committed log now carries a baseline census — the disclosure's 'not evidence' half "
         "has to be re-measured, and the measured run is not this probe's output")
@@ -1543,7 +1554,7 @@ def test_the_hardening_list_promises_no_completeness_and_carries_the_late_findin
     assert "RATIO: 0.8697" in section, (
         "and it must say where the number actually is — the log's own RATIO/WHY lines — so the "
         "disclosure is checkable instead of a reassurance")
-    log_text = (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").read_text()
+    log_text = (probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_text()
     assert "VERDICT: HYPOTHESIS-FALSIFIED\n" in log_text, (
         "MEASURED, not asserted: the shipped log's VERDICT line is the bare token. If this fails, a "
         "measured log was rewritten or replaced and the deviation disclosure must be re-derived")

@@ -220,7 +220,8 @@ not establish:** its arm headers name fresh graphs (`s3ablate_a1075dfc_179349222
 same epoch-second suffix on both) and its `created=` counts are per-session deltas — that is
 *consistent with* a fresh baseline, and it is **not evidence of one**, because the pre-fix probe
 never printed the baseline and this log therefore contains no `graph baseline` line to check
-(`grep -c 'graph baseline' docs/evidence/5087-hypothesis/s3-ablation-a1075dfc.log` → `0`). The
+(`grep -c 'graph baseline' docs/evidence/5087-hypothesis/withdrawn/s3-ablation-a1075dfc.log` → `0`;
+the log is under `withdrawn/` — see `withdrawn/WITHDRAWN.md` for why, and #10463 for the ruling). The
 guard is enforced for future runs only. **No number moves** — the assertion can only REFUSE a run;
 it touches no count, no denominator and no bar.
 
