@@ -606,6 +606,37 @@ def test_a_late_edit_cannot_erase_the_disclosure_requirement(tmp_path, monkeypat
     assert any("is not an ancestor of" in f for f in failures), failures
 
 
+def test_a_late_strip_cannot_green_a_predating_log(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-11 P1): the predating arm was the last one with no topology bound.
+
+    A later commit stripping the numbers out of a predating log flipped the guard's central HARD
+    FAIL into green ("exempt by CONTENT, measured nothing") — the content read was no longer the
+    content that entered with the tree.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_000)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    # The strip: the same path, rewritten so any content reader would now see "no measurement".
+    log.write_text("x\nstripped\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "strip the numbers", epoch=1_700_000_200)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    failures = check.check_ordering(prereg, [log])
+    assert failures and "is not an ancestor of" in failures[0], failures
+
+
+def test_a_pins_exempt_atomic_log_does_not_claim_its_disclosure(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-11 P2): the pass is the EXEMPTION's, so the disclosure is not its
+    ground — deleting the disclosure from the identical tree yields the same verdict."""
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "capstone.log", epoch=1_700_000_000, body=_capstone_body())
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
+    with_disclosure: list[str] = []
+    check.check_ordering(prereg, [log], _exempt(), None, with_disclosure,
+                         _atomic_pins(log.name), {})
+    assert with_disclosure == [], with_disclosure
+
+
 def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
     """The ATOMIC shape: the registration and the log land in the SAME commit.
 

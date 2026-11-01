@@ -1261,13 +1261,12 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             # exempt log that IS atomic and carries a disclosure reached the anti-rot loop and was
             # told "but it is not one" — the cycle-3 defect class resurfacing through this arm.
             if atomic_pair:
+                # ⛔ `atomic_seen` ONLY (#10531 review cycle 11, P2). Reporting the declaration here
+                # named a ground that carried nothing: deleting the disclosure from the identical
+                # tree yields the same verdict, because this pass is the PINS EXEMPTION's. Cycle-7
+                # ruled exactly this for the content arm; cycle-4's purpose for the block is served
+                # by `atomic_seen`, which is what the anti-rot loop reads.
                 atomic_seen.add(log.name)
-                if (atomic_added is not None and log.name in atomic
-                        and log.name not in disclosure_failed):
-                    atomic_added.append(log.name)
-                if (atomic_detail is not None and log.name in atomic
-                        and log.name not in disclosure_failed):
-                    atomic_detail[log.name] = _atomic_detail_entry(atomic[log.name])
             continue
         # ⛔ ATOMIC IS IDENTICAL-SHA, NOT EQUAL-EPOCH (#10531 review cycle 4, P1) — computed above,
         # over EVERY add-commit, so `%ct` cannot choose the representative (#10531 cycle 10, P1).
@@ -1278,7 +1277,23 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         # pass green whenever its committer date was set to look LATER — the exact route this guard
         # exists to close, with no disclosure and no failure. The content arm is asked first, so an
         # unscored log is still exempt (#9089).
+        # ⛔ ONE topology bound for EVERY arm that reads the log's CONTENT (#10531 review cycle 11,
+        # P1). The predating arm was the last one without it, so a later commit that STRIPPED the
+        # numbers out of a predating log flipped the guard's central hard fail into green ("exempt by
+        # CONTENT, measured nothing") — the content read was no longer the content that entered with
+        # the tree. Computed once here; the arms that claim content entered at/before the
+        # registration consult it. The proven-order pass (a descendant add-commit) does NOT: there
+        # the registration predates the whole log, so later touches are beside the point.
+        late = _late_touches(log, prereg_sha)
         if predating_sha:
+            if late:
+                failures.append(
+                    f"{log.name}: commit {late[0][:9]} changed it and is not an ancestor of "
+                    f"{PREREG_NAME}'s add-commit {prereg_sha[:9]} — so the content this check would "
+                    "read is not the content that entered with the tree, and an in-place edit can "
+                    "strip a number after the thresholds were written"
+                )
+                continue
             ok, why = _log_declares_no_measurement(log)
             if not ok:
                 # ⛔ The ground is ANCESTRY, not the epoch (#10531 review cycle 6, P2): the committer
@@ -1310,12 +1325,11 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         # unscored log needs no disclosure to be ordered, whichever commit carried it.
         if log_epoch <= prereg_epoch:
             # ⛔ THE TOPOLOGY BOUND COMES BEFORE THE CONTENT PASS (#10531 review cycle 10, P2). The
-            # content arm `continue`d before `_late_touches` was consulted, so an atomic log whose
-            # record was STRIPPED of its numbers in a LATER commit — leaving `run.status` not
-            # COMPLETED — was certified "measured nothing" and the disclosure requirement erased,
-            # while `_late_touches` did flag that commit. A post-green edit flipping the verdict is
-            # the cycle-8 silent-green class, one arm earlier.
-            late = _late_touches(log, prereg_sha)
+            # content arm `continue`d before the bound was consulted, so an atomic log whose record
+            # was STRIPPED of its numbers in a LATER commit — leaving `run.status` not COMPLETED —
+            # was certified "measured nothing" and the disclosure requirement erased. A post-green
+            # edit flipping the verdict is the cycle-8 silent-green class, one arm earlier. `late` is
+            # the single hoisted bound above.
             if late:
                 failures.append(
                     f"{log.name}: commit {late[0][:9]} changed it and is not an ancestor of "
@@ -1382,7 +1396,6 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             # module whose own cycle-5 finding says `%ct` is attacker-controlled. The rewrite the
             # forward-dated test killed passed green when BACKDATED. Whether a touching commit is
             # behind the registration is a fact about the graph.
-            late = _late_touches(log, prereg_sha)
             if late:
                 failures.append(
                     f"{log.name}: the pair is atomic, but commit {late[0][:9]} changed it and is "
