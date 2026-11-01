@@ -192,6 +192,11 @@ The two bounds are not measured safe intervals — they exist so that "when was
 this read, and about what?" has an answer. Raising one is a one-line diff
 someone reviews; omitting the check is what let a foreign file pass.
 
+A plan generated WITHOUT `--health-json` records no armed evidence, and then
+cannot authorise an execute even if a fresh `/health` passes today
+(`REFUSE_NO_ARMED_EVIDENCE`): what the human approved is the artefact set, and
+an unarmed record at approval time is not repaired by arming it afterwards.
+
 EXIT CODES
 ==========
     0  a plan was produced (dry run) — or, under `--execute`, the planned set
@@ -1175,9 +1180,10 @@ def main(argv: list[str] | None = None) -> int:
         # A mistyped path or malformed JSON is a CONFIG fault: exit 3 (a side
         # could not be read), never an uncaught traceback a caller reads as a
         # crash.
-        sys.stderr.write(f"purge_legacy_turns: --health-json/--restore-proof "
-                         f"could not be read ({type(exc).__name__}: {exc}) — "
-                         f"an absence is NOT established.\n")
+        sys.stderr.write(
+            f"purge_legacy_turns: --health-json/--restore-proof/"
+            f"--approval-record could not be read ({type(exc).__name__}: "
+            f"{exc}) — an absence is NOT established.\n")
         return 3
     target = _target_from_args(args)
 
