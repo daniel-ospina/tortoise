@@ -8321,11 +8321,10 @@ class TestSearchOffloadConcurrency:
                                             org=TEST_TEAM))
                 # Empty temp DB -> FTS finds nothing; the meaningful assert is
                 # 200-shaped (no HTTPException) + count == 0.
-                # #8447: `truncated: False` is a POSITIVE claim that the read
-                # was complete — the degraded-to-FTS read matched 0 rows and
-                # dropped none, so the empty answer is complete, not a silent
-                # subset. It rides because the marker is not flag-gated.
-                assert result == {"results": [], "count": 0, "truncated": False}
+                # #8447: `truncated` is always on the body — an empty read of a
+                # reachable store is COMPLETE, so it says so.
+                assert result == {"results": [], "count": 0,
+                                  "truncated": False}
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 

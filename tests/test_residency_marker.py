@@ -454,12 +454,8 @@ class TestHostedSearchRoute:
                 if read_status_out is not None:
                     read_status_out["status"] = "empty"
                     read_status_out[RESIDENCY_FIELD] = RESIDENCY_NOT_HOT
-                # #8447: the real read path records the truncation verdict on
-                # EVERY return path (seeded COMPLETE before any early return),
-                # so a faithful fake does too. A fake that stays silent here
-                # models the silent-subset bug the marker exists to prevent —
-                # and is refused by `truncation.truncation_field` (a missing
-                # verdict is a producer bug, never a default `False`).
+                # #8447: a faithful fake records the truncation verdict too —
+                # the real read path sets it on EVERY return path.
                 if _truncation_out is not None:
                     _truncation_out["truncated"] = False
                 return [{"id": "p1", "content": "alpha", "pointKind": "statement"}]
@@ -484,13 +480,15 @@ class TestHostedSearchRoute:
         hosted_api = self._patch_route(monkeypatch)
         self._flags(monkeypatch, status=False, residency=False)
         body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
+        # #8447: `truncated` is NOT flag-gated (it costs two len() calls and a
+        # default-off marker preserves the silent subset), so it is the one key
+        # present here. The property this test guards — `status` and `residency`
+        # absent by default — is unchanged.
         assert body == {"results": [{"id": "p1", "content": "alpha",
                                      "kind": "statement"}], "count": 1,
-                        # #8447: `truncated` is NOT flag-gated, so it rides
-                        # even here. "Both fields absent" is about the two
-                        # FLAGGED fields (`status` / `residency`); a marker
-                        # that defaults off would preserve the silent subset.
                         "truncated": False}
+        assert "status" not in body
+        assert RESIDENCY_FIELD not in body
 
     def test_the_residency_field_rides_the_response_when_enabled(
             self, monkeypatch):
@@ -527,11 +525,9 @@ class TestHostedSearchRoute:
                     # the store is down: the SDK sets `degraded` and the
                     # declaration is never read, so no residency key.
                     read_status_out["status"] = "degraded"
-                # #8447: the outage path is an early return, so the real path
-                # marks it COMPLETE from the seed (nothing was cut) — the sink
-                # is never left un-marked, hence no 500 from the route.
+                # #8447: an UNREAD store is not a complete empty answer.
                 if _truncation_out is not None:
-                    _truncation_out["truncated"] = False
+                    _truncation_out["truncated"] = True
                 return []
 
             def close(self):
@@ -555,10 +551,9 @@ class TestHostedSearchRoute:
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = "degraded"
-                # #8447: see the outage note above — the real path always
-                # records a verdict, so the faithful fake does too.
+                # #8447: see above — unread, never "complete".
                 if _truncation_out is not None:
-                    _truncation_out["truncated"] = False
+                    _truncation_out["truncated"] = True
                 return []
 
             def close(self):
@@ -569,9 +564,11 @@ class TestHostedSearchRoute:
                             lambda org, scope, name: None)
         self._flags(monkeypatch, status=False, residency=False)
         body = asyncio.run(hosted_api.search(q="alpha", limit=5, org={}))
-        # #8447: `truncated` is always emitted (it is not one of the flagged
-        # fields), so "off means off" holds for the two FLAGGED fields only.
-        assert body == {"results": [], "count": 0, "truncated": False}
+        # #8447: an UNREAD store is not a complete empty answer, so `truncated`
+        # is True even with both status flags off — the marker is the only thing
+        # that says so on this deployment.
+        assert body == {"results": [], "count": 0, "truncated": True}
+        assert "status" not in body
 
     def test_both_fields_ride_when_both_flags_are_on(self, monkeypatch):
         hosted_api = self._patch_route(monkeypatch)
