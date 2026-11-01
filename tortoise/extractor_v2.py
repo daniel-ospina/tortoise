@@ -11293,7 +11293,9 @@ def _compact_guarantee_tail(master: dict, lines: list[str]) -> str:
 # understand them. Recurrence is the operator's signal: a genuine marker recurs
 # across many claims, a one-off detail does not.
 #
-# Read it with ``vocabulary_gap_report()``; reset it with
+# Read it with ``vocabulary_gap_report()`` (the counts) and
+# ``vocabulary_gap_snapshot()`` (the counts PLUS the bounds actually hit — the
+# only reading that says whether the sample is complete); reset it with
 # ``reset_vocabulary_gap_census()`` between measurement windows.
 
 #: Distinct absorbed tokens retained (a report is a SAMPLE of the tail, and
@@ -11308,10 +11310,14 @@ _VOCABULARY_GAP_LOG_CAP = 32
 #: un-truncated it would pin claim-sized strings for the process's lifetime and
 #: emit claim-sized log records. Longer ones are counted, not retained.
 _VOCABULARY_GAP_MAX_TOKEN = 64
-#: Tokens the boundary ALREADY understands through a pair-read vocabulary, so a
-#: fold that carries one is not a vocabulary gap. `off`/`because` live here:
-#: they are named, and reading them needs the PAIR (the #5134/#5139 guards),
-#: not another list entry.
+#: Tokens a CLOSED vocabulary already NAMES, so their presence is no evidence of
+#: a *vocabulary* gap. `off`/`because` live here: they are in
+#: ``_POLARITY_MEMBERS`` / ``_CONNECTIVE_MEMBERS``, and reading them needs the
+#: PAIR (``_polarity_drop`` / ``_connective_swap``) — so a residual in their
+#: class is the pair-read guard's gap (#5134/#5139), not a missing list entry.
+#: ⚠️ Being subtracted here does NOT mean the boundary understood the token: a
+#: pair can still fold with the token absorbed, and that loss is then
+#: unrepresented in the census (it is the #5134 residual, tracked there).
 _VOCABULARY_GAP_UNDERSTOOD = _CONNECTIVE_MEMBERS | _POLARITY_MEMBERS
 
 
@@ -11339,9 +11345,14 @@ class _VocabularyGapCensus:
     def record(self, tokens) -> None:
         """Count one fold decision and the tokens it absorbed.
 
-        NEVER raises: it is called from the boundary's fail-closed path, where
-        an escaping exception would be read as an unreadable pair and refuse a
-        fold the pair is entitled to.
+        NEVER raises, and the suppress is LOAD-BEARING (review cycle 1): the
+        call sits in ``_boundary``'s ``finally``, OUTSIDE its ``try/except``, so
+        an escaping exception is not swallowed as an "unreadable" pair — it
+        propagates out of ``_boundary``/``fold_allowed`` into the caller
+        (the SDK dedup seam, ``dedup_classify``'s per-candidate loop), neither
+        of which wraps the call. A maintainer who moved this call INSIDE the
+        ``try`` would convert a raising handler into the silent false refusal
+        this suppress exists to prevent.
         """
         with contextlib.suppress(Exception):  # observability never decides
             self._record(tokens)
@@ -11376,7 +11387,8 @@ class _VocabularyGapCensus:
                     "one-sided token(s) %s that reached NO identity dimension "
                     "(read as an added detail, then discarded). A marker among "
                     "them lost its difference; a recurring token is the "
-                    "signal. Counts: extractor_v2.vocabulary_gap_report()", new)
+                    "signal. Read the counts AND the bounds with "
+                    "extractor_v2.vocabulary_gap_snapshot()", new)
 
     def report(self) -> dict[str, int]:
         """``{token: fold decisions absorbing it}``, commonest first."""
@@ -11415,15 +11427,22 @@ _VOCABULARY_GAPS = _VocabularyGapCensus()
 
 
 def vocabulary_gap_report() -> dict[str, int]:
-    """Every one-sided token a fold decision absorbed (#5329), counted.
+    """The one-sided tokens fold decisions absorbed (#5329), counted.
 
     ``{token: number of fold decisions that absorbed it}``, commonest first.
     These are the tokens the boundary read as "a detail added to one side" and
     dropped — the population in which an unlisted negator, condition or date
     word hides, so it is the count of what the marker vocabularies did not
-    understand, minus the tokens the pair-read vocabularies do understand
-    (``_VOCABULARY_GAP_UNDERSTOOD``).  It also contains ordinary dropped
-    details; the census does not classify (see the section comment above).
+    understand, minus the tokens a closed vocabulary NAMES
+    (``_VOCABULARY_GAP_UNDERSTOOD``, which is the pair-read guards' residual,
+    not this census's).  It also contains ordinary dropped details; the census
+    does not classify (see the section comment above).
+
+    ⚠️ This dict is NOT complete on its own: at ``_VOCABULARY_GAP_CAP`` distinct
+    tokens it stops GROWING, and oversize tokens are never retained, while this
+    return value carries neither fact. Read ``vocabulary_gap_snapshot()`` when
+    the completeness of the sample matters — it reports ``distinct_tokens``,
+    ``truncated_observations`` and ``oversize_tokens_omitted`` alongside it.
     """
     return _VOCABULARY_GAPS.report()
 
