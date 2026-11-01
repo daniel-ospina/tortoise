@@ -121,9 +121,13 @@ Consequences (E2E-5 exit gate):
   (`supabase_control.per_graph_namespace_prefixes`): `org_{org_id}_{gid}` (what
   `insert_graph`/`_provision_graph` mint) or the pre-#3543
   `team_{org_id}_{gid}` that no data migration rewrites — plus the org's own
-  bare `org_{org_id}`/`team_{org_id}`, which the historical open already
-  resolves (that is what promoting the ORIGINAL graph back looks like). Any
-  other shape is refused `409 GRAPH_NAMESPACE_UNFOLLOWABLE`: accepting it would
+  bare `org_{org_id}`, which the historical open already resolves (that is what
+  promoting the ORIGINAL graph back looks like). ⛔ The BARE `team_{org_id}` is
+  NOT accepted: it is a real stored value, but the historical open resolves
+  `org_{org_id}`, not `team_{org_id}`, so promoting a legacy org-level row would
+  point every lane at a third graph — neither the promoted one nor the demoted
+  one — and a legacy org reaches it by the ordinary un-promote flow. Any other
+  shape is refused `409 GRAPH_NAMESPACE_UNFOLLOWABLE`: accepting it would
   succeed and then route every org-wide lane back to the graph the same call
   demoted (records filed under the promoted graph, nodes written to the demoted
   one). Check before you promote —

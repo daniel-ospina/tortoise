@@ -24004,10 +24004,24 @@ async def promote_graph(graph_id: str, request: Request, org_id: str,
     action on an ORG-WIDE pointer, so an ordinary data-plane or minted
     ``deleg=0`` key never reaches it. Unknown/foreign org → 404, suspended org
     → 403, unknown or foreign graph → 404, a graph in the TRASH → 409 naming
-    the restore verb, a non-active status → 409, the CURRENT default →
-    idempotent 200 (``already_default: true``: no graph row moves; a drifted
-    ``organizations.graph_name`` is REPAIRED and reported as
-    ``namespace_repaired``).
+    the restore verb, a non-active status → 409, a target whose NAMESPACE no
+    org-wide resolver can follow → 409 ``GRAPH_NAMESPACE_UNFOLLOWABLE`` (see
+    below), the CURRENT default → idempotent 200 (``already_default: true``: no
+    graph row moves; a drifted ``organizations.graph_name`` is REPAIRED and
+    reported as ``namespace_repaired``) — EXCEPT 409 ``GRAPH_DEFAULT_DRIFT`` when
+    the org already holds two active default rows, a state that arm cannot
+    converge because it returns before the demote.
+
+    ⛔ THE TARGET'S NAMESPACE MUST BE ONE THE ORG-WIDE LANES CAN FOLLOW. The
+    verb writes the target row's ``namespace`` into ``organizations.graph_name``,
+    and every resolver derives the default from that column through ONE shape
+    test (``supabase_control.per_graph_namespace_prefixes``):
+    ``org_{org_id}_{gid}``, or the pre-#3543 ``team_{org_id}_{gid}`` that no data
+    migration rewrites — plus the org's own bare ``org_{org_id}``, which the
+    historical open already resolves (that is what promoting the ORIGINAL graph
+    back looks like). Anything else (a bare ``team_{org_id}``, a pre-#1903
+    ``org_{name}``) is refused rather than accepted: the move would SUCCEED and
+    then route every org-wide lane to a graph other than the one just promoted.
 
     ATOMICITY: one call into ``public.promote_default_graph`` (migration
     ``20261102000001``), i.e. ONE transaction that locks the organization row

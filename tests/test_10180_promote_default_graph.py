@@ -664,15 +664,14 @@ def test_the_verb_refuses_a_target_its_resolvers_cannot_follow(sb, monkeypatch):
     resolvers open the demoted graph.
     """
     tc, fake, _ = sb
-    followable_defaults = (f"org_{TEAM}", f"team_{TEAM}")
-    # A shape no resolver follows: the pre-#1903 org-level name with a suffix
-    # that is not a per-graph namespace of THIS org.
+    # A shape no resolver follows: a namespace of ANOTHER name entirely.
     fake.tables["graphs"].append(
         {"id": "g_10180legacy0006", "org_id": TEAM, "name": "legacy",
          "kind": "custom", "namespace": "team_some_other_name",
          "status": "active", "recording": None})
     _as_session()
-    r = tc.post(f"/v1/graphs/g_10180legacy0006/promote?org_id={TEAM}")
+    r = tc.post("/v1/graphs/g_10180legacy0006/promote?org_id={TEAM}"
+                .replace("{TEAM}", TEAM))
     assert r.status_code == 409, r.text
     assert r.json()["detail"]["error_code"] == "GRAPH_NAMESPACE_UNFOLLOWABLE"
     # Nothing moved: the refusal is not a half-applied promotion.
@@ -680,16 +679,60 @@ def test_the_verb_refuses_a_target_its_resolvers_cannot_follow(sb, monkeypatch):
     assert kinds == {OLD_ID: "default", NEW_ID: "custom",
                      "g_10180legacy0006": "custom"}
     assert fake.tables["organizations"][0]["graph_name"] == f"org_{TEAM}"
-    assert followable_defaults  # the two shapes the guard DOES accept, named
 
 
-def test_the_sql_refuses_exactly_the_namespaces_the_gate_opens():
-    """The guard and the gate are two halves of ONE decision, and the SQL cannot
-    call the Python function — so pin the agreement at the source.
+def test_the_bare_legacy_team_namespace_is_refused_as_a_move_target(sb):
+    """#10452 review round 9, P1: the guard first accepted the bare
+    `team_{org_id}` as a target because it is a real stored value — but the
+    historical open resolves `org_{org_id}`, NOT `team_{org_id}`
+    (`moved_default_namespace` answers None for it, which is #2023's pin). A
+    promotion of a legacy org-level row would therefore point every org-wide lane
+    at a THIRD graph: neither the promoted one nor the demoted one.
 
-    FAIL-ON: change `per_graph_namespace_prefixes` (or the SQL) alone and the
-    verb accepts what the resolvers refuse, which is the P1 this pair closes.
+    Reachable by the documented un-promote flow: promote a custom graph once, the
+    legacy row is demoted, promote it BACK.
+
+    FAIL-ON: re-add `AND v_target_ns <> 'team_' || p_org_id` to the SQL guard (or
+    `ns == f"team_{org_id}"` to the double) and this returns 200 while
+    `moved_default_namespace` answers None for the value it stored.
     """
+    from tortoise.supabase_control import moved_default_namespace
+
+    tc, fake, _ = sb
+    legacy_level = f"team_{TEAM}"
+    fake.tables["graphs"].append(
+        {"id": "g_10180legacyorg10", "org_id": TEAM, "name": "legacy-org",
+         "kind": "custom", "namespace": legacy_level,
+         "status": "active", "recording": None})
+    _as_session()
+    r = tc.post(f"/v1/graphs/g_10180legacyorg10/promote?org_id={TEAM}")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["error_code"] == "GRAPH_NAMESPACE_UNFOLLOWABLE"
+    # The property that makes the refusal right, asserted rather than assumed:
+    # the resolvers do NOT follow this value, so accepting it would have been a
+    # graph no org-wide lane opens.
+    _hosted_parity = moved_default_namespace
+    assert _hosted_parity(TEAM, legacy_level) is None
+    assert fake.tables["organizations"][0]["graph_name"] == f"org_{TEAM}"
+    assert {g["id"]: g["kind"] for g in fake.tables["graphs"]}[OLD_ID] == (
+        "default")
+
+
+def test_the_sql_guard_accepts_exactly_what_the_gate_follows():
+    """The guard and the gate are two halves of ONE decision, and the SQL cannot
+    call the Python function — so pin the agreement AT THE SOURCE, in BOTH
+    directions: the set of shapes the SQL accepts must equal the gate's
+    per-graph prefixes plus the bare `org_{org_id}`... and nothing else.
+
+    A one-way pin ("does the SQL contain the gate's prefixes?") is green when the
+    SQL accepts an EXTRA shape — which is exactly the round-9 P1. So the accepted
+    set is derived from the SQL text and compared as a set.
+
+    FAIL-ON: widen the guard by one clause (a third prefix, or the bare `team_`)
+    and this reds; narrow it and this reds; change `per_graph_namespace_prefixes`
+    alone and this reds.
+    """
+    import re
     from pathlib import Path
 
     from tortoise.supabase_control import per_graph_namespace_prefixes
@@ -698,26 +741,28 @@ def test_the_sql_refuses_exactly_the_namespaces_the_gate_opens():
             / "20261102000001_graphs_promote_default.sql")
     sql = "\n".join(line.split("--")[0] for line in
                     path.read_text(encoding="utf-8").splitlines())
-    guard = sql[sql.index("left(v_target_ns"):sql.index("UPDATE public.graphs")]
     assert "the target namespace is not one the org-wide lanes can follow" in sql
-    for prefix in per_graph_namespace_prefixes("<org>"):
-        # The static half of the prefix (`org_` / `team_`): the org id is
-        # `p_org_id` in the SQL, so only the stem is literal.
-        stem = prefix[:-1].replace("<org>", "")
-        # The per-graph form, compared by LENGTH+LEFT (never LIKE: `_` is a
-        # one-character wildcard in a LIKE pattern).
-        expr = f"'{stem}' || p_org_id || '_'"
-        assert guard.count(expr) == 2, (
-            f"the SQL must accept targets under the {stem!r} per-graph prefix "
-            "the gate opens (length() and the comparison both use it)")
-        # The org's own BARE namespace is followable too: it is what the
-        # HISTORICAL open resolves, i.e. the shape of un-promoting back.
-        assert f"<> '{stem}' || p_org_id" in guard, (
-            f"a bare {stem!r} namespace must be accepted: the historical open "
-            "resolves it")
+    # Every accepted shape is one of these two expressions in the guard; read
+    # them OUT of the SQL rather than restating them (a restatement is the pin's
+    # own failure mode).
+    per_graph = set(re.findall(
+        r"left\(v_target_ns, length\('(\w+_)' \|\| p_org_id \|\| '_'\)\)", sql))
+    bare = set(re.findall(r"v_target_ns <> '(\w+_)' \|\| p_org_id\n", sql))
+    gate = {prefix[:prefix.index("_") + 1]
+            for prefix in per_graph_namespace_prefixes("<org>")}
+    assert per_graph == gate, (
+        f"the SQL accepts per-graph prefixes {sorted(per_graph)}; the gate opens "
+        f"{sorted(gate)} — they must be the same set")
+    assert bare == {"org_"}, (
+        "only the org's OWN bare namespace is followable: the historical open "
+        f"resolves `org_{{org_id}}`. The SQL accepts {sorted(bare)}; the bare "
+        "`team_{org_id}` must NOT be accepted — `moved_default_namespace` answers "
+        "None for it (#2023), so a promotion would point every lane at a THIRD "
+        "graph")
+    # Prefer LENGTH+LEFT over LIKE: `_` is a single-character wildcard in a
+    # LIKE pattern, so the pattern form would accept namespaces the gate refuses.
     assert "LIKE" not in sql, (
-        "a LIKE pattern would match any character where `_` stands, so it "
-        "would accept namespaces the gate refuses")
+        "a LIKE pattern would match any character where `_` stands")
 
 
 # ── 8. The lanes that build their OWN SDK follow the same pointer ──────────
@@ -1178,6 +1223,10 @@ def test_every_sql_refusal_has_a_mapped_http_status():
             f"the SQL refuses with {literal!r} but no mapped code matches, so the "
             "endpoint would answer 500")
         checked += 1
+    # Bound to the SQL, not to a round number: a threshold below the real count
+    # lets a refusal (or its map entry) be deleted while this stays green.
+    named = [r for r in raises if "are required" not in r]
+    assert checked == len(named), f"checked {checked} of {len(named)} named refusals"
     assert checked >= 5, f"expected the named refusals to be checked, saw {checked}"
 
 

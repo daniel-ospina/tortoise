@@ -253,7 +253,7 @@ END $$;
 -- …and the LEGACY per-graph spelling IS followable, so a graph minted before the
 -- #3543 rename must still be promotable (the oldest orgs are the ones most
 -- likely to have outgrown their first graph). Accepted here; the Python gate
--- that OPENS it is pinned in `tests/test_10180promote_default_graph.py`.
+-- that OPENS it is pinned in `tests/test_10180_promote_default_graph.py`.
 INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
 VALUES ('g_10180legacy0008', '10180promote', 'legacy', 'custom',
         'team_10180promote_g_10180legacy0008', 'active');
@@ -268,6 +268,28 @@ SELECT tests.assert(
   (SELECT graph_name FROM public.organizations WHERE id = '10180promote')
     = 'team_10180promote_g_10180legacy0008',
   '#10180: …and the org pointer follows it, so the gate can open it');
+
+-- (f) the BARE pre-#3543 org-level namespace is refused as a MOVE target too
+-- (review round 9, P1). It is a real stored value, but the historical open
+-- resolves `org_{org_id}` — not `team_{org_id}` — so accepting it would point
+-- every org-wide lane at a THIRD graph: neither the promoted one nor the demoted
+-- one. Reachable by the documented un-promote flow (promote a custom graph, the
+-- legacy row is demoted, promote it back).
+DO $$
+BEGIN
+  INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
+  VALUES ('g_10180legacyorg09', '10180promote', 'legacy-org', 'custom',
+          'team_10180promote', 'active');
+  PERFORM public.promote_default_graph('10180promote', 'g_10180legacyorg09');
+  RAISE EXCEPTION
+    'ASSERTION FAILED: the bare legacy org-level namespace was promoted';
+EXCEPTION WHEN others THEN
+  IF SQLERRM NOT LIKE
+     'promote_default_graph: the target namespace is not one the org-wide lanes%'
+  THEN
+    RAISE;
+  END IF;
+END $$;
 
 -- Put the org back on the current-spelling default for the sections below.
 SELECT public.promote_default_graph('10180promote', 'g_10180promote0002');
@@ -345,7 +367,7 @@ SELECT tests.assert(
 -- the unique index (a 500 for a caller who did nothing wrong). The lock is
 -- `FOR UPDATE` on the ORGANIZATION row, taken BEFORE the target is read.
 -- PGlite is ONE session, so a real two-transaction race is not expressible
--- here; `tests/test_10180promote_default_graph.py` pins the shape of the
+-- here; `tests/test_10180_promote_default_graph.py` pins the shape of the
 -- statement and this asserts the effect that matters at the DB level: a SECOND
 -- promotion of another graph still lands on exactly one default.
 INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)

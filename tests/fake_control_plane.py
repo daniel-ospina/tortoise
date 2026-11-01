@@ -1675,16 +1675,20 @@ class FakeControlPlane:
                     "namespace_repaired": repaired}
         # ⛔ A target the ORG-WIDE LANES CANNOT FOLLOW is refused, exactly as the
         # SQL refuses it (#10452 review round 8, P1). The resolvers derive the
-        # default from `organizations.graph_name` through ONE shape test
-        # (`supabase_control.per_graph_namespace_prefixes`), so promoting a
-        # namespace of any other shape would succeed here and then send every
-        # org-wide lane to the graph this very call demotes. Mirror of the SQL's
-        # `left(...) = ...` prefix comparison (NOT `LIKE`: `_` is a wildcard).
+        # default from `organizations.graph_name` through ONE shape test, so
+        # promoting a namespace of any other shape would succeed here and then
+        # send every org-wide lane to the graph this very call demotes. Mirror of
+        # the SQL's `left(...) = ...` prefix comparison (NOT `LIKE`: `_` is a
+        # wildcard), built from the gate's OWN list so the two cannot drift.
+        # ⛔ The bare `team_{org_id}` is deliberately NOT accepted (round 9, P1):
+        # the historical open resolves `org_{org_id}`, not `team_{org_id}`.
         ns = target.get("namespace")
         if ns is not None:
+            from tortoise.supabase_control import per_graph_namespace_prefixes
+
             followable = (
-                ns in (f"org_{org_id}", f"team_{org_id}")
-                or ns.startswith((f"org_{org_id}_", f"team_{org_id}_")))
+                ns == f"org_{org_id}"
+                or ns.startswith(per_graph_namespace_prefixes(org_id)))
             if not followable:
                 raise RuntimeError(
                     "promote_default_graph: the target namespace is not one "
