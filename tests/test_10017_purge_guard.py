@@ -560,28 +560,44 @@ class _FakeGraph:
 def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
                  journal_configured=True, journal_result=True):
     """Replace the SDK / projection seams `_execute` imports, and record what
-    they were asked to do."""
+    they were asked to do.
+
+    `sdk_graph` FORCES the graph the fake SDK reports (a drift injection). When
+    it is `None` the fake derives its graph the way the real SDK does — an
+    explicit `graph_name=` verbatim, else `"tortoise"`
+    (`tortoise/sdk.py::_derive_graph_name`) — so a run that never HANDS the
+    graph over is visible here instead of being satisfied by the fixture
+    (#10483 review round 7, P1-A).
+    """
     graph = _FakeGraph(survivors_after)
     journaled: list[str] = []
+    handed_graph_names: list = []
 
     class _Proj:
         def __init__(self, *args, **kwargs):
             self.g = graph
+            # The census projection's own graph (what the DELETEs go through).
+            self.graph_name = kwargs.get("graph_name") or "tortoise"
 
         @classmethod
         def from_uri(cls, uri, graph_name=None):
-            return cls()
+            return cls(graph_name=graph_name)
 
     class _SDK:
-        def __init__(self, db_path=None, event_log_path=None):
+        def __init__(self, db_path=None, event_log_path=None, graph_name=None):
             self.db_path = db_path
             self.event_log_path = event_log_path
+            self.graph_name = graph_name
+            handed_graph_names.append(graph_name)
 
         def _get_event_log(self):
             return object() if journal_configured else None
 
         def _get_proj(self):
-            return types.SimpleNamespace(graph_name=sdk_graph)
+            derived = self.graph_name if self.graph_name is not None else \
+                "tortoise"
+            return types.SimpleNamespace(
+                graph_name=sdk_graph if sdk_graph is not None else derived)
 
         def _journal_turn_removal(self, ids):
             journaled.extend(ids)
@@ -589,6 +605,9 @@ def _patch_store(monkeypatch, *, survivors_after=(), sdk_graph=None,
 
     monkeypatch.setattr("tortoise.projection.FalkorProjection", _Proj)
     monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _SDK)
+    # What the tool HANDED the SDK (`graph_name=`), so a test can pin that the
+    # binding is explicit rather than derived from a fixture.
+    graph.sdk_graph_names = handed_graph_names
     return graph, journaled
 
 
@@ -621,18 +640,24 @@ class _Exec:
 def _exec_setup(tmp_path, monkeypatch, *, ids=("s1_t0",), session="s1",
                 journal_lines=1, plan_journal="same", argv_journal="same",
                 survivors_after=(), sdk_graph="g", journal_configured=True,
-                journal_result=True, record_keys=None):
-    """A hermetic `_execute` call: real args, real plan, fake stores."""
+                journal_result=True, record_keys=None, graph_name="g"):
+    """A hermetic `_execute` call: real args, real plan, fake stores.
+
+    `graph_name=None` OMITS `--graph-name`, which is the case the SDK/census
+    alignment check used to skip entirely (#10483 review round 7, P1-A).
+    """
     journal = tmp_path / "journal.jsonl"
     if journal_lines:
         journal.write_text('{"type": "PointAdded"}\n', encoding="utf-8")
     argv_journal_path = (journal if argv_journal == "same"
                          else tmp_path / "missing-journal.jsonl")
-    args = purge._build_parser().parse_args([
-        "--db-path", str(tmp_path / "graph.db"), "--graph-name", "g",
-        "--org-id", "org", "--graph-id", "graph",
-        "--record-dsn", "postgresql://record",
-        "--event-log-path", str(argv_journal_path)])
+    argv = ["--db-path", str(tmp_path / "graph.db"),
+            "--org-id", "org", "--graph-id", "graph",
+            "--record-dsn", "postgresql://record",
+            "--event-log-path", str(argv_journal_path)]
+    if graph_name is not None:
+        argv += ["--graph-name", graph_name]
+    args = purge._build_parser().parse_args(argv)
     target = purge._target_from_args(args)
     plan_journal_path = (str(journal) if plan_journal == "same"
                          else None if plan_journal is None
@@ -839,6 +864,37 @@ def test_execute_refuses_when_no_journal_is_configured(
 def test_execute_refuses_when_the_sdk_addresses_another_graph(
         tmp_path, monkeypatch, capsys):
     setup = _exec_setup(tmp_path, monkeypatch, sdk_graph="some-other-graph")
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 2
+    assert setup.graph.statements("DETACH DELETE") == []
+    assert purge.REFUSE_TARGET_DRIFT in capsys.readouterr().err
+
+
+def test_execute_hands_the_censused_graph_to_the_sdk(
+        tmp_path, monkeypatch):
+    """P1-A: `--execute` must TELL the SDK which graph to address.
+
+    Without `graph_name=`, the SDK derives `uri_graph or "tortoise"`
+    (`sdk.py::_derive_graph_name`), so a named-graph target compared two graphs
+    the tool had itself put out of step: `target-drift` on every real run, and
+    removals journaled into the fallback graph's projection. Pre-fix this
+    refuses (rc 2, nothing journaled) and the SDK is handed `None`.
+    """
+    setup = _exec_setup(tmp_path, monkeypatch, sdk_graph=None)
+    rc = purge._execute(setup.plan, setup.args, setup.target)
+    assert rc == 0, "a named-graph target must not refuse its own alignment"
+    assert setup.graph.sdk_graph_names == ["g"]
+    assert setup.journaled == ["s1_t0"]
+
+
+def test_execute_checks_the_alignment_when_no_graph_name_is_passed(
+        tmp_path, monkeypatch, capsys):
+    """P1-A: with `--graph-name` omitted the check used to be DEAD CODE
+    (`if args.graph_name and ...`) — the one case where the SDK's derivation and
+    the census projection's derivation are free to diverge."""
+    setup = _exec_setup(tmp_path, monkeypatch, graph_name=None,
+                        sdk_graph="some-other-graph")
+    assert setup.args.graph_name is None
     rc = purge._execute(setup.plan, setup.args, setup.target)
     assert rc == 2
     assert setup.graph.statements("DETACH DELETE") == []
@@ -1268,6 +1324,32 @@ def test_the_preview_closing_line_names_every_flag_execute_requires(tmp_path,
     for flag in ("--execute", "--approval-record", "--health-url",
                  "--restore-proof"):
         assert flag in closing[0], (flag, closing[0])
+
+
+def test_the_tool_does_not_claim_event_log_path_is_required_at_preview(
+        tmp_path, capsys):
+    """P3 (#10483 review round 7): the docstring said `--event-log-path` "is
+    REQUIRED here" (at preview) and the parser help said "Required at PREVIEW
+    time too", while the preview path enforces nothing — a claim-vs-artefact
+    mismatch of the same shape as the phantom `--dry-run`.
+
+    The prose now states what the code does: preview without the flag SUCCEEDS
+    and records `journal: null`, and every `--execute` of that plan refuses.
+    """
+    claims = " ".join([purge.__doc__ or "",
+                       next((a.help or "") for a in purge._build_parser()._actions
+                            if a.dest == "event_log_path")])
+    assert "REQUIRED here" not in claims
+    assert "Required at PREVIEW time too" not in claims
+    # ...and the behaviour the reworded prose describes is the real one.
+    rc = purge.main([*_TARGET_ARGV, "--target-note", "t",
+                     "--census-json", _write(tmp_path, "c.json", _report()),
+                     "--plan-out", str(tmp_path / "plan.json")])
+    assert rc == 0
+    plan = json.loads((tmp_path / "plan.json").read_text(encoding="utf-8"))
+    assert plan["journal"]["path"] is None
+    assert any("no --event-log-path" in m for m in plan["recovery"]["missing"])
+    assert "--event-log-path" in capsys.readouterr().out
 
 
 # ── round 5: the ARMED evidence's own inputs ──────────────────────────────

@@ -146,8 +146,12 @@ refused anything is decoration.
 USAGE
 =====
     # 1. PREVIEW (the default — no flag needed, nothing is written to a store).
-    #    --event-log-path is REQUIRED here and recorded in the plan: the journal
-    #    is named by the artefact a human approves, not chosen at delete time.
+    #    --event-log-path is REQUIRED FOR A PLAN `--execute` CAN ACT ON, and is
+    #    recorded in the plan: a preview run without it writes a plan whose
+    #    `journal.path` is null, and EVERY `--execute` of that plan then
+    #    refuses `journal-unusable`. It is not enforced at preview time (a
+    #    preview deletes nothing and its MISSING list names the gap); what the
+    #    plan records is what the human approves.
     python tools/purge_legacy_turns.py \
         --uri '<target FalkorDB URI>' --graph-name <graph> \
         --record-dsn "$TORTOISE_RECORD_DSN" \
@@ -1303,10 +1307,13 @@ def _build_parser() -> _UsageParser:
                         help="the plan digest the human approved (--execute)")
     parser.add_argument("--event-log-path", default=None,
                         help="the JSONL journal a rebuild of THIS graph reads "
-                             "(--execute). Required at PREVIEW time too: the "
-                             "plan records it, so the artefact a human "
-                             "approves names the journal the deletions land "
-                             "in (an unjournaled removal is a resurrection, "
+                             "(--execute). Required for a plan `--execute` can "
+                             "act on: the preview records it in the plan, and "
+                             "a plan written without it names no journal, so "
+                             "every `--execute` of it refuses "
+                             "journal-unusable — the artefact a human approves "
+                             "must name the journal the deletions land in (an "
+                             "unjournaled removal is a resurrection, "
                              "#3316)")
     return parser
 
@@ -1501,10 +1508,13 @@ def _execute(plan: dict, args, target: dict) -> int:
             fresh file (`EventLog.append`), so the removals would land in a log
             the target's rebuild never reads — `record != replay(journal)`
             forever, while the run reports success (#10483 review, P1);
-        0b. the SDK must be addressing the SAME graph the census read, and it
-            must have a journal — an unjournalable target is refused up front,
-            never discovered after a session has already been deleted (a
-            rebuild would resurrect those turns while this run failed);
+        0b. the SDK must be addressing the SAME graph the census read — it is
+            handed `graph_name=` explicitly, never left to its own derivation,
+            and the alignment check runs unconditionally against this run's own
+            projection — and it must have a journal: an unjournalable target is
+            refused up front, never discovered after a session has already been
+            deleted (a rebuild would resurrect those turns while this run
+            failed);
         1. PER SESSION, immediately before its delete: the RECORD must still
             hold every planned id. The record is read once in `main`, and
             between that census and session k's delete sit a paged graph read,
@@ -1604,7 +1614,17 @@ def _execute(plan: dict, args, target: dict) -> int:
                                 or "tortoise")
         sdk_db_path = args.db_path
 
-    sdk = TortoiseSDK(db_path=sdk_db_path,
+    # ⛔ THE SDK IS TOLD WHICH GRAPH TO ADDRESS. `graph_name=` is verbatim
+    # (`tortoise/sdk.py` __init__ → `_graph_name`), and without it the SDK's
+    # own derivation falls back to `uri_graph or "tortoise"`
+    # (`sdk.py::_derive_graph_name`) — so a named-graph target made the check
+    # below compare two graphs this tool had itself put out of step, refusing
+    # `target-drift` on EVERY real run with a message asserting the operator
+    # had addressed the wrong graph. The removals would also have been
+    # journaled into that fallback graph's projection (`_journal_turn_removal`
+    # → `_emit_event` writes `self._get_proj()`), not the censused one
+    # (#10483 review round 7, P1-A).
+    sdk = TortoiseSDK(db_path=sdk_db_path, graph_name=args.graph_name,
                       event_log_path=args.event_log_path)
 
     # ⛔ BEFORE THE FIRST DELETE. `_journal_turn_removal` returns `None` per id
@@ -1619,11 +1639,18 @@ def _execute(plan: dict, args, target: dict) -> int:
         return 2
     sdk_proj = sdk._get_proj()
     sdk_graph = getattr(sdk_proj, "graph_name", None)
-    if args.graph_name and sdk_graph != args.graph_name:
+    # Unconditional, against the graph THIS RUN's own projection addresses
+    # (`proj`, which is what the DELETE statements below are issued through),
+    # never against `args.graph_name` alone: gating on the flag made the check
+    # dead code in exactly the case it exists for — `--graph-name` omitted,
+    # where two independent derivations (the SDK's and the census projection's)
+    # are free to diverge (#10483 review round 7, P1-A).
+    censused_graph = getattr(proj, "graph_name", None)
+    if sdk_graph != censused_graph:
         sys.stderr.write(
             f"purge_legacy_turns: REFUSED {REFUSE_TARGET_DRIFT}: the SDK "
-            f"addresses graph {sdk_graph!r} but the census read "
-            f"{args.graph_name!r}. Journaling into one graph's journal while "
+            f"addresses graph {sdk_graph!r} but this run deletes from "
+            f"{censused_graph!r}. Journaling into one graph's journal while "
             f"deleting from another would record removals a rebuild of the "
             f"target never sees. Nothing was deleted.\n")
         return 2
