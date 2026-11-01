@@ -93,6 +93,22 @@ _UNKNOWN_PER_MANIFEST_KEYS = (
     "points_unmeasured",
 )
 
+#: #10137: the BELIEF-ELIGIBLE denominator and its substrate exclusion, summed
+#: by the SAME rule as the four above but kept in their OWN tuple.
+#:
+#: Why separate: ``_UNKNOWN_PER_MANIFEST_KEYS`` is also the completeness set the
+#: census probe reads per question (a manifest missing one of its cells is an
+#: UNREAD question). Folding these in would retroactively mark every pre-#10137
+#: checkpoint — whose own cells WERE measured — as unread, silently devaluing
+#: published history to make room for a new cell. Adding a cell must never
+#: change the disclosure state of a run that never had it.
+_UNKNOWN_PER_MANIFEST_KEYS_10137 = (
+    "points_substrate",
+    "belief_eligible_total",
+    "belief_eligible_with_ep",
+    "belief_eligible_unmeasured",
+)
+
 # ── #10137: WHY a question has no measured contribution ──────────────────
 # The state (``activated``/``partial``/``inert``/``unknown``) says HOW MUCH of
 # the run is covered. These reasons say WHY the rest is not — enumerated, per
@@ -404,6 +420,40 @@ def summarize_belief_activation(
         known = [v for v in values if v is not None]
         summary[key] = sum(known) if known else None
         summary[f"{key}_unread"] = len(values) - len(known)
+    # #10137: the belief-eligible cells. The point-level pair above counts every
+    # non-operator ``Point``, and an eval graph's population is dominated by the
+    # ingest's episodic substrate (turn/chunk points, ``is_episodic=true``) that
+    # no factor can reach — so ``points_with_ep / points`` is a FLOOR on belief
+    # coverage, never belief coverage, and its dilution is unbounded (measured
+    # 9.77% on the 24-question sample, ``docs/evidence/10137-corpus-ep-census/``).
+    # These are the same census over the population that can actually carry a
+    # belief; ``points_substrate`` publishes what was excluded (the turn and
+    # transcript-chunk points the ingest writes — NOT ``is_episodic``, which the
+    # ingest also stamps on the extracted claims themselves).
+    for key in _UNKNOWN_PER_MANIFEST_KEYS_10137:
+        values = [
+            _optional_int(o["belief_activation"].get(key))
+            if isinstance(o.get("belief_activation"), dict) else None
+            for o in rows]
+        known = [v for v in values if v is not None]
+        summary[key] = sum(known) if known else None
+        summary[f"{key}_unread"] = len(values) - len(known)
+
+    # ── #10137: the belief-eligible coverage RATIO ────────────────────
+    # The number this issue exists to publish: of the points that can actually
+    # CARRY a belief (the non-substrate, non-operator population — turn and
+    # transcript-chunk points excluded), how many carry one? UNKNOWN
+    # when either side is — a ratio over a partial census is the fabricated
+    # figure the ``*_unread`` companions exist to make impossible.
+    _elig_total = summary.get("belief_eligible_total")
+    _elig_with = summary.get("belief_eligible_with_ep")
+    _elig_complete = (
+        summary.get("belief_eligible_total_unread") == 0
+        and summary.get("belief_eligible_with_ep_unread") == 0)
+    summary["belief_eligible_ratio"] = (
+        (_elig_with / _elig_total)
+        if _elig_complete and isinstance(_elig_total, int)
+        and isinstance(_elig_with, int) and _elig_total > 0 else None)
 
     # ── #10137: the POPULATIONS, enumerated per question ──────────────
     inert: list[dict[str, Any]] = []

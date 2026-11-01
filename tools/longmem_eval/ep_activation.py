@@ -110,6 +110,78 @@ _COUNT_POINTS_WITH_EP = (
     "RETURN count(n)"
 )
 
+# ── #10137: the BELIEF-ELIGIBLE denominator ──────────────────────────────
+# ``_COUNT_POINTS_TOTAL`` is every non-operator ``Point``, and on an eval graph
+# that population also carries the EPISODIC SUBSTRATE: the v2 ingest writes one
+# ``:Point`` per conversation turn (``ingest_v2.py:611-618``, kind ``event``
+# with ``speaker`` set) and one per transcript chunk (``:637-643``, kind
+# ``session-transcript``). No factor reaches those nodes, so EP can never write
+# one, and counting them in the denominator makes ``points_with_ep / points`` a
+# floor whose dilution is unbounded (measured 2,696 / 27,608 = 9.77% on the
+# 24-question sample, ``docs/evidence/10137-corpus-ep-census/``).
+#
+# ⛔ ``is_episodic`` is NOT the discriminator, and using it is how this fix was
+# wrong on its first pass (review P0): the ingest stamps ``is_episodic=True`` on
+# the EXTRACTED CLAIMS TOO (``ingest_v2.py:275-290``, kind ``statement``). The
+# flag is the QUOTA discriminator (``tortoise/quota.py:1024-1030`` counts only
+# non-episodic points, which is why the eval ingest marks everything), not a
+# belief/evidence one — filtering on it excluded every claim EP stamps: 3 claims
+# + 2 IMPL read ``belief_eligible_total = 0`` against ``points_with_ep = 3``.
+# The substrate is identified by the SHAPE its writer stamps, the one property
+# pair the two substrate writers set and the claim writer does not.
+#
+# ⛔ The published point-level ratio is NOT renamed/"fixed" here — it is a real
+# measurement of a real population, and the review that renamed the evidence key
+# ``claim_coverage`` → ``point_coverage`` (#10137 review P2) is respected: that
+# denominator cannot support a claim-coverage name. What was MISSING is a
+# denominator that CAN. These cells are it, published ALONGSIDE the point-level
+# pair so the two populations are never conflated again.
+#
+# A graph with no substrate nodes reads identically in both pairs, which is the
+# correct answer, not a fallback.
+# ``coalesce`` is not decoration: ``NOT (NULL = 'x')`` is NULL in Cypher, so a
+# ``:Point`` written with no ``pointKind`` (reachable — the projection fold is a
+# bare ``MERGE (n:Point {id})`` + conditional ``SET``) would fall out of BOTH
+# populations, leaving a hole in the partition that no cell reports (review
+# cycle 2, P2). Total-ising the predicate keeps
+# ``points_substrate + belief_eligible_total == points_with_ep +
+# points_unmeasured`` an invariant a test can hold.
+#
+# The event side requires ``is_episodic`` and NOT ``speaker``: ``speaker``
+# arrived with delta 5 (#721), so pre-#721 turns carry ``pointKind='event'`` +
+# ``is_episodic=true`` and no speaker, and `tortoise/session_reinjection.py:213-220`
+# already ruled that requiring it "would silently exclude legacy turns for no
+# additional exclusion power" — here it would do the opposite, absorbing legacy
+# turn EVIDENCE into the belief denominator (review cycle 2, P1).
+# Residual, named rather than absorbed: a kind-``event`` point with NEITHER flag
+# (the demo seed, ``tortoise/hosted_api.py:12173``) is counted as belief-eligible.
+# Excluding it needs the content-shape decision the repo owns in
+# ``_TURN_SHAPE_FILTER``, not a second predicate here.
+_SUBSTRATE_PREDICATE = (
+    "(coalesce(n.pointKind, '') = 'session-transcript' "
+    " OR (coalesce(n.pointKind, '') = 'event' "
+    "     AND coalesce(n.is_episodic, false) = true)) "
+)
+_COUNT_POINTS_SUBSTRATE = (
+    "MATCH (n:Point) "
+    "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+    f"AND {_SUBSTRATE_PREDICATE}"
+    "RETURN count(n)"
+)
+_COUNT_BELIEF_ELIGIBLE_TOTAL = (
+    "MATCH (n:Point) "
+    "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+    f"AND NOT {_SUBSTRATE_PREDICATE}"
+    "RETURN count(n)"
+)
+_COUNT_BELIEF_ELIGIBLE_WITH_EP = (
+    "MATCH (n:Point) "
+    "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+    f"AND NOT {_SUBSTRATE_PREDICATE}"
+    "AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+    "RETURN count(n)"
+)
+
 # ── #10137: the CONTRIBUTION census ──────────────────────────────────────
 # ``points_with_ep`` answers "is there EP state on this claim". It does NOT
 # answer "did EP move it": on a graph whose operators are IMPL over the
@@ -454,7 +526,9 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
 
     Returns a manifest:
         ``{points_promoted, operators_promoted, ep_ran, ep_engine,
-        points_with_ep, points_unmeasured, operators, factor_edges,
+        points_with_ep, points_unmeasured, points_substrate,
+        belief_eligible_total, belief_eligible_with_ep,
+        belief_eligible_unmeasured, operators, factor_edges,
         points_off_neutral, points_moved_off_neutral, factors, no_op_reason,
         duration_ms}``
 
@@ -483,6 +557,22 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
       (#888 W5), so ``operators == 0`` on its own does NOT make a graph
       structurally EP-inert; a STRUCTURAL verdict needs BOTH to be a measured
       ``0``.
+    * ``points_substrate`` / ``belief_eligible_*`` — the population split
+      behind the coverage pair. ``points_with_ep`` counts every non-operator
+      ``Point``, and an eval graph's population is dominated by the EPISODIC
+      substrate the ingest writes as points (one per turn, kind ``event`` with
+      ``speaker``; one per transcript chunk, kind ``session-transcript``) — evidence that no factor can ever reach
+      and EP can never write. Folding it into the denominator makes the
+      published ratio a floor whose dilution is unbounded (measured 9.77% on
+      the 24-question sample, `docs/evidence/10137-corpus-ep-census/`).
+      ``belief_eligible_total`` / ``_with_ep`` / ``_unmeasured`` are the SAME
+      census over the non-substrate population (turn and transcript-chunk
+      points excluded; the claims EP stamps DO carry ``is_episodic``, which is
+      why that flag is not the discriminator), and
+      ``points_substrate`` publishes the excluded count so nothing is hidden.
+      These are ADDITIVE: ``points_with_ep`` / ``points_unmeasured`` keep
+      their established meaning, because a key that silently changes
+      denominator re-cuts every number ever published from it.
     * ``factors`` — the operators THIS PASS selected, read from the dream
       result's ``budget_used`` (full mode). Deliberately not the health
       surface's ``operator_counts``: a full pass is a batch loop and the
@@ -620,6 +710,17 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
     points_unmeasured = (max(total - with_ep, 0)
                          if total is not None and with_ep is not None
                          else None)
+    # #10137: the belief-eligible population (claims + belief-bearing parts),
+    # with the episodic substrate counted SEPARATELY rather than folded into
+    # the denominator. See the query block for why this is additive and not a
+    # redefinition of ``points_unmeasured``.
+    points_substrate = _census(g, _COUNT_POINTS_SUBSTRATE)
+    eligible_total = _census(g, _COUNT_BELIEF_ELIGIBLE_TOTAL)
+    eligible_with_ep = _census(g, _COUNT_BELIEF_ELIGIBLE_WITH_EP)
+    eligible_unmeasured = (
+        max(eligible_total - eligible_with_ep, 0)
+        if eligible_total is not None and eligible_with_ep is not None
+        else None)
     # #10137: coverage is not contribution. Both are measured, every run.
     #
     # The GRAPH SHAPE (`operators`, `factor_edges`) is a property of the graph,
@@ -676,6 +777,14 @@ def activate_beliefs(sdk, *, namespace: str | None = None,
         "ep_engine": EP_ENGINE,
         "points_with_ep": with_ep,
         "points_unmeasured": points_unmeasured,
+        # #10137: the two populations the point-level pair conflates. The
+        # episodic substrate is EVIDENCE (turn/chunk points)
+        # and is never a belief, so it is excluded from the denominator and
+        # reported here instead of silently inflating it.
+        "points_substrate": points_substrate,
+        "belief_eligible_total": eligible_total,
+        "belief_eligible_with_ep": eligible_with_ep,
+        "belief_eligible_unmeasured": eligible_unmeasured,
         # #10137 contribution census — `points_with_ep == points` while
         # `points_off_neutral == 0` is a fully covered, zero-contribution graph.
         "operators": operators,
