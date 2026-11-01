@@ -708,3 +708,65 @@ def test_a_2xx_that_stored_without_extracting_is_counted_not_just_filed(
     assert run["queued"] == 0
     assert post.session_ids == ["stored-only", "extracted"]
     assert "stored-not-extracted 1" in format_progress(run)
+
+
+def test_a_file_scoped_run_is_non_destructive_for_lines_it_cannot_attribute(
+        tmp_path: Path) -> None:
+    """P3 from review: `--file X` dead-lettered lines it could not attribute to X.
+
+    The scope check sat AFTER the parse, so an unparseable line was dead-lettered
+    into the SHARED `dead-letter.jsonl` and its index crossed — for a record any
+    other session may own, on a run that was never asked about it. The function's
+    own comment says the opposite ("a null sid included: it cannot be attributed
+    to the scope … not ours to dead-letter either"), and `_count_records` states
+    the same reading for the plan, so plan and pass answered two questions.
+
+    MUTATION THAT REDS THIS: move the `scoped` branch below the parse verdicts
+    (i.e. restore the pre-fix order) → `dead_lettered == 1` and one row lands.
+    """
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    _write_day(root, "2026-10-01.jsonl", ["{not json", _record("target")])
+
+    scoped = Recorder()
+    summary = _drain(root, store, scoped, only_session_id="target")
+
+    assert scoped.session_ids == ["target"]
+    assert summary["filed"] == 1
+    assert summary["dead_lettered"] == 0, "a scoped run judged a line it cannot attribute"
+    assert summary["unselected"] == 1
+    assert read_dead_letter_count(store) == 0, (
+        "a `--file` run appended a dead-letter row for another session's record"
+    )
+
+    # The line is still queued (unselected never consumes), so an UNSCOPED pass —
+    # the one that IS entitled to judge it — still dead-letters it.
+    everything = Recorder()
+    other = _drain(root, store, everything)
+    assert other["dead_lettered"] == 1
+    assert read_dead_letter_count(store) == 1
+
+
+def test_a_torn_tail_under_a_file_scope_is_unselected_not_a_strike(
+        tmp_path: Path) -> None:
+    """A torn tail outside the scope must not charge a strike and stop the pass.
+
+    Under `--file X`, a torn tail in ANY day file returned `retry`, which charged
+    a consecutive-refusal strike and ended the pass with `stopped="refused"` —
+    before it ever reached the session it was scoped to, and for a record that
+    cannot be attributed to that session at all.
+
+    MUTATION THAT REDS THIS: return `retry` for the torn tail without consulting
+    `scoped` → `stopped == "refused"` and `unselected == 0`.
+    """
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    # The tail is on a file modified JUST NOW, so it reads as mid-append
+    # (`SETTLE_GRACE_SECONDS`) rather than as a corrupt record.
+    _write_day(root, "2026-10-01.jsonl", [_record("target"), '{"session_id": "tor'])
+
+    summary = _drain(root, store, Recorder(), only_session_id="target")
+
+    assert summary["filed"] == 1
+    assert summary["unselected"] == 1
+    assert summary["deferred"] == 0
+    assert summary["stopped"] is None, "a line outside the scope ended the scoped pass"
+    assert summary["dead_lettered"] == 0

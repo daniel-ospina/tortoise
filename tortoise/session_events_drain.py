@@ -721,16 +721,26 @@ def drain_session_events(
             # re-file the day rather than cross records that were never filed.
             cursor.day(key)["consumed"] = 0
             cursor.day(key)["crossed"] = []
+            # The STRIKES/`probes` state belongs to the index space being
+            # discarded, exactly as `note_shape` already treats it there: stale
+            # strikes from the previous space made unrelated records in the
+            # rewritten day read as `stuck` sooner (found in review). Nothing was
+            # dropped, but the fairness was wrong.
+            cursor.day(key)["strikes"] = {}
+            cursor.day(key)["probes"] = 0
             summary["detail"] = f"{key}: cursor exceeded the file, re-filing"
         settled = _file_age(path, clock) > SETTLE_GRACE_SECONDS
-        # The probe slot: ONE struck record per day file, chosen by a rotating
-        # ordinal so every struck record is eventually probed again.
+        # The probe slots: `STUCK_RETRIES_PER_PASS` struck records per day file,
+        # chosen by a rotating ordinal so every struck record is eventually
+        # probed again. The constant was documented and exported but never READ —
+        # one hard-coded slot meant raising it changed nothing (found in review).
         struck = [i for i in range(cursor.consumed(key), total)
                   if cursor.strikes(key, i) >= MAX_STRIKES]
-        probe_index = -1
+        probe_indices: set[int] = set()
         if struck:
             ordinal = cursor.next_probe(key)
-            probe_index = struck[ordinal % len(struck)]
+            for slot in range(min(max(0, STUCK_RETRIES_PER_PASS), len(struck))):
+                probe_indices.add(struck[(ordinal + slot) % len(struck)])
         index = -1
         for line in lines:
             index += 1
@@ -746,7 +756,7 @@ def drain_session_events(
                 # counts records given a TERMINAL verdict, POSTed or not.
                 stopped = stopped or "batch"
                 break
-            if cursor.strikes(key, index) >= MAX_STRIKES and index != probe_index:
+            if cursor.strikes(key, index) >= MAX_STRIKES and index not in probe_indices:
                 # A known-stuck record would spend the whole POST budget on
                 # itself every pass, so the cap could never reach a not-yet-
                 # struck record — the escape hatch defeated exactly when it is
@@ -897,9 +907,24 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
         summary["verdicts"] += 1
         return "dead", session_id
 
+    scoped = only_session_id is not None
+
     try:
         record = json.loads(line)
     except json.JSONDecodeError:
+        if scoped:
+            # The SCOPE decision comes BEFORE every verdict, because a line this
+            # pass cannot attribute is not ours to judge (#6388 review). It used
+            # to be parsed first, so a `--file X` run dead-lettered and CROSSED an
+            # unparseable line (a row into the shared dead-letter file, the index
+            # consumed) that may belong to any other session — and a torn tail in
+            # ANY day file charged a strike and ended the scoped pass with
+            # `stopped="refused"` before it ever reached the session it was
+            # scoped to. `_count_records` already states the reading the plan
+            # uses ("unparseable lines are counted as NOT matching a named
+            # session"); this makes the pass agree with it, and `unselected`
+            # never consumes, so the unscoped pass still picks it up.
+            return "unselected", None
         if is_last and not settled:
             # A writer may be mid-append on this file RIGHT NOW: the tail line is
             # torn, not corrupt. Defer, so the cursor stays before it and the
@@ -909,6 +934,10 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
             return "retry", None
         return dead("unparseable_record", "line is not valid JSON")
     if not isinstance(record, dict):
+        if scoped:
+            # Same rule for a JSON line that is not an object: it carries no
+            # session_id to compare, so it cannot be attributed to the scope.
+            return "unselected", None
         return dead("unparseable_record", "record is not an object")
 
     raw_sid = record.get("session_id")

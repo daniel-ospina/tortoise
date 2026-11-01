@@ -548,6 +548,38 @@ def _sanitise_reason(text: str) -> str:
     return " ".join(cleaned.split())[:80]
 
 
+#: The ``status`` values the session-events leg reports when it did NOT drain
+#: anything — the leg's own verdict, not an exception. Read by
+#: :func:`_events_failure_reason` so a non-zero sweep can NAME this leg.
+_EVENTS_NOT_DRAINED = frozenset({"declined", "no_credential"})
+
+
+def _events_failure_reason(events: Any) -> str | None:
+    """Why the SESSION-EVENTS leg did not drain, as a token — or ``None``.
+
+    The reason chain in :func:`write_sweep_status` could only see the LOG half
+    (``worker_status``/``withheld``/``errors``) and the SPOOL half
+    (``spool.error``), so a failure that came ONLY from the events leg fell
+    through to the generic ``"worker exited non-zero"`` — naming the node
+    worker, a component that exited 0 and delivered its turns.
+
+    Under ``--no-spool`` (the Pi extension's own cadence) the spool half is
+    ``None`` entirely, so the generic fallback was the ONLY case there was: an
+    events-leg failure read as a worker crash, and the leg that actually failed
+    was named nowhere on the health line.
+
+    ``status`` is consulted only for the NOT-DRAINED verdicts: a real pass
+    reports ``"drained"`` / ``"dry_run"``, which are not failures. A real
+    failure is the exception arm (``error``) or a cursor that could not be
+    written (``cursor_error``).
+    """
+    if not isinstance(events, dict):
+        return None
+    return (events.get("cursor_error") or events.get("error")
+            or (events.get("status") if events.get("status") in _EVENTS_NOT_DRAINED
+                else None))
+
+
 def _reason_token(errors: list[Any]) -> str | None:
     """The first error, as a known-class TOKEN or as its raw text (sanitised later)."""
     if not errors:
@@ -614,6 +646,10 @@ def write_sweep_status(receipt: dict, cursor_dir: Path | str | None) -> None:
         if not reason and receipt.get("ok") is False:
             spool = receipt.get("spool") or {}
             reason = spool.get("error") if isinstance(spool, dict) else None
+        if not reason and receipt.get("ok") is False:
+            # #6388: the third leg, BEFORE the generic fallback — otherwise an
+            # events-only failure is persisted as a worker crash it is not.
+            reason = _events_failure_reason(receipt.get("session_events"))
         if not reason and receipt.get("ok") is False:
             reason = "worker exited non-zero"
         # ONE place, after all three sources are resolved: `errors[]`,
@@ -721,6 +757,27 @@ def main(args) -> int:
                   file=sys.stderr)
         if receipt.get("spool"):
             print(f"store-sync: spool — {receipt['spool']}", file=sys.stderr)
+        # #6388: the third leg reports on the human path too. It was persisted
+        # in `sweep-status.json` and printed by `session drain`, but NEVER here —
+        # so the Pi cadence (`store-sync --no-spool`, stdio ignored) and any
+        # human `tortoise store-sync` got no line at all, including for `stuck`,
+        # `held`, `unreadable` and `cursor_error`. A count that reaches only
+        # `--json` is a count nobody reads.
+        if receipt.get("session_events"):
+            events = receipt["session_events"]
+            if not isinstance(events, dict):
+                events = {}
+            if events.get("error"):
+                print(f"store-sync: session-events FAILED — {events['error']}",
+                      file=sys.stderr)
+            elif events.get("status") in _EVENTS_NOT_DRAINED:
+                print(f"store-sync: session-events not drained — "
+                      f"{events.get('status')}: {events.get('detail', '')}",
+                      file=sys.stderr)
+            else:
+                from tortoise.session_events_drain import format_progress
+
+                print(format_progress(events), file=sys.stderr)
     if not getattr(args, "dry_run", False):
         # A `--dry-run` is a PLAN, not an outcome. `main` used to write the
         # status unconditionally, so a human running `tortoise store-sync

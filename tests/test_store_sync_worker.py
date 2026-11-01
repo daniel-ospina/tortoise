@@ -1294,3 +1294,312 @@ def test_the_status_temp_path_is_PER_PROCESS(tmp_path, monkeypatch):
         "sweep-status.json.tmp.111",
         "sweep-status.json.tmp.222",
     ], f"two writers must never share a temp name: {survivors}"
+
+
+# ── the SESSION-EVENTS leg (#6388): the third substrate and its two call sites
+#
+# Every row below exists because the leg arrived with NO test on either of the
+# two sites that make it a transmission path: `run_sweep`'s third leg
+# (`store_sync.py`) and `_cmd_session_drain`'s appended block
+# (`__main__.py`). Deleting either left every case in the repo green — including
+# the CONSENT GATE, which is the one line that decides whether a new primitive
+# uploads a user's transcripts.
+
+
+def _events_fixture(monkeypatch, tmp_path, session_ids=("sess-ev-1",)):
+    """A real ``~/.tortoise/session-events/`` day file under ``tmp_path``.
+
+    ``TORTOISE_SESSION_EVENTS_DIR`` is pinned (the module documents that this is
+    how a test gets its own substrate) and the SPOOL root is pinned beside it, so
+    the derived cursor directory also lands under ``tmp_path``.
+    """
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
+    root = tmp_path / "session-events"
+    root.mkdir(parents=True, exist_ok=True)
+    body = "".join(json.dumps({
+        "session_id": sid,
+        "conversation": [{"role": "user", "content": f"hello from {sid}"}],
+        "metadata": {"source": "pi-session-quit"},
+        "harness": "pi",
+        "machine_id": "m" * 64,
+        "model": "deepseek/deepseek-flash",
+    }) + "\n" for sid in session_ids)
+    (root / "2026-10-01.jsonl").write_text(body, encoding="utf-8")
+    monkeypatch.setenv("TORTOISE_SESSION_EVENTS_DIR", str(root))
+    return root
+
+
+def _stub_post(sink: list[dict]):
+    """A transport that records payloads and answers 2xx-with-extraction."""
+    from tortoise.capture_spool import PostOutcome
+
+    def post(payload):
+        sink.append(payload)
+        return PostOutcome(ok=True, status=201, body={"extraction_mode": "extracted"})
+
+    return post
+
+
+def test_the_session_events_leg_files_when_consented(monkeypatch, tmp_path):
+    """The THIRD substrate really drains — the leg this PR exists to add.
+
+    MUTATION THAT REDS THIS: delete the `else:` branch that calls
+    `drain_session_events` in `run_sweep` → the day file is never read and
+    nothing is posted.
+    """
+    from tortoise.store_sync import run_sweep
+
+    posted: list[dict] = []
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    _events_fixture(monkeypatch, tmp_path, ("sess-ev-1", "sess-ev-2"))
+    cursor = tmp_path / "store-sync"
+
+    receipt = run_sweep(spool=False, post=_stub_post(posted),
+                        cursor_dir=cursor, node="/nonexistent/node")
+
+    assert receipt["session_events"]["filed"] == 2, receipt["session_events"]
+    assert sorted(p["session_id"] for p in posted) == ["sess-ev-1", "sess-ev-2"]
+    # The pass persisted its position: the NEXT sweep must not re-POST these.
+    assert (cursor / "session-events-cursor.json").exists()
+
+
+def test_the_session_events_leg_is_CONSENT_GATED(monkeypatch, tmp_path):
+    """The leg is a TRANSMISSION primitive: no consent ⇒ nothing leaves the box.
+
+    MUTATION THAT REDS THIS: drop the `capture_consent_enabled()` branch for this
+    leg in `run_sweep` → an unconsented host's transcripts are uploaded.
+    """
+    from tortoise.store_sync import run_sweep
+
+    posted: list[dict] = []
+    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
+    _events_fixture(monkeypatch, tmp_path, ("sess-ev-unconsented",))
+    cursor = tmp_path / "store-sync"
+
+    receipt = run_sweep(spool=False, post=_stub_post(posted),
+                        cursor_dir=cursor, node="/nonexistent/node")
+
+    assert posted == [], "a host that never consented had its day files uploaded"
+    assert receipt["session_events"]["status"] == "declined", receipt["session_events"]
+    assert "consent" in receipt["session_events"]["detail"]
+    assert not (cursor / "session-events-cursor.json").exists()
+
+
+def test_the_session_events_leg_reports_no_credential_without_posting(
+        monkeypatch, tmp_path):
+    """No key ⇒ the leg says so AND the sweep is not reported as OK.
+
+    Under `--no-spool` (the Pi cadence's own invocation) there is no spool half to
+    carry that verdict, so if this leg is silent the whole sweep reads `ok: true`
+    over an undrained substrate.
+    """
+    from tortoise.store_sync import run_sweep
+
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    _events_fixture(monkeypatch, tmp_path, ("sess-ev-nocred",))
+
+    receipt = run_sweep(spool=False, api_key=None, post=None,
+                        cursor_dir=tmp_path / "store-sync",
+                        node="/nonexistent/node")
+
+    assert receipt["session_events"]["status"] == "no_credential", receipt["session_events"]
+    assert receipt["ok"] is False, "a substrate that was NOT drained is not a success"
+
+
+def test_a_dry_run_plans_the_session_events_leg_without_moving_it(
+        monkeypatch, tmp_path):
+    """`--dry-run` answers "how big is the backlog" for THIS substrate too.
+
+    MUTATION THAT REDS THIS: drop the `dry_run` branch → the plan posts the day's
+    records and moves the cursor, i.e. the plan performs the work it reports on.
+    """
+    from tortoise.store_sync import run_sweep
+
+    posted: list[dict] = []
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    _events_fixture(monkeypatch, tmp_path, ("sess-ev-plan-1", "sess-ev-plan-2"))
+    cursor = tmp_path / "store-sync"
+
+    receipt = run_sweep(spool=False, dry_run=True, post=_stub_post(posted),
+                        cursor_dir=cursor, node="/nonexistent/node")
+
+    assert receipt["session_events"]["status"] == "dry_run", receipt["session_events"]
+    assert receipt["session_events"]["queued"] == 2
+    assert posted == []
+    assert not (cursor / "session-events-cursor.json").exists()
+
+
+def test_a_cursor_store_that_cannot_be_written_is_not_reported_OK(
+        monkeypatch, tmp_path):
+    """A backlog that moved but could not be REMEMBERED is a failure, not a pass.
+
+    The next sweep re-POSTs the whole pass, so the operator has to see it — the
+    verdict belongs on the sweep, not only in the leg's own summary.
+
+    MUTATION THAT REDS THIS: drop the `cursor_error → ok = False` arm in
+    `run_sweep` → the health line reports a clean sweep over a re-POST storm.
+    """
+    from tortoise.store_sync import run_sweep
+
+    posted: list[dict] = []
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    _events_fixture(monkeypatch, tmp_path, ("sess-ev-cursor",))
+    # A FILE where the cursor directory should be: every write into it is ENOENT
+    # / ENOTDIR, deterministically, with no permissions to arrange.
+    blocker = tmp_path / "store-is-a-file"
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    receipt = run_sweep(spool=False, post=_stub_post(posted),
+                        cursor_dir=blocker, node="/nonexistent/node")
+
+    assert receipt["session_events"]["cursor_error"], receipt["session_events"]
+    assert receipt["ok"] is False
+
+
+def test_a_broken_events_leg_does_not_kill_the_other_legs(monkeypatch, tmp_path):
+    """A substrate that raises is REPORTED on the leg, never fatal to the sweep.
+
+    MUTATION THAT REDS THIS: remove the `except Exception` arm around the leg →
+    the exception escapes `run_sweep` and the log half never runs at all.
+    """
+    import tortoise.session_events_drain as events_mod
+    from tortoise.store_sync import run_sweep
+
+    posted: list[dict] = []
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    _events_fixture(monkeypatch, tmp_path, ("sess-ev-boom",))
+    monkeypatch.setattr(events_mod, "drain_session_events",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("substrate on fire")))
+
+    receipt = run_sweep(spool=False, post=_stub_post(posted),
+                        cursor_dir=tmp_path / "store-sync",
+                        node="/nonexistent/node")
+
+    assert "substrate on fire" in receipt["session_events"]["error"], receipt["session_events"]
+    assert receipt["ok"] is False
+    # The log half still ran: it is the leg that must not be lost to this one.
+    assert receipt["log"] is not None
+
+
+def test_the_sweep_forwards_the_FILE_scope_to_the_events_leg(monkeypatch, tmp_path):
+    """`--file <session>` reaches this leg, and out-of-scope records stay QUEUED.
+
+    MUTATION THAT REDS THIS: drop `only_session_id=` from the leg's call →
+    `store-sync --file X` drains every session's records from this substrate.
+    """
+    from tortoise.store_sync import run_sweep
+
+    posted: list[dict] = []
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    # The filename tail IS the scope (`_session_id_from_filename` reads it), so the
+    # two ids have to be plausible ones — a 6-character tail is deliberately
+    # rejected by the CLI rather than guessed at.
+    _events_fixture(monkeypatch, tmp_path, ("sess-target", "sess-other"))
+    cursor = tmp_path / "store-sync"
+
+    receipt = run_sweep(spool=False, post=_stub_post(posted), cursor_dir=cursor,
+                        files=[str(tmp_path / "2026-10-01T10-00-00Z_sess-target.jsonl")],
+                        node="/nonexistent/node")
+
+    assert [p["session_id"] for p in posted] == ["sess-target"]
+    assert receipt["session_events"]["unselected"] == 1, receipt["session_events"]
+
+
+def test_the_persisted_reason_NAMES_the_session_events_leg(tmp_path):
+    """An events-only failure must not be persisted as a node-worker crash.
+
+    The reason chain could only see the LOG half and the SPOOL half; with
+    `--no-spool` there is no spool half, so the fallback `"worker exited
+    non-zero"` named a component that had exited 0 and delivered its turns.
+
+    MUTATION THAT REDS THIS: remove `_events_failure_reason` from the chain in
+    `write_sweep_status` → both reasons become `"worker exited non-zero"`.
+    """
+    from tortoise import store_sync
+
+    store = tmp_path / "store"
+
+    store_sync.write_sweep_status(
+        {"ok": False, "log": {}, "spool": None,
+         "session_events": {"status": "no_credential", "detail": "no API key"}},
+        store)
+    assert json.loads((store / "sweep-status.json").read_text())["reason"] == "no_credential"
+
+    store_sync.write_sweep_status(
+        {"ok": False, "log": {}, "spool": None,
+         "session_events": {"cursor_error": "PermissionError: denied"}}, store)
+    assert json.loads((store / "sweep-status.json").read_text())["reason"] == "PermissionError: denied"
+
+
+def test_MAIN_prints_the_session_events_leg(monkeypatch, tmp_path, capsys):
+    """The body claims every pass is "printed as one line".
+
+    The persistence was implemented; the PRINT was not, on the leg the production
+    cadence actually runs (`store-sync --no-spool`, stdio ignored) — so `stuck`,
+    `held`, `unreadable` and `cursor_error` reached only `--json`.
+
+    MUTATION THAT REDS THIS: delete the `receipt["session_events"]` print block
+    from `main` → the progress line is absent from stderr.
+    """
+    from tortoise import store_sync
+
+    posted: list[dict] = []
+    monkeypatch.setattr(store_sync, "worker_path", lambda: tmp_path / "missing-worker.ts")
+    monkeypatch.setattr("tortoise.__main__._session_post",
+                        lambda key, url: _stub_post(posted))
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    _events_fixture(monkeypatch, tmp_path, ("sess-ev-main",))
+    cursor = tmp_path / "store-sync"
+
+    rc = store_sync.main(_main_args(cursor, api_key="tt_test",
+                                    api_url="https://example.invalid"))
+
+    err = capsys.readouterr().err
+    assert rc == 1, "the log half has no worker, so the sweep is not OK"
+    assert "session-events drain: filed 1" in err, err
+
+
+def test_the_session_DRAIN_command_drains_the_session_events_substrate(
+        monkeypatch, tmp_path, capsys):
+    """`session drain` (the Claude `SessionStart` cadence) drains it too.
+
+    MUTATION THAT REDS THIS: delete the `#6388` block from `_cmd_session_drain` →
+    nothing is posted from the day file and no line is printed.
+    """
+    from tortoise import __main__ as cli
+
+    posted: list[dict] = []
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    _events_fixture(monkeypatch, tmp_path, ("sess-ev-drain",))
+    monkeypatch.setattr(cli, "_session_post", lambda key, url: _stub_post(posted))
+
+    assert cli._cmd_session_drain("tt_test", "https://example.invalid") == 0
+
+    assert [p["session_id"] for p in posted] == ["sess-ev-drain"]
+    assert "session-events drain: filed 1" in capsys.readouterr().err
+
+
+def test_the_session_drain_command_prints_a_pass_that_only_HELD(
+        monkeypatch, tmp_path, capsys):
+    """The print gate must fire on the states that make NO progress at all.
+
+    Gating on `consumed` alone printed nothing when every record was held for the
+    live session — the exact state an operator needs to see, because nothing will
+    ever move until that session ends.
+
+    MUTATION THAT REDS THIS: gate the print on `events["consumed"]` → held-only
+    passes print nothing.
+    """
+    from tortoise import __main__ as cli
+
+    posted: list[dict] = []
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    _events_fixture(monkeypatch, tmp_path, ("sess-ev-live",))
+    monkeypatch.setattr(cli, "_session_post", lambda key, url: _stub_post(posted))
+
+    assert cli._cmd_session_drain("tt_test", "https://example.invalid",
+                                  exclude_session_id="sess-ev-live") == 0
+
+    err = capsys.readouterr().err
+    assert posted == [], "the LIVE session was filed from the day file"
+    assert "held 1 (live session)" in err, err
