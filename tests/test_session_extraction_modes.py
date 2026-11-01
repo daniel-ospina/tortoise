@@ -223,12 +223,22 @@ def test_a_venice_key_does_not_take_over_a_multi_key_deployment(monkeypatch):
 
 
 def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
-    """#8133 Indicator 2: the lane-gate key set must be a SUPERSET of the v2
-    extractor's provider key set, so no future provider can land in one
-    registry only (the #1549 venice drift).
+    """#8133 Indicator 2: the lane-gate key set must be a SUPERSET of the
+    provider key map the v2/ask lanes route over (``_PROVIDER_KEY_ENV``), so a
+    provider added there cannot land in one registry only (the #1549 venice
+    drift).
+
+    ⚠️ Scope, stated so the guard is not over-claimed (review cycle 1): what is
+    pinned is the KEY MAP, not ``resolve_extractor_provider``, which reads
+    ``DEEPSEEK_API_KEY``/``OPENROUTER_API_KEY``/``VENICE_API_KEY`` INLINE
+    (``model_adapters.py:591-593``) rather than through this map. A provider
+    added by editing only the resolver's inline reads stays green here — that
+    residual is why ``test_a_venice_only_deployment_extracts`` asserts all
+    three readings agree end-to-end on a venice-only env, which a registry-only
+    drift cannot satisfy.
 
     ``test_sdk_priority_covers_all_registry_providers`` guards the other
-    direction (ingest -> priority/hosted); this guards v2 -> lane gate.
+    direction (ingest -> priority/hosted); this guards the key map -> lane gate.
     """
     from tortoise import hosted_api
     from tortoise.model_adapters import _PROVIDER_KEY_ENV

@@ -43,13 +43,18 @@ from .render import render
 #   * ``hosted_api._llm_provider_keys`` (the hosted ``no_provider`` gate),
 #   * ``test_session_extraction_modes.test_the_lane_gate_registry_covers_the_v2_extractor_registry``
 #     and the #1197 drift guard, which demand the two entries below.
-# ⚠️ THREE registration sites, not one — this mapping plus
-# ``sdk._SESSION_LLM_PROVIDER_PRIORITY`` (which provider serves a capture) and
-# ``sdk._SESSION_LLM_DEFAULT_MODELS`` (which model id is sent).  Adding a
-# provider HERE alone registers its KEY and leaves ``_build_session_llm_extractor``
-# raising ``KeyError`` on the missing default model: the #1197 guard catches the
-# first omission, the second is caught only by an end-to-end venice-only test
-# (tests/test_session_extraction_modes.py).
+# ⚠️ FOUR registration sites, not one — this mapping, plus
+# ``sdk._SESSION_LLM_PROVIDER_PRIORITY`` (which provider serves a capture), plus
+# ``sdk._SESSION_LLM_DEFAULT_MODELS`` (which model id is sent), plus
+# ``.github/workflows/deploy-hosted.yml`` (the secret GATE and the ``fly secrets``
+# argv — pinned to ``hosted_api._LLM_PROVIDER_KEYS`` by
+# tests/test_deploy_workflow.py).  Adding a provider HERE alone registers its KEY
+# and then (a) leaves ``_build_session_llm_extractor`` raising ``KeyError`` on the
+# missing default model once the provider is also in the priority tuple, and
+# (b) leaves a HOSTED deployment without the secret, so it still reports
+# no-provider and skips extraction — the #8133 defect again, in the deploy lane.
+# The #1197 guard catches (a)'s first half and (b); the default-model omission and
+# the venice-only behaviour are caught by tests/test_session_extraction_modes.py.
 # Before #8133 ``model_adapters.resolve_extractor_provider`` (the v2 extractor's
 # registry) carried ``venice`` and this mapping did not, so a venice-only
 # deployment reported ``('venice', ['venice'])`` there while every lane gate said
