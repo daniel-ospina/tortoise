@@ -611,6 +611,134 @@ def test_a_REFUSED_session_records_once_per_spool_state(tmp_path):
     assert len(lines()) == 3
 
 
+def test_TWO_sessions_refused_alternately_do_not_re_amplify(tmp_path):
+    """The dedupe stamp is a BOUNDED MAP of (session, reason) pairs, not one slot.
+
+    A single slot holds only the LAST refusal, so with A and B both refused while
+    the spool sits unchanged (a refusal writes nothing, so the spool fingerprint
+    never moves) they overwrite each other and EACH appends a ledger line on its
+    NEXT turn — one line per turn per refused session, forever. That is not a
+    corner: the shape this seam is built for is an indefinite keyless backlog,
+    where every session on the box is refused and several run at once.
+
+    MUTATION THAT REDS THIS: restore the single-slot stamp (read one record, write
+    one record) -> the alternating refusals produce 8 lines instead of 2.
+    """
+    from tortoise import capture_spool as sp
+
+    bounds = sp.Bounds(max_entries=1, max_total_bytes=10_000_000, max_entry_bytes=10_000)
+    write_spool_entry(tmp_path, _snapshot("held", [{"role": "user", "content": "h"}]),
+                      bounds)
+
+    def refuse(session_id: str, size: int) -> None:
+        refused = sp.write_spool_entry(
+            tmp_path,
+            _snapshot(session_id, [{"role": "user", "content": "r" * size}]),
+            bounds)
+        assert refused["written"] is False
+
+    # ALTERNATING refusals of two sessions against an UNCHANGED spool.
+    for size in (1, 2, 3, 4):
+        refuse("refused-a", size)
+        refuse("refused-b", size)
+
+    lines = [d for d in read_discards(tmp_path) if d["reason"] == "spool_saturated"]
+    assert len(lines) == 2, (
+        f"one line per (session, unchanged spool), not per turn: {len(lines)}")
+    assert {d["session_id"] for d in lines} == {"refused-a", "refused-b"}
+
+    # Each pair is still independently recorded when the state moves.
+    sp._remove_entry_files(tmp_path, "held")
+    write_spool_entry(tmp_path, _snapshot("held-2", [{"role": "user", "content": "h"}]),
+                      bounds)
+    refuse("refused-a", 9)
+    refuse("refused-b", 9)
+    assert len([d for d in read_discards(tmp_path)
+                if d["reason"] == "spool_saturated"]) == 4
+
+
+def test_the_refusal_stamp_is_BOUNDED_and_evicts_oldest_first(tmp_path):
+    """The map must be bounded, or it is just the append-only file it replaced.
+
+    `CAPTURE_REFUSAL_STAMP_MAX` distinct (session, reason) pairs are remembered;
+    the oldest-written pair is evicted first, so the only failure an eviction can
+    produce is a RE-record of a refusal that is still happening — never a silent
+    drop. The ledger, which is the record of truth, is unaffected: every DISTINCT
+    event is still one line.
+
+    MUTATION THAT REDS THIS: write the history unbounded (`refreshed`, no slice)
+    -> the stamp file holds MAX+3 entries; keep the OLDEST instead of the newest
+    (`refreshed[:MAX]`) -> the freshly-refused session is not remembered and
+    repeats.
+    """
+    from tortoise import capture_spool as sp
+
+    bounds = sp.Bounds(max_entries=1, max_total_bytes=10_000_000, max_entry_bytes=10_000)
+    write_spool_entry(tmp_path, _snapshot("held", [{"role": "user", "content": "h"}]),
+                      bounds)
+    window = sp.CAPTURE_REFUSAL_STAMP_MAX
+    assert window >= 2, "a one-entry window is the single slot this replaced"
+
+    sessions = [f"s{i}" for i in range(window + 3)]
+    for session_id in sessions:
+        sp.write_spool_entry(
+            tmp_path, _snapshot(session_id, [{"role": "user", "content": "r"}]), bounds)
+
+    stamps = json.loads(
+        (tmp_path / sp.CAPTURE_REFUSAL_STAMP_FILE).read_text(encoding="utf-8"))["refusals"]
+    assert len(stamps) == window, f"bounded window: {len(stamps)} != {window}"
+    assert [s["session_id"] for s in stamps] == sessions[-window:], (
+        "oldest-written evicted first; the newest refusals are the ones remembered")
+
+    # The ledger is the record of truth and is not truncated by the window.
+    lines = [d for d in read_discards(tmp_path) if d["reason"] == "spool_saturated"]
+    assert len(lines) == len(sessions)
+
+
+def test_the_refusal_stamp_is_READ_CROSS_LEG(tmp_path):
+    """The two legs share ONE spool directory and ONE ledger, so a stamp written
+    by either leg must suppress a repeat the other observes for the same session
+    (the store-sync backstop re-offers `~/.pi/agent/sessions/**` after the hook
+    leg). That is only possible if both legs key on the SAME string
+    (`<name-digest>:<mtime_ns>`) — the Pi leg used to store a NUMBER, which can
+    never equal this leg's string, so neither leg suppressed the other's repeat.
+
+    MUTATION THAT REDS THIS: read only the single-record shape (ignore a
+    `refusals` map) -> the stamp is not matched, a duplicate line is appended.
+    Also RED (in the TS twin) if `entries_stamp` is a number.
+    """
+    from tortoise import capture_spool as sp
+
+    bounds = sp.Bounds(max_entries=1, max_total_bytes=10_000_000, max_entry_bytes=10_000)
+    write_spool_entry(tmp_path, _snapshot("held", [{"role": "user", "content": "h"}]),
+                      bounds)
+
+    # The stamp the OTHER leg writes for a refusal of this same session: the map
+    # shape, the string key, the ledger line it produced.
+    stamp = sp._entries_dir_stamp(tmp_path)
+    assert re.fullmatch(r"[0-9a-f]{16}:\d+", stamp), (
+        f"the cross-leg key shape is `<16-hex-name-digest>:<mtime-ns>`: {stamp!r}")
+    prior = {"reason": "spool_saturated", "session_id": "refused", "at": "x"}
+    (tmp_path / sp.CAPTURE_REFUSAL_STAMP_FILE).write_text(
+        json.dumps({"refusals": [{
+            "session_id": "refused",
+            "reason": "spool_saturated",
+            "entries_stamp": stamp,
+            "record": prior,
+        }]}) + "\n",
+        encoding="utf-8")
+
+    refused = sp.write_spool_entry(
+        tmp_path, _snapshot("refused", [{"role": "user", "content": "r"}]), bounds)
+    assert refused["written"] is False
+    assert [d for d in read_discards(tmp_path)
+            if d["reason"] == "spool_saturated"] == [], (
+        "the other leg's stamp suppresses this leg's repeat — no duplicate line")
+    assert refused["discards"][-1] == prior, (
+        "the caller is still told the state: a suppressed repeat returns the prior "
+        "line rather than inventing an event")
+
+
 def test_the_health_line_NAMES_saturation(tmp_path):
     """`spool_saturated`'s own docstring calls the state "first-class, reported",
     but none of the five health states could say it: a REFUSING box printed

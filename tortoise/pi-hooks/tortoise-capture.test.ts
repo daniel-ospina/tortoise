@@ -29,8 +29,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { createHash } from "node:crypto";
 import {
   CAPTURE_LANES,
+  CAPTURE_REFUSAL_STAMP_FILE,
+  CAPTURE_REFUSAL_STAMP_MAX,
   COHORT_COST_CAP_CODE,
   DISCARD_COUNT_EXCEEDED,
   DISCARD_HTTP_REJECTED,
@@ -2328,6 +2331,163 @@ test("a REFUSED session records once per spool state", () => {
   writeSpoolEntry(spool, { ...snapshot("held-2"), turns: [{ role: "user", content: "h" }] }, bounds);
   writeSpoolEntry(spool, { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] }, bounds);
   assert.equal(lines().length, 3);
+});
+
+test("TWO sessions refused alternately do not re-amplify", () => {
+  // A single stamp slot holds only the LAST refusal, so with A and B both refused
+  // while the spool sits unchanged (a refusal writes nothing) they overwrite each
+  // other and EACH appends one ledger line on its next turn — one line per turn
+  // per refused session, forever. That is the NORMAL state on a keyless box, where
+  // every session is refused and several run at once, not a corner.
+  //
+  // MUTATION THAT REDS THIS: restore the single-slot stamp (keep only the last
+  // record) → the four alternating refusals produce 8 lines instead of 2.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 1, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(spool, { ...snapshot("held"), turns: [{ role: "user", content: "h" }] }, bounds);
+
+  for (const size of [1, 2, 3, 4]) {
+    for (const session of ["refused-a", "refused-b"]) {
+      const refused = writeSpoolEntry(
+        spool,
+        { ...snapshot(session), turns: [{ role: "user", content: "r".repeat(size) }] },
+        bounds,
+      );
+      assert.equal(refused.written, false);
+    }
+  }
+  const lines = () => readDiscards(spool).filter((d) => d.reason === "spool_saturated");
+  assert.equal(lines().length, 2, `one line per (session, unchanged spool): ${lines().length}`);
+  assert.deepEqual(
+    new Set(lines().map((d) => d.session_id)),
+    new Set(["refused-a", "refused-b"]),
+  );
+
+  // Each pair is still independently recorded when the state moves.
+  unlinkSync(join(spool, "entries", `${entryKey("held")}.meta.json`));
+  unlinkSync(join(spool, "entries", `${entryKey("held")}.turns.jsonl`));
+  writeSpoolEntry(spool, { ...snapshot("held-2"), turns: [{ role: "user", content: "h" }] }, bounds);
+  writeSpoolEntry(spool, { ...snapshot("refused-a"), turns: [{ role: "user", content: "r" }] }, bounds);
+  writeSpoolEntry(spool, { ...snapshot("refused-b"), turns: [{ role: "user", content: "r" }] }, bounds);
+  assert.equal(lines().length, 4);
+});
+
+test("the refusal stamp is BOUNDED and evicts oldest first", () => {
+  // Bounded on purpose: an unbounded map would just be the append-only file it
+  // replaced. Oldest-written pair evicted first, so the only failure an eviction
+  // can produce is a RE-record of a refusal that is still happening — never a
+  // silent drop. The ledger is the record of truth and is not truncated.
+  //
+  // MUTATION THAT REDS THIS: write the history unbounded → the stamp file holds
+  // MAX+3 entries; keep the OLDEST instead of the newest → the freshly-refused
+  // session is forgotten and repeats.
+  const spool = tmpSpool();
+  const bounds = { maxEntries: 1, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(spool, { ...snapshot("held"), turns: [{ role: "user", content: "h" }] }, bounds);
+  assert.ok(CAPTURE_REFUSAL_STAMP_MAX >= 2, "a one-entry window is the single slot replaced");
+
+  const sessions = Array.from(
+    { length: CAPTURE_REFUSAL_STAMP_MAX + 3 },
+    (_, i) => `s${i}`,
+  );
+  for (const session of sessions) {
+    writeSpoolEntry(spool, { ...snapshot(session), turns: [{ role: "user", content: "r" }] }, bounds);
+  }
+
+  const stamps = JSON.parse(readFileSync(join(spool, CAPTURE_REFUSAL_STAMP_FILE), "utf8"))
+    .refusals as { session_id?: string }[];
+  assert.equal(stamps.length, CAPTURE_REFUSAL_STAMP_MAX, "bounded window");
+  assert.deepEqual(
+    stamps.map((s) => s.session_id),
+    sessions.slice(-CAPTURE_REFUSAL_STAMP_MAX),
+    "oldest-written evicted first; the newest refusals are remembered",
+  );
+  const lines = readDiscards(spool).filter((d) => d.reason === "spool_saturated");
+  assert.equal(lines.length, sessions.length, "the ledger is not truncated by the window");
+});
+
+test("a refusal inside ONE coarse filesystem tick is still recorded", () => {
+  // The stamp is `<name-digest>:<mtime>` because an mtime ALONE is not enough:
+  // directory timestamps are coarse (tmpfs ticks at ~4 ms), so a removal and a
+  // re-admission inside one tick look like the same state and the genuinely NEW
+  // refusal is dropped from the ledger — the one surface a refusal has. This pins
+  // the mtime to a fixed value on both sides, so ONLY the name digest can tell the
+  // two states apart — deterministic, no dependence on the filesystem's clock.
+  //
+  // MUTATION THAT REDS THIS: return `statSync(entriesDir).mtimeMs` (mtime only,
+  // the pre-fix shape) → the second refusal is suppressed and stays at 1 line.
+  const spool = tmpSpool();
+  const entriesPath = join(spool, "entries");
+  const bounds = { maxEntries: 1, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(spool, { ...snapshot("held"), turns: [{ role: "user", content: "h" }] }, bounds);
+
+  const clock = new Date(1_700_000_000_000);
+  utimesSync(entriesPath, clock, clock);
+  writeSpoolEntry(spool, { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] }, bounds);
+  const lines = () => readDiscards(spool).filter((d) => d.reason === "spool_saturated");
+  assert.equal(lines().length, 1);
+
+  // A DIFFERENT entry set, with `entries/`'s mtime pinned to the SAME tick.
+  unlinkSync(join(entriesPath, `${entryKey("held")}.meta.json`));
+  unlinkSync(join(entriesPath, `${entryKey("held")}.turns.jsonl`));
+  writeSpoolEntry(spool, { ...snapshot("held-2"), turns: [{ role: "user", content: "h" }] }, bounds);
+  utimesSync(entriesPath, clock, clock);
+  writeSpoolEntry(spool, { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] }, bounds);
+  assert.equal(lines().length, 2, "a changed entry set is a new observation, not a repeat");
+});
+
+test("the refusal stamp is READ CROSS-LEG (same file, same string key)", () => {
+  // The two legs share ONE spool directory and ONE ledger, so a stamp written by
+  // either leg must suppress a repeat the other observes for the same session (the
+  // store-sync backstop re-offers `~/.pi/agent/sessions/**` after the hook leg).
+  // That needs the SAME key on both: this leg used to store a NUMBER where Python
+  // stores `<name-digest>:<mtime_ns>`, so neither leg could ever suppress the
+  // other's repeat.
+  //
+  // MUTATION THAT REDS THIS: store/compare `entries_stamp` as a number → the
+  // string-keyed record is not matched, and a fresh line is appended.
+  const spool = tmpSpool();
+  const entriesPath = join(spool, "entries");
+  const bounds = { maxEntries: 1, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
+  writeSpoolEntry(spool, { ...snapshot("held"), turns: [{ role: "user", content: "h" }] }, bounds);
+  writeSpoolEntry(spool, { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] }, bounds);
+
+  // The stamp the OTHER leg would write: the map shape, with the key string this
+  // leg must be able to produce and compare. Assert the exact format so the two
+  // legs cannot drift apart again.
+  const names = readdirSync(entriesPath).filter((n) => n.endsWith(".meta.json")).sort();
+  const digest = createHash("sha256").update(names.join("\n"), "utf8").digest("hex").slice(0, 16);
+  const { mtimeNs } = statSync(entriesPath, { bigint: true });
+  const expected = `${digest}:${mtimeNs}`;
+  const written = JSON.parse(readFileSync(join(spool, CAPTURE_REFUSAL_STAMP_FILE), "utf8"))
+    .refusals[0];
+  assert.equal(written.entries_stamp, expected, "the cross-leg key string");
+  assert.equal(typeof written.entries_stamp, "string");
+
+  const prior = { session_id: "refused", reason: "spool_saturated", at: "the-other-leg" };
+  writeFileSync(
+    join(spool, CAPTURE_REFUSAL_STAMP_FILE),
+    `${JSON.stringify({
+      refusals: [{
+        session_id: "refused",
+        reason: "spool_saturated",
+        entries_stamp: expected,
+        record: prior,
+      }],
+    })}\n`,
+  );
+  const refused = writeSpoolEntry(
+    spool,
+    { ...snapshot("refused"), turns: [{ role: "user", content: "r" }] },
+    bounds,
+  );
+  assert.equal(refused.written, false);
+  assert.equal(
+    readDiscards(spool).filter((d) => d.reason === "spool_saturated").length,
+    1,
+    "the other leg's stamp suppresses this leg's repeat — no duplicate line",
+  );
+  assert.deepEqual(refused.discards.at(-1), prior, "the suppressed repeat returns the prior line");
 });
 
 test("the ONE health scan answers both questions the same way", async () => {

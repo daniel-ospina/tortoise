@@ -1,4 +1,4 @@
-// tortoise-hook-version: 16
+// tortoise-hook-version: 17
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -40,6 +40,18 @@
 // shipped bytes move. `session verify`'s "it captures with older logic"
 // wording is imprecise for this one generation; the classification and the
 // repair it prompts are right.
+//
+// Generation 17 (capture-loss, #10479 review): the refusal-ledger dedupe became a
+// BOUNDED MAP instead of one stamp, and its key became identical to the Python
+// leg's. A single slot let two concurrently-refused sessions overwrite each
+// other and re-amplify one ledger line per turn each — the normal state on a
+// keyless box, where every session is refused — and the leg stored the stamp as
+// a NUMBER where Python stores `<name-digest>:<mtime_ns>`, so neither leg could
+// ever suppress a repeat the other recorded for the same session. The stamp now
+// carries the name digest (a coarse mtime alone could hide a removal plus a
+// re-admission inside one tick and drop a genuinely NEW refusal), and the window
+// is `CAPTURE_REFUSAL_STAMP_MAX` distinct (session, reason) pairs, evicted
+// oldest-written first so an eviction can only ever cause a RE-record.
 //
 // Generation 16 (capture-loss, #10479): this seam no longer DISCARDS an
 // undelivered capture to make room, and it says so on the health line. Four
@@ -1031,6 +1043,23 @@ export const DISCARD_HTTP_REJECTED = "http_rejected";
  *  Python leg's `CAPTURE_REFUSAL_STAMP_FILE` — one spool, two legs, so the file
  *  NAME is part of the contract). */
 export const CAPTURE_REFUSAL_STAMP_FILE = ".refusal-stamp.json";
+/** How many DISTINCT refused (session, reason) pairs the stamp remembers (the
+ *  Python leg's `CAPTURE_REFUSAL_STAMP_MAX` — same file, same window). One slot
+ *  was not enough: with A and B both refused while the spool sits unchanged, a
+ *  single stamp lets them overwrite each other and each then appends one ledger
+ *  line per turn. Bounded on purpose — an unbounded map would just be the
+ *  append-only file it replaced. */
+export const CAPTURE_REFUSAL_STAMP_MAX = 32;
+
+/** One remembered refusal: the key parts plus the ledger line it produced.
+ *  `entries_stamp` is a STRING (`<name-digest>:<mtime_ns>`) so a stamp written by
+ *  either leg can suppress a repeat the other observes. */
+export interface RefusalStamp {
+  session_id?: string;
+  reason?: string;
+  entries_stamp?: string;
+  record?: DiscardRecord;
+}
 
 export interface SpoolMeta {
   version: 1;
@@ -1547,29 +1576,55 @@ function refusalStampPath(dir: string): string {
   return join(dir, CAPTURE_REFUSAL_STAMP_FILE);
 }
 
-/** The last stamped refusal, or `undefined` — a TOTAL read, never a throw. */
-function readRefusalStamp(dir: string):
-  { session_id?: string; reason?: string; entries_stamp?: number; record?: DiscardRecord } | undefined {
+/** The last stamped refusals, most recent LAST — a TOTAL read, never a throw.
+ *
+ * Accepts the SINGLE-record shape written before the map existed
+ * (`{session_id, reason, entries_stamp, record}`) as a one-entry history, so an
+ * upgrade on a live box does not have to re-learn the refusal it had just
+ * suppressed. */
+function readRefusalStamps(dir: string): RefusalStamp[] {
   try {
     const parsed = JSON.parse(readFileSync(refusalStampPath(dir), "utf8"));
-    return parsed && typeof parsed === "object" ? parsed : undefined;
+    if (!parsed || typeof parsed !== "object") return [];
+    const history = (parsed as { refusals?: unknown }).refusals;
+    if (Array.isArray(history)) {
+      return history.filter((s): s is RefusalStamp => !!s && typeof s === "object");
+    }
+    return "session_id" in parsed ? [parsed as RefusalStamp] : [];
   } catch {
-    return undefined;
+    return [];
   }
 }
 
 /** A cheap fingerprint of the spool state a refusal was measured against.
  *
+ * `<digest of the meta-name set>:<entries/ mtime>` — the EXACT string the Python
+ * leg's `_entries_dir_stamp` produces, because the two legs share this one stamp
+ * file and a stamp one leg wrote must suppress a repeat the other observes for
+ * the same session (the store-sync backstop re-offers a session the hook leg
+ * already refused). A number here could never equal Python's string, so the two
+ * legs silently re-recorded each other's refusals — the safe direction, but not
+ * the stated rule and not the one the ledger's "bounded" claim relies on.
+ *
  * `entries/`'s mtime moves on create, unlink and rename — exactly the
  * transitions that can change "is anything evictable?" — and does NOT move when
- * a refused session re-snapshots, because a refusal writes nothing at all. That
- * is what makes the stamp hold across a refused session's turns while still
- * letting the next refusal after a drain be recorded. */
-function entriesDirStamp(dir: string): number {
+ * a refused session re-snapshots, because a refusal writes nothing at all. The
+ * NAME DIGEST is what makes membership changes exact: filesystem timestamps are
+ * coarse (tmpfs ticks at ~4 ms), so a removal and a re-admission inside one tick
+ * would otherwise look like the same state and a genuinely NEW refusal would be
+ * dropped from the ledger — the one surface a refusal has.
+ *
+ * Fails toward RECORDING, exactly like the Python leg. */
+function entriesDirStamp(dir: string): string {
   try {
-    return statSync(entriesDir(dir)).mtimeMs;
+    const names = readdirSync(entriesDir(dir))
+      .filter((name) => name.endsWith(".meta.json"))
+      .sort();
+    const digest = createHash("sha256").update(names.join("\n"), "utf8").digest("hex").slice(0, 16);
+    const { mtimeNs } = statSync(entriesDir(dir), { bigint: true });
+    return `${digest}:${mtimeNs}`;
   } catch {
-    return 0;
+    return "unreadable";
   }
 }
 
@@ -1585,10 +1640,14 @@ function entriesDirStamp(dir: string): number {
  *
  * The key is (session_id, reason, `entries/` stamp): the same session, refused
  * for the same reason, while the spool itself has not changed, is the SAME
- * event. One stamp stores the LAST refusal only, so it can suppress at most a
- * repeat of itself: a different session, a different reason, or any change in
- * the entry set is always recorded. The Python leg's `_record_refusal` is the
- * twin and keys identically, because the two legs share this one ledger.
+ * event. The history holds the last `CAPTURE_REFUSAL_STAMP_MAX` distinct
+ * (session, reason) pairs — a single slot let two concurrently-refused sessions
+ * overwrite each other and re-amplify per turn, which is the normal state on a
+ * keyless box, not a corner. A different session, a different reason, or any
+ * change in the entry set is always recorded. The Python leg's `_record_refusal`
+ * is the twin and keys IDENTICALLY (same string stamp, same window), because the
+ * two legs share this one ledger. Eviction is oldest-written first, so the only
+ * failure an eviction can produce is a RE-record.
  *
  * Returns the ledger line either way — the prior one when this is a suppressed
  * repeat — so a caller may report "the state" without inventing an event. */
@@ -1607,19 +1666,26 @@ export function recordRefusal(
     reason: rec.reason,
     entries_stamp: entriesDirStamp(dir),
   };
-  const stamp = readRefusalStamp(dir);
-  if (
-    stamp &&
-    Object.entries(fingerprint).every(([key, value]) =>
-      stamp[key as keyof typeof fingerprint] === value,
-    )
-  ) {
+  const history = readRefusalStamps(dir);
+  for (const stamp of history) {
+    if (stamp.session_id !== fingerprint.session_id) continue;
+    if (stamp.reason !== fingerprint.reason) continue;
+    if (stamp.entries_stamp !== fingerprint.entries_stamp) continue;
     if (stamp.record && typeof stamp.record === "object") return stamp.record;
   }
   const full = recordDiscard(dir, rec);
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    atomicWrite(refusalStampPath(dir), `${JSON.stringify({ ...fingerprint, record: full })}\n`);
+    // Drop this pair's previous observation, append the fresh one LAST, and keep
+    // the window bounded — oldest-written pair evicted first.
+    const refreshed = history.filter(
+      (stamp) => stamp.session_id !== fingerprint.session_id || stamp.reason !== fingerprint.reason,
+    );
+    refreshed.push({ ...fingerprint, record: full });
+    atomicWrite(
+      refusalStampPath(dir),
+      `${JSON.stringify({ refusals: refreshed.slice(-CAPTURE_REFUSAL_STAMP_MAX) })}\n`,
+    );
   } catch {
     // the stamp is an optimisation, never a precondition for recording
   }

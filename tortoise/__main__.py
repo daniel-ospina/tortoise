@@ -6160,7 +6160,7 @@ def _print_capture_health() -> None:
 
     Best-effort by construction: a health read must never break the exit-0
     contract of the drain, and an `OK`/`DRAINING` line on every drain would be
-    noise. Only a BLOCKED or an UNREADABLE spool is worth printing.
+    noise. Only a BLOCKED, SATURATED or an UNREADABLE spool is worth printing.
 
     NOTE the surface: this writes to the DRAIN's stderr, which the SessionStart
     hook redirects to /dev/null. It is therefore an operator's line for a drain
@@ -6175,14 +6175,18 @@ def _print_capture_health() -> None:
         health = capture_health_line(spool_dir(), api_key=_capture_key_presence())
     except Exception:
         return
-    # BLOCKED and UNREADABLE only: a DRAINING spool on a normal SessionStart is
-    # usually the live session held back for its own final flush (and INACTIVE is
-    # already reported by this command's own keyless message), so a line about
-    # either on every start is noise — the alert-fatigue pattern recorded at the
-    # doctor's consent row. UNREADABLE is printed because a drain that could not
-    # READ the spool is the one case where printing nothing would leave the
-    # operator with the silent empty backlog this issue removed.
-    if health.state in ("blocked", "unreadable"):
+    # BLOCKED, SATURATED and UNREADABLE: a DRAINING spool on a normal
+    # SessionStart is usually the live session held back for its own final flush
+    # (and INACTIVE is already reported by this command's own keyless message), so
+    # a line about either on every start is noise — the alert-fatigue pattern
+    # recorded at the doctor's consent row. UNREADABLE is printed because a drain
+    # that could not READ the spool is the one case where printing nothing would
+    # leave the operator with the silent empty backlog this issue removed.
+    # SATURATED belongs here for the same reason and was the stale-filter gap a
+    # reviewer found: the box refusing every new capture is exactly the box whose
+    # operator runs the drain by hand to find out why, and this was the one hand-
+    # run surface that stayed silent about it.
+    if health.state in ("blocked", "unreadable", "saturated"):
         print(health.line, file=_sys.stderr)
 
 

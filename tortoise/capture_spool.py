@@ -126,6 +126,16 @@ CAPTURE_STATUS_FILE = "status.json"
 #: root, counted against no ceiling. Bookkeeping only: never a record of the
 #: capture state, never read as a verdict.
 CAPTURE_REFUSAL_STAMP_FILE = ".refusal-stamp.json"
+#: How many DISTINCT refused (session, reason) pairs the stamp remembers.
+#:
+#: One slot was not enough: the shape this seam is built for is an indefinite
+#: keyless backlog, where MORE THAN ONE session is refused while the spool sits
+#: unchanged. With a single stamp, A and B overwrite each other and each then
+#: appends one ledger line per turn — the amplifier the stamp exists to close,
+#: still open at N lines/turn. Bounded on purpose: an unbounded map would just be
+#: the append-only file it replaced. Oldest-written pair is evicted first, so the
+#: worst case is a RE-record (the safe direction), never a silent drop.
+CAPTURE_REFUSAL_STAMP_MAX = 32
 #: The server's machine-readable 402 categories. #4614 made the 402 carry one
 #: precisely because capture clients are FORBIDDEN from prose-matching the
 #: message; the Pi leg names the same two (`QUOTA_EXCEEDED_CODE`,
@@ -819,13 +829,24 @@ def _refusal_stamp_path(root: Path) -> Path:
     return root / CAPTURE_REFUSAL_STAMP_FILE
 
 
-def _read_refusal_stamp(root: Path) -> dict | None:
-    """The last stamped refusal, or ``None`` — a TOTAL read, never a crash."""
+def _read_refusal_stamps(root: Path) -> list[dict]:
+    """Every stamped refusal, most recent LAST — a TOTAL read, never a crash.
+
+    Accepts the SINGLE-record shape written before the map existed
+    (``{session_id, reason, entries_stamp, record}``) as a one-entry history, so
+    an upgrade on a live box does not have to re-learn the refusal it had just
+    suppressed.
+    """
     try:
-        record = json.loads(_refusal_stamp_path(root).read_text(encoding="utf-8"))
+        parsed = json.loads(_refusal_stamp_path(root).read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
-        return None
-    return record if isinstance(record, dict) else None
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    history = parsed.get("refusals")
+    if isinstance(history, list):
+        return [stamp for stamp in history if isinstance(stamp, dict)]
+    return [parsed] if "session_id" in parsed else []
 
 
 def _entries_dir_stamp(root: Path) -> str:
@@ -867,29 +888,42 @@ def _record_refusal(root: Path, record: dict) -> dict:
 
     The key is (session_id, reason, ``entries/`` stamp): the same session,
     refused for the same reason, while the spool itself has not changed, is the
-    SAME event. One stamp stores the LAST refusal only, so it can suppress at
-    most a repeat of itself: a different session, a different reason, or any
-    change in the entry set is always recorded.
+    SAME event. The history holds the last ``CAPTURE_REFUSAL_STAMP_MAX`` distinct
+    (session, reason) pairs — a single slot let two concurrently-refused sessions
+    overwrite each other and re-amplify per turn, which is the normal state on a
+    keyless box, not a corner. A different session, a different reason, or any
+    change in the entry set is always recorded; only an indistinguishable repeat
+    of the pair's own last observation is suppressed.
 
     Returns the ledger line either way — the prior one when this is a suppressed
     repeat — so a caller may report "the state" without inventing an event.
     """
+    key = (record.get("session_id"), record.get("reason"))
     fingerprint = {
-        "session_id": record.get("session_id"),
-        "reason": record.get("reason"),
+        "session_id": key[0],
+        "reason": key[1],
         "entries_stamp": _entries_dir_stamp(root),
     }
-    stamp = _read_refusal_stamp(root)
-    if stamp is not None and all(stamp.get(key) == value
-                                 for key, value in fingerprint.items()):
+    history = _read_refusal_stamps(root)
+    for stamp in history:
+        if (stamp.get("session_id"), stamp.get("reason")) != key:
+            continue
+        if stamp.get("entries_stamp") != fingerprint["entries_stamp"]:
+            continue
         prior = stamp.get("record")
         if isinstance(prior, dict):
             return prior
     full = record_discard(root, record)
     with contextlib.suppress(OSError):
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Drop this pair's previous observation, append the fresh one LAST, and
+        # keep the window bounded — oldest-written pair evicted first, so the
+        # only failure mode an eviction can produce is a re-record.
+        refreshed = [stamp for stamp in history
+                     if (stamp.get("session_id"), stamp.get("reason")) != key]
+        refreshed.append({**fingerprint, "record": full})
         _atomic_write(_refusal_stamp_path(root),
-                      json.dumps({**fingerprint, "record": full},
+                      json.dumps({"refusals": refreshed[-CAPTURE_REFUSAL_STAMP_MAX:]},
                                  ensure_ascii=False) + "\n")
     return full
 
