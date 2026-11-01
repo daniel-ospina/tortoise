@@ -272,6 +272,15 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             labels = {lab for _v, lab in pairs}
             if len(labels) == 1:
                 label = labels.pop()
+            elif len(labels) > 1:
+                # Two labels in one writer's Cypher: picking one would report a
+                # stored label as covered while the other may be unserved.
+                label = "UNKNOWN(two labels: " + ",".join(sorted(labels)) + ")"
+                writers[node.name] = {
+                    "callee": callee, "at": f"{path.relative_to(root)}:{node.lineno}",
+                    "kind": kind, "label": label,
+                }
+                continue
             else:
                 stem = (node.name[len("_upsert_"):]
                         if node.name.startswith("_upsert_") else node.name)
@@ -294,22 +303,91 @@ def _write_seams_that_embed() -> dict[str, str]:
     return {w: d["at"] for w, d in embedding_writers().items() if d["kind"] == "gated"}
 
 
+#: Where a "shipped default" for a flag would live. Searched, not assumed:
+#: `measure()` clears the ambient env so a lane's own shell cannot make a
+#: default-off gate read as enforced, which also means the ambient value can
+#: NEVER answer "is this shipped on" (review round 3, P2).
+CONFIG_SURFACES: tuple[str, ...] = (
+    ".env.example",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "Dockerfile",
+    "config",
+    ".github/workflows",
+)
+
+
+def flag_in_shipped_configs(flag: str) -> dict:
+    """Is ``flag`` switched ON by any configuration this repo ships?
+
+    Returns ``{"on": bool, "files": [...], "searched": [paths]}``. A flag set
+    nowhere is a measured `False` — with the list of places that were searched,
+    so a reader can see what "nowhere" covered.
+    """
+    hits: list[str] = []
+    searched: list[str] = []
+    for rel in CONFIG_SURFACES:
+        target = REPO_ROOT / rel
+        candidates = ([target] if target.is_file()
+                      else sorted(target.rglob("*")) if target.is_dir() else [])
+        for path in candidates:
+            if not path.is_file() or path.stat().st_size > 2_000_000:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if flag not in text:
+                continue
+            searched.append(path.relative_to(REPO_ROOT).as_posix())
+            for line in text.splitlines():
+                if flag not in line:
+                    continue
+                value = line.split(flag, 1)[1].lstrip("=: ").strip().strip("'\"")
+                if value.split()[0].lower() in ("1", "true", "yes", "on"):
+                    hits.append(f"{path.relative_to(REPO_ROOT)}: {line.strip()[:90]}")
+    return {"on": bool(hits), "files": hits, "searched": searched,
+            "surfaces": list(CONFIG_SURFACES)}
+
+
 def score_rule_bullet() -> Row:
     """Bullet 1 — the rule is stated, is ONE rule set, and is enforced."""
     import tortoise.embed_gate as embed_gate
     import tortoise.value_gate as value_gate
 
     gate_src = (REPO_ROOT / "tortoise/embed_gate.py").read_text(encoding="utf-8")
-    stated = "def embedding_verdict" in gate_src
+    # Stated = the predicate EXISTS, and WIRED = the seam actually calls it.
+    # Both are read; a decorative `SEAM` constant is not evidence (review
+    # round 3, P3: "the parenthetical is never measured").
+    stated_in_gate = "def embedding_verdict" in gate_src
+    seam_wired = False
+    try:
+        import ast as _ast
+
+        seam_src = (REPO_ROOT / "tortoise/embeddings.py").read_text(encoding="utf-8")
+        for node in _ast.walk(_ast.parse(seam_src)):
+            if (isinstance(node, _ast.FunctionDef) and node.name == "encode_for_row"):
+                seg = _ast.get_source_segment(seam_src, node) or ""
+                seam_wired = "embed_gate.embedding_verdict" in seg
+                break
+    except (OSError, SyntaxError):
+        seam_wired = False
+    stated = stated_in_gate and seam_wired
     # Identity, not equality: a COPY of the rule set is the drift §12.2a names.
     shared = embed_gate.RULE_SET is value_gate.RULES
     writers = embedding_writers()
     gated = {w: d for w, d in writers.items() if d["kind"] == "gated"}
     ungated = {w: d for w, d in writers.items() if d["kind"] == "ungated"}
     unparsed = [w for w, d in writers.items() if d["kind"] == "unparsed"]
-    on_by_default = embed_gate.embed_gate_enabled()  # env-cleared by measure()
+    # ⛔ Two different questions, both asked: the ambient env is what
+    # `measure()` deliberately clears (so a lane's shell cannot fake it), and
+    # the SHIPPED config is where a default actually lives.
+    ambient = embed_gate.embed_gate_enabled()
+    shipped = flag_in_shipped_configs(embed_gate.ENV_FLAG)
+    on_by_default = ambient or shipped["on"]
     notes = [
-        f"stated: {stated} ({SEAM.rsplit('::', 1)[-1]} asks the predicate)",
+        f"stated: {stated} (predicate in embed_gate: {stated_in_gate}; "
+        f"{SEAM} calls it: {seam_wired})",
         f"one rule set: {shared} (embed_gate.RULE_SET is value_gate.RULES; "
         f"ids={len(value_gate.RULES)})",
         f"write paths reaching the gated seam: {len(gated)} "
@@ -318,8 +396,10 @@ def score_rule_bullet() -> Row:
         f"({', '.join(f'{w} @ {d['at']}' for w, d in sorted(ungated.items())) or 'none'})"
         + (" — the session/Turn writers #5008 declares as exempt"
            if ungated else ""),
-        f"gate enabled by default: {on_by_default} "
-        f"(TORTOISE_EMBED_GATE={os.environ.get(embed_gate.ENV_FLAG, '')!r})",
+        f"gate enabled by default: {on_by_default} (ambient "
+        f"{embed_gate.ENV_FLAG}={os.environ.get(embed_gate.ENV_FLAG, '')!r}; "
+        f"shipped configs searched: {shipped['searched'] or 'none mention it'}"
+        f"; set ON in: {shipped['files'] or 'none'})",
         # ⛔ A module that will not parse is a HOLE in the measurement, not a
         # zero: its writers — gated or bypassing — are invisible to every row
         # (this tool's own review, P2).
@@ -577,7 +657,11 @@ def score_v1_bullet() -> Row:
             elif re.search(r"\bOPEN\b|\bopen decision\b|human gate|owner decision",
                            line) or "never spends that decision" in line:
                 open_lines.append(f"{rel}:{i}: {line.strip()}")
-    notes = [f"decided markers found: {len(decided)}"]
+    notes = [
+        f"decided markers found: {len(decided)}",
+        "implemented: UNMEASURED(not what a decision record proves — a ruling "
+        "creates the follow-up work; this row can only see the record)",
+    ]
     notes += [f"open: {ln}" for ln in open_lines[:3]]
     return Row(
         bullet=4,
@@ -627,6 +711,42 @@ def _resolve(root: Path, parts: list[str]) -> set[str]:
     return out
 
 
+def _import_edges(root: Path, tree, path: Path) -> set[str]:
+    """In-tree modules one file imports: the AST, because a regex is not.
+
+    ⛔ Both shapes below are IN THIS TREE and both were missed by a one-line
+    `from … import …` regex, each producing `count: 1 / MET` on a tree with two
+    predicates (review round 3, P2):
+
+    * `import tortoise.kind_index as ki` (a plain `import` — `kind_classifier.py:204`);
+    * `from .pkg import (\n    a,\n    b,\n)` (a parenthesised, multi-line list —
+      `api.py:175`, `entities.py:28`, `session_indexer.py:32`, …).
+    """
+    import ast
+
+    targets: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if parts[0] == "tortoise":
+                    targets |= _resolve(root, parts[1:])
+        elif isinstance(node, ast.ImportFrom):
+            spec = node.module or ""
+            if node.level:  # relative: `from .` / `from ..pkg`
+                base: list[str] = []
+                parts = [x for x in spec.split(".") if x]
+                targets |= _resolve(root, parts) if parts else set()
+                for alias in node.names:
+                    targets |= _resolve(root, [*base, *parts, alias.name])
+            elif spec == "tortoise" or spec.startswith("tortoise."):
+                parts = [x for x in spec.split(".")[1:] if x]
+                targets |= _resolve(root, parts)
+                for alias in node.names:
+                    targets |= _resolve(root, [*parts, alias.name])
+    return targets
+
+
 def embed_path_modules() -> set[str]:
     """Every `tortoise/**.py` reachable from the embed seam by LOCAL imports.
 
@@ -645,31 +765,11 @@ def _embed_path_modules(root: Path) -> frozenset[str]:
     for path in sorted((root / "tortoise").rglob("*.py")):
         try:
             src = path.read_text(encoding="utf-8")
-        except OSError:
+            tree = ast.parse(src)
+        except (OSError, SyntaxError):
             continue
         mod = path.relative_to(root).as_posix()
-        targets: set[str] = set()
-        for m in _LOCAL_IMPORT.finditer(src):
-            dotted, imported = m.group(1), m.group(2)
-            names = [n.strip().split(" as ")[0].split(".")[0]
-                     for n in imported.split(",") if n.strip()]
-            if dotted.startswith("."):
-                parts = [x for x in dotted.lstrip(".").split(".") if x]
-                # `from . import a, b` — the imported NAMES are modules.
-                if not parts:
-                    for name in names:
-                        targets |= _resolve(root, [name])
-                    continue
-                # `from .pkg.mod import x` — the DOTTED path is the module; an
-                # imported name may still be a submodule of it.
-                targets |= _resolve(root, parts)
-                for name in names:
-                    targets |= _resolve(root, [*parts, name])
-            else:  # absolute `from tortoise.pkg.mod import x`
-                parts = dotted.split(".")[1:]
-                targets |= _resolve(root, parts)
-                for name in names:
-                    targets |= _resolve(root, [*parts, name])
+        targets: set[str] = _import_edges(root, tree, path)
         edges[mod] = targets
     seen: set[str] = set()
     queue = [r for r in EMBED_PATH_ROOTS if (root / r).exists()]
@@ -816,9 +916,17 @@ def vector_census(graph, graph_name: str, at: str | None = None,
         graph_labels = [r[0] for r in (graph.query("CALL db.labels()").result_set or [])]
         population_source = "CALL db.labels()"
     except Exception as e:
-        graph_labels = []
-        population_source = (f"UNMEASURED({type(e).__name__}: {e}) — population "
-                            f"falls back to the catalogue's labels")
+        # ⛔ NOT a narrowed fallback to `indexed | served`: that is the very
+        # population bug this census exists to remove, and it silently drops
+        # the stored-no-index-no-query-path class (review round 3, P2). A
+        # population that could not be read is a measurement that did not
+        # happen.
+        return {"graph": graph_name, "at": at, "labels": {},
+                "catalogue": f"UNMEASURED(population read failed: "
+                             f"{type(e).__name__}: {e})",
+                "population": "UNMEASURED(CALL db.labels() failed)",
+                "command": CENSUS_COMMAND, "uri_path_graph": uri_graph_name,
+                "unreadable_catalogue_rows": unreadable}
 
     labels: dict[str, dict] = {}
     for label in sorted(set(graph_labels) | set(indexed) | served_labels()):
@@ -829,6 +937,8 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             stored = int(res[0][0])
         except Exception as e:
             stored = f"UNMEASURED({type(e).__name__}: {e})"
+        unreadable_here = [u for u in unreadable if u.startswith(repr(label))
+                           or u.startswith(f"{label!r}")]
         found = indexed.get(label) or []
         # ⛔ An index on the LABEL is not an index on the COLUMN counted here.
         # `field` was already read and used to be ignored: a `(Source:vec)`
@@ -837,16 +947,10 @@ def vector_census(graph, graph_name: str, at: str | None = None,
         covering = [ix for ix in found if ix["field"] == "embedding"]
         idx = covering[0] if covering else (found[0] if found else None)
         dim = idx["dimension"] if covering and isinstance(idx["dimension"], int) else None
-        if isinstance(stored, str):
-            unindexed = "UNMEASURED(stored count unreadable)"
-        elif covering:
-            unindexed = 0
-        else:
-            unindexed = stored
-        # The payload is DERIVED (a vecf32 component is 4 bytes) and needs BOTH
-        # a covering index dimension AND a width probe that agrees with it —
-        # otherwise it would multiply the stored count by a number that
-        # describes a different field or a different vector (review P2).
+        # The stored WIDTH is probed once, before either column is written:
+        # `unindexed` must not claim "covered" when the index and the stored
+        # vectors disagree on dimension (the `#4280` class), and the payload is
+        # derived from the same number.
         width = None
         if isinstance(stored, int) and stored > 0:
             try:
@@ -861,6 +965,14 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                     width = len(probe[0][0])
             except Exception:
                 width = None
+        if isinstance(stored, str):
+            unindexed = "UNMEASURED(stored count unreadable)"
+        elif covering and width is not None and dim is not None and width != dim:
+            unindexed = f"UNMEASURED(index dim {dim} != stored width {width})"
+        elif covering:
+            unindexed = 0
+        else:
+            unindexed = stored
         if isinstance(stored, int) and stored == 0:
             payload = {"derived_payload_B": 0, "how": "no stored vectors on this label"}
         elif dim is None:
@@ -880,8 +992,13 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                               f"probed width {width} agrees"}
         labels[label] = {
             "stored": stored,
-            "indexed": bool(covering),
-            "unindexed": unindexed,
+            # An unreadable catalogue row is NOT "this label has no index": it
+            # is a row we could not read, and the column says so.
+            "indexed": ("UNMEASURED(catalogue row unreadable: "
+                        f"{unreadable_here[0]})" if unreadable_here
+                        else bool(covering)),
+            "unindexed": (f"UNMEASURED(catalogue row unreadable: {unreadable_here[0]})"
+                          if unreadable_here else unindexed),
             "vector_indexes_on_label": found or "none",
             "index": idx or "none",
             "payload": payload,
@@ -1035,6 +1152,11 @@ def main(argv: list[str] | None = None) -> int:
                   f"payload={d['payload']['derived_payload_B']}")
         if "error" in c:
             print(f"  {c['error']}")
+        if c.get("population"):
+            print(f"  population: {c['population']}")
+        if c.get("unreadable_catalogue_rows"):
+            print("  unreadable catalogue rows: "
+                  + "; ".join(c["unreadable_catalogue_rows"][:3]))
     return 2 if unmeasured else 0
 
 

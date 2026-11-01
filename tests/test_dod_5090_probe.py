@@ -445,3 +445,77 @@ def test_the_fallback_probe_restores_the_circuit_breakers():
     probe.fallback_probe()
     after = (b._fails, b._open_until, b._probing)
     assert after == before, (before, after)
+
+
+def test_a_failed_population_read_is_unmeasured_not_a_narrowed_population():
+    """`CALL db.labels()` failing must not fall back to `indexed | served`."""
+
+    class _NoLabels(_CensusGraph):
+        def query(self, cypher, params=None, timeout=None):
+            if "db.labels()" in cypher:
+                raise RuntimeError("Timeout reading from socket")
+            return super().query(cypher, params, timeout)
+
+    graph = _NoLabels([_index_row("Point", "embedding", 384)], ["Point"],
+                      {"Point": (1, [0.0] * 384)})
+    census = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                                 graph_names=["g"])
+    assert census["labels"] == {}
+    assert census["catalogue"].startswith("UNMEASURED"), census["catalogue"]
+
+
+def test_an_unreadable_catalogue_row_is_not_an_unindexed_label():
+    """A row we could not read must not assert `indexed: False`."""
+    graph = _CensusGraph(
+        catalogue=[["Point", ["embedding"], "not-a-dict"]],
+        labels=["Point"], vectors={"Point": (7, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                                 graph_names=["g"])
+    row = census["labels"]["Point"]
+    assert isinstance(row["indexed"], str) and row["indexed"].startswith("UNMEASURED"), row
+    assert str(row["unindexed"]).startswith("UNMEASURED"), row
+
+
+def test_the_predicate_walk_follows_plain_import_and_multiline_from(
+        tmp_path, monkeypatch):
+    """`import tortoise.X` and `from .pkg import (\n a,\n)` — both in this tree."""
+    t = tmp_path / "tortoise"
+    (t / "pkg").mkdir(parents=True)
+    (t / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (t / "pkg" / "sub_rules.py").write_text("import re\n_S = re.compile(r'z')\n",
+                                            encoding="utf-8")
+    (t / "abs_rules.py").write_text("import re\n_A = re.compile(r'y')\n",
+                                    encoding="utf-8")
+    (t / "value_gate.py").write_text("import re\n_V = re.compile(r'#\\d+')\nRULES=('r',)\n",
+                                     encoding="utf-8")
+    (t / "embed_gate.py").write_text(
+        "import tortoise.abs_rules as ar\n"
+        "from .pkg import (\n    sub_rules,\n)\n"
+        "from . import value_gate\nRULE_SET = value_gate.RULES\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 3, counted
+    assert counted["verdict"] == "DRIFT", counted
+
+
+def test_the_shipped_default_is_searched_not_assumed():
+    """`measure()` clears the ambient env, so the default must be read from config."""
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped["files"]
+    assert shipped["surfaces"], shipped
+
+
+def test_a_writer_that_names_an_unserved_label_scores_NOT_MET(tmp_path, monkeypatch):
+    """The VERDICT, not just the set difference (review round 3, P3)."""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "writer.py").write_text(
+        "from .embeddings import encode_for_row\n"
+        "def _upsert_document(ev):\n"
+        "    emb = encode_for_row('x', 3)\n"
+        "    return 'MERGE (n:Document {id: 1}) SET n.embedding = $emb', emb\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    assert probe.score_path_bullet().verdict == "NOT MET"
