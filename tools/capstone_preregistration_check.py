@@ -1224,16 +1224,17 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 # ⛔ The atomic state is recorded HERE too (#10531 review P1): a log that is both
                 # atomic AND provably unscored is honestly disclosable, and a disclosure was being
                 # punished as "not an atomic add" because this `continue` skipped the bookkeeping.
-                # It is also REPORTED (#10531 review cycle 4, P2): a disclosure nobody prints is
-                # the silent path this tool refuses.
+                #
+                # ⛔ BUT IT IS NOT REPORTED AS A DISCLOSURE (#10531 review cycle 7, P2). This arm
+                # decided the pass on the log's CONTENT — deleting the disclosure from the same tree
+                # yields the identical verdict — so claiming `the ordering HOLDS BY DISCLOSURE` here
+                # would name a ground that carried nothing, and the printed block would be followed
+                # by zero commit lines because `atomic_detail` was never filled. The waiver IS still
+                # visible: `exempted` carries it into `ordering_exempt` and the claim line prints
+                # "(exempt by CONTENT, measured nothing: <log>)". `atomic_seen` is set so the
+                # anti-rot rule still sees a genuinely atomic log.
                 if atomic_pair:
                     atomic_seen.add(log.name)
-                    # ⛔ Only a DECLARED atomic add is reported as declared (#10531 review cycle 5,
-                    # P2): appending unconditionally made `run_order_claim` assert a disclosure the
-                    # record does not contain, and the printed block point at an absent key.
-                    if (atomic_added is not None and log.name in atomic
-                            and log.name not in disclosure_failed):
-                        atomic_added.append(log.name)
                 if exempted is not None:
                     exempted.append(log.name)
                 continue
@@ -1243,7 +1244,14 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             # object is identical, so the comparison answers nothing; the disclosure is required.
             if log.name in disclosure_failed:
                 continue  # the specific field failure is already reported above
-            if log.name not in atomic and not record_unreadable:
+            if log.name not in atomic:
+                if record_unreadable:
+                    # ⛔ RETURN, do not fall through (#10531 review cycle 7, P1). The record itself
+                    # could not be read, so there is nothing declared and nothing to index —
+                    # `atomic[log.name]` below raised KeyError straight out of run()/main(),
+                    # printing a traceback and NO findings, on exactly the state this flag exists
+                    # for. `check_machine_record` owns the diagnosis.
+                    continue
                 failures.append(
                     f"{log.name}: added at {log_epoch} by the SAME commit that added "
                     f"{PREREG_NAME} ({log_sha[:9]}) — the ordering is atomic, so git cannot show "
@@ -1252,6 +1260,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY} or the ordering is unproven."
                 )
                 continue
+            # `log.name` is provably in `atomic` from here on.
             # ⛔ The STATE is derived HERE, never read back from the caller's out-param (#10531
             # review P1). Deciding the anti-rot rule from `atomic_added` made the verdict depend on
             # whether a caller happened to pass a list: the same tree and pins gave `[]` via

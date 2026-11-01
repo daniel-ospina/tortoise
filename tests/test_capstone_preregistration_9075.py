@@ -475,9 +475,15 @@ def test_an_unreadable_record_does_not_add_a_wrong_instruction(tmp_path, monkeyp
     """REGRESSION (#10531 cycle-6 P2): 'disclose it under X' is the wrong repair when X cannot be read."""
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
-    failures = check.check_ordering(prereg, [log], None, None, None, None, None,
+    # `atomic_detail` is a DICT here, as `run()` always passes one — the earlier version of this
+    # test passed `None` and so could not see the KeyError the dict path raised (#10531 cycle 7, P1).
+    failures = check.check_ordering(prereg, [log], None, None, None, None, {},
                                     record_unreadable=True)
     assert not any("Disclose it under" in f for f in failures), failures
+    # And an UNREADABLE record must never be reported as a declaration either.
+    added: list[str] = []
+    check.check_ordering(prereg, [log], None, None, added, None, {}, record_unreadable=True)
+    assert added == [], added
 
 
 def test_a_report_never_claims_a_declaration_the_record_does_not_carry(tmp_path, monkeypatch):
