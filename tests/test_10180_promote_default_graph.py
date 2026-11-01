@@ -620,6 +620,106 @@ def test_the_gate_only_moves_a_per_graph_namespace(monkeypatch):
     assert moved_default_namespace(TEAM, f"org_{TEAM}_{NEW_ID}") is None
 
 
+def test_a_legacy_team_namespace_graph_is_promotable_and_followed(monkeypatch):
+    """#10452 review round 8, P1: a graph minted BEFORE the #3543 rename carries
+    a `team_{org_id}_{gid}` namespace, and no data migration rewrites those
+    (`backup_sweep._purge` accepts both spellings for exactly that reason).
+
+    So the verb accepts one as a target — and the ONE decision every resolver
+    shares must follow it, or the promotion succeeds and then sends every
+    org-wide lane back to the graph it just demoted (records filed under the
+    promoted graph, nodes written to the demoted one, silently).
+
+    FAIL-ON: narrow the gate back to `org_`-only (the pre-fix shape) and
+    `moved_default_namespace` returns None here, so `_org_sdk` opens
+    `namespace=TEAM` — the demoted graph.
+    """
+    from tortoise.supabase_control import (
+        moved_default_namespace,
+        per_graph_namespace_prefixes,
+    )
+
+    _hosted(monkeypatch)
+    legacy_ns = f"team_{TEAM}_{NEW_ID}"
+    # The shape the SQL refuses anything outside of, and the gate opens.
+    assert legacy_ns.startswith(per_graph_namespace_prefixes(TEAM))
+    assert moved_default_namespace(TEAM, legacy_ns) == legacy_ns
+
+    # …and the lanes actually built from it open THAT graph, not graph 0.
+    _fake_org_row(monkeypatch, legacy_ns)
+    opened = _capture_make_sdk(monkeypatch)
+    ha._org_sdk(TEAM)
+    assert opened == [{"graph_name": legacy_ns}], (
+        "an org-wide lane must open the promoted legacy graph")
+
+
+def test_the_verb_refuses_a_target_its_resolvers_cannot_follow(sb, monkeypatch):
+    """#10452 review round 8, P1: `promote_default_graph` writes the target's
+    namespace into `organizations.graph_name`, and every resolver derives the
+    default from that column through ONE shape test. A namespace outside those
+    shapes would therefore be accepted and then UNFOLLOWABLE.
+
+    FAIL-ON: drop the SQL guard (or the double's mirror of it) and this
+    promotion succeeds while `moved_default_namespace` answers None — the
+    resolvers open the demoted graph.
+    """
+    tc, fake, _ = sb
+    followable_defaults = (f"org_{TEAM}", f"team_{TEAM}")
+    # A shape no resolver follows: the pre-#1903 org-level name with a suffix
+    # that is not a per-graph namespace of THIS org.
+    fake.tables["graphs"].append(
+        {"id": "g_10180legacy0006", "org_id": TEAM, "name": "legacy",
+         "kind": "custom", "namespace": "team_some_other_name",
+         "status": "active", "recording": None})
+    _as_session()
+    r = tc.post(f"/v1/graphs/g_10180legacy0006/promote?org_id={TEAM}")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["error_code"] == "GRAPH_NAMESPACE_UNFOLLOWABLE"
+    # Nothing moved: the refusal is not a half-applied promotion.
+    kinds = {g["id"]: g["kind"] for g in fake.tables["graphs"]}
+    assert kinds == {OLD_ID: "default", NEW_ID: "custom",
+                     "g_10180legacy0006": "custom"}
+    assert fake.tables["organizations"][0]["graph_name"] == f"org_{TEAM}"
+    assert followable_defaults  # the two shapes the guard DOES accept, named
+
+
+def test_the_sql_refuses_exactly_the_namespaces_the_gate_opens():
+    """The guard and the gate are two halves of ONE decision, and the SQL cannot
+    call the Python function — so pin the agreement at the source.
+
+    FAIL-ON: change `per_graph_namespace_prefixes` (or the SQL) alone and the
+    verb accepts what the resolvers refuse, which is the P1 this pair closes.
+    """
+    from pathlib import Path
+
+    from tortoise.supabase_control import per_graph_namespace_prefixes
+
+    path = (Path(__file__).resolve().parent.parent / "supabase" / "migrations"
+            / "20261102000001_graphs_promote_default.sql")
+    sql = "\n".join(line.split("--")[0] for line in
+                    path.read_text(encoding="utf-8").splitlines())
+    guard = sql[sql.index("left(v_target_ns"):sql.index("UPDATE public.graphs")]
+    assert "the target namespace is not one the org-wide lanes can follow" in sql
+    for prefix in per_graph_namespace_prefixes("<org>"):
+        # The static half of the prefix (`org_` / `team_`): the org id is
+        # `p_org_id` in the SQL, so only the stem is literal.
+        stem = prefix[:-1].replace("<org>", "")
+        # The per-graph form, compared by LENGTH+LEFT (never LIKE: `_` is a
+        # one-character wildcard in a LIKE pattern).
+        expr = f"'{stem}' || p_org_id || '_'"
+        assert guard.count(expr) == 2, (
+            f"the SQL must accept targets under the {stem!r} per-graph prefix "
+            "the gate opens (length() and the comparison both use it)")
+        # The org's own BARE namespace is followable too: it is what the
+        # HISTORICAL open resolves, i.e. the shape of un-promoting back.
+        assert f"<> '{stem}' || p_org_id" in guard, (
+            f"a bare {stem!r} namespace must be accepted: the historical open "
+            "resolves it")
+    assert "LIKE" not in sql, (
+        "a LIKE pattern would match any character where `_` stands, so it "
+        "would accept namespaces the gate refuses")
+
+
 # ── 8. The lanes that build their OWN SDK follow the same pointer ──────────
 # Converting only `_data_sdk` was the inherited lane's defect: the dream drain,
 # the event sweep, the pack catalog, the quota counter and the seed/indexing
@@ -1001,6 +1101,84 @@ def test_the_idempotent_arm_repairs_a_drifted_org_namespace(sb):
     # …and no graph row moved: the repair is not a re-promotion.
     assert {g["id"]: g["kind"] for g in fake.tables["graphs"]} == {
         OLD_ID: "default", NEW_ID: "custom"}
+
+
+def test_the_idempotent_arm_checks_the_post_condition_too():
+    """#10452 review round 8, P2: the `already_default` arm RETURNs before the
+    demote, so it used to answer `ok, already_default: true` over an org holding
+    TWO active defaults — the state the function's own post-condition exists to
+    refuse, and the converging demote never ran. Both arms now enforce the SAME
+    invariant.
+
+    Reachability, stated honestly: while `uq_graphs_org_default_active` stands
+    the state cannot exist in Postgres, so this is a contract-parity guard, not
+    a live race — the double is where its behaviour is observable.
+
+    FAIL-ON: delete the check from the arm (the pre-fix SQL and double) and this
+    returns the `already_default` receipt over the drifted org.
+    """
+    from pathlib import Path
+
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
+                             "org_memberships": [], "invitations": [],
+                             "graphs": []})
+    _seed(fake)
+    fake.tables["graphs"].append(
+        {"id": "g_10180dupe00009", "org_id": TEAM, "name": "dupe",
+         "kind": "default", "namespace": "org_dupe", "status": "active"})
+    assert len(fake._live_default_rows(TEAM)) == 2
+    with pytest.raises(RuntimeError, match="more than one active default"):
+        fake.rpc("promote_default_graph",
+                 {"p_org_id": TEAM, "p_graph_id": OLD_ID},
+                 representation=True)
+    # …and the double did not half-apply the §3 repair on its way out.
+    assert fake.tables["organizations"][0]["graph_name"] == f"org_{TEAM}"
+
+    # The SQL must carry the same check, on the same arm — and the check must
+    # come BEFORE the two RETURNs of that arm, or it never runs.
+    path = (Path(__file__).resolve().parent.parent / "supabase" / "migrations"
+            / "20261102000001_graphs_promote_default.sql")
+    sql = "\n".join(line.split("--")[0] for line in
+                    path.read_text(encoding="utf-8").splitlines())
+    fn = sql.split("CREATE OR REPLACE FUNCTION public.promote_default_graph")[1]
+    arm = fn[fn.index("IF v_kind = 'default' THEN"):]
+    assert "more than one active default" in arm.split("RETURN jsonb_build_object")[0], (
+        "the already-default arm is the drift repair lever; it must refuse a "
+        "drifted org rather than answer ok")
+
+
+def test_every_sql_refusal_has_a_mapped_http_status():
+    """The endpoint is the ONE caller of the RPC and it maps refusals by
+    SUBSTRING of the SQL's own text — so a message the map does not know is a 500
+    on a caller mistake. Four review rounds checked that pair by hand; this pins
+    it mechanically, including the two refusals added in round 8.
+
+    Only `… are required` is exempt: that is the function's own NULL-argument
+    guard (`plpgsql` programming error), unreachable from an endpoint that
+    validates the path and the org first.
+    """
+    import re
+    from pathlib import Path
+
+    from tortoise.supabase_control import _PROMOTE_DEFAULT_ERROR_CODES
+
+    path = (Path(__file__).resolve().parent.parent / "supabase" / "migrations"
+            / "20261102000001_graphs_promote_default.sql")
+    sql = "\n".join(line.split("--")[0] for line in
+                    path.read_text(encoding="utf-8").splitlines())
+    raises = re.findall(r"RAISE EXCEPTION\s*'([^']*)'", sql)
+    assert raises, "the function refuses in named ways; none were found"
+    checked = 0
+    for literal in raises:
+        # `%` starts the format arguments; the runtime text is the prefix.
+        prefix = literal.split("%")[0]
+        if "are required" in literal:
+            continue  # the NULL-argument guard: not reachable from the endpoint
+        assert any(code in prefix for code in _PROMOTE_DEFAULT_ERROR_CODES), (
+            f"the SQL refuses with {literal!r} but no mapped code matches, so the "
+            "endpoint would answer 500")
+        checked += 1
+    assert checked >= 5, f"expected the named refusals to be checked, saw {checked}"
 
 
 def test_a_failed_post_condition_is_a_retryable_conflict_not_a_500(monkeypatch):

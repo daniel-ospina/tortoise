@@ -4764,6 +4764,20 @@ _PROMOTE_DEFAULT_ERROR_CODES: dict[str, tuple[int, str]] = {
     # cover. Nothing was written — the whole transaction rolled back — so this
     # is a RETRYABLE conflict, not a 500 and not a caller mistake.
     "promote_default_graph: the default did not move": (409, "PROMOTE_CONFLICT"),
+    # #10180 review round 8, P1: the target's namespace is not one the org-wide
+    # lanes can FOLLOW, so promoting it would succeed and then route every
+    # resolver back to the graph this transaction demotes. Not retryable as-is:
+    # the caller must pick a graph whose namespace derives from this org
+    # (`org_{org_id}_{gid}`, or the pre-#3543 `team_{org_id}_{gid}`).
+    "promote_default_graph: the target namespace is not one the org-wide "
+    "lanes can follow": (409, "GRAPH_NAMESPACE_UNFOLLOWABLE"),
+    # #10180 review round 8, P2: the IDEMPOTENT arm is asked for a repair while
+    # the org already holds two active defaults. That arm returns before the
+    # demote, so it cannot converge the drift — retrying is pointless, and the
+    # operator dials in a promotion of the intended graph (which does converge
+    # it) or repairs the rows.
+    "promote_default_graph: the org already holds more than one active "
+    "default": (409, "GRAPH_DEFAULT_DRIFT"),
 }
 
 
@@ -4775,12 +4789,39 @@ class PromoteDefaultGraphError(RuntimeError):
     else (transport, an unexpected Postgres error) propagates as the plain
     ``RuntimeError`` the ``rpc`` seam raises, so a genuine outage is never
     dressed up as a caller mistake.
+
+    The 409s are the three states the caller (or an operator) must resolve: the
+    post-condition's race (``PROMOTE_CONFLICT``, retryable), a target namespace
+    no org-wide resolver can follow (``GRAPH_NAMESPACE_UNFOLLOWABLE``), and an
+    org that already holds two active defaults when the idempotent arm was asked
+    for a repair (``GRAPH_DEFAULT_DRIFT``).
     """
 
     def __init__(self, message: str, *, status: int, code: str) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
+
+
+def per_graph_namespace_prefixes(org_id: str) -> tuple[str, ...]:
+    """The prefixes a PER-GRAPH namespace of ``org_id`` may carry (#10180).
+
+    TWO spellings, because the data has two: ``insert_graph``/
+    ``_provision_graph`` mint ``org_{org_id}_{gid}``, and namespaces written
+    before the #3543 tenancy rename still carry ``team_{org_id}_{gid}`` — no data
+    migration rewrites them (``backup_sweep._purge`` accepts both for exactly
+    that reason: the value derives from THIS org and THIS graph id whichever
+    spelling minted it).
+
+    ⛔ ONE list, two consumers that must not drift: `moved_default_namespace`
+    below (which opens the graph) and `promote_default_graph`'s SQL, which
+    REFUSES a target whose namespace is none of these — otherwise the verb could
+    mint an ``organizations.graph_name`` its own resolvers cannot follow, and
+    every org-wide lane would silently fall back to the graph the promotion just
+    DEMOTED. The SQL cannot call this function, so the pair is pinned by
+    `tests/test_10180_promote_default_graph.py`.
+    """
+    return (f"org_{org_id}_", f"team_{org_id}_")
 
 
 def moved_default_namespace(org_id: str | None,
@@ -4801,13 +4842,25 @@ def moved_default_namespace(org_id: str | None,
       move (the promote verb refuses there), so its ``graph_name`` is a name
       about a different mapping and must never open its default graph;
     * the value must have the SHAPE of a per-graph namespace of THIS org, i.e.
-      the ``org_{org_id}_`` prefix that ``insert_graph`` / ``_provision_graph``
-      mint (``org_{org_id}_{gid}``) and that a promotion moves
-      ``organizations.graph_name`` to. Only a promotion produces that value; the
-      untouched ``org_{org_id}``, the pre-#3543 ``team_{org_id}`` and the
+      one of the prefixes in `per_graph_namespace_prefixes` — ``org_{org_id}_``
+      (what ``insert_graph`` / ``_provision_graph`` mint) or the pre-#3543
+      ``team_{org_id}_`` that is still stored for older graphs. Both are values
+      only a promotion puts in ``organizations.graph_name``; the untouched
+      ``org_{org_id}``, the pre-#3543 org-level ``team_{org_id}`` and the
       registry's ``org_{name}`` (``sdk.org_create``, #2023) all fail the test and
       keep the historical open — the exact regression #2023's pin in
       ``_data_sdk`` exists to prevent.
+
+    ⛔ WHY THE LEGACY ``team_`` PREFIX IS ACCEPTED (review round 8, P1): the
+    target of a promotion is any active graph of the org, and the oldest orgs —
+    the ones most likely to have outgrown their first graph — own graphs whose
+    ``namespaces`` were minted before #3543. A gate that knew only ``org_``
+    would make ``POST /v1/graphs/{id}/promote`` SUCCEED on such a graph (the row
+    moves, the org pointer moves) while every resolver kept the historical open
+    onto the graph it had just demoted: records filed under the promoted graph,
+    nodes written to the demoted one, silent. Accepting the legacy spelling is
+    what makes those graphs promotable; `promote_default_graph` refuses any
+    OTHER shape, so the two halves cannot disagree.
 
     ⚠️ **Precisely: a PREFIX test, and its one residual.** The suffix is not
     checked against this org's ``public.graphs`` ids (that would cost a read on
@@ -4829,7 +4882,7 @@ def moved_default_namespace(org_id: str | None,
         return None
     if not is_supabase_enabled():
         return None
-    if not namespace.startswith(f"org_{org_id}_"):
+    if not namespace.startswith(per_graph_namespace_prefixes(org_id)):
         return None
     return namespace
 
