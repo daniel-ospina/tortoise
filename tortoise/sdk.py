@@ -18837,10 +18837,14 @@ class TortoiseSDK:
                 # and ``direction_flows`` tests membership in a frozenset — so
                 # handing it over aborts the supersede with a ``TypeError`` the
                 # guard is not about. ⚠️ The three cases below are DIFFERENT,
-                # and each is judged on the token's READER leg set — the
-                # CREATION DOOR's canonicalization decides only where no reader
-                # verdict exists. A *string* token passes through verbatim (one
-                # outside the vocabulary is
+                # and none is read off ``create_direct_edge`` blindly: a string
+                # is judged on the leg set ``direction_flows`` gives it, a
+                # present non-string is judged BOTH ways (the hashable reader
+                # verdict, and the fail-closed stand-in where no reader verdict
+                # exists), and only the ABSENT case takes the creation door's
+                # canonical form — because that is the token the door WRITES,
+                # so no reader ever sees a door-made absent edge. A *string*
+                # token passes through verbatim (one outside the vocabulary is
                 # read by ``direction_flows`` as both ways — the leg set the EP
                 # backstop sees, so a door reading it more narrowly would keep
                 # a factor the load side drops); an ABSENT token takes the
@@ -18893,7 +18897,8 @@ class TortoiseSDK:
                         surface=(f"supersede_point: re-pointing the "
                                  f"{_rtype} edge {_src_id!r}->{_tgt_id!r} "
                                  f"(from {old_id!r} to {new_id!r}, "
-                                 f"direction {_eff_dir!r})")))
+                                 f"direction {_raw_dir!r} "
+                                 f"(judged {_eff_dir!r}))")))
 
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
