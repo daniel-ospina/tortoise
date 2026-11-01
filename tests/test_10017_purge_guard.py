@@ -152,7 +152,7 @@ def _plan(clean, *, journal_path: str | None = "/tmp/journal.jsonl") -> dict:
 
 def _gate(plan, live=None, health=None, proof=None, confirm=None,
           note="test target", live_target=None, approval=None,
-          record_dsn: str = _DSN):
+          record_dsn: str = _DSN, health_fetched: bool = True):
     return purge.evaluate_gate(
         plan=plan, live_report=live,
         health=_health() if health is None else health,
@@ -162,6 +162,10 @@ def _gate(plan, live=None, health=None, proof=None, confirm=None,
         confirm_digest=(plan["plan_digest"] if confirm is None else confirm),
         target_note=note,
         live_target=(plan["target"] if live_target is None else live_target),
+        # The `--execute` default: the arming fact was MEASURED by this run
+        # (`--health-url`). `--health-json` cannot authorise a delete (#10483
+        # review, P2-3).
+        health_fetched=health_fetched,
         record_dsn=record_dsn,
     )
 
@@ -335,7 +339,7 @@ def test_execute_refuses_without_a_plan_or_a_target_note():
                                   health=_health(),
                                   restore_proof=_proof(), approval=_approval("x"),
                                   confirm_digest="x", target_note="t",
-                                  live_target=_target())
+                                  live_target=_target(), health_fetched=True)
     assert code == purge.REFUSE_NO_PLAN
     plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
     code, _ = _gate(plan, live=_report(
@@ -465,7 +469,7 @@ def test_execute_refuses_a_restore_proof_that_proves_nothing():
             plan=plan, live_report=live, health=_health(),
             restore_proof=garbage, approval=_approval(plan["plan_digest"]),
             confirm_digest=plan["plan_digest"], target_note="test target",
-            live_target=_target())
+            live_target=_target(), health_fetched=True)
         assert code in (purge.REFUSE_NO_RESTORE_PROOF,
                         purge.REFUSE_RESTORE_PROOF_STALE), garbage
 
@@ -767,7 +771,7 @@ def _write(tmp_path, name: str, obj) -> str:
 def _cli_execute(tmp_path, monkeypatch, *, report, plan=None, health=None,
                  proof=None, approval=None, note="test target",
                  digest=None, journal_lines=1, health_url=None,
-                 record_dsn: str = _DSN):
+                 record_dsn: str = _DSN, health_json: bool = False):
     _patch_live_census(monkeypatch, report)
     called: list[dict] = []
     monkeypatch.setattr(purge, "_execute",
@@ -786,9 +790,20 @@ def _cli_execute(tmp_path, monkeypatch, *, report, plan=None, health=None,
             else digest]
     if health_url:
         argv += ["--health-url", health_url]
-    else:
+    elif health_json:
         argv += ["--health-json", _write(tmp_path, "health.json",
                                          _health() if health is None else health)]
+    else:
+        # The DEFAULT `--execute` path is the live read (`--health-url`): a
+        # captured body cannot authorise a delete (#10483 review, P2-3), so the
+        # wiring is driven the way an operator must drive it.
+        def _fetch(url, **_kwargs):
+            body = dict(_health() if health is None else health)
+            body["read_at"] = _ts(1)
+            return body
+
+        monkeypatch.setattr(purge, "_fetch_health", _fetch)
+        argv += ["--health-url", "https://tortoise.example/health"]
     argv += ["--restore-proof", _write(tmp_path, "proof.json",
                                        _proof() if proof is None else proof)]
     if approval is not False:
@@ -814,21 +829,10 @@ def test_execute_wiring_refuses_a_record_behind_target_before_any_delete(
     ids = ["s1_t0", "s1_t1"]
     live = _report(failed=[_failed("s1", ids, [
         {"node": "s1_t1", "field": "key", "problem": "missing_in_record"}])])
-    _patch_live_census(monkeypatch, live)
-    called: list[dict] = []
-    monkeypatch.setattr(purge, "_execute", lambda p, a, t: (called.append(p), 0)[1])
     journal = tmp_path / "journal.jsonl"
-    journal.write_text("{}\n", encoding="utf-8")
-    plan = _plan([_clean_with_ids("s1", ids)], journal_path=str(journal))
-    rc = purge.main([*_TARGET_ARGV, "--target-note", "test target", "--execute",
-                     "--record-dsn", _DSN,
-                     "--event-log-path", str(journal),
-                     "--plan", _write(tmp_path, "plan.json", plan),
-                     "--confirm-plan-digest", plan["plan_digest"],
-                     "--health-json", _write(tmp_path, "h.json", _health()),
-                     "--restore-proof", _write(tmp_path, "p.json", _proof()),
-                     "--approval-record", _write(
-                         tmp_path, "a.json", _approval(plan["plan_digest"]))])
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch, report=live,
+        plan=_plan([_clean_with_ids("s1", ids)], journal_path=str(journal)))
     assert rc == 2
     assert called == []
     assert purge.REFUSE_RECORD_BEHIND in capsys.readouterr().err
@@ -1345,7 +1349,7 @@ def test_an_edited_plan_cannot_borrow_the_approval_of_the_original():
         plan=edited, live_report=live, health=_health(),
         restore_proof=_proof(), approval=_approval(plan["plan_digest"]),
         confirm_digest=edited["plan_digest"], target_note="test target",
-        live_target=edited["target"])
+        live_target=edited["target"], health_fetched=True)
     assert code == purge.REFUSE_CONFIRMATION_MISMATCH      # …the approval does not
 
 
@@ -1546,6 +1550,51 @@ def test_a_health_url_that_cannot_be_read_is_exit_three_not_a_refusal(
     assert "ARMED" in capsys.readouterr().err
 
 
+def test_a_captured_health_body_cannot_authorise_a_delete(tmp_path, monkeypatch,
+                                                        capsys):
+    """P2-3: `main` could not tell a live `/health` read from a FILE, and the
+    file's own `fetched_at` is whatever its author wrote — so a hand-written
+    `{"record": {"armed": true, "dsn": "<fp>"}}`, or a capture up to 24 h
+    old, satisfied `--execute`'s arming precondition for a deployment that is
+    UNARMED now.
+
+    A CAPTURE still produces a plan (it deletes nothing): the preview arm below
+    runs the same body through `main` and exits 0.
+    """
+    rc, called = _cli_execute(
+        tmp_path, monkeypatch,
+        report=_report(clean=[_clean_with_ids("s1", ["s1_t0"])]),
+        health_json=True)
+    assert rc == 2
+    assert called == []                      # `_execute` was NEVER reached
+    err = capsys.readouterr().err
+    assert purge.REFUSE_ARMED_EVIDENCE_STALE in err
+    assert "--health-url" in err
+
+    # …and the same captured body is a legitimate PREVIEW input.
+    census = _write(tmp_path, "c.json",
+                    _report(clean=[_clean_with_ids("s1", ["s1_t0"])]))
+    health = _write(tmp_path, "h.json", _health())
+    assert purge.main([*_TARGET_ARGV, "--target-note", "t",
+                       "--census-json", census, "--health-json", health,
+                       "--plan-out", str(tmp_path / "plan.json")]) == 0
+
+
+def test_the_gate_asks_for_a_measured_arming_fact_and_has_no_default():
+    """A guard that is opt-out by omission is not a guard: `health_fetched`
+    must be a REQUIRED keyword so a caller cannot forget it into a pass."""
+    import inspect
+
+    params = inspect.signature(purge.evaluate_gate).parameters
+    assert "health_fetched" in params
+    assert params["health_fetched"].default is inspect.Parameter.empty
+    plan = _plan([_clean_with_ids("s1", ["s1_t0"])])
+    code, message = _gate(plan, live=_report(
+        clean=[_clean_with_ids("s1", ["s1_t0"])]), health_fetched=False)
+    assert code == purge.REFUSE_ARMED_EVIDENCE_STALE
+    assert "FILE" in message
+
+
 def test_both_health_sources_at_once_is_a_usage_error(tmp_path, capsys):
     """Two sources for one fact: refuse rather than silently pick one."""
     argv = [*_TARGET_ARGV, "--target-note", "t",
@@ -1632,7 +1681,7 @@ def test_the_tool_does_not_claim_target_note_is_required_at_preview(
         plan=plan, live_report=_report(), health=_health(),
         restore_proof=_proof(), approval=_approval(plan["plan_digest"]),
         confirm_digest=plan["plan_digest"], target_note="",
-        live_target=plan["target"], record_dsn=_DSN)
+        live_target=plan["target"], health_fetched=True, record_dsn=_DSN)
     assert code == purge.REFUSE_NO_TARGET_NOTE
 
 
@@ -1807,7 +1856,8 @@ def test_the_preview_and_the_execute_gate_ask_the_same_restore_proof_question():
             plan=plan, live_report=_report(clean=clean), health=_health(),
             restore_proof=body, approval=_approval(plan["plan_digest"]),
             confirm_digest=plan["plan_digest"], target_note="test target",
-            live_target=plan["target"], record_dsn=_DSN)
+            live_target=plan["target"], health_fetched=True,
+            record_dsn=_DSN)
         assert preview_gap == bool(code), (name, preview_gap, code)
         # …and the agreement is not "both always refuse" / "both always pass".
         assert preview_gap == (name != "real"), (name, preview_gap)

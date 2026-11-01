@@ -186,16 +186,21 @@ EVIDENCE HAS AN AGE AND AN ADDRESS
 must say (a) WHEN it was read and (b) WHICH deployment it describes, or it is
 not evidence for this run:
 
-  * `/health` — TWO ways in, and they are not equally strong:
+  * `/health` — TWO ways in, and only one of them can autorise a delete:
 
     - `--health-url` — THIS RUN reads the deployment's own `/health` and
-      stamps `read_at` with its own clock. Preferred for `--execute`: the
-      arming fact and its age are then a measurement, not a claim.
-    - `--health-json` — a captured body. It carries the deployment's own
-      `fetched_at` (#9548 added it for exactly this reader); a capture that
-      states no instant at all (a body saved before that field existed) is
-      refused `REFUSE_ARMED_EVIDENCE_STALE` — re-read the endpoint, or pass
-      `--health-url` and let this run read it.
+      stamps `read_at` with its own clock. It is what `--execute` REQUIRES:
+      the arming fact and its age are then a measurement, not a claim.
+    - `--health-json` — a captured body, for a PREVIEW. It carries the
+      deployment's own `fetched_at` (#9548 added it for exactly this reader);
+      a capture that states no instant at all (a body saved before that field
+      existed) is refused `REFUSE_ARMED_EVIDENCE_STALE`. ⛔ `--execute` REFUSES
+      this source outright under the same code: `main` could not tell the live
+      read from a file, so a hand-written
+      `{"record": {"armed": true, "dsn": "<fp>"}}` — or a capture up to 24 h
+      old — certified a record that is unarmed NOW (#10483 review, P2-3). A
+      precondition a text editor can satisfy is not a precondition; a preview
+      deletes nothing, so the file keeps its one honest use.
 
     Either way `record.armed` must be the boolean `true`, and the body must
     state `record.dsn` — the fingerprint of the record DSN the deployment is
@@ -224,7 +229,9 @@ A plan generated WITHOUT `--health-url`/`--health-json` records no armed
 evidence, and then cannot authorise an execute even if a fresh `/health` passes
 today
 (`REFUSE_NO_ARMED_EVIDENCE`): what the human approved is the artefact set, and
-an unarmed record at approval time is not repaired by arming it afterwards.
+an unarmed record at approval time is not repaired by arming it afterwards —
+just as a plan approved over a CAPTURED body still requires the executing run
+to measure the arming itself.
 
 EXIT CODES
 ==========
@@ -511,7 +518,7 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                   health: dict | None, restore_proof: dict | None,
                   approval: dict | None, confirm_digest: str,
                   target_note: str, live_target: dict,
-                  record_dsn: str = "") -> tuple[str, str]:
+                  health_fetched: bool, record_dsn: str = "") -> tuple[str, str]:
     """The `--execute` gate. Pure: no I/O, no deletion, one verdict.
 
     Returns `(refusal_code, message)` where an EMPTY code means "every
@@ -552,6 +559,26 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
                 "no live target was supplied, so the plan cannot be compared "
                 "to the deployment this run would mutate — an unverified "
                 "target is not the approved target")
+    # ⛔ THE ARMING FACT MUST BE A MEASUREMENT THIS RUN MADE, NOT A FILE.
+    # `main` takes the live read OR a captured body, and `evaluate_gate` could
+    # not tell them apart — so a hand-written
+    # `{"record": {"armed": true, "dsn": "<fp>"}, "fetched_at": "<now>"}`, or
+    # a capture up to 24 h old, satisfied the arming precondition for a
+    # deployment that is UNARMED now (#10483 review, P2-3). The fingerprint
+    # comparison still bound it to the record this run reads, so what was
+    # defeated was {"a record is armed right now"}, not a lost turn — and a
+    # precondition that a text editor can satisfy is not a precondition.
+    # A CAPTURE is still the documented input for a PREVIEW (it deletes
+    # nothing); `--execute` re-reads it from the deployment.
+    if not health_fetched:
+        return (REFUSE_ARMED_EVIDENCE_STALE,
+                "the armed evidence was supplied as a FILE (--health-json), "
+                "not read from the deployment by this run — a body anyone "
+                "can write, or a capture up to "
+                f"{_HEALTH_MAX_AGE_SECONDS / 3600:.0f}h old, would certify a "
+                "record that is UNARMED now. `--execute` requires "
+                "--health-url, so the arming fact and its age are this run's "
+                "own measurement")
     armed_code, armed_problem = _armed_evidence_problem(
         health, live_target, record_dsn=record_dsn)
     if armed_code:
@@ -1374,14 +1401,17 @@ def _build_parser() -> _UsageParser:
                              "preview time (a preview deletes nothing, and "
                              "its MISSING list names the gap)")
     parser.add_argument("--health-json", default=None,
-                        help="a CAPTURED /health body (record.armed evidence) — "
-                             "it must state when it was read (fetched_at / "
-                             "recorded_at). Preferred for --execute: "
-                             "--health-url, which this run reads live")
+                        help="a CAPTURED /health body (record.armed evidence) "
+                             "for a PREVIEW — it must state when it was read "
+                             "(fetched_at / recorded_at). `--execute` REFUSES "
+                             "it (armed-evidence-stale): the arming fact has "
+                             "to be this run's own measurement, so pass "
+                             "--health-url there")
     parser.add_argument("--health-url", default=None,
                         help="read the deployment's own /health at RUN time "
                              "(strongest armed-record evidence: the fact and "
-                             "its age are measured by this run)")
+                             "its age are measured by this run, not written "
+                             "by an operator). Required by `--execute`")
     parser.add_argument("--restore-proof", default=None,
                         help="a restore-proof artefact (issue precondition 3)")
     parser.add_argument("--approval-record", default=None,
@@ -1540,6 +1570,9 @@ def main(argv: list[str] | None = None) -> int:
             restore_proof=restore_proof, approval=approval,
             confirm_digest=args.confirm_plan_digest or "",
             target_note=args.target_note, live_target=target,
+            # The arming fact must be THIS RUN's measurement: `--health-url`
+            # reads the deployment at run time, `--health-json` is a file.
+            health_fetched=bool(args.health_url),
             record_dsn=record_dsn)
         if code:
             sys.stderr.write(f"purge_legacy_turns: REFUSED {code}: "
@@ -1594,8 +1627,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"journal    : "
           f"{plan['journal']['path'] or '<NOT NAMED — --execute will refuse>'}")
     print("dry run    : NOTHING WAS DELETED. This is a preview; the purge "
-          "requires --execute with the digest above, --restore-proof, an "
-          "armed-record artefact (--health-url), --target-note and an "
+          "requires --execute with the digest above, --restore-proof, "
+          "--health-url (a captured --health-json body is preview-only), "
+          "--target-note and an "
           "out-of-band approval (--approval-record, kept outside the plan "
           "file).")
     return 0
