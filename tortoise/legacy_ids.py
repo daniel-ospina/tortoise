@@ -72,8 +72,8 @@ original keys back.
 
 ## The mapping, and why it is not a new id scheme
 
-``new = _derived_legacy_handle(label, old)`` — a MIGRATION-ONLY handle
-(``tortoise/ids.py``), applied to the node's already-unique key. §1.4 rule 1:
+``new = _derived_legacy_handle(label, old)`` — a MIGRATION-ONLY handle defined
+**in this module**, applied to the node's already-unique key. §1.4 rule 1:
 *"the legacy id is already the node's unique key; the rewrite is a rename of
 the key value, not a merge"*. So the target is one a reader can recompute, and
 there is no second MINTER to drift. The resulting handle is canonical by
@@ -244,8 +244,25 @@ DECLARED_OUT_OF_SCOPE: dict[str, str] = {
         "mints the default, otherwise the customer's own id), i.e. content the "
         "harness will supply again — §1.4: opaque and valid"
     ),
-    "Subject": "keyed on `name` (§1.1); §1.2 clause 2 — a rename of a name is a NEW node",
-    "Object": "keyed on `name` (§1.1); §1.2 clause 2 — a rename of a name is a NEW node",
+    # ⚠️ The key cited here is `id`, NOT `name`. §1.1's `:Subject`/`:Object` row is
+    # the pre-#3590 key and carries a CORRECTION (2026-10-24, #9881): #3590 made
+    # `name` a MUTABLE natural key two live entities may share, and #9881 moved the
+    # record with it — `public.subject.node_key` / `public.object.node_key` ARE the
+    # `id` (`CHECK (id IS NOT NULL AND node_key = id)`), and
+    # ``cache_projection.KEY_PROPERTY`` reads `id` for both labels. So they are
+    # re-keyable BY THE CONTRACT and are excluded by the SCOPE RULING alone —
+    # quoting the retired ground would leave a reader unable to tell whether the
+    # exclusion is a decision or a stale inference. It is a decision (2026-10-10).
+    "Subject": (
+        "excluded by the 2026-10-10 scope ruling, not by its key: §1.1's name-keyed "
+        "row is superseded (#9881) and the contract key is `id`, so a rename here "
+        "would be in-contract — it is out of THIS pass by decision"
+    ),
+    "Object": (
+        "excluded by the 2026-10-10 scope ruling, not by its key: §1.1's name-keyed "
+        "row is superseded (#9881) and the contract key is `id`, so a rename here "
+        "would be in-contract — it is out of THIS pass by decision"
+    ),
     "Source": "keyed on `url` (§1.1)",
 }
 
