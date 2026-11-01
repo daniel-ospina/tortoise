@@ -1870,3 +1870,36 @@ def test_the_existence_gate_follows_a_promoted_default(monkeypatch):
     assert ha._graph_has_org_namespace(TEAM, listed={_OLD_NS}) is True
     assert ha._graph_has_org_namespace(TEAM, listed={f"team_{TEAM}"}) is True
     assert ha._graph_has_org_namespace(TEAM, listed={_NEW_NS}) is False
+
+
+def test_the_projection_answers_both_questions_from_one_resolution(sb, monkeypatch):
+    """FAIL-ON: the existence VERDICT and the graph OPEN are two questions about
+    ONE graph, so they must be ONE resolution of the org's default namespace.
+
+    The #10180 lanes convert every org-level reader onto the PROMOTED default,
+    and `_get_onboarding_projection` asks twice — "does the org have a default
+    graph?" (`_graph_has_org_namespace`) and "which name do I open?"
+    (`_open_org_graph_sdk`). Each helper resolving for itself makes the two
+    answers come from two instants: a promotion landing between them has the
+    verdict made about one graph and the open about another — the `derived !=
+    measured` class #10025 exists to remove — and on a lane with no credential
+    hint (the MCP onboarding gate, a background pass) it pays TWO control-plane
+    reads per projection instead of one.
+
+    Counting the resolver is the only way to see it: the number is not visible
+    in any answer the projection returns, which is exactly why it drifted.
+    """
+    _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete")
+    seen: list[str] = []
+    real = ha._org_default_namespace
+
+    def _counting(org_id: str):
+        seen.append(org_id)
+        return real(org_id)
+
+    monkeypatch.setattr(ha, "_org_default_namespace", _counting)
+    projection = ha._get_onboarding_projection(TEAM)
+    assert projection["onboarding_complete"] is True, projection
+    assert seen == [TEAM], (
+        "the projection resolved the default namespace "
+        f"{len(seen)} times — the verdict and the open must share ONE answer")
