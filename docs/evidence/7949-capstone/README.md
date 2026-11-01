@@ -63,7 +63,7 @@ running end to end."*
 > |---|---|---|---|
 > | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.600000**, after **0.600000** over **25** Objects → below the floor, so **REFUSED** (the arithmetic would fail: the bound is 0.300000) | ⛔ **BLOCKED** |
 > | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a: the frozen **14-unit** denominator is carried by **no committed artifact** (the artifact counts 42 value literals, before = after); E2b: **1/114 = 0.008772** | ⛔ **BLOCKED** (E2a unmeasured) |
-> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **148 / 433 = 0.3418** — `Point` 141/338 anchored, `:Object` **0/50**, `:Event` **7/45** | ⛔ **RED** |
+> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **148 / 433 = 0.3418** as registered (2026-10-21); **148 / 383 = 0.38642** under the amended class set (`Point`+`Event`+`Document`, `PRE-REGISTRATION.md` §10.1) — `Point` 141/338 anchored, `:Object` **0/50**, `:Event` **7/45** | ⛔ **RED** |
 > | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** | ⛔ **RED** |
 > | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** |
 >
@@ -335,11 +335,26 @@ per label so the pair can never disagree again
 Relationship-level: `extractedFrom` **141/141** anchored, `references` **7/7**, and
 `aboutObject` **0/211**, `mitigated_by` 0/9, `CONTAINS` 0/300 (those are not derivation links).
 
-⇒ **E3 = 148/433 = 0.3418, RED — and the RED is the decision, not a defect.** `:Object` mention
+⇒ **E3 = 148/433 = 0.3418 as registered on 2026-10-21 — RED, and the RED is the decision, not a
+defect.** `:Object` mention
 links are identity links that carry no `sourceVersion` **by design** (owner-approved option A,
-2026-09-25, #5199), so the frozen denominator — which counts `:Object` — makes `= 1.000`
-unreachable **as registered**. #9736 owns the choice: re-register the denominator as the classes
-the model treats as derivations, or reopen the model. A lane cannot pick, and this bundle does not.
+2026-09-25, #5199), so the original denominator — which counts `:Object` — makes `= 1.000`
+unreachable **as registered**. ~~#9736 owns the choice: re-register the denominator as the classes
+the model treats as derivations, or reopen the model. A lane cannot pick, and this bundle does not.~~
+
+**AMENDED 2026-11-01 — `PRE-REGISTRATION.md` §10.1 (#9736).** The registration in this bundle now
+names the amended class set (`Point` + `Event` + `Document`), §10.1 records old → new with the
+authority and the date, and the probe derives the same set from `_DERIVATION_REFERENCES_LABELS`
+(`probes/capstone_measure.py`) instead of hardcoding it — so the next run prints **148/383 =
+0.38642**, not 148/433. That is **following** a recorded decision, not picking between the two
+options struck above: #5199 option A already ruled the anchor sits on the **derivation link**, so
+counting `:Object` mentions in E3's denominator was the registration lagging the decision rather
+than a bar. **No threshold moved and the narrowing does not rescue the bar** — the residual (188 of
+338 `Point`s are turn rows or operator Points and can never carry an `extractedFrom` link, §10.1)
+stays #9736's to attribute and is disclosed there, not absorbed. **#9736 remains OPEN and
+owner-gated**: this amendment is the reopen with the evidence in front of the owner, `Refs` and not
+`Closes`, and both readings stay printed (`148/433` as registered, `148/383` under the amended class
+set).
 
 ⛔ **E3's Point denominator mixes classes that CANNOT derive, and the figure is taken over the
 writer class — not over the link.** Of the 338 `Point` nodes: **159 mechanical turn rows**
@@ -367,7 +382,9 @@ visible in the figure. On this run: **`141/150 = 0.940000`**, and dropping one o
 moves it to `140/150`. That is also why it is not the `141/179 = 0.7877` a denominator summing
 operator Points reports (a shortfall nothing could close): the incapable classes are named with
 their own anchored counts instead of being folded in, and the frozen denominator is **not** changed
-unilaterally — the "all derived nodes" reading (148/433, and the 285 unanchored nodes — nearly all
+by this probe or unilaterally — it moves only through the disclosed amendment in
+`PRE-REGISTRATION.md` §10.1 — so the "all derived nodes" reading (148/433, and the 285 unanchored
+nodes — nearly all
 turn rows, `:Object` mention links and operator Points, none of them derivations) stays printed
 beside it. Without that, those 285 read as "extraction claims lost their provenance" when most are
 not derivations at all. What the figure cannot say by itself is whether a given unanchored `other`
@@ -565,7 +582,10 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   value-bearing units) are not carried by any committed artifact, and E1's only artifact is below
   its floor on a different corpus. Both rows are `BLOCKED` with their proxies printed.
 - **No evidence that E3's `= 1.000` bar is reachable as registered.** It is not: `:Object`
-  mention links are unanchored by design (#5199 → #9736 owns the choice).
+  mention links are unanchored by design (#5199). The registered denominator of 2026-10-21 counted
+  them; the amendment in `PRE-REGISTRATION.md` §10.1 re-registers it to the classes #5199 says the
+  model anchors, and the bar is **still** not reached (`148/383 = 0.38642`, §10.1) — #9736 remains
+  the owner-gated attribution of the residual.
 - **No E4 edge denominator of our own.** E4's number is the committed operator receipt's
   (`2/15`), whose corpus revision is not the frozen one; the run's own operator-shaped
   relationships (`IMPL=57 INPUT=58 NAND=10` — the `S5` row above and the log's `step S5`
@@ -715,8 +735,8 @@ gated the pass off, or the stage produced nothing.
 | `#5199` the version anchor stops at Points | **CLOSED COMPLETED** — the anchor is on the derivation link by design; #9736 owns the metric contradiction that leaves behind |
 | `#7947` the raw-vs-narrative measurement | **CLOSED COMPLETED** — E5 re-scores its arms |
 | `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, `S2.3` only once its classify pass does work (IDLE on this corpus), and V5's 8/8 scoping is the owner's open decision on the issue |
-| `#9736` E3's denominator vs the owner-approved model | **OPEN** — E3's blocker |
-| `#9738` E5's disclosure and population reconciliation | **OPEN** — E5's blocker |
+| `#9736` E3's denominator vs the owner-approved model | **OPEN — owner-gated**; `PRE-REGISTRATION.md` §10.1 carries the amended class set (`Point`+`Event`+`Document`, re-derived `148/383 = 0.38642`, still RED) as the reopen awaiting the ruling |
+| `#9738` E5's disclosure and population reconciliation | **OPEN — owner-gated**; `PRE-REGISTRATION.md` §10.2 carries the amendment (`measurement_visible_to_author: true` for E5, the 2026-10-19 measurement named) as the reopen awaiting the ruling |
 | `#5333` may any pass remove/relocate an Object (owner ruling) | **OPEN** — E1's blocker (the mechanism that must move the share) |
 | `#10360` nothing enforces the state-value guarantee on the write path | **OPEN** — E2's blocker (the render half is closed: PR `#10382` on `#9775`) |
 | `#8503` the planted operator edges are not formed | **OPEN** — E4's blocker |

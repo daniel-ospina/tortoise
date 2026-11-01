@@ -762,7 +762,21 @@ class _CannedQuery:
             rows = [["extractedFrom", 150, 141], ["references", 7, 7],
                     ["aboutObject", 211, 0]]
         elif "AS points" in cypher:                                        # composition
-            rows = [[338, 159, 29, 150, 9, 141, 0, 0, 0]]
+            # Columns, in `census()`'s own unpack order (#10525 review):
+            #   points=turn_rows=operator_points=extraction_claims=other_points=
+            #   extraction_claims_anchored=turn_rows_anchored=
+            #   operator_points_anchored=other_points_anchored
+            # The shipped log's own composition line
+            # (`capstone-measured-e0fc940b.log:37`) is
+            # `turn_rows=159 (anchored 0) extraction_claims=141 (anchored 141)
+            #  operator_points=29 (anchored 0) other=9 (anchored 0) (total=338)`,
+            # and it PARTITIONS 338 (159 + 29 + 141 + 9). The 150 that sits one
+            # column to the left here is the `extractedFrom` LINK count
+            # (`["extractedFrom", 150, 141]` above: 141 claims + 9 `other`, one
+            # each) — not a claim count. Transcribing it into the claim slot made
+            # the fixture's own partition impossible (347 ≠ 338) and pinned a
+            # value the artifact it cites cannot produce.
+            rows = [[338, 159, 29, 141, 9, 141, 0, 0, 0]]
         else:                                                             # anchor census
             label = re.match(r"MATCH \(n:(\w+)\)", cypher).group(1)
             rows = [list(_CENSUS_ROWS[label])]
@@ -824,9 +838,19 @@ def test_the_sibling_ablation_instrument_still_counts_objects(monkeypatch):
     spec.loader.exec_module(s3)
     counts = s3.created_counts(_canned_census(monkeypatch))
     assert counts["objects"] == 50, counts
-    assert counts["extraction_claims"] == 150, counts
+    # Read off the log's own composition line, never off the link count:
+    # `extraction_claims=141 (anchored 141)` (`capstone-measured-e0fc940b.log:37`).
+    assert counts["extraction_claims"] == 141, counts
     assert counts["events"] == 45, counts
-    assert counts["extraction_nodes"] == 245, counts
+    # 141 + 50 + 45, which is what #10463's committed log can produce; the 245
+    # this pin used to assert came from the mis-transcription above.
+    assert counts["extraction_nodes"] == 236, counts
+    # The partition the fixture must satisfy to be a transcription at all: the
+    # composition's classes sum to the `Point` total the census reports.
+    composition = _canned_census(monkeypatch)["point_composition"]
+    assert (composition["turn_rows"] + composition["operator_points"]
+            + composition["extraction_claims"]
+            + composition["other_points"]) == composition["points"], composition
 
 
 # ── the eight steps: measured, derived, never assigned (#9089 round 5 F3) ─
