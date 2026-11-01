@@ -162,9 +162,21 @@ def test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit():
     assert v2._value_slot_divergence("we saw 5k QPS", "we saw 6,000 QPS")
     assert v2._value_slot_divergence("we ran 20k", "we ran 21km")
     assert v2._value_slot_divergence("the delta is -20k", "the delta is 20km")
+    # ⛔ The equal-core half is gated on the OTHER unit (#10513 review P1):
+    # "the cores are equal" is "the same number" only while `k` stands for that
+    # unit word. Against `m`/`mi` the same cores are a 1000x change — the class
+    # `20 km`/`20 m` is refused for — and the first version of this arm WROTE
+    # them: measured `20k`/`20m` and `20k`/`20mi` both passed with no warning.
+    assert v2._value_slot_divergence("the drive is 20k", "the drive is 20m")
+    assert v2._value_slot_divergence("the drive is 20k", "the drive is 20mi")
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5,000 mi QPS")
+    # …and the two tolerance cases the arm exists for still hold, so the gate did
+    # not buy the detection by re-introducing the false refusals.
+    assert v2._value_slot_divergence("the drive is 20k", "the drive is 20kg") == ()
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5,000 QPS") == ()
 
 
-def test_the_one_classifier_is_the_production_value_engine():
+def test_the_one_classifier_is_the_production_value_engine(monkeypatch):
     """No second value classifier: the rule reads ``_value_bindings``.
 
     The previous attempt at this issue introduced a private
@@ -173,12 +185,80 @@ def test_the_one_classifier_is_the_production_value_engine():
     thing with redundant machinery"). Asserted structurally, because a comment
     cannot fail: a value the engine binds is a value the rule judges, and a
     token the engine does not bind is invisible to the rule.
+
+    ⛔ AND ASSERTED AS A CALL (#10513 review P2, measured). The three
+    assertions below are all about ``_value_slots``' OUTPUT, so a lane that added
+    a parallel regex classifier INSIDE ``_value_slots`` would satisfy every one of
+    them — the exact P2 that killed the previous attempt, passing green. The
+    counter is what makes this pin fail on that shape; it is the same device
+    ``test_an_over_long_side_is_not_tokenised_at_all`` uses for the bound.
     """
+    calls = {"n": 0}
+    real = v2._value_bindings
+
+    def counting(text):
+        calls["n"] += 1
+        return real(text)
+
+    monkeypatch.setattr(v2, "_value_bindings", counting)
     assert v2._value_slots("the TTL is twenty minutes") == (("ttl", ("", "20", "min")),)
+    assert calls["n"] == 1, (
+        f"_value_slots answered without calling the ONE engine: {calls['n']} "
+        "calls — a second value classifier is the P2 this row forbids")
     assert v2._value_slots("the team prefers intervals") == ()
+    assert calls["n"] == 2
     # the rule's judged set IS the engine's, minus the excluded FORMS
     engine = [v for _a, v in v2._value_bindings("the freeze starts 03:00")]
     assert engine and v2._value_slots("the freeze starts 03:00") == ()
+    assert calls["n"] == 4, calls["n"]
+
+
+def test_a_clock_valid_colon_form_is_excluded_but_a_duration_is_judged():
+    """The colon exclusion is CLOCK-VALID, not "any colon" (#10513 review P1).
+
+    An any-colon exclusion swallowed every colon-bearing numeric token, so a
+    race time — the ``STATE_VALUE_CARVE_OUT`` text's OWN example, "my personal
+    best 5K time is 27:12" — was outside the judged set and ``27:00`` for it was
+    written with no warning. The carve-out's headline case was the one case the
+    rule could never see.
+
+    Measured on the committed census, narrowing it changes NOTHING (62 judged /
+    0 refused), so this pin buys the carve-out's own example at no precision
+    cost on the corpus the residual cites.
+    """
+    # a valid clock stays outside the judged set — the measured false-positive
+    # class (`03:00`/`3am`), which is why the arm exists at all.
+    assert v2._value_form_outside_judged("9:30")
+    assert v2._value_form_outside_judged("03:00")
+    assert v2._value_form_outside_judged("23:59:59")
+    assert not v2._value_slot_divergence("the freeze starts 03:00",
+                                         "the freeze starts 3am")
+    # a colon form that is NOT a clock is a value, and a moved one is a rewrite
+    assert not v2._value_form_outside_judged("27:12")
+    assert v2._value_slot_divergence("my personal best 5K time is 27:00",
+                                     "my personal best 5K time is 27:12")
+    # …and the write path refuses it, so the carve-out's own example is enforced
+    result = _write("my personal best 5K time is 27:00",
+                    "my personal best 5K time is 27:12")
+    assert result["payload"]["points"] == [], result["warnings"]
+
+
+def test_a_typographic_minus_is_a_sign_not_decoration():
+    """U+2212 is a sign (#10513 review P1, measured).
+
+    The ASCII-only read made ``−4`` and ``4`` one value, and let ``−20k`` through
+    where the ASCII ``-20k`` is refused — so the registry's "a dropped sign …
+    still refuse" was true of one spelling of the minus and false of the other.
+    ``value_normalizer.py`` already reads U+2212 as a sign; this pins that the
+    value rule joins it.
+    """
+    assert v2._value_slot_divergence("the delta is \u22124 percent",
+                                     "the delta is 4 percent")
+    assert v2._value_slot_divergence("the delta is \u221220k",
+                                     "the delta is 20km")
+    # positive control: both spellings of the SAME signed value agree
+    assert not v2._value_slot_divergence("the delta is \u22124 percent",
+                                         "the delta is -4 percent")
 
 
 # ── 2. the enforcement, in the write path ───────────────────────────────────
@@ -436,6 +516,42 @@ def test_a_refused_value_cannot_re_enter_the_graph_through_an_operator():
     assert "the p95 hit 4.0 seconds" not in contents, contents
     assert any("refused for rewriting its own verbatim quote" in w
                for w in result["warnings"]), result["warnings"]
+
+
+@pytest.mark.parametrize("variant", [
+    "the p95 hit 4.0 seconds.",   # a trailing period
+    "the p95 hit 4.0 second",     # a singular unit
+])
+def test_a_refused_value_cannot_re_enter_the_graph_under_a_VARIANT_name(variant):
+    """#10513 review P2: the guard is the VALUE, not the byte string.
+
+    The first version keyed only on ``_norm`` equality, which is EXACT — so an
+    operator naming the refused ref with one character added re-minted the
+    rewritten value as an endpoint Point, which is the resurrection 1(b) exists
+    to stop. Measured before the fix: the payload held
+    ``'the p95 hit 4.0 seconds.'`` and ``'the p95 hit 4.0 second'``.
+
+    The second key is ``_value_slots``: a variant that states the SAME value in
+    the SAME slot is the same resurrection even when its bytes differ. An
+    endpoint carrying no value has no slots and is unaffected (positive control
+    below), so this cannot be read as "any operator endpoint is refused".
+    """
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["operators"] = [{
+        "src": variant,
+        "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert variant not in contents, contents
+    # positive control: an endpoint with no value in it is still minted, so the
+    # slot key is a value guard and not a blanket refusal of the operator path.
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["operators"] = [{
+        "src": "the nightly rebuild window",
+        "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the nightly rebuild window" in contents, contents
 
 
 # ── 7. pins for the cycle-3 findings ──────────────────────────────────────

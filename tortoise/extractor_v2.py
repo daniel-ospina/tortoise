@@ -4062,6 +4062,15 @@ _VALUE_DECIMALS = re.compile(r"\d+(?:\.\d+)?")
 #: a date slot is outside the judged set, exactly like a clock.
 _ISO_DATE_TOKEN = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+#: A RAW token that is a valid clock time: hours 0-23, minutes and seconds 0-59.
+#: ⛔ Deliberately NOT "any colon-bearing token" (#10513 review P1, measured):
+#: that put `27:12` — the `STATE_VALUE_CARVE_OUT` text's OWN example ('my
+#: personal best 5K time is 27:12') — outside the judged set, so the carve-out's
+#: headline case was the one case the rule could never see, and a race time
+#: rewritten 27:12 -> 27:00 was written with no warning. Hour 27 is not a clock,
+#: so the shape below judges it while `9:30`/`03:00` stay excluded.
+_CLOCK_FORM = re.compile(r"(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?")
+
 
 def _value_form_outside_judged(token: str) -> bool:
     """True when a value token's FORM, not its value, is what differs.
@@ -4073,12 +4082,26 @@ def _value_form_outside_judged(token: str) -> bool:
     ``2026-10-09``/"yesterday", ``2026-11-02``/"November 2") while catching
     zero rewrites (#10360 lane record, §4). The clock exclusion reads the forms
     ``_canonicalise_clocks`` produces (``clocka0300``, ``meridiem-pm``) as well
-    as a raw ``9:30``, so a value the ONE engine already canonicalised is not
-    re-judged by a second opinion here.
+    as a raw clock-VALID ``9:30``, so a value the ONE engine already
+    canonicalised is not re-judged by a second opinion here.
+
+    ⛔ The raw arm is CLOCK-VALID, not "any colon" (#10513 review P1). An
+    any-colon exclusion swallowed every colon-bearing numeric token, so
+    ``27:12`` — a race time, and the carve-out's own worked example — was never
+    judged: ``27:00`` for ``27:12`` was written with no warning. Re-measured
+    under the narrowed arm the committed census is UNCHANGED (62 judged / 0
+    refused), so this buys the carve-out's own example at no precision cost on
+    the corpus the residual cites.
+
+    Named residual: a colon-form value that IS a valid clock shape but is not a
+    clock (``4:32`` read as a marathon time) is still outside the judged set —
+    the two are the same token shape and nothing in the text distinguishes them,
+    so this is a stated trade rather than a silent gap.
     """
     t = str(token or "").lower()
     return (t.startswith("clock") or t.startswith("meridiem-")
-            or ":" in t or bool(_ISO_DATE_TOKEN.search(t)))
+            or bool(_ISO_DATE_TOKEN.search(t))
+            or bool(_CLOCK_FORM.fullmatch(t)))
 
 
 #: Spelling equivalents of one UNIT — the tolerance is SPELLING, never the
@@ -4137,6 +4160,20 @@ _MAGNITUDE_PREFIXES = frozenset({"k"})
 #: asserts the containment: a prefix with no factor makes `_magnitude_agrees`
 #: return False for everything, so the arm becomes a silent no-op and the false
 #: refusals it exists to remove quietly come back (review, measured).
+#:
+#: ⛔ **OVERRIDES:** `tortoise/value_normalizer.py`'s #2817 ruling that NO
+#: magnitude table ships (`k`/`M`/`MM`/`mil`/`milhão` dropped as a class, on the
+#: ground that "a second interpretation of the same token is how a third opinion
+#: gets invented") — scoped to THIS seam, and only for `k`, because the ruling
+#: governs the money DERIVATION (a magnitude word must not silently scale an
+#: amount) while this table governs VALUE IDENTITY in the write-path refusal,
+#: where `k` is ALREADY a unit identity in `_UNIT_EQUIV` because it is a unit
+#: `_value_bindings` fuses. Without it the rule refuses `5k QPS` against
+#: `5,000 QPS` — a truthful point withheld over a spelling, which is the
+#: false-accusation direction this carve-out must never take (#10513 review P1).
+#: It re-admits nothing into `value_normalizer`'s money path, which keeps its
+#: ruling unchanged and pinned. Recorded on #10360 as a departure the owner can
+#: reverse; the gauge is #10513 review cycle 8, P1-3.
 _MAGNITUDE_FACTORS = {"k": 1000}
 
 #: The longest side the #10360 rule will JUDGE, in characters. The quote a point
@@ -4170,7 +4207,12 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     matches = list(_VALUE_DECIMALS.finditer(raw))
     if not matches:
         return None
-    sign = "-" if raw.lstrip().startswith("-") else ""
+    # U+2212 MINUS SIGN is a sign, not decoration (#10513 review P1, measured):
+    # the ASCII-only read made `\u22124` and `4` one value and let `\u221220k`
+    # through where the ASCII `-20k` is refused — the very "dropped sign" row the
+    # registry promises is still judged. `value_normalizer.py` already reads the
+    # typographic minus as a sign, so this is this module JOINING that reading.
+    sign = "-" if raw.lstrip().startswith(("-", "\u2212")) else ""
     out: list[str] = []
     for m in matches:
         run = m.group(0)
@@ -4196,6 +4238,14 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     return (sign, "/".join(out), _UNIT_EQUIV.get(suffix, suffix or None))
 
 
+#: The units a bare ``k`` can actually BE an abbreviation of. The equal-core
+#: arm may only waive the unit mismatch where the other side names one of these:
+#: `20k`/`20km` is one value written two ways, while `20k`/`20m` is 20 km against
+#: 20 metres — a 1000x unit change, exactly what `20 km`/`20 m` is refused for
+#: (#10513 review P1, measured: `20k`/`20m` and `20k`/`20mi` were WRITTEN).
+_K_ABBREVIATES = frozenset({"km", "kg"})
+
+
 def _magnitude_agrees(with_prefix: tuple[str, str, str | None],
                       other: tuple[str, str, str | None]) -> bool:
     """Do these two identities name the SAME number, reading the prefix as x1000?
@@ -4213,9 +4263,19 @@ def _magnitude_agrees(with_prefix: tuple[str, str, str | None],
         and no number was ever restated;
       * the prefix reading closes the gap — `5k`/`5,000`, where `5 x 1000` IS
         the other side's core.
+
+    ⛔ BOTH are gated on the OTHER side's unit (`_K_ABBREVIATES`, #10513 review
+    P1). "The cores are equal" is only "the same number" while `k` is standing
+    for the other side's unit word: against `m`/`mi`/`M` the same equal cores
+    are a 1000x change and the arm must not waive it — `20k`/`20m` (20 km vs
+    20 m) is the pair a reviewer measured passing through the first version. The
+    factor arm takes the same gate for the same reason (`5k`/`5,000` is bare,
+    but `5k`/`5,000 mi` is not).
     """
     factor = _MAGNITUDE_FACTORS.get(with_prefix[2])
     if factor is None or with_prefix[0] != other[0]:
+        return False
+    if other[2] is not None and other[2] not in _K_ABBREVIATES:
         return False
     if with_prefix[1] == other[1]:
         return True
@@ -8176,6 +8236,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     #: verbatim anchor, i.e. the refusal held only for the payload point it was
     #: refusing and the rewritten value was written anyway (review cycle 2, P2).
     refused_value_contents: set[str] = set()
+    #: …and the same refusal keyed on the VALUE SLOTS, which is what makes 1(b)
+    #: true rather than approximate (#10513 review P2, measured: `_norm` equality
+    #: is exact, so re-naming the refused ref `the p95 hit 4.0 seconds.` (a
+    #: trailing period) or `… 4.0 second` re-minted the rewritten value). The
+    #: slot key is `_value_slots`' own output, so a variant that states the SAME
+    #: value in the SAME slot is the same resurrection even when its bytes
+    #: differ. Empty slots never match: an endpoint carrying no value cannot be
+    #: the resurrection of a refused one.
+    refused_value_slots: set[tuple] = set()
     tier_a_points = 0                # E2 (#1534): Tier-A state-value count
     noops: list[dict] = []           # E7 (D4): folded duplicates — result-level
     # #5006 (D12/O4): the FUSIONS — near-duplicate pairs merged onto ONE
@@ -8332,6 +8401,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # re-minted as an endpoint Point from exactly such a shape.
             refused_value_contents.add(_norm(content))
             refused_value_contents.add(_norm(_raw_content))
+            _refused_slots = _value_slots(_raw_content)
+            if _refused_slots:
+                refused_value_slots.add(_refused_slots)
             # The point's own `supersedes` ref is dropped WITH the point, and
             # #9906's rule is that none of the drop doors is silent — so the
             # reversal is reported through the same carry helper the other
@@ -8596,7 +8668,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # where suppressing it keeps a truthful ref from being reported as
         # "refused" (review cycle 5 measured both branches: the edge drops the
         # same way, one misleading warning fewer).
-        if _norm(content) in refused_value_contents and _norm(content) not in point_ids:
+        _refused_here = _norm(content) in refused_value_contents
+        if not _refused_here:
+            # …and the SLOT key (#10513 review P2, measured): `_norm` equality is
+            # EXACT, so re-naming the refused ref `the p95 hit 4.0 seconds.` (one
+            # trailing period) or `… 4.0 second` re-minted the rewritten value —
+            # the resurrection 1(b) exists to stop. A variant that states the
+            # SAME value in the SAME slot is that resurrection even when its
+            # bytes differ. An endpoint carrying NO value has no slots and can
+            # never match, so a plain ref is unaffected.
+            _slots = _value_slots(content)
+            _refused_here = bool(_slots) and _slots in refused_value_slots
+        if _refused_here and _norm(content) not in point_ids:
             # #10360: mint-before-wire must not resurrect what the
             # value-fidelity rule refused. Minting here would build a
             # `statement` Point out of the MODEL's text — the rewritten value —

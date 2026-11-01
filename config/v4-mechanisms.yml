@@ -508,7 +508,12 @@ mechanisms:
       (mint-before-wire, #2552) builds a Point from the MODEL's text, so it reads
       `refused_value_contents` and refuses to mint a refused ref — measured: an
       operator naming a refused point used to re-materialise the rewritten value
-      as an endpoint Point, undoing the refusal one step later.
+      as an endpoint Point, undoing the refusal one step later. The key is the
+      VALUE, not the byte string: `_norm` equality is exact, so re-naming the
+      refused ref `the p95 hit 4.0 seconds.` re-minted it (measured), and the
+      guard therefore also matches the refused point's own `_value_slots` — a
+      variant stating the SAME value in the SAME slot is the same resurrection.
+      An endpoint carrying no value has no slots and is unaffected.
       ⚠️ That is not RETENTION: a refused point loses its value entirely, so what
       is enforced is "the graph never records a rewritten value as verbatim",
       not "every value survives".
@@ -522,10 +527,15 @@ mechanisms:
       SIGN and its UNIT kept, so ``1200``/``1,200``, ``4.20``/``4.2``,
       ``20%``/``20 percent``, ``.5``/``0.5`` and ``800ms``/``800 milliseconds``
       are one value while ``20 minutes``/``20 hours`` and ``20 km``/``20 mi`` are
-      rewrites; (ii) clock forms (any colon-bearing token, including the engine's
-      own `clocka0300` placeholder) and ISO dates are OUTSIDE the judged set — a
-      strict containment rule refuses 16 of the 101 truthful census spans and
-      every one of the 16 is a normalised FORM, catching zero rewrites; (iii) a
+      rewrites; (ii) clock forms (a CLOCK-VALID colon token — `HH:MM` with hours
+      0-23, plus the engine's own `clocka0300`/`meridiem-pm` placeholders) and ISO
+      dates are OUTSIDE the judged set — a strict containment rule refuses 16 of
+      the 101 truthful census spans and every one of the 16 is a normalised FORM,
+      catching zero rewrites. ⛔ The exclusion is CLOCK-VALID, not "any colon":
+      an any-colon arm put `27:12` — this carve-out's OWN worked example —
+      outside the judged set (measured: `27:00` for `27:12` was written with no
+      warning), and narrowing it changes the census result not at all (62 judged
+      / 0 refused, re-derived); (iii) a
       value is judged only where both sides bind the SAME anchor sequence, so a
       quote that fragments, drops, reorders or adds a value fails OPEN.
       ⚠️ EVERY tolerance above is measured against OVER-REFUSAL on a truthful
@@ -546,7 +556,10 @@ mechanisms:
       on the flags-on arm against the 49/90 = 54.4% committed baseline (`#5064`
       comment 2026-10-13, `#7949` E2) — the figure that would move is the E2
       arm's, and this lane ran no LLM arm. `UNMEASURED(<an E2 LLM arm run>)`.
-      (c) a rewritten CLOCK or ISO date is not caught (form excluded by design);
+      (c) a rewritten CLOCK or ISO date is not caught (form excluded by design),
+      and neither is a colon-form value that happens to be a valid clock shape
+      without being a clock (`4:32` read as a marathon time) — the two are the
+      same token shape and nothing in the text separates them;
       (d) a unit WORD the engine's own `_UNIT_WORDS` vocabulary does not carry
       (`seconds`, `minute`, `hour`, `day`, `mile`, …) is never fused into the
       value token — apart or not — so a minutes→seconds rewrite is not judged:
@@ -586,20 +599,28 @@ mechanisms:
       fires only where `_magnitude_agrees` proves the two sides name the SAME
       NUMBER — equal cores, or the prefix reading closing the gap
       (`_MAGNITUDE_FACTORS`, `5 x 1000 == 5,000`) — so a moved number
-      (`5k`/`6,000`, `5k`/`6k`, `20k`/`21km`) and a dropped sign
-      (`-20k`/`20km`) are still judged and still refuse. An earlier revision of
-      this arm fired on the unit mismatch alone and WROTE three of those
-      (`5k`/`6,000`, `20k`/`21km`, `-20k`/`20km`; `5k`/`6k` was refused even then,
-      because both sides carry `k` so the arm never opened) — that is why the
-      gate exists and why those rows are pinned.
-      ⛔ THE CLASS THAT *IS* UNPROVEN, named as an example a reader can use: where
-      the cores are EQUAL, the arm cannot tell whether `k` was a PREFIX or the
-      unit — `20k`/`20 min` (20,000 against 20 minutes), `20k`/`20%`, and
-      `5k`/`5 mi` (5 km against 5 miles, a real unit rewrite) all fail OPEN. That
-      is the ambiguity itself, and failing open is the direction this rule must
-      take; it is stated here rather than buried, because it is the one shape
-      where a rewrite can pass. (`5k`/`5,000` is NOT in this class — the prefix
-      branch proves it arithmetically.)
+      (`5k`/`6,000`, `5k`/`6k`, `20k`/`21km`) and a dropped sign (ASCII `-` or
+      U+2212 `\u2212`: `-20k`/`20km`) are still judged and still refuse. An
+      earlier revision of this arm fired on the unit mismatch alone and WROTE
+      three of those (`5k`/`6,000`, `20k`/`21km`, `-20k`/`20km`; `5k`/`6k` was
+      refused even then, because both sides carry `k` so the arm never opened) —
+      that is why the gate exists and why those rows are pinned.
+      ⛔ AND BOTH BRANCHES ARE GATED ON THE OTHER SIDE'S UNIT (`_K_ABBREVIATES`,
+      review cycle 8 P1): "the cores are equal" is "the same number" only while
+      `k` is standing for that unit word, so `20k`/`20km` and `20k`/`20kg` are
+      tolerated, while `20k`/`20m`, `20k`/`20mi` — 20 km against 20 m, a 1000x
+      unit change, the class `20 km`/`20 m` is refused for — and `20k`/`20 min`
+      (20,000 against 20 minutes), `20k`/`20%` and `5k`/`5 mi` (5 km against 5
+      miles) are REFUSED. Before that gate, `20k`/`20m` and `20k`/`20mi` were
+      WRITTEN (measured), which is this class the wrong way round: a REAL unit
+      rewrite passing on equal cores.
+      ⛔ THE PART THAT IS STILL UNPROVEN, narrowed rather than claimed away: the
+      gate can only compare unit words it knows, so an equal-core pair whose
+      other side carries NO recognised unit still fails OPEN — `20k`/`20 zorks`
+      is tolerated, the same `_UNIT_EQUIV` residual (d) names for every unknown
+      spelling. And the module never asserts `5k == 5,000` as a VALUE anywhere:
+      the prefix branch TOLERATES the pair arithmetically, it does not rewrite
+      the core.
       Still NOT caught, and named rather than implied: a `k`-suffixed value is
       never multiplied into its core, so nowhere does the module assert
       `5k == 5,000` as a VALUE — the arm merely tolerates the pair; and `M`/`m`
