@@ -5927,18 +5927,37 @@ def _split_whitespace_keeping_spaced_paths(line: str) -> list[str]:
     longer list (`tortoise/sdk.py docs/release notes.md tests/x.py`), which a
     whole-line existence check alone cannot see.
 
-    A COMMA IS ONLY A SEPARATOR BETWEEN TOKENS (review P2). `_split_changed_files`
-    folds commas for a line with no whitespace; inside a whitespace-bearing line a
-    comma stays INSIDE its token, so `docs/a,b.md` survives as one entry — the same
-    protection the space case gets, from the same predicate instead of a second
-    rule. Edge commas (`a.py, b.py`) are stripped per token.
+    A COMMA IS A SEPARATOR BETWEEN TOKENS, AND INSIDE ONE TOO WHEN IT IS NOT PART
+    OF A PATH (review P2, measured). `_split_changed_files` folds commas for a line
+    with no whitespace; inside a whitespace-bearing line a token is kept whole when
+    it NAMES AN EXISTING PATH (`docs/a,b.md`) and folded on its commas when it does
+    not — the same existence predicate as the space case, not a second rule and not
+    an assumption that paths do not contain commas.
+
+    WHY THAT LAST CLAUSE IS NOT OPTIONAL. The first cut of this function only
+    stripped EDGE commas from a token, so
+    `"tortoise/hosted_api.py,tortoise/sdk.py tests/test_ci_selection.py"` kept
+    `tortoise/hosted_api.py,tortoise/sdk.py` as ONE entry — which PREFIX-MATCHES
+    the `tortoise/hosted_api.py` pattern, so it was not an unknown path, so
+    nothing warned, and the selection answered `full=false` with
+    `tortoise/sdk.py` (a SHARED_MODULE) reported as not changed: 885 tests instead
+    of the matrix, silently. That is the very defect this change exists to remove,
+    reintroduced by a separator the fix claimed to handle.
 
     Deterministic by construction: the only input to the join is the filesystem,
     the pass is left to right, and an extension is taken only on a positive hit —
     so `tortoise/a.py tortoise/b.py` (no such joined path) splits, while
     `release notes.md` (a real file) does not.
     """
-    tokens = [t for t in (tok.strip(",") for tok in line.split()) if t]
+    tokens: list[str] = []
+    for raw in line.split():
+        tok = raw.strip(",")
+        if not tok:
+            continue
+        if "," in tok and not _names_existing_path(tok):
+            tokens.extend(p for p in (x.strip() for x in tok.split(",")) if p)
+        else:
+            tokens.append(tok)
     out: list[str] = []
     i = 0
     while i < len(tokens):

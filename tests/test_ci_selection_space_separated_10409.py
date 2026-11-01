@@ -196,6 +196,30 @@ def test_a_path_containing_a_comma_is_kept_whole(parser, tmp_path):
     assert parser("docs/a,b.md other.py") == ["docs/a,b.md", "other.py"]
 
 
+def test_a_comma_inside_a_space_separated_list_is_still_a_separator(tmp_path):
+    """THE P1 THE REVIEW FOUND IN THE FIRST CUT OF THIS FIX, pinned.
+
+    A token carrying a comma, inside a line that also carries a space
+    (`"tortoise/hosted_api.py,tortoise/sdk.py tests/test_ci_selection.py"`), is a
+    LIST. Kept whole it PREFIX-MATCHES the `tortoise/hosted_api.py` pattern, so it
+    is not an unknown path, nothing warns, and `tortoise/sdk.py` — a SHARED_MODULE
+    — is silently dropped: measured `full=false`, 885 tests instead of the matrix.
+    """
+    got = _selected(
+        tmp_path,
+        ["--changed-files", "tortoise/hosted_api.py,tortoise/sdk.py tests/test_ci_selection.py"],
+        artifact="mixed_comma_space",
+    )
+    want = _selected(tmp_path, ["--changed-files", "-"],
+                     stdin="tortoise/hosted_api.py\ntortoise/sdk.py\ntests/test_ci_selection.py\n",
+                     artifact="newline")
+    assert got == want
+    assert got["full"] is True, got
+    assert _selection(tmp_path, "mixed_comma_space")["changed_files"] == [
+        "tortoise/hosted_api.py", "tortoise/sdk.py", "tests/test_ci_selection.py",
+    ]
+
+
 # ── the forms that already worked must not move ──────────────────────────────
 
 def test_the_documented_single_path_inline_form_is_unchanged(tmp_path):
