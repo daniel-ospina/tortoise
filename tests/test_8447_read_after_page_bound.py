@@ -44,14 +44,36 @@ def test_the_rest_route_declares_the_seam_s_bound():
     A drift here is not cosmetic — a route that accepts a larger ``limit`` than
     ``read_after`` refuses hands the seam an out-of-domain page and answers 400
     to a request its own validator called legal.
+
+    The two DEFAULTS are pinned here for the same reason, and they are the half
+    a ``(minimum, maximum)`` assertion is blind to: neither default is derived
+    from ``MAX_PAGE`` (the route's ``Query(100, ...)`` and the seam's
+    ``limit=100`` are both literals), so lowering ``MAX_PAGE`` below 100 leaves
+    every caller that passes NO limit out of domain — the route would advertise
+    a default the seam refuses, and ``read_after(proj, 0)`` would raise — while
+    the maximum still matched. Two independent literals must stay ``<=`` the
+    bound, so the relation is asserted, not just the endpoints.
     """
+    import inspect
+
     from tortoise.hosted_api import app
+    from tortoise.sdk import TortoiseSDK
 
     params = app.openapi()["paths"]["/v1/events"]["get"]["parameters"]
     limit = next(p for p in params if p["name"] == "limit")
     schema = limit["schema"]
     assert (schema.get("minimum"), schema.get("maximum")) == (
         1, event_store.MAX_PAGE), schema
+
+    # The route's OWN advertised default, and the two defaults a caller who
+    # passes no `limit` actually lands on.
+    assert schema["minimum"] <= schema["default"] <= schema["maximum"], schema
+    for label, fn in (("event_store.read_after", event_store.read_after),
+                      ("TortoiseSDK.poll_events", TortoiseSDK.poll_events)):
+        default = inspect.signature(fn).parameters["limit"].default
+        assert 1 <= default <= event_store.MAX_PAGE, (
+            f"{label}'s default {default} is outside 1..{event_store.MAX_PAGE}"
+            " — a caller that passes no limit would be REFUSED")
 
 
 def _seed(proj, n: int) -> None:
