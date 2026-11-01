@@ -6411,6 +6411,31 @@ def _item_dedup_key(item: dict) -> str | None:
     return val if isinstance(val, str) and val.strip() else None
 
 
+def _item_point_kind(item: dict) -> str:
+    """The ``pointKind`` an ingest ``points`` item writes — the value the write
+    loop passes to ``create_point`` as its positional ``kind`` (``statement``
+    when the item declares none).
+
+    One home so the two Phase-1 readers of that value cannot drift: the batched
+    candidate read (:meth:`TortoiseSDK._terminal_content_candidates`) is built
+    BEFORE the ``points`` loop and the loop's own ``pkind`` is read after it, so
+    a guard scoped by a different kind than the write would resolve a different
+    node set (fail-open or over-reject). #9819.
+
+    ⚠️ Always a ``str``, including for a NON-string spelling. Such a kind is
+    already a Phase-1 violation (``_check_kind``: "pointKind must be a string")
+    and ``create_point`` refuses it, so it never reaches a write — but it DOES
+    reach the identity maps the content guard keys by ``(identity, kind)``, and
+    an unhashable spelling (``kind: {"a": 1}``) made those lookups hash a dict:
+    ``ingest`` raised a raw ``TypeError: unhashable type`` out of Phase 1
+    instead of returning the structured verdict the caller is owed (measured;
+    present since the content guard landed). It falls back to the same default
+    an item with no kind gets, and the bundle is still refused.
+    """
+    kind = item.get("kind")
+    return kind if isinstance(kind, str) and kind else "statement"
+
+
 def _item_prop_at_depth(item: dict, key: str, depth: int) -> tuple[bool, object]:
     """``(declares, value)`` for ``key``, read at the depth the ITEM'S WRITE
     DOOR flattens (#7925 review P2).
@@ -6515,6 +6540,86 @@ _ENTITY_ITEM_FLATTEN_DEPTH = {"subject": 2, "object": 2, "event": 2,
                               "document": 1}
 #: ``create_point`` folds once, then the DEDUP relay ``update_point`` folds again.
 _POINT_ITEM_FLATTEN_DEPTH = 2
+#: The depth at which a POINT ITEM's declared ``status`` is STORED when the item
+#: MINTS — ONE, because ``create_point`` pops ``status`` BEFORE its dedup branch
+#: (a dedup hit must never forward the caller's status into ``update_point``,
+#: #1905), so the only fold a stored status ever passes through is
+#: ``create_point``'s own. It is NOT ``_POINT_ITEM_FLATTEN_DEPTH``: that depth
+#: exists for the arms that read a prop the DEDUP RELAY can still see (the
+#: ``outdated`` refusal, which is not popped), and reading a STATUS at it makes
+#: Phase 1 predict a terminal stamp the writer never performs — measured on a
+#: double-wrapped ``{"props": {"props": {"status": "retracted"}}}`` point item:
+#: the writer stores ``live`` while the bundle-order simulation reported "mints
+#: with status 'retracted'" and refused the NEXT item (#9819 review P2).
+#:
+#: ⛔ WHY ONE FOLD IS DEPTH ONE — the step that has been re-derived wrong twice,
+#: so it is written down. ``create_point``'s signature ends ``**props``, and the
+#: ingest loop calls it as ``create_point(kind, content, dedup=True,
+#: **write_item)`` — so an item's ``props`` VALUE becomes the ``props`` KEYWORD,
+#: and lands as a KEY CALLED ``props`` inside the passthrough dict, ONE LEVEL
+#: DEEPER THAN THE ITEM. The door's single ``_coerce_props`` fold then surfaces
+#: that dict's own keys, i.e. exactly ``item["props"][…]`` = depth 1; the dict
+#: one level further in is written as a literal ``props`` property, which
+#: FalkorDB cannot store and degrades to null (#7369). MEASURED, both
+#: directions: ``create_point("statement", "x", props={"status":
+#: "retracted"})`` stores ``retracted`` and ``…props={"props": {"status":
+#: "retracted"}}`` stores ``live``. Pinned by
+#: ``tests/test_6110_key_identity.py::…::test_the_mint_depth_is_the_depth_the_
+#: write_door_folds`` (which also asserts depth 2 DOES report ``retracted``, so
+#: the divergence is deliberate rather than a narrow read) and its kind sibling.
+#: A later review proposed raising this to 2 on the model that one fold surfaces
+#: ``item["props"]["props"]``; that model omits the ``**props`` wrapping, and raising
+#: it re-opens the round-5 over-reject (both reproducers pinned on the INGEST surface).
+_POINT_ITEM_MINT_STATUS_DEPTH = 1
+
+
+def _item_stored_point_kind(item: dict) -> str | None:
+    """The ``pointKind`` PROPERTY a minted ``points`` node will CARRY — which
+    is NOT always the positional answer :func:`_item_point_kind` gives (#9819
+    review P2, round 5).
+
+    ``create_point`` maps the positional kind into its CREATE map and then
+    applies the caller's props over it — ``_create_map[_key] = f"${_pname}"``
+    for every prop — so a ``pointKind`` prop WINS and is the value the node
+    stores (#5475/#9287; pinned by
+    ``tests/test_kind_layer_partition_9964.py``). The depth is the MINT's own
+    single fold, the same ``_POINT_ITEM_MINT_STATUS_DEPTH`` the sibling status
+    record reads and for the same reason: a deeper spelling is a fold
+    ``create_point`` never performs before its dedup branch. ⚠️ "One fold" is
+    depth ONE from the item, not two — ``create_point``'s ``**props`` receives
+    the item's ``props`` VALUE under a ``props`` KEY, so the fold reaches
+    ``item["props"]``'s own keys and no further; see that constant for the
+    measurement and its pinning test.
+
+    ⛔ THIS IS NOT A REPLACEMENT FOR ``_item_point_kind`` — the two answer
+    different questions and the guard needs BOTH. The writer's dedup QUERY
+    scopes by the POSITIONAL kind (``_resolve_dedup_hit(content,
+    pointKind=kind)`` -> ``_find_point_by_content``'s ``n.pointKind = $kind``,
+    and ``_find_points_by_key(key, pointKind=kind)``), so every LOOKUP and
+    every graph read keeps the positional kind. Only the bundle-order RECORD
+    of a node this bundle MINTS is keyed by the STORED one, because that is
+    the value a LATER item's dedup query compares against. Keying the record
+    by the positional kind instead failed OPEN (a later item whose positional
+    kind equals this item's STORED kind resolves the minted node and the
+    simulation never recorded it) and over-rejected the mirror — measured, and
+    pinned by ``TestTheMintRecordIsKeyedByTheSTOREDKind``.
+
+    ``None`` for a declared non-string ``pointKind``: ``n.pointKind = $kind``
+    can match no string kind, so nobody can fold onto that mint. ⛔ The write
+    door does NOT refuse that shape — ``_refuse_invisible_point_kinds``
+    delegates to ``_refuse_invisible_kind``, which REFUSES PADDED STRINGS ONLY
+    and returns early for a non-``str`` (``create_point(42, …)`` is documented
+    there as out of contract but writable), so a list-valued ``pointKind`` can
+    reach the node. ``None`` here is therefore what keeps the guard from
+    claiming an identity the graph will not hold — and the same rule is why
+    :meth:`TortoiseSDK._terminal_content_candidates` skips a non-``str`` STORED
+    kind instead of keying a dict by it (#9819 review round 6).
+    """
+    declares, value = _item_prop_at_depth(
+        item, "pointKind", _POINT_ITEM_MINT_STATUS_DEPTH)
+    if declares:
+        return value if isinstance(value, str) else None
+    return _item_point_kind(item)
 
 
 def _item_flatten_depth(item: dict, section: str) -> int:
@@ -6940,6 +7045,78 @@ def _wire_about_value(proj, source_id: str, value, rel: str) -> bool:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _content_candidate_resolution(cands, content: str,
+                                  kind: str
+                                  ) -> tuple[str | None, bool, frozenset[str]]:
+    """One bundle item's answer out of
+    :meth:`TortoiseSDK._terminal_content_candidates`.
+
+    ``(terminal_hit_id_or_None, would_mint, fold_target_keys)`` — the first two
+    are the questions the per-item graph reads answered, and each one copies the
+    order of the site it must mirror rather than re-deriving it:
+
+    * the TERMINAL HIT is :meth:`TortoiseSDK._find_terminal_dedup_hit`'s order:
+      a terminal row under the CONTENT HASH, and only on that miss — and only
+      when there is NO unfiltered hash row at all (#2971) — the hash-less A10
+      fallback. Running that fallback on the terminal-filtered miss alone would
+      reject a bundle whose ref the writer dedups onto a LIVE hash-present
+      sibling.
+    * ``would_mint`` is :meth:`TortoiseSDK._find_point_by_content`'s order —
+      the WRITER's, which is what decides whether an item mints at all (and so
+      whether its declared terminal status may be recorded for bundle order):
+      no row under the hash (ANY status) and no hash-less row under the
+      content.
+
+    ⛔ The asymmetry between the two fallbacks is deliberate and inherited, not
+    a bug to "unify": the guard refuses only when the writer could not have
+    resolved a hash-present sibling instead, while the writer takes any
+    hash-less match it finds. Each arm mirrors its own site.
+
+    ``fold_target_keys`` is the third question, and it is **not** bookkeeping
+    (#9819 review P1): the non-empty ``key`` values stored on the node(s) this
+    item's CONTENT fold can land on — empty when the item mints, or when the
+    candidates carry no key at all. ``create_point`` applies the supplied key
+    through ``update_point`` on a content fold **only when the resolved point
+    holds no OTHER key**; a point that already holds a different one keeps it
+    and the supplied key is POPPED (`create_point`, #6110). So "the key was
+    free at Phase-1 time" does not mean "this item writes it", and a caller
+    predicting what LATER items will find must ask this set, not the absence of
+    a holder.
+
+    ⚠️ MULTIPLE candidates under one identity make the answer a SUPERSET, on
+    purpose: the writer resolves ``rows[0]`` of its own query, which carries no
+    ``ORDER BY``, so when one candidate holds a conflicting key and another
+    holds none, WHICH node the fold lands on is not decidable at Phase-1 time.
+    The caller's rule is therefore "the key lands only if EVERY candidate
+    accepts it", i.e. it treats an ambiguous pair as "does not land" — the
+    fail-closed direction (an item wrongly believed to hold its key can only
+    mask a later fold, while one wrongly believed not to hold it can only
+    over-reject a bundle that is already carrying duplicate content, which is
+    itself the broken pre-#6110 state).
+    """
+    (terminal_by_hash, present_by_hash,
+     terminal_hashless, present_hashless,
+     keys_by_hash, keys_hashless) = cands
+    ch = _content_hash(content)
+    hit = terminal_by_hash.get((ch, kind))
+    _hash_present = (ch, kind) in present_by_hash
+    if hit is None and not _hash_present:
+        hit = terminal_hashless.get((content, kind))
+    mints = (_hash_present is False
+             and (content, kind) not in present_hashless)
+    # The arm the writer would resolve from, in the writer's own order: the hash
+    # query first, and the A10 fallback only on a hash MISS (`_find_point_by_
+    # content`). Reading the other arm's keys would describe a node the write
+    # never addresses.
+    if _hash_present:
+        fold_keys = keys_by_hash.get((ch, kind), frozenset())
+    elif (content, kind) in present_hashless:
+        fold_keys = keys_hashless.get((content, kind), frozenset())
+    else:
+        fold_keys = frozenset()
+    return hit, mints, fold_keys
 
 
 # #2335 WI-2: the "file a report" hook target — the bug_report.yml template
@@ -22533,23 +22710,13 @@ class TortoiseSDK:
         dead for exactly the bundles it protects, because a ``points`` ref makes
         the pair Point-bearing by construction.
 
-        The CONTENT-dedup legs stay route-scoped in :meth:`_find_terminal_dedup_hit`
-        — #9173 deliberately made wiring an operator to a terminal point legal,
-        and that is the class its scoping governs. Only the key IDENTITY is
-        unconditional here: the key holder is the SAME node, so there is no edge
-        question to ask.
-
-        ⚠️ RESIDUAL, stated so this helper is not read as closing more than it
-        does: a CONTENT (or hash) fold onto a terminal point is still reachable
-        from an ingest and still mutates it — ``create_point(dedup=True)``
-        resolves content unconditionally, so a fresh key (or none) with the
-        SAME content as a retracted point folds onto it and stamps
-        ``batch_id`` — and moves ``updatedAt`` when the item carries props —
-        exactly as the key case did (measured on this tree; an intra-bundle pair
-        can fold onto a terminal point it minted one statement earlier). That
-        half is NOT closed by this change
-        and not claimed to be; it is #9173's accepted trade and needs its own
-        decision rather than a silent widening of this guard.
+        ⚠️ #9173's route-scoping governs the ``create_direct_edge`` prediction,
+        not either half of this POINT-WRITE prediction, so the CONTENT identity
+        is now closed the same unconditional way (#9819): a content fold is a
+        write every route reaches, and the CONTENT-dedup terminal guard lives in
+        ``_check_endpoints``'s unconditional ``points`` loop beside this key leg
+        (it does not run through this helper — the key identity has no edge
+        question, so it is resolved here and there separately).
 
         ⛔ What this helper CANNOT answer, and does not pretend to: it reads the
         COMMITTED graph, so a point minted terminal by an EARLIER item of the
@@ -22705,6 +22872,176 @@ class TortoiseSDK:
                     params={**fallback_params, "content": content},
                 ).result_set
         return rows[0][0] if rows else None
+
+    def _terminal_content_candidates(
+        self, wanted: list[tuple[str, str]],
+    ) -> tuple[dict[tuple[str, str], str], set[tuple[str, str]],
+               dict[tuple[str, str], str], set[tuple[str, str]],
+               dict[tuple[str, str], frozenset[str]],
+               dict[tuple[str, str], frozenset[str]]]:
+        """Batched twin of :meth:`_find_terminal_dedup_hit` for a WHOLE bundle.
+
+        ``wanted`` is one ``(content, pointKind)`` per candidate item. Returns
+        ``(terminal_by_hash, present_by_hash, terminal_hashless,
+        present_hashless, keys_by_hash, keys_hashless)``, every one keyed
+        ``(identity, pointKind)`` — the identity being the content HASH, or the
+        CONTENT itself for the hash-less A10 rows — so a caller resolves an
+        item with NO graph read (:func:`_content_candidate_resolution` is that
+        resolver). The two ``keys_*`` maps carry the non-empty ``key`` value
+        each candidate row STORES, as a SET per identity: a content fold applies
+        the supplied key only when the resolved point holds no other
+        (``create_point`` pops it, #6110), so the caller needs the stored keys,
+        not just the presence, of the node(s) the fold can land on. Two rows can
+        hold one identity, so the answer is a set and the caller must treat a
+        conflict in ANY member as "the key may be dropped" — see
+        :func:`_content_candidate_resolution`.
+
+        ⛔ AT MOST TWO queries for the bundle, not one per item. The per-item
+        helper costs THREE (terminal-hash, unfiltered-hash, hash-less fallback)
+        and ``_check_endpoints`` asked it once per ``points`` item, which is the
+        #9819 review P2 regression this replaces: measured ``_validate_bundle``
+        on 200 fresh-content points went 0.00 s (``origin/main``) → 3.01 s at
+        the pre-batch head, and 2.08 s for 200 live-content hits — linear in
+        bundle size, on the common ingest path.
+
+        ⛔ TWO STATEMENTS, NOT ONE — and the reason is a MEASURED plan, not
+        taste. The single statement this used to issue joined the hash identity
+        to the hash-less A10 fallback with ``OR``, and that OR defeated the
+        ``Point.content_hash`` index: ``g.explain`` on an embedded graph
+        returned ``Node By Label Scan | (n:Point)``, i.e. O(all Points) per
+        ``_validate_bundle`` — which would have traded the per-item regression
+        for a graph-sized one. Split, the hash arm plans as
+        ``Node By Index Scan`` and the legacy arm (``content`` is not indexed,
+        so it cannot seek) is GATED: it runs only when some wanted pair has no
+        hash row, which is the only condition under which
+        :func:`_content_candidate_resolution` can read it. Pinned by
+        ``TestTheBatchedReadPlansAsASeek``.
+
+        ⛔ NOT a forked predicate, which is the whole risk of a batched form.
+        The WHERE clause is the SAME ``_dedup_match_clauses`` the writer uses,
+        built WITHOUT ``point_kind`` (a deliberate superset: one query serves
+        every kind in the bundle), and the terminal flag is the SAME
+        ``live._terminal_expression`` Cypher builder, projected as a column
+        exactly as ``_entity_name_holders`` already does. Only the per-item
+        MATCHING happens in Python, and it is equality on the two fields the
+        Cypher would have compared: a row's ``pointKind`` is precisely what
+        ``n.pointKind = $kind`` tests, so a NULL kind matches no item — the same
+        answer Cypher gives.
+
+        Why the two ``present_*`` sets are needed at all (they are not
+        bookkeeping): they carry the writer's HASH-FIRST ordering. #2971 gates
+        the guard's hash-less fallback on the UNFILTERED hash lookup being
+        empty, and ``minted_terminal_content``'s "does this item MINT?" gate is
+        ``_find_point_by_content``, whose fallback runs on a hash MISS. Both
+        questions are answered off this one read so neither arm re-queries.
+
+        A ``None`` content hash is only ever the A10 hash-less shape, so the two
+        identity spaces cannot collide within one map (they are separate maps
+        by construction, and a hash-less row is keyed by its content).
+
+        ⛔ A row whose STORED ``pointKind`` is not a ``str`` is SKIPPED, never
+        keyed (#9819 review round 6). The writer's ``n.pointKind = $kind``
+        compares a STRING, so an array kind is addressable by no item's dedup
+        query: skipping the row changes no verdict and the item ``mints``,
+        exactly what the writer does. Keying it instead raised a bare
+        ``TypeError: unhashable type: 'list'`` out of Phase 1 (a FalkorDB
+        property may be a list), bypassing the aggregated
+        ``BundleValidationError`` contract — the same defect class the ITEM
+        side already closes in :func:`_item_point_kind`.
+        """
+        if not wanted:
+            return {}, set(), {}, set(), {}, {}
+        # ONE hash per wanted content, computed once (it is sha256 over the
+        # content, and both the parameter list and the legacy-arm gate read it).
+        wanted_hashes = {content: _content_hash(content) for content, _ in wanted}
+        hashes = sorted(set(wanted_hashes.values()))
+        clauses, params = self._dedup_match_clauses()
+        terminal_by_hash: dict[tuple[str, str], str] = {}
+        present_by_hash: set[tuple[str, str]] = set()
+        terminal_hashless: dict[tuple[str, str], str] = {}
+        present_hashless: set[tuple[str, str]] = set()
+        # The STORED keys of the rows, so a caller can predict whether a content
+        # fold would WRITE the item's key or pop it (#9819 review P1) — built
+        # from the same rows, so it costs no statement.
+        keys_by_hash: dict[tuple[str, str], set[str]] = {}
+        keys_hashless: dict[tuple[str, str], set[str]] = {}
+        # ── arm 1: the HASH identity — INDEX-ANCHORED.
+        # ⛔ `n.content_hash IN $hashes` seeks `Point.content_hash` (
+        # `_POINT_RANGE_INDEX_PROPS`); measured on a 21-Point embedded graph
+        # with `g.explain`, the plan is `Node By Index Scan`. The single
+        # `... OR (n.content_hash IS NULL AND n.content IN $contents)`
+        # statement this replaces planned as `Node By Label Scan` over EVERY
+        # `:Point` — O(graph) per `_validate_bundle`, i.e. the batching traded
+        # the per-item cost regression for a worse, graph-sized one (#9819
+        # review UNVERIFIED 1, settled by measurement: the OR defeats the
+        # index). Two statements are two index-arms, never a fork: the clauses
+        # are the same `_dedup_match_clauses()` and the same
+        # `live._terminal_expression`, and the arms are disjoint by
+        # construction (a row has a hash or it does not), so their union is
+        # exactly the old result set.
+        rows = self._get_proj().g.query(
+            "MATCH (n:Point) WHERE "
+            f"{' AND '.join(clauses)} "
+            "AND n.content_hash IN $hashes "
+            "RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "
+            f"{_terminal_expression('n')} AS term",
+            params={**params, "hashes": hashes},
+        ).result_set
+        for raw_hash, kind, _content, node_id, stored_key, terminal in rows:
+            if not isinstance(kind, str):
+                # ✋ Unhashable (and unaddressable) — see the docstring. `raw_hash`
+                # need no such test for the mirror-image reason: the WHERE admits
+                # only a value that EQUALS one of the bundle's own strings
+                # (`content_hash IN $hashes`), so it cannot be a non-string here.
+                continue
+            present_by_hash.add((raw_hash, kind))
+            if isinstance(stored_key, str) and stored_key:
+                # `create_point`'s own test on the resolved point's key is plain
+                # truthiness (`isinstance(...) and ... and != supplied`), so this
+                # one matches it exactly — a whitespace-only stored key DOES pop
+                # the incoming one, and a `strip()` here would disagree.
+                keys_by_hash.setdefault((raw_hash, kind), set()).add(stored_key)
+            if terminal:
+                terminal_by_hash.setdefault((raw_hash, kind), node_id)
+        # ── arm 2: the A10 hash-less fallback, and ONLY when some item's hash
+        # row is absent. `content` is NOT indexed (only the identity props
+        # are), so this arm is a label scan — the SAME shape the per-item
+        # `_find_point_by_content` fallback runs on a hash miss, but ONE scan
+        # for the bundle instead of one per item. The gate is exact, not an
+        # optimisation heuristic: `_content_candidate_resolution` consults the
+        # hash-less maps only under `(ch, kind) not in present_by_hash`, so
+        # when no wanted pair is missing from that set, no answer can read them
+        # and running the scan would be pure cost — the common re-ingest shape
+        # (every content already in the graph), where the old single statement
+        # scanned the whole label to answer nothing.
+        if any((wanted_hashes[content], kind) not in present_by_hash
+               for content, kind in wanted):
+            contents = sorted({content for content, _ in wanted})
+            rows = self._get_proj().g.query(
+                "MATCH (n:Point) WHERE "
+                f"{' AND '.join(clauses)} "
+                "AND n.content_hash IS NULL AND n.content IN $contents "
+                "RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "
+                f"{_terminal_expression('n')} AS term",
+                params={**params, "contents": contents},
+            ).result_set
+            for _raw_hash, kind, content, node_id, stored_key, terminal in rows:
+                if not isinstance(kind, str):
+                    # ✋ Unhashable (and unaddressable) — see the docstring. The
+                    # WHERE admits only a value that EQUALS one of the bundle's
+                    # own strings (`content IN $contents`) or a NULL hash, so
+                    # neither can be a non-string here.
+                    continue
+                present_hashless.add((content, kind))
+                if isinstance(stored_key, str) and stored_key:
+                    keys_hashless.setdefault((content, kind), set()).add(
+                        stored_key)
+                if terminal:
+                    terminal_hashless.setdefault((content, kind), node_id)
+        return (terminal_by_hash, present_by_hash,
+                terminal_hashless, present_hashless,
+                {k: frozenset(v) for k, v in keys_by_hash.items()},
+                {k: frozenset(v) for k, v in keys_hashless.items()})
 
     def _entity_name_holders(
         self, label: str, name: str,
@@ -22918,14 +23255,16 @@ class TortoiseSDK:
         ``create_direct_edge``, and narrowing the endpoint-kind gate (#8499) is
         the only change that would make it live again.
 
-        ⛔ That scoping does NOT cover the KEY-identity arm (#8400), and the two
-        must not be read as one rule: the content legs predict a
-        ``create_direct_edge`` raise, while the key leg predicts a POINT WRITE —
-        ``create_point``'s key-first dedup folds onto the key holder on EVERY
-        route, connection or not — so the key leg runs unconditionally, at the
-        bottom of this method, over every ``points`` item. Scoping it by
+        ⛔ That scoping does NOT cover the KEY-identity arm (#8400) OR the
+        CONTENT-identity arm (#9819), and the three must not be read as one
+        rule: the per-connection content legs above predict a
+        ``create_direct_edge`` raise, while both identity arms predict a POINT
+        WRITE — ``create_point``'s dedup folds onto the resolved node on EVERY
+        route, connection or not — so both run unconditionally, at the bottom of
+        this method, over every ``points`` item. Scoping them by
         ``route == "direct"`` is what left #8400's guard inert for exactly the
-        bundles it protects.
+        bundles it protects; the same scoping left the CONTENT fold (#9819)
+        mutating a terminal point through ``_stamp_batch_id``.
 
         The by-name / declared-status arms in the item loop are NOT that: they
         are the ENTITY legs (``section == "entities"``), an Object/Subject/Event
@@ -22969,6 +23308,19 @@ class TortoiseSDK:
           the bundle would MUTATE a terminal point. Read off the graph for
           committed holders and off ``minted_terminal`` (bundle-order
           simulation) for holders this same bundle creates;
+        - the UNCONDITIONAL content-identity terminal leg (#9819), the sibling
+          of the key leg and reached whenever the item carries no key or its key
+          is a MISS (``_resolve_dedup_hit`` then falls through to CONTENT): a
+          ``points`` item whose content matches a terminal point, or whose
+          content an EARLIER item of the same bundle mints terminal. Same
+          hazard — the fold stamps ``batch_id`` / moves ``updatedAt`` on a
+          terminal node — and the same unconditional scope, because #9173's
+          route-scoping governs the ``create_direct_edge`` prediction, not the
+          write. Read off the graph via ``_terminal_content_candidates`` — the
+          batched form of ``_find_terminal_dedup_hit``, ONE query for the whole
+          bundle rather than three per item (#9819 review P2), same shared
+          ``_dedup_match_clauses`` predicate and same ``live._terminal_expression``
+          — and off ``minted_terminal_content`` (bundle-order simulation);
         - an invalid ``:Subject`` ``status`` (outside ``SUBJECT_STATUS_VALUES``,
           non-string, or an explicit ``None``) on ANY entity item —
           referenced or not, on EITHER route, because the ``:Subject`` writer
@@ -23482,7 +23834,11 @@ class TortoiseSDK:
         # the pair Point-bearing, so `route` above is now the EFFECTIVE route
         # (always 'operator' for such a pair) and this leg's `route != "direct"`
         # guard skips it. Kept as the prediction of `create_direct_edge` it was
-        # written as — see `_check_endpoints`' docstring.
+        # written as — see `_check_endpoints`' docstring. ⛔ The POINT-WRITE half
+        # it used to double as (#9819: a content fold mutates the terminal node
+        # on every route) is now covered unconditionally by the `points` loop at
+        # the bottom of this method; this leg no longer carries that meaning and
+        # must not be read as the content guard.
         for i, conn, route, vals in conns:  # noqa: B007
             if route != "direct":
                 continue
@@ -23756,7 +24112,18 @@ class TortoiseSDK:
                     # 'int' object has no attribute 'encode') — shape violation
                     # already reported (check 1), skip the dedup-hit scan.
                     continue
-                kind = item.get("kind") or "statement"
+                # #9819 review P3: the item's ``pointKind`` has ONE home —
+                # ``_item_point_kind`` — and this leg is one of its Phase-1
+                # readers. It used to re-derive the value inline
+                # (``item.get("kind") or "statement"``), which is the same
+                # answer for a ``str`` kind but a THIRD reader of it: a truthy
+                # non-``str`` spelling (``kind: {"a": 1}``) would reach
+                # ``_find_terminal_dedup_hit`` as ``pointKind`` and raise a raw
+                # driver error out of Phase 1 instead of the structured verdict
+                # ``_check_kind`` owes the caller. Dead today (the
+                # ``route != "direct"`` skip above), so this is the leg being
+                # correct BEFORE a #8499 narrowing re-arms it.
+                kind = _item_point_kind(item)
                 # #8400: pass the item's effective key with `_coerce_props`'
                 # precedence (top-level wins by PRESENCE, not truthiness), so
                 # the guard resolves exactly the point the writer folds onto —
@@ -23778,16 +24145,23 @@ class TortoiseSDK:
         # prediction about a POINT WRITE, not about `create_direct_edge`, so it
         # runs on EVERY route and over EVERY `points` item — connection or not.
         #
-        # The leg above is dead by construction (#9173's own note says so): a
-        # `points` ref makes the pair Point-bearing, so the effective route is
-        # always `operator` and the `route != "direct"` gate skips it. That is
-        # correct for the CONTENT-dedup prediction it carries. It was NOT
-        # correct for the key IDENTITY, which `create_point` folds onto
-        # unconditionally — measured on this tree: a bundle whose `points` item
-        # carried a retracted point's key left that point with `batch_id`
-        # stamped and `updatedAt` moved (status still `retracted`). Scoping the
-        # key leg by route is what let a terminal point be mutated by an
-        # ingest that Phase 1 had certified.
+        # The leg above is dead as the `create_direct_edge` prediction it was
+        # written for (#9173's own note says so): a `points` ref makes the pair
+        # Point-bearing, so the effective route is always `operator` and the
+        # `route != "direct"` gate skips it. ⛔ It does NOT follow that the
+        # content fold needs no unconditional treatment — that reading is the
+        # one #9819 overturned. The POINT-WRITE half the leg used to double as
+        # is a write every route reaches, so it is covered unconditionally by
+        # the CONTENT-identity arm of the `points` loop below, beside the key
+        # leg; the leg above must not be read as the content guard (the same
+        # note the leg itself carries at the top of this method).
+        #
+        # It was likewise NOT correct for the key IDENTITY, which
+        # `create_point` folds onto unconditionally — measured on this tree: a
+        # bundle whose `points` item carried a retracted point's key left that
+        # point with `batch_id` stamped and `updatedAt` moved (status still
+        # `retracted`). Scoping the key leg by route is what let a terminal
+        # point be mutated by an ingest that Phase 1 had certified.
         #
         # A points item is checked here whether or not a connection references
         # it: step 3 writes every point item, so the fold (and the mutation)
@@ -23805,66 +24179,360 @@ class TortoiseSDK:
         # `_bundle_entity_name_outcomes` already uses for name-merged entities
         # (a record of what the ORDERED items will have written, not a graph
         # read).
-        _points_depth = _POINT_ITEM_FLATTEN_DEPTH
+        # ⛔ The point-item STATUS below is read at
+        # `_POINT_ITEM_MINT_STATUS_DEPTH`, not at `_POINT_ITEM_FLATTEN_DEPTH`:
+        # these records predict a MINT, and a mint stores the status after
+        # `create_point`'s ONE fold (see that constant). `_POINT_ITEM_FLATTEN_DEPTH`
+        # still governs the arms that read a prop the dedup RELAY can see, via
+        # `_item_flatten_depth`.
         minted_terminal: dict[tuple[str, str], tuple[int, object]] = {}
+        # Bundle-order simulation for the CONTENT identity, the sibling of
+        # `minted_terminal` (see its docstring above): a point an EARLIER item
+        # mints terminal under a content the later item also carries is
+        # invisible to the graph read, exactly as the key case was.
+        minted_terminal_content: dict[tuple[str, str], tuple[int, object]] = {}
+        # FIRST-WRITER-WINS on the CONTENT identity, the same shape the KEY
+        # simulation uses (`minted_terminal` forgets every later item under a
+        # key an earlier one minted; see `_mints_here` below). `_mints` is a
+        # GRAPH read, so it cannot see a point an EARLIER item of this bundle
+        # mints — without this map the later item is recorded as a terminal
+        # mint it never performs and the bundle is refused for a fold onto a
+        # mint that does not happen (#9819 review P2).
+        # ⛔ ALL THREE maps below are keyed by the STORED `pointKind`
+        # (`mkind`) and queried by the item's POSITIONAL one (`pkind`): the
+        # writer's dedup query scopes by the positional kind, so that is the
+        # value a LATER item compares against, while the node a mint creates
+        # carries the stored one. One kind for both sides is the drift
+        # `_item_stored_point_kind` and `_item_point_kind` exist to stop.
+        minted_content: dict[tuple[str, str], int] = {}
+        # The `key` the node an in-bundle CREATION stores, per content identity
+        # (`None` = the mint wrote no key). It exists because the graph read
+        # (`_terminal_content_candidates`) cannot see a node minted earlier in
+        # THIS bundle, and whether a later item's supply of its own key is
+        # WRITTEN or POPPED on that fold turns on that node's key (#9819 review
+        # P1 — see `_key_writes_here`). Same conventional keys as
+        # `minted_content`: recorded under the STORED `pointKind`, looked up
+        # with the later item's POSITIONAL one.
+        minted_content_keys: dict[tuple[str, str], str | None] = {}
+        # The non-empty `key` values the fold target for a content identity is
+        # known to hold AFTER the items processed so far, per (POSITIONAL kind,
+        # content id). Seeded on first resolution from the writer's own arm (the
+        # batched graph read's `_fold_keys`, or the key an in-bundle mint
+        # stored) and extended by every FOLD that writes one — because the graph
+        # read is a Phase-1 snapshot taken before ANY item is written, so the
+        # first fold that lands a key on a keyless target changes the answer for
+        # every later fold under the same content (#9819 review P1).
+        content_target_keys: dict[tuple[str, str], set[str]] = {}
+        # FIRST-WRITER-WINS on the KEY identity, recorded for EVERY minting item
+        # (unlike `minted_terminal`, which records only a TERMINAL mint). The
+        # writer resolves the key FIRST (`_resolve_dedup_hit`), so an item whose
+        # key an EARLIER item of this bundle minted does NOT write content at
+        # all — it folds onto that node by key. Without this map the simulation
+        # still recorded `minted_content` for it, i.e. a CONTENT mint the writer
+        # never performs, and that phantom record then suppressed the terminal
+        # record of the item that DOES mint that content — so a later item
+        # folded onto a bundle-minted TERMINAL point with Phase 1 certifying the
+        # bundle. Measured on the pre-fix head: `[{key: K, content: A},
+        # {key: K, content: B}, {content: B, status: retracted},
+        # {content: B, props: {confidence: 0.9}}]` COMMITTED, and the node
+        # points[2] minted came back with `batch_id` stamped and `confidence`
+        # written, `status` still `retracted` — the #8400/#9819 hazard, over a
+        # node the same bundle minted (#9819 review P1).
+        # ⛔ A repeated key is NOT a Phase-1 violation by itself: the key leg
+        # above refuses only a key minted TERMINAL, so a re-run under one key
+        # with recomputed content (exactly the #6110 path, and the shape a
+        # timed-out write forces a caller down) stays legal — it just mints
+        # nothing here, and nothing must be recorded for it.
+        minted_keys: dict[tuple[str, str], int] = {}
+        # #9819 review P2: the CONTENT identity is now resolved in at most TWO
+        # queries for the whole bundle instead of three per item
+        # (`_find_terminal_dedup_hit` → any-hash → hash-less fallback), which
+        # had made `_validate_bundle` linear in bundle size — 200
+        # fresh-content points cost 3.01 s here vs 0.00 s on `origin/main`. The
+        # hash arm and the gated legacy arm are index-anchored / one-scan-per-
+        # bundle respectively (see `_terminal_content_candidates`). A superset
+        # is collected (EVERY `points` item
+        # with a str content, keyed or not) because the per-item key resolution
+        # decides LATER whether the content leg is reached at all; an item that
+        # never reaches it simply never looks its answer up.
+        _content_cands = self._terminal_content_candidates([
+            (pitem.get("content"), _item_point_kind(pitem))
+            for pitem in (bundle.get("points") or [])
+            if isinstance(pitem, dict) and isinstance(pitem.get("content"), str)
+        ])
         for j, pitem in enumerate(bundle.get("points") or []):
             if not isinstance(pitem, dict):
                 continue
             pkey = _item_dedup_key(pitem)
-            if not (isinstance(pkey, str) and pkey.strip()):
-                continue
-            pkind = pitem.get("kind") or "statement"
-            holders, holder = self._key_holder_state(pkind, pkey)
-            if holder:
-                violations.append({
-                    "section": "points", "index": j,
-                    "message": f"ingest: points[{j}] (ref {pitem.get('ref')!r}) "
-                               f"key {pkey!r} is held by terminal point "
-                               f"{holder!r} (dedup hit) — create_point resolves "
-                               f"a key BEFORE content, so this write would "
-                               f"fold onto a terminal point and MUTATE it; a "
-                               f"bundle cannot turn that fold off (its "
-                               f"points are written with dedup=True, and a "
-                               f"nested 'dedup' spelling is shadowed and "
-                               f"dropped). Supersede-transfer the key first, "
-                               f"or mint the second point OUTSIDE the bundle "
-                               f"with create_point(..., key=<a FRESH key>, "
-                               f"dedup=False) — the same key with dedup=False "
-                               f"would create a second CARRIER of one key "
-                               f"(#6110) (#8400)",
-                })
-                continue
-            earlier = minted_terminal.get((pkind, pkey))
-            if earlier is not None:
-                violations.append({
-                    "section": "points", "index": j,
-                    "message": f"ingest: points[{j}] (ref {pitem.get('ref')!r}) "
-                               f"reuses key {pkey!r}, which points[{earlier[0]}] "
-                               f"in THIS bundle mints with status "
-                               f"{earlier[1]!r} — the key-first fold would land "
-                               f"on a point this same bundle creates terminal "
-                               f"and stamp it, so the bundle is rejected at "
-                               f"validation (bundle-order, not a graph read): "
-                               f"mint the second point under a FRESH key "
-                               f"(#8400)",
-                })
-                continue
-            if holders:
-                # A key HIT means the writer folds onto an existing point and
-                # the declared status is popped before the dedup branch is
-                # taken — so this item does not MINT anything terminal, and
-                # later items under the key land on that live holder.
-                continue
-            declared = _item_effective_status(pitem, _points_depth)
-            # Conservative in the FAIL-CLOSED direction, stated so it is not
-            # read as precision: this records a declared terminal status without
-            # predicting a CONTENT fold onto an existing live point (which would
-            # pop the declaration and mint nothing terminal). Over-rejecting that
-            # pathological combination — a bundle that declares `retracted` on a
-            # key which content-folds onto a live point and then reuses the key —
-            # is preferred to letting a fold land on a terminal mint.
-            if isinstance(declared, str) and declared in TERMINAL_EXCLUDED_STATUSES:
-                minted_terminal[(pkind, pkey)] = (j, declared)
+            _has_pkey = isinstance(pkey, str) and bool(pkey.strip())
+            # ⛔ TWO kinds, deliberately (#9819 review P2, round 5): `pkind` is
+            # the item's POSITIONAL kind — the value the writer hands its dedup
+            # query (`_resolve_dedup_hit(content, pointKind=kind)` /
+            # `_find_points_by_key(key, pointKind=kind)`), so it is what every
+            # LOOKUP and the batched graph read below use. `mkind` is the
+            # `pointKind` the minted NODE will store (a props `pointKind` WINS
+            # over the positional one — `_item_stored_point_kind`), and it is
+            # what the bundle-order RECORDS are keyed by, because that is the
+            # value a LATER item's dedup query compares against.
+            pkind = _item_point_kind(pitem)
+            mkind = _item_stored_point_kind(pitem)
+            holders: list[str] = []
+            if _has_pkey:
+                holders, holder = self._key_holder_state(pkind, pkey)
+                if holder:
+                    violations.append({
+                        "section": "points", "index": j,
+                        "message": f"ingest: points[{j}] (ref {pitem.get('ref')!r}) "
+                                   f"key {pkey!r} is held by terminal point "
+                                   f"{holder!r} (dedup hit) — create_point resolves "
+                                   f"a key BEFORE content, so this write would "
+                                   f"fold onto a terminal point and MUTATE it; a "
+                                   f"bundle cannot turn that fold off (its "
+                                   f"points are written with dedup=True, and a "
+                                   f"nested 'dedup' spelling is shadowed and "
+                                   f"dropped). Mint the second point OUTSIDE the "
+                                   f"bundle with create_point(..., key=<a FRESH "
+                                   f"key>, dedup=False) — the same key with "
+                                   f"dedup=False would create a second CARRIER of "
+                                   f"one key (#6110). Retiring the holder does "
+                                   f"NOT free the key: supersede_point transfers "
+                                   f"edges and stamps status/validity, and never "
+                                   f"writes key, so the key-first fold resolves "
+                                   f"that terminal holder again (#8400)",
+                    })
+                    continue
+                earlier = minted_terminal.get((pkind, pkey))
+                if earlier is not None:
+                    violations.append({
+                        "section": "points", "index": j,
+                        "message": f"ingest: points[{j}] (ref {pitem.get('ref')!r}) "
+                                   f"reuses key {pkey!r}, which points[{earlier[0]}] "
+                                   f"in THIS bundle mints with status "
+                                   f"{earlier[1]!r} — the key-first fold would land "
+                                   f"on a point this same bundle creates terminal "
+                                   f"and stamp it, so the bundle is rejected at "
+                                   f"validation (bundle-order, not a graph read): "
+                                   f"mint the second point under a FRESH key "
+                                   f"(#8400)",
+                    })
+                    continue
+                if holders:
+                    # A key HIT means the writer folds onto an existing point and
+                    # the declared status is popped before the dedup branch is
+                    # taken — so this item does not MINT anything terminal, and
+                    # later items under the key land on that live holder. The
+                    # writer never reaches its content leg on a key hit (#6110),
+                    # so no content check runs here either.
+                    continue
+            # ── #9819: the CONTENT identity half of the same point-write
+            # prediction. Reached when the item carries NO key, or its key is a
+            # MISS — in both cases `create_point`'s key-first resolution falls
+            # through to CONTENT (`_resolve_dedup_hit`), which is unconditional:
+            # it runs on EVERY route and whether or not a connection references
+            # the item, because step 2 writes every `points` item. #9173's
+            # route-scoping governs the create_direct_edge prediction, NOT this
+            # one — a content fold reaches `_stamp_batch_id` on the operator
+            # route too, so scoping it left it dead for exactly the bundles it
+            # protects (measured: a retracted point came back with `batch_id`
+            # stamped and `updatedAt` moved, status still `retracted`).
+            content = pitem.get("content")
+            _content_id: str | None = None
+            _mints = False
+            # The stored `key` values of the node(s) this item's CONTENT fold can
+            # land on — empty when it mints, or when the candidates carry none
+            # (see `_content_candidate_resolution`). Read only when the item's
+            # key is a MISS, which is the same condition `create_point` falls
+            # through to content on.
+            _fold_keys: frozenset[str] = frozenset()
+            # ⛔ NOT `and content`: the writer treats `""` as CONTENT, not as
+            # absent. `_check_item_shape` admits it (only `None`/non-str is
+            # refused) and `create_point`'s only content boundary is
+            # `isinstance(content, str)`, so `create_point("statement", "")`
+            # mints a real point with `content_hash = sha256("")` — retract it
+            # and an ingest item carrying `""` folds onto it and reaches
+            # `_stamp_batch_id`, i.e. the #9819 hazard, through a legal bundle
+            # item. A truthiness test here is the guard/writer divergence
+            # `_find_terminal_dedup_hit`'s own docstring forbids (measured on
+            # the pre-fix head: the terminal point came back with `batch_id`
+            # stamped, #9819 review P1/P3). The KEY leg's truthiness test above
+            # is parity, not a precedent: `_resolve_dedup_hit` itself treats a
+            # blank key as absent, and nothing treats blank content that way.
+            if isinstance(content, str):
+                _content_id = _content_hash(content)
+                chit, _mints, _fold_keys = _content_candidate_resolution(
+                    _content_cands, content, pkind)
+                if chit:
+                    violations.append({
+                        "section": "points", "index": j,
+                        "message": f"ingest: points[{j}] (ref "
+                                   f"{pitem.get('ref')!r}) content matches "
+                                   f"terminal point {chit!r} (dedup hit) — "
+                                   f"create_point's CONTENT dedup resolves on "
+                                   f"every route, so this write would fold onto "
+                                   f"that terminal point and MUTATE it "
+                                   f"(batch_id / updatedAt); a bundle cannot turn "
+                                   f"the fold off (its points are written with "
+                                   f"dedup=True, and a nested 'dedup' spelling is "
+                                   f"shadowed and dropped). Mint the point "
+                                   f"OUTSIDE the bundle with DIFFERENT content "
+                                   f"(dedup=False): retiring the collided row "
+                                   f"does NOT free its content — supersede_point "
+                                   f"transfers edges and stamps "
+                                   f"status/validity, and never rewrites content "
+                                   f"or content_hash, so the next ingest of this "
+                                   f"content folds onto it again (#8400/#9819)",
+                    })
+                    continue
+                minted_c = minted_terminal_content.get((pkind, _content_id))
+                if minted_c is not None:
+                    violations.append({
+                        "section": "points", "index": j,
+                        "message": f"ingest: points[{j}] (ref "
+                                   f"{pitem.get('ref')!r}) reuses content that "
+                                   f"points[{minted_c[0]}] in THIS bundle mints "
+                                   f"with status {minted_c[1]!r} — the content "
+                                   f"fold would land on a point this same bundle "
+                                   f"creates terminal and stamp it, so the "
+                                   f"bundle is rejected at validation "
+                                   f"(bundle-order, not a graph read): give the "
+                                   f"second point DIFFERENT content "
+                                   f"(#8400/#9819)",
+                    })
+                    continue
+            # The MINT-predicted status, read at the depth the MINT actually
+            # stores it (`create_point`'s own single fold — a dedup hit POPS the
+            # declared status before its relay, so the deeper read reported a
+            # terminal status the writer never writes; #9819 review P2).
+            mint_status = _item_effective_status(
+                pitem, _POINT_ITEM_MINT_STATUS_DEPTH)
+            # Does THIS item mint the content identity? `_mints` is the
+            # writer's own `_find_point_by_content` answer, but it is a GRAPH
+            # read — it cannot see a point an earlier item of THIS bundle
+            # minted, and `create_point` pops the declared status BEFORE its
+            # dedup branch, so a later item under an already-in-bundle-minted
+            # content FOLDS onto that node and mints nothing. FIRST WRITER WINS
+            # (`minted_content`), exactly as the key simulation does: the
+            # record below must describe the write, not the graph read.
+            # ⛔ …and the writer's order is KEY FIRST. An item whose key an
+            # earlier item of THIS bundle minted folds onto that node by key,
+            # never reaches its content leg, and therefore mints nothing on the
+            # CONTENT axis (`_key_folds_here`). Recording it was a phantom mint
+            # on BOTH axes — the fail-open above and its mirror over-reject.
+            _key_folds_here = _has_pkey and (pkind, pkey) in minted_keys
+            # ⛔ A key that is FREE among the records is NOT a key this item
+            # WRITES (#9819 review P1). Those come apart on exactly one shape,
+            # and the writer's own code names it: the key is free, the CONTENT
+            # resolves to an existing point, and that point already holds a
+            # DIFFERENT key — `create_point` then POPS the supplied key
+            # (`props.pop("key", None)`) rather than reassign it. So "this item
+            # holds the key from here on" needs POSITIVE evidence, on the two
+            # ways an item can end up holding it:
+            #   * it MINTS (`_mints`) — the CREATE stores the supplied key, no
+            #     question;
+            #   * it FOLDS by content onto a node that holds no OTHER key — the
+            #     fold applies the key through `update_point`, so the node
+            #     holds it afterwards (that is the #6110 "content hit adopts
+            #     the key" path, now predicted instead of assumed).
+            # Recording the key on the mere absence of a holder is what let a
+            # phantom record suppress EVERY later record for that key — no key
+            # mint, no content mint, no `minted_terminal` — so a later item's
+            # terminal mint went unrecorded and a third item key-folded onto it
+            # with Phase 1 certifying the bundle (measured: `[{key: K,
+            # content: C0}, {key: K, content: C1, status: retracted}, {key: K,
+            # content: C2, props: {confidence: 0.9}}]` COMMITTED over a live
+            # point holding a different key, and C1's retracted node came back
+            # with `batch_id` stamped).
+            # ⚠️ Both directions are settled TOGETHER, because dropping the
+            # record alone re-opens the mirror: a content-folding item under a
+            # key whose fold target holds NO key DOES write it, and treating
+            # that key as free makes the NEXT item's real fold look like a mint
+            # — recording a terminal mint for a node nobody creates, and
+            # over-rejecting the third item.
+            # ⛔ …and the fold target is a MOVING value, not a Phase-1 constant:
+            # the graph read is a snapshot taken before ANY item is written, so
+            # the first fold that lands a key on a keyless target changes what
+            # every LATER fold under that content sees. Tracking it is
+            # `content_target_keys` — seeded once per identity from the arm the
+            # writer would use (the batched graph read, or the key that an
+            # in-bundle mint stored) and extended by each fold that writes one.
+            _key_writes_here = False
+            if _has_pkey and not _key_folds_here and mkind is not None:
+                # `None` = this item CREATES the node (the CREATE stores the
+                # key); a set = the keys the fold target is known to hold.
+                _fold_target: set[str] | None = None
+                # …and `False` when the record the target's key lives in is
+                # MISSING — which cannot happen while the two maps are written in
+                # one block, so it can only mean they drifted. That case fails
+                # CLOSED ("the key may be dropped"), the direction that cannot
+                # mask a later fold.
+                _target_known = True
+                if (isinstance(content, str)
+                        and (pkind, _content_id) in minted_content):
+                    # An EARLIER item of this bundle minted that node, so the
+                    # graph read cannot see it — its stored key is the one that
+                    # item supplied (`minted_content_keys`).
+                    if (pkind, _content_id) in minted_content_keys:
+                        _mk = minted_content_keys[(pkind, _content_id)]
+                        _fold_target = set() if _mk is None else {_mk}
+                    else:
+                        _target_known = False
+                elif _mints or not isinstance(content, str):
+                    # …the CREATE leg (a non-str content item is refused on its
+                    # own, `_check_item_shape`, so it reaches no write at all).
+                    _fold_target = None
+                else:
+                    # …a content fold onto a node already in the GRAPH. "May be
+                    # dropped" wins over "may land" when duplicate candidates
+                    # disagree — the writer picks `rows[0]` with no ORDER BY.
+                    _fold_target = set(_fold_keys)
+                if _fold_target is None:
+                    _key_writes_here = _target_known
+                else:
+                    _live = content_target_keys.get((pkind, _content_id))
+                    if _live is None:
+                        _live = content_target_keys[(pkind, _content_id)] = (
+                            _fold_target)
+                    _key_writes_here = all(k == pkey for k in _live)
+                    if _key_writes_here:
+                        # …and a WRITTEN key is what every later fold under this
+                        # content sees from now on.
+                        _live.add(pkey)
+            # ⛔ The TERMINAL record is still written by the FIRST minting item,
+            # so a fold onto an intra-bundle TERMINAL point stays refused. Its
+            # key is the STORED kind (`mkind`) — see the map declarations.
+            _mints_here = (_mints and not _key_folds_here
+                           and (pkind, _content_id) not in minted_content)
+            if _key_writes_here:
+                minted_keys[(mkind, pkey)] = j
+            if _mints_here and mkind is not None:
+                minted_content[(mkind, _content_id)] = j
+                # The key the minted NODE stores, so a later item that
+                # content-folds onto it can answer the same question without a
+                # graph read (`_key_writes_here` above). `None` means "the mint
+                # wrote no key", which accepts any supplied one.
+                minted_content_keys[(mkind, _content_id)] = (
+                    pkey if _has_pkey else None)
+            if (isinstance(mint_status, str)
+                    and mint_status in TERMINAL_EXCLUDED_STATUSES):
+                # ⛔ This record predicts a node BORN TERMINAL, so BOTH halves
+                # must hold: the item really CREATES the node (`_mints_here` —
+                # a content fold pops the declared status and stores nothing),
+                # and the key really rides that create (`_key_writes_here`).
+                # Reading only the key half over-rejected a bundle whose item
+                # content-folded under a key: it mints nothing, so the next item
+                # under that key was refused for a terminal mint that never
+                # happens (the mirror of the fail-open above, same root cause).
+                if _key_writes_here and _mints_here:
+                    minted_terminal[(mkind, pkey)] = (j, mint_status)
+                # Content is an identity too, so the same simulation covers a
+                # later item with the SAME content under a DIFFERENT (or no)
+                # key. Only record when this item actually MINTS
+                # (`_mints_here`): an item whose content already matches a
+                # graph point, OR a point minted by an EARLIER ITEM of this
+                # bundle, content-folds and mints nothing terminal (its
+                # declared status is popped by the dedup branch).
+                if _content_id is not None and _mints_here and mkind is not None:
+                    minted_terminal_content[(mkind, _content_id)] = (j, mint_status)
 
     def _check_endpoint_race(self, index: int, conn: dict,
                              refs: dict[str, str], violations: list[dict],
