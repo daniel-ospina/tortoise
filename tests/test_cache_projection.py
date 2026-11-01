@@ -1994,7 +1994,6 @@ def test_a_status_carrying_rename_is_folded_not_just_a_bare_restatus():
     value — and `never_store` means no layer table holds it — so the rebuild
     answers LIVE for an archived node.
     """
-    import re as _re
     sql = cp._LIFECYCLE_EVENTS_SQL
     assert "jsonb_typeof(payload -> 'state' -> 'status') = 'string'" in sql, (
         "the record reader no longer selects by the PAYLOAD — a status carried "
@@ -2118,8 +2117,10 @@ def test_the_connector_fold_never_writes_a_subject_status():
     assert by_label["Object"].props.get("status") == "completed"
     assert "status" not in by_label["Subject"].props, (
         "the connector fold wrote a lifecycle word onto the :Subject of the same "
-        "name — the live fold cannot produce that value, and reconciliation "
-        "cannot see it because it reads the same fold"
+        "name — the live fold cannot produce that value. ⚠️ Reconciliation "
+        "DOES see a record-side-only value (`scan_cache_view` reads raw graph "
+        "props); what it cannot do is discriminate a fabricated value once both "
+        "sides agree — so the gate must prevent this, not report it"
     )
 
 
@@ -2216,7 +2217,7 @@ def test_an_empty_string_status_is_folded_because_the_graph_stores_it():
     terminal fold, so the rebuilt cache HID a name the graph resolves — the very
     direction the exclusion claimed to avoid. Folding it reproduces the graph.
     """
-    import ast as _ast, inspect as _inspect
+    import inspect as _inspect
 
     src = _inspect.getsource(cp._lifecycle_events)
     assert "or not restatus" not in src, (
