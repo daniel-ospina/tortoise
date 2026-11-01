@@ -900,7 +900,7 @@ verdicts a `runs-on:` label against a **baked-in list of GitHub-hosted labels**.
 above are CUSTOM, so the first workflow that pins one is a hard error — measured on the #10237 canary
 job's first run, which redded the required aggregate for a diff that was correct:
 
-```
+```text
 .github/workflows/ci.yml:1534:28: label "self-hosted-x64" is unknown. … set list of labels in
 actionlint.yaml config file [runner-label]
 ```
