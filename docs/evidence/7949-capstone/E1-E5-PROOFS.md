@@ -153,7 +153,7 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
   the README does not name this file — so "reachable through the bundle's rows" was
   false and a reader routing by the documented entry point could not reach it. (An
   earlier draft justified adding nothing by `_index_row`'s "exactly one" rule; that was
-  wrong — `_index_row` (`tests/test_e1_e2_measurement.py:1839`) selects rows
+  wrong — `_index_row` (`tests/test_e1_e2_measurement.py:1848`) selects rows
   containing the literal cell `docs/evidence/7949-capstone/E1-E2.md`, so a second row
   cannot collide. Both the premise and the conclusion were wrong, caught by the
   `#10108` review.)
@@ -175,7 +175,7 @@ here so "swept" is never read into a number nothing re-checks.
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:15195` is the meta fold — while the extractor builds
+`tortoise/sdk.py:15257` is the meta fold — while the extractor builds
 `result["classify_later"]` (`tortoise/extractor_v2.py:9475`) and `result["vet"]`
 (`tortoise/extractor_v2.py:9485`) on the extractor's OWN return.
 

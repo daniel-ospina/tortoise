@@ -16,7 +16,7 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:14367``, called at ``:13404``) →
+   (``sdk.py:14429``, called at ``:13466``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:8984``) calls
    ``_edus_from_conversation`` (S0, ``:9102``), ``run_s1`` (S1, ``:9142``),
    ``run_s2`` (S2.1, ``:9166``), ``_run_vet_pass`` (S2.2, ``:9195``),
@@ -26,7 +26,7 @@ the corrected reading:
    (S5+S6, ``:9447``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
-   that pair form is how ``_apply_classify_kinds`` sat on ``:8788`` (naming
+   that pair form is how ``_apply_classify_kinds`` sat on ``:9210`` (naming
    ``classify_items``' line) while the README's one-symbol row was right. The
    SYMBOL is authoritative and the line is a convenience — the three
    FILE-NAMED cites above are resolved against the tree by the bundle's pin,

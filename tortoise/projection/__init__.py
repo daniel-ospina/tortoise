@@ -7951,6 +7951,53 @@ def _owns_point(label: object) -> bool:
     return not (isinstance(label, str) and label in _NON_POINT_ENTITY_LABELS)
 
 
+#: The FOLD's own record flag — the payload key `_fold_source_evidence` mints on
+#: the `PointAdded` it re-emits to journal a dedup fold (#7704 / #10010 review).
+#:
+#: Payload-only metadata, never a node property (`entities._POINT_HANDLED`), and
+#: refused at every caller-prop boundary (`sdk._sanitize_props`, `api`'s internal
+#: seam, the MCP boundary) — the same treatment `embedding_preserved` gets.
+#:
+#: ⛔ It exists because the REPLAY's recreate anchor is not self-describing. Every
+#: creation record advances `last_recreate` (and `_rebuild_all_replay`'s own
+#: `last_recreate_seq`) — "a terminalizer at or before it died with the replaced
+#: node". A FOLD replaces NOTHING: it re-emits an EXISTING incarnation's snapshot
+#: so pass-1a restates the props and pass-2 re-derives the edges. Counting it as
+#: a re-creation refused the very stamp that killed the claim: the rebuild
+#: reassembled `status`/`validTo` from the fold's own snapshot but dropped
+#: `outdated`/`expiredAt`/CORRECTS, which ONLY the terminalizer stamp writes
+#: (`_POINT_DENY` — no payload can restore them), leaving a dead claim with no
+#: `outdated` flag: the state `entities.py` names as "an invalidated Point with no
+#: `outdated` flag — a dead claim served". Measured on the shape the fold's own
+#: branch authorises (`#7819` is scoped to `_TEMPORAL_RESTAMP_PROPS`, so a fold
+#: carrying no temporal prop applies to a dead claim exactly as any revision
+#: does): create → supersede (or invalidate) → re-ingest the same content from a
+#: second source folds onto the dead id, and a `rebuild_all` then dropped
+#: `outdated`/`expiredAt` while `check_consistency` reds with an action ("replay
+#: the journal") that reproduces the same graph.
+#:
+#: Spelled here, next to the plan that reads it, and IMPORTED by the producer, so
+#: the two cannot drift the way `create_document(type="SourceCreated")` did.
+EVIDENCE_FOLD_KEY = "evidence_fold"
+
+
+def record_is_evidence_fold(ev: dict) -> bool:
+    """Is this creation-shaped record a dedup FOLD rather than a creation?
+
+    Reads both journal shapes the replay tolerates (after ``_norm`` a nested
+    record carries the flag in BOTH places, a flat ``EventAPI`` record in one),
+    so the answer cannot depend on which door minted the record.
+
+    A record that states the flag but is NOT a creation type is still reported
+    here; every caller checks the type first, so the flag alone never decides
+    what the record IS.
+    """
+    point = ev.get("point")
+    if isinstance(point, dict) and point.get(EVIDENCE_FOLD_KEY):
+        return True
+    return bool(ev.get(EVIDENCE_FOLD_KEY))
+
+
 def plan_point_restamp_folds(
     events,
 ) -> tuple[dict[int, tuple[bool, bool]], dict[str, int]]:
@@ -7991,7 +8038,10 @@ def plan_point_restamp_folds(
 
     * ``last_recreate_seq[(Point, id)]`` — the id's LAST ``PointAdded`` /
       ``OperatorAdded`` — bounds the STAMP half. A fold at or before it died
-      with the replaced node. ``PointPromoted`` is deliberately NOT a boundary
+      with the replaced node. A FOLD record is NOT such a boundary
+      (``record_is_evidence_fold``, #10010 review): it re-emits an existing
+      incarnation's snapshot and replaces nothing. ``PointPromoted`` is
+      deliberately NOT a boundary
       (same-node draft→live: it clears neither ``outdated`` nor CORRECTS), so
       seeding from it would silently drop a pre-promote invalidate fold.
     * ``last_ann_drop_seq[(Point, id)]`` — the id's last REAL
@@ -8063,6 +8113,14 @@ def plan_point_restamp_folds(
                     pending_deleted.add(("Point", mid))
             continue
         if t in ("PointAdded", "OperatorAdded"):
+            # #10010 review P1: a FOLD re-emits an EXISTING id's snapshot and
+            # replaces nothing, so it is not a recreate boundary — and it must
+            # not consume a pending delete either, because the recreate anchor
+            # belongs to whichever record actually materialized the incarnation
+            # (`record_is_evidence_fold`). Without this, a fold onto a dead
+            # claim refused that claim's own terminalizer stamp below.
+            if record_is_evidence_fold(ev):
+                continue
             p = ev.get("point")
             if isinstance(p, dict) and isinstance(p.get("id"), str):
                 key = ("Point", p["id"])
@@ -8249,6 +8307,18 @@ def journal_recreate_seqs(events) -> set[int]:
     ``seq`` is the enumerate index over the SAME ordered ``events`` list the
     replay engines walk (the seq space ``journal_hard_delete_seqs`` documents),
     so a fold can ask ``seq in journal_recreate_seqs(events)``.
+
+    ⚠️ Deliberately **NOT** fold-aware, so the mirror above is no longer
+    LITERAL (#10010 review): ``_rebuild_all_replay`` excludes an evidence fold
+    from its ``is_recreate`` arm (:func:`record_is_evidence_fold`), so a
+    ``delete → fold`` ordering is a re-creation here and is refused there. No
+    observable divergence is constructible today — every prop that arms a gate
+    on this set (``tags``, ``_REVISION_PROVENANCE_PROPS``) is read off a node
+    the hard delete already removed, and both consumers (``_apply_one``'s
+    carry-forward and pass 1a's #4042 wipe) land on a FRESH node, so both end
+    empty. Recorded here, next to the code, because the next editor of this
+    function needs to know the two readings differ BY DESIGN — this is a note
+    about a mirror, not evidence of a defect.
     """
     armed: set[str] = set()
     recreate: set[int] = set()
@@ -14238,7 +14308,22 @@ class FalkorProjection(
                 # NOT a drop boundary (promote is same-node draft→live; it
                 # never clears outdated/CORRECTS, so seeding from it would
                 # silently drop a pre-promote invalidate fold).
-                if t in ("PointAdded", "OperatorAdded"):
+                # #10010 review P1: a FOLD re-emits an EXISTING id's
+                # snapshot and replaces nothing — it is not a recreate
+                # boundary, and it must not consume a pending delete (the
+                # next REAL creation owns that anchor). Same predicate as
+                # ``plan_point_restamp_folds``, so the sweep and the
+                # chronological pass cannot read one record two ways. Read
+                # ONCE and reused by ``is_recreate`` below: the fold must be
+                # excluded from EVERY recreate-shaped write in this block, or
+                # the two engines still read one record two ways (the #4042
+                # wipe and ``last_ann_drop_seq`` are recreate-shaped too).
+                _is_evidence_fold = record_is_evidence_fold(ev)
+                # (No second type test here: the enclosing block is already
+                # ``t in ("PointAdded", "OperatorAdded")``, so a re-test would
+                # be always-true and would read as if a third type could reach
+                # it — #10010 review round 8.)
+                if not _is_evidence_fold:
                     last_recreate_seq[("Point", p["id"])] = seq
                     last_recreate_seq_any[p["id"]] = seq
                 # #3689 review P2: the annotator folds' drop boundary is a
@@ -14251,7 +14336,18 @@ class FalkorProjection(
                 # possibly-Point) — a foreign-kind delete cannot advance the
                 # Point annotator boundary. #4042 reuses ``is_recreate`` below
                 # for the recreate wipe and its per-source anchors.
-                is_recreate = ("Point", p["id"]) in pending_deleted
+                # #10010 review P2: the FOLD exclusion applies here too. A fold
+                # materialises no incarnation, so it is not a delete→recreate
+                # boundary: consuming the pending delete here moved the
+                # belief/annotator drop anchor onto a record that replaced
+                # nothing (letting a dead incarnation's folds survive), and it
+                # ran the #4042 wipe on a record whose payload cannot restore
+                # ``content_hash``. ``plan_point_restamp_folds`` already skips
+                # the fold before its own ``pending_deleted.discard``; without
+                # this arm the sweep and this chronological pass disagreed —
+                # the exact drift that guard's comment claims is impossible.
+                is_recreate = (not _is_evidence_fold
+                               and ("Point", p["id"]) in pending_deleted)
                 if is_recreate:
                     last_ann_drop_seq[("Point", p["id"])] = seq
                     pending_deleted.discard(("Point", p["id"]))
@@ -14314,11 +14410,51 @@ class FalkorProjection(
                     # and the rebuilt node diverges from live AND from `fold()`.
                     # The wipe runs BEFORE `_upsert_point_props`, so a
                     # re-creation that DOES restate them still writes them.
+                    #
+                    # #7704: `extractedFromAll` — the fold's accumulated ref
+                    # SET — is the same class and is wiped HERE for the same
+                    # reason. Its writer (`_upsert_point_props`'s
+                    # `_ef_clauses`) emits `SET n.extractedFromAll = $all` only
+                    # when the payload states a non-empty list, and a
+                    # re-creation's payload can never state one (only
+                    # `_fold_source_evidence` writes that key; `create_point`
+                    # has no `extractedFromAll` in its `_create_map`). The key
+                    # is in `_POINT_HANDLED`, so the open-set passthrough never
+                    # writes it and never clears it either — so without this
+                    # entry an identical-id re-creation lets the DEAD
+                    # incarnation's folded set survive a rebuild while live has
+                    # none: `derived = replay(journal)` goes false on a
+                    # REPORTED surface (`get_point` returns `properties(n)`),
+                    # naming sources the new incarnation never carried. The
+                    # #4042 residual note below scopes itself to OPEN-SET props
+                    # and therefore does not cover this one: the key is
+                    # declared, handled, and written by its own clause — which
+                    # is exactly why it needs a wipe entry, as
+                    # `embedding_verbatim` (#5004 r4), `sourceVersionTransit`
+                    # (#5256), `tags` (#2897) and the four capture props
+                    # (#9350) each got one. `check_consistency` DOES compare
+                    # this key, so the wipe is what keeps the checker GREEN on
+                    # a re-creation rather than what silences an unseeable
+                    # break (#10010 review P3 — the earlier text here claimed
+                    # the opposite and was false). `_uncarried` does skip every
+                    # `_POINT_HANDLED` key, but that skip only classifies keys
+                    # the projection cannot HOLD for the loss report — it never
+                    # reaches `skip`, which is `frozenset(uncarried.get(pid))`
+                    # — and `_canonical_point_fields` keeps every key not in
+                    # `_NOT_COMPARED`, which `extractedFromAll` is not. Without
+                    # this entry the rebuilt node keeps the dead incarnation's
+                    # folded set, the re-creation's `PointAdded` states none,
+                    # and the gate reports `divergent_points[].fields ==
+                    # ['extractedFromAll']` — a NOISY break, not a silent one.
+                    # `tests/test_source_version_extractedfrom_5038.py::
+                    # test_consistency_gate_compares_the_folded_set` pins it on
+                    # both halves.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
                         "    n.embedding_verbatim = NULL, "
                         "    n.sourceVersionTransit = NULL, "
+                        "    n.extractedFromAll = NULL, "
                         "    n.tags = NULL, "
                         "    n.eventId = NULL, n.source_session = NULL, "
                         "    n.source_harness = NULL, n.ingested_at = NULL",

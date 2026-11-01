@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -219,6 +220,112 @@ def test_capture_session_module_isolates_real_home(tmp_path):
         "capture-consent-notice")
 
 
+def test_the_isolated_home_does_not_isolate_the_model_cache(tmp_path):
+    """#10010: the HOME isolation above must not take the MODEL cache with it.
+
+    ``huggingface_hub`` reads ``HF_HOME`` (default ``~/.cache/huggingface``) at
+    IMPORT time, and ``sentence_transformers`` is imported lazily — inside the
+    first test that needs an embedding. With only ``HOME`` redirected, that
+    first import freezes the cache inside a per-test tmp dir, so the load finds
+    an EMPTY cache and pays the cold path instead of using the copy CI
+    provisioned (``Cache HF embedding model`` + ``Embedding model REQUIRED``).
+
+    Measured on test-slow (e) at 2feca037f (run 41183376264): 120 of 857 items
+    in 2405 s, watchdog-killed with zero failures — a red check no failure
+    identity could explain. Pinned here because the isolation lives HERE; its
+    counterpart that keeps the cache outside it is ``tests/conftest.py``'s
+    ``HF_HOME`` pin, assigned at conftest import (too late for a per-test flag,
+    per the vendor's own "read at import time" contract).
+    """
+    hf_home = os.environ.get("HF_HOME")
+    assert hf_home, (
+        "the suite must pin HF_HOME at conftest import (tests/conftest.py) — a "
+        "lazily imported huggingface_hub would otherwise freeze the model "
+        "cache inside this test's redirected $HOME and every load pays cold")
+    cache = Path(hf_home)
+    assert cache.is_absolute(), f"HF_HOME must be absolute, got {cache}"
+    # The exact shape the leak took: `~/.cache/huggingface` re-resolved under
+    # the isolated HOME.
+    assert cache != Path(os.environ["HOME"]) / ".cache" / "huggingface", (
+        "HF_HOME resolves under the isolated $HOME — the model cache is "
+        "per-test again, which is what made the leg cold-load per test")
+    assert Path(tmp_path) not in cache.parents and cache != Path(tmp_path), (
+        f"HF_HOME ({cache}) must not live in the per-test tmp dir")
+
+
+def test_the_pinned_cache_is_the_one_huggingface_hub_froze():
+    """#10010: the pin must land BEFORE the vendor constants freeze.
+
+    ``huggingface_hub`` documents that its environment is read at import time and
+    "any modification made afterwards will not be taken into account", so an
+    ``HF_HOME`` set per-test would be inert. This asserts the constant the loader
+    actually uses is the pinned one — the difference between a pin and a wish.
+
+    ``importorskip``, not a bare import (#10010 review F5): ``huggingface_hub``
+    arrives only through the ``embeddings`` extra, plain ``uv sync`` is a
+    documented supported state (``AGENTS.md`` → *"Plain ``uv sync`` (no extras)
+    yields a KEYWORD-ONLY product"*), and this file imports nothing
+    embedder-related at module level so it otherwise runs there. In a bare dev
+    env this must SKIP, not ERROR — the rule this repo already wrote down for
+    this package in ``tests/test_sdk_group3.py`` (#880).
+    """
+    pytest.importorskip("huggingface_hub")
+    from huggingface_hub import constants
+
+    hf_home = Path(os.environ["HF_HOME"])
+    assert Path(constants.HF_HOME) == hf_home, (
+        f"huggingface_hub froze HF_HOME={constants.HF_HOME}, not the pinned "
+        f"{hf_home} — the pin happened after the import, so it is inert")
+    assert Path(constants.HF_HUB_CACHE) == hf_home / "hub", (
+        f"the hub cache ({constants.HF_HUB_CACHE}) is not under the pinned "
+        f"HF_HOME ({hf_home})")
+
+
+def test_the_default_hf_home_is_the_one_the_vendor_would_resolve(tmp_path):
+    """#10010 review F4: the pin must name the cache the VENDOR would pick.
+
+    The pin's own justification used to be "identical value" to the vendor's
+    default, but it hardcoded the no-XDG arm: `huggingface_hub` resolves
+    ``$XDG_CACHE_HOME/huggingface`` when that variable is set, so on any such
+    host the pin REDIRECTED the suite away from the cache the loader would have
+    used — silently, because ``test_the_pinned_cache_is_the_one_huggingface_hub_
+    froze`` only compares the pinned env value to the frozen constant, which is
+    equal by construction once the pin has landed.
+
+    Discriminating, not self-referential: the vendor's OWN constant is built in
+    a subprocess from the same environment, for both arms of the fallback, and
+    the pin's helper must agree with it. The old hardcoded
+    ``~/.cache/huggingface`` disagrees on the XDG arm — which is what this test
+    would have caught.
+    """
+    import subprocess
+    import sys
+
+    from tests.conftest import _default_hf_home
+
+    base = {k: v for k, v in os.environ.items() if k not in ("HF_HOME", "XDG_CACHE_HOME")}
+    xdg = str(tmp_path / "xdg")
+
+    for label, extra in (("XDG unset", {}), ("XDG set", {"XDG_CACHE_HOME": xdg})):
+        env = {**base, **extra}
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "from huggingface_hub import constants; print(constants.HF_HOME)"],
+            env=env, capture_output=True, text=True, timeout=300)
+        if probe.returncode != 0:
+            pytest.skip(f"huggingface_hub not importable in this env: {probe.stderr[-300:]}")
+        vendor = probe.stdout.strip()
+        ours = _default_hf_home(extra)
+        assert ours == vendor, (
+            f"[{label}] the HF_HOME pin resolves to {ours!r} but "
+            f"huggingface_hub resolves {vendor!r} from the same environment — "
+            f"the pin must name the cache the loader would use, or the suite "
+            f"cold-loads on every test")
+
+    # The XDG arm is not decorative: it moves the answer.
+    assert _default_hf_home({"XDG_CACHE_HOME": xdg}) == str(Path(xdg) / "huggingface")
+
+
 # Legacy predicate name for negative-direction tests (#281). Kept as a
 # constant so no edge-syntax literal appears in source (Task 5 sweep requires
 # zero hits) — same pattern as tests/test_ranking.py.
@@ -268,6 +375,11 @@ def _isolated_home(monkeypatch, tmp_path):
     that file's decline matrix), so the consented control test is unaffected.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    # #10010: the MODEL cache is deliberately NOT isolated with it — `HF_HOME` is
+    # pinned to the pre-isolation cache root at conftest import (see
+    # `test_the_isolated_home_does_not_isolate_the_model_cache` for why: the
+    # lazily imported huggingface_hub froze this cache inside this per-test tmp
+    # dir and every load paid the cold path).
 
 
 @pytest.fixture()
@@ -1699,10 +1811,25 @@ def test_capture_session_long_turn_extracts_only_stored_text(sdk, monkeypatch):
     # decision/claim regex so the past-cut claim is the only candidate for the
     # claims patterns (the per-turn cap would otherwise eat it — #721).
     lead = "I believe the root cause is known. "
-    pad = "plain filler text without triggers. "
+    # The filler carries NO sentence break ON PURPOSE. The extractor emits one
+    # candidate per sentence and every candidate costs a point write (and, on
+    # the dense lane, an embedding), so the previous "plain filler text without
+    # triggers. " x 145 shape minted **138 points** for a test that inspects two
+    # of them — measured 11.3 s wall on the keyword-only local lane vs 4.5 s for
+    # the shape below, and on the CI pool runners that multiplier put this test
+    # on the 300 s per-test budget, where it tripped it: test-slow (c) and (e)
+    # both red with "Failed: Timeout (>300.0s) from pytest-timeout" (#10010 CI
+    # run 40861737614), and the same nodeid times out on `main` (run 40796571501).
+    # One period-free filler crosses the same 5000-char cap with **2** candidate
+    # points and every assertion below is unchanged — so keep it period-free.
+    pad = "plain filler text without triggers "
     assert not re.search(r"(?:let'?s|we will|we should|I will|I'm going to|decided|decision|I think|I believe|my understanding is|the problem is|the key insight|evidence suggests|data shows|we found that|this means|plan is|next steps?:|action item:)", pad, re.I)
-    before = lead + pad * 145  # past the cap, see the assert below
+    before = lead + pad * ((5000 + 200) // len(pad) + 1)  # past the cap, see the assert below
     assert len(before) > 5000
+    assert "." not in pad, (
+        "the filler must stay a SINGLE sentence — a period splits it into one "
+        "candidate per repetition and puts this test back on the 300 s budget"
+    )
     past_cut = "evidence suggests the fix landed."
     content = before + past_cut
     res = sdk.capture_session([{"role": "user", "content": content}])

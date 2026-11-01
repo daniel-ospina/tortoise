@@ -971,10 +971,6 @@ def _run_all():
     print(f"\nall {sum(1 for n in globals() if n.startswith('test_') and callable(globals()[n]))} tests passed")
 
 
-if __name__ == "__main__":
-    _run_all()
-
-
 # ------------------------------------------------------------------ #125 capture-metadata (live DB)
 
 
@@ -1476,3 +1472,12 @@ def test_sc4_deprecation_markers_present():
     doc = inspect.getdoc(TortoiseSDK.ingest_corpus) or ""
     assert "extract_metadata" in doc and "divergence" in doc.lower(), \
         "ingest_corpus must record the extract_metadata flag-semantics divergence"
+
+
+# ---------------------------------------------------------------------------
+# runner guard — LAST statement, on purpose (#10010 F3): `_run_all()` discovers
+# tests from `globals()` at call time, so a guard above a later `def test_`
+# runs none of it. Enforced by
+# tests/test_main_guards.py::test_a_globals_discovery_main_guard_is_last.
+if __name__ == "__main__":
+    _run_all()

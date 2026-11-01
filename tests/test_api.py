@@ -397,10 +397,6 @@ def _run_all():
     print("\nall API coverage tests passed")
 
 
-if __name__ == "__main__":
-    _run_all()
-
-
 # ------------------------------------------------------------------ #125 capture API
 
 
@@ -547,3 +543,12 @@ def test_add_operator_single_string_input_not_char_split():
     assert op["inputs"] == [a], f"bare string was char-split: {op['inputs']!r}"
     print("PASS test_add_operator_single_string_input_not_char_split")
 
+
+
+# ── runner guard ─────────────────────────────────────────────────────
+# LAST statement, on purpose (#10010 F3): `_run_all()` discovers tests from
+# `globals()` at call time, so a guard above a later `def test_` runs none of
+# it and still prints "all passed". Enforced by
+# tests/test_main_guards.py::test_a_globals_discovery_main_guard_is_last.
+if __name__ == "__main__":
+    _run_all()
