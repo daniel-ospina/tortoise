@@ -10609,6 +10609,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     from tortoise.read_status import read_status_enabled as _read_status_enabled
     from tortoise.residency import residency_enabled as _residency_enabled
     from tortoise.status_vocabulary import STATUS_DEGRADED as _STATUS_DEGRADED
+    from tortoise.truncation import truncation_field
 
     # The sink is the READ PATH's carrier for both fields; each field is
     # emitted only under its own flag. The ONE exception is the impairment
@@ -10618,6 +10619,12 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     _status_on = _read_status_enabled()
     _residency_on = _residency_enabled()
     status_out: dict | None = {} if (_status_on or _residency_on) else None
+    # #8447: the TRUNCATION marker. Always on — unlike ``status`` / ``residency``
+    # it costs two ``len()`` calls over lists the read already holds, so gating it
+    # off by default would preserve exactly the defect it fixes (a caller who did
+    # not know to pass a flag still gets a silent subset). See
+    # ``tortoise/truncation.py`` for the two fields and the three states.
+    trunc_out: dict = {}
     # #3718 (construction half of #4660, second batch): the SDK is BUILT off the
     # loop, not just used off it. In embedded mode `_make_sdk` probes the
     # keepalive anchor (`_anchor_usable`) and may eagerly connect with the
@@ -10646,7 +10653,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
         # asyncio.to_thread pattern used throughout this file).
         results = await asyncio.to_thread(
             sdk.tortoise_fts_query, q, limit=limit,
-            read_status_out=status_out)
+            read_status_out=status_out, _truncation_out=trunc_out)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
@@ -10663,6 +10670,15 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
             props["kind"] = "statement"
         out.append(props)
     response = {"results": out, "count": len(out)}
+    # #8447: say so when this read did not deliver everything it MATCHED — the
+    # ``limit`` cap cut rows, or a downstream stage dropped them — so
+    # ``count: 5`` on a 20-match
+    # query is never indistinguishable from a complete 5-match answer. Lives on
+    # the response because that is where the caller is — a log line would only
+    # tell a developer. This path has no offset and no cursor, so a dropped row
+    # is unreachable by any follow-up call: exempted pagination (which reports
+    # ``total``/``hasMore``) is a different surface, see ``truncation.py``.
+    response.update(truncation_field(trunc_out))
     if status_out is not None:
         # The SDK sets `status` on every return path; a missing term is a bug,
         # not a reason to emit null under a vocabulary of exactly four terms.
