@@ -47,12 +47,23 @@ trusted"*); the instrument records the consequence rather than re-deciding it.
 
 `STORAGE-ARCHITECTURE.md` §12.2a forbids *"a second, independently-derived rule
 set"* for `EMBED`. The instrument counts the **predicates that can answer
-`NO-EMBED`**, mechanically: the modules on the embed path that **own identifier
-patterns** (`re.compile` at module scope). The target is **1**,
+`NO-EMBED`**, mechanically: the modules that **own identifier patterns**
+(`re.compile` at module scope) over the population `predicate_population()`
+returns — the modules the gate **imports** (walked, so a new
+`embed_rules.py` counts the day it exists) **plus** the seam modules that decide
+whether the gate is consulted at all (`OWNERSHIP_ONLY`, scanned for their own
+patterns with their imports NOT followed). The target is **1**,
 `value_gate.identifier_only`, asked by `embed_gate.embedding_verdict` — which is
 the ASK, not a second predicate, and must report the *shared* rule id. A second
 pattern list is the drift the criterion exists to prevent, and it makes this
 count read `2`.
+
+⚠️ **Two ways the population can be right and the verdict still unearned,**
+both closed here: a module that will not **parse** (or will not read) is a hole,
+not a zero, so the verdict is `UNDETERMINED` rather than `MET`; and the seam that
+**decides whether to consult the gate** cannot be reached by walking the gate's
+own imports — an import makes the *importer* depend on the *importee* — so it is
+scanned for ownership separately.
 
 ## The census — `stored` / `indexed` / `unindexed` per label
 
@@ -942,11 +953,30 @@ def score_v1_bullet() -> Row:
 #: The modules a predicate can live in without being a second RULE SET: the
 #: embed seam's own module graph, walked rather than listed.
 EMBED_PATH_ROOTS: tuple[str, ...] = (
-    # NOT `tortoise/embeddings.py`: it is the CALLER, and it imports half the
-    # tree, so walking it counted 47 unrelated pattern owners as predicates.
-    # A predicate has to be imported BY the gate to be reachable from it.
+    # NOT `tortoise/embeddings.py`, and for a reason about WALKING only: it is
+    # the CALLER and imports half the tree, so WALKING it counted 47 unrelated
+    # pattern owners as predicates. ⛔ That is NOT an argument that the seam
+    # owns no predicate — see `OWNERSHIP_ONLY` immediately below, which scans
+    # it for its own patterns without following its imports.
     "tortoise/embed_gate.py",
     "tortoise/value_gate.py",
+)
+
+#: Modules that can answer `NO-EMBED` but must not be WALKED.
+#:
+#: ⛔ `tortoise/embeddings.py` is the seam that DECIDES whether the gate is
+#: consulted at all (`if embed_gate.embed_gate_enabled():`), and it is the
+#: conventional home of an inline skip — so its OWN module-scope patterns are
+#: predicates in exactly §12.2a's sense. It is excluded from
+#: `EMBED_PATH_ROOTS` for a different reason that reads as if it covered this
+#: one: its IMPORTS fan out to half the tree, which is an argument about
+#: reachability, not about its own assignments. (An import makes the IMPORTER
+#: depend on the IMPORTEE — Python Language Reference §5 — so no forward walk
+#: from the gate can ever enter its caller; the edge runs the wrong way.)
+#:
+#: ⚠️ Scanned for OWNERSHIP ONLY: its imports are NOT followed.
+OWNERSHIP_ONLY: tuple[str, ...] = (
+    "tortoise/embeddings.py",
 )
 
 
@@ -1008,6 +1038,26 @@ def _import_edges(root: Path, tree, path: Path) -> set[str]:
     return targets
 
 
+def predicate_population() -> list[str]:
+    """Every module the §12.2a count SCANS: reachable-by-import PLUS owned.
+
+    ⛔ The two halves answer two different questions and are not
+    interchangeable. `embed_path_modules()` walks the gate's own import graph,
+    so it can only enter a module the gate DEPENDS ON. A module that depends on
+    the gate — most importantly the seam that decides whether to consult it
+    (`tortoise/embeddings.py`) — owns predicates by §12.2a's definition while
+    being unreachable from that walk, because an import makes the importer
+    depend on the importee and never the reverse (Python Language Reference §5).
+    Scanning it WITHOUT walking it is what closes that hole without dragging in
+    the forty-odd unrelated pattern owners its imports reach (this tool's own
+    review, P3: the count read `1 / MET` over a seam module carrying a second
+    rule set).
+    """
+    return sorted(set(embed_path_modules()) | {
+        m for m in OWNERSHIP_ONLY if (REPO_ROOT / m).exists()
+    })
+
+
 def embed_path_modules() -> set[str]:
     """Every `tortoise/**.py` reachable from the embed seam by LOCAL imports.
 
@@ -1046,24 +1096,39 @@ def _embed_path_modules(root: Path) -> frozenset[str]:
 def count_embed_predicates() -> dict:
     """Count the distinct predicates that can answer `NO-EMBED` (target: 1).
 
-    A predicate is a module on the embed path that **owns identifier patterns**
-    (`re.compile` at module scope). `embed_gate.embedding_verdict` is the ASK,
-    not a predicate: it must call the shared one and report the shared rule id,
-    which is checked separately (`RULE_SET is value_gate.RULES`).
+    A predicate is a module in `predicate_population()` that **owns identifier
+    patterns** (`re.compile` at module scope) — that is, the modules the gate
+    imports PLUS the seam modules that decide whether the gate is consulted,
+    scanned for ownership without their imports being followed.
+
+    `embed_gate.embedding_verdict` is the ASK, not a predicate: it must call the
+    shared one and report the shared rule id, which is checked separately
+    (`RULE_SET is value_gate.RULES`).
+
+    ⛔ A module that will not parse, or will not read, is a HOLE in the
+    measurement and NOT a zero — the same doctrine the writer map states at
+    `_embedding_writers`/`score_rule_bullet` ("a module that will not parse is a
+    HOLE in the measurement, not a zero: its writers … are invisible to every
+    row"). It used to `continue`, so an unparseable module carrying a second
+    pattern list left `count: 1` and `verdict: MET` (this tool's own review,
+    P3) — the verdict this whole instrument exists to withhold.
     """
     import tortoise.embed_gate as embed_gate
     import tortoise.value_gate as value_gate
 
     owners: list[str] = []
-    for rel in sorted(embed_path_modules()):
-        src = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    unparseable: list[str] = []
+    for rel in predicate_population():
         # AST, not a text pattern: an ALIASED import (`import re as _re`) is
         # still a pattern, and a substring scan missed exactly that in this
         # tool's own mutation check — the falsifier PASSED on mutated code,
         # which is the one failure a falsifier must not have.
         try:
-            tree = ast.parse(src)
-        except SyntaxError:
+            tree = ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            # ⛔ Reported, never `continue`d: keyed by the PATH so the verdict
+            # can name the hole it could not read.
+            unparseable.append(rel)
             continue
         # ANY module-scope expression that calls `.compile(` owns a pattern —
         # a single assignment AND a collection (`_PATS = [re.compile(…), …]`),
@@ -1090,8 +1155,14 @@ def count_embed_predicates() -> dict:
         "predicate": PREDICATE_NAME,
         "rule_ids": list(value_gate.RULES),
         "rule_set_is_shared_identity": embed_gate.RULE_SET is value_gate.RULES,
-        "verdict": "MET" if len(owners) == 1 and embed_gate.RULE_SET is value_gate.RULES
-                   else "DRIFT",
+        # ⛔ `UNDETERMINED` BEFORE the two real verdicts: a population this
+        # instrument could not read cannot certify `MET`, and calling it `DRIFT`
+        # would claim a second rule set it never SAW. Neither answer is available
+        # from a hole, so the third value is the honest one.
+        "unparseable": unparseable,
+        "verdict": ("UNDETERMINED" if unparseable else
+                    "MET" if len(owners) == 1 and embed_gate.RULE_SET is value_gate.RULES
+                    else "DRIFT"),
     }
 
 
@@ -1448,6 +1519,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n§12.2a predicates: {p['count']} (target {p['target']}) — "
           f"{p['verdict']}; owners={p['owners']}; shared identity="
           f"{p['rule_set_is_shared_identity']}")
+    if p["unparseable"]:
+        # ⛔ Printed BESIDE the count, so `<N> — MET` can never be read off a
+        # line whose population had a hole in it (`UNDETERMINED` is above).
+        print(f"  ⛔ unreadable modules (this count could not scan them): "
+              f"{p['unparseable']}")
     if "census" in report:
         c = report["census"]
         print(f"\nCensus — graph `{c.get('graph')}` at {c.get('at')} "
