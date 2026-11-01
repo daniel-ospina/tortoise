@@ -5885,7 +5885,12 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         capture_consent_enabled,
         record_capture_declined,
     )
-    from tortoise.capture_spool import _terminal_marker, flush_spool, read_spool_meta
+    from tortoise.capture_spool import (
+        DISCARD_SPOOL_SATURATED,
+        _terminal_marker,
+        flush_spool,
+        read_spool_meta,
+    )
     if not capture_consent_enabled():
         # Durable + one-time: a stale copied hook discards this stderr
         # (`2>/dev/null`), so the same notice is also written to
@@ -5907,7 +5912,25 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         print(f"spool discard ({d['reason']}): {d['detail']}", file=_sys.stderr)
 
     if not written["written"] and written["bytes"] == 0:
-        # The entry exceeded the per-entry bound (the discard above names it).
+        # The write was refused BEFORE anything reached the disk. TWO different
+        # causes land here and they are not the same event:
+        #
+        #   * `entry_too_large` on a FRESH snapshot — the capture itself is
+        #     unfilable, nothing was written and nothing was kept. A failure.
+        #   * `spool_saturated` — the box refuses NEW work to keep an undelivered
+        #     backlog. Nothing was oversized and nothing was LOST, so reporting
+        #     "the entry exceeded the per-entry bound" (this branch's pre-fix
+        #     reading of a zero-byte refusal) named the wrong cause and exited 1
+        #     for a refusal that destroyed nothing.
+        if any(d.get("reason") == DISCARD_SPOOL_SATURATED
+               for d in written["discards"]):
+            print(f"capture REFUSED: session {session_id} was not spooled — the "
+                  "local spool is at its ceiling with nothing evictable, so new "
+                  "capture is refused rather than deleting an undelivered "
+                  "capture.", file=_sys.stderr)
+            print("run 'tortoise session drain' once the backlog can be filed, "
+                  "then re-capture this session", file=_sys.stderr)
+            return 0
         return 1
 
     summary = flush_spool(root, _session_post(api_key, api_url), only_session_id=session_id)
@@ -6137,7 +6160,7 @@ def _print_capture_health() -> None:
 
     Best-effort by construction: a health read must never break the exit-0
     contract of the drain, and an `OK`/`DRAINING` line on every drain would be
-    noise. Only a BLOCKED or an UNREADABLE spool is worth printing.
+    noise. Only a BLOCKED, SATURATED or an UNREADABLE spool is worth printing.
 
     NOTE the surface: this writes to the DRAIN's stderr, which the SessionStart
     hook redirects to /dev/null. It is therefore an operator's line for a drain
@@ -6152,14 +6175,18 @@ def _print_capture_health() -> None:
         health = capture_health_line(spool_dir(), api_key=_capture_key_presence())
     except Exception:
         return
-    # BLOCKED and UNREADABLE only: a DRAINING spool on a normal SessionStart is
-    # usually the live session held back for its own final flush (and INACTIVE is
-    # already reported by this command's own keyless message), so a line about
-    # either on every start is noise — the alert-fatigue pattern recorded at the
-    # doctor's consent row. UNREADABLE is printed because a drain that could not
-    # READ the spool is the one case where printing nothing would leave the
-    # operator with the silent empty backlog this issue removed.
-    if health.state in ("blocked", "unreadable"):
+    # BLOCKED, SATURATED and UNREADABLE: a DRAINING spool on a normal
+    # SessionStart is usually the live session held back for its own final flush
+    # (and INACTIVE is already reported by this command's own keyless message), so
+    # a line about either on every start is noise — the alert-fatigue pattern
+    # recorded at the doctor's consent row. UNREADABLE is printed because a drain
+    # that could not READ the spool is the one case where printing nothing would
+    # leave the operator with the silent empty backlog this issue removed.
+    # SATURATED belongs here for the same reason and was the stale-filter gap a
+    # reviewer found: the box refusing every new capture is exactly the box whose
+    # operator runs the drain by hand to find out why, and this was the one hand-
+    # run surface that stayed silent about it.
+    if health.state in ("blocked", "unreadable", "saturated"):
         print(health.line, file=_sys.stderr)
 
 
@@ -10750,12 +10777,22 @@ def _cmd_doctor(args):
     # prevent, one level up. Every state is named here so a new one cannot fall
     # through.
     #
-    # `❌` only for BLOCKED: only a refusal retrying cannot fix fails the report
-    # (and so the exit code). DRAINING and INACTIVE are INFORMATION, not warnings:
-    # a pending capture on a live box is usually the running session awaiting its
-    # own final flush, and a keyless box is a normal install — painting either as
-    # "1 warn" is the alert-fatigue pattern the consent row below already
-    # records (#3615).
+    # `❌` only for a refusal retrying cannot fix: BLOCKED and SATURATED are those
+    # two (and so the exit code). DRAINING and INACTIVE are INFORMATION, not
+    # warnings: a pending capture on a live box is usually the running session
+    # awaiting its own final flush, and a keyless box is a normal install —
+    # painting either as "1 warn" is the alert-fatigue pattern the consent row
+    # below already records (#3615).
+    #
+    # ⛔ A SATURATED SPOOL IS NAMED HERE, NOT LEFT TO THE FALLBACK. It is a
+    # refusal retrying cannot FIX — nothing is evictable, so only filing, adding
+    # a key or deleting entries clears it — which is the paragraph's own rule for
+    # `❌`; rendering it through `"⚠️"` would have made the one report an operator
+    # runs EXIT 0 on a box that captures nothing. It was missing from this map
+    # when the state was added (capture-loss review, #10479), so the comment's own
+    # claim ("every state is named here so a new one cannot fall through") was
+    # already false — the two other enumerations of the same set (the state type
+    # and `_print_capture_health`'s filter) were updated, this one was not.
     try:
         from tortoise.capture_spool import capture_health_line, spool_dir
         _capture_health = capture_health_line(
@@ -10763,6 +10800,7 @@ def _cmd_doctor(args):
         _capture_icon = {
             "blocked": "❌",
             "unreadable": "⚠️",
+            "saturated": "❌",
             "draining": "ℹ️",
             "inactive": "ℹ️",
             "ok": "✅",

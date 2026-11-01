@@ -580,6 +580,15 @@ surfaces:
   # through a P0. DB-free (pepper env + a stubbed DB probe, no FalkorDB, no
   # Postgres, no network).
   - test_9548_record_arming_health.py
+  # #10447: `/health` published no build identity, so "is this deployed?" was
+  # unanswerable from the endpoint every watchdog and census probes — a stale
+  # build served `status: ok` and every other block happily. DUAL-REGISTERED
+  # (api + core) for the reason the /health guards above are: the file it pins is
+  # `tortoise/hosted_api.py`, which matches an `api` SOURCE_PATTERN, so an
+  # `api`-only registration in the `core` list would NEVER RUN on the very diff it
+  # exists for (the "guard for X does not run when X changes" class). The `core`
+  # arm covers the `record_projection.py` migration resolver the same pin reads.
+  - test_health_build_identity_10447.py
   # #7816: importing tortoise.hosted_api must not write the audit JSONL fallback
   # into $HOME. Dual-registered from `core` for the reason this list exists: the
   # guard subprocess-imports tortoise/hosted_api.py, an exact `api` surface match
@@ -3375,6 +3384,15 @@ surfaces:
   # `record_writer.py`-only diff (the `dsn_fingerprint` single definition this
   # file also pins) falls through to `core`.
   - test_9548_record_arming_health.py
+  # #10447: `/health` published no build identity, so "is this deployed?" was
+  # unanswerable from the endpoint every watchdog and census probes — a stale
+  # build served `status: ok` and every other block happily. DB-free; the
+  # `record_projection`-only half (where the schema head is resolved) falls
+  # through to `core`. This row is the SECOND half of a dual registration:
+  # `tortoise/hosted_api.py` is an exact `api` SOURCE_PATTERN that REPLACES the
+  # `core` fallback, so the file also has an `api` row above — without it this
+  # guard is dropped on every hosted_api.py-only diff.
+  - test_health_build_identity_10447.py
   - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
@@ -7705,6 +7723,7 @@ durations_captured_at: "2026-10-26T04:45:51Z"
 durations_held_equal:
   test_mcp_rename_table.py: test_bridge_table.py
 durations:
+  test_health_build_identity_10447.py: 2.0  # new in #10467 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`. ⚠️ Re-measured at #10467's head rather than assumed, and the coverage floor is NOT what the row buys here: `fast_pool()` is 1049 and `duration_coverage_issues()` is `[]` BOTH ways — 1021/1049 = 0.973308 without the row, 1022/1049 = 0.974261 with it. `tools/ci_selection.py --integrity` is the authority; the row is kept because a fast file added by a PR must carry a weight at all (the #3400/#4348 trap), not because its absence reds a gate. What the weight covers: DB-free, server-free, network-free and model-free — it imports `tortoise.hosted_api` and stubs `_probe_db`/the watcher/`_HEALTH_PROBE` through `monkeypatch`, so the only I/O is the `git init`/`git commit` pair it spawns in `tmp_path/history` to prove the identity is whatever the DEPLOY was told to build. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_reap_redislite_orphans.py: 2.0  # new in #3653 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default: the `core` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: hermetic — it reads every workflow in `.github/workflows/` (both `.yml` and `.yaml`) and drives the stdlib reaper by path (one `sys.executable` subprocess for the CLI seam); no DB, no server, no network, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_ci_preview_isolation.py: 2.0  # new in #10283 — a file a PR ADDS can never carry a CI junit reading yet (same reasoning as the #3653 row above), so it takes the flat `DEFAULT_FAST_WEIGHT`; the row must EXIST because the `core` registration puts one more file in `fast_pool()` and `--integrity`'s coverage floor is measured against that pool. What the weight covers: hermetic — it reads `.github/workflows/*.yml` (text + YAML arms) and drives `.github/scripts/preview-server.sh` by path, spawning 3 short-lived `sleep`/`bash` process trees per run to prove `stop` is pid-scoped and a peer's decoy survives; no DB, no network, no browser, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_inbound_relay_sweep.py: 2.0  # carried forward (not a full-file CI measurement) — the inbound-relay CONVERGENCE fix (#2409/#2441): the 15-minute sweep that applies the relay's own policy when its event-time run never executes (measured 8/8 external triggers `startup_failure`, 0 executions in 800 runs). No CI sweep has collected it, so it carries the flat `DEFAULT_FAST_WEIGHT` for an unmeasured file (the #2818/#3419/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: DB-free, graph-free and network-free — it loads `tools/inbound_relay_sweep.py` by path, drives a recording fake GitHub client, and evaluates the REAL job-level `if:` of `.github/workflows/inbound-relay.yml` through `tests/test_inbound_relay_guard.py`'s expression parser; no `gh`, no docker, no FalkorDB, no model, and the only file reads are the two workflow YAMLs plus `.mergify.yml`. The row must EXIST, not merely default: the `core` registration puts one more fast file in the pool, and `--integrity`'s `duration_coverage_issues` measures the ratio against the pool's own size. ⚠️ The counterfactual this row was written with ("without the row: 925/1028 = 0.8998") is a SNAPSHOT OF A MOVING DENOMINATOR, not a current requirement, and it no longer reproduces — re-measured after the `origin/main` merge the pool is 1032 and `duration_coverage_issues()` is `[]` BOTH ways: 930/1032 = 0.901163 with the row, 929/1032 = 0.900194 without it. `tools/ci_selection.py --integrity` is the authority; the row is kept because a fast file added by a PR must carry a weight at all (the #3400/#4348 trap) and because one unweighted fast file is all the headroom this pool has. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it. — ci-timing junit-census+top-15 2026-10-26 (run 40259128208): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.6s) is a LOWER bound; kept 2.0
