@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests._provider_env import pin_provider_routing_env
 from tortoise.sdk import (
     _CAPTURE_TURN_CAP,
     TortoiseSDK,
@@ -57,11 +58,17 @@ def _secret() -> str:
 def _keyless(monkeypatch) -> None:
     """No LLM extraction: the turns are written by the mechanical loop under
     test, and a keyless capture cannot make a network call (same seam as
-    ``tests/test_capture_secret_redaction_4911.py``)."""
+    ``tests/test_capture_secret_redaction_4911.py``).
+
+    ⚠️ The provider set is DERIVED (``pin_provider_routing_env``), never a
+    literal list — the #3695 / #5477 class. This hand-list was complete until
+    #8133 registered ``venice`` in ``ingest._PROVIDERS``: after that an ambient
+    ``VENICE_API_KEY`` builds a real billed extractor on a box that has one,
+    while CI (which has none) stays green.
+    """
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    pin_provider_routing_env(monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     from tortoise.sdk import _build_session_llm_extractor
     assert _build_session_llm_extractor() is None, "keys leaked into the test"
 

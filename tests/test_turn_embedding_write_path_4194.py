@@ -37,6 +37,7 @@ import pytest
 # established pattern for hosted-surface tests (see
 # tests/test_capture_loop_responsiveness.py); the offline MockModel seam means
 # no provider/network call.
+from tests._provider_env import pin_provider_routing_env
 from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
 from tortoise.embeddings import EmbeddingModel, compute_embedding
@@ -105,11 +106,16 @@ def _keyless(monkeypatch) -> None:
     The turns are still written by the mechanical loop under test; clearing the
     mock seam AND every provider key makes any extraction attempt fail loudly
     instead of quietly serving a mock.
+
+    ⚠️ The provider set is DERIVED (``pin_provider_routing_env``), never a
+    literal list — see the #3695 / #5477 note in ``tests/conftest.py``. The
+    hand-list this replaces was complete until #8133 registered ``venice``, at
+    which point an ambient ``VENICE_API_KEY`` built a real billed extractor on
+    a box that has one and silently passed in CI that does not.
     """
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
+    pin_provider_routing_env(monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     from tortoise.sdk import _build_session_llm_extractor
     assert _build_session_llm_extractor() is None, "keys leaked into the test"
 
