@@ -3079,6 +3079,107 @@ def test_the_measurement_probe_derives_the_same_class_set():
             "different criteria (#9736)"
         )
 
+
+# ── the record's description of its own gate, and the routing row a reader arrives through ──
+
+
+def test_the_records_e3_rule_states_the_rule_the_gate_implements():
+    """§7 item 6 is the record's statement of its own MECHANICAL enforcement, so it must be true.
+
+    #10525 review P3, MEASURED: §7 said E3's cells must name **exactly** `{Point} ∪
+    _DERIVATION_REFERENCES_LABELS`, while the gate holds each cell to one ALIAS GROUP per anchored
+    class — so a row spelling the document-derivation class `Source` (the node label it is stored on
+    once `Document`'s label retires) PASSED a rule the record told a reader refuses it. §7 is the
+    section whose whole job is to be the checkable statement of what is enforced; it stated the
+    opposite, and no test compared the sentence with the code.
+
+    The requirement is derived FROM the code (`e3_required_class_groups`), so the prose cannot drift
+    again: every member of every anchored-class group must be named in §7 item 6, and the flat-set
+    claim that replaced a group with a single spelling must not come back.
+
+    Non-vacuity: at the pre-fix head the paragraph carried `**exactly**` and `{Point} ∪ that set`
+    and named neither `Document` nor `Source` as alternatives, so this reds on it.
+    """
+    text = PREREG.read_text()
+    start = text.index("**E3's class set is re-derived")
+    paragraph = text[start:].split("\n\n", 1)[0]
+    for group in check.e3_required_class_groups():
+        for member in sorted(group):
+            assert f"`{member}`" in paragraph, (
+                f"§7 item 6 never names `{member}`, which the gate requires — a reader would "
+                f"conclude the rule refuses a row this gate accepts: {paragraph!r}"
+            )
+    assert "{Point} ∪ that set" not in paragraph, (
+        "§7 item 6 claims the required set is the FLAT `{Point} ∪ _DERIVATION_REFERENCES_LABELS`, "
+        "but the gate holds a cell to one alias GROUP per class — the sentence is false in the "
+        "direction that lets an accepted spelling read as a refused one"
+    )
+    assert "**exactly**" not in paragraph, (
+        "§7 item 6 says the cells must name *exactly* one set; the document-derivation class has "
+        "two accepted spellings, so `exactly` cannot be what is enforced"
+    )
+
+
+def test_the_routing_index_carries_both_e3_readings():
+    """A reader arrives through `docs/00_index.md`, so the amendment has to reach that row too.
+
+    #10525 review P2: §10.1, the README and the E-row audit were all extended with the amended
+    reading, and the index row was not — it still published `148/433` and "the frozen `= 1.000` is
+    unreachable as registered", which is the interpretation §10 records as the registration's
+    DEFECT. The surface the repo routes readers through therefore said the amendment had not
+    happened, which is the artefact-contradicts-artefact class §10 exists to remove.
+
+    Non-vacuity: the pre-fix row carried neither `148/383` nor the `OPEN` marker, so this reds.
+    """
+    row = next(
+        ln for ln in (REPO_ROOT / "docs" / "00_index.md").read_text().splitlines()
+        if ln.startswith("| **`#7949` / `#9080`")
+    )
+    assert "148/433" in row, "the AS-REGISTERED reading must stay published — it is not erased"
+    assert "148/383" in row and "0.38642" in row, (
+        "the index row publishes only the pre-amendment reading; §10.1 re-registers the denominator "
+        f"to the anchored class set, so the row is stale: {row[:200]!r}"
+    )
+    assert "#9736" in row and "OPEN" in row, (
+        f"the row must say #9736 remains OPEN and owner-gated — the amendment does not close it: {row[:200]!r}"
+    )
+
+
+def test_a_skipped_arm_names_the_bundle_that_skipped_it(tmp_path):
+    """A declared skip must name its OWN subject (#10525 review P3, MEASURED).
+
+    The class-set note hardcoded `docs/evidence/5087-hypothesis`'s evidence, and it is emitted for
+    WHICHEVER bundle skipped the arm — so stripping the class names from the CAPSTONE's own E3 row
+    made the gate explain the capstone's skip with the sibling's session-arm receipt criterion. A
+    skip whose declaration names the wrong subject reads as a checked one, which is the class this
+    tool exists to refuse.
+
+    Non-vacuity: at the pre-fix head the note carried `docs/evidence/5087-hypothesis's E3 is a
+    session-arm receipt check` for this bundle, so both assertions red on it.
+    """
+    directory = tmp_path / "a-named-bundle"
+    directory.mkdir()
+    _record_copy(directory)
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "every derived node the run writes carries a version anchor",
+        "denominator": "every derived node the run writes (floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(
+        directory, rows, check.parse_pins(PREREG.read_text()), scopes
+    )
+    assert failures == [], failures
+    class_set = [s for s in scopes if "names no graph class" in s]
+    assert class_set, scopes
+    assert all("a-named-bundle" in s for s in class_set), class_set
+    assert not any("5087-hypothesis" in s for s in class_set), (
+        f"the skip for THIS bundle is explained with a sibling's evidence: {class_set}"
+    )
+
 # ── the multi-bundle CLI: `--dir` is repeatable, a failure names its bundle (#10468) ────────
 
 def test_a_multi_bundle_json_error_names_the_bundle_it_came_from(tmp_path, capsys):
