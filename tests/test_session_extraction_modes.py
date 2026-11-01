@@ -14,6 +14,7 @@ gone. Semantics under test:
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 
 import pytest
@@ -303,6 +304,84 @@ def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
         f"capture lane gate — a deployment configured with only those would "
         f"silently skip extraction (#8133); register the provider in "
         f"tortoise.ingest._PROVIDERS"
+    )
+
+
+def test_env_example_states_the_real_session_extraction_provider_set():
+    """#8133 review round 5: ``.env.example`` IS this repo's env contract (the
+    same convention ``tests/test_identifier_tokens_8933.py``,
+    ``tests/test_bm25_lexical_8488.py`` and
+    ``tests/test_env_contract_covers_supabase_config.py`` pin), and it still
+    stated the PRE-#8133 world: the session lane's providers as the legacy four,
+    and the priority chain without venice.
+
+    The wrong outcome it prevents, point at it happening: an operator deploying
+    with only ``VENICE_API_KEY`` read the template, concluded the capture lane
+    needed one of the other four, and reported the #8133 symptom ("capture skips
+    extraction") on a deployment where the code now works — the same defect one
+    step earlier in the operator's life.
+
+    Derived, not literal, on purpose: the next provider registered in
+    ``ingest._PROVIDERS`` must RED this test rather than silently leave the
+    template stale — a longer hand-list is the drift class #8133 exists to
+    close (compare ``providers/{openrouter,deepseek,openai,gemini}`` hardcoded
+    in five places before it).
+
+    Non-vacuity (measured against the pre-fix block): both assertions fail —
+    ``VENICE_API_KEY`` is absent from the provider list and ``venice`` from the
+    priority chain, and no VENICE line in the evals paragraph says "capture".
+    """
+    from pathlib import Path
+
+    from tortoise import hosted_api
+    from tortoise.sdk import _SESSION_LLM_PROVIDER_PRIORITY
+
+    env = (Path(__file__).resolve().parent.parent / ".env.example").read_text()
+    start = env.index("POST /v1/sessions extraction")
+    block = env[start:env.index("KEY SOURCE — the keys are split by surface", start)]
+
+    # (1) the provider LIST must name every key the lane gate consumes. The
+    # template abbreviates all but the last (``A/B/C/D/E_API_KEY``), so the
+    # parenthetical is normalised back to env-var names before comparing.
+    clause = re.search(r"when a provider key is configured[\s#]*\(([^)]*)\)", block, re.S)
+    assert clause, (
+        ".env.example no longer names the session-extraction provider keys in a "
+        f"parenthetical, so this pin cannot read them:\n{block}"
+    )
+    listed = {
+        t if t.endswith("_API_KEY") else f"{t}_API_KEY"
+        for t in re.split(r"[^A-Z0-9_]+", clause.group(1)) if t
+    }
+    consumed = set(hosted_api._LLM_PROVIDER_KEYS)
+    assert listed == consumed, (
+        f".env.example's session-extraction block names {sorted(listed)} but the "
+        f"capture lane gate consumes {sorted(consumed)} — an operator following "
+        f"the template configures a key the lane ignores (or misses one it "
+        f"accepts), which is the #8133 report one step earlier"
+    )
+
+    # (2) ...and the PRIORITY chain must be the tuple the code actually walks.
+    chain = " > ".join(_SESSION_LLM_PROVIDER_PRIORITY)
+    assert chain in block, (
+        f".env.example does not state the real first-configured-wins chain "
+        f"({chain!r}) — that order is a deploy-time decision (#329), so a stale "
+        f"chain sends the capture to a provider the operator did not expect:\n"
+        f"{block}"
+    )
+
+    # (3) the evals-home paragraph must say venice is a CAPTURE key, not an
+    # ask/longmem-only one — a reader otherwise routes the capture around it.
+    evals = env[env.index("The evals home holds"):]
+    evals = evals[:evals.index("OPENROUTER_API_KEY=")]
+    venice_lines = [ln for ln in evals.splitlines() if "VENICE" in ln]
+    assert venice_lines, (
+        "the evals-home paragraph no longer names VENICE at all — its role in "
+        "the capture lane (#8133) went with it"
+    )
+    assert any("capture" in ln.lower() for ln in venice_lines), (
+        "the evals-home paragraph still describes VENICE as an ask/longmem-only "
+        f"key (#8133 registered it in ingest._PROVIDERS, which the session "
+        f"CAPTURE lane reads): {venice_lines}"
     )
 
 
