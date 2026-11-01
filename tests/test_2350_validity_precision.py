@@ -1000,9 +1000,19 @@ def test_a_millis_bound_is_skipped_rather_than_restating_the_unit():
     Non-vacuous: the assertion that makes this test fail on the pre-fix code is
     the ``[valid]`` (no start clause) one — the pre-fix marker printed
     ``[valid since 2024-07-01]`` for the same stored value.
+
+    ⚠️ This test also PINS the residual, as a measurement rather than prose
+    (#9741 review P2-2): the marker states no start while
+    ``validity.effective_precision`` still reports ``"day"`` beside it, because
+    the numeric short-circuit in BOTH predicates exists for ``OverflowError``
+    safety and not as a parse verdict. Naming the divergence here is what stops
+    the parity sentence in ``retrieval._bounds_an_instant`` from reading as a
+    guarantee — repairing the precision side is a ``validity`` question about
+    what a NUMBER bound means, and this lane deliberately does not decide it.
     """
     from tortoise.retrieval import BOUND_RENDER_OUTCOMES, _validity_marker
     from tortoise.search_engine import _created_sort_key
+    from tortoise.validity import effective_precision
 
     millis = 1719792000000          # 2024-07-01 as MILLIS
     seconds = 1719792000            # 2024-07-01 as SECONDS
@@ -1014,6 +1024,11 @@ def test_a_millis_bound_is_skipped_rather_than_restating_the_unit():
     assert _validity_marker({"id": "p", "valid_from": millis,
                              "end_state": "open"}) == "[valid]"
     assert BOUND_RENDER_OUTCOMES["unreadable_bound"] == before + 1
+    # ⚠️ the KNOWN residual, measured: no start clause in the marker, "day" from
+    # the precision beside it. Pinned so a change to EITHER surface reds here
+    # instead of silently re-splitting two answers about one stored value.
+    assert effective_precision(millis, None) == "day"
+    assert effective_precision(seconds, None) == "day"
     # an int too large for a calendar is the same class, not a crash
     assert _validity_marker({"id": "p", "valid_from": 10 ** 20,
                              "end_state": "open"}) == "[valid]"
@@ -1179,8 +1194,17 @@ def test_the_bound_census_counts_hits_not_marker_calls():
     ``stats["bound_render_outcomes"]`` (it was previously write-only: incremented
     in three places, readable from nowhere).
 
-    Fails pre-fix on both ``== 1`` assertions (they read 2 and 3), which is the
-    whole point: the same input, one defective hit, one count.
+    #9741 review P2-3 — the SAME unit question one level down: the increment
+    lived in ``_display_bound``, which runs once per bound FIELD, so a hit
+    carrying two unreadable bounds added 2 to a counter the caller reads as
+    "hits". The increment is now :func:`_validity_marker`'s and is at most 1 per
+    hit, matching its sibling key ``marker_failed``; the two-unreadable-bounds
+    case below is what tells the two units apart (the earlier cases could not,
+    having only single-defect hits).
+
+    Fails pre-fix on both ``== 1`` assertions (they read 2 and 3) and on the
+    two-field case (it read 2), which is the whole point: the same input, one
+    defective hit, one count.
     """
     from tortoise.retrieval import assemble_context, assemble_session_context, render_context
 
@@ -1210,6 +1234,17 @@ def test_the_bound_census_counts_hits_not_marker_calls():
         [poisoned, plain], max_context_tokens=10_000, stats=sstats)
     assert {h["id"] for h in session_selected} == {"poison", "plain"}
     assert sstats["bound_render_outcomes"]["unreadable_bound"] == 1
+
+    # ... and the unit is a HIT, not a bound FIELD: one hit with TWO unreadable
+    # bounds (start AND end) is still one hit, and counts once.
+    doubly_bad = {"id": "doubly-bad", "content": "two bad bounds",
+                  "valid_from": float("nan"), "valid_to": float("nan")}
+    dstats: dict = {}
+    assemble_context([doubly_bad], top_k=5, max_context_tokens=10_000,
+                     stats=dstats)
+    assert dstats["bound_render_outcomes"]["unreadable_bound"] == 1, (
+        "the census counts HITS: three bound fields share one hit"
+    )
 
 
 def test_one_unreadable_hit_does_not_deny_the_rendered_read(monkeypatch):

@@ -76,7 +76,7 @@ _log = logging.getLogger(__name__)
 #: that a hit's annotation is missing and why. Process-local; the ``warning``
 #: line beside each increment carries the offending value for anything durable.
 BOUND_RENDER_OUTCOMES: dict[str, int] = {
-    "unreadable_bound": 0,      # a bound present but of no readable shape
+    "unreadable_bound": 0,      # a hit with >=1 bound present but unreadable
     "marker_failed": 0,         # the marker raised for one hit (backstop)
 }
 
@@ -998,14 +998,22 @@ def _display_bound(value: object, field: str, hit: dict) -> str:
 
     Anything else (a mapping, a list, a number outside the authored span) is a
     value the marker cannot honestly date. It is SKIPPED — the hit loses that
-    clause and the read completes — with ``BOUND_RENDER_OUTCOMES`` counted and a
-    ``warning`` naming the point id, the field and the value, because a skip the
-    caller cannot observe is the silent-loss defect this file's annotation
-    history is made of. It is deliberately NOT coerced to ``""`` and forgotten:
-    "unreadable" and "absent" must stay distinguishable — absent never
-    increments the counter, and :func:`_bound_present` is the per-hit predicate
-    that keeps them apart for THIS hit (a process counter cannot, see the #9741
-    review P2 note there).
+    clause and the read completes — with a ``warning`` naming the point id, the
+    field and the value, because a skip the caller cannot observe is the
+    silent-loss defect this file's annotation history is made of. It is
+    deliberately NOT coerced to ``""`` and forgotten: "unreadable" and "absent"
+    must stay distinguishable — absent never counts, and :func:`_bound_present`
+    is the per-hit predicate that keeps them apart for THIS hit (a process
+    counter cannot, see the #9741 review P2 note there).
+
+    ⛔ This function does NOT touch ``BOUND_RENDER_OUTCOMES`` (#9741 review
+    P2-3): it is called once per FIELD, so a hit carrying ``valid_from = nan``
+    AND ``valid_to = nan`` would add 2 — a census of defective bound fields,
+    while ``stats["bound_render_outcomes"]`` promises HITS. The increment is
+    :func:`_validity_marker`'s, once per hit, because a hit is the unit the
+    caller acts on and the sibling key ``marker_failed`` is already per-hit
+    (the census must measure one quantity, or its number means two things).
+    The per-FIELD detail is not lost: it is the ``warning`` below.
 
     It never raises: a render path that raises on stored data is the poison pill
     this issue is about.
@@ -1019,7 +1027,6 @@ def _display_bound(value: object, field: str, hit: dict) -> str:
         day = _epoch_utc_day(value)
         if day is not None:
             return day
-    BOUND_RENDER_OUTCOMES["unreadable_bound"] += 1
     _log.warning(
         "validity marker skipped an unreadable %s on point %r: %r (%s) — "
         "rendered without that clause",
@@ -1143,14 +1150,25 @@ def _validity_marker(h: dict) -> str:
     # ``'int' object has no attribute 'strip'`` aborted rendering for EVERY hit
     # in the result set. ``_display_bound`` accepts ISO text and a numeric
     # epoch (seconds or millis) and returns the calendar day the reader states;
-    # anything it cannot read is SKIPPED with ``BOUND_RENDER_OUTCOMES`` counted
-    # and the value named in a ``warning`` — never raised, never rendered as an
-    # absent bound's silence.
+    # anything it cannot read is SKIPPED and the value named in a ``warning`` —
+    # never raised, never rendered as an absent bound's silence.
     raw_vf = h.get("valid_from")
     vf = _display_bound(raw_vf, "valid_from", h)
     raw_vt = h.get("valid_to")
     vt = _display_bound(raw_vt, "valid_to", h)
-    ex = _display_bound(h.get("expired_at"), "expired_at", h)
+    raw_ex = h.get("expired_at")
+    ex = _display_bound(raw_ex, "expired_at", h)
+    # #9741 review P2-3: ONE increment per HIT, not per bound field. The
+    # normaliser above runs once per field, so counting there made a hit with
+    # ``valid_from = nan`` AND ``valid_to = nan`` add 2 — while
+    # ``stats["bound_render_outcomes"]`` promises the caller hits, and the
+    # sibling key ``marker_failed`` is already at most 1 per hit. Two quantities
+    # under one census is a number that means neither (Prometheus' naming rule:
+    # a metric MUST refer to a single quantity). The per-FIELD detail survives
+    # in ``_display_bound``'s ``warning``; this is the operator's count.
+    if any(_bound_present(raw) and not shown for raw, shown
+           in ((raw_vf, vf), (raw_vt, vt), (raw_ex, ex))):
+        BOUND_RENDER_OUTCOMES["unreadable_bound"] += 1
     # ⛔ The SAME distinction, one field over: an END that was STORED but could
     # not be stated is not an ABSENT end. ``_bound_present`` already keeps them
     # apart for a start; without it here the unreadable end falls through to the
@@ -1253,13 +1271,33 @@ def _bounds_an_instant(value: object) -> bool:
 
     THE predicate is ``search_engine._created_sort_key(value)[0] == 0``, the
     one the #6140/#9201/#9244 read gate resolves precision behind and
-    ``commit_schema.validate_validity_window`` orders with — so for every bound
-    the marker CONSULTS, the reader-facing marker and the precision beside it
+    ``commit_schema.validate_validity_window`` orders with — so for every STRING
+    bound the marker consults, and for every NUMBER inside the authored span
+    (:data:`_EPOCH_AUTHORED_SECONDS_SPAN` — the span ``_display_bound``
+    actually dates), the reader-facing marker and the precision beside it
     cannot disagree about whether that bound names an instant. That is why
     ``_validity_marker`` hands this function the RAW stored bound, never its own
     display copy (a padded date orders as nothing on every other surface). Imported lazily inside the call for the same reason
     ``validity.effective_precision`` does: ``retrieval`` sits in the import
     graph ``search_engine`` is assembled from, and the eager edge is the cycle.
+
+    ⚠️ The OUT-OF-SPAN NUMERIC is not parity, and pretending otherwise is what
+    this docstring did before #9741 review P2-2. A number outside the authored
+    span is still short-circuited to True here (and to ``"day"`` in
+    ``validity.effective_precision``), because the numeric short-circuit exists
+    for ``OverflowError`` safety, not as a parse verdict — while
+    ``_display_bound`` SKIPS it, since it names no day inside the span the
+    renderer will state. So ``valid_from = 1719792000000`` renders ``[valid]``
+    ("no start recorded") beside a ``"day"`` precision. That residual is REAL,
+    KNOWN and PINNED — ``tests/test_2350_validity_precision.py``
+    ::test_a_millis_bound_is_skipped_rather_than_restating_the_unit asserts both
+    sides of it — and it is not repaired here on purpose: the skip-and-count
+    reading is the correct one (re-reading the number in another unit would
+    state a date ``_created_sort_key`` denies), and making the precision agree
+    is a ``validity`` question about what a NUMBER bound means, not a
+    renderer-local rule. Naming it here is the point: before #9741 the sentence
+    was VACUOUSLY true (the numeric branch was unreachable) and said so; it is
+    now reachable, so the residual is stated instead of denied.
 
     A NUMERIC bound (``int``/``float``, and so ``bool``) short-circuits to True
     — mirroring ``validity.effective_precision``'s own short-circuit, which is
@@ -1275,8 +1313,8 @@ def _bounds_an_instant(value: object) -> bool:
     ``_display_bound`` and gates on THIS predicate over the RAW value. So an
     epoch-``0`` start renders ``[valid since 1970-01-01]`` — matching the
     ``"day"`` precision ``validity.effective_precision`` reports beside it —
-    and a numeric too large for ``float()`` cannot turn the parity above into an
-    ``OverflowError`` on the read path. ``tests/test_2350_validity_precision.py``
+    and a numeric too large for ``float()`` cannot raise ``OverflowError`` on
+    the read path. ``tests/test_2350_validity_precision.py``
     ::test_an_epoch_zero_start_renders_its_day pins the epoch-0 reading (it
     pinned the ABSENCE, under the old name ``…_renders_no_window_is_recorded``,
     before #9741).
@@ -1748,8 +1786,13 @@ def assemble_context(
     annotation is missing and why. It is a DELTA, not the process-lifetime
     total, and the marker is resolved ONCE PER HIT (:class:`_SafeMarkerCache`)
     rather than once per question asked about it, so the numbers count HITS with
-    a defect — the quantity an operator acts on. Without this key the counters
-    were write-only: incremented in three places and readable from nowhere.
+    a defect — the quantity an operator acts on. BOTH keys are per-HIT and
+    therefore additive inside ONE census (#9741 review P2-3):
+    ``unreadable_bound`` is incremented once for a hit however many of its three
+    bound fields were unreadable (the per-field detail is the ``warning``
+    :func:`_display_bound` logs), so ``n`` always means ``n`` hits. Without this
+    key the counters were write-only: incremented in three places and readable
+    from nowhere.
 
     Token accounting (the alignment invariant): raw whitespace words
     accumulate per block (question_date-independent) + the once-prepended
