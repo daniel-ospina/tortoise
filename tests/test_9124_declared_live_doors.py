@@ -438,6 +438,21 @@ _UNRESOLVED = {
     "_find_point_by_content",
     "_find_points_by_key",
     "_find_terminal_dedup_hit",
+    # #9819: the BATCHED twin of `_find_terminal_dedup_hit` — ONE
+    # `MATCH (n:Point) … RETURN …` for a whole bundle, assembled from the same
+    # `_dedup_match_clauses` builder and the same `_terminal_expression`
+    # predicate the per-item helper uses (that shared construction is the whole
+    # point: a batched guard must not fork the writer's predicate). The
+    # resolver cannot flatten it for the same reason as its per-item sibling —
+    # the statement interpolates a JOINED fragment (`' AND '.join(clauses)`) and
+    # the rendered terminal predicate. Checked by hand: the resolvable part is a
+    # `MATCH … RETURN` read listing the candidate rows (hash, pointKind,
+    # content, id, stored `key`, terminal flag); it appends no record, writes
+    # nothing, and exists only to decide whether a fold WOULD be refused before
+    # any write. The stored `key` column is still a READ — `create_point`
+    # predicts a content fold's key-drop from it (#9819 review P1), it does not
+    # write one.
+    "_terminal_content_candidates",
     # #8400 review P3: ONE query now backs both key legs. It was hoisted out of
     # the per-leg copies — those callers no longer reach the graph handle
     # themselves and are not scan entry points any more — so the two legs stop

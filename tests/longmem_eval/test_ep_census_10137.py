@@ -252,6 +252,158 @@ def test_a_hybrid_op_type_claim_reads_operator_shaped_not_structural(sdk):
     assert mp.INERT_NO_EP_FACTORS not in mp.INERT_REASONS_STRUCTURAL
 
 
+# ── #10137: the point ratio conflates evidence with belief ────────────────
+
+def _ingest_claim(sdk: TortoiseSDK, content: str) -> str:
+    """A claim written EXACTLY as ``ingest_v2._write_extraction`` writes one:
+    kind ``statement``, ``status="draft"``, and — the trap — ``is_episodic=True``
+    (``ingest_v2.py:275-290``). The flag is the QUOTA discriminator
+    (``quota.py:1024-1030``), not a belief/evidence one; a denominator filtered
+    on it would exclude every claim EP stamps (review P0)."""
+    return sdk.create_point("statement", content, dedup=False,
+                            is_episodic=True, status="draft")["id"]
+
+
+def _ingest_turn(sdk: TortoiseSDK, i: int) -> None:
+    """A turn point, as ``ingest_v2.py:611-618`` writes it: kind ``event`` with
+    a ``speaker``, ``is_episodic=True``."""
+    sdk.create_point("event", f"[user] turn {i}", dedup=False, speaker="user",
+                     is_episodic=True, status="draft")
+
+
+def _ingest_chunk(sdk: TortoiseSDK, i: int) -> None:
+    """A transcript chunk, as ``ingest_v2.py:637-643`` writes it."""
+    sdk.create_point("session-transcript", f"chunk {i}", dedup=False,
+                     is_episodic=True, status="draft")
+
+
+def test_the_episodic_substrate_is_not_a_belief_denominator(sdk):
+    """WHY the published ``points_with_ep / points`` is a floor, measured.
+
+    Every non-operator point in an eval graph carries ``is_episodic=True`` —
+    claims included — so the point-level denominator counts the evidence
+    substrate (turn and transcript-chunk points) as if it were belief. No factor
+    reaches a substrate node and EP can never write one, yet on a real graph they
+    dominate the denominator (2,696 / 27,608 = 9.77% on the 24-question sample).
+
+    The shape at its clearest: three ingest-shaped claims, all three stamped by
+    the pass, plus seven substrate nodes it can never reach. The point ratio
+    reads 3/10 = 0.30 while every belief-eligible point is covered.
+
+    Asserts on the OBSERVABLE CONTRIBUTION (the published cells), never on a
+    message.
+    """
+    a = _ingest_claim(sdk, "conclusion A")
+    b = _ingest_claim(sdk, "premise B")
+    c = _ingest_claim(sdk, "premise C")
+    sdk.create_operator("IMPL", b, [a])
+    sdk.create_operator("IMPL", c, [a])
+    for i in range(5):
+        _ingest_turn(sdk, i)
+    for i in range(2):
+        _ingest_chunk(sdk, i)
+
+    manifest = _manifest_of(sdk)
+
+    # the point-level pair is UNCHANGED (its meaning is published history) ...
+    assert manifest["points_with_ep"] == 3
+    assert manifest["points_unmeasured"] == 7
+    assert manifest["points_with_ep"] / (
+        manifest["points_with_ep"] + manifest["points_unmeasured"]) == 0.3
+
+    # ... and the belief-eligible pair says what that 0.30 was hiding —
+    # with claims that carry the same `is_episodic` flag as the substrate.
+    assert manifest["points_substrate"] == 7
+    assert manifest["belief_eligible_total"] == 3
+    assert manifest["belief_eligible_with_ep"] == 3
+    assert manifest["belief_eligible_unmeasured"] == 0
+
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "question_type": "single-session-user",
+          "belief_activation": manifest}], requested=True)
+    assert summary["belief_eligible_ratio"] == 1.0
+    assert summary["points_substrate"] == 7
+    assert summary["belief_eligible_total_unread"] == 0
+
+
+def test_the_two_denominators_agree_on_a_graph_with_no_substrate(sdk):
+    """The anti-dilution control: with no substrate nodes the belief-eligible
+    cells must EQUAL the point-level pair — the split is a refinement of the
+    population, not a second, more flattering measurement."""
+    a = _ingest_claim(sdk, "conclusion A")
+    b = _ingest_claim(sdk, "premise B")
+    sdk.create_operator("IMPL", b, [a])
+
+    manifest = _manifest_of(sdk)
+
+    assert manifest["points_substrate"] == 0
+    assert manifest["belief_eligible_total"] == (
+        manifest["points_with_ep"] + manifest["points_unmeasured"])
+    assert manifest["belief_eligible_with_ep"] == manifest["points_with_ep"]
+
+
+def test_an_unread_eligible_census_publishes_unknown_not_zero(sdk):
+    """A census that could not be read is UNKNOWN, never ``0`` — the module's
+    one rule. The ratio must follow it: no measured denominator, no ratio, and
+    a PARTIAL census must not publish one either (review P1)."""
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "question_type": "t",
+          "belief_activation": {"ep_ran": False, "error": "boom"}}],
+        requested=True)
+
+    assert summary["belief_eligible_total"] is None
+    assert summary["belief_eligible_ratio"] is None
+    assert summary["belief_eligible_total_unread"] == 1
+
+
+def test_a_partial_census_does_not_publish_a_ratio(sdk):
+    """A complete-looking 100% over half a population is the fabricated figure
+    the ``*_unread`` companions exist to prevent (review P1)."""
+    a = _ingest_claim(sdk, "conclusion A")
+    b = _ingest_claim(sdk, "premise B")
+    sdk.create_operator("IMPL", b, [a])
+    measured = _manifest_of(sdk)
+
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "question_type": "t",
+          "belief_activation": measured},
+         {"question_id": "q2", "question_type": "t",
+          "belief_activation": {"ep_ran": False, "error": "boom"}}],
+        requested=True)
+
+    assert summary["belief_eligible_total_unread"] == 1
+    assert summary["belief_eligible_ratio"] is None
+
+
+def test_a_pre_speaker_turn_is_substrate_and_a_kindless_point_is_neither_hole(sdk):
+    """Two shapes the first predicate got wrong (review cycle 2, P1+P2).
+
+    ``speaker`` arrived with delta 5 (#721), so a pre-#721 turn is
+    ``pointKind='event'`` + ``is_episodic=true`` with NO speaker — classifying it
+    belief-eligible puts turn EVIDENCE back in the denominator this change exists
+    to clean (``tortoise/session_reinjection.py:213-220`` already ruled that
+    requiring ``speaker`` "would silently exclude legacy turns").
+
+    And ``NOT (NULL = 'x')`` is NULL in Cypher, so a ``:Point`` with no
+    ``pointKind`` falls out of BOTH populations unless the predicate is total.
+    The partition invariant is the thing a test can hold: every non-operator
+    point is substrate OR belief-eligible, never neither.
+    """
+    a = _ingest_claim(sdk, "conclusion A")
+    b = _ingest_claim(sdk, "premise B")
+    sdk.create_operator("IMPL", b, [a])
+    sdk.create_point("event", "[user] legacy turn", dedup=False,  # no speaker
+                     is_episodic=True, status="draft")
+    sdk._get_proj().g.query("MERGE (n:Point {id:'legacy-kindless'})")
+
+    manifest = _manifest_of(sdk)
+    total = manifest["points_with_ep"] + manifest["points_unmeasured"]
+
+    assert manifest["points_substrate"] == 1          # the pre-speaker turn
+    assert manifest["belief_eligible_total"] == 3    # 2 claims + the kindless
+    assert manifest["points_substrate"] + manifest["belief_eligible_total"] == total
+
+
 def test_an_outdated_endpoint_edge_still_counts_as_a_shape_factor(sdk):
     """The `factor_edges` census deliberately counts SHAPE, not consumability.
 

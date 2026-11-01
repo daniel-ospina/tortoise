@@ -57,6 +57,7 @@ and on embedded FalkorDBLite otherwise — the same dual-lane convention as
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import types
 import uuid
@@ -64,6 +65,7 @@ import uuid
 import pytest
 import redis.exceptions as redis_exc
 
+from tortoise import embeddings
 from tortoise.sdk import TortoiseSDK
 
 # The MEASURED v6 literal (see #7685): one sentence for two realities — a
@@ -979,51 +981,239 @@ def test_retract_does_not_claim_already_terminal_after_a_retry(
             sdk.close()
 
 
+_WRITE_SLOT = "another write is in progress, retry the query"
+
+
+class _TargetVanishesBeforeTheWrite:
+    """The target is PRESENT at the guard read and gone by the write.
+
+    This is the ONE shape on the NON-PROMOTE arm in which a zero-row statement
+    is a legitimate, NON-RAISING outcome for ``update_point`` (#8854 review
+    round 10, I1): #10119 refuses an id absent AT the guard read before any
+    WRITE statement is issued, so the reachable benign-zero-row case here is a
+    point that existed at that read and was removed (rebuild / replay) before
+    the write ran.
+
+    Other zero-row shapes are NOT this one, and the difference is the outcome:
+    on the promote arm a zero-row statement either RAISES (an absent id gets
+    `No point`; a terminal one gets the #432 Illegal-status error) or returns
+    the POINT as the #1088 idempotent success once the node has gone live
+    between the #1088 probe and the guarded ``SET``. None of them returns the
+    empty ``{}`` this arm's vanished-target case does.
+
+    Two polarities, and the difference is the whole point:
+
+    - ``abort_message=None`` — the first matching statement simply runs and
+      matches nothing. No abort, so the retry wrapper is never consulted and
+      its witness is never called: a first attempt is never witnessed.
+    - ``abort_message=_WRITE_SLOT`` — the first matching statement aborts with
+      the write-slot arm, which is RETRYABLE but state-INDEPENDENT: it says
+      nothing about whether the target exists, so it must not ARM the witness.
+      The re-issue then reports zero rows, and a mis-armed witness would turn
+      that into a ``_WriteNotLanded`` surfacing the bare write-slot text
+      ("retry the query") on a target that is simply gone — never the
+      corruption-flavoured graph-replaced diagnosis, which belongs to the
+      LATCH family only (``_GraphAbortThenSlotAbortEmptyGraph``).
+
+    ``matched_rows`` counts what the statements ACTUALLY matched, so "nothing
+    landed" is measured rather than assumed.
+    """
+
+    def __init__(self, real, needle: str, *, abort_message: str | None = None
+                 ) -> None:
+        self._real = real
+        self._needle = needle
+        self._abort_message = abort_message
+        self.matching = 0
+        self.matched_rows = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                # the target is gone before the statement runs
+                self._real.query("MATCH (n:Point) DETACH DELETE n")
+                if self._abort_message is not None:
+                    raise redis_exc.ResponseError(self._abort_message)
+            res = self._real.query(cypher, params=params, timeout=timeout)
+            self.matched_rows += (res.result_set[0][0]
+                                  if res.result_set else 0)
+            return res
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 def test_a_first_attempt_that_matches_nothing_keeps_the_empty_contract(
         tmp_path):
     """The witness must NOT change a legitimate zero-row FIRST attempt.
 
-    ``update_point`` on a missing id historically returns ``{}`` without
-    raising. A first attempt never consults the witness, so this stays true.
-    (The GATE itself — "only a graph-replaced abort arms it" — is pinned by
-    ``test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract``;
-    this test alone cannot observe it, since ``origin/main`` passes it too.)
+    ``update_point`` returns ``{}`` when its statement matches nothing, and a
+    first attempt never consults the witness, so this stays true.
+
+    ⛔ #10119 moved WHERE that shape is reachable: an id absent at the guard
+    read now issues no WRITE statement (pinned by
+    ``test_an_absent_id_issues_no_statement_for_the_write``), so this test
+    reaches it the only way left — the target is PRESENT at that read and
+    vanishes before the write. Do NOT "restore" a write for an id that is
+    absent at entry to make this look like the old shape: that would re-open
+    #10119 (an absent id journalling a revision, advancing the EP epoch and
+    stranding a dirty root). The GATE itself — "only a graph-replaced abort
+    arms the witness" — is pinned by
+    ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``.
     """
-    sdk = _sdk(tmp_path, "missing")
+    sdk = _sdk(tmp_path, "vanished")
     try:
-        missing = str(uuid.uuid4())
-        assert sdk.update_point(missing, confidence=0.5) == {}
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _TargetVanishesBeforeTheWrite(
+            proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+
+        assert sdk.update_point(pid, confidence=0.5) == {}
+        assert proxy.matching == 1, (
+            "a target present at the guard read must still take its write "
+            f"({proxy.matching} statements)")
+        assert proxy.matched_rows == 0, (
+            "the statement must have matched nothing — otherwise this test "
+            "is not the benign zero-row shape")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
 
 
-_WRITE_SLOT = "another write is in progress, retry the query"
-
-
-def test_a_write_slot_abort_on_a_missing_target_keeps_the_empty_contract(
+def test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract(
         tmp_path, monkeypatch):
     """A non-rebuild abort must NOT arm the witness (#8854 review P1).
 
     ``retryable_aborted_write`` also admits the write-slot arm — ordinary
     multi-writer contention — which says nothing about whether the TARGET
-    exists. Arming the witness on it turned ``update_point(<missing id>)`` into
-    a stale ``ResponseError`` after four attempts, where the documented answer
-    is ``{}``. Only the graph-deleted-or-replaced family can mean "not
-    replayed yet", so only that family arms the witness.
+    exists. Arming the witness on it turns a re-issue that legitimately matches
+    nothing into a stale ``ResponseError`` (the bare write-slot text, "retry
+    the query") where the documented answer for a write that lands nowhere is
+    ``{}``. Only the graph-deleted-or-replaced family can mean "not replayed
+    yet", so only that family arms the witness.
+
+    ⛔ #10119 RE-BASED THIS TEST, and it is not the same test it was: it used to
+    abort on an id absent at ENTRY, which is now refused before any WRITE
+    statement is issued (so its write-slot injection could never fire and its
+    assertion silently became "no write statement reached"). The invariant it names is still
+    reachable, and this is the shape that reaches it — the target is PRESENT at
+    the guard read, the FIRST statement aborts write-slot, the target vanishes
+    so the RE-ISSUE matches zero rows. Nothing may report that as a landing,
+    and nothing may report it as a graph replacement either: the caller gets
+    the same empty contract, because a state-independent abort never armed the
+    witness.
+
+    ⚠️ A PREDECESSOR REVISION'S CLAIM HERE WAS MEASURED FALSE — read this
+    before deleting the test. `784d0c26a` concluded that "a present target
+    matches", so a PRESENT-target replacement would pass on both trees and
+    nothing should be added. That reasoning misses the window this gate exists
+    for: a target PRESENT at the guard read can VANISH before the write
+    (rebuild / replay), and the write then legitimately matches zero rows —
+    the shape below. Measured on that revision's tree, with the arming gate
+    mutated to `if keep:`: THIS test fails (the aborted statement is re-issued
+    three times and the bare write-slot ``ResponseError`` escapes). It is not a
+    test that passes with the guard deleted.
     """
     monkeypatch.setattr("tortoise.retry.time",
                         types.SimpleNamespace(sleep=lambda _s: None))
-    sdk = _sdk(tmp_path, "lockslot")
+    sdk = _sdk(tmp_path, "vanishedslot")
+    try:
+        pid = _pid(sdk)
+        proj = sdk._get_proj()
+        proxy = _TargetVanishesBeforeTheWrite(
+            proj.g, _POINT_PROP_SET_NEEDLE, abort_message=_WRITE_SLOT)
+        proj.g = proxy
+
+        # No ``pytest.raises``: a witness armed by the write-slot abort would
+        # surface ``_WRITE_SLOT`` here after the retry budget, and the
+        # graph-replaced family would append its rebuild diagnosis — neither is
+        # what a vanished target under contention may produce.
+        assert sdk.update_point(pid, confidence=0.5) == {}
+        assert proxy.matching >= 2, (
+            "the aborted statement must be RE-ISSUED — otherwise the witness "
+            "was never reachable and this test proves nothing")
+        assert proxy.matched_rows == 0, (
+            "the re-issue matched a row, so it was not the zero-row shape")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_absent_id_issues_no_statement_for_the_write(tmp_path):
+    """#10119: an id absent at the guard read is refused BEFORE the write.
+
+    This is where the #8854 witness question used to be tested, and it can no
+    longer be: the door reads the target's existence from the lifecycle guard
+    BEFORE the journal append and BEFORE any write, so an absent id issues NO
+    WRITE statement — ``proxy.matching == 0`` — and there is no first attempt
+    to abort and retry. The witness gate itself is now pinned on the shape that
+    still issues a statement,
+    ``test_a_write_slot_abort_on_a_vanished_target_keeps_the_empty_contract``.
+
+    The proxy injects the graph-replaced abort by default precisely so a
+    regression that re-opens the write for an absent id cannot pass quietly: it
+    would be aborted and retried, and ``matching`` would leave zero.
+    """
+    sdk = _sdk(tmp_path, "absentwrite")
     try:
         missing = str(uuid.uuid4())
         proj = sdk._get_proj()
-        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE,
-                               message=_WRITE_SLOT)
+        proxy = _AbortOnceGraph(proj.g, _POINT_PROP_SET_NEEDLE)
         proj.g = proxy
 
         assert sdk.update_point(missing, confidence=0.5) == {}
-        assert proxy.matching >= 2, "the aborted statement was never re-issued"
+        assert proxy.matching == 0, (
+            "an ABSENT id issued a write statement (#10119: the guard read "
+            "must precede the append and every write)")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_absent_id_is_not_embedded_at_all(tmp_path, monkeypatch):
+    """#10495 review P3: the derived-embedding seam runs AFTER the guard read.
+
+    ``update_point(content=…)`` re-encodes the row through ``encode_for_row``,
+    which is a real inference — a model round-trip, or a timeout on a wedged
+    one. The seam used to sit ABOVE the lifecycle guard (#10119's read), so an
+    id that is ABSENT — the typo case that guard exists for — paid for a full
+    encode whose vector the early return then DISCARDED: work on a write that
+    cannot land. Measured on the pre-fix tree with this same spy:
+    ``update_point("typo-4", content=…)`` -> the embedder was called once.
+
+    Discriminating: on the pre-fix tree the first assertion fails with
+    ``['a revision that cannot land']``. The POSITIVE CONTROL keeps the spy
+    honest — if the content-edit arm stopped deriving a vector at all (a
+    regression of #4208), the second half fails instead of passing quietly.
+    """
+    sdk = _sdk(tmp_path, "absentembed")
+    try:
+        calls: list[str] = []
+        real = embeddings.encode_for_row
+
+        def _spy(content, expected_dim):
+            calls.append(content)
+            return real(content, expected_dim)
+
+        monkeypatch.setattr(embeddings, "encode_for_row", _spy)
+
+        missing = str(uuid.uuid4())
+        assert sdk.update_point(
+            missing, content="a revision that cannot land") == {}
+        assert calls == [], (
+            "an ABSENT id paid for an embedding the early return then threw "
+            f"away (#10495 review P3): {calls}")
+
+        # POSITIVE CONTROL: a real point's content edit must still derive.
+        pid = _pid(sdk)
+        calls.clear()
+        sdk.update_point(pid, content="a revision that lands")
+        assert calls == ["a revision that lands"], (
+            "the derived-embedding arm no longer re-encodes a content edit "
+            f"(#4208): {calls}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -2925,6 +3115,300 @@ def test_a_landed_promote_is_journaled_before_a_later_arm_can_abort(
             "record lane applies `status` from this payload (`PointRevised` is "
             "a flat NodePatch onto `point.status`), so a record without it "
             f"would close nothing — record: {record!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+# ── #10473 — the target VANISHES between the guard read and the write ──────
+#
+# The #10119 arm (an id ABSENT at the guard read) is a different defect, and it
+# is NOT on this tree: the fix for it lives in PR #10470, where the door answers
+# at ENTRY from the guard's own read — a re-read is the right tool there because
+# the caller's id is a typo. This arm cannot be answered that way.
+# a second read would only move the window — and the statement that would mutate
+# is the only thing that can answer "did I mutate", because in it the presence
+# check and the mutation are ONE operation.
+#
+# The interleaving below is FORCED, not timed: the proxy removes the node on the
+# first matching WRITE statement and then issues that statement for real, so the
+# guard read has already returned "present" when the vanish happens. Nothing here
+# depends on scheduling, and the assertions are on the OBSERVABLE EFFECTS (the
+# `:EpMeta` epoch, `_dirty_roots`, orphan `:Tag` nodes) — never on a message.
+
+_VANISH_ARMS = (
+    (_POINT_PROP_SET_NEEDLE, False),    # the :Point per-key SET
+    (_OBJECT_PROP_SET_NEEDLE, True),    # the :Point:Object single SET
+)
+
+
+class _VanishOnFirstWrite:
+    """Delete the target on the first matching write, then issue it for real.
+
+    ``rows_matched`` is the sum of the ``RETURN count(n)`` values the real
+    statements answered with, so "the conditional write proved the target gone"
+    is MEASURED rather than assumed — it is the premise every assertion in this
+    section rests on (a proxy that let the write land would prove nothing).
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+        self.rows_matched = 0
+        self.tag_statements = 0
+        self.vanished: list[str] = []
+
+    def query(self, cypher, params=None, timeout=None):
+        if "MERGE (t:Tag" in cypher:
+            self.tag_statements += 1
+        if self._needle in cypher:
+            self.matching += 1
+            pid = (params or {}).get("id")
+            if pid is not None and not self.vanished:
+                # THE RACE: present at the guard read, deleted before the write.
+                self._real.query(
+                    "MATCH (n:Point {id:$id}) DETACH DELETE n",
+                    params={"id": pid})
+                self.vanished.append(pid)
+            res = self._real.query(cypher, params=params, timeout=timeout)
+            rows = res.result_set[0][0] if res.result_set else 0
+            with contextlib.suppress(TypeError, ValueError):
+                self.rows_matched += int(rows or 0)
+            return res
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _ep_version(sdk) -> int:
+    rows = sdk._get_proj().g.query(
+        "MATCH (m:EpMeta) RETURN m.ep_version").result_set
+    return int(rows[0][0]) if rows else 0
+
+
+def _sdk_journaled(tmp_path, tag: str):
+    """A real SDK on the configured lane, with the JSONL journal wired."""
+    uri = os.environ.get("TORTOISE_DB_URI")
+    journal = str(tmp_path / f"{tag}.jsonl")
+    sdk = TortoiseSDK(
+        None if uri else str(tmp_path / f"{tag}.db"),
+        namespace=f"test_7405_up_{tag}_{uuid.uuid4().hex[:8]}",
+        event_log_path=journal,
+    )
+    return sdk, journal
+
+
+def _journalled(journal: str, *, type_: str, pid: str) -> list[dict]:
+    """The records of ``type_`` for ``pid`` in the JSONL journal."""
+    out: list[dict] = []
+    try:
+        with open(journal, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("type") == type_ and ev.get("id") == pid:
+                    out.append(ev)
+    except FileNotFoundError:
+        return []
+    return out
+
+
+@pytest.mark.parametrize("needle,as_object", _VANISH_ARMS)
+def test_a_target_that_vanishes_at_the_write_strands_no_dirty_root(
+        tmp_path, needle, as_object):
+    """A zero-row CONDITIONAL write must take no EP side effects (#10473).
+
+    Measured on the pre-fix tree with this exact interleaving: the reply was
+    ``{}`` (correct), the journal row was appended (correct — see the sibling
+    test), and then the door fell through to ``_mark_dirty``, which advanced
+    ``:EpMeta.ep_version`` and classified the vanished id as a delete zombie,
+    KEEPING it in ``_dirty_roots``. No *sweep* can converge it (the persist SET
+    matches no node, and ``_prune_nonexistent_dirty_roots`` runs only inside a
+    dream), so ``_auto_dream_mode`` stays 'local' until a dream pass runs —
+    while the point it names does not exist — the #2422/#7505/#9269 pinning harm.
+
+    The write statements are conditional by construction
+    (``MATCH … SET … RETURN count(n)``), so the fix consumes their answer
+    instead of discarding it on the non-abort path.
+    """
+    sdk = _sdk(tmp_path, f"vanishroot{as_object}")
+    try:
+        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+                               dedup=False, status="live")["id"]
+        proj = sdk._get_proj()
+        if as_object:
+            proj.g.query("MATCH (n:Point {id:$id}) SET n:Object",
+                         params={"id": pid})
+        # Model a converged sweep: the create's own root is not the subject.
+        sdk._dirty_roots.clear()
+        before_ep = _ep_version(sdk)
+        before_roots = set(sdk._dirty_roots)
+
+        proxy = _VanishOnFirstWrite(proj.g, needle)
+        proj.g = proxy
+        reply = sdk.update_point(pid, confidence=0.5)
+        proj.g = proxy._real
+
+        assert proxy.vanished == [pid], (
+            "fixture precondition: the target must have been deleted by the "
+            f"proxy — vanished {proxy.vanished!r}")
+        assert proxy.rows_matched == 0, (
+            "fixture precondition: the conditional write must have matched "
+            f"NOTHING — rows matched {proxy.rows_matched}")
+        assert not proj.g.query("MATCH (n:Point {id:$id}) RETURN count(n)",
+                                params={"id": pid}).result_set[0][0], (
+            "fixture precondition: the node must be gone")
+
+        # The reply is the door's documented absent-id contract (#10079: with
+        # no end receipt — the shaped-but-unstored window cannot report an end).
+        assert reply == {}, f"a vanished target answers the absent contract, saw {reply!r}"
+
+        assert _ep_version(sdk) == before_ep, (
+            "the vanished shape advanced the graph-wide EP epoch: "
+            f"{before_ep} -> {_ep_version(sdk)} — the epoch's ordering stamp is "
+            "spent on a target that cannot carry the dirty flag it stamps")
+        assert pid not in sdk._dirty_roots, (
+            "the vanished id was retained as a dirty root, where no sweep can "
+            f"converge it — roots {sorted(sdk._dirty_roots)} (before "
+            f"{sorted(before_roots)})")
+        # The PIN itself, not a restatement of the root set: this fixture holds
+        # one point and no operators, so `_auto_dream_mode` answers 'full' —
+        # unless a write-context root (the stranded vanished id) holds it in the
+        # local window. Measured pre-fix: 'local'.
+        assert sdk._auto_dream_mode() == "full", (
+            "a vanished target alone must not hold the instance in the local "
+            f"dream window — mode {sdk._auto_dream_mode()!r}, roots "
+            f"{sorted(sdk._dirty_roots)}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_vanish_shape_keeps_the_JOURNAL_record_that_carries_the_revision(
+        tmp_path):
+    """The fix must NOT suppress the append: it is the rebuild-window record.
+
+    The SAME zero-row shape covers a target DELETED concurrently and a target
+    NOT YET REPLAYED mid-rebuild (#7405). In the second, this ``PointRevised``
+    is the only copy of the caller's revision — the replay applies it as soon as
+    the node is back. A "conditional append" would trade a stranded EP root for
+    a LOST revision, so the append is journal-first by decision (§17.1) and is
+    untouched here. This is the over-reject control for the fix above.
+    """
+    sdk, journal = _sdk_journaled(tmp_path, "vanishjournal")
+    try:
+        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+                               dedup=False, status="live")["id"]
+        proj = sdk._get_proj()
+        # Model a converged sweep: the CREATE's own root is not the subject, so
+        # what remains in `_dirty_roots` below is this call's doing alone.
+        sdk._dirty_roots.clear()
+        before_ep = _ep_version(sdk)
+        proxy = _VanishOnFirstWrite(proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+
+        reply = sdk.update_point(pid, confidence=0.5)  # must NOT raise
+        proj.g = proxy._real
+
+        assert reply == {}
+        assert proxy.rows_matched == 0, "fixture precondition"
+        records = _journalled(journal, type_="PointRevised", pid=pid)
+        assert len(records) == 1, (
+            "the vanished target's revision must STILL be journaled — it is the "
+            "record a rebuild replays onto the node when it comes back "
+            f"(#7405): saw {len(records)} record(s)")
+        assert records[0].get("confidence") == 0.5, (
+            "the record must carry the caller's revision — a rebuild applies "
+            f"what the payload says: saw {records[0]!r}")
+        assert pid not in sdk._dirty_roots, (
+            "the journal record must not come at the price of a stranded root: "
+            f"{sorted(sdk._dirty_roots)}")
+        assert _ep_version(sdk) == before_ep, (
+            "the same call advanced the EP epoch for a target that cannot carry "
+            f"the stamp: {before_ep} -> {_ep_version(sdk)}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_vanished_tagged_target_issues_no_tag_sync(tmp_path):
+    """The tag sync is the door's OTHER post-write statement group (#10473).
+
+    MEASURED, and the reason this asserts on STATEMENTS rather than on orphan
+    ``:Tag`` nodes: ``_sync_tags`` issues ``MATCH (p:Point {id:$pid}) MERGE
+    (t:Tag {name:$tag}) MERGE (p)-[:TAGGED]->(t)`` — the MERGE is ANCHORED on
+    the Point match, so a vanished target creates no ``:Tag`` (verified on the
+    pre-fix tree: the orphan count is 0 either way). What the vanish shape does
+    produce, pre-fix, is one futile statement per tag against a Point that is not
+    there; after the fix the door returns at the conditional write's answer and
+    issues none.
+    """
+    sdk = _sdk(tmp_path, "vanishtags")
+    try:
+        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+                               dedup=False, status="live")["id"]
+        tag = f"10473-{uuid.uuid4().hex[:8]}"
+        proj = sdk._get_proj()
+        proxy = _VanishOnFirstWrite(proj.g, _POINT_PROP_SET_NEEDLE)
+        proj.g = proxy
+        sdk.update_point(pid, tags=[tag])
+        proj.g = proxy._real
+
+        assert proxy.rows_matched == 0, "fixture precondition"
+        assert proxy.tag_statements == 0, (
+            "a tag sync ran against a Point that does not exist — the door "
+            f"issued {proxy.tag_statements} `MERGE (t:Tag …)` statement(s) for "
+            "a target the conditional write proved gone")
+        orphans = proj.g.query(
+            "MATCH (t:Tag {name:$tag}) RETURN count(t)",
+            params={"tag": tag}).result_set[0][0]
+        assert not orphans, (
+            "PREMISE, not the fix — the MERGE is anchored on the Point match, "
+            "so it mints nothing on this shape either way; the discriminating "
+            f"assertion in this test is the statement count above ({tag!r})")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_LANDED_update_still_runs_the_ep_side_effects(tmp_path):
+    """The negative control: the gate must not disarm a real revision.
+
+    Without this, "no epoch advance, no dirty root" would also pass on a fix
+    that simply deleted the tail — which would strand EVERY revision's
+    confidence recompute.
+    """
+    sdk = _sdk(tmp_path, "vanishcontrol")
+    try:
+        pid = sdk.create_point("evidence", f"claim {uuid.uuid4().hex}",
+                               dedup=False, status="live")["id"]
+        sdk._dirty_roots.clear()
+        before_ep = _ep_version(sdk)
+
+        out = sdk.update_point(pid, confidence=0.42)
+
+        assert out.get("confidence") == 0.42, (
+            f"the write must land on a present target, saw {out.get('confidence')!r}")
+        assert _ep_version(sdk) == before_ep + 1, (
+            "a LANDED revision must advance the EP epoch — otherwise the fix "
+            "disarmed the write path instead of the vanish shape: "
+            f"{before_ep} -> {_ep_version(sdk)}")
+        assert pid in sdk._dirty_roots, (
+            "a LANDED revision must leave its point a dirty root, or its "
+            "confidence is never re-derived (#1240/DE2E-4): roots "
+            f"{sorted(sdk._dirty_roots)}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

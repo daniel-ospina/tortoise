@@ -1875,32 +1875,32 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("9178", "if vet_enabled and embed_list:"),
-            ("9179", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("9300", "if vet_enabled and complete_list:"),
-            ("9301", "vet_union_stats, _w, _ = _run_vet_pass("),
+            ("9194", "if vet_enabled and embed_list:"),
+            ("9195", "vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("9316", "if vet_enabled and complete_list:"),
+            ("9317", "vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its three lines of keys close on line 9446
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("9459", 'result["classify_later"] = {'),
-            ("9469", 'result["vet"] = {'),
+            ("9475", 'result["classify_later"] = {'),
+            ("9485", 'result["vet"] = {'),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("9087", "if not edus:"),
-            ("9103", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("9103", "if not edus:"),
+            ("9119", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("9103", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("9119", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("9086", "edus = _edus_from_conversation(conversation)"),
+            ("9102", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("9469", 'result["vet"] = {'),
-            ("9473", ("exact", "}")),
+            ("9485", 'result["vet"] = {'),
+            ("9489", ("exact", "}")),
         )),
     )
     docs = dict(_BUNDLE_DOCS)
@@ -2089,6 +2089,77 @@ def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
                     f"tree-derived table have drifted apart. Re-derive the "
                     f"document's cites; do not relax this leg. "
                     f"cited spans: {sorted(spans)}")
+
+
+#: A bare CONTINUATION cite in either backtick spelling: the probes are
+#: docstrings, so they write ``:13334`` (RST) where the markdown writes `:13334`.
+_BARE_CONTINUATION = re.compile(r"`{1,2}(:\d+(?:-\d+)?)`{1,2}")
+
+#: The two documents that print the entry-point pair — the `def` cite AND the
+#: `:N` continuation naming the CALL. `E1-E5-PROOFS.md`, `docs/00_index.md` and
+#: `EXTRACTOR-V4-ARCHITECTURE.md` never restate the pair, so they are not this
+#: leg's business (their own prefixed cites are swept above).
+_ENTRY_POINT_DOCS = (
+    ("README.md", _REPO / "docs/evidence/7949-capstone/README.md"),
+    ("probes/capstone_run.py",
+     _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"),
+)
+
+
+def test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names():
+    """The `:N` continuation naming the `_extract_session_v2` CALL is checked.
+
+    `_BUNDLE_CITE` only matches a cite that NAMES a file, so `(sdk.py:14297;
+    called at :13334)` had exactly one checked number and one unverifiable one —
+    and the unchecked half went stale TWICE on this branch, once at the commit
+    that re-derived it (it was already `:13299` there). Re-staling it to a wrong
+    line reds NOTHING: measured, `:13334` → `:13399` in both documents leaves this
+    file at 51 passed. That is the blind spot this leg closes from the other side,
+    the same one `_BARE_CITE` names above for the per-surface numbers.
+
+    Both numbers are DERIVED from the tree (the bundle's own convention: the
+    symbol is authoritative, the line is a convenience), so this leg never carries
+    a typed number that an insertion above `_extract_session_v2` would silently
+    invalidate. The pair must sit on ONE line, because that is what makes a bare
+    continuation attributable at all: with no file in front of it, the only thing
+    that says WHICH tree the number counts is its sentence.
+
+    Non-vacuity: the anchors must each match exactly one line (two calls would make
+    "the" call site a guess, and the message says so), and re-staling the doc's
+    continuation to any other number reds here.
+    """
+    sdk_lines = (_REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    call_anchor = "extracted, meta = self._extract_session_v2("
+    def_anchor = "def _extract_session_v2("
+    calls = [i + 1 for i, ln in enumerate(sdk_lines) if call_anchor in ln]
+    defs = [i + 1 for i, ln in enumerate(sdk_lines)
+            if ln.lstrip().startswith(def_anchor)]
+    assert len(calls) == 1, (
+        f"{len(calls)} lines carry {call_anchor!r} ({calls}) — the call site this "
+        "leg pins is no longer unique, so derive the one the entry-point paragraph "
+        "means before trusting a number here")
+    assert len(defs) == 1, (
+        f"{len(defs)} lines define `_extract_session_v2` ({defs}) — the bundle "
+        "trumpets ONE entry point; re-derive which def it means")
+    call_line, def_line = calls[0], defs[0]
+    assert call_line != def_line, (call_line, def_line)
+    for name, path in _ENTRY_POINT_DOCS:
+        text = path.read_text(encoding="utf-8")
+        doc_lines = text.splitlines()
+        citing = [ln for ln in doc_lines if f"sdk.py:{def_line}" in ln]
+        assert len(citing) == 1, (
+            f"{name} cites the entry point `sdk.py:{def_line}` on {len(citing)} "
+            f"lines — this leg attributes the bare continuation by its LINE, so "
+            "exactly one line may carry the pair")
+        bare = [m.group(1) for m in _BARE_CONTINUATION.finditer(citing[0])]
+        bare = [b for b in bare if b != f":{def_line}"]
+        assert bare == [f":{call_line}"], (
+            f"{name} names the entry point at `sdk.py:{def_line}` but its "
+            f"continuation cites {bare or 'nothing'}; the CALL is at "
+            f"sdk.py:{call_line} (`{call_anchor}`) and the `def` is at "
+            f"sdk.py:{def_line}. A bare `:N` names no file, so `_BUNDLE_CITE` — and "
+            "every rule in `_BUNDLE_RULES` — cannot check it; this is the leg that "
+            "can. Re-derive the number from the tree; do not delete the cite.")
 
 
 # ── E2's blocker names the LIVE half, not the closed render issue ─────────
