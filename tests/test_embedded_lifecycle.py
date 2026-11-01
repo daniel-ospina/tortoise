@@ -5020,6 +5020,9 @@ def test_embedded_start_refuses_a_db_directory_that_is_gone(tmp_path, capfd):
 #     redis.exceptions.ConnectionError: Error 111 connecting to
 #     /tmp/tt_bb_3f48q/tmpp7l87lx_/redis.socket. Connection refused.
 #
+# tracked as #10492 (a CI run is not a tracker record: the next lane that hits
+# this cannot scope, cite or reopen one).
+#
 # raised from `client.py:471 -> _wait_for_server_start -> ping -> _connect` on a
 # test file that PR does not touch, after 676 tests had passed in the same leg,
 # on a host whose own orphan gate counted 476 redislite servers from 2 OTHER
@@ -5237,9 +5240,11 @@ def test_the_boot_window_budget_exhaustion_names_the_attempt_count(caplog):
     at all: `elapsed` is the only remaining signal and nothing logs it.
     """
     stuck = _FakeBootClient(refusals=-1, start_timeout=1)
-    with caplog.at_level(logging.WARNING, logger=_BOOT_LOGGER_NAME):
-        with pytest.raises(_rex.ConnectionError) as excinfo:
-            _redislite_client.RedisMixin._wait_for_server_start(stuck)
+    with (
+        caplog.at_level(logging.WARNING, logger=_BOOT_LOGGER_NAME),
+        pytest.raises(_rex.ConnectionError) as excinfo,
+    ):
+        _redislite_client.RedisMixin._wait_for_server_start(stuck)
 
     assert "Connection refused" in str(excinfo.value), (
         "the exhausted budget must still re-raise the refused connect unchanged")

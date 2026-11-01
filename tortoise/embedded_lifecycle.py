@@ -3341,6 +3341,10 @@ def _install_dead_socket_guard() -> None:
 # suites (`other_suites=2`). A loaded host is exactly when bind->listen (and
 # backlog) stops being instantaneous.
 #
+# TRACKED AS #10492. The provenance above is a CI run, and a CI run is not a
+# tracker record — the next lane that hits this cannot scope, cite or reopen
+# one. #10492 is the defect record this guard and its pins answer to.
+#
 # WHAT THIS PATCH DOES, and its limits: it re-runs the ORIGINAL wait while
 # the failure is a REFUSED connect and the total wall time is still inside the
 # server's OWN declared `start_timeout` budget, then re-raises the last
