@@ -5972,13 +5972,15 @@ def _split_whitespace_keeping_spaced_paths(line: str) -> list[str]:
         if _names_existing_path(group):
             out.append(group)
             continue
-        tok = group.strip(",")
-        if not tok:
-            continue
-        if "," in tok:
-            out.extend(p for p in (x.strip() for x in tok.split(",")) if p)
-        else:
-            out.append(tok)
+        # ONE implementation of "an edge comma is a separator": the comma FOLD
+        # below. A preceding `group.strip(",")` was inert — every shape it
+        # handled produced the identical list through this fold — and no fixture
+        # could distinguish it, so it was deleted rather than kept as an untested
+        # second operation (review P2).
+        if "," in group:
+            out.extend(p for p in (x.strip() for x in group.split(",")) if p)
+        elif group:
+            out.append(group)
     return out
 
 
