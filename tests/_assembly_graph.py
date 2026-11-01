@@ -430,3 +430,108 @@ def build_out_of_subgraph_gold(sdk: TortoiseSDK) -> dict:
             "question": ("which came first - buying the couch or the dog "
                          "bed getting chewed?"),
             "date": "2026-09-05"}
+
+
+#: #2653 N-ary ordering substrate — THREE named subjects, the issue's own
+#: example wording ("which came first, the couch, the dog bed, or the
+#: bookshelf?"). One dated gold row per subject, each aboutObject-linked, on
+#: three distinct days so a chain HAS an order to state.
+NARY_SUBJECTS = ("couch", "dog bed", "bookshelf")
+NARY_GOLD_ROWS = {
+    # subject -> (point id, statement, dated day, gold marker)
+    "couch": ("pNaryCouch", "bought the grey couch from ikea",
+              "2026-08-10", "grey couch from ikea"),
+    "dog bed": ("pNaryDogBed", "the dog bed arrived from the shop",
+                "2026-08-18", "dog bed arrived"),
+    "bookshelf": ("pNaryBookshelf", "we assembled the bookshelf",
+                  "2026-08-26", "assembled the bookshelf"),
+}
+
+
+def build_nary_ordering_substrate(sdk: TortoiseSDK,
+                                  crowd_rows: int = 60) -> dict:
+    """#2653 N-ary evaluation substrate: three named subjects, one dated
+    aboutObject GOLD row each, plus a crowd of rows that carry all three
+    question nouns and NO aboutObject edge.
+
+    The two halves of the geometry this substrate exists to measure —
+    MEASURED, not predicted (60 crowd rows, pinned caps:
+    ``TORTOISE_ASK_RETRIEVAL_LIMIT=40`` / ``CONTEXT_ITEM_CAP=40``):
+
+    * **B (assembled)** resolves each of the three terms and walks ITS OWN
+      subgraph, so the three golds are reachable by construction — the N-ary
+      chain decomposes into per-subject slices over the same dated spine.
+      Measured block: **5** evidence chunks (Current-Date header + the chain
+      line + the three gold rows), **zero** crowd rows.
+    * **A (legacy)** pools ONE result set for the whole question and **admits
+      all three golds too** — MEASURED, and by the mechanism the shipped
+      chain actually has, not by an edge walk. There is **no entity-anchored
+      retrieval leg on this lane**: ``tortoise/search_engine.py`` carries zero
+      ``aboutObject`` references, and ``run_ask_lane`` passes NEITHER
+      ``entity_key_expansion`` (:34121, default ``False``) nor
+      ``structural_hops``, so no edge traversal can fire. Admission here is
+      decided by the pooled full-text window's own row order — the
+      deterministic-but-opaque internal order ``build_deep_rank_substrate``
+      documents above. Measured block: **41** chunks, **37** of them crowd
+      rows.
+
+    ⛔ SO THIS SUBSTRATE MEASURES **PRECISION**, NOT ADMISSION. Do not read
+    ``crowd_rows`` as starving legacy's gold admission: it does not, and a
+    test that pins ``legacy admits fewer than 3`` on THIS geometry would be
+    pinning a falsehood. (The measured admission parity is also not an
+    EP-rerank artifact — re-measured with the golds' EP neutralised, same
+    3/3.) Authoring order relative to the crowd was NOT controlled for: the
+    three golds are created BEFORE the crowd loop below, which is the position
+    the module note above says explains WHICH tied row lands where. Treat the
+    parity as a measurement at a head, never as a property of the geometry.
+
+    ⛔ For that reason the A arm's admission COUNT is **reported, not
+    pinned**. ``test_nary_ordering_chain_admits_every_gold_vs_legacy`` pins the
+    order-independent halves — legacy's window stays non-vacuous, the fired
+    block carries zero crowd rows and is narrower — and carries the measured
+    count and each gold's chunk index in its own failure messages. Pinning
+    ``legacy admits exactly 3`` would pin which tied row falls inside a 40-row
+    window, which is exactly what the ``build_deep_rank_substrate`` note
+    forbids ("assert the pool-depth invariant, never a specific gold's
+    index") and what cost main a red at #3095/#3273.
+
+    The crowd rows are deliberately NOT aboutObject-linked: they are ordinary
+    chatter, so they cannot enter any subject slice and cannot alter the
+    chain's anchors (each subject's earliest dated row stays its gold, and
+    every crowd row is dated after 2026-08-26).
+
+    Returns a handle dict of the gold ids/markers/dates, the question and the
+    crowd size. The caller does the measuring; this builder asserts nothing
+    about admission.
+    """
+    proj = sdk._get_proj()
+    qid = "q2653nary"
+    for name in NARY_SUBJECTS:
+        sdk.create_entity("object", name, objectKind="core:furniture",
+                          lme_question_id=qid, is_episodic=True)
+    golds: dict[str, dict] = {}
+    for subject, (pid, statement, day, marker) in NARY_GOLD_ROWS.items():
+        sdk.create_point(
+            "statement", statement, id=pid,
+            session_id=f"sess-nary-{subject.replace(' ', '-')}",
+            lme_question_id=qid, is_episodic=True, status="draft",
+            has_answer=True, quote=marker,
+            search_keys=f"{subject} {marker}",
+            createdAt=day, when=day, validFrom=day)
+        _link_point_about(proj, pid, [subject])
+        stamp_ep(proj, pid, 9.0, 1.0)
+        golds[subject] = {"id": pid, "marker": marker, "date": day}
+    for i in range(crowd_rows):
+        sdk.create_point(
+            "statement",
+            f"day {i}: we talked about the couch, the dog bed and the "
+            "bookshelf while rearranging the living room",
+            id=f"pNaryCrowd{i}", session_id=f"sess-nary-crowd-{i}",
+            lme_question_id=qid, is_episodic=True, status="draft",
+            search_keys="couch dog bed bookshelf rearranging living room",
+            createdAt=f"2026-09-{(i % 28) + 1:02d}")
+    return {"qid": qid, "subjects": NARY_SUBJECTS, "golds": golds,
+            "crowd_rows": crowd_rows,
+            "crowd_marker": "rearranging the living room",
+            "question": ("which came first, the couch, the dog bed, or the "
+                         "bookshelf?")}
