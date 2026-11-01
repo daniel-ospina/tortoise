@@ -20,8 +20,9 @@ overstated it.
 
 ⚠️ **Read this before quoting `0.988`.** The same pinned tree, corpus and 7 sessions produced an **untreated**
 baseline of `284` in the recorded run and `253` here — a **31-node (10.9 %) drift in the arm that received no
-treatment**, about **ten times** the 3-node ON−OFF difference (`31` vs `3` nodes; `10.9 %` vs `1.2 %` of each
-arm's own denominator). This instrument cannot resolve an effect below about 11 % between runs, so the defensible sentence is *"no measurable effect at ~0.99, well inside the ~11 %
+treatment**, about **ten times** the 3-node ON−OFF difference (`31` vs `3` nodes; `10.9 %` of the recorded run's
+untreated arm and `1.2 %` of this run's, each against its own untreated-arm denominator). This instrument cannot resolve an effect below
+about 11 % between runs, so the defensible sentence is *"no measurable effect at ~0.99, well inside the ~11 %
 between-run drift this instrument shows on its untreated arm"* — **not** *"priors cut creates by 1 %"*. If you
 need one number, quote the pair (`253 / 250`) beside the drift, or quote `0.870` and `0.988` together as the
 range this corpus supports. The four-decimal ratio `0.9881` is an arithmetic artefact of a 3-node difference
@@ -29,7 +30,8 @@ range this corpus supports. The four-decimal ratio `0.9881` is an arithmetic art
 
 ## 1. Why a second run exists at all
 
-The recorded measurement (`s3-ablation-a1075dfc.log`, ratio 0.870) was ruled **PROVISIONAL**: its registration
+The recorded measurement (`s3-ablation-a1075dfc.log`, ratio 0.870) was ruled **PROVISIONAL** — the ruling is the
+`gh issue view 10463 --comments` record whose id is `comment 6564634454`: its registration
 and its log landed in ONE squash commit (`cfa3de857`), so both carry epoch `1793558646` and the ordering
 property — *"the registration strictly precedes the log"* — could not be shown. The ruling kept the guard
 unchanged and said the conclusion stands only **once re-measured with the registration already on the base
@@ -116,10 +118,32 @@ drift bounds the **between-run** comparison of two totals; it does not bound a s
 ## 5. Method differences, disclosed — and the one thing that did NOT move
 
 No bar, floor, denominator or metric definition was changed to accommodate this run. The registration's pinned
-block is unchanged; `created_new_nodes`, `real_facts`, `operator_edges` and the verdict arithmetic are
-byte-identical between the two runs' probe code, and the only files this run's head differs by from the pin are
-evidence/docs/tests/tooling. What differs is **instrumentation around those functions**, plus four deviations
-that are stated here rather than left for a reader to find:
+block is unchanged. Between the probe revision at `a1075dfc2` and the one at `a83c23a85`, the **metric functions
+are byte-identical** — `created_counts`, `real_facts`, `operator_edges`, `concentration` — and so is every number
+they produce; the only files this run's head differs by from the pin are evidence/docs/tests/tooling.
+
+`decide()` — the function that turns those numbers into a ratio and a verdict — is **not** byte-identical,
+and saying so matters in the one paragraph whose job is to show nothing was tuned. Three hunks differ inside it,
+and a fourth refusal sits beside it:
+
+- a **session-count refusal inside `decide()`** (*"the arms replay N/M sessions; the pre-registration freezes 7"*).
+  Both runs replay 7/7, so it never fires. A second, module-level `paired_sessions` helper called from `main()`
+  refuses the same condition while building the per-session table;
+- the **guards reformulated** from `on >= off` to `on >= guard_ratio_min * off` — algebraically identical at
+  `guard_ratio_min = 1.00`, and the same outcome both ways: recorded run `40 >= 47` → False, this run
+  `44 >= 41` → True — carrying the E2b `not-majority-of-sessions` qualifier in the same hunk, which neither run
+  triggers (5 of 7 and 4 of 7, bar 4);
+- **two payload keys added** (`corroboration_met`, `cost_met`), which add the `bar`/`met=` annotation to the printed
+  `COST:` line — this log prints
+  `COST: model calls OFF 21 ON 27 (ratio 1.2857142857142858; bar <= 2.0; met=True)` where the recorded log prints
+  the ratio alone — and feed a `SESSIONS WHOSE CREATES FELL:` line that the recorded probe did not print at all.
+
+**No measured quantity differs between the two runs' code**: the counts, ratio, real facts, operator edges, cost and
+concentration are produced by byte-identical functions, and the two logs' numbers are compared line by line in §4.
+What differs is refusals that never fire, and reporting that annotates data both logs already carry.
+
+What differs beyond that is **instrumentation around those functions**, plus seven deviations stated here rather
+than left for a reader to find:
 
 1. **The recorded run's probe bytes were never committed, and this run's probe cannot prove it was the bytes
    that ran.** The recorded log names `head=a1075dfc2`, but the probe at that commit reads a receipt field this
@@ -158,12 +182,12 @@ that are stated here rather than left for a reader to find:
    unchanged; a reader who wants §4 applied at its word should read this log as a second registration instance
    whose only differences are the run head and the instrument version.
 7. **Filename.** The probe wrote this log to the path given to `--out`, which was a working filename
-   (`s3-ablation-88b4e19d9.log`); it is committed as `s3-ablation-a83c23a8.log`, named for the run head as the
-   bundle's reproduce command names it. **No filename for this log appears inside it** — the only path it names is
-   the pre-existing `docs/evidence/5087-hypothesis/s3-ablation-a1075dfc.log` in its changed-file line — so nothing
-   in it is inconsistent with the name it is committed under. **But the pre-rename bytes were not recorded, so the
-   rename is disclosed, not verifiable.** The committed blob's sha256 is
-   `796c1a49c0d2ff22266377ca58713c0e3ff14febab2a9a62aca9a27689a06174`.
+   (`s3-ablation-88b4e19d9.log` — a run-time token, not a commit: it resolves to no object here); it is committed as
+   `s3-ablation-a83c23a8.log`, named for the run head as the bundle's reproduce command names it. **No filename for
+   this log appears inside it** — the only paths it names are the seven in its `source_sha..head changed files` line
+   (line 5), none of which is this log — so nothing in it is inconsistent with the name it is committed under.
+   **But the pre-rename bytes were not recorded, so the rename is disclosed, not verifiable.** The committed blob's
+   sha256 is `796c1a49c0d2ff22266377ca58713c0e3ff14febab2a9a62aca9a27689a06174`.
 
 ## 6. Reproduce
 
