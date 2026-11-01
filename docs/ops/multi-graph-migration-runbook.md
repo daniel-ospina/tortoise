@@ -523,13 +523,18 @@ transaction demoted, and reports the outcome in the response:
 ```
 
 It cannot join the SQL transaction (a graph is a second store), so the response
-is where its verdict lives. Read `reason` on every promotion:
+is where its verdict lives. Read `reason` on every promotion. The values below
+are exactly the ones `hosted_api._carry_onboarding_state` RETURNS — pinned
+against the function's own return statements by
+`test_the_runbook_lists_exactly_the_carry_reasons_the_code_returns`, so a new
+arm cannot ship undocumented (and a documented arm cannot outlive its code):
 
 | `reason` | meaning | what to do |
 |---|---|---|
 | `copied` | the record moved | nothing |
 | `absent` | the previous default had no node (org never onboarded) | nothing |
-| `already_present` / `no_source` / `no_move` | nothing to carry (idempotent promote, or no historical graph listed) | nothing |
+| `already_present` / `no_source` | nothing to carry (idempotent promote, or no historical graph listed) | nothing |
+| `no_namespace` | the promotion reported no target namespace, so there is nowhere to carry to (a defensive branch — the RPC names one for every real move) | nothing |
 | `carry_failed` | **the record is still in the demoted graph** | re-promote the CURRENT default (`POST /v1/graphs/default/promote`): the idempotent arm repairs an absent record from the listed historical name. It never overwrites a present node. |
 
 `_graph_has_org_namespace` follows the default too (a promoted org's existence
