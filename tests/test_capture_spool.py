@@ -180,19 +180,25 @@ def test_entry_past_its_byte_bound_is_discarded_with_a_reason(tmp_path):
     assert ledger[0]["reason"] == "entry_too_large"
 
 
-def test_the_count_bound_evicts_the_oldest_with_a_recorded_reason(tmp_path):
-    """MUTATION THAT REDS THIS: drop the count condition from `prune_spool`."""
+def test_the_count_bound_REFUSES_a_new_entry_rather_than_evicting_undelivered(tmp_path):
+    """capture-loss: at the count ceiling with NOTHING filed, the NEW session is
+    refused, loudly — an undelivered backlog is never deleted.
+
+    MUTATION THAT REDS THIS: drop the `spool_saturated` admission guard from
+    `write_spool_entry` (or let `prune_spool` reap an unfiled entry again) ->
+    s1 is destroyed to admit s3.
+    """
     root = tmp_path
     bounds = Bounds(max_entries=2, max_total_bytes=10_000_000, max_entry_bytes=10_000)
     for sid in ("s1", "s2", "s3"):
         write_spool_entry(root, _snapshot(sid, [{"role": "user", "content": sid}]), bounds)
 
-    assert read_spool_meta(root, "s1") is None, "oldest evicted"
+    assert read_spool_meta(root, "s1") is not None, "the oldest UNDELIVERED entry survives"
     assert read_spool_meta(root, "s2") is not None
-    assert read_spool_meta(root, "s3") is not None
+    assert read_spool_meta(root, "s3") is None, "the NEW session is the one refused"
     ledger = read_discards(root)
-    assert ledger[-1]["session_id"] == "s1"
-    assert ledger[-1]["reason"] == "spool_count_exceeded"
+    assert ledger[-1]["session_id"] == "s3"
+    assert ledger[-1]["reason"] == "spool_saturated"
 
 
 def test_the_count_bound_reaps_a_FILED_entry_before_an_UNFILED_one(tmp_path):
@@ -246,40 +252,42 @@ def test_the_count_bound_reaps_a_FILED_entry_before_an_UNFILED_one(tmp_path):
     )
 
 
-def test_an_unfiled_entry_evicted_at_the_cap_says_it_was_UNDELIVERED(tmp_path):
-    """#6388 (2026-10-18 comment): the discard line must say the loss was real.
+def test_an_all_undelivered_spool_REFUSES_new_work_and_names_the_state(tmp_path):
+    """capture-loss (2026-11-01): the cap must never trade an undelivered
+    conversation for room. When EVERY candidate is undelivered the spool is
+    SATURATED: it refuses the new session and the ledger says so. This supersedes
+    #6388's "when every candidate is undelivered the oldest undelivered entry is
+    reaped and the record says so" — bounded disk is still kept (a refused write
+    adds nothing), without unlinking the only copy of a conversation.
 
-    The operator read `spool DISCARD <id> — spool_count_exceeded` as "the session
-    that just started was dropped" and asked whether the cap discards the newest.
-    It never does (`keep_session_id` is excluded), but the line could not say
-    which class of loss it was. When EVERY candidate is undelivered the cap must
-    still reap (bounded disk is a promise too) — and say so, or an operator reads
-    an evicted backlog as noise.
-
-    MUTATION THAT REDS THIS: drop the class term from the discard `detail`.
+    MUTATION THAT REDS THIS: let the cap reap an unfiled entry -> u1 is gone and
+    no `spool_saturated` line exists.
     """
     root = tmp_path
     bounds = Bounds(max_entries=2, max_total_bytes=10_000_000, max_entry_bytes=10_000)
     for sid in ("u1", "u2", "u3"):
         write_spool_entry(root, _snapshot(sid, [{"role": "user", "content": sid}]), bounds)
 
-    assert read_spool_meta(root, "u1") is None, "the cap still bounds the spool"
-    evicted = [d for d in read_discards(root) if d["session_id"] == "u1"]
-    assert len(evicted) == 1
-    assert "UNDELIVERED" in evicted[0]["detail"]
-    assert read_spool_meta(root, "u3") is not None, "the just-written entry is never evicted"
+    assert read_spool_meta(root, "u1") is not None, "the backlog is never reaped"
+    refused = [d for d in read_discards(root) if d["reason"] == "spool_saturated"]
+    assert len(refused) == 1 and refused[0]["session_id"] == "u3", (
+        "the NEW session is refused, and the refusal is recorded loudly"
+    )
+    assert read_spool_meta(root, "u3") is None
 
 
-def test_the_byte_bound_evicts_with_its_own_recorded_reason(tmp_path):
-    """MUTATION THAT REDS THIS: drop the byte condition from `prune_spool`."""
+def test_the_byte_bound_REFUSES_new_work_when_only_undelivered_remain(tmp_path):
+    """MUTATION THAT REDS THIS: drop the byte condition from `spool_saturated`
+    (or the admission guard) -> b1 is unlinked and no `spool_saturated` line
+    exists."""
     root = tmp_path
     turns = [{"role": "user", "content": "y" * 2000}]
     bounds = Bounds(max_entries=100, max_total_bytes=6000, max_entry_bytes=10_000)
-    for sid in ("b1", "b2", "b3"):
+    for sid in ("b1", "b2", "b3", "b4"):
         write_spool_entry(root, _snapshot(sid, turns), bounds)
 
-    assert read_spool_meta(root, "b1") is None, "oldest evicted under the byte bound"
-    assert any(d["reason"] == "spool_total_bytes_exceeded" for d in read_discards(root))
+    assert read_spool_meta(root, "b1") is not None, "no undelivered entry is evicted"
+    assert any(d["reason"] == "spool_saturated" for d in read_discards(root))
 
 
 # ── (4) Endpoint unreachable → retry with backoff, never a loss ────────────
@@ -3857,7 +3865,7 @@ def test_the_spool_ceilings_are_finite_and_identical_on_both_legs(tmp_path):
     """
     from tortoise import capture_spool
 
-    assert capture_spool.SPOOL_MAX_ENTRIES == 1000
+    assert capture_spool.SPOOL_MAX_ENTRIES == 20000
     assert capture_spool.SPOOL_MAX_TOTAL_BYTES == 256 * 1024 * 1024
 
     node = _node_that_can_strip_ts()

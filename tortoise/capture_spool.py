@@ -59,6 +59,7 @@ __all__ = [
     "DISCARD_CORRUPT",
     "DISCARD_COUNT_EXCEEDED",
     "DISCARD_ENTRY_TOO_LARGE",
+    "DISCARD_SPOOL_SATURATED",
     "DISCARD_HTTP_REJECTED",
     "DISCARD_TRANSCRIPT_EMPTY",
     "DISCARD_TRANSCRIPT_TORN",
@@ -99,7 +100,7 @@ __all__ = [
 # incident's size — a blocked box's captures are the user's data, and evicting
 # them to make a number look better is the data loss the retry policy exists to
 # avoid. Both legs share the directory and a parity test pins the pair equal.
-SPOOL_MAX_ENTRIES = 1000
+SPOOL_MAX_ENTRIES = 20000
 SPOOL_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 # Must exceed the SERVER's legal maximum, or a legal capture is discarded as
 # oversized: 500 turns x 5000 chars x up to 4 UTF-8 bytes/char ~= 10 MB, plus
@@ -128,6 +129,11 @@ _MAX_ATTEMPTS = 64
 DISCARD_ENTRY_TOO_LARGE = "entry_too_large"
 DISCARD_COUNT_EXCEEDED = "spool_count_exceeded"
 DISCARD_BYTES_EXCEEDED = "spool_total_bytes_exceeded"
+#: The spool is at a ceiling with NOTHING evictable, so a NEW session is
+#: REFUSED rather than deleting an undelivered one. A refusal is a DELAY (the
+#: harness's own session log still holds the conversation); a cap eviction is a
+#: LOSS — ``_discard_entry`` unlinks the turn log and no surface can deliver it.
+DISCARD_SPOOL_SATURATED = "spool_saturated"
 #: The turn log is ABSENT or ZERO BYTES: there is provably no transcript to
 #: keep, so the entry (meta + empty log) is removed. This is the ONLY
 #: transcript-related reason that may unlink.
@@ -169,7 +175,11 @@ DISCARD_HTTP_REJECTED = "http_rejected"
 #: backoff, the latter marked terminal), so treating either as a failure would
 #: report a capture as lost while it is still on disk (#3971, #7708).
 RETAINED_DISCARD_REASONS = frozenset(
-    {DISCARD_ENTRY_FAILED, DISCARD_HTTP_REJECTED, DISCARD_TRANSCRIPT_TORN})
+    {DISCARD_ENTRY_FAILED, DISCARD_HTTP_REJECTED, DISCARD_TRANSCRIPT_TORN,
+     # A saturation REFUSAL deleted nothing: it is a refusal to ADMIT, recorded
+     # so the state is visible. Counting it as a lost capture would report the
+     # inverse of what happened (capture-loss review, issue 5).
+     DISCARD_SPOOL_SATURATED})
 
 
 def is_lost_discard(record: dict) -> bool:
@@ -422,12 +432,13 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
     carried across turns, so a growing session is retried on the backoff clock
     rather than once per turn. That converts immediate loss into a BOUNDED,
     DEFERRED one: `SPOOL_MAX_ENTRIES` / `SPOOL_MAX_TOTAL_BYTES` still apply, and
-    `prune_spool` evicts with a recorded reason — the already-filed class first,
-    then oldest-first within a class — so an org that stays over quota does
-    eventually lose its oldest UNDELIVERED captures, visibly, on the discard
-    ledger, never silently. Retry is the safe direction here: the
-    asymmetry is a bounded, recorded deferral versus irreversible unlink of the
-    only copy.
+    `prune_spool` evicts ONLY the already-filed class (oldest-first within it),
+    with a recorded reason. An org that stays over quota therefore loses NO
+    undelivered capture at all: nothing can file, so nothing is evictable and the
+    spool SATURATES — new work is refused and recorded (`spool_saturated`) while
+    the backlog is kept (capture-loss, 2026-11-01). Retry is the safe direction
+    here: a bounded, recorded refusal versus irreversible unlink of the only
+    copy.
 
     PERMANENT: every other 4xx — a malformed payload or an out-of-range turn
     count never becomes valid by waiting.
@@ -1411,6 +1422,30 @@ def write_spool_entry(
         ))
         return {"written": False, "bytes": 0, "discards": discards}
 
+    # ⛔ ADMISSION CONTROL — never eviction — when the spool is full of work that
+    # has never been delivered. Refuse the NEW session, loudly and in the ledger,
+    # and KEEP the backlog: its turn logs are the only copy the spool holds, while
+    # this snapshot's conversation is still in the harness's session log. A cap
+    # that deletes undelivered work to admit new work destroys exactly what the
+    # queue exists to deliver.
+    #
+    # ``prior`` only guards the REFUSAL: an existing entry may always grow (that
+    # adds no count, and ``max_entry_bytes`` bounds it).
+    if not prior and spool_saturated(root, bounds):
+        discards.append(record_discard(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": meta["capture_key"],
+            "reason": DISCARD_SPOOL_SATURATED,
+            "detail": (
+                f"spool is at its ceiling (max_entries={bounds.max_entries},"
+                f" max_total_bytes={bounds.max_total_bytes}) with NOTHING"
+                " evictable — this NEW session was REFUSED rather than evicting"
+                " an UNDELIVERED entry; its transcript is still in the harness"
+                " session log"
+            ),
+        }))
+        return {"written": False, "bytes": 0, "discards": discards}
+
     try:
         if extends:
             fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -1543,6 +1578,33 @@ def _attempts(meta: dict) -> int:
     return min(max(0, int(as_float)), _MAX_ATTEMPTS)
 
 
+def spool_saturated(root: Path, bounds: Bounds = DEFAULT_BOUNDS) -> bool:
+    """Is the spool at a ceiling with NOTHING evictable?
+
+    ``prune_spool`` may only evict ORPHANS and FILED entries, so a spool whose
+    live entries are all undelivered cannot shrink: it is SATURATED. That state
+    is exactly where a cap silently destroys the product's own data (measured:
+    80 ``spool_count_exceeded`` evictions of never-filed sessions on
+    pi-cell-3, 2026-11-01), so it is a first-class, reported state rather than
+    an eviction trigger. Both ceilings are checked, because either one can bind.
+
+    One spool directory, two legs: the Pi leg's ``spoolSaturated`` is the twin
+    and states the same rule.
+    """
+    metas, _ = list_spool_metas(root)
+    total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
+    total += sum(_file_size(p) for p in _orphan_paths(root))
+    # STRICT: the question is whether ADDING an entry would cross the ceiling, so
+    # a spool exactly AT the count ceiling is already saturated.
+    if len(metas) < bounds.max_entries and total < bounds.max_total_bytes:
+        return False
+    # Over a ceiling: only a FILED entry may make room. A quarantined orphan is
+    # NOT "safe" here — its delivered-ness is unknowable (`_quarantine_log`
+    # removed the meta, the only copy of `filed_key`), so admitting a new capture
+    # on the strength of one would delete a possibly-undelivered transcript.
+    return not any(_entry_is_filed(m) for m in metas)
+
+
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:
     """Enforce COUNT and BYTE ceilings, evicting the SAFEST loss first.
 
@@ -1559,26 +1621,26 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     stay deferred (saturated backoff; a keyless window whose entries are only
     retried once a key appears) appends the successes ABOVE the backlog, and the
     cap then reaps the very backlog it exists to deliver. Within a class the
-    order is UNCHANGED (oldest first), so a spool with nothing filed behaves
-    exactly as before, and the cap still bounds the disk either way: when every
-    candidate is undelivered, the oldest undelivered entry is reaped and the
-    record says so.
+    order is UNCHANGED (oldest first). WHEN EVERY CANDIDATE IS UNDELIVERED THE
+    CAP REAPS NOTHING (capture-loss, 2026-11-01): an undelivered entry is the only
+    copy of a conversation that never reached the graph, and evicting it UNLINKS
+    it. The spool is SATURATED instead (`spool_saturated`), which refuses NEW
+    work and records `spool_saturated` — bounded disk without destroying the
+    backlog.
 
     A quarantined turn log (``_quarantine_log``) has no meta, so it is absent
     from the meta scan and from ``_entry_bytes``: its bytes are counted HERE and
-    it is evicted (oldest first, by mtime) before any live entry, filed or not.
-    Without this, the byte ceiling stopped applying the moment a meta was
-    quarantined and the spool could grow past it without bound — one full
-    transcript per corrupt meta, each up to ``max_entry_bytes`` (#8531 review).
-    An orphan goes first because it is the SAFEST loss of the three: a corrupt
-    meta moved it out of every scan, so no drain can file it and no reader can
-    list it, while a live entry — filed or not — still has a surface that can
-    deliver it. The eviction is still a real loss, and its record names that
-    class in the same ``loss`` vocabulary the live entries use (#6388) — but it
-    must not claim MORE than survives the quarantine: `_quarantine_log` removes
-    the corrupt meta, which was the only copy of `filed_key`, so whether the
-    bytes ever reached the wire is unknowable and the record says `unknown`
-    rather than inventing the answer.
+    it is evicted (oldest first, by mtime) AFTER the filed-entry pass and before
+    any UNFILED live entry. Without this, the byte ceiling stopped applying the
+    moment a meta was quarantined and the spool could grow past it without bound
+    — one full transcript per corrupt meta, each up to ``max_entry_bytes``
+    (#8531 review). A quarantined log goes LAST of the evictable classes, not
+    first: a FILED entry's content is already on the wire, so reclaiming it is a
+    CERTAIN zero-cost choice, while an orphan's delivered-ness is unknowable
+    (``_quarantine_log`` removes the corrupt meta, which was the only copy of
+    ``filed_key``) — the certain option must be spent before the possible loss.
+    The eviction is still a real loss, and its record names that class in the
+    same ``loss`` vocabulary the live entries use (#6388).
     """
     discards: list[dict] = []
     metas, _ = list_spool_metas(root)
@@ -1590,12 +1652,51 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     count = len(metas)
     total = sum(_entry_bytes(root, m["session_id"]) for m in metas)
     total += sum(_file_size(path) for path in orphans)
-    # Quarantined logs go FIRST, ahead of even the class ordering below: an
-    # orphan is already unreachable to every surface (a corrupt meta moved it
-    # aside, so no drain can file it and no reader can list it), while a live
-    # entry — filed or not — still has a surface that can deliver it. It is
-    # therefore the SAFEST loss of all, and the record says so in the same
-    # `loss` vocabulary the live entries use (#6388).
+    # The quarantined-log pass runs AFTER the filed-entry pass below, never
+    # before it: a FILED entry is a CERTAIN zero-cost reclaim (its content is on
+    # the wire), while an orphan's delivered-ness is unknowable — so the certain
+    # option is spent FIRST. An orphan is, however, still preferable to an
+    # UNFILED live entry: it is unreachable to every surface (a corrupt meta
+    # moved it aside, so no drain can file it and no reader can list it), while
+    # an unfiled entry still has a surface that can deliver it — and an unfiled
+    # entry is never evicted at all (capture-loss). The record names the class in
+    # the same `loss` vocabulary the live entries use (#6388).
+    for meta in ranked:
+        if count <= bounds.max_entries and total <= bounds.max_total_bytes:
+            break
+        # ⛔ ONLY a FILED entry is evictable. Its content is already on the wire,
+        # so dropping it costs nothing a reader cannot re-fetch; an UNDELIVERED
+        # entry is the only copy of a conversation that never reached the graph,
+        # and ``_discard_entry`` UNLINKS it. The cap therefore stops here and the
+        # spool reports SATURATED instead (``spool_saturated``), which refuses
+        # NEW work rather than destroying old work. Filed-first was already the
+        # #6388 ranking; this makes it the whole candidate set.
+        if not _entry_is_filed(meta):
+            continue
+        size = _entry_bytes(root, meta["session_id"])
+        # #6388: name the CLASS of loss. The discard line is the only surface a
+        # cap eviction has, and "spool has 1001 entries" alone read (fairly, from
+        # that text) as "something was dropped", with no way to tell the safe
+        # eviction from the irreversible one.
+        # Only a FILED entry reaches this line (the loop above skips unfiled
+        # candidates), so the class term is constant — keeping an unreachable
+        # "UNDELIVERED" arm made the code read as if the forbidden eviction
+        # still existed (capture-loss review).
+        loss = "; evicted an already filed entry (its content is on the wire)"
+        if total > bounds.max_total_bytes:
+            reason = DISCARD_BYTES_EXCEEDED
+            detail = (
+                f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}"
+                f"{loss}"
+            )
+        else:
+            reason = DISCARD_COUNT_EXCEEDED
+            detail = (
+                f"spool has {count} entries > max_entries={bounds.max_entries}{loss}"
+            )
+        discards.append(_discard_entry(root, meta, reason, detail))
+        count -= 1
+        total -= size
     for orphan in orphans:
         if total <= bounds.max_total_bytes:
             break
@@ -1611,33 +1712,6 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
         }))
         with contextlib.suppress(OSError):
             orphan.unlink()
-        total -= size
-    for meta in ranked:
-        if count <= bounds.max_entries and total <= bounds.max_total_bytes:
-            break
-        size = _entry_bytes(root, meta["session_id"])
-        # #6388: name the CLASS of loss. The discard line is the only surface a
-        # cap eviction has, and "spool has 1001 entries" alone read (fairly, from
-        # that text) as "something was dropped", with no way to tell the safe
-        # eviction from the irreversible one.
-        loss = (
-            "; evicted an already filed entry (its content is on the wire)"
-            if _entry_is_filed(meta)
-            else "; evicted an UNDELIVERED entry (never filed)"
-        )
-        if total > bounds.max_total_bytes:
-            reason = DISCARD_BYTES_EXCEEDED
-            detail = (
-                f"spool is {total} bytes > max_total_bytes={bounds.max_total_bytes}"
-                f"{loss}"
-            )
-        else:
-            reason = DISCARD_COUNT_EXCEEDED
-            detail = (
-                f"spool has {count} entries > max_entries={bounds.max_entries}{loss}"
-            )
-        discards.append(_discard_entry(root, meta, reason, detail))
-        count -= 1
         total -= size
     return discards
 

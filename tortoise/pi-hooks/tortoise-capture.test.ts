@@ -1779,22 +1779,28 @@ test("an entry past its byte bound is discarded with a recorded reason", () => {
   assert.equal(ledger[0].reason, "entry_too_large");
 });
 
-test("the spool count bound evicts the OLDEST entry with a recorded reason", () => {
+test("the spool count bound REFUSES a new entry rather than evicting undelivered work", () => {
+  // capture-loss (2026-11-01): at the ceiling with NOTHING filed, the NEW
+  // session is refused, loudly. An undelivered backlog is the only copy of
+  // conversations that never reached the graph, and `discardEntry` UNLINKS it.
+  //
+  // MUTATION THAT REDS THIS: drop the `spoolSaturated` admission guard from
+  // `writeSpoolEntry` (or let `pruneSpool` reap an unfiled entry again) → s1 is
+  // destroyed to admit s3.
   const spool = tmpSpool();
   const bounds = { maxEntries: 2, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
-  // MUTATION THAT REDS THIS: delete the `pruneSpool` call (or its count
-  // condition) → all three entries survive → count is 3, ledger is empty.
   writeSpoolEntry(spool, { ...snapshot("s1"), turns: [{ role: "user", content: "1" }] }, bounds);
   writeSpoolEntry(spool, { ...snapshot("s2"), turns: [{ role: "user", content: "2" }] }, bounds);
-  writeSpoolEntry(spool, { ...snapshot("s3"), turns: [{ role: "user", content: "3" }] }, bounds);
+  const third = writeSpoolEntry(spool, { ...snapshot("s3"), turns: [{ role: "user", content: "3" }] }, bounds);
 
-  assert.equal(readSpoolEntry(spool, "s1"), undefined, "oldest evicted");
+  assert.equal(third.written, false, "the NEW session is the one refused");
+  assert.ok(readSpoolEntry(spool, "s1"), "the oldest UNDELIVERED entry survives");
   assert.ok(readSpoolEntry(spool, "s2"), "next-oldest kept");
-  assert.ok(readSpoolEntry(spool, "s3"), "newest kept");
+  assert.equal(readSpoolEntry(spool, "s3"), undefined, "the refused entry is not on disk");
   const ledger = readDiscards(spool);
   assert.equal(ledger.length, 1);
-  assert.equal(ledger[0].session_id, "s1");
-  assert.equal(ledger[0].reason, "spool_count_exceeded");
+  assert.equal(ledger[0].session_id, "s3");
+  assert.equal(ledger[0].reason, "spool_saturated");
 });
 
 test("the count bound reaps a FILED entry before an UNFILED one (#6388)", async () => {
@@ -1846,40 +1852,46 @@ test("the count bound reaps a FILED entry before an UNFILED one (#6388)", async 
   assert.match(String(evicted[0].detail), /already filed/);
 });
 
-test("an UNFILED entry evicted at the cap says the loss was UNDELIVERED (#6388)", () => {
-  // The operator read `spool DISCARD <id> — spool_count_exceeded` as "the session
-  // that just started was dropped" and asked whether the cap discards the
-  // NEWEST. It never does (`keepSessionId` is excluded), but the line could not
-  // say WHICH class of loss it was. When every candidate is undelivered the cap
-  // must still reap (bounded disk is a promise too) — and say so, or an operator
-  // reads an evicted backlog as noise.
+test("an all-undelivered spool REFUSES new work instead of evicting any (#6388 superseded)", () => {
+  // capture-loss (2026-11-01). #6388 said: "when every candidate is undelivered
+  // the cap must still reap (bounded disk is a promise too) — and say so". That
+  // sentence is SUPERSEDED: reaping an undelivered entry UNLINKS the only copy
+  // of a conversation (measured: 80 of them, `discarded.jsonl` on pi-cell-3),
+  // while bounded disk is kept just as well by REFUSING the write — a refused
+  // write adds nothing.
   //
-  // MUTATION THAT REDS THIS: drop the class term from the discard `detail`.
+  // MUTATION THAT REDS THIS: let the cap reap an unfiled entry → u1 is gone and
+  // no `spool_saturated` line exists.
   const spool = tmpSpool();
   const bounds = { maxEntries: 2, maxTotalBytes: 1_000_000, maxEntryBytes: 10_000 };
   for (const sid of ["u1", "u2", "u3"]) {
     writeSpoolEntry(spool, { ...snapshot(sid), turns: [{ role: "user", content: sid }] }, bounds);
   }
 
-  assert.equal(readSpoolEntry(spool, "u1"), undefined, "the cap still bounds the spool");
-  const evicted = readDiscards(spool).filter((d) => d.session_id === "u1");
-  assert.equal(evicted.length, 1);
-  assert.match(String(evicted[0].detail), /UNDELIVERED/);
-  assert.ok(readSpoolEntry(spool, "u3"), "the just-written entry is never evicted");
+  assert.ok(readSpoolEntry(spool, "u1"), "the backlog is never reaped");
+  assert.ok(readSpoolEntry(spool, "u2"), "the backlog is never reaped");
+  assert.equal(readSpoolEntry(spool, "u3"), undefined, "the NEW session is refused");
+  const refused = readDiscards(spool).filter((d) => d.reason === "spool_saturated");
+  assert.equal(refused.length, 1);
+  assert.equal(refused[0].session_id, "u3");
 });
 
-test("the spool byte bound evicts with its own recorded reason", () => {
+test("the spool byte bound REFUSES new work when only undelivered entries remain", () => {
   const spool = tmpSpool();
   const chunk = [{ role: "user" as const, content: "y".repeat(2000) }];
   const bounds = { maxEntries: 100, maxTotalBytes: 6_000, maxEntryBytes: 10_000 };
   writeSpoolEntry(spool, { ...snapshot("b1"), turns: chunk }, bounds);
   writeSpoolEntry(spool, { ...snapshot("b2"), turns: chunk }, bounds);
   writeSpoolEntry(spool, { ...snapshot("b3"), turns: chunk }, bounds);
+  // The ceiling can be crossed ONCE by the entry that crosses it; the NEXT write
+  // is the one refused (admission is about ADDING, not about undoing).
+  const fourth = writeSpoolEntry(spool, { ...snapshot("b4"), turns: chunk }, bounds);
 
-  // MUTATION THAT REDS THIS: drop the byte condition from pruneSpool → all
-  // three entries stay and the ledger has no `spool_total_bytes_exceeded` line.
-  assert.equal(readSpoolEntry(spool, "b1"), undefined, "oldest evicted under the byte bound");
-  assert.ok(readDiscards(spool).some((d) => d.reason === "spool_total_bytes_exceeded"));
+  // MUTATION THAT REDS THIS: drop the byte condition from `spoolSaturated` (or
+  // the admission guard) → b1 is unlinked and no `spool_saturated` line exists.
+  assert.equal(fourth.written, false, "the write that would cross the byte ceiling is refused");
+  assert.ok(readSpoolEntry(spool, "b1"), "no undelivered entry is evicted");
+  assert.ok(readDiscards(spool).some((d) => d.reason === "spool_saturated"));
 });
 
 test("#8531: a quarantined orphan is COUNTED under the byte ceiling, not invisible to it", () => {
@@ -3269,7 +3281,7 @@ test("#2100: a 402 quota refusal is NAMED — BLOCKED, one attempt per pass, dur
   );
 });
 
-test("#2100: an exhausted quota cannot grow the spool past its count bound (drop-OLDEST)", async () => {
+test("#2100: an exhausted quota cannot grow the spool past its count bound (refuse-NEW)", async () => {
   // The disk half of the defect. The bound already exists (`pruneSpool`); what
   // was never pinned is the QUOTA-BLOCKED steady state that #2100 measured — a
   // spool that never drains because every POST is refused. It must still be
@@ -3291,10 +3303,14 @@ test("#2100: an exhausted quota cannot grow the spool past its count bound (drop
   const kept = listSpoolEntries(spool)
     .metas.map((m) => m.session_id)
     .sort();
-  assert.deepEqual(kept, ["sess-cap3", "sess-cap4", "sess-cap5"], "drop-OLDEST keeps the newest");
+  // capture-loss (2026-11-01): SUPERSEDES this test's original "drop-OLDEST keeps
+  // the newest". Under a dead quota nothing can be delivered, so every candidate
+  // is undelivered and evicting one destroys the only copy of a conversation.
+  // The spool keeps the backlog it already holds and REFUSES the new sessions.
+  assert.deepEqual(kept, ["sess-cap0", "sess-cap1", "sess-cap2"], "the backlog is kept, not the newest");
   assert.ok(
-    readDiscards(spool).some((d) => d.reason === DISCARD_COUNT_EXCEEDED),
-    "every eviction is recorded — never a silent drop",
+    readDiscards(spool).some((d) => d.reason === "spool_saturated"),
+    "every refusal is recorded — never a silent drop",
   );
 });
 
@@ -3814,7 +3830,7 @@ test("#2100: the SHIPPED ceilings are finite and identical on both legs", () => 
   // policy exists to keep. The defect was the INLINE flush, not the ceiling.
   //
   // MUTATION THAT REDS THIS: raise either ceiling here only.
-  assert.equal(SPOOL_MAX_ENTRIES, 1000);
+  assert.equal(SPOOL_MAX_ENTRIES, 20000);
   assert.equal(SPOOL_MAX_TOTAL_BYTES, 256 * 1024 * 1024);
 });
 
