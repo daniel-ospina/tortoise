@@ -223,9 +223,10 @@ and file:line — and any table the probe emits records `steps_observed` **and**
 moves only once its classify pass carries a non-empty `s2`/`union` — on the measured corpus that
 pass is IDLE (`enabled: true`, both counters empty), so a re-run there still reports S2.3
 **unobserved** — and since `#10215` that is a **witnessed idle**, not a refusal: `observe_idle`
-accounts it from the receipt's own facts and G5/V5 accept the accounting because the frozen
-pre-registration declares the step conditional. The two scored rows above keep the count the run
-measured.
+accounts it from the receipt's own facts, this probe emits that accounting itself
+(`run.steps_required` / `run.steps_conditional`, read from the SAME frozen record G5 reads), and
+G5/V5 accept it because the pre-registration declares the step conditional. The two scored rows
+above keep the count the run measured.
 
 ⛔ **The count is a measurement, not a constant.** `observe_steps` looks for a `vet` /
 `classify_later` surface in what the run actually holds (the receipt's top-level keys and its
@@ -590,7 +591,8 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   **S2.2**; **S2.3 does not flip**, because its classify pass is IDLE on this corpus and the witness
   says so (`enabled: true`, empty `s2`/`union`) — since `#10215` that is accounted as a **witnessed
   idle** (flag ON, no activity, no fail-open marker, a positive candidate count) rather than refused,
-  so G5/V5 accept it where the frozen pre-registration declares the step conditional.
+  and the probe emits that split itself (`run.steps_required` / `run.steps_conditional`, read from
+  the frozen record) so G5/V5 accept it where the record declares the step conditional.
 
 ## Reproduce
 
@@ -706,8 +708,10 @@ head moves **S2.2**; **S2.3 does not move on this corpus** — its classify pass
 (`enabled: true`, empty counters, and the map typed every candidate), so `observe_steps` still
 refuses to count it as OBSERVED. Since `#10215` that is a **witnessed idle**, not a refusal:
 `observe_idle` accounts S2.3 from the receipt's own facts (flag ON, empty counters, NO fail-open
-marker, a positive candidate count) and G5/V5 accept the accounting because the frozen
-pre-registration declares the step conditional. Nothing here relabels a historical measurement.
+marker, a positive candidate count), this probe writes that accounting into its own log
+(`run.steps_required` / `run.steps_conditional`, from the frozen record — the split the gate reads
+and cannot infer), and G5/V5 accept it because the pre-registration declares the step conditional.
+Nothing here relabels a historical measurement.
 
 ⛔ The distinction the gate keeps, and why it is load-bearing: a receipt with **no**
 `step_witness` at all (a replay, a keyless capture, the M2 lane) is refused as the **INSTRUMENT**

@@ -1110,6 +1110,164 @@ def test_every_step_is_witnessed_or_given_a_cause():
     assert not set(observed) & set(unobserved)
 
 
+# ── the conditional step, ACCOUNTED on the SCORING path (#10215 review P1) ──
+#
+# `capstone_run.py`'s G5 learned #10215's rule; THIS probe — the one that produces
+# the E1–E5 numbers — kept emitting neither `steps_required` nor
+# `steps_conditional`, so V5 read every log it writes as the pre-#10215 "all eight
+# required" shape and refused a GREEN row for S2.3. The restatement reached one of
+# the two places its logs come from, which is why #10215's own symptom was still
+# live on the scoring path.
+
+_RECORD_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
+
+
+def _idle_run(session_id: str = "wp01_quarry_debug", **overrides) -> dict:
+    """One measured session holding the classify surface ENABLED with no work.
+
+    Carries a POSITIVE candidate count on the receipt's own witness, because the
+    idle predicates require it: an empty candidate list skips the pass's `try` and
+    leaves the same `enabled=true`/`s2={}`/`union={}` shape, which is why
+    `observe_idle` has four predicates rather than three.
+    """
+    run = _run(session_id=session_id,
+               stats={**_FULL_STATS,
+                      "step_witness": {"map": {"items": {"entities": 4,
+                                                          "events": 1}}}},
+               surfaces={"classify_later": {"enabled": True, "s2": {},
+                                            "union": {}}})
+    run.update(overrides)
+    return run
+
+
+def _with_head() -> str:
+    """The commit under test — `_record_conditional` reads the record FROM git.
+
+    Derived, never typed: the gate resolves the frozen `steps` block out of
+    ``git show <sha>:<artifact>``, so this arm only has teeth against a real
+    commit, and a typed one would re-stale on the next push.
+    """
+    return cvc._git(_REPO, "rev-parse", "HEAD").stdout.strip()
+
+
+def _seven_observed() -> dict:
+    """What a post-seam run witnesses on this corpus: seven, S2.3 absent."""
+    return {step: f"witnessed ({step})" for step in measure.STEPS if step != "S2.3"}
+
+
+def test_the_scoring_probe_emits_the_split_v5_reads_and_the_old_shape_is_what_reds():
+    """The finding, end to end: a GREEN row's step half now passes V5.
+
+    Non-vacuity is the second half of this test, and it IS the finding: the same
+    seven observed steps under the PRE-FIX run block — no `steps_required`, no
+    `steps_conditional` — are refused by the shipped gate for exactly the reason
+    #10215 was filed about. Asserted, not described, so the arm cannot regress to
+    "the gate says it accepts the accounting" on this probe's logs.
+    """
+    required, accounts, gap = measure.step_accounting(
+        measure.read_conditional(_prereg()), [_idle_run()], _seven_observed())
+    assert gap == "", gap
+    assert required == [s for s in cvc.STEPS if s != "S2.3"], required
+    assert [entry["step"] for entry in accounts] == ["S2.3"], accounts
+    assert accounts[0]["state"] == "idle", accounts[0]
+    assert "EMPTY ITEM SET" in accounts[0]["basis"], accounts[0]
+
+    run = {"status": "COMPLETED", "steps_required": required,
+           "steps_conditional": accounts,
+           "steps_observed": [s for s in cvc.STEPS if s != "S2.3"]}
+    assert cvc._step_accounting(_REPO, run, tuple(run["steps_observed"]),
+                                _with_head(), _RECORD_ARTIFACT) == []
+    # ... and the PRE-FIX shape of the same run, which is what this probe emitted:
+    prefix = {"status": "COMPLETED",
+              "steps_observed": [s for s in cvc.STEPS if s != "S2.3"]}
+    assert [(code, msg.split(" — ")[0]) for code, msg in
+            cvc._step_accounting(_REPO, prefix, tuple(prefix["steps_observed"]),
+                                 _with_head(), _RECORD_ARTIFACT)] == [
+        ("V5", "GREEN with steps not observed in the run: S2.3")]
+
+
+def test_the_split_is_the_frozen_records_not_this_probes_choice():
+    """Direction matters: a step is conditional because the RECORD says so.
+
+    A probe that decided its own conditional set could hand itself an accounting it
+    was never granted, and `capstone_run.G5` refuses exactly that. A malformed
+    declaration refuses the RUN too — degrading it to "all eight required" would
+    look identical to correct behaviour.
+    """
+    # the real frozen record declares S2.3 conditional
+    assert set(measure.read_conditional(_prereg())) == {"S2.3"}
+    # a record that declares NOTHING conditional leaves all eight required
+    assert measure.read_conditional({}) == {}
+    required, accounts, gap = measure.step_accounting({}, [_idle_run()],
+                                                     _seven_observed())
+    assert required == list(cvc.STEPS) and accounts == [] and gap == ""
+    # a malformed declaration is a REFUSAL, never a silent "all eight"
+    for broken in ({"steps": []},
+                   {"steps": {"conditional": "S2.3"}},
+                   {"steps": {"conditional": [{"step": "S4"}]}}):
+        try:
+            measure.read_conditional(broken)
+        except SystemExit as exc:
+            assert "unreadable" in str(exc), exc
+            continue
+        raise AssertionError(f"{broken}: a malformed declaration did not refuse")
+
+
+def test_a_failed_classify_pass_is_never_accounted_idle_by_this_probe():
+    """The fail-open `except` leaves the SAME empty counters as an idle pass.
+
+    The receipt says which one it was in `errors` / `diagnostics` (the raw string
+    rides `diagnostics` on the real receipt), so a crashed pass must fall back to
+    the pre-#10215 shape instead of handing the run an idle basis. Without this arm
+    `#10215`'s restatement would make a CRASH look like "nothing to do".
+    """
+    for failure in ({"errors": ["classify(S2) failed: RuntimeError: boom"]},
+                    {"diagnostics": ["classify(union) failed: TimeoutError: slow"]},
+                    {"warnings": ["classify-later init failed"]}):
+        required, accounts, gap = measure.step_accounting(
+            measure.read_conditional(_prereg()), [_idle_run(**failure)],
+            _seven_observed())
+        assert required == list(cvc.STEPS), (failure, required)
+        assert accounts == [], (failure, accounts)
+        assert "neither observed nor witnessed idle: S2.3" in gap, gap
+
+
+def test_an_idle_claim_is_run_wide_so_one_session_can_refute_it():
+    """Seven sessions, one number: an idle step must be idle on ALL of them.
+
+    `observe_idle` grades a single receipt, and this probe measures a corpus. One
+    session's idle block beside another's flag-off (or zero-candidate, or failed)
+    block is not a run-wide idle — and the fallback is the strict direction: the
+    gate then refuses the step for the fact that is true.
+    """
+    conditional = measure.read_conditional(_prereg())
+    idle = _idle_run("wp01_quarry_debug")
+    # two idle sessions: accounted, and the basis names the surface it read
+    required, accounts, gap = measure.step_accounting(
+        conditional, [idle, _idle_run("wp03_ember_design")], _seven_observed())
+    assert gap == "" and accounts[0]["state"] == "idle", (gap, accounts)
+    assert "2 measured session(s)" in accounts[0]["basis"], accounts[0]["basis"]
+    # one flag-off session in the run refutes it
+    flag_off = _idle_run("wp05_retro_writeup",
+                         surfaces={"classify_later": {"enabled": False,
+                                                      "s2": {}, "union": {}}})
+    required, accounts, gap = measure.step_accounting(
+        conditional, [idle, flag_off], _seven_observed())
+    assert accounts == [] and required == list(cvc.STEPS), accounts
+    assert "wp05_retro_writeup" in gap, gap
+    # a session with NO surface at all is the #9116 gap, not a contradiction, and
+    # does not by itself make the run idle either
+    silent = _run(session_id="wp06_bare")
+    required, accounts, gap = measure.step_accounting(
+        conditional, [silent], _seven_observed())
+    assert accounts == [] and "INSTRUMENT gap" in gap, (accounts, gap)
+    # an OBSERVED conditional step is accounted as observed, never as idle
+    observed = dict(_seven_observed(), **{"S2.3": "the pass assigned 3 kinds"})
+    required, accounts, gap = measure.step_accounting(conditional, [idle], observed)
+    assert gap == "" and accounts == [{"step": "S2.3", "state": "observed",
+                                       "basis": "the pass assigned 3 kinds"}], accounts
+
+
 # ── E3's Point denominator is disclosed, not silently mixed (F4) ──────────
 
 def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
