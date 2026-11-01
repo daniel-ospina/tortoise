@@ -2186,8 +2186,10 @@ def test_a_client_identity_only_diff_runs_the_consent_identity_guards():
     r = _sel(["tortoise/client_identity.py"])
     assert r["full"] is False
     assert "api" in r["surfaces"], (
-        f"a client_identity.py-only diff selects {r['surfaces']} — both consent "
-        "guards are registered on `api`, and `core` does not run either"
+        f"a client_identity.py-only diff selects {r['surfaces']} — the identity "
+        "rule is an `api` SOURCE_PATTERNS entry (#8218 finding 3), and the "
+        "`core` fallback does not run tests/test_oauth_mcp.py, whose "
+        "renderer-contract assertions pin what the page prints"
     )
     assert "test_oauth_consent_client_identity_8218.py" in r["test_files"], (
         "a client_identity.py-only diff does not run the count-based invariant "

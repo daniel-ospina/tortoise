@@ -407,6 +407,38 @@ def test_a_cimd_looking_client_id_registered_by_DCR_is_not_backed():
             {"id": client_id, "client_name": "claude.ai"}).backed_by != BACKED_BY_CIMD_ORIGIN
 
 
+def test_userinfo_is_refused_exactly_as_cimd_refuses_it():
+    """`_cimd_host` must never be LOOSER than the gate the persister passed.
+
+    `cimd.validate_client_id_url` refuses userinfo with `is not None`, so an
+    EMPTY userinfo (`https://@claude.ai/x`) is refused upstream. `_cimd_host`
+    tested the VALUES for truthiness, which accepted exactly that shape and
+    rendered `claude.ai` as a BACKED name for a URL the CIMD gate would not have
+    stored — the fail-open direction its own docstring forbids. The same lines
+    also read `parsed.username`/`parsed.password` raw, which is what reddened
+    `tests/test_from_uri_userinfo.py::test_no_raw_urlparse_userinfo_read_in_
+    guarded_dirs` (#3039) on this branch's head.
+
+    Both halves are pinned against `cimd`'s own predicate here, so a future edit
+    cannot silently differ from the gate it is supposed to mirror.
+    """
+    from tortoise.cimd import CimdError, validate_client_id_url
+
+    for client_id in (
+        "https://claude.ai@evil.example/oauth/client",   # non-empty userinfo
+        "https://@claude.ai/oauth/client",               # EMPTY userinfo
+        "https://:pw@claude.ai/oauth/client",            # empty user, password
+    ):
+        # The upstream gate refuses all three...
+        with pytest.raises(CimdError):
+            validate_client_id_url(client_id)
+        # ...so the render predicate must refuse them too.
+        identity = resolve_client_identity(
+            {"id": client_id, "client_name": "claude.ai"})
+        assert identity.backed_by == SELF_DECLARED, client_id
+        assert identity.display_name is None, client_id
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 6. Fail-closed: a broken allowlist attests NOBODY
 # ═══════════════════════════════════════════════════════════════════════════

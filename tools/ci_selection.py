@@ -1102,8 +1102,11 @@ SOURCE_PATTERNS = {
             # `--changed-files tortoise/client_identity.py --event pull_request`
             # -> surfaces ['core'], full=false, with NEITHER
             # `test_oauth_consent_client_identity_8218.py` NOR `test_oauth_mcp.py`
-            # selected. No CORE_ALSO entry: both pinning suites are registered
-            # `api`-only, so the named-surface match drops nothing. Pinned by
+            # selected. No CORE_ALSO entry: the count invariant is registered
+            # `api` + `core` (the `core` arm carries its AST-enumeration half),
+            # so the named-surface match still selects it through `api`, and
+            # `test_oauth_mcp.py` is an `api` registration (plus `slow_files`) —
+            # the `core` fallback adds nothing either suite needs. Pinned by
             # tests/test_ci_selection.py::test_a_client_identity_only_diff_runs_
             # the_consent_identity_guards.
             "tortoise/client_identity.py",

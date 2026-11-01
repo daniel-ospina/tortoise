@@ -216,10 +216,24 @@ def _cimd_host(client_id: object) -> str | None:
         return None
     if parsed.scheme != "https" or not parsed.hostname:
         return None
-    # Userinfo is refused for the same reason `cimd.validate_client_id_url`
-    # refuses it: `https://claude.ai@evil.example/` renders a host that does not
-    # match the authority a reader sees.
-    if parsed.username or parsed.password:
+    # ⛔ USERINFO IS REFUSED, and it is read from the AUTHORITY rather than from
+    # `parsed.username`/`parsed.password`. Two reasons, and the second is a red
+    # CI job if ignored:
+    #
+    # 1. `cimd.validate_client_id_url` refuses userinfo with
+    #    `parts.username is not None or parts.password is not None` — so an EMPTY
+    #    userinfo (`https://@claude.ai/x`) is refused upstream. Testing the
+    #    values for TRUTHINESS accepted exactly that shape here, which made this
+    #    predicate LOOSER than the gate the persister passed — the one thing its
+    #    docstring forbids. `"@" in netloc` refuses it, matching upstream.
+    # 2. `tests/test_from_uri_userinfo.py` (#3039) forbids a raw userinfo read
+    #    under `tortoise/` outside `config.parse_uri_userinfo`, because a
+    #    percent-ENCODED credential reaching a client undecoded is a real bug
+    #    class. This module never wants the credentials, only whether the
+    #    authority carries any: reading the netloc states the predicate without
+    #    extracting a credential at all — strictly narrower than the exemption
+    #    `tortoise/cimd.py` carries for the same validation-only read.
+    if "@" in parsed.netloc:
         return None
     # ⛔ ASCII ONLY (review finding 3). `cimd.validate_client_id_url` refuses a
     # non-ASCII host as a HOMOGRAPH (`сlaude.ai` vs `claude.ai`), and this is the
