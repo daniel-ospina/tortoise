@@ -194,6 +194,9 @@ _EXERCISED_WRITERS = frozenset({
     "write_compact", "write_fork_unsure_at", "clear_fork_unsure_at",
     "write_last_decide_attempt", "write_operational_state",
     "remove_decide_completed_edge", "regress_status",
+    # #10180 review P2: the promote carry's anchor link (the writer that can
+    # mint a `:Subject` in the TARGET graph).
+    "carry_onboards_edge",
     # #9157: the eager-init route — the CREATION write the lane used to miss.
     # Exercised here so the label census covers it in the SAME walk.
     "run_eager_init",
@@ -207,6 +210,13 @@ _EXERCISED_READERS = frozenset({
 _STATED_OTHERS = {
     "_prune_orphan_decide_step":
         "private; reached from remove_decide_completed_edge, which IS exercised",
+    # #10180 review P2: the anchor-carry's two READS are private and reached
+    # ONLY from `carry_onboards_edge`, which the write walk exercises (both the
+    # decline arm and the carried arm, so their statements are seen).
+    "_read_subject_anchor":
+        "private; reached from carry_onboards_edge, which IS exercised",
+    "_subject_anchor_name_taken":
+        "private; reached from carry_onboards_edge, which IS exercised",
 }
 
 
@@ -227,6 +237,23 @@ def _walk_the_hosted_write_set(proj, org_id: str = ORG) -> None:
     _os.write_completed_step(proj, org_id, "team-named")
     _os.write_member_progress(proj, org_id, "user-1", ["team-named"])
     _os.write_onboards_edge(proj, org_id, f"anchor-{org_id}")
+    # #10180 (review P2): the PROMOTE CARRY's anchor link. It is the one writer
+    # in this lane that can MINT a `:Subject` from a SOURCE graph, so the class
+    # check must see its real arms rather than assume it: the LINK/DECLINE arm
+    # first (the anchor already in the target, which is the arm a re-promotion
+    # takes), then the CARRIED arm into a second graph so the mutating MERGE is
+    # actually issued through the declared lane and attributed to it.
+    _os.carry_onboards_edge(proj, proj, org_id, f"anchor-{org_id}")
+    # …and the CARRIED arm, which needs a source anchor that HAS an identity.
+    # The seed statement below is deliberately the SAME shape the carry writes,
+    # so the walk introduces no third `:Subject` statement into the census the
+    # `test_the_subject_anchor_mint_is_not_widened` pin reads.
+    _os._run(proj, "MERGE (s:Subject {id: $sid}) SET s.name = $name, "
+                   "s.subjectKind = $subjectKind, s.org_id = $org_id",
+             {"sid": f"carry-{org_id}", "name": f"Carry Anchor {org_id}",
+              "subjectKind": "organization", "org_id": org_id})
+    _os.carry_onboards_edge(proj, proj.db.select_graph(f"carry_{org_id}"),
+                            org_id, f"carry-{org_id}")
     _os.write_status(proj, org_id, _os.STATUS_COMPLETE)
     _os.write_compact(proj, org_id, True)
     _os.write_fork_unsure_at(proj, org_id, "2026-10-19T00:00:00Z")
@@ -420,14 +447,23 @@ def test_the_subject_anchor_mint_is_not_widened(sdk_with_journal, monkeypatch):
         "MERGE (s:Subject {id: $sid}) WITH s "
         f"MERGE (n:{_os.ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
         "SET n.org_subject_id = $sid WITH n, s "
-        f"MERGE (n)-[:{_os.ONBOARDS_EDGE}]->(s)"
+        f"MERGE (n)-[:{_os.ONBOARDS_EDGE}]->(s)",
+        # #10180 (review P2): the promote carry's anchor. Its target graph is
+        # the org's NEW DEFAULT and has never held the anchor, so an id-only
+        # MERGE there mints a name-less `:Subject` the seed's BY-NAME
+        # collision check cannot see. This is the one widening that argument
+        # admits, and it is stated rather than discovered: the same id the
+        # onboarding node carries, plus the identity properties a seed would
+        # have written. A THIRD shape still reds below.
+        "MERGE (s:Subject {id: $sid}) "
+        "SET s.name = $name, s.subjectKind = $subjectKind, s.org_id = $org_id",
     )
     subject_statements = [c for c, _r, w in seen if w and "Subject" in c]
     assert subject_statements, (
         "no statement touching `:Subject` was issued — this pin would be vacuous"
     )
     for cypher in subject_statements:
-        assert cypher == expected, (
+        assert cypher in expected, (
             "the `:Subject` anchor statement changed. It is the ONE write on "
             "this lane to a journalled ontology class, authorized only as the "
             "id-only anchor link (see the ANCHOR MINT bullet above "

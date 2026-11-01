@@ -341,6 +341,10 @@ class _RecordingState:
         # invisible — the old count read pinned `team_<tid>`).
         self.query_graphs: list = []
         self.team_meta = 0
+        # #10180: `_open_org_graph_sdk` gates its open on the registry listing,
+        # so the recorder models one. A name the test does not declare here is
+        # NEVER opened — the same pin the door enforces in production.
+        self.existing_graphs: set = set()
 
     def record(self, graph_name, cypher, params=None):
         c = " ".join(str(cypher).split())
@@ -372,11 +376,16 @@ class _RecordingGraph:
 
 
 class _RecordingSDK:
-    """One stand-in SDK per `_make_sdk(namespace=...)` call."""
+    """One stand-in SDK per `_make_sdk(...)` call."""
 
-    def __init__(self, state, namespace=None):
+    def __init__(self, state, namespace=None, graph_name=None):
         self._state = state
-        self._current = f"org_{namespace}" if namespace else None
+        self._current = (graph_name or
+                         (f"org_{namespace}" if namespace else None))
+
+    def close(self):
+        """No-op: `_registry_existing_graphs` closes its probe in a `finally`,
+        and an AttributeError there would be read as a FAILED probe."""
 
     def _get_proj(self):
         state = self._state
@@ -395,7 +404,12 @@ class _RecordingSDK:
             return _RecordingGraph(state, name)
 
         _proj = type("_Proj", (), {
-            "db": type("_Db", (), {"select_graph": staticmethod(_select_graph)})(),
+            "db": type("_Db", (), {
+                "select_graph": staticmethod(_select_graph),
+                # #10180: `_registry_existing_graphs()` is the LISTING gate the
+                # default-graph door opens through.
+                "list_graphs": staticmethod(lambda: set(state.existing_graphs)),
+            })(),
             "query": staticmethod(_query),
             "close": lambda self: None,
         })()
@@ -407,7 +421,8 @@ def _recording_sdk(monkeypatch) -> list:
     import tortoise.hosted_api as ha_mod
     state = _RecordingState()
     monkeypatch.setattr(ha_mod, "_make_sdk",
-                        lambda **kw: _RecordingSDK(state, kw.get("namespace")))
+                        lambda **kw: _RecordingSDK(state, kw.get("namespace"),
+                                                   kw.get("graph_name")))
     _RECORDED_STATES.clear()
     _RECORDED_STATES.append(state)
     return state.statements
@@ -657,6 +672,12 @@ class TestEagerGraphIdempotency:
         _seed_team(fake, prior)
         _seed_membership(fake, prior)
         statements = _recording_sdk(monkeypatch)
+        # #10180: the prior org's default graph is opened through the
+        # LISTING-gated door (`_open_org_graph_sdk`), so the probe must be able
+        # to see it — a name it did not observe is never opened (the read path
+        # must not mint a graph, pin 4). Declaring it is what makes the
+        # assertion below about the READ rather than about the gate.
+        _last_state().existing_graphs.add(f"org_{prior}")
         tid = _tid("g")
         assert ha_mod._eager_provision_org_graph(
             fake, tid, "Forked", _U1) == f"org_{tid}"
