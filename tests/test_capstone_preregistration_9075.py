@@ -2779,6 +2779,35 @@ def test_an_e3_row_naming_neither_document_spelling_is_still_refused():
         assert "Document" in failure and "Source" in failure, failure
 
 
+def test_an_e3_row_naming_the_NOUN_source_instead_of_the_class_is_refused():
+    """#10525 review ROUND 2, P2 — MEASURED: the ordinary English noun satisfied the arm.
+
+    The class matcher casefolded the cell and matched the lower-case token, so E3's own wording —
+    *"``Point`` + ``Event`` … that are the SOURCE of at least one ``extractedFrom`` relationship"*
+    — named `{Point, Event, Source}` and PASSED, i.e. a cell naming NO document class at all was
+    accepted by the very arm written to refuse it, against §7 item 6 ("a cell that names NO
+    document class at all still fails"). A Cypher node label is case-sensitive: the class is
+    spelled `Source`/`Document`, the prose noun is `source`/`SOURCE` and names nothing.
+
+    Non-vacuity: on the pre-fix matcher both spellings yielded `Source` in the named set and
+    `_e3_class_set_failures` returned `[]` — so the `len(failures) == 2` below reds on it.
+    """
+    row = {"line": "269", "metric": "", "denominator": ""}
+    for prose in ("the SOURCE of at least one `extractedFrom` relationship",
+                  "the source of at least one `extractedFrom` relationship"):
+        cell = f"`Point` + `Event` that are {prose}"
+        named = check._classes_named(cell)
+        assert named == {"Point", "Event"}, (prose, sorted(named))
+        cells = {"metric": named, "denominator": set(named)}
+        failures = check._e3_class_set_failures(row, cells, check.e3_required_class_groups())
+        assert len(failures) == 2, (prose, failures)
+        for failure in failures:
+            assert "omits the document-derivation class" in failure, failure
+    # ...and the CLASS spelling is still accepted, including the owner-gated retired one.
+    assert "Source" in check._classes_named("`Point` + `Event` + `:Source`")
+    assert "Document" in check._classes_named("`Point` + `Event` + `Document`")
+
+
 def test_an_e3_numerator_narrower_than_its_denominator_is_refused():
     """THE MUTATION PROOF for #10525 P1, measured on the pre-fix code.
 

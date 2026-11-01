@@ -1549,6 +1549,20 @@ def test_the_e3_narration_never_claims_the_amended_denominator_counts_object():
     # and the splice guard this note has always had stays green on the rewritten text
     assert not re.search(r"\d+/\d+ = 1\.000000", note), note
 
+    # ⛔ #10525 review ROUND 2, P1 — MEASURED: two of these sentences asserted their own arithmetic
+    # falsely. The 'all derived nodes' figure had been called "the PRE-AMENDMENT reading" and said to
+    # be WIDER than "the figure above", while after the amendment that figure IS the registered one
+    # (383 = Point 338 + Event 45 + Document 0) — so the line called 383 pre-amendment and then said
+    # the registered reading is narrower than 383. And the row claimed to report "BOTH readings"
+    # while its value carries only `148/383` (`"433" in note` is False). Both are now stated where
+    # the pre-amendment figure actually lives — §10.1's table — and the claims are pinned as the
+    # true ones, not as fragments that merely rhyme with them.
+    assert "narrower than the figure above" not in line, line
+    assert "PRE-AMENDMENT reading and is retained" not in line, line
+    assert "this row reports BOTH readings" not in note, note
+    assert "which §10.1's table states" in line, line
+    assert "§10.1 reports BOTH readings" in note, note
+
 
 def test_the_shipped_log_states_the_e3_note_the_same_way_in_both_copies():
     """One note, two copies (the human `row E3 note:` line and the machine `note`).

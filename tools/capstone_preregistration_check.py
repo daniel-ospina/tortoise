@@ -806,12 +806,23 @@ def _classes_named(cell: str) -> set[str]:
     this line), and a hard error once invalid escapes stop being tolerated. It is also an asymmetry
     inside one commit: the sibling docstring in ``tests/test_capstone_preregistration_9075.py``
     already writes the same text escaped, and now both compile clean.
+
+    ⛔ THE MATCH IS CASE-SENSITIVE AND SPELLS THE LABEL (#10525 review round 2, P2 — MEASURED). The
+    first revision casefolded the cell and matched the lower-case token, so the ORDINARY ENGLISH
+    NOUN satisfied the rule: E3's own wording — *"``Point`` + ``Event`` … that are the SOURCE of at
+    least one ``extractedFrom`` relationship"* — yielded ``{'Point', 'Event', 'Source'}`` and PASSED,
+    i.e. a cell naming NO document class at all was accepted by the very arm written to refuse it,
+    contradicting §7 item 6 ("a cell that names NO document class at all still fails"). A Cypher node
+    label is case-sensitive, so ``Point``/``Event``/``Document``/``Object``/``Source`` are the class
+    spellings and ``SOURCE``/``source`` are prose. The canonical name is the TOKEN's value
+    (``NODE_CLASS_TOKENS``), which is exactly the label spelling, so it is matched rather than the
+    lower-case key; the plural stays tolerated (``Points`` names the class too).
     """
-    plain = _plain(cell).casefold()
+    plain = _plain(cell)
     return {
         canonical
         for token, canonical in NODE_CLASS_TOKENS.items()
-        if re.search(rf"(?<![\w]){token}s?(?![\w])", plain)
+        if re.search(rf"(?<![\w]){re.escape(canonical)}s?(?![\w])", plain)
     }
 
 
@@ -962,7 +973,18 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
 
     e3 = [r for r in rows if r["id"] == "E3"]
     if not e3:
-        failures.append("no E3 row — its class set cannot be compared with the model")
+        # ⛔ SCOPED LIKE EVERY OTHER ARM IN THIS FUNCTION (#10525 review round 2, P3). It was
+        # unconditional, so a bundle that declares neither the visibility schema nor an E3
+        # criterion was RED-ed for a rule it never opted into — the sibling visibility arm below
+        # declares its skip instead. A skip that is not declared is the silent-green shape this
+        # tool refuses; a failure on a subject the bundle never raised is the mirror defect, and
+        # the "names no graph class at all" note further down is the declared-skip precedent.
+        if declares_visibility:
+            failures.append("no E3 row — its class set cannot be compared with the model")
+        else:
+            _note(scopes, "the record carries no E3 criterion, so its class set cannot be "
+                          "compared with the model — the #9736 arm is not asked of this bundle"
+                          " (the same scope rule as the #9738 arm above)")
     groups: tuple[frozenset[str], ...] | None = None
     for row in e3:
         cells = {name: _classes_named(row[name]) for name in E3_CLASS_CELLS}
