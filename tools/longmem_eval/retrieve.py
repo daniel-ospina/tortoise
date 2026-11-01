@@ -2023,7 +2023,8 @@ def retrieve_for_question(
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": None, "count": len(_tl_picks)})
         else:
-            # honest trace reason — the five distinct empty-leg causes
+            # honest trace reason — the six distinct empty-leg causes
+            # (``no_window_candidates`` is the #10538 windowed miss)
             # (never launder a budget/anchor/weight miss as "no dates").
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": temporal_leg_empty_reason(

@@ -46,13 +46,16 @@ SPREAD_POOL = [
 def test_a_date_window_spreads_without_anchors():
     """The pre-fix leg is INERT here (no anchors, spread-only refuses), so
     top-5 is 5 pieces of session A and recall_all@5 is 0 even though sessions
-    B and C are in the pool. With the window, the picks must reach B and C."""
+    B and C are in the pool. With the window, the picks must reach the sessions
+    the reader does NOT already hold: the bucket of ``candidates[head]`` (the
+    session at the promotion boundary) is excluded, because re-emitting it is a
+    structural no-op (review cycle 3, #10549)."""
     order = temporal_leg_order(
         SPREAD_POOL, anchors=(), limit=6, head=0,
         date_window=("2023-04-10", "2023-04-20"))
     sessions = {c["session_id"] for c in SPREAD_POOL if c["id"] in order}
-    assert sessions == {"sA", "sB", "sC"}, (
-        f"a window-targeted spread must reach every in-window session, "
+    assert sessions == {"sB", "sC"}, (
+        f"the window spread must reach the sessions the reader lacks, "
         f"got {sessions} from picks {order}")
 
 
@@ -69,12 +72,16 @@ def test_the_window_is_respected_and_out_of_window_is_not_promoted():
          "content": "alpha"},
         {"id": "in", "session_id": "sB", "session_date": "2023-04-18",
          "content": "alpha"},
+        {"id": "a_far", "session_id": "sA", "session_date": "2023-04-30",
+         "content": "alpha"},
     ]
     order = temporal_leg_order(
         pool, anchors=(), limit=4, head=0,
         date_window=("2023-04-10", "2023-04-20"))
     assert "in" in order
     assert "far" not in order
+    # a SAME-session candidate outside the window is also never picked
+    assert "a_far" not in order
 
 
 def test_an_unclustered_pool_is_not_reordered_by_a_window():
@@ -142,28 +149,67 @@ def test_a_two_slot_sample_cannot_claim_clustering():
         pool, anchors=(), date_window=("2023-04-10", "2023-04-20")) == []
 
 
-def test_the_fused_caller_places_window_picks_in_the_tail():
-    """The PRODUCTION geometry (review cycle 2): ``ceiling = window - limit``
-    and the picks fuse AFTER ``candidates[:ceiling]``, so they land in the
-    reader-window tail — which is why this arm cannot move top-5 membership by
-    construction (declared, not measured, in the PR body). Pinned here so the
-    placement contract is not silently credited with an @5 effect."""
+def test_the_fused_caller_actually_moves_the_order():
+    """The PRODUCTION geometry: ``ceiling = window - limit`` and the picks fuse
+    AFTER ``candidates[:ceiling]``. Review cycle 3 (#10549): the earlier version
+    of this test passed on a leg that moved NOTHING — its picks were re-emitted
+    ids already in the head slice. The fused order must actually CHANGE, the
+    pick's index must strictly DECREASE, and a pick must never be a session the
+    reader already holds at the ceiling."""
     pool = [
         {"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
-         "content": "alpha"} for i in range(10)
+         "content": "alpha"} for i in range(14)
     ] + [
         {"id": "b1", "session_id": "sB", "session_date": "2023-04-14",
          "content": "alpha"},
-        {"id": "c1", "session_id": "sC", "session_date": "2023-04-18",
+    ]
+    base = [c["id"] for c in pool]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=12, date_window=("2023-04-10", "2023-04-20"))
+    assert picks == ["b1"], picks
+    assert order != base, "the windowed pick moved nothing — a no-op reported as applied"
+    assert order.index("b1") < base.index("b1")
+
+
+def test_the_conservative_limit_one_arm_is_not_a_no_op():
+    """``TORTOISE_LME_TEMPORAL_LEG_LIMIT=1`` is the documented conservative
+    arm. Before review cycle 3 its single pick was always the id already
+    sitting at the promotion ceiling, so the fused order was byte-identical
+    while the stats reported ``applied`` with ``picks=1``."""
+    pool = [
+        {"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
+         "content": "alpha"} for i in range(14)
+    ] + [
+        {"id": "b1", "session_id": "sB", "session_date": "2023-04-14",
+         "content": "alpha"},
+    ]
+    base = [c["id"] for c in pool]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=12, limit=1,
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks == ["b1"], picks
+    assert order != base, "limit=1 must lift a NEW session, not re-emit the ceiling id"
+
+
+def test_the_head_placement_arm_declines_on_an_unclustered_window():
+    """Cycle 2 finding #1 named the ``placement=\"head\"`` arm specifically (it
+    sets ``head_excl = 0``, so the gate sees ``head == 0``): with the real
+    window in hand it must still decline on a well-spread visible slice. This
+    is the only path that exercises ``elif window > 0``."""
+    pool = [
+        {"id": f"x{i}", "session_id": f"s{i}", "session_date": "2023-04-11",
+         "content": "alpha"} for i in range(2)
+    ] + [
+        {"id": "p2", "session_id": "sP", "session_date": "2023-04-12",
+         "content": "alpha"},
+        {"id": "q2", "session_id": "sQ", "session_date": "2023-04-13",
          "content": "alpha"},
     ]
     order, picks = temporal_leg_fusion_order(
-        pool, anchors=(), window=12, date_window=("2023-04-10", "2023-04-20"))
-    assert picks, "a clustered in-window pool must produce picks"
-    for pid in picks:
-        assert order.index(pid) >= 10, (
-            f"a window pick must land in the window tail, not at rank "
-            f"{order.index(pid)}: {order}")
+        pool, anchors=(), window=4, limit=1, placement="head",
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks == [], picks
+    assert order == [c["id"] for c in pool]
 
 
 def test_the_fused_caller_declines_on_an_unclustered_window():
@@ -190,12 +236,13 @@ def test_no_anchors_and_no_window_stays_inert():
 
 def test_the_reader_visible_head_is_never_disturbed_by_the_window():
     """``head`` excludes the reader-visible prefix from both phases; the window
-    path must honour it — it must not re-promote what the reader already has
-    (that would double-count the head against the fused slice). With the first
-    6 candidates excluded as the head, only the deep B/C items are promotable."""
+    path must honour it. With the first 6 candidates excluded, ``b1`` is the
+    candidate AT the promotion boundary — its bucket is the session the reader
+    already has there, so it is never re-emitted (a structural no-op, review
+    cycle 3) and the pick is the one genuinely new session, ``c1``."""
     order = temporal_leg_order(
         SPREAD_POOL, anchors=(), limit=6, head=6,
         date_window=("2023-04-10", "2023-04-20"))
-    assert order == ["b1", "c1"], order
+    assert order == ["c1"], order
     head_ids = {c["id"] for c in SPREAD_POOL[:6]}
     assert not head_ids & set(order)

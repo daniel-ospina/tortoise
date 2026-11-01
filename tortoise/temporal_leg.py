@@ -193,11 +193,14 @@ def _session_clustered(candidates: list[dict], head: int, limit: int,
 
     The visible prefix is ``head`` (the reader-visible slice the caller
     excludes from promotion). ``head == 0`` is the unguarded test mode AND the
-    ``placement="head"`` counterfactual, where ``window`` (the real reader
-    window the caller holds) stands in for it — never ``limit``, which is the
-    promotion BUDGET: on a 2-slot sample ``max(counts) * 2 >= len(visible)``
-    is a tautology, so a budget-sized sample made this guard inert and let the
-    four-distinct-session pool promote (review cycle 2, #10549).
+    ``placement="head"`` counterfactual; there ``window`` (the real reader
+    window the caller holds) stands in for it when supplied, and only when
+    BOTH ``head`` and ``window`` are 0 (a direct caller with no window in
+    hand) does the promotion ``limit`` size the sample. That last fallback is
+    non-vacuous only because of the ``< 3`` guard below — at the default
+    ``limit=2`` a 2-slot sample makes ``max(counts) * 2 >= len(visible)``
+    vacuously true, which is what let a four-distinct-session pool promote
+    before the guard existed (review cycles 2-3, #10549).
     """
     if head > 0:
         visible = candidates[:head]
@@ -348,6 +351,9 @@ no candidate is dated, which the caller treats as "leg inert".
     seen: set[str] = set()
     #: ids sharing at least one content token with some anchor
     relevant: set[str] = set()
+    #: #10538: the (date, session) bucket the reader already holds at the
+    #: promotion ceiling — never re-emitted by the window path.
+    exclude_bucket: tuple[str, str] | None = None
     #: true per-(date, session) cap accounting ACROSS both phases — a
     #: phase-1 anchor pick consumes its bucket's slot.
     bucket_counts: dict[tuple[str, str], int] = {}
@@ -405,6 +411,16 @@ no candidate is dated, which the caller treats as "leg inert".
             relevant = {c["id"] for c in promotable
                         if _in_date_window(c.get("session_date"),
                                            date_window)}
+            # The reader ALREADY holds the session sitting at the promotion
+            # ceiling, so promoting a second item from that same bucket is a
+            # structural no-op: it re-emits an id that is already in the head
+            # slice and the fused order comes out byte-identical while the
+            # stats report ``applied``/``picks=1`` (review cycle 3, #10549 —
+            # the ``TORTOISE_LME_TEMPORAL_LEG_LIMIT=1`` conservative arm did
+            # nothing at all). Drop that bucket so every pick is a session the
+            # reader does NOT already have.
+            if 0 <= head < len(candidates):
+                exclude_bucket = _bucket_key(candidates[head])
         if not relevant:
             return []
 
@@ -420,6 +436,8 @@ no candidate is dated, which the caller treats as "leg inert".
         buckets.setdefault(_bucket_key(c), []).append(c["id"])
     for round_idx in range(bucket_cap):
         for key, members in buckets.items():
+            if key == exclude_bucket and round_idx == 0:
+                continue
             if round_idx < len(members):
                 if bucket_counts.get(key, 0) >= bucket_cap:
                     continue
