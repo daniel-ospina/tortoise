@@ -1009,9 +1009,15 @@ _ORG_WIDE_OPENER_ALLOWLIST = {
     "_drop_org_graph_impl": 1,
     # → provisioning/creation: each of these MINTS the default row (or runs
     #   inside the same provisioning flow), so no promotion can predate it.
+    #   `_eager_provision_org_graph`'s remaining site is the org being CREATED
+    #   (`namespace=org_id`, materialized on purpose). Its SECOND site used to
+    #   read the PRIOR org — a pre-existing org a promotion CAN predate — and
+    #   was converted to `_open_org_graph_sdk` (which resolves the moved
+    #   namespace and gates on the listing), so the count is 1 and the reason
+    #   now covers only the mint. Review P3 at `93697f51e895`.
     "provision_tenant": 1,
     "register_user": 3,
-    "_eager_provision_org_graph": 2,
+    "_eager_provision_org_graph": 1,
 }
 
 
@@ -2029,7 +2035,12 @@ def test_the_promotion_carries_the_orgs_onboarding_record(sb):
     carried = r.json()["onboarding_state"]
     assert carried == {"migrated": True, "reason": "copied", "from": _OLD_NS,
                        "to": _NEW_NS, "steps": len(_COMPLETE_STEPS),
-                       "status": "complete"}, carried
+                       "status": "complete",
+                       # no `org_subject_id` seeded, so there is no anchor to
+                       # carry — reported rather than silently omitted
+                       # (`test_the_carried_anchor_is_the_orgs_identity...`
+                       # pins the seeded case).
+                       "subject_anchor": "absent"}, carried
 
     # The new default graph really holds the record ...
     node = _read_onboarding(_NEW_NS)
@@ -2161,3 +2172,192 @@ def test_the_projection_answers_both_questions_from_one_resolution(sb, monkeypat
     assert seen == [TEAM], (
         "the projection resolved the default namespace "
         f"{len(seen)} times — the verdict and the open must share ONE answer")
+
+
+# ── 12. The carried ANCHOR is an anchor, not an id-only stub ───────────────
+# Review P2 at `93697f51e895`. `copy_org_state` linked the carried node to the
+# org's DM-1 Subject through `write_onboards_edge`, whose
+# `MERGE (s:Subject {id: $sid})` is a LINK only where the anchor ALREADY
+# exists — which is true of every caller that writer was written for (the seed
+# core files the Subject first, and its docstring says so). The promote carry's
+# target graph holds no copied data BY DESIGN, so there that MERGE MINTS: a
+# Subject carrying an `id` and nothing else. `find_subject_by_name` resolves BY
+# NAME, so it cannot see such a node — the next seed cannot recognise it as
+# ours and files a SECOND Organization Subject in the org's new DEFAULT graph,
+# while `_count_resource("points")` counts the anonymous one as a tenant point.
+
+def _seed_org_anchor(namespace: str, *, name: str = "Team 10180") -> str:
+    """File the DM-1 Organization Subject in `namespace` and link the node."""
+    from tortoise.onboarding.seed import ORG_ANCHOR_KIND
+    _os = _onboarding_state()
+    sdk = ha._make_sdk(graph_name=namespace)
+    try:
+        proj = sdk._get_proj()
+        subj = sdk.create_subject(name=name, subjectKind=ORG_ANCHOR_KIND,
+                                  org_id=TEAM)
+        _os.write_onboards_edge(proj, TEAM, str(subj["id"]))
+        return str(subj["id"])
+    finally:
+        sdk.close()
+
+
+def _subjects(namespace: str) -> list[dict]:
+    """Every `:Subject` in `namespace`, with the identity properties that decide
+    whether it IS an anchor (the seed's collision check reads the NAME)."""
+    _os = _onboarding_state()
+    sdk = ha._make_sdk(graph_name=namespace)
+    try:
+        res = _os._run(sdk._get_proj(),
+                       "MATCH (s:Subject) RETURN s.id, s.name, s.subjectKind, "
+                       "s.org_id", {})
+        return [{"id": r[0], "name": r[1], "subjectKind": r[2],
+                 "org_id": r[3]} for r in res.result_set]
+    finally:
+        sdk.close()
+
+
+def test_the_carried_anchor_is_the_orgs_identity_not_an_id_only_stub(sb):
+    """FAIL-ON: the promoted graph is the org's DEFAULT graph, and an anonymous
+    `:Subject` standing in for its identity there is state a tenant cannot see
+    and cannot repair by re-seeding."""
+    tc, _, _ = sb
+    _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete")
+    sid = _seed_org_anchor(_OLD_NS)
+
+    _as_session()
+    r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding_state"]["subject_anchor"] == "carried", r.text
+
+    subjects = _subjects(_NEW_NS)
+    assert len(subjects) == 1, subjects
+    carried = subjects[0]
+    assert carried["id"] == sid
+    # The identity the seed's collision check reads BY NAME travels with the
+    # id — otherwise the next seed files a SECOND anchor beside it.
+    assert carried["name"] == "Team 10180", carried
+    assert carried["subjectKind"] == "organization", carried
+    assert carried["org_id"] == TEAM, carried
+    # ... and the carried node really points at it.
+    _os = _onboarding_state()
+    sdk = ha._make_sdk(graph_name=_NEW_NS)
+    try:
+        node = _os.read_onboarding_node(sdk._get_proj(), TEAM)
+    finally:
+        sdk.close()
+    assert node is not None and node["org_subject_id"] == sid, node
+    # The demoted graph keeps its own anchor: the move copies, it does not steal.
+    assert [s["id"] for s in _subjects(_OLD_NS)] == [sid]
+
+
+def test_the_carry_never_mints_an_anchor_it_cannot_identify(sb):
+    """The other half of the same rule: when there is no identity to carry, the
+    carry DECLINES (and says so) instead of writing an id-only stub."""
+    tc, _, _ = sb
+    _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete")
+    # A node whose `org_subject_id` names a Subject with no identity anywhere —
+    # `write_onboards_edge` is what mints that id-only node in the SOURCE.
+    _os = _onboarding_state()
+    sdk = ha._make_sdk(graph_name=_OLD_NS)
+    try:
+        _os.write_onboards_edge(sdk._get_proj(), TEAM, "subj-anonymous")
+    finally:
+        sdk.close()
+
+    _as_session()
+    r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding_state"]["subject_anchor"] == "not_in_target", r.text
+    # Nothing was minted into the graph that is now the org's default.
+    assert _subjects(_NEW_NS) == []
+
+
+def _write_anchor_row(proj, sid: str, *,
+                      name: str | None = None, kind: str | None = None,
+                      org_id: str | None = None) -> None:
+    """MERGE an anchor row in `proj` carrying exactly the properties given."""
+    _os = _onboarding_state()
+    props = {k: v for k, v in (("name", name), ("subjectKind", kind),
+                               ("org_id", org_id)) if v is not None}
+    assign = "".join(f" SET s.{k} = ${k}" for k in props)
+    _os._run(proj, f"MERGE (s:Subject {{id: $sid}}){assign}",
+             {"sid": sid, **props})
+
+
+def test_the_anchor_carry_links_a_target_that_already_holds_the_anchor(sb):
+    """The historical arm stays a LINK: a target that already holds the real
+    anchor (a re-promotion, or a graph the org's seed already wrote into) gains
+    no second Subject and no rewritten identity."""
+    _os = _onboarding_state()
+    src_sdk = ha._make_sdk(graph_name=_OLD_NS)
+    dst_sdk = ha._make_sdk(graph_name=_NEW_NS)
+    try:
+        src, dst = src_sdk._get_proj(), dst_sdk._get_proj()
+        _write_anchor_row(src, "subj-real", name="Team 10180",
+                          kind="organization", org_id=TEAM)
+        _write_anchor_row(dst, "subj-real", name="Team 10180",
+                          kind="organization", org_id=TEAM)
+        assert _os.carry_onboards_edge(src, dst, TEAM, "subj-real") == "linked"
+        assert [s["id"] for s in _subjects(_NEW_NS)] == ["subj-real"]
+    finally:
+        src_sdk.close()
+        dst_sdk.close()
+
+
+def test_the_anchor_carry_repairs_the_stub_an_older_head_minted(sb):
+    """An org promoted by an earlier head already has the id-only stub. The
+    carry REPAIRS that node's identity in place (same id, now nameable) rather
+    than adding a second anchor — so re-promoting the current default heals
+    the state that head created."""
+    _os = _onboarding_state()
+    src_sdk = ha._make_sdk(graph_name=_OLD_NS)
+    dst_sdk = ha._make_sdk(graph_name=_NEW_NS)
+    try:
+        src, dst = src_sdk._get_proj(), dst_sdk._get_proj()
+        _write_anchor_row(src, "subj-10180", name="Team 10180",
+                          kind="organization", org_id=TEAM)
+        _write_anchor_row(dst, "subj-10180")          # the old head's stub
+        assert _os.carry_onboards_edge(src, dst, TEAM, "subj-10180") == "carried"
+        subjects = _subjects(_NEW_NS)
+        assert len(subjects) == 1, subjects
+        assert subjects[0]["name"] == "Team 10180", subjects
+        assert subjects[0]["org_id"] == TEAM, subjects
+    finally:
+        src_sdk.close()
+        dst_sdk.close()
+
+
+# ── 13. The new org inherits the fork from the PRIOR org's DEFAULT graph ───
+# Review P3 at `93697f51e895`. `_eager_provision_org_graph` read the creator's
+# prior org through `_make_sdk(namespace=prior)`, i.e. the historical
+# `org_{prior}`. After a promotion that name holds no `:OnboardingState` (the
+# carry moves the org onto the promoted graph, and any onboarding finished
+# SINCE the promotion was only ever written there), so `read_prior_org_fork`
+# answered None and `resolve_init_fork_compact` silently started the new org in
+# `fork='self'` — a different onboarding mode than the creator chose.
+
+def test_a_new_org_inherits_the_fork_from_the_prior_promoted_default(sb):
+    """FAIL-ON: the record exists ONLY in the namespace the org now has as its
+    default, which is the realistic post-promotion state."""
+    tc, fake, _ = sb
+    _seed_onboarding(_NEW_NS, steps=_COMPLETE_STEPS, status="complete",
+                     fork="build")
+    _as_session()
+    promoted = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert promoted.status_code == 200, promoted.text
+    # the promotion really moved the org's default off `org_{TEAM}`
+    assert fake.tables["organizations"][0]["graph_name"] == _NEW_NS
+
+    new_org = "team-10180-second"
+    graph_name = ha._eager_provision_org_graph(
+        fake, new_org, "Second Org", OWNER, prior_org_ids=[TEAM])
+    _os = _onboarding_state()
+    sdk = ha._make_sdk(graph_name=graph_name)
+    try:
+        node = _os.read_onboarding_node(sdk._get_proj(), new_org)
+    finally:
+        sdk.close()
+    assert node is not None, "the eager init wrote no OnboardingState"
+    assert node["fork"] == "build", (
+        "the new org did not inherit the creator's prior fork — the prior-org "
+        f"read opened the DEMOTED graph: {node}")
