@@ -401,6 +401,21 @@ def _step_accounting(repo: Path, run: dict, observed: tuple,
                 else list(STEPS))
     entries = run.get("steps_conditional") or []
     out: list[tuple[str, str]] = []
+    # A step id is a STRING — the epic's eight are S-ids — so a non-string entry
+    # (`"steps_required": [1, "S3"]`, a hand-edited log, which is the threat model
+    # this gate names) is a malformed record rather than a step. Uncleaned it
+    # reached the `', '.join(...)` below and raised TypeError: EXIT 1 ON A
+    # TRACEBACK, which this file documents as "the table has findings" — the same
+    # escape class V3/V8 cover, and the caller already covers it for a
+    # non-iterable `steps_observed`. Reported and DROPPED here, so the id also
+    # cannot stand in for a step it is not (`dropped` then reports the real gap).
+    bad_ids = [s for s in required if not isinstance(s, str)]
+    if bad_ids:
+        out.append(("V5", "steps_required carries entries that are not step ids "
+                          f"({', '.join(repr(s) for s in bad_ids)}) — a step id is a "
+                          "string, so a log naming another type has not declared a "
+                          "step at all"))
+        required = [s for s in required if isinstance(s, str)]
     if not isinstance(entries, (list, tuple)):
         # A green row cannot lean on a conditional declaration that is not a list:
         # report it and fall back to "nothing is conditional" (rule 2 then applies).

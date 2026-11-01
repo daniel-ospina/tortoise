@@ -163,11 +163,11 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
 
 ## Why no row can be GREEN — the structural cap, re-verified here
 
-`tools/capstone_verdict_check.py:110` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
-"S2.3", "S3", "S5", "S6")`, and `:498` refuses a GREEN row whose run left any step
-out (`missing = [s for s in STEPS if s not in observed]`, message at `:500`).
+`tools/capstone_verdict_check.py:118` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
+"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:379`) refuses a GREEN row whose
+run left a REQUIRED step out (`:460`, message at `:462`).
 
-⚠️ **Those three cites are re-checked BY HAND at the audit head, not by the bundle
+⚠️ **Those cites are re-checked BY HAND at the audit head, not by the bundle
 sweep.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches only the three
 sources this bundle prints numbers for (`sdk.py`, `edges.py`, `extractor_v2.py`), so a
 `tools/*.py` cite and the bare `:N` continuation below are invisible to it — stated
@@ -193,9 +193,11 @@ the already-scored log contains can be certified GREEN, whatever the underlying
 numbers do — that is a limit of the measurement's stamp, not of the verdicts.
 The seam does not by itself move a row: a row moves only by RE-RUNNING
 `probes/capstone_measure.py` at a post-seam head, which is what makes those two
-rows **witnessable** — S2.2 moves on such a re-run, while S2.3 moves only once its
-classify pass carries a non-empty `s2`/`union` (on the measured corpus it is IDLE,
-so a re-run still reports it unobserved). Until such a re-run is committed, the epic's closing rule
+rows **witnessable** — S2.2 moves on such a re-run, while S2.3 needs no such move: since
+`#10215` restated V5/G5 as **all eight accounted**, an idle classify pass is ACCOUNTED
+from the receipt's own facts (flag ON, no activity, no fail-open marker, a positive
+candidate count) instead of being required to appear in `steps_observed`. Until such a
+re-run is committed, the epic's closing rule
 stays unsatisfiable on the committed evidence, ahead of every row's own blocker.
 
 ---

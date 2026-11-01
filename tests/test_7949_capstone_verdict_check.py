@@ -3120,11 +3120,27 @@ def test_a_step_declared_both_required_and_conditional_is_a_finding():
 
 
 def test_a_conditional_step_that_is_observed_is_accounted_as_observed():
-    """A pass that DID run needs no idle claim — observed outranks it."""
-    rec = _idle_green(_record())
+    """A pass that DID run needs no idle claim — observed outranks it.
+
+    DISCRIMINATING on purpose, and the basis is deliberately EMPTY: that same record
+    without the observation is a finding (`test_an_idle_claim_with_no_basis_is_a_finding`),
+    so the only thing keeping this one green is the `step in observed` precedence. Delete
+    that branch and this test reds instead of passing for a reason nobody pinned.
+    """
+    rec = _idle_green(_record(), basis="")
     rec["run"]["steps_observed"] = list(cvc.STEPS)
     findings = cvc.check(rec, repo=_REPO, require_green=False)
     assert not findings, findings.render()
+
+
+def test_a_non_string_step_id_is_a_finding_not_a_traceback():
+    """A malformed log must REFUSE, not crash: `', '.join` on an int raised TypeError,
+    i.e. exit 1 on a traceback — indistinguishable from a real refusal (V3/V8's class)."""
+    rec = _idle_green(_record())
+    rec["run"]["steps_required"] = [1, *rec["run"]["steps_required"]]
+    codes = _codes(rec)
+    assert "V5" in codes, codes
+    assert any("not step ids" in m for m in _messages(rec)), _messages(rec)
 
 
 def test_a_required_step_still_missing_reds_alongside_a_conditional_one():
