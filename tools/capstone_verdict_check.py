@@ -108,9 +108,9 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import json
+import posixpath
 import re
 import subprocess
-import posixpath
 from pathlib import Path
 
 SCHEMA = "capstone-verdict-v1"

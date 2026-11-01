@@ -706,4 +706,3 @@ which is the fail-open shape a gate may not have. The failure is visible: the ex
 and does not make the epic closeable: a run still has to produce five measured rows. It removes one
 **impossible** requirement from the step gate so that the gate can answer the question it was built
 to answer.
-
