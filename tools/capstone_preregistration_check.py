@@ -74,7 +74,10 @@ It verifies six things, and it fails on each of them for a specific reason:
    block** on every number it restates. Two copies of a threshold that can disagree is how a gate
    reads one while a reviewer reads the other. It must also pin ``document_sha256``: the record is
    the artefact the run probe freezes, so an argument re-edited without the record moving with it is
-   a document the record no longer describes (#9075 review r3 P3).
+   a document the record no longer describes (#9075 review r3 P3). `hypothesis_bars` is compared by
+   the same rule, in both directions: the measured log names only five of the seven frozen bars, so
+   the record's restatement is what holds the other two — `corroboration_min_sessions`, which decides
+   the published `not-majority-of-sessions` qualifier, and the emitted-only `sessions_total`.
 
 6. **The record may not contradict the history or the model it describes.** Two contradictions, one
    rule, because both are the same defect: a frozen artefact asserting something the tree already
@@ -155,6 +158,12 @@ SCORED_LOG_GLOB = "capstone-measured-*.log"
 #: its ``prereg=`` line, so the name is not this check's invention.
 MACHINE_RECORD = "preregistration.json"
 PREREG_SCHEMA = "capstone-preregistration/v1"
+
+#: The bundle CI has always checked. A second pre-registered bundle (#10463's ablation) is added by
+#: repeating ``--dir``: before that, no CI job read it at all, so its ordering rule and its
+#: record↔pins cross-check never executed — and a docs-only diff (which runs only the ``tier1``
+#: slice) is exactly the change that can move a threshold after the numbers landed (#10468 r6 F1).
+DEFAULT_PREREG_DIR = "docs/evidence/7949-capstone"
 
 #: The document's own sha256, restated in the record and REQUIRED there. ``git log`` bounds the
 #: document only where history is available (a shallow checkout has none) and ``--diff-filter=A``
@@ -756,13 +765,20 @@ def derivation_label_classes() -> frozenset[str]:
 def _classes_named(cell: str) -> set[str]:
     """Which graph classes a cell NAMES, by the prose tokens above (``:Object`` folded in).
 
-    ⚠️ THE ANCHOR IS ``(?<![\w])``, NOT ``(?<![\w:])`` (#9736 review P2). A previous revision
+    ⚠️ THE ANCHOR IS ``(?<![\\w])``, NOT ``(?<![\\w:])`` (#9736 review P2). A previous revision
     excluded a preceding colon to avoid matching ``tuple:point``-shaped words — which made the
     CANONICAL ``:Object`` spelling invisible: a row written ``Point`` + ``:Object`` + ``Event`` (the
     spelling §3.4 itself uses) named only ``{Point, Event}`` and PASSED the very rule written to
     refuse it, while a correct row spelled entirely with colons named nothing and was FALSELY red-ed
     for omitting all three classes. A colon is exactly the markdown/Cypher class prefix, so it must
     not block a match; ``fooObject`` still does not match because ``o`` is a word character.
+
+    ⛔ THE BACKSLASHES ABOVE ARE DOUBLED ON PURPOSE (#10525 review P2): this is a NORMAL docstring,
+    so a single-backslash ``\\w`` is an invalid escape sequence — a ``SyntaxWarning`` on every run
+    that imports this gate (measured: ``-W error::SyntaxWarning`` turns it into a ``SyntaxError`` at
+    this line), and a hard error once invalid escapes stop being tolerated. It is also an asymmetry
+    inside one commit: the sibling docstring in ``tests/test_capstone_preregistration_9075.py``
+    already writes the same text escaped, and now both compile clean.
     """
     plain = _plain(cell).casefold()
     return {
@@ -773,7 +789,7 @@ def _classes_named(cell: str) -> set[str]:
 
 
 def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
-                                  pins: dict) -> list[str]:
+                                  pins: dict, scopes: list[str] | None = None) -> list[str]:
     """The registry may not contradict the history it describes — nor the model it scores (#9736).
 
     TWO CONTRADICTIONS, one rule, because both are the same defect: a frozen artefact asserting
@@ -793,6 +809,28 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
 
     ```[]`` when the record cannot be read at all: ``check_machine_record`` owns that failure, and
     reporting it twice would make one defect look like two.
+
+    ⛔ SCOPE — AN ARM IS ASKED ONLY OF A BUNDLE THAT MAKES ITS CLAIM (#10525 review, MEASURED).
+    This gate is invoked on TWO bundles in one CI step
+    (``--dir docs/evidence/7949-capstone --dir docs/evidence/5087-hypothesis``), and these two arms
+    were written for the first. Applied unconditionally they red-ed the second for seven things it
+    never said: six criteria that carry no ``measurement_visible_to_author`` field and no
+    ``prior_measurements`` block (a record that predates the field makes no visibility claim, so it
+    has no claim to contradict), and an E3 that is a SESSION-ARM criterion naming no graph class at
+    all (comparing it with the anchor model is a category error — the model never scored it). So:
+
+      * the visibility arm is asked of a record that carries the schema — ``prior_measurements``, or
+        the per-criterion field on at least one criterion. Deleting ONE criterion's field does not
+        opt out: the record still declares the schema, so the deleted one fails as a non-boolean;
+      * the class-set arm is asked of an E3 row that names at least one graph class. A row naming
+        none is declared in ``scopes`` instead. A row that names classes must name exactly the
+        anchored set in EVERY cell (see ``_e3_class_set_failures``), so narrowing the numerator to
+        escape it is itself a failure.
+
+    ```scopes``, when given, collects one human-readable line per arm NOT applied to this bundle. A
+    skip that is not declared is the silent-green shape this tool exists to refuse, so the caller
+    prints them (``--json`` carries them as ``registry_scopes``); a bundle that declares nothing is
+    told so rather than passed quietly.
     """
     failures: list[str] = []
     path = directory / MACHINE_RECORD
@@ -806,6 +844,18 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
     criteria = [c for c in _list(record, "criteria", MACHINE_RECORD) if isinstance(c, dict)]
     prior = _mapping(record, "prior_measurements", MACHINE_RECORD)
     by_id = {str(c.get("id") or ""): c for c in criteria}
+
+    #: Whether this record carries the #9738 schema at all. Not `bool(prior)`: an empty
+    #: `prior_measurements: {}` is a DECLARATION that there are none, and a record that declares the
+    #: mechanism must still answer the per-criterion field (a bundle cannot opt out by emptying it).
+    declares_visibility = "prior_measurements" in record or any(
+        "measurement_visible_to_author" in c for c in criteria
+    )
+    if not declares_visibility and by_id:
+        _note(scopes, "the record carries no `prior_measurements` block and no criterion carries "
+                      "`measurement_visible_to_author`, so the #9738 rule is not asked of it — a "
+                      "record that makes no visibility claim has no claim to contradict "
+                      "(measured: docs/evidence/5087-hypothesis predates the field)")
 
     for cid in sorted(prior):
         entry = prior[cid]
@@ -833,7 +883,7 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
                 "or delete the citation; the two may not stand together"
             )
 
-    for cid, crit in by_id.items():
+    for cid, crit in (by_id.items() if declares_visibility else ()):
         visible = crit.get("measurement_visible_to_author")
         if not isinstance(visible, bool):
             failures.append(
@@ -861,28 +911,78 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
             "copies of a commit pin that can disagree is how a reader is sent to the wrong history"
         )
 
-    anchored = frozenset(SELF_ANCHORED_CLASSES) | derivation_label_classes()
     e3 = [r for r in rows if r["id"] == "E3"]
     if not e3:
         failures.append("no E3 row — its class set cannot be compared with the model")
+    anchored: frozenset[str] | None = None
     for row in e3:
-        named = _classes_named(row["metric"]) | _classes_named(row["denominator"])
-        extra = sorted(named - anchored)
-        missing = sorted(anchored - named)
-        if extra:
-            failures.append(
-                f"E3 (line {row['line']}) counts {extra} among its derived nodes, but the model "
-                f"anchors only {sorted(anchored)} ({DERIVATION_LABELS_NAME} + {list(SELF_ANCHORED_CLASSES)}) "
-                "— an unanchored class in the numerator makes `= 1.000` unreachable as registered, "
-                "and reports a recorded decision (#5199 option A) as a defect (#9736)"
-            )
+        cells = {name: _classes_named(row[name]) for name in E3_CLASS_CELLS}
+        named = cells["metric"] | cells["denominator"]
+        if not named:
+            _note(scopes, f"E3 (line {row['line']}) names no graph class at all, so the anchor "
+                          "model does not apply to it — a criterion measured over something other "
+                          "than written nodes (measured: docs/evidence/5087-hypothesis's E3 is a "
+                          "session-arm receipt check) is not a class-set row")
+            continue
+        if anchored is None:
+            anchored = frozenset(SELF_ANCHORED_CLASSES) | derivation_label_classes()
+        failures += _e3_class_set_failures(row, cells, anchored)
+    return failures
+
+
+#: The two cells that must each name exactly the anchored class set (#9736). Both, not their union:
+#: a numerator narrower than its own denominator cannot reach it, which is the #9736 defect one
+#: level down, and a union test passes exactly that row.
+E3_CLASS_CELLS = ("metric", "denominator")
+
+
+#: Why a class missing from each cell fails, in the words of the cell it is missing from.
+_E3_CELL_OMISSION_REASON = {
+    "metric": "a numerator that cannot count an anchored class cannot reach the denominator it must "
+              "equal (#9736)",
+    "denominator": "a denominator that does not count an anchored class scores a subset of the "
+                   "nodes the model writes, so `= 1.000` measures something narrower than the row "
+                   "claims (#9736)",
+}
+
+
+def _e3_class_set_failures(row: dict[str, str], cells: dict[str, set[str]],
+                           anchored: frozenset[str]) -> list[str]:
+    """E3's class set, held to the model **cell by cell** (#10525 review P1).
+
+    The previous revision compared ``metric | denominator`` with ``anchored``. That made the
+    omission arm inert against the shape it was written for: each class only had to appear in ONE
+    of the two cells, so a metric counting ``Point`` + ``Event`` against a denominator counting
+    ``Point`` + ``Event`` + ``Document`` — #9736's own defect, one level down — produced no failure.
+    Measured on the shipped row with only the metric cell mutated: baseline ``[]``, metric-only
+    omission ``[]``. Every cell is now held to the anchored set on its own.
+    """
+    failures: list[str] = []
+    counted = sorted((cells["metric"] | cells["denominator"]) - anchored)
+    if counted:
+        where = " and ".join(name for name in E3_CLASS_CELLS if cells[name] & set(counted))
+        failures.append(
+            f"E3 (line {row['line']}) counts {counted} among its derived nodes in its {where}, but "
+            f"the model anchors only {sorted(anchored)} ({DERIVATION_LABELS_NAME} + "
+            f"{list(SELF_ANCHORED_CLASSES)}) — an unanchored class in the numerator makes "
+            "`= 1.000` unreachable as registered, and reports a recorded decision (#5199 option A) "
+            "as a defect (#9736)"
+        )
+    for name in E3_CLASS_CELLS:
+        missing = sorted(anchored - cells[name])
         if missing:
             failures.append(
-                f"E3 (line {row['line']}) omits {missing} from its derived nodes, but the model "
-                f"anchors {sorted(anchored)} — a numerator that cannot count an anchored class "
-                "cannot reach the denominator it must equal (#9736)"
+                f"E3 (line {row['line']}) omits {missing} from its {name}, but the model anchors "
+                f"{sorted(anchored)} — {_E3_CELL_OMISSION_REASON[name]}"
             )
     return failures
+
+
+def _note(scopes: list[str] | None, message: str) -> None:
+    """Declare an arm this bundle is NOT asked — never a silent skip (see the caller's docstring)."""
+    if scopes is not None:
+        scopes.append(message)
+
 
 
 def _measured_locations(record: dict) -> list[str]:
@@ -1255,6 +1355,30 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
             "REFUSED boundary the document does not state"
         )
 
+    # The hypothesis bars, same shape as `denominator_floors` (#10468 review `f0b6842eb`, P2).
+    # THE SHARP CASE IS NOT A DISAGREEMENT: the measured log names only five of the seven bars, so
+    # the two it cannot be held to — `corroboration_min_sessions` (which decides the published
+    # `not-majority-of-sessions` qualifier) and the emitted-only `sessions_total` — are held to
+    # nothing at all unless this comparison exists. `hypothesis_bars` is optional at the PINS side
+    # because it is a block this bundle introduced (`docs/evidence/7949-capstone` has no such map);
+    # where the document does state it, the record may neither disagree, drop a bar, nor invent one.
+    pins_bars = _pins_mapping(pins, "hypothesis_bars")
+    rec_bars = _mapping(record, "hypothesis_bars", MACHINE_RECORD)
+    if not pins_bars:
+        if rec_bars:
+            failures.append(
+                f"{MACHINE_RECORD} hypothesis_bars has no pins block — the record may not invent a "
+                "bar the document does not state"
+            )
+    else:
+        for key, want in pins_bars.items():
+            cmp(f"hypothesis_bars.{key}", want, rec_bars.get(key))
+        for key in sorted(set(rec_bars) - set(pins_bars)):
+            failures.append(
+                f"{MACHINE_RECORD} hypothesis_bars.{key} has no pin — the record may not invent a "
+                "bar the document does not state"
+            )
+
     pins_split = _pins_mapping(pins, "split")
     rec_split = _mapping(record, "split", MACHINE_RECORD)
     for half in ("tune", "held_out"):
@@ -1537,7 +1661,8 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     failures: list[str] = []
     failures += check_completeness(rows)
     failures += check_e4_denominator(rows, text, pins)
-    failures += check_registry_contradictions(directory, rows, pins)
+    registry_scopes: list[str] = []
+    failures += check_registry_contradictions(directory, rows, pins, registry_scopes)
 
     logs = sorted(directory.glob(EVIDENCE_LOG_GLOB))
     report["evidence_logs"] = [p.name for p in logs]
@@ -1596,6 +1721,11 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
         corpus_state = "UNVERIFIED (--no-corpus)"
     report["corpus"] = corpus_state
 
+    if registry_scopes:
+        # A rule this bundle is not asked is a DECLARED skip, printed by `main` and carried in the
+        # JSON — the same treatment `--no-corpus` gets, for the same reason (#10525).
+        report["registry_scopes"] = registry_scopes
+
     report["failures"] = failures
     report["ok"] = not failures
     # The machine record's run-order claim is TRUSTED, not derived: the only independent evidence
@@ -1610,8 +1740,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Verify the extractor-v4 capstone pre-registration (#9075)."
     )
-    ap.add_argument("--dir", default="docs/evidence/7949-capstone",
-                    help="directory holding PRE-REGISTRATION.md and its evidence logs")
+    ap.add_argument("--dir", action="append", default=None,
+                    help="directory holding PRE-REGISTRATION.md and its evidence logs; REPEAT to "
+                         f"check several bundles in one run (default: {DEFAULT_PREREG_DIR})")
     ap.add_argument("--no-git", action="store_true",
                     help="skip the commit-ordering check (pre-commit authoring)")
     ap.add_argument("--no-corpus", action="store_true",
@@ -1619,21 +1750,43 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit the report as JSON")
     args = ap.parse_args(argv)
 
-    directory = Path(args.dir)
-    if not directory.is_absolute():
-        directory = REPO_ROOT / directory
-    try:
-        report = run(directory, use_git=not args.no_git, use_corpus=not args.no_corpus)
-    except CheckError as exc:
-        if args.json:
-            print(json.dumps({"ok": False, "error": str(exc)}))
-        else:
-            print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
+    directories = []
+    for entry in args.dir or [DEFAULT_PREREG_DIR]:
+        directory = Path(entry)
+        directories.append(directory if directory.is_absolute() else REPO_ROOT / directory)
+
+    reports: list[dict] = []
+    errors: list[tuple[Path, str]] = []
+    for directory in directories:
+        try:
+            reports.append(run(directory, use_git=not args.no_git,
+                               use_corpus=not args.no_corpus))
+        except CheckError as exc:
+            errors.append((directory, str(exc)))
+    # 2 outranks 1 on purpose: "I could not check this subject" is a different answer from "I
+    # checked it and found problems", and a run that cannot read ONE of the bundles it was given
+    # must never report the other bundles' green as the verdict.
+    exit_code = 2 if errors else (0 if all(r["ok"] for r in reports) else 1)
 
     if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
-    else:
+        if len(directories) == 1:
+            print(json.dumps({"ok": False, "error": errors[0][1]} if errors else reports[0],
+                             indent=2, sort_keys=True))
+        else:
+            # Each error carries its OWN directory (#10468 review: the human path prints
+            # `ERROR: {directory}: {message}`, but the JSON emitted only the message — so a
+            # consumer of a two-bundle `--json` run could see THAT one failed and not WHICH).
+            print(json.dumps({"ok": exit_code == 0, "reports": reports,
+                              "errors": [{"directory": str(directory), "error": message}
+                                         for directory, message in errors]},
+                             indent=2, sort_keys=True))
+        return exit_code
+
+    for directory, message in errors:
+        print(f"ERROR: {directory}: {message}", file=sys.stderr)
+    for report in reports:
+        if len(directories) > 1:
+            print(f"=== {report['document']} ===")
         print(f"pre-registration: {report['document']}")
         print(f"criteria rows: {', '.join(r['id'] for r in report['rows']) or '(none)'}")
         print(f"evidence logs: {len(report['evidence_logs'])}"
@@ -1663,12 +1816,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL — {len(report['failures'])} problem(s):")
             for f in report["failures"]:
                 print(f"  - {f}")
+        for note in report.get("registry_scopes", []):
+            print(f"registry arm NOT applied — {note}")
         exempt_note = ""
         if report.get("ordering_exempt"):
             exempt_note = (f" (exempt by CONTENT, measured nothing: "
                            f"{', '.join(report['ordering_exempt'])})")
         print(f"machine record run-order claim: {report['run_order_claim']}{exempt_note}")
-    return 0 if report["ok"] else 1
+    return exit_code
 
 
 if __name__ == "__main__":

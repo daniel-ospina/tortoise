@@ -20,10 +20,12 @@ unregistered test file).
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -132,6 +134,56 @@ def _label_hits() -> tuple[int, int, int]:
         lines += len(hits)
         narrow += sum(1 for line in hits if re.search(r"\(\w*:Document", line))
     return lines, files, narrow
+
+
+#: The UNPATCHED `Path.read_text`, captured at import. Every recorder below passes
+#: through THIS rather than through `Path.read_text` as it happens to be at that
+#: moment: `test_a_read_from_another_thread_is_not_attributed_to_label_hits` needs
+#: two recorders in one test, and a pass-through captured inside the second one
+#: would be the FIRST recorder — two spies chained, each appending to its own list.
+_REAL_READ_TEXT = Path.read_text
+
+
+def _label_hits_reads(
+    monkeypatch,
+    *,
+    scope_to_thread: bool = True,
+    during=None,
+) -> list[Path]:
+    """Every path `_label_hits()` read via `Path.read_text`, in read order.
+
+    `scope_to_thread` records ONLY reads made on the calling thread, and that is
+    load-bearing rather than tidy. `monkeypatch.setattr(Path, "read_text", …)`
+    patches an attribute on a class, so the patch is GLOBAL TO THE PROCESS until
+    teardown (pytest's own documented behaviour: the attribute is replaced, not a
+    per-thread view of it) — every other thread that reads a file inside the
+    window is recorded as if the function under test had read it.
+
+    Measured on CI rather than argued: `test (a)` of run 41319892722 (job
+    124892295398) reddened `test_the_label_population_is_every_tracked_file_
+    not_just_py` with `Extra items in the left set: PosixPath('/proc/2839/stat')`.
+    `_label_hits` never reads `/proc`; `tortoise/embedded_reaper._pid_alive`
+    does (`embedded_reaper.py:991`) from the sweep's worker thread, and the
+    unscoped recorder attributed that read to the population control. A false
+    RED — the exact mirror of the false CLEAN that control was written to close.
+
+    `during` runs after the patch is installed and before `_label_hits()`, so a
+    caller can stage a concurrent read deterministically instead of hoping for
+    one (`test_a_read_from_another_thread_is_not_attributed_to_label_hits`).
+    """
+    read: list[Path] = []
+    mine = threading.get_ident()
+
+    def _spy(self, *args, **kwargs):
+        if not scope_to_thread or threading.get_ident() == mine:
+            read.append(self)
+        return _REAL_READ_TEXT(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _spy)
+    if during is not None:
+        during()
+    _label_hits()
+    return read
 
 
 def _checkout_history_is_complete() -> bool:
@@ -1096,16 +1148,13 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
     count matches either way and the latent false CLEAN survives behind a green
     suite. A control on the helper is not a control on the count (#5086 review
     P2, cycle 5).
+
+    The recorder is THREAD-SCOPED (`_label_hits_reads`) so a concurrent read by an
+    unrelated worker thread cannot be mistaken for one of `_label_hits`'s — that
+    false RED reddened CI, and `test_a_read_from_another_thread_is_not_attributed_
+    to_label_hits` pins both halves of it.
     """
-    read: list[Path] = []
-    real_read_text = Path.read_text
-
-    def _spy(self, *args, **kwargs):
-        read.append(self)
-        return real_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", _spy)
-    _label_hits()
+    read = _label_hits_reads(monkeypatch)
 
     assert read, "`_label_hits` read no files at all"
     non_py = [p for p in read if p.suffix != ".py"]
@@ -1118,6 +1167,66 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
     assert set(read) <= set(_tracked_files_under(_TRACKED_DIR)), (
         "`_label_hits` read a file that is not tracked under tortoise/ — the "
         "population drifted off the one §5's `git grep` sentence is stated in"
+    )
+
+
+def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch) -> None:
+    """Fails if a read made by ANOTHER thread lands in `_label_hits`'s population.
+
+    Reachable, and measured on CI: `test (a)` of run 41319892722 (job
+    124892295398) reddened `test_the_label_population_is_every_tracked_file_
+    not_just_py` with `Extra items in the left set: PosixPath('/proc/2839/stat')`.
+    `_label_hits` never reads `/proc`; `tortoise/embedded_reaper._pid_alive` does
+    (`embedded_reaper.py:991`), on the sweep's worker thread — and because
+    `Path.read_text` is patched on the CLASS, every thread that reads a file
+    inside the window is recorded. The control then compared a foreign path
+    against the tracked population and failed: a false RED, the mirror of the
+    false CLEAN it exists to close, reddening the required `test` job with no
+    defect behind it.
+
+    Both halves are asserted, so this cannot regress in either direction: the
+    UNscoped recorder DOES see the other thread's read (the race is reproduced
+    deterministically through `during`, not assumed), and the scoped one — the
+    one the population control uses — does not.
+    """
+    #: A path `_label_hits()` provably never reads: not under `tortoise/`, and it
+    #: need not exist — the recorder appends BEFORE the read, exactly as it did
+    #: for `/proc/<pid>/stat`, so an `OSError` here is the steadiest case rather
+    #: than a weak one.
+    foreign = REPO / ".git" / "a-path-another-thread-read.txt"
+
+    def _another_thread_reads() -> None:
+        def _probe() -> None:
+            with contextlib.suppress(OSError):
+                foreign.read_text(encoding="utf-8")
+
+        thread = threading.Thread(target=_probe, daemon=True)
+        thread.start()
+        thread.join(timeout=_INDEX_TIMEOUT_S)
+        assert not thread.is_alive(), (
+            "the probe thread did not finish inside the patched window, so this "
+            "test would prove nothing about what a concurrent read is attributed to"
+        )
+
+    unscoped = _label_hits_reads(
+        monkeypatch, scope_to_thread=False, during=_another_thread_reads
+    )
+    assert foreign in unscoped, (
+        "the unscoped recorder did not see the other thread's read, so the "
+        "contamination this test guards against was not reproduced — the "
+        "scoped assertion below would then be vacuous"
+    )
+
+    scoped = _label_hits_reads(monkeypatch, during=_another_thread_reads)
+    assert scoped, "`_label_hits` read no files at all on the calling thread"
+    assert foreign not in scoped, (
+        "a read made on ANOTHER thread was attributed to `_label_hits`, which "
+        "reds the population control on a foreign path and reports a defect "
+        "that is not there (CI: `/proc/2839/stat` from the reaper's sweep thread)"
+    )
+    assert set(scoped) <= set(_tracked_files_under(_TRACKED_DIR)), (
+        "the scoped population drifted off the tracked set under tortoise/ — "
+        "the population §5's `git grep` sentence is stated in"
     )
 
 
