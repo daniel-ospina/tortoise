@@ -248,6 +248,7 @@ REFUSE_NO_PLAN = "no-plan"
 REFUSE_PLAN_UNREADABLE = "plan-unreadable"
 REFUSE_NO_TARGET_NOTE = "no-target-note"
 REFUSE_RECORD_NOT_ARMED = "record-not-armed"
+REFUSE_NO_ARMED_EVIDENCE = "no-armed-evidence"
 REFUSE_NO_RESTORE_PROOF = "no-restore-proof"
 REFUSE_RESTORE_PROOF_STALE = "restore-proof-stale"
 REFUSE_CONFIRMATION_MISMATCH = "confirmation-mismatch"
@@ -562,7 +563,7 @@ def evaluate_gate(*, plan: dict | None, live_report: dict | None,
     # authorise a delete even if a fresher /health passes today.
     approved_armed = plan.get("armed_evidence")
     if not isinstance(approved_armed, dict) or not approved_armed:
-        return (REFUSE_NOT_IN_PLAN,
+        return (REFUSE_NO_ARMED_EVIDENCE,
                 "the plan records no armed evidence — it was generated "
                 "without a /health artefact, so the record was not proven "
                 "ARMED when it was approved. Regenerate it with "

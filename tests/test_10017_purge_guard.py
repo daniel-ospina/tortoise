@@ -391,6 +391,7 @@ def test_entry_point_carries_the_python_guard():
 
 @pytest.mark.parametrize("code", [
     purge.REFUSE_NO_PLAN, purge.REFUSE_RECORD_NOT_ARMED,
+    purge.REFUSE_NO_ARMED_EVIDENCE,
     purge.REFUSE_NO_RESTORE_PROOF, purge.REFUSE_CONFIRMATION_MISMATCH,
     purge.REFUSE_EXACT_SET_MISMATCH, purge.REFUSE_RECORD_BEHIND,
     purge.REFUSE_MISMATCH, purge.REFUSE_NO_TARGET_NOTE,
@@ -401,6 +402,7 @@ def test_every_refusal_code_is_a_distinct_name(code):
     codes = {purge.REFUSE_NO_PLAN, purge.REFUSE_PLAN_UNREADABLE,
              purge.REFUSE_NO_TARGET_NOTE, purge.REFUSE_RECORD_NOT_ARMED,
              purge.REFUSE_NO_RESTORE_PROOF, purge.REFUSE_RESTORE_PROOF_STALE,
+             purge.REFUSE_NO_ARMED_EVIDENCE,
              purge.REFUSE_CONFIRMATION_MISMATCH,
              purge.REFUSE_EXACT_SET_MISMATCH, purge.REFUSE_RECORD_BEHIND,
              purge.REFUSE_MISMATCH, purge.REFUSE_NOT_IN_PLAN,
@@ -409,7 +411,7 @@ def test_every_refusal_code_is_a_distinct_name(code):
              purge.REFUSE_CENSUS_UNREADABLE, purge.REFUSE_TARGET_DRIFT,
              purge.REFUSE_ARMED_EVIDENCE_STALE, purge.REFUSE_NO_APPROVAL,
              purge.REFUSE_PARTIAL_SWEEP}
-    assert len(codes) == 20
+    assert len(codes) == 21
     assert code in codes
 
 
@@ -1060,7 +1062,7 @@ def test_a_plan_without_armed_evidence_cannot_authorise_a_delete():
                             restore_proof=_proof(), target_note="test target",
                             recovery_missing=[])
     code, message = _gate(plan, live=report)
-    assert code == purge.REFUSE_NOT_IN_PLAN
+    assert code == purge.REFUSE_NO_ARMED_EVIDENCE
     assert "armed evidence" in message
 
 
