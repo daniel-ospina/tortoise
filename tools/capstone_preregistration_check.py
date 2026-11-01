@@ -1603,6 +1603,12 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
     # Present on EVERY path: a consumer that reads `ordering_exempt` must be able to tell "nothing
     # was exempted" from "the arm that fills it never ran" (review cycle 1, finding 2).
     report.setdefault("ordering_exempt", [])
+    # …and so is the BASE, on every path (review cycle 4, finding 1). It was reported only in
+    # `--json`, so the CI log a human reads could not tell a verdict measured against `origin/main`
+    # from one measured against the local `HEAD` fallback — which IS the PR-internal rule #10463
+    # removes. A green line that reads the same either way is the silent-green this field exists to
+    # remove, and it must not be visible only to machines.
+    report.setdefault("ordering_base", "(not measured)")
     report["ordering"] = ordering
     failures += check_machine_record(directory, pins)
 
@@ -1740,6 +1746,10 @@ def main(argv: list[str] | None = None) -> int:
             exempt_note = (f" (exempt by CONTENT, measured nothing: "
                            f"{', '.join(report['ordering_exempt'])})")
         print(f"machine record run-order claim: {report['run_order_claim']}{exempt_note}")
+        # The ref the verdict was measured against, PRINTED — not only in `--json` (review cycle 4,
+        # finding 1). A verdict against the local `HEAD` fallback is the PR-internal rule this
+        # change removes, and the log must not read identically to one against the published base.
+        print(f"ordering measured against: {report['ordering_base']}")
     return exit_code
 
 

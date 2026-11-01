@@ -2623,7 +2623,7 @@ def test_a_multi_bundle_json_error_names_the_bundle_it_came_from(tmp_path, capsy
 # ⚠️ NOT covered, and not claimed: these arms read ADD commits only (`--diff-filter=A`), so a
 # contribution that rewrites a threshold in the registration AND lands a scored log in one commit is
 # accepted. Closing that needs a modification bound on the ordinary arm (the exemption arm already
-# has one, `_touch_epochs`) and is a new rule, filed rather than invented here.
+# has one, `_touch_epochs`) and is a new rule — tracked as **#10555**, not invented here.
 
 
 def _repo_with_published_base(tmp_path: Path, monkeypatch) -> Path:
@@ -2743,3 +2743,39 @@ def test_equal_epochs_on_the_base_are_still_not_before(tmp_path, monkeypatch):
     failures = check.check_ordering(prereg, [log])
     assert failures, "equal epochs must not pass as 'before'"
     assert "not strictly after" in failures[0], failures[0]
+
+
+def test_the_base_ref_refusal_names_the_cause_that_actually_fired(tmp_path, monkeypatch):
+    """BOTH branches of `no_base_ref_message`, because the explicit one is the CI shape.
+
+    The CI step ALWAYS passes `--base-ref "origin/<branch>"`, so the operator's most likely failure
+    is "that ref is not fetched here" — not "you forgot the flag". The shared message told them the
+    flag was absent (it was not) and that `origin/main`/`main` did not resolve (they do), sending
+    them to debug flag wiring instead of fetching the branch. Asserted in BOTH directions: naming
+    the cause is only worth anything if the other cause's text is absent (#10463 review cycle 4).
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/contrib")
+    _git(repo, "remote", "add", "upstream", "https://example.invalid/x.git")
+    (repo / "README.md").write_text("base\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "base", epoch=1_700_000_000)
+    prereg = _commit_prereg(
+        repo, epoch=1_700_000_100, text=(PREREG_DIR / check.PREREG_NAME).read_text())
+
+    explicit = check.no_base_ref_message("origin/nope")
+    assert "origin/nope" in explicit, explicit
+    assert "no --base-ref" not in explicit, explicit
+    assert "exit 2" in explicit and "third outcome" in explicit, explicit
+
+    implicit = check.no_base_ref_message(None)
+    assert "no --base-ref" in implicit, implicit
+    assert "origin/nope" not in implicit, implicit
+    assert "exit 2" in implicit and "third outcome" in implicit, implicit
+
+    # …and the caller really does pass the explicit ref through, so the branch above is reachable.
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_200)
+    with pytest.raises(check.CheckError) as exc:
+        check.check_ordering(prereg, [log], base_ref="origin/nope")
+    assert "origin/nope" in str(exc.value), str(exc.value)
+    assert "no --base-ref" not in str(exc.value), str(exc.value)
