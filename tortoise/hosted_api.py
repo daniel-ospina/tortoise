@@ -8482,11 +8482,73 @@ def _key_limit_refusal(
         QuotaExceededError(message, resource="api_keys"))
 
 
-#: The resources `quota._count_resource` counts in the TENANT graph (as opposed
-#: to the control plane / the registry, where the graph pointer is irrelevant).
-#: #10180: these are the ones whose count must follow a promoted default — see
-#: `_check_org_limit`.
-_TENANT_GRAPH_RESOURCES = frozenset({"points", "sessions", "documents"})
+#: The resources whose count reads the TENANT GRAPH (`quota._count_resource`'s
+#: tenant-graph branch). For these the gate must count the graph the request
+#: actually opens; the registry-scoped resources (`api_keys`/`users`/`graphs`)
+#: are counted in the control plane and take no data SDK (#4051).
+#: This SUPERSEDES the `_TENANT_GRAPH_RESOURCES` literal #10180 added here: same
+#: members, and one name for the one set, so the two cannot drift.
+_GRAPH_SCOPED_QUOTA_RESOURCES = frozenset({"points", "sessions", "documents"})
+
+
+def _gate_sdk_for(org: dict, resource: str):
+    """The SDK whose graph the org-limit gate must COUNT — #4051.
+
+    `_data_graph_name` is *"the single value the ADMISSION GATE and the opener
+    share"*, but the gate did not use it: it called `enforce_org_limit(org,
+    resource)` with no SDK, so `quota._count_resource` fell back to its own
+    `_make_sdk(namespace=org_id)` — the org's **DEFAULT** graph, whatever graph
+    the request would actually open. `_data_sdk` writes into the graph-bound
+    key's CUSTOM `org_<tid>_<gid>` graph, so the gate counted a different graph
+    than it guarded: a custom graph already OVER its `max_points` still passed
+    the commit lane's points gate (measured: 5 points against a limit of 5, the
+    default graph empty, no refusal).
+
+    This mirrors the opener's TWO call forms rather than re-deriving one:
+    a graph-bound key gets `graph_name=_data_graph_name(org)` (the value
+    `_data_sdk` passes verbatim), and an org-wide key gets exactly what
+    `_org_sdk_for_credential` builds — which is the SAME decision the #10180
+    promotion work put on this path, reused rather than restated: a moved
+    default opens `graph_name=<promoted namespace>`, and every other org opens
+    the historical `namespace=org_id`. Those two axes are ORTHOGONAL and both
+    were real — #10180 made an org-wide count follow a PROMOTION, #4051 makes a
+    graph-BOUND count follow the BINDING, and before the merge of the two each
+    fix left the other's lane vacuous.
+
+    Mirroring the FORMS matters as much as the graph: `_make_sdk` keys its
+    embedded keepalive anchor on `graph_name if graph_name is not None else
+    namespace` (`_FALLBACK_KEEPALIVE`), and that dict has no eviction path — so
+    `graph_name="org_team-001"` for an org-wide key would park a SECOND anchor
+    (`org_team-001` beside the write's `team-001`) for every org in the process.
+    Mirroring also preserves the "identical connection" property
+    `mcp_server._enforce_quota` states as the rule.
+
+    Two deliberate non-uses:
+    - registry-scoped resources get `None`: their count is a control-plane read
+      and building a data SDK for them would be pure cost on the key-mint path.
+    - an UNRESOLVED graph binding (`_data_graph_name` → `None`) also gets
+      `None`. That request is refused 403 GRAPH_NOT_FOUND by `_data_sdk`
+      before any write, so which graph the gate read cannot change an outcome —
+      and substituting a graph here would be a fail-OPEN widening.
+
+    ⛔ KNOWN RESIDUAL (recorded, not fixed): on the three `/v1/{points,objects,
+    subjects}` sites the gate runs BEFORE `_data_sdk`'s `_assert_graph_owned`, so
+    for a binding whose namespace RESOLVES but is not owned (a DB-inconsistency
+    window, never client input — `graph_namespace` is auth-stamped) the gate now
+    counts that graph and a 402 can pre-empt the 403. Closing it means either
+    moving the gate after the SDK open at those three sites or gating the graph
+    SDK on a completed ownership check; both are their own change.
+    """
+    if resource not in _GRAPH_SCOPED_QUOTA_RESOURCES:
+        return None
+    if org.get("graph_id"):
+        graph = _data_graph_name(org)
+        if graph is None:
+            return None
+        return _make_sdk(graph_name=graph)
+    if not org.get("org_id"):
+        return None
+    return _org_sdk_for_credential(org)
 
 
 def _check_org_limit(org: dict, resource: str, *,
@@ -8529,27 +8591,26 @@ def _check_org_limit(org: dict, resource: str, *,
         quota_refusal_payload,
     )
     try:
-        # #10180: the points/sessions/documents counts are TENANT-graph counts, so
-        # the SDK they run against decides which graph the cap is measured on.
-        # Pass the org's DEFAULT-graph SDK explicitly (the `sdk=` arm
-        # `_count_resource` already documents for "REST callers that already hold
-        # one") so a promoted default is counted where the writes it admits
-        # actually land. Without it the gate counts the graph a promotion
-        # DEMOTED: a stale-low count admits an org past its real cap (the money
-        # gate failing OPEN) and a stale-high one refuses writes it is under.
-        # `org` is the RESOLVED CREDENTIAL (not the org ROW): an org-wide one
-        # carries `graph_namespace` — its default's namespace, resolved once at
-        # auth — so this needs no control-plane read and cannot fail open. (An
-        # earlier draft read `graph_name` here, a key no credential dict has:
-        # every gate then took the I/O branch, i.e. a blocking PostgREST read on
-        # the event loop of the capture path.) Scoped to the resources that ARE
-        # counted in the tenant graph — `api_keys`/`users`/`graphs` are counted
-        # from the control plane or the registry and must not pay for an SDK
-        # they never touch.
-        enforce_org_limit(
-            org, resource, slot_credit=slot_credit,
-            sdk=(_org_sdk_for_credential(org)
-                 if resource in _TENANT_GRAPH_RESOURCES else None))
+        # #4051 + #10180: the points/sessions/documents counts are TENANT-graph
+        # counts, so the SDK they run against decides WHICH graph the cap is
+        # measured on. Two orthogonal ways that went wrong, both closed by
+        # `_gate_sdk_for`: (a) #4051 — a graph-BOUND key was counted in the org's
+        # DEFAULT graph while its write went to a custom one, so the gate was
+        # present and vacuous; (b) #10180 — a PROMOTED default was counted where
+        # it used to be, so a stale-low count admitted an org past its real cap
+        # (the money gate failing OPEN). `org` is the RESOLVED CREDENTIAL (not
+        # the org ROW): an org-wide one carries `graph_namespace` — its
+        # default's namespace, resolved once at auth — so this needs no
+        # control-plane read and cannot fail open.
+        #
+        # `sdk_factory=` (lazy), NOT `sdk=`: a gate that RETURNS before counting
+        # must not build a graph handle to prove it. `sessions` is unlimited by
+        # #4010 and `documents` returns for an unlimited `max_points`, so an
+        # eager resolve was measured as 0 -> 1 `_make_sdk` per capture, 764 us of
+        # it embedded, on the event loop — for a count that never ran.
+        enforce_org_limit(org, resource,
+                          sdk_factory=lambda: _gate_sdk_for(org, resource),
+                          slot_credit=slot_credit)
     except QuotaExceededError as e:
         # #4614: the refusal is a STRUCTURED, distinguishable state — a `code`
         # plus the resource/used/limit the gate actually compared — not the

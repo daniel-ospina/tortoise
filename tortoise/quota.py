@@ -1041,8 +1041,40 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         raise QuotaCheckError(f"quota count failed for {resource}: {redacted}") from e
 
 
+def _resolve_count_sdk(sdk, sdk_factory):
+    """The SDK `_count_resource` must count through, built LAZILY (#4051).
+
+    The gate can return before it ever counts — an explicitly-`None` limit is
+    unlimited (#683) and `sessions` is now always that (#4010), and the
+    `documents` derived branch returns for an unlimited `max_points`. Resolving
+    the graph SDK eagerly therefore built and parked one per gate call for a
+    count that never runs: measured by the #4051 reviewer on the capture lane as
+    **0 -> 1 `_make_sdk` calls per capture, 764 us of it embedded**, on the event
+    loop. A factory defers it to the moment the count is actually taken.
+
+    Errors are re-raised as `QuotaCheckError`, never left as the bare exception
+    the construction raised: `_count_resource` used to own this construction and
+    turned every failure into that fail-closed class (500 + an ERROR log). A
+    caller that passes a factory relies on the same contract, so the factory call
+    must not become the one way a counting fault escapes unclassified.
+    """
+    if sdk is not None or sdk_factory is None:
+        return sdk
+    try:
+        return sdk_factory()
+    except QuotaCheckError:
+        raise
+    except Exception as e:
+        from .security import redact_error
+        redacted = redact_error(e)
+        _logger.error(
+            "quota count sdk unavailable (fail-closed): error=%s", redacted)
+        raise QuotaCheckError(
+            f"quota count sdk unavailable: {redacted}") from e
+
+
 def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
-                      slot_credit: int = 0) -> None:
+                      slot_credit: int = 0, sdk_factory=None) -> None:
     """Reject a write when the org is at/over its resource limit.
 
     Args:
@@ -1069,6 +1101,13 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
             | "documents".
         sdk: pre-built org SDK (REST callers already hold one) — optional.
+        sdk_factory: #4051 — called ONLY if and when the count is actually
+            taken, for callers that must count the graph the write will open but
+            must not build an SDK when the limit is unlimited (the capture lane's
+            `sessions` gate is vacuous by #4010 and counted nothing before this —
+            it must not start building a graph handle to prove it). Mutually
+            exclusive with `sdk`: a non-None `sdk` wins and the factory is never
+            called.
         slot_credit: #4355 — how many slots this write RELEASES as part of the
             same operation, so the admission check is evaluated against the
             post-release count. It exists for exactly ONE caller: the
@@ -1119,7 +1158,8 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
                 f"team limits max_points invalid for documents resource "
                 f"({max_points!r})") from None
         limit = max_points * _DOCUMENTS_FROM_POINTS_FACTOR
-        count = _count_resource(org_id, "documents", sdk=sdk)
+        count = _count_resource(org_id, "documents",
+                                sdk=_resolve_count_sdk(sdk, sdk_factory))
         if count >= limit:
             raise QuotaExceededError(
                 with_limit_contact(
@@ -1200,7 +1240,8 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
         raise QuotaCheckError(
             f"team limits {limit_key} unreadable for resource {resource!r} "
             f"({limit!r})") from None
-    count = _count_resource(org_id, resource, sdk=sdk)
+    count = _count_resource(org_id, resource,
+                            sdk=_resolve_count_sdk(sdk, sdk_factory))
     # #4614: report what the gate COMPARED (post-credit), never a fresh count —
     # the refusal's numbers must be the ones that produced it.
     used = count - slot_credit
