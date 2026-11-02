@@ -91,7 +91,8 @@ dropped at the cap is unreachable by any subsequent call. Every site that meets
 it today is named below by ``<module>::<function>``, and
 ``tests/test_8447_truncation_marker.py::TestTheMarkerSiteRegisterIsComplete``
 derives that list from the tree so this register cannot re-stale — it has
-already shipped wrong once as a count ("the only place", then "TWO sites"):
+already shipped wrong twice, both times as a claim about how MANY sites there
+are rather than naming them:
 
 - ``tortoise/sdk.py::tortoise_fts_query`` — the limit-capped search path
   (``result_ids[:limit]``, no offset and no cursor; ``/v1/search``).
