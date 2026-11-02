@@ -106,6 +106,21 @@ a row moves only by RE-RUNNING the probe and deleting the file it replaces, so t
 from the tree while the numbers it produced stay citable from history. Where the two disagree, the
 log at `9152448d7` wins.
 
+⚠️ **The FROZEN pre-registration still names the deleted file, and it cannot be edited.**
+`PRE-REGISTRATION.md` (§8's "**A scored evidence log already exists**: `capstone-measured-e0fc940b.log`"
+and its `E3 census` / `E5` cites) and `preregistration.json`'s three `post_registration_measurement`
+fields all name `capstone-measured-e0fc940b.log`, which this PR deletes. That is expected, not a
+broken reference: the record is **hash-frozen** — `document_sha256:
+sha256:e8b838724a344251d5a8ef51a641e097b97f18319d03a82f1c8de714ad6ddb45` — so editing it to follow
+the supersede would destroy the pre-registration's whole point. Read every path it names as **as-of
+its own stamp**, and use the durable route for the content: `git show
+2609039079717e445a19a0b0308e4302b02f0a8b:docs/evidence/7949-capstone/capstone-measured-e0fc940b.log`.
+⚠️ That commit is the file's ADD commit on `origin/main` — `e0fc940b5` itself does **not** contain the
+log (it is the head the run was stamped at, written by a later commit), which is the trap a reader
+hits first if they try `git show e0fc940b5:…`. `tools/capstone_preregistration_check.py --dir
+docs/evidence/7949-capstone` exits 0 against the frozen bytes, which is why this is disclosed HERE
+instead of "fixed" there.
+
 ---
 
 ## The measured run

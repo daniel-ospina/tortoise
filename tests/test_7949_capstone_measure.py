@@ -3684,6 +3684,17 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("E1-E5-PROOFS.md", "_step_accounting` (`:504`) refuses a GREEN row whose", (
             ("504", "def _step_accounting("),
         ), "capstone_verdict_check"),
+        # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
+        # `docs/00_index.md`'s capstone row cites this gate too, and it moved
+        # `:118` -> `:131` while the target moved to `:132` — so the index pointed
+        # at `CRITERIA = (...)` while its sibling document pointed at `STEPS`. No
+        # sweep caught it: `_BUNDLE_CITE` resolves only `sdk|edges|extractor_v2`,
+        # and the rows above covered ONE document. Every doc that prints a
+        # `tools/*.py` number needs its own row here, not just the first one.
+        ("docs/00_index.md", "declares the eight steps", (
+            ("132", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+                    '"S5", "S6")'),
+        ), "capstone_verdict_check"),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
     # line number — a quoted rule cannot drift by an insertion above it, which is why
@@ -3752,6 +3763,61 @@ def test_the_bare_continuation_cites_name_what_they_say():
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
+
+
+def test_every_readme_line_cite_carries_the_sentence_it_quotes():
+    """A `README.md:<line>` cite is invisible to every sweep — resolve it here.
+
+    ⛔ WHY (#10601 review round 2). `E1-E5-PROOFS.md` cited `README.md:430-435`
+    for the sentence *"printed, and NOT used to green the row, because the
+    artifact counts atomic Points, not surviving planted units"* — but at this
+    head 430-435 is the E5 re-score SHELL TRANSCRIPT and the quoted sentence had
+    moved to 534-535. It was already stale at the base and every added line
+    pushed it further, and nothing could see it: `_BUNDLE_CITE` resolves only
+    `sdk|edges|extractor_v2`, `_BUNDLE_CITE_PREFIX` requires the file to be one
+    of those three, and the bundle's own docs are not sources. A document whose
+    thesis is "a claim nothing re-checks can rot silently" leaves its
+    `README.md:<line>` cites unwatched, so this pin resolves them: whatever
+    sentence the cite QUOTES must appear inside the lines it names.
+
+    Non-vacuity: at the pre-fix head it reds on `README.md:430-435`, where the
+    quote is absent.
+    """
+    import re as _re
+
+    def plain(text: str) -> str:
+        # markdown emphasis and code spans are FORMATTING, not wording
+        return " ".join(_re.sub(r"[*`]", "", text).split())
+
+    doc = (_REPO / "docs/evidence/7949-capstone/E1-E5-PROOFS.md").read_text(
+        encoding="utf-8")
+    readme_lines = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
+        encoding="utf-8").splitlines()
+    checked = 0
+    found = list(_re.finditer(r"README\.md:(\d+)(?:-(\d+))?", doc))
+    for index, match in enumerate(found):
+        start = int(match.group(1))
+        end = int(match.group(2) or match.group(1))
+        # ⛔ THE WINDOW STOPS AT THE NEXT CITE. A fixed-length lookahead reached
+        # past the following `README.md:554-555` and attributed ITS quote to this
+        # cite, which would have made the pin pass on a cite pointing at nothing.
+        nxt = found[index + 1].start() if index + 1 < len(found) else len(doc)
+        tail = doc[match.end():min(nxt, match.end() + 600)]
+        quoted = _re.search(r'"([^"]{25,})"', tail)
+        if quoted is None:
+            continue          # a cite that quotes no sentence owes no quote check
+        checked += 1
+        wanted = plain(quoted.group(1))
+        cited = plain("\n".join(readme_lines[start - 1:end]))
+        assert wanted in cited, (
+            f"E1-E5-PROOFS.md cites README.md:{start}-{end} for {quoted.group(1)[:70]!r}, "
+            f"but those lines carry {cited[:120]!r} — re-derive the range from the "
+            f"file, or drop the line numbers and keep the quote (the bundle's own "
+            "convention), rather than pointing at text that is not there")
+    assert checked >= 1, (
+        "no README line-cite in E1-E5-PROOFS.md carried a quoted sentence — if the "
+        "quotes were dropped, this pin stops testing anything and must be removed "
+        "with them, not left green")
 
 
 def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():

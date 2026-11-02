@@ -3181,7 +3181,9 @@ def test_an_unparseable_checked_at_is_a_usage_error_not_a_verification(tmp_path)
     V12 exists to remove, one level up.
     """
     import json
+
     import pytest
+
     for stamp in ("zzz-not-a-timestamp", "2026-11-02T12:09:48", "2026-13-45T99:99:99Z"):
         bad = tmp_path / "states.json"
         record = json.loads((_REPO / cvc.BLOCKER_STATES_DEFAULT).read_text())
@@ -3198,18 +3200,75 @@ def test_an_unparseable_checked_at_is_a_usage_error_not_a_verification(tmp_path)
 
 
 def test_the_ok_line_names_the_blocker_verification():
-    """The OK line is where the gate lied; it must state what it checked."""
+    """The OK line is where the gate lied; it must state what it checked.
+
+    ⛔ AND IT MUST STATE WHICH ARM RAN (#10601 review round 2). Asserting only
+    `"blocker states:" in out` plus the record's `checked_at` is satisfied by ALL
+    THREE branches of the line, so the two honesty arms — the EXEMPT count and
+    the NOT-VERIFIED warning — were exercised by nothing: measured, with
+    `blockers_exempt` never incrementing (the pre-fix sentence over
+    `capstone.log`'s five CLOSED blockers) the old assertions still passed. The
+    exempt arm is pinned here from the SAME `main()` run that prints it.
+    """
     import io
     from contextlib import redirect_stdout
     record_path = _REPO / cvc.BLOCKER_STATES_DEFAULT
+    states = cvc.load_blocker_states(record_path)
+    # (a) the SCORED log: the "every cited blocker verified" arm
+    buf = io.StringIO()
+    scored = _REPO / "docs/evidence/7949-capstone/capstone-measured-9152448d.log"
+    with redirect_stdout(buf):
+        code = cvc.main([str(scored), "--repo", str(_REPO)])
+    assert code == 0, code
+    out = buf.getvalue()
+    assert "blocker states:" in out, out
+    assert states["_checked_at"] in out, out
+    assert "every cited blocker verified" in out, out
+    assert "EXEMPT" not in out, out
+    # (b) the REFUSAL log: the EXEMPT arm, with the count the arm itself set
     buf = io.StringIO()
     with redirect_stdout(buf):
         code = cvc.main([str(LOG), "--repo", str(_REPO)])
     assert code == 0, code
     out = buf.getvalue()
-    assert "blocker states:" in out, out
-    states = cvc.load_blocker_states(record_path)
-    assert states["_checked_at"] in out, out
+    assert "are EXEMPT" in out, out
+    assert "5 row(s) are EXEMPT" in out, (
+        f"the OK line no longer counts the exempt rows it skipped: {out}")
+    assert "every cited blocker verified" not in out, (
+        "the OK line claims a verification it did not perform over exempt rows "
+        f"— this is the exact sentence V12 exists to remove: {out}")
+
+
+def test_the_absent_record_arm_is_LOUD_and_is_the_only_place_it_shows(tmp_path):
+    """No record and no `--blocker-states` must SAY SO — and say nothing else.
+
+    The absent-record path is the PR's stated design (exit 0, V12 inert), so the
+    OK line's warning is the ONLY thing carrying it: a green `✅ … structurally
+    sound` with no `NOT verified` clause would be indistinguishable from a table
+    whose blockers were all checked (#10601 review round 2 — the arm had no pin
+    at all). The bundle is copied to a throwaway repo WITHOUT the record so the
+    default path genuinely does not resolve.
+    """
+    import io
+    import shutil
+    from contextlib import redirect_stdout
+    bundle = _REPO / "docs/evidence/7949-capstone"
+    dest = tmp_path / "docs/evidence/7949-capstone"
+    dest.mkdir(parents=True)
+    for name in ("capstone.log", "preregistration.json"):
+        src = bundle / name
+        if src.exists():
+            shutil.copy(src, dest / name)
+    assert not (dest / cvc.BLOCKER_STATES_DEFAULT.name).exists()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = cvc.main([str(LOG), "--repo", str(tmp_path)])
+    out = buf.getvalue()
+    assert code == 0, (code, out)
+    assert "NOT verified" in out, (
+        "with no blocker-state record the gate printed the ordinary OK line — "
+        f"a reader cannot tell V12 never ran: {out}")
+    assert "every cited blocker verified" not in out, out
 
 
 def test_a_refused_run_whose_row_carries_a_measurement_is_not_exempt():
