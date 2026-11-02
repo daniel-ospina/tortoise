@@ -560,11 +560,11 @@ def _attestable(point: dict) -> bool:
       1. no RESTORED vector — the identity/text check is only reached on the
          branch that writes the journalled vector
          (``projection/entities.py:2508-2509``);
-      2. no identity **and** no revision (``:937-946``) — "stay silent": the
+      2. no identity **and** no revision (``:943-952``) — "stay silent": the
          record cannot attest its origin, which is exactly the shape
          ``stamp_journal_embedding(creating=False)`` emits;
       3. no string ``embedding_text_hash``, or no string text to hash
-         (``:963-968``), where the text is ``embeddingText or content``.
+         (``:963-971``), where the text is ``embeddingText or content``.
 
     The identity clause is BELT-AND-BRACES for every journal the seam can
     produce: ``stamp_journal_embedding`` stamps the hash and the identity inside
@@ -580,6 +580,20 @@ def _attestable(point: dict) -> bool:
     if not isinstance(point.get("embedding_text_hash"), str):
         return False
     return isinstance(point.get("embeddingText") or point.get("content"), str)
+
+
+def _attested_text(point: dict) -> str:
+    """The text the attestation covers — the SAME fallback production hashes.
+
+    `_attestable` deliberately ADMITS a record with no `embeddingText` (the
+    hash then covers `content`), so no derivation below may index
+    `p["embeddingText"]`: on that shape it raises `TypeError`, and a
+    `None != content` comparison would satisfy leg 1's discrimination premise
+    against a record that cannot discriminate at all — production would hash
+    `content` under BOTH spellings of the check (review cycle 4, P2). One
+    accessor, so the derivations cannot drift from the predicate again.
+    """
+    return point.get("embeddingText") or point.get("content")
 
 
 def test_the_attestable_predicate_mirrors_the_replay_early_returns():
@@ -684,8 +698,8 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     # ⛔ ONE predicate (`_attestable`, module level) used by EVERY derivation
     # below so they cannot SKEW (review cycle 3, P3). It mirrors
     # `_record_embedding_identity`'s early returns in order — no restored
-    # vector, no identity (`projection/entities.py:937-946`), no string hash
-    # (`:963-968`). A re-emitted snapshot —
+    # vector, no identity (`projection/entities.py:943-952`), no string hash
+    # (`:963-971`). A re-emitted snapshot —
     # `stamp_journal_embedding(creating=False)` — deliberately carries NEITHER a
     # hash nor an identity (its own docstring says so), so counting it here
     # would demand a contract production never makes and would false-red on a
@@ -700,7 +714,7 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     # keep the suite green — the exact false confidence this test prevents.
     differing_from_content = [
         p.get("id") for p in points
-        if _attestable(p) and p.get("embeddingText") != p.get("content")]
+        if _attestable(p) and _attested_text(p) != p.get("content")]
     assert differing_from_content, (
         "premise: no journalled record has embeddingText != content, so leg 1 "
         "cannot distinguish an embeddingText check from a `content` check — "
@@ -708,7 +722,7 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     tampered_ids = []
     for p in points:
         if _attestable(p):
-            p["embeddingText"] = p["embeddingText"] + " (tampered)"
+            p["embeddingText"] = _attested_text(p) + " (tampered)"
             tampered_ids.append(p.get("id"))
     assert tampered_ids, (
         "premise: the journal carried no attestable enriched record, so this "
@@ -718,7 +732,7 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     mismatched_ids = [
         str(p.get("id")) for p in points
         if _attestable(p)
-        and p.get("embedding_text_hash") != content_hash(p["embeddingText"])]
+        and p.get("embedding_text_hash") != content_hash(_attested_text(p))]
     assert mismatched_ids, (
         "premise: tampering did not produce a hash mismatch, so leg 2 has "
         "nothing to detect")
@@ -744,10 +758,10 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
         # demand a stronger contract than the code makes and would red on a
         # fixture whose turns share a text — a legitimate, intended de-dup.
         pairs = {
-            (p.get("embedding_text_hash"), content_hash(p["embeddingText"]))
+            (p.get("embedding_text_hash"), content_hash(_attested_text(p)))
             for p in points
             if _attestable(p)
-            and p.get("embedding_text_hash") != content_hash(p["embeddingText"])}
+            and p.get("embedding_text_hash") != content_hash(_attested_text(p))}
         # PREMISE (review cycle 3, P3): `len(messages) == len(pairs)` can only
         # catch "report only the FIRST" when there are at least TWO distinct
         # pairs. A later edit to CONV/the rewriter that left both turns with the
