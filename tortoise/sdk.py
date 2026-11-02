@@ -32940,7 +32940,7 @@ class TortoiseSDK:
         # computed: a false origin, and the R1 model-change warning is silenced
         # by construction (it compares the JOURNALED identity to the configured
         # embedder). `embedding_preserved` is the marker the capture writer uses
-        # for exactly this case (`_write_capture_turns`, sdk.py:2760-2769) and it
+        # for exactly this case (see the marker `_write_capture_turns` sets) and it
         # is payload-only metadata — never a node property — so it cannot leak
         # into the graph. Set only when a vector is actually carried: with none,
         # `stamp_journal_embedding`'s `vec is not None` arm already takes the
