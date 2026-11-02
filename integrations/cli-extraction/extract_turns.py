@@ -138,14 +138,19 @@ _DUMP_QUERY = (
     # order puts `t10` before `t2`.
     #
     # ⛔ THE LAST TWO COLUMNS ARE WHAT MAKES A PARTIAL DUMP DETECTABLE. The
-    # `:Session` states, in the SAME MERGE that wires these turns, how many
-    # turns it holds (`turn_count`, a WINDOW length) and where its id space
-    # ENDS (`turn_max_index`, the live inclusive end — `sdk._write_session_and_
-    # turns`). Without them a graph holding only PART of a session is
-    # indistinguishable from a complete one, and `dump` reported success over a
-    # truncated transcript (#10574 review P1). Column order is load-bearing:
-    # `_is_turn_of` reads 0 and 5, `_turn_record` reads 0-4, so the marks are
-    # APPENDED and never inserted.
+    # `:Session` MERGE in `sdk._write_session_and_turns` states, in the SAME
+    # capture and immediately BEFORE the turn store runs, how many turns the
+    # window holds (`turn_count`, a WINDOW length) and where the id space ENDS
+    # (`turn_max_index`, the live inclusive end). ⚠️ Not the same statement as
+    # the `CONTAINS` wiring: that edge is `_TURN_WRITE_CYPHER`'s, and on a
+    # record-armed capture where every turn landed in the record the graph keeps
+    # "the Session's counters and nothing else (#10000): one node write, no
+    # rows, no `CONTAINS` edges" (`sdk._write_capture_turns`). Without these two
+    # columns a graph holding only PART of a session is indistinguishable from a
+    # complete one, and `dump` reported success over a truncated transcript
+    # (#10574 review P1). Column order is load-bearing: `_is_turn_of` reads 0
+    # and 5, `_turn_record` reads 0-4, so the marks are APPENDED, never
+    # inserted.
     "RETURN 'session://' + s.id, t.pointKind, t.speaker, t.content, t.createdAt, "
     "t.id, s.turn_count, s.turn_max_index"
 )
@@ -262,13 +267,18 @@ def _as_int(value) -> int | None:
 def _session_marks(turns) -> dict[str, tuple[int | None, int | None]]:
     """{session: (turn_count, turn_max_index)} — what each `:Session` DECLARES.
 
-    Both are written by the ONE turn store's MERGE (`sdk._write_session_and_
-    turns`): `turn_count` is the WINDOW length, `turn_max_index` the session's
-    LIVE inclusive id-space end (lowered by a shorter re-capture, never a peak).
-    `None` on either means this dump cannot read it — a row carrying an older
-    column set, or a session captured before the mark existed (#10000) — and
-    the checks that need it then degrade rather than invent a defect, exactly
-    as `record_read._shortfall` degrades on a `None` mark.
+    Both are written by the `:Session` MERGE in `sdk._write_session_and_turns`
+    — the same capture, the statement immediately before the turn store:
+    `turn_count` is the WINDOW length and `turn_max_index` the session's LIVE
+    inclusive id-space end (lowered by a shorter re-capture, never a peak).
+    ⚠️ Neither is written by the `CONTAINS` wiring (`_TURN_WRITE_CYPHER`), and
+    on a capture whose turns all landed in the record the graph keeps the
+    counters and no edges at all (#10000).
+
+    `None` on either means this dump cannot read it — a session captured before
+    the mark existed, or a value the container could not hand over as an int —
+    and the checks that need it then degrade rather than invent a defect,
+    exactly as `record_read._shortfall` degrades on a `None` mark.
     """
     marks: dict[str, tuple[int | None, int | None]] = {}
     for row in turns:
@@ -325,6 +335,22 @@ def _dump_shortfall(turns) -> str | None:
     * the ids stop BELOW `turn_max_index` — a refused HIGHEST turn, which is
       invisible to the other two (a missing tail sits above `max(held)`, and
       the run stays contiguous with `len(rows) >= turn_count`).
+
+    ⛔ THE GAP ARM IS ANCHORED AT INDEX 0 ON PURPOSE, AND THAT IS AN ASSUMPTION.
+    The writer can start a window anywhere (`_capture_turn_id(session, i,
+    turn_offset)` keys `_t{i+offset}`, and `turn_max_index = turn_offset +
+    turn_count - 1`), so `tools/backfill_graph_turns.py` — a census over
+    OBSERVED indices — tests only its own `last - first + 1` window and records
+    why: "never anchored at index 0". This read cannot copy that rule, because
+    deriving the start from `turn_max_index - turn_count + 1` would PASS a
+    session whose earlier turns live in the RECORD (`_t2`/`_t3` in the graph
+    against a 2-turn window at offset 2, `_t0`/`_t1` only in the record) — the
+    truncated transcript this check exists to refuse. Anchoring at 0 is
+    fail-CLOSED: it refuses that transcript, and the price is a false refusal
+    for a session whose window genuinely STARTS above 0. No in-tree caller
+    passes a non-zero `turn_offset` to `capture_session` today, so that state is
+    unreachable; a future non-zero-offset caller must hand this check a start
+    index rather than expect it to be guessed.
 
     ⛔ THE GAP CHECK IS ARITHMETIC, NOT A WALK OF THE ID SPACE (CWE-407, the
     lesson #10021 review P2 records in `record_read`): `turn_max_index` is a
@@ -400,6 +426,14 @@ def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
     from a shorter re-capture whose surplus sweep did not land (#10000). They
     are DROPPED and reported, never written as this session's transcript — the
     same rule `record_read.merge_turn_payloads` applies on the read door.
+
+    ⚠️ WHAT A PASSING DUMP PROVES, AND WHAT IT DOES NOT: the account shows
+    COVERAGE (the graph holds the whole id space its `:Session` declares), never
+    VINTAGE. A re-capture on an armed deployment whose turns ALL landed in the
+    record writes no graph rows, so the graph keeps the PREVIOUS capture's text
+    under unchanged ids while the counters move — coverage holds, and the rows
+    are older than the session. Only `sdk.get_session()` (record first) serves
+    the current text; this graph-only read cannot tell the two apart.
     """
     ns = _cfg("TORTOISE_NAMESPACE", "selfhost")
     log = _cfg("TORTOISE_EVENT_LOG", f"/data/events/{ns}.jsonl")
@@ -438,6 +472,25 @@ def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
                 "whose surplus sweep did not land (#10000). The session no longer "
                 "owns them, so this lane will not write them as its transcript "
                 "(pass --allow-empty to accept an empty dump)")
+        if rows and rejected < len(rows):
+            # A MIXED dump: some rows carry no turn id AND the rest sat above
+            # the live end, so neither single-cause sentence below is true of
+            # this one. Naming one of them would repeat #9932's own defect one
+            # layer down ("a message that offers one cause where another
+            # applies") — and the residue drop above is what made `rows > 0`
+            # with `rejected < len(rows)` reachable at all.
+            raise SystemExit(
+                f"dump: 0 turns captured — the query MATCHED {len(rows)} "
+                f"point(s) under a :Session and none is this session's "
+                f"transcript: {rejected} carry no `{{session}}_t<i>` id "
+                f"(`_is_turn_of`) and {len(residue)} sit ABOVE their session's "
+                "`turn_max_index` (residue from a shorter re-capture whose "
+                "surplus sweep did not land, #10000). Both counts are measured; "
+                "the CAUSES are not — a rejected row may be a caller-minted "
+                "`is_episodic` `event` Point (an OPEN `pointKind` vocabulary, "
+                "`session_reinjection._TURN_SHAPE_FILTER`) or the id derivation "
+                "may have moved (`sdk._capture_turn_id`). "
+                "(pass --allow-empty to accept an empty dump)")
         # The two empty cases have DIFFERENT causes and the old one-line
         # message named neither of them: it sent every operator to their
         # capture setting (#9932), which is the wrong cause in both. NEITHER
@@ -450,6 +503,8 @@ def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
         # that offers two and omits the third repeats #9932's own defect: it
         # sent every operator to a setting that was not the cause).
         if rows:
+            # The all-rejected case (`rejected == len(rows)`) — the mixed one
+            # returned above, so "all {rejected} were rejected" is TRUE here.
             # TWO causes, for the same reason the branch below names three:
             # a message that offers one where another applies sends the
             # operator to the wrong place, which is #9932 itself. The count
@@ -472,6 +527,24 @@ def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
                 "so a caller-minted `is_episodic` `event` Point under the Session "
                 "matches the predicate and is not a turn "
                 "(`session_reinjection._TURN_SHAPE_FILTER`). "
+                "(pass --allow-empty to accept an empty dump)")
+        if rows:
+            # A MIXED dump: some rows carry no turn id AND the rest sat above
+            # the live end, so neither single-cause sentence below is true of
+            # this one. Naming one of them would repeat #9932's own defect one
+            # layer down ("a message that offers one cause where another
+            # applies"), and a peer review caught exactly that here.
+            raise SystemExit(
+                f"dump: 0 turns captured — the query MATCHED {len(rows)} "
+                f"point(s) under a :Session and none is this session's "
+                f"transcript: {rejected} carry no `{{session}}_t<i>` id "
+                f"(`_is_turn_of`), and {len(residue)} sit ABOVE their session's "
+                "`turn_max_index` (residue from a shorter re-capture whose "
+                "surplus sweep did not land, #10000). Both counts are measured; "
+                "the CAUSES are not — a rejected row may be a caller-minted "
+                "`is_episodic` `event` Point (an OPEN `pointKind` vocabulary, "
+                "`session_reinjection._TURN_SHAPE_FILTER`), or the id derivation "
+                "may have moved (`sdk._capture_turn_id`). "
                 "(pass --allow-empty to accept an empty dump)")
         raise SystemExit(
             "dump: 0 turns captured — the query matched NO point at all, so this is "
@@ -499,13 +572,16 @@ def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
                 f"dump: the transcript is PARTIAL — {shortfall}. "
                 "Refusing by default: `run` would extract claims from a "
                 "truncated session and `write` would land them as that "
-                "session's durable output. The cause is the SPLIT STORE, not "
-                "the capture setting — with TORTOISE_RECORD_DSN armed the "
-                "writer's store decision is PER TURN (`sdk._write_capture_turns` "
-                "writes a refused turn to the GRAPH) while this read's is PER "
-                "SESSION, so a mid-capture refusal leaves part of the "
-                "transcript in each store (#10000); `sdk.get_session()` serves "
-                "the UNION of both. (pass --allow-partial to write what the "
+                "session's durable output. The USUAL cause is the SPLIT STORE — "
+                "with TORTOISE_RECORD_DSN armed the writer's store decision is "
+                "PER TURN (`sdk._write_capture_turns` writes a refused turn to "
+                "the GRAPH) while this read's is PER SESSION, so a mid-capture "
+                "refusal leaves part of the transcript in each store (#10000) — "
+                "but the shape alone does not prove it: the same shortfall "
+                "comes from a turn removed through `delete_point` (nothing "
+                "lowers `s.turn_count`) or from a capture whose turn write never "
+                "landed all of them. `sdk.get_session()` serves the UNION of "
+                "both stores. (pass --allow-partial to write what the "
                 "graph holds anyway)")
             # ⛔ THE CHECK RUNS *BEFORE* THE WRITE, and the file is not touched:
             # a refusal must not leave a truncated `turns_raw.jsonl` behind for

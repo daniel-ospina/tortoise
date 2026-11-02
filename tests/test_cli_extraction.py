@@ -640,9 +640,13 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
     def test_the_append_window_is_not_a_false_refusal(self):
         # ⛔ THE TRAP `record_read.served_turn_count` DOCUMENTS, MEASURED: an
         # APPEND at `turn_offset=2` leaves 4 rows `_t0.._t3` against a
-        # `turn_count` of 2 (a WINDOW length, not a running total). A
-        # `len(rows) < turn_count` rule refuses this HEALTHY, COMPLETE session —
-        # so the witness is the id-space COVERAGE, not a count comparison.
+        # `turn_count` of 2 (a WINDOW length, not a running total), so an
+        # EQUALITY rule (`served != expected` — the rule that docstring rejects
+        # at `record_read.py:669-673`) refuses this HEALTHY, COMPLETE session.
+        # The witness is therefore the id-space COVERAGE, not a count
+        # comparison. (The `len(...) < count` arm IS present and is correct: it
+        # fires only when the graph holds fewer turns than the window length,
+        # which a complete append never is — `4 < 2` is false.)
         rows = [_mark("s1", i, 2, 3) for i in range(4)]
         payload = "\n".join(json.dumps(r) for r in rows)
         with tempfile.TemporaryDirectory() as td:
@@ -704,21 +708,79 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         self.assertIn("dropped 2 row(s)", printed.getvalue(),
                       "a deletion the operator cannot see is not a report")
 
-    def test_a_session_with_no_declared_marks_degrades_rather_than_refuses(self):
-        # A pre-#10000 capture carries no `turn_max_index` (the property did not
-        # exist) and an older emitter carries neither column. `None` degrades to
-        # the checks that do not need it — the same rule `record_read._shortfall`
-        # states — so an old graph is not refused for a mark it never had.
+    def test_the_count_arm_catches_a_shortfall_the_mark_cannot_see(self):
+        # ⛔ PINNED ON THE SHAPE THE EMITTER ACTUALLY PRODUCES: 8 columns with
+        # `turn_max_index = None` (a capture before the mark existed, #10000).
+        # The tail arm abstains on a `None` mark, so the ONLY witness left is
+        # `len(held) < turn_count` — delete that arm and this dumps 3 turns and
+        # exits 0, i.e. the partial this commit exists to refuse goes out
+        # silently (measured by mutation on the previous cut, which this test
+        # was written to kill).
+        rows = [_mark("s1", i, 4, None) for i in (0, 1, 2)]
+        payload = "\n".join(json.dumps(r) for r in rows)
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "turns.jsonl"
-            payload = "\n".join(json.dumps(["session://s1", "event", "user",
-                                            _frame("user", f"m{i}"), None,
-                                            _turn_id("s1", i)])
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        self.assertIn("declares 4 turn(s)", str(cm.exception))
+        self.assertIn("holds only 3", str(cm.exception))
+
+        # ...and the SAME shape SATISFIED is not a false refusal: 4 declared, 4
+        # held, no mark to compare — degrade, never invent (the rule
+        # `record_read._shortfall` states for a `None` mark).
+        complete = [_mark("s1", i, 4, None) for i in range(4)]
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(
+                    stdout="\n".join(json.dumps(r) for r in complete) + "\n", stderr="")
+                dump(out)
+            self.assertEqual(len(out.read_text().splitlines()), 4)
+
+    def test_a_session_with_no_declared_marks_degrades_rather_than_refuses(self):
+        # A pre-#10000 capture carries neither count nor mark. Built as the
+        # 8-column row the emitter produces with BOTH values null, so this
+        # exercises `_as_int(None)` — the reachable degradation — rather than a
+        # short row the emitter can never emit.
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            payload = "\n".join(json.dumps(_mark("s1", i, None, None))
                                 for i in (3, 0, 1, 2))
             with mock.patch("extract_turns.subprocess.run") as run:
                 run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
                 dump(out)
-            self.assertEqual(len(out.read_text().splitlines()), 4)
+            self.assertEqual(len(out.read_text().splitlines()), 4,
+                             "a session that declares nothing is not refused for it")
+
+    def test_a_mixed_all_dropped_dump_names_both_measured_facts(self):
+        # One caller-minted non-turn Point plus two rows above the mark: NONE
+        # survives, but they are not all rejected by the id filter. The message
+        # must not claim "all N were rejected: none carried the id" — that
+        # sentence is only true when `rejected == len(rows)`, and the residue
+        # drop made the other case reachable (peer review P2 on this commit).
+        rows = [
+            ["session://s1", "event", "user", _frame("user", "x"),
+             "2026-11-02T00:00:00+00:00", "s1_note", 2, 1],
+            _mark("s1", 2, 2, 1),
+            _mark("s1", 3, 2, 1),
+        ]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        mixed = str(cm.exception)
+        self.assertIn("1 carry no", mixed)
+        self.assertIn("2 sit ABOVE", mixed)
+        self.assertNotIn("all 1 were rejected", mixed,
+                         "two of the three rows DID carry the id — that claim is "
+                         "a cause the branch never measured")
 
     def test_a_non_turn_point_is_not_spliced_into_the_transcript(self):
         # `is_episodic` + `pointKind='event'` is not enough: only the derived

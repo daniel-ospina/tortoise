@@ -42,6 +42,13 @@ session's durable output. `sdk.get_session()` serves the UNION of both stores;
 ABOVE `turn_max_index` are residue from a shorter re-capture whose surplus
 sweep did not land: they are dropped and reported, never written.
 
+⚠️ A passing dump proves **coverage**, not **vintage**. A re-capture on an armed
+deployment whose turns all land in the record writes no graph rows, so the graph
+keeps the previous capture's text under the same ids while `turn_count` and
+`turn_max_index` move to the new window — the check passes and the rows are
+older than the session. Only `sdk.get_session()` (record first) serves the
+current text; this graph-only read cannot tell the two apart.
+
 ## How it works
 
 ```text
