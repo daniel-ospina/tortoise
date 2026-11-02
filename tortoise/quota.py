@@ -1041,7 +1041,7 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         raise QuotaCheckError(f"quota count failed for {resource}: {redacted}") from e
 
 
-def _resolve_count_sdk(sdk, sdk_factory):
+def _resolve_count_sdk(sdk, sdk_factory, *, org_id, resource):
     """The SDK `_count_resource` must count through, built LAZILY (#4051).
 
     The gate can return before it ever counts — an explicitly-`None` limit is
@@ -1057,6 +1057,14 @@ def _resolve_count_sdk(sdk, sdk_factory):
     turned every failure into that fail-closed class (500 + an ERROR log). A
     caller that passes a factory relies on the same contract, so the factory call
     must not become the one way a counting fault escapes unclassified.
+
+    `org_id`/`resource` exist for the LOG ONLY, and they are not optional: every
+    other fail-closed log in this module carries `team=%s resource=%s`
+    (`_count_resource`, the unreadable-limit and missing-limit arms), and
+    `_check_org_limit`'s #686 paragraph promises exactly that for every
+    data-fault `QuotaCheckError`. A construction fault IS one, so an
+    unattributable line here would be the one class a team/resource dashboard
+    silently drops (#4051 convergence review).
     """
     if sdk is not None or sdk_factory is None:
         return sdk
@@ -1068,7 +1076,8 @@ def _resolve_count_sdk(sdk, sdk_factory):
         from .security import redact_error
         redacted = redact_error(e)
         _logger.error(
-            "quota count sdk unavailable (fail-closed): error=%s", redacted)
+            "quota count sdk unavailable (fail-closed): team=%s resource=%s "
+            "error=%s", org_id, resource, redacted)
         raise QuotaCheckError(
             f"quota count sdk unavailable: {redacted}") from e
 
@@ -1159,7 +1168,9 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
                 f"({max_points!r})") from None
         limit = max_points * _DOCUMENTS_FROM_POINTS_FACTOR
         count = _count_resource(org_id, "documents",
-                                sdk=_resolve_count_sdk(sdk, sdk_factory))
+                                sdk=_resolve_count_sdk(
+                                    sdk, sdk_factory, org_id=org_id,
+                                    resource="documents"))
         if count >= limit:
             raise QuotaExceededError(
                 with_limit_contact(
@@ -1241,7 +1252,9 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             f"team limits {limit_key} unreadable for resource {resource!r} "
             f"({limit!r})") from None
     count = _count_resource(org_id, resource,
-                            sdk=_resolve_count_sdk(sdk, sdk_factory))
+                            sdk=_resolve_count_sdk(
+                                sdk, sdk_factory, org_id=org_id,
+                                resource=resource))
     # #4614: report what the gate COMPARED (post-credit), never a fresh count —
     # the refusal's numbers must be the ones that produced it.
     used = count - slot_credit

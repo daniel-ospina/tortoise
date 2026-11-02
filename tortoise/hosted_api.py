@@ -7891,19 +7891,25 @@ def _gate_sdk_for(org: dict, resource: str):
     `namespace=org["org_id"]` (exactly what `_data_sdk` builds). Mirroring the
     FORMS matters as much as the graph: `_make_sdk` keys its embedded keepalive
     anchor on `graph_name if graph_name is not None else namespace`
-    (`_FALLBACK_KEEPALIVE`), and that dict has no eviction path — so
-    `graph_name="org_team-001"` for an org-wide key would park a SECOND anchor
-    (`org_team-001` beside the write's `team-001`) for every org in the process.
-    Mirroring also preserves the "identical connection" property
+    (`_FALLBACK_KEEPALIVE`), and that dict never evicts a HEALTHY anchor — it is
+    only replaced when `_anchor_usable` fails (#1502) and never to bound its
+    size — so `graph_name="org_team-001"` for an org-wide key would park a SECOND
+    anchor (`org_team-001` beside the write's `team-001`) for every org in the
+    process. Mirroring also preserves the "identical connection" property
     `mcp_server._enforce_quota` states as the rule.
 
     Two deliberate non-uses:
     - registry-scoped resources get `None`: their count is a control-plane read
       and building a data SDK for them would be pure cost on the key-mint path.
     - an UNRESOLVED graph binding (`_data_graph_name` → `None`) also gets
-      `None`. That request is refused 403 GRAPH_NOT_FOUND by `_data_sdk`
-      before any write, so which graph the gate read cannot change an outcome —
-      and substituting a graph here would be a fail-OPEN widening.
+      `None`, and NOT because the gate's reading is harmless: what holds is that
+      **no write can occur either way** — `_data_sdk` refuses the request 403
+      GRAPH_NOT_FOUND — so returning `None` cannot widen access. Substituting a
+      graph here WOULD be a fail-open widening. ⚠️ At the three
+      `/v1/{points,objects,subjects}` sites the gate runs before that 403, so the
+      default-graph count is still taken first and a 402 can pre-empt the 403 —
+      the same ordering the residual below records for the RESOLVED arm; this
+      arm is not exempt from it.
 
     ⛔ KNOWN RESIDUAL (recorded, not fixed): on the three `/v1/{points,objects,
     subjects}` sites the gate runs BEFORE `_data_sdk`'s `_assert_graph_owned`, so
@@ -7911,7 +7917,8 @@ def _gate_sdk_for(org: dict, resource: str):
     window, never client input — `graph_namespace` is auth-stamped) the gate now
     counts that graph and a 402 can pre-empt the 403. Closing it means either
     moving the gate after the SDK open at those three sites or gating the graph
-    SDK on a completed ownership check; both are their own change.
+    SDK on a completed ownership check; both are their own change. The commit
+    lane is NOT in this class: it opens `_data_sdk` before its gate.
     """
     if resource not in _GRAPH_SCOPED_QUOTA_RESOURCES:
         return None

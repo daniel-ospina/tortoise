@@ -158,9 +158,10 @@ def test_org_wide_gate_sdk_mirrors_the_openers_namespace_form(monkeypatch):
     """The gate must build the ORG-WIDE sdk the opener builds (`namespace=`).
 
     `_make_sdk` keys its embedded keepalive anchor on `graph_name if graph_name
-    is not None else namespace`, and that dict has no eviction path — so
-    resolving the org-wide lane via `graph_name=` would park a SECOND anchor per
-    org (`org_<tid>` beside the write's `<tid>`).
+    is not None else namespace`, and that dict never evicts a HEALTHY anchor (it
+    is only replaced when `_anchor_usable` fails, #1502 — never to bound its
+    size), so resolving the org-wide lane via `graph_name=` would park a SECOND
+    anchor per org (`org_<tid>` beside the write's `<tid>`).
     """
     calls = []
     import tortoise.hosted_api as ha
@@ -203,3 +204,41 @@ def test_a_gate_that_never_counts_never_builds_a_sdk(monkeypatch):
     # `documents` derives its cap from `max_points`; an explicit None returns too.
     ha._check_org_limit({**GRAPH_BOUND_ORG, "max_points": None}, "documents")
     assert calls == [], calls
+
+
+def test_a_factory_failure_is_fail_closed_and_attributable(monkeypatch, caplog):
+    """A gate-SDK construction fault stays a CLASSIFIED refusal (#4051).
+
+    `_count_resource` used to own this construction, so every failure became a
+    `QuotaCheckError` → 500 with an ERROR log carrying team + resource.
+    `_resolve_count_sdk` must keep that contract: without it the fault escapes
+    `_check_org_limit`'s `except QuotaCheckError` as an unclassified 500 with no
+    fail-closed line, which is the defect the lazy factory introduced.
+    """
+    import logging
+
+    import tortoise.hosted_api as ha
+
+    def boom(**kwargs):
+        raise RuntimeError("anchor unavailable")
+
+    monkeypatch.setattr(ha, "_make_sdk", boom)
+    with (
+        caplog.at_level(logging.ERROR, logger="tortoise.quota"),
+        pytest.raises(HTTPException) as ei,
+    ):
+        ha._check_org_limit(dict(GRAPH_BOUND_ORG), "points")
+
+    assert ei.value.status_code == 500, ei.value
+    assert str(ei.value.detail).startswith("Quota check failed: quota count sdk unavailable"), (
+        ei.value.detail
+    )
+
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "tortoise.quota" and r.levelno == logging.ERROR
+    ]
+    assert any("sdk unavailable" in m for m in lines), lines
+    # attributable: the #686 promise is team= + resource= on every fail-closed line
+    assert any(f"team={TEST_ORG_ID}" in m and "resource=points" in m for m in lines), lines
