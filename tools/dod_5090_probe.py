@@ -1151,11 +1151,12 @@ def score_path_bullet() -> Row:
     if unresolved_writers:
         notes.append(
             "#10541 census over the unresolved set: "
-            # ⛔ NOT `" | "`: `Row.observed` joins these notes and `_table`
-            # emits the result RAW into a 4-column markdown row, so one pipe in
-            # one note adds spurious columns to the one artifact a reader
-            # actually looks at (GFM: an unescaped `|` is a cell separator).
-            # A middle dot separates the counts without escaping anything.
+            # A middle dot, not `" | "`: `Row.observed` joins these notes into
+            # ONE markdown table cell, and a pipe there used to split a
+            # 4-column row into seven. `_table` now escapes the character at
+            # the EMITTER (`_cell`), so this is legibility, not the guard —
+            # which is the point: a per-note rule is only as wide as the last
+            # author to remember it.
             + " · ".join(
                 f"{cls}={len(by_class.get(cls, []))}"
                 + (f" ({', '.join(sorted(by_class[cls]))})" if by_class.get(cls) else "")
