@@ -33822,6 +33822,7 @@ class TortoiseSDK:
         # call so the marker's own proof (a lost leg, a saturated pool) is MADE
         # ONCE, by the code that drops the rows — never re-derived here.
         from .truncation import (
+            EXACT_KEY as _EXACT_KEY,
             mark_truncation as _mark_truncation,
             truncation_field as _truncation_field,
         )
@@ -33869,10 +33870,27 @@ class TortoiseSDK:
             # answer is incomplete EVEN IF the gate below delivers everything it
             # kept (``truncation.mark_truncation``'s ``incomplete`` case).
             retrieval_incomplete = bool(_trunc_out.get("truncated"))
-            # A pool that came back EXACTLY at its bound was cut by it; matches
-            # past it exist and are unreachable by any follow-up call.
-            pool_saturated = len(semantic_hits) >= pool_limit
-            _exact = not retrieval_incomplete and not pool_saturated
+            # ⛔ ``_exact`` is RELAYED from the marker's own recorded proof, never
+            # re-derived: ``truncated: False`` is NOT ``exact`` — it is also what
+            # a read reports when it completed but had to WITHHOLD exactness. A
+            # local ``len(pool) >= pool_limit`` test is worse still: it marks a
+            # pool that came back at EXACTLY its bound as cut (the retrieval path
+            # already says ``truncated: False`` there, because it keeps every
+            # row), which is a false positive that withholds an exact total and
+            # trains callers to ignore the marker (#8447 review round 2).
+            #
+            # ⛔ BOTH halves are required, and they answer different questions.
+            # ``retrieval_incomplete``: the pool WAS cut, so the relevance gate
+            # only saw part of the match population — `relevant_hits` is a FLOOR
+            # even though the retrieval path's own candidate count was exact
+            # (measured: 25 matches at limit=2, pool bound 20 → inner
+            # `{truncated: True, total_available: 25}`; the 5 unseen rows could
+            # clear the gate too, so publishing 20 as a total would be a lie).
+            # ``_EXACT_KEY``: the retrieval path PROVED its candidate set is the
+            # whole population; without it, a completed-but-exactness-withheld
+            # read would publish its survivors as a total.
+            _exact = (bool(_trunc_out.get(_EXACT_KEY))
+                      and not retrieval_incomplete)
             # c70: drop hits that clear neither the EP-confidence floor nor a
             # shared-token floor (TF-IDF fallback hits carry no EP annotation;
             # FTS-mode hits are EP-annotated but unmeasured points must still
@@ -33892,7 +33910,7 @@ class TortoiseSDK:
             _mark_truncation(
                 _trunc_out, returned=len(semantic_hits),
                 candidates=relevant_hits, exact=_exact,
-                incomplete=retrieval_incomplete or pool_saturated)
+                incomplete=retrieval_incomplete)
 
         repo_points: list[dict] = []
         if repo:

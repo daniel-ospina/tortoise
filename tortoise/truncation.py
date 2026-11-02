@@ -135,6 +135,17 @@ DEFAULT_LEG_ANSWERED_REASONS: frozenset[str] = _ANSWERED_REASONS
 #: Present ONLY when it is exact — absence means "unknown", never "zero".
 TOTAL_AVAILABLE_FIELD = "total_available"
 
+#: A PRIVATE relay: did this read PROVE the candidate population is the whole
+#: match set? NOT a response field (``truncation_field`` never republishes it) —
+#: it exists so a consumer ABOVE the read can relay the marker's own proof
+#: instead of re-deriving it from ``truncated``, which is not equivalent:
+#: ``truncated: False`` is also what a read reports when it COMPLETED but had to
+#: WITHHOLD exactness (a post-window filter shrank the union, so the survivors
+#: are no longer the whole population). A consumer that read ``not truncated``
+#: as ``exact`` would publish that floor as a total — the same defect one level
+#: up. Reading the recorded proof is the only sound route.
+EXACT_KEY = "_exact"
+
 
 def mark_truncation(sink: dict | None, *, returned: int,
                     candidates: int, exact: bool = False,
@@ -169,6 +180,10 @@ def mark_truncation(sink: dict | None, *, returned: int,
         return
     truncated = (candidates > returned) or incomplete
     sink[TRUNCATED_FIELD] = truncated
+    # The exactness PROOF, recorded so a consumer relays it rather than
+    # re-deriving it (see EXACT_KEY). A private key: ``truncation_field``
+    # publishes only the two response fields, so this never reaches a caller.
+    sink[EXACT_KEY] = bool(exact)
     # Hygiene, not decoration: a sink is CALLER-OWNED and may be REUSED, so a
     # stale ``total_available`` from an earlier call would ride a later verdict —
     # a complete (or unprovable) answer advertising an exact total, which is the

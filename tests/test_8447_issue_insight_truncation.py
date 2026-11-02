@@ -40,7 +40,14 @@ QUERY = "zebra migration claim"
 
 
 @pytest.fixture()
-def sdk(tmp_path, monkeypatch):
+def sdk(tmp_path, monkeypatch, force_sparse_tfidf):
+    """Embedded store for the marker's end-to-end assertions.
+
+    `force_sparse_tfidf` (tests/conftest.py) pins the embedder state: these tests
+    pin EXACT pool sizes, and a box with the `embeddings` extra present would let
+    the dense leg widen the union past the pool bound and redden them for an
+    unrelated environment difference (the #2573/#2772 rule).
+    """
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     # `total_available` is emitted only when the candidate pool proves it saw
     # EVERY match, and the pool bound is `max(limit*5, 20)`; the retrieval
@@ -128,7 +135,8 @@ class TestIssueInsightTruncation:
 
         The pool itself was cut, so matches past it were never read and the exact
         population is UNKNOWN. Absence of `total_available` is the honest answer;
-        publishing `20` would be the same defect one level down.
+        publishing `20` — or `25`, the store's true count — would be the same
+        defect one level down, and the prose is qualified to match.
         """
         _seed(sdk, 25)
         assert _store_matches(sdk) == 25
@@ -137,6 +145,26 @@ class TestIssueInsightTruncation:
 
         assert resp[TRUNCATED_FIELD] is True
         assert TOTAL_AVAILABLE_FIELD not in resp
+        assert resp["insight"].startswith("at least "), resp["insight"]
+
+    def test_a_pool_at_exactly_its_bound_is_not_marked_cut(self, sdk):
+        """⛔ A pool that came back AT its bound was not cut by it.
+
+        20 matches, `limit=2` → pool bound 20, and the retrieval path keeps every
+        row and reports COMPLETE. A local `len(pool) >= pool_limit` test would
+        call that cut — a false positive that withholds an exact total (20) and
+        trains callers to ignore the marker. The marker's own recorded proof is
+        the only sound source, and it says: exact.
+        """
+        _seed(sdk, 20)
+        assert _store_matches(sdk) == 20
+
+        resp = sdk.issue_insight(QUERY, limit=2)
+
+        assert len(resp["data_points"]) == 2
+        assert resp[TRUNCATED_FIELD] is True          # 20 > 2: the cut fired
+        assert resp[TOTAL_AVAILABLE_FIELD] == 20      # ... and the total is EXACT
+        assert resp["insight"].startswith("20 graph hit(s)"), resp["insight"]
 
     def test_absence_is_not_claimed_over_an_unread_store(self, sdk):
         """(d) `total_points == 0` is the only path that proves absence."""
