@@ -200,6 +200,132 @@ _EMBED_WRITE = re.compile(
     r"(?:\w+\.embedding|(?<![\w.])embedding)\s*=|set_embedding_clause\("
 )
 
+#: ── The RESOLVED census (#10541) ────────────────────────────────────────────
+#: A three-name callee vocabulary cannot tell a legitimate exemption from a
+#: bypass, so bullet 2 used to be held at `PARTIAL` over every function the
+#: instrument could not resolve. Each such function is now carried by ONE of
+#: the classes #10541 names, with the `file:line` that decides it. The entries
+#: below were READ at their seam — not inferred from a name.
+#:
+#: ⚠️ `recognised_producer` here means "DIRECTLY reaches a recognised producer"
+#: — the canonical clause builder (`set_embedding_clause`,
+#: tortoise/vector_write.py) or the session producer (`_session_embedding` →
+#: `compute_session_embedding`). It does NOT mean `encode_for_row`: NONE of the
+#: six calls it, so under #10541's literal class-1 wording ("route it through
+#: `encode_for_row`") none of them is a CONVERSION.
+#: Why each of the six is nonetheless legitimate is stated PER ENTRY, not as a
+#: blanket: the ONLY declaration here is #5008, which covers the session chain
+#: (`_session_event_write`, `ingest_corpus`, `_embedding_repair_attempt`) and
+#: nothing else. The other three (`restore_graph`, `_event_plain_merge`,
+#: `_rebuild_all_replay`) carry NO declared exemption — they store a vector
+#: computed or backed up UPSTREAM, through the canonical builder.
+#: The name also inverts this file's own `kind == "producer"`, which means
+#: "computes a vector another function writes"; that is a wart, kept because
+#: #10541 names the class.
+#: `exempt` — the function is not a producer of a STORED vector: it renders the
+#:   clause, forwards one, journals one, reads one, sets a FLAG or emits a
+#:   DIAGNOSTIC, or merely MENTIONS one in a comment/docstring (the instrument's
+#:   own false positives), or stores one under a NAMED owner exemption.
+#: `bypass` — a write that escapes the rule. Measured: **none**.
+CENSUS_RECOGNISED = "recognised_producer"
+CENSUS_EXEMPT = "exempt"
+CENSUS_BYPASS = "bypass"
+CENSUS_CLASSES = (CENSUS_RECOGNISED, CENSUS_EXEMPT, CENSUS_BYPASS)
+
+WRITER_CENSUS: dict[str, tuple[str, str]] = {
+    "tortoise.consistency::_compare_views": (
+        CENSUS_EXEMPT,
+        "issues no write; the only WRITE-SHAPED text is a COMMENT at "
+        "tortoise/consistency.py:859 quoting what the view cannot produce "
+        "(the function reads `\"embedding\"` at :826/:827 and names it in a "
+        "field list at :862/:873/:877/:881 — reads and appends, never a write)"),
+    "tortoise.hosted_backup::restore_graph": (
+        CENSUS_RECOGNISED,
+        "tortoise/hosted_backup.py:1026 writes through the canonical clause "
+        "builder (`set_embedding_clause(\"n\", \"r.v\")`) from the backed-up row"),
+    "tortoise.projection.entities::_event_plain_merge": (
+        CENSUS_RECOGNISED,
+        "tortoise/projection/entities.py:5631-5632 `set_embedding_clause(\"e\", "
+        "preserve_on_null=False)` / `set_embedding_clause(\"e\")` — canonical clause"),
+    "tortoise.projection::_prewipe_synthetic_write_scope": (
+        CENSUS_EXEMPT,
+        "tortoise/projection/__init__.py:4650 — the match is inside the scope's "
+        "DOCSTRING and the statement NULLs the vector; a wipe is not a producer"),
+    "tortoise.projection::_rebuild_all_replay": (
+        CENSUS_RECOGNISED,
+        "tortoise/projection/__init__.py:15809 `set_embedding_clause(\"n\", \"$emb\")` "
+        "(canonical clause). Its labels are LITERAL (`n:Point` at :14318/:15813) — "
+        "the label reads UNKNOWN only because the `unresolved_write` branch "
+        "hardcodes `UNKNOWN(unresolved producer)` and never derives one. ⚠️ It "
+        "also holds two OTHER embedding statements this class does not rest on: "
+        ":14319 `SET n.embedding = NULL` (a wipe) and :15803 a DIRECT "
+        "`n.embedding = $emb` that bypasses the canonical builder"),
+    "tortoise.record_read::turn_prior_vectors": (
+        CENSUS_EXEMPT,
+        "tortoise/record_read.py:776 `embedding=row[2]` populates a dataclass "
+        "from a returned row — a READ, with no write clause"),
+    "tortoise.sdk::_embedding_repair_attempt": (
+        CENSUS_RECOGNISED,
+        "the repair helper DOES compute and store: tortoise/sdk.py:43932 "
+        "`embedding = self._session_embedding(...)` + `set_embedding_clause(\"e\")` "
+        "at :43954. It is a producer on the #5008 session chain, and a repair "
+        "by ROLE — both, so `exempt` would contradict the classes above"),
+    "tortoise.sdk::_event_raw_write_door": (
+        CENSUS_EXEMPT,
+        "tortoise/sdk.py:11019 — a TRANSPORT door: it forwards an already-computed "
+        "`embedding` into `query_params` and executes the statement at "
+        ":11082-11085 inside `_live_write_scope` (the §17.1 sanctioned "
+        "live-write lane); it never computes one"),
+    "tortoise.sdk::_index_process_unit": (
+        CENSUS_EXEMPT,
+        "tortoise/sdk.py:43533 — the instrument's match is the DIAGNOSTIC STRING "
+        "`\"error\": \"indexed with embedding=None \"`, not a write clause. "
+        "That line sits on the `merge_outcome == \"indexed\"` branch of the "
+        "unit-completion path, whose store is DELEGATED to "
+        "`_session_event_write` at :43412. Its other stores are both "
+        "DELEGATED to `_embedding_repair_attempt`, at TWO distinct sites: the "
+        "repair-only branch at :43390 (`embedding_only_incomplete`), and the "
+        "post-full-write repair site at :43482 — whose own comment at "
+        ":43472-43475 records that the repair-only branch is NOT re-entered. "
+        "Every callee is a recognised producer, so this function produces no "
+        "vector of its own"),
+    "tortoise.sdk::_journal_event_raw_write": (
+        CENSUS_EXEMPT,
+        "the instrument matches the SIGNATURE DEFAULT at sdk.py:11090 "
+        "(`embedding=None) -> bool | None:`), not a write clause — `_EMBED_WRITE` "
+        "cannot see the dict-key form at :11146 `record[\"embedding\"] = embedding`. "
+        "It stores no LIVE graph vector, but its journal IS the sanctioned replay "
+        "carrier (:11050-11055: `_upsert_event` consumes `embedding` off the "
+        "record instead of recomputing it) — exempt as a sanctioned carrier, NOT "
+        "because no store is reachable through it"),
+    "tortoise.sdk::_session_event_write": (
+        CENSUS_RECOGNISED,
+        "tortoise/sdk.py:43720 `self._session_embedding(...)` → "
+        "`compute_session_embedding` (the documented #5008 exemption) + "
+        "`set_embedding_clause` at :43736-43737"),
+    "tortoise.sdk::_update_entity": (
+        CENSUS_EXEMPT,
+        "tortoise/sdk.py:41146 is a COMMENT, but that is only what the regex "
+        "MATCHED — the function DOES store: :41147 `point_props = dict(props)` "
+        "keeps a caller-supplied `embedding` through the map-merge at "
+        ":41182-41184 (`SET n += $p`). `_EMBED_WRITE` cannot see a map-merge. "
+        "Exempt on the NAMED #4094 exemption, not on absence of a write"),
+    "tortoise.sdk::ingest_corpus": (
+        CENSUS_RECOGNISED,
+        "tortoise/sdk.py:33340/33449 `self._session_embedding(...)` + "
+        "`set_embedding_clause(\"e\")` at :33384/33460 — same canonical chain"),
+    "tortoise.vector_write::set_embedding_clause": (
+        CENSUS_EXEMPT,
+        "tortoise/vector_write.py:200 — the clause BUILDER itself; it renders the "
+        "`<alias>.embedding = …` clause and stores no vector"),
+}
+
+
+def _census_class(writer: str) -> str | None:
+    """The class #10541 recorded for ``writer``, or None when unclassified."""
+    entry = WRITER_CENSUS.get(writer)
+    return entry[0] if entry else None
+
 
 def _strings(node) -> str:
     """Every string literal in ``node`` — where the Cypher actually lives."""
@@ -734,15 +860,54 @@ def score_path_bullet() -> Row:
         )
     if unparsed:
         notes.append(f"unparseable modules (hold this row at PARTIAL): {unparsed}")
+    # ── #10541: the census turns "cannot resolve" into a SCORED answer ───────
+    # A function the vocabulary could not resolve is only a hole in the
+    # measurement if NOTHING says which of the three honest classes it is in.
+    # Once it carries one, the row has a RECORDED ANSWER for every unresolved
+    # writer — which is the whole of #10541. It is NOT a licence to move the
+    # verdict: the writer set is unchanged and `unknown` still holds the row at
+    # PARTIAL below, because re-classing a writer does not make the vocabulary
+    # resolve it. (An earlier draft read this as "a complete measurement" and
+    # flipped the row to MET, breaking bullet 2's own falsifier; reverted.)
+    unclassified = sorted(fn for fn in unknown if _census_class(fn) is None)
+    by_class: dict[str, list[str]] = {}
+    for fn in unknown:
+        cls = _census_class(fn)
+        if cls in CENSUS_CLASSES:
+            by_class.setdefault(cls, []).append(fn)
+    if unknown:
+        notes.append(
+            "#10541 census over the unresolved set: "
+            + " | ".join(
+                f"{cls}={len(by_class.get(cls, []))}"
+                + (f" ({', '.join(sorted(by_class[cls]))})" if by_class.get(cls) else "")
+                for cls in CENSUS_CLASSES
+            )
+        )
+    if unclassified:
+        notes.append(
+            f"UNCLASSIFIED writers (hold this row at PARTIAL — #10541's own "
+            f"defect): {unclassified}"
+        )
+    real_bypasses = sorted(by_class.get(CENSUS_BYPASS, []))
+    if real_bypasses:
+        notes.append(
+            f"REAL BYPASSES (#10541 class 3 — a defect, not an exemption): "
+            f"{real_bypasses}"
+        )
     overridden = sorted(_overridden_writers() & set(written))
     if overridden:
         notes.append(
             f"labels assigned by the DOCUMENTED override, not derived from "
             f"Cypher (reported, as that comment promises): {overridden}"
         )
-    # A stored-and-unqueryable class is the bullet's failure; an UNRESOLVED
-    # writer (or a collapsed/duplicate identity, or a module that will not
-    # parse) is not proof either way, so it can at most hold the row at PARTIAL.
+    # ⛔ #10541: the census CLASSIFIES the unresolved set; it does not license
+    # moving this verdict. `test_an_unresolved_writer_is_reported_and_holds_
+    # bullet_two_at_partial` is bullet 2's own falsifier and it encodes the
+    # honesty rule: while a writer is unresolved the row cannot claim a
+    # COMPLETE measurement. Re-classing the writer does not make the vocabulary
+    # resolve it, so the row keeps holding. The open fork is recorded on
+    # #10541 — flipping this is a decision, not a cleanup.
     verdict = "NOT MET" if orphans else (
         "PARTIAL" if (unknown or unparsed or duplicates) else "MET")
     return Row(
