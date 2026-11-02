@@ -24198,6 +24198,16 @@ async def _apply_graph_rename(
     return {"graph_id": graph_id, "name": name}
 
 
+#: `_historical_onboarding_source`'s answer when the registry PROBE FAILED, as
+#: opposed to ``None`` ("looked, and no historical graph is listed"). #10452
+#: review P2: the two were collapsed — `listed = _registry_existing_graphs() or
+#: set()` turned "I could not look" into "nothing to carry" — and the runbook's
+#: recovery table tells an operator that `no_source` means "do nothing", so the
+#: one call whose purpose is recovery answered a benign receipt while the org's
+#: `:OnboardingState` stayed stranded in the demoted graph.
+_PROBE_FAILED = object()
+
+
 def _historical_onboarding_source(org_id: str, namespace: str) -> str | None:
     """The graph an org's onboarding record may still be sitting in (#10180).
 
@@ -24205,8 +24215,15 @@ def _historical_onboarding_source(org_id: str, namespace: str) -> str | None:
     actually LISTS: ``_make_sdk(namespace=…)`` re-derives ``org_{org_id}`` and
     would MINT it, which is the pin-4 read-path write this tree bans. A name the
     probe never observed is never opened.
+
+    Returns ``_PROBE_FAILED`` (a distinct sentinel, NOT ``None``) when the probe
+    itself failed: "I could not look" and "nothing to carry" need different
+    operator remedies, and a caller that reports the first as the second turns a
+    recoverable promotion into a silently stranded record (#10452 review P2).
     """
-    listed = _registry_existing_graphs() or set()
+    listed = _registry_existing_graphs()
+    if listed is None:
+        return _PROBE_FAILED
     for candidate in (f"org_{org_id}", f"team_{org_id}"):
         if candidate != namespace and candidate in listed:
             return candidate
@@ -24246,6 +24263,12 @@ def _carry_onboarding_state(org_id: str, previous_ns: str | None,
        the current default, mirroring the RPC's own idempotent-arm repair
        (``namespace_repaired``). It never overwrites a present node.
 
+    ``probe_failed`` is its own reason on the repair arm (#10452 review P2): the
+    registry probe that LISTS the historical graphs returned "unknown", which is
+    not the ``no_source`` the table maps to "nothing to carry, do nothing". A
+    caller told ``no_source`` when the probe merely failed would conclude the
+    record is fine while it is still in the demoted graph.
+
     Best-effort by contract: the move has already COMMITTED when this runs, so
     a graph failure must not fail the verb — it is reported as
     ``carry_failed`` with its exception type (never silently reported as done).
@@ -24264,6 +24287,13 @@ def _carry_onboarding_state(org_id: str, previous_ns: str | None,
                 # ABSENT record, so a repeated promote cannot churn state.
                 return {**report, "reason": "already_present"}
             source = _historical_onboarding_source(org_id, namespace)
+            if source is _PROBE_FAILED:
+                # #10452 review P2: "I could not look" is NOT "nothing to
+                # carry". `no_source` is documented as "do nothing" (the
+                # runbook's recovery table), so collapsing a failed probe into
+                # it told an operator the repair was unnecessary while the org's
+                # record stayed stranded in the demoted graph.
+                return {**report, "reason": "probe_failed"}
             if source is None:
                 return {**report, "reason": "no_source"}
         dst_sdk = dst_sdk or _make_sdk(graph_name=namespace)

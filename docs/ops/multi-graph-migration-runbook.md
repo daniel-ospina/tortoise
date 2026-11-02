@@ -535,6 +535,7 @@ arm cannot ship undocumented (and a documented arm cannot outlive its code):
 | `copied` | the record moved | nothing |
 | `absent` | the previous default had no node (org never onboarded) | nothing |
 | `already_present` / `no_source` | nothing to carry (idempotent promote, or no historical graph listed) | nothing |
+| `probe_failed` | the registry probe that LISTS the historical graphs failed, so the repair arm could not tell whether there is anything to carry — **not** the same as `no_source` | re-promote the CURRENT default once the probe recovers (`POST /v1/graphs/default/promote`); until then the org's onboarding record may still be in the demoted graph |
 | `no_namespace` | the promotion reported no target namespace, so there is nowhere to carry to (a defensive branch — the RPC names one for every real move) | nothing |
 | `carry_failed` | **the record is still in the demoted graph** | re-promote the CURRENT default (`POST /v1/graphs/default/promote`): the idempotent arm repairs an absent record from the listed historical name. It never overwrites a present node. |
 

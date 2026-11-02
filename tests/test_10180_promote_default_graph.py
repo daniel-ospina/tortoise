@@ -2447,6 +2447,40 @@ def test_re_promoting_the_current_default_repairs_a_stranded_record(
     assert _read_onboarding(_NEW_NS)["status"] == "complete"
 
 
+def test_a_failed_registry_probe_is_not_reported_as_nothing_to_carry(
+        sb, monkeypatch):
+    """#10452 review P2: "I could not look" is not "nothing to carry".
+
+    The repair arm lists the org's historical graphs through
+    `_registry_existing_graphs`, which answers ``None`` when the PROBE ITSELF
+    failed. `listed = _registry_existing_graphs() or set()` collapsed that into
+    "no candidates", so `_carry_onboarding_state` reported ``no_source`` — the
+    value the runbook's recovery table maps to "nothing to carry, do nothing".
+    An operator diagnosing a failed carry after re-promoting the current default
+    would then be told the repair was unnecessary while the org's
+    `:OnboardingState` stayed in the demoted graph (wizard re-opens, and the
+    recorded `fork`/`compact` is lost).
+
+    FAIL-ON: with the `or set()` collapse the first assertion reads
+    ``no_source``.
+    """
+    _ = sb   # the embedded lane + a fresh org: the target holds no record
+    assert _read_onboarding(_NEW_NS) is None
+
+    # The probe FAILED (unknown), so the arm cannot know whether there is
+    # anything to carry — that is its own reason, never `no_source`.
+    monkeypatch.setattr(ha, "_registry_existing_graphs", lambda: None)
+    failed = ha._carry_onboarding_state(TEAM, None, _NEW_NS)
+    assert failed["reason"] == "probe_failed", failed
+    assert failed["migrated"] is False
+
+    # …and a probe that ANSWERED, with nothing listed, is still `no_source`:
+    # the two states must stay distinguishable in both directions.
+    monkeypatch.setattr(ha, "_registry_existing_graphs", lambda: set())
+    answered = ha._carry_onboarding_state(TEAM, None, _NEW_NS)
+    assert answered["reason"] == "no_source", answered
+
+
 def test_the_existence_gate_follows_a_promoted_default(monkeypatch):
     """The projection's existence verdict is about the org's DEFAULT namespace,
     not `org_{org_id}`: the demoted graph is an ordinary custom graph and can be
@@ -2879,7 +2913,7 @@ def test_the_runbook_lists_exactly_the_carry_reasons_the_code_returns():
                         and isinstance(v.value, str)):
                     returned.add(v.value)
     assert returned == {"copied", "absent", "already_present", "no_source",
-                        "no_namespace", "carry_failed"}, returned
+                        "no_namespace", "carry_failed", "probe_failed"}, returned
 
     doc = (root / "docs" / "ops" / "multi-graph-migration-runbook.md").read_text(
         encoding="utf-8")
