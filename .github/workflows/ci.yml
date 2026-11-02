@@ -1554,16 +1554,21 @@ jobs:
       # reddening the SIGPIPE / ai-review-evidence / backup guards for a reason
       # unrelated to the diff. Same shape as `ci-timing.yml:56-62`.
       #
-      # ⚠️ `jq` IS PRESENT ON THE POOL, and this step is an ASSERTION, not an
-      # install. The premise it was first justified with ("the hosted image
-      # ships both; the pool does not") is falsified by this PR's own run: the
-      # job concluded `success` on `pi-runner-cmux-x64-8` (run 41328630369) at a
-      # head carrying an UNCONDITIONAL `ensure jq`, and an unsatisfied assertion
-      # exits 1 and reds the job. `runner-tools.sh ensure_one` (`:197-213`)
+      # ⚠️ `jq` RESOLVES ON THE ONE x64 RUNNER THIS CANARY HAS LANDED ON — read
+      # that as narrow, because it is. The measurement is
+      # `pi-runner-cmux-x64-8` (run 41328630369, at a head carrying an
+      # UNCONDITIONAL `ensure jq`; an unsatisfied assertion exits 1 and reds the
+      # job), so the green proves jq resolves THERE and nowhere else. The pin
+      # selects ~10 x64 agents across more than one host family
+      # (`runner-tools.sh:10`), and `tools/install-ci-runner-x64.sh` installs no
+      # `jq` — it only calls `gh api --jq` — so NOTHING in the tree makes jq's
+      # presence pool-wide by construction. This step is therefore an
+      # ASSERTION, not an install: `runner-tools.sh ensure_one` (`:197-213`)
       # installs `gh` and nothing else, so `ensure jq` can never repair an absent
-      # jq — it fails CLOSED with `reason=absent-not-provisionable`. That is the
-      # contract's own intent (name the tool, never inherit the machine); do not
-      # read "ensure" as "provisioned" when copying this onto another leg.
+      # jq — it fails CLOSED with `reason=absent-not-provisionable` on any box
+      # that lacks it. That is the contract's own intent (name the tool, never
+      # inherit the machine); do not read "ensure" as "provisioned" when
+      # copying this onto another leg.
       #
       # ⚠️ AND IT IS GATED THE WAY ITS CONSUMER IS. The only REAL `jq`
       # invocation in this job is `registry-cron.test.sh:280` (`jq -Rsc`), whose

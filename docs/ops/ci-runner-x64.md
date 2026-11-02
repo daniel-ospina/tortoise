@@ -964,12 +964,17 @@ green is not licence to move one.
 
 Two further facts measured on the canary, so the next author copies the right premise:
 
-- **`jq` is present on the pool.** `runner-tools.sh ensure_one` installs `gh` and nothing else, so
+- **`jq` resolves on the ONE x64 runner this canary has landed on — not pool-wide.** The
+  measurement is `pi-runner-cmux-x64-8` (run `41328630369`, at a head carrying the assert
+  unconditionally); an unsatisfied assertion exits 1 and reds the job, so that green proves jq
+  resolves THERE. The pin selects ~10 x64 agents across more than one host family
+  (`runner-tools.sh:10`), and `tools/install-ci-runner-x64.sh` installs no `jq` — its nine `jq`
+  hits are all `gh api --jq` — so nothing in the tree makes its presence pool-wide by
+  construction. `runner-tools.sh ensure_one` (`:197-213`) installs `gh` and nothing else, so
   `ensure jq` can never repair an absent jq — it fails closed with
-  `reason=absent-not-provisionable`. It is therefore an ASSERTION, and the canary's own green
-  (run `41328630369`, at a head carrying it unconditionally) is the measurement that jq resolves
-  there. The premise it was first justified with — "the hosted image ships both; the pool does
-  not" — is false for jq and was corrected in `ci.yml`.
+  `reason=absent-not-provisionable` on any box that lacks it. It is therefore an ASSERTION, and
+  the premise it was first justified with — "the hosted image ships both; the pool does not" —
+  is false for jq and was corrected in `ci.yml`.
 - **It is gated the way its consumer is.** The only real jq invocation in that job is
   `registry-cron.test.sh:280` (`jq -Rsc`), gated on the `driver_scripts` surface, so the assert
   carries the same gate. Ungated it would red every PR — including the large majority that cannot
