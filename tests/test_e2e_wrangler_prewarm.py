@@ -82,6 +82,7 @@ rather than grepping its path.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import os
 import re
@@ -750,6 +751,23 @@ def _run_wedge(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _rename_onto(prefix: Path, residue: Path) -> None:
+    """`rename(2)` — the syscall npm's install actually fails on.
+
+    ⛔ NOT `subprocess.run(["mv", "-T", …])`. `-T` is a **GNU Coreutils** option
+    (`--no-target-directory`); BSD/macOS `mv` documents no such flag and exits 64
+    with `illegal option -- T`, so that form red the file on every dev host
+    outside Linux while CI — Ubuntu-only — stayed green (#10523 review, P2).
+
+    The leg's subject is the SYSTEM CALL, and `os.rename` IS `rename(2)` on POSIX,
+    so the reproduction needs no subprocess and no option at all, and the failure
+    can be keyed on `errno` rather than on a program's stderr prose. Plain `mv` is
+    not a substitute: with an existing directory as the final operand it moves the
+    source INTO it and succeeds, which hides the very defect this pins.
+    """
+    os.rename(prefix / "wrangler", residue)
+
+
 def _prefix(tmp_path: Path) -> Path:
     """A throwaway global prefix with a package directory in it."""
     prefix = tmp_path / "node_modules"
@@ -768,34 +786,33 @@ def test_the_measured_runner_residue_reproduces_from_npms_own_formula() -> None:
 
 
 def test_the_healer_clears_the_residue_that_blocks_npms_rename(tmp_path: Path) -> None:
-    """The failure is a rename(2), so this reproduces THAT — before and after.
+    """The failure is a `rename(2)`, so this reproduces THAT — before and after.
 
-    `mv -T` is `rename(2)` (plain `mv` would move the package INTO the existing
-    directory and succeed, hiding the defect). Pre-heal the rename fails with the
-    exact syscall error npm reported; post-heal the same rename succeeds.
+    Pre-heal the rename fails with the exact syscall error npm reported; post-heal
+    the same rename succeeds. Both halves are `os.rename`, i.e. `rename(2)` itself
+    — no `mv`, so the arm is platform-neutral (see `_rename_onto`).
     """
     prefix = _prefix(tmp_path)
     residue = Path(_npm_retired_name(str(prefix / "wrangler")))
     (residue / "lib").mkdir(parents=True)
     (residue / "lib" / "stale.js").write_text("// residue\n", encoding="utf-8")
 
-    broken = subprocess.run(
-        ["mv", "-T", str(prefix / "wrangler"), str(residue)],
-        capture_output=True, text=True,
+    with pytest.raises(OSError) as wedge:
+        _rename_onto(prefix, residue)
+    # POSIX leaves the code to the implementation: rename() onto a NON-EMPTY
+    # directory "shall" fail, and the spec's own ERRORS list offers ENOTEMPTY or
+    # EEXIST. Keying on the code is what makes this an assertion about the syscall
+    # instead of about one `mv`'s wording.
+    assert wedge.value.errno in (errno.ENOTEMPTY, errno.EEXIST), (
+        f"the fixture is not a wedge: rename(2) failed with {wedge.value!r}"
     )
-    assert broken.returncode != 0, "the rename succeeded — this fixture is not a wedge"
-    assert "not empty" in (broken.stderr or "").lower(), broken.stderr
 
     healed = _run_wedge("clear", str(prefix / "wrangler"))
     assert healed.returncode == 0, healed.stderr
     assert f"CLEARED {residue}" in healed.stdout, healed.stdout
     assert not residue.exists()
 
-    repaired = subprocess.run(
-        ["mv", "-T", str(prefix / "wrangler"), str(residue)],
-        capture_output=True, text=True,
-    )
-    assert repaired.returncode == 0, repaired.stderr
+    _rename_onto(prefix, residue)
     assert residue.is_dir() and (residue / "lib" / "index.js").is_file()
 
 
