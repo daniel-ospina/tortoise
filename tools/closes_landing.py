@@ -159,16 +159,26 @@ class Finding:
 _CONTAINER_PREFIX_RE = re.compile(r"^(?:\s*>\s?)*")
 
 
-def _fence_run(line: str) -> tuple[str, int] | None:
-    """The (character, length) of a leading ```/`~~~` fence run, if any.
+def _quote_depth(line: str) -> int:
+    """How many blockquote markers (`>`) the line carries."""
+    return _CONTAINER_PREFIX_RE.match(line).group(0).count(">")
+
+
+def _fence_run(line: str) -> tuple[str, int, int] | None:
+    """(character, run length, blockquote depth) of a leading fence, if any.
 
     Blockquote prefixes (`> `, `> > `) are seen through: a fenced block inside a
     quote is still a fence, and `_fence_run` not seeing it made the block's
     contents look like prose (review c4-5, second shape).
+
+    The DEPTH is carried out because a fence belongs to its quote: a line after
+    it that carries NO `>` is not inside that blockquote any more (a fenced block
+    has no lazy continuation), so it is top-level prose and its keywords are real
+    claims. Blanking it was a silent PASS over the inert shape (review c7-2).
     """
     body = _CONTAINER_PREFIX_RE.sub("", line)
     m = re.match(r"(`{3,}|~{3,})", body.lstrip())
-    return (m.group(1)[0], len(m.group(1))) if m else None
+    return (m.group(1)[0], len(m.group(1)), _quote_depth(line)) if m else None
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -202,14 +212,21 @@ def strip_code(body: str, strict: bool = False) -> str:
     safe direction (an extra warning, never a pass) and is accepted.
     """
     out: list[str] = []
-    fence: tuple[str, int] | None = None
+    fence: tuple[str, int, int] | None = None
     for line in body.splitlines():
         run = _fence_run(line)
         if strict and (line.startswith("    ") or line.startswith("\t")):
             out.append("")
             continue
         if fence is not None:
-            if run and run[0] == fence[0] and run[1] >= fence[1]:
+            # A line that leaves the quote ENDS the block (a fenced block has no
+            # lazy continuation), so it is prose again — including its keywords.
+            if line.strip() and _quote_depth(line) < fence[2]:
+                fence = None
+                out.append(line)
+                continue
+            if run and run[0] == fence[0] and run[1] >= fence[1] \
+                    and run[2] >= fence[2]:
                 fence = None
             out.append("")
             continue

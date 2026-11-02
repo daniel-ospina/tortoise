@@ -743,3 +743,36 @@ def test_the_empty_report_does_not_claim_a_non_default_base(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "no closing refs to judge" in out
     assert "non-default base" not in out
+
+
+# ── cycle 7: a fence inside a blockquote does not swallow out-of-quote prose ──
+
+def test_a_keyword_after_a_blockquote_fence_ends_is_a_real_claim():
+    """A fenced block has no lazy continuation: once a line drops its `>` the
+    blockquote has ended, so the rest is top-level prose and its keyword is a
+    real claim. Blanking it was a silent PASS over the inert shape (review c7-2)."""
+    body = "fix: something\n\n> ```\nCloses #10541\n> ```\n"
+    assert cl.parse_closing_refs(body) == [10541]
+    assert cl.parse_closing_refs(body, None, strict=True) == [10541]
+
+
+def test_an_inert_stacked_keyword_after_a_blockquote_fence_still_fires():
+    subject = _pr(120, SIBLING, "fix: something\n\n> ```\nCloses #10541\n> ```\n")
+    carrier = _pr(121, DEFAULT, "no keyword", head=SIBLING)
+    (finding,) = cl.classify(subject, _by_head(subject, carrier), DEFAULT)
+    assert finding.verdict == "inert"
+
+
+def test_a_keyword_inside_the_blockquote_fence_is_still_stripped():
+    body = "> ```\n> Closes #10541\n> ```\n"
+    assert cl.parse_closing_refs(body) == []
+
+
+if __name__ == "__main__":  # the standalone form the docstring advertises
+    # This file opens no graph, so it is exactly the #1647 P4 carve-out case; the
+    # session gate otherwise refuses every test with "default pytest requires
+    # TORTOISE_DB_URI" and the standalone form would report a wall of errors.
+    import os
+
+    os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
+    raise SystemExit(pytest.main([__file__, "-q"]))
