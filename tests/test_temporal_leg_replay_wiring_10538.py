@@ -109,7 +109,7 @@ def test_the_proxy_uses_the_question_date_as_the_recency_clock(monkeypatch):
 
 
 def test_the_proxy_resolves_the_month_name_year_from_the_question_date(monkeypatch):
-    """Review cycle 11 (#10549): the mirror was only half taken.
+    """Review at ``871b7561f`` (#10549): the mirror was only half taken.
 
     ``retrieve.py`` calls ``detect_time_constraint(question, default_year=year)``
     where ``year`` comes from ``question_date`` (``:1891-1896``), because

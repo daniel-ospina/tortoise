@@ -109,15 +109,15 @@ def replay(questions: list[dict], *, window: int,
         # bound (``facet_window_bounds`` returns ``None``) → ``None`` → the
         # pre-#10538 replay.
         #
-        # BOTH halves of the mirror, not just the bounds call (review cycle
-        # 11, #10549): the resolver's month-name ``interval`` branch takes its
-        # YEAR from ``default_year`` and falls back to ``2026`` when it is
-        # omitted, so a 2023 question phrased "between April 10 and April 20"
-        # built a 2026 window here while the shipped path built 2023 — the arm
-        # inert, no ``leg_fired``, again. ``retrieve.py:1891-1896`` derives the
-        # year from ``question_date`` (unparseable → ``None``, never a guess)
-        # and this file now does the same, so the two seams resolve identical
-        # bounds. Pinned by
+        # BOTH halves of the mirror, not just the bounds call (the review at
+        # ``871b7561f``, #10549): the resolver's month-name ``interval``
+        # branch takes its YEAR from ``default_year`` and falls back to ``2026``
+        # when it is omitted, so a 2023 question phrased "between April 10 and
+        # April 20" built a 2026 window here while the shipped path built 2023
+        # — the arm inert, no ``leg_fired``, again. ``retrieve.py:1891-1896``
+        # derives the year from ``question_date`` (unparseable → ``None``,
+        # never a guess) and this file now does the same, so the two seams
+        # resolve identical bounds. Pinned by
         # ``test_the_proxy_resolves_the_month_name_year_from_the_question_date``.
         _qdate = q.get("question_date") or None
         try:
