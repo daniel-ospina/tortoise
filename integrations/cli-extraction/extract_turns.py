@@ -164,7 +164,7 @@ def _is_turn_of(row) -> bool:
 #: `*` rather than `+` for the role, so an EMPTY role still unframes) — a local
 #: copy because `dump` maps rows on the HOST, where `tortoise` is not
 #: necessarily importable (the whole lane talks to the container).
-_FRAME_RE = re.compile(r"^\[([^\]]*)\]\s*", re.S)
+_FRAME_RE = re.compile(r"^\[([^\]]*)\]\s*")
 
 
 def _turn_order(row) -> tuple:
@@ -251,10 +251,13 @@ def dump(out: Path, allow_empty: bool = False):
     if n == 0 and not allow_empty:
         # The two empty cases have DIFFERENT causes and the old one-line
         # message named neither of them: it sent every operator to their
-        # capture setting (#9932), which is the wrong cause in both. `rows`
-        # is what the query actually returned, so the split below is measured
-        # rather than guessed: rows>0 means the predicate matched and the ID
-        # shape moved; rows==0 means the predicate matched nothing at all.
+        # capture setting (#9932), which is the wrong cause in both.
+        # `rows` is what the query actually returned, so the split below is
+        # measured rather than guessed: rows>0 means the predicate matched and
+        # the ID shape moved; rows==0 means the predicate matched nothing at
+        # all — which has THREE causes, not two (a message that offers two and
+        # omits the third repeats #9932's own defect: it sent every operator to
+        # a setting that was not the cause).
         if rows:
             raise SystemExit(
                 f"dump: 0 turns captured — the query MATCHED {len(rows)} turn-shaped "
@@ -264,11 +267,16 @@ def dump(out: Path, allow_empty: bool = False):
                 "(`sdk._capture_turn_id`). (pass --allow-empty to accept an empty dump)")
         raise SystemExit(
             "dump: 0 turns captured — the query matched NO point at all, so this is "
-            "not the id filter. Either TORTOISE_CAPTURE was off for the sessions you "
-            "expect, or the turns live in the Postgres RECORD: with "
-            "TORTOISE_RECORD_DSN armed (#10000) capture is ON and this lane's "
-            "graph-only read legitimately finds nothing — `sdk.get_session()` serves "
-            "those. (pass --allow-empty to accept an empty dump)")
+            "not the id filter. Any of three causes applies: TORTOISE_CAPTURE was "
+            "off for the sessions you expect; the turns live in the Postgres RECORD "
+            "(with TORTOISE_RECORD_DSN armed, #10000, capture is ON and this lane's "
+            "graph-only read legitimately finds nothing — `sdk.get_session()` "
+            "serves those); or the turn nodes do not carry the names/values "
+            "`_DUMP_QUERY` reads — pre-#947 captures wrote turn Points with NO "
+            "`is_episodic` flag (`graph-scripts/backfill_is_episodic.py` backfills "
+            "it, and its scope covers exactly `(s:Session)-[:CONTAINS]->(:Point)`), "
+            "and a writer that has moved past these property names matches nothing "
+            "either. (pass --allow-empty to accept an empty dump)")
     keys = ", ".join(build_transcripts(out)) or "(none)"
     print(f"dumped {n} turns -> {out}")
     print(f"transcripts: {keys}")
