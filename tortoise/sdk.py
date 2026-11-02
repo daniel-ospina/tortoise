@@ -18665,8 +18665,9 @@ class TortoiseSDK:
         # when ABSENT, both ways for a present non-string (see the per-row
         # note) — and, for the first two, the same canonicalizer as
         # ``create_operator``, ``create_direct_edge``, ``ingest``'s
-        # partial-absorb branch and #10195's operator pre-flight above. A second copy of "may this edge
-        # exist" would be a finding of its own. The REFUSAL message is that
+        # partial-absorb branch and #10195's operator pre-flight above. A
+        # second copy of "may this edge exist" would be a finding of its own.
+        # The REFUSAL message is that
         # predicate's own (``override_refusal``), with this surface named —
         # the caller's ways out are the same ones it states.
         #
