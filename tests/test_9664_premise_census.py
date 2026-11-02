@@ -66,15 +66,23 @@ WHAT THIS PINS
    not ship, and it misreports in both directions — a false FALSIFIED when the
    override names an unknown pack, a green section when it names a subset
    (round 4, P3).
+12. The documented recipe (``README.md`` → "Re-running the measurable half")
+   reproduces ``MEASURED: 25 premises, 0 unmeasured sections.`` on a box that
+   exports ``TORTOISE_API_KEY`` without a pepper, its stdout is byte-identical
+   when the key is absent, and the documented command's fail-closed tail exits 3
+   on a deliberate refusal.
 
 Non-vacuity: on the pre-fix probe, (1) has no ``tortoise_health`` /
 ``tortoise_overview`` / ``tortoise_onboarding_state`` row, (2) has no
 "is in a completion gate" row and reads 2 of the 3 gates, (4) prints
 ``CONFIRMED`` while the org-create fragment writes no ``team-named`` edge, and
 (5) has no step-2 row at all — ``row("2"`` matched nothing, so the whole step-2
-group of guards reds against it.
+group of guards reds against it. Two mutations of the FIX were measured at
+cd536eedb: removing the guard at its call site reds the exported arm
+(``assert 3 == 0``), and mutating the probe's tail to a bare ``main()`` reds the
+refusal arm (``assert 0 == 3``) — the fail-open that no in-process pin could see.
 
-Static: imports the probe and the onboarding modules; no DB, no network.
+Static, plus THREE ``sys.executable`` child runs of the probe (no DB, no network).
 """
 from __future__ import annotations
 
@@ -722,12 +730,14 @@ def test_the_onboarding_section_measures_on_a_box_that_exports_the_hosted_key() 
     over it because `tests/conftest.py:18` supplies the pepper the recipe does
     not — so this one reproduces the recipe, in a fresh process.
 
-    Two arms, because either alone is a gate that lies: the exported arm proves
-    the section measures at all and that the documented command's verdict is the
-    published one, and the unexported arm proves the fix does not CHANGE the
-    output (both arms' full stdout is compared). The probe's other refusal knobs
-    are stripped too, so a red pin cannot be an ambient-env artifact — it means
-    the hosted-key regression, or a real change in what a section can measure.
+    Three arms: the exported arm proves the section measures at all and that the
+    documented command's verdict is the published one; the unexported arm proves
+    the fix does not CHANGE the output (both arms' full stdout is compared); and
+    the refusal arm pins the contract the repo's ``__main__`` tail must not
+    swallow (``main()`` returning 3 ⇒ the process exits 3). The probe's other
+    refusal knobs are stripped too, so a red pin cannot be an ambient-env
+    artifact — it means the hosted-key regression, or a real change in what a
+    section can measure.
     """
     base = {k: v for k, v in os.environ.items()
             if k not in ("TORTOISE_API_KEY", "TORTOISE_SECRET_PEPPER",

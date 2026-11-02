@@ -22,7 +22,7 @@ Sections
                 cleared (`_hosted_startup_guard_cleared`): that key is a
                 server-STARTUP precondition, and leaving it set (without a
                 `TORTOISE_SECRET_PEPPER`) made this section unmeasurable on
-                every box that exports it
+                every box that exported it without a pepper
   packs       — step 2's "the default is catalog union + core": the THREE
                 resolution arms of `pack_state.resolved_pack_set` (driven
                 through the real function), the starter-set/catalog relation,
@@ -86,10 +86,11 @@ def _hosted_startup_guard_cleared():
     three gates and `_CHECKPOINT_STEPS` are module constants, and measured
     output is byte-identical with and without it.
 
-    Side effect, deliberate: `tortoise.auth` is imported against the dev pepper
-    and stays cached for the rest of the process. No section reads `auth`, but a
-    future row that measures key hashing must run in its own process rather than
-    here.
+    Side effect, deliberate: on a box with no `TORTOISE_SECRET_PEPPER` — the box
+    that used to raise — `tortoise.auth` is imported on the dev-pepper fallback
+    and stays cached for the rest of the process (with a pepper set this import
+    is unchanged, since only the key is popped). No section reads `auth`, but a
+    future row that measures key hashing must run in its own process.
 
     The class this only papers over at one call site — every other
     `from tortoise.hosted_api import …` in a non-server process on such a box
