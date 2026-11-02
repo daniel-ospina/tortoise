@@ -58,6 +58,7 @@ from tortoise.embeddings import (
     compute_embedding,
 )
 from tortoise.ids import content_hash
+from tortoise.projection.entities import _writable_journalled_vector
 from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import run_vector_query
 
@@ -559,7 +560,16 @@ def _attestable(point: dict) -> bool:
 
       1. no RESTORED vector — the identity/text check is only reached on the
          branch that writes the journalled vector
-         (``projection/entities.py:2508-2509``);
+         (``projection/entities.py:2508-2509``). This clause tests only that
+         the FIELD carries a value; production additionally requires the value
+         to be *restorable* (`_writable_journalled_vector`) and, at the call
+         site, of the store's WIDTH (`:2491-2505`). Both are unrepresentable in
+         this fixture, so the predicate below is exactly production's
+         population — and the mismatch test PINS that with a premise assertion
+         rather than making this pure predicate store-dependent. A future
+         fixture that journals a refused width or a non-finite value reds that
+         premise instead of silently counting a record the replay never
+         attests (last-review non-blocking note 2);
       2. no identity **and** no revision (``:943-952``) — "stay silent": the
          record cannot attest its origin, which is exactly the shape
          ``stamp_journal_embedding(creating=False)`` emits;
@@ -616,6 +626,15 @@ def test_the_attestable_predicate_mirrors_the_replay_early_returns():
     assert _attestable(base), base
     # 1. the field is journalled but carries NO usable vector → never restored.
     assert not _attestable(dict(base, embedding=None))
+    # 1b. UNMODELLED BY THIS PREDICATE, deliberately and pinned: restorability
+    #     (`_writable_journalled_vector`) and store WIDTH are CALL-SITE gates
+    #     (`projection/entities.py:2488-2505`) needing state a pure predicate
+    #     does not have, so an empty/refused vector still reads as attestable
+    #     here. The mismatch test asserts the FIXTURE premise that no such
+    #     record exists, which keeps the two populations identical. Adding a
+    #     restorability clause HERE instead would red this line — correctly, as
+    #     it would make the predicate claim more than it can know.
+    assert _attestable(dict(base, embedding=[]))
     # 2. no identity at all → the replay stays silent; either half alone is
     #    enough for it to compare.
     assert not _attestable(dict(base, embedding_model=None,
@@ -676,6 +695,8 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     # ── leg 1: a FAITHFUL enriched journal must not look like a divergence ──
     s = TortoiseSDK(str(tmp_path / "m.db"), event_log_path=log_path)
     try:
+        # The store's vector width — the call-site gate the premise below needs.
+        store_dim = s._get_proj().required_embedding_dim
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
             caplog.clear()
@@ -712,6 +733,45 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     # assumed: a later edit to CONV/the rewriter that left every turn an
     # identity rewrite would silently remove one of the two mutation kills and
     # keep the suite green — the exact false confidence this test prevents.
+    # PREMISE (last-review non-blocking note 2): the call site gates the
+    # identity/text check on `_writable_journalled_vector(...) is not None`
+    # (non-empty list, finite, plausible length) AND on the width matching
+    # `FalkorProjection.required_embedding_dim` (`projection/entities.py:2491-
+    # 2505`); neither is expressible in a pure predicate, and neither fires on
+    # this fixture's vectors. Asserting it keeps the population identity —
+    # `_attestable` == what the replay attests — a checkable fact instead of an
+    # observation: a future fixture that journals a wrong-width or non-finite
+    # vector reds HERE instead of quietly demanding a warning production can
+    # never emit.
+    unwritable = [
+        p.get("id") for p in points
+        if _attestable(p)
+        and _writable_journalled_vector(p.get("embedding")) is None]
+    assert not unwritable, (
+        "premise: these attestable records carry a vector the replay REFUSES "
+        "(`_writable_journalled_vector` -> None), so it never reaches the "
+        f"text comparison: {unwritable}")
+    # The WIDTH half of that gate is unreachable in THIS lane: the fixture is
+    # embedded (`pytestmark = embedded_only`), and an embedded store skips
+    # vector-index creation by design, so `required_embedding_dim` is None
+    # (`projection/__init__.py:19814`) and the refusal at `:2492-2494` cannot
+    # narrow the population. Asserted BOTH ways so the reasoning is checked, not
+    # assumed: unreachable ⇒ say so; reachable ⇒ every vector must match it.
+    if store_dim is None:
+        assert all(
+            _writable_journalled_vector(p.get("embedding")) is not None
+            for p in points if _attestable(p)), (
+            "premise: an embedded store has NO width constraint, so the only "
+            "call-site refusal left is restorability — and a record failed it")
+    else:
+        wrong_width = [
+            p.get("id") for p in points
+            if _attestable(p)
+            and len(_writable_journalled_vector(p.get("embedding"))) != store_dim]
+        assert not wrong_width, (
+            "premise: these attestable records carry a vector of the WRONG "
+            f"WIDTH for this store ({store_dim}), so the call site refuses it "
+            f"before `_record_embedding_identity` runs: {wrong_width}")
     differing_from_content = [
         p.get("id") for p in points
         if _attestable(p) and _attested_text(p) != p.get("content")]
