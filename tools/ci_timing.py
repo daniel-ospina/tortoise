@@ -2205,8 +2205,9 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        associated with a particular node", so *nothing* in the file says which row
        an indented block documents. This map's DOMINANT convention is the opposite
        of the one the previous two conditions imply — an indented block PRECEDES
-       the row it documents (measured at this head: 72 of the 73 such blocks open a
-       new note, and the ones sampled document the row BELOW — `# #4071: …` sits
+       the row it documents (measured at this head with this module's own
+       predicates: 73 of the 74 such blocks open a new note, and the ones sampled
+       document the row BELOW — `# #4071: …` sits
        above `test_embedded_lane_canonical_store_4071.py`, `# #5612: …` above
        `test_journal_growth.py`, and the `355.0 IS A DELIBERATE CAP … #9172` block
        above `test_lane_stash.py` while lying directly under `test_work_claim.py`).

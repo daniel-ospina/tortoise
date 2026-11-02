@@ -6283,7 +6283,7 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
 # ── …and the OTHER convention: a block that OPENS a note is not the row above's ──
 #
 # This map's dominant convention is the block that PRECEDES the row it documents
-# (72 of the 73 blocks beside a row at this head open a note of their own),
+# (73 of the 74 blocks beside a row at this head open a note of their own),
 # and nothing in YAML says which row a comment belongs to — §3.2.3.3 of the spec:
 # comments are “a presentation detail … not associated with a particular node”.
 #
