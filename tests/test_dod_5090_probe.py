@@ -967,6 +967,53 @@ def test_an_unreadable_catalogue_row_is_not_an_unindexed_label():
     assert str(row["unindexed"]).startswith("UNMEASURED"), row
 
 
+def test_an_UNATTRIBUTABLE_catalogue_row_holds_EVERY_label_UNMEASURED():
+    """A catalogue row with no readable label cell is every label's row.
+
+    Measured failure this pins (round-23 review, P3): `unreadable` holds
+    `(label-or-None, why)` entries and the per-label filter was
+    `lab == label`. `label` is ALWAYS a str (the population is
+    `graph_labels | indexed | served_labels()`), so an entry keyed `None`
+    matched NOTHING — `unreadable_here` was empty for every label, both columns
+    took the MEASURED branch, and a graph whose `CALL db.indexes()` answered one
+    empty row reported `indexed=False, unindexed=N` for `Point` — which in this
+    test carries a VECTOR index on `embedding` — and for every other label.
+    That is the exact inversion of the comment beside the column ("An unreadable
+    catalogue row is NOT 'this label has no index'") and of the function's own
+    docstring ("either measured or `UNMEASURED(<why>)` — never `0`").
+
+    The empty row is the only SHAPE that reaches a `None` label: the
+    pre-existing falsifier drives `["Point", ["embedding"], "not-a-dict"]`,
+    whose label IS recoverable, so the `UNMEASURED` branch was taken there and
+    this hole went unnoticed.
+    """
+    graph = _CensusGraph(
+        catalogue=[[]],
+        labels=["Point", "Source"],
+        vectors={"Point": (3, [0.0] * 384), "Source": (2, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-01T00:00:00Z",
+                                graph_names=["g"])
+    assert census["unreadable_catalogue_rows"] == [(None, "short row []")], (
+        census["unreadable_catalogue_rows"])
+    for label in ("Point", "Source"):
+        row = census["labels"][label]
+        assert isinstance(row["indexed"], str), (label, row)
+        assert row["indexed"].startswith("UNMEASURED"), (label, row)
+        assert isinstance(row["unindexed"], str), (label, row)
+        assert row["unindexed"].startswith("UNMEASURED"), (label, row)
+        # The reason is NAMED…
+        assert "short row []" in row["indexed"], (label, row)
+        # …and it is NOT attributed to a label literally called `None`, which
+        # is what a `lab == label or lab is None` fix would have printed.
+        assert "None:" not in row["indexed"], (label, row)
+        # The STORED count is still MEASURED: the fix poisons the two
+        # catalogue-derived columns, not the whole census (a fix that returned
+        # UNMEASURED everywhere would hide a figure that DID measure).
+        assert not isinstance(row["stored"], str), (label, row)
+        assert row["stored"] == {"Point": 3, "Source": 2}[label], (label, row)
+
+
 def test_a_backtick_in_a_graph_label_cannot_re_purpose_the_census_query():
     """A label is QUOTED by the repo's identifier rule, never concatenated raw.
 

@@ -1946,7 +1946,32 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             stored = int(res[0][0])
         except Exception as e:
             stored = f"UNMEASURED({type(e).__name__}: {e})"
-        unreadable_here = [f"{lab}: {why}" for lab, why in unreadable if lab == label]
+        # ⛔ A row we could not read and could not ATTRIBUTE (no label cell at
+        # all — `[]`, or a label cell that is not the label string, e.g. `None`)
+        # is not "this label's row" and it is not NO label's row: it is EVERY
+        # label's. Keying it on `None` and matching `lab == label` dropped it
+        # for every label — `label` is always a str (the population is
+        # `graph_labels | indexed | served_labels()`), so the filter was empty
+        # everywhere and BOTH columns took the MEASURED branch: a label printed
+        # `indexed=False, unindexed=stored` ("this label has no index, and all N
+        # of its vectors are unindexed") while the catalogue that would have
+        # said otherwise was a row this code could not read. That is the exact
+        # inversion of the contract stated three lines below and in the
+        # function docstring — `stored`/`indexed` are "either measured or
+        # `UNMEASURED(<why>)` — never `0`, because 'no rows' and 'could not
+        # read' are different facts" (round-23 review, P3, measured with
+        # `catalogue=[[]]`). An unattributable row therefore holds EVERY label's
+        # two columns at `UNMEASURED`, the same safe direction the attributable
+        # case already takes.
+        unreadable_here: list[str] = []
+        for lab, why in unreadable:
+            if lab is None:
+                # The reason alone. Prefixing it with `None: ` would read as a
+                # label literally named `None` — the printer already formats
+                # this tuple the same way (`lab is None` → `why`).
+                unreadable_here.append(why)
+            elif lab == label:
+                unreadable_here.append(f"{lab}: {why}")
         found = indexed.get(label) or []
         # ⛔ An index on the LABEL is not an index on the COLUMN counted here.
         # `field` was already read and used to be ignored: a `(Source:vec)`
