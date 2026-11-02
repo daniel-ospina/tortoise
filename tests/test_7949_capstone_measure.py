@@ -158,6 +158,25 @@ def _extractor_range(code: str) -> str:
     return f":{start}-{end}"
 
 
+def _extractor_fail_open_except(append_code: str) -> str:
+    """``:LINE`` of the `except` that swallows the classify pass naming `append_code`.
+
+    The document cites the FAIL-OPEN `except` (not the `errors.append` one line below
+    it), so the pin derives the clause from the append rather than typing the number:
+    `except` alone is not uniquely searchable — every fail-open arm in the extractor
+    carries one — and a bare `except Exception as e:` search would pin whichever arm
+    happened to come first. Walking back from the message that names the pass ties the
+    cite to the pass it is about.
+    """
+    lines = (_REPO / _EXTRACTOR).read_text().splitlines()
+    for n in range(_extractor_lineno(append_code) - 1, 0, -1):
+        if lines[n - 1].strip().startswith("except "):
+            return f":{n}"
+    raise AssertionError(
+        f"no `except` above extractor_v2.py:{_extractor_lineno(append_code)} "
+        f"for {append_code!r}")
+
+
 def _extractor_items_gate(gate_code: str) -> str:
     """``:LINE`` of the first `if items:` after the classify gate `gate_code`.
 
@@ -2667,7 +2686,7 @@ _PREREG_STEP_CITE_DOCS = (
 
 
 def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
-    """§11's three code sites are DERIVED from the tree, never typed twice.
+    """§11's five code sites are DERIVED from the tree, never typed twice.
 
     A typed number can only be repaired by another hand re-derivation — the class
     this bundle has already filed twice (`#10377`, `#5095`) and re-derived by hand
@@ -2675,9 +2694,17 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
     `_EXTRACTOR_SITES`, the same readers the rest of this file resolves cites with,
     so moving the classifier in `extractor_v2.py` moves the document with it.
 
+    The two FAIL-OPEN `except` cites are here because they were the pair the earlier
+    re-derivations left behind while every neighbour moved: `#10513`/`#10360`'s
+    +1,101-line insert carried the collector and both `if items:` gates forward and
+    left `:9223`/`:9353` (comment lines at the head) in the sentence that argues why
+    an idle step is distinguishable from a crashed one — the sentence this section's
+    whole honesty case rests on. Nothing read them, so nothing red-ed.
+
     Non-vacuity: at `68b2e617d` the pre-registration cited `:8666`/`:8666-8690`/
     `:9209`/`:9341` while the tree carried `:9767`/`:9767-9789`/`:10310`/`:10442`,
-    and this leg reds on every one of them.
+    and at `c3612c299` it still cited `:9223`/`:9353` for the fail-open `except`
+    arms the tree carries at `:10323`/`:10453` — this leg reds on every one of them.
     """
     collector = _extractor_lineno("def _collect_classify_items(")
     # The collector's EXTENT is read, not assumed: the cited end is a claim too, and
@@ -2690,6 +2717,12 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         and node.name == "_collect_classify_items")
     gates = (_EXTRACTOR_SITES["classify_later"]["items_s2"],
              _EXTRACTOR_SITES["classify_later"]["items_union"])
+    # §11.3's "a crash cannot impersonate an idle pass" argument cites both
+    # fail-open `except` arms by their own lines; derive them the same way.
+    fail_opens = (
+        _extractor_fail_open_except('errors.append(f"classify(S2) failed'),
+        _extractor_fail_open_except('errors.append(f"classify(union) failed'),
+    )
     for doc_name, path in _PREREG_STEP_CITE_DOCS:
         text = path.read_text(encoding="utf-8")
         assert f"tortoise/extractor_v2.py:{collector}" in text, (
@@ -2711,6 +2744,12 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
                 f"{doc_name} does not cite the `if items:` gate at {gate} — the "
                 f"classify passes are gated on the collector's list being "
                 f"non-empty, which is the whole of S2.3's conditionality")
+        for fail_open in fail_opens:
+            assert f"`{fail_open}`" in text, (
+                f"{doc_name} does not cite the fail-open `except` at {fail_open} — "
+                "the idle witness is only distinguishable from a CRASHED pass "
+                "because this `except` writes a marker, so a cite landing on any "
+                "other line is an argument from code that never runs")
 
 
 def test_the_pre_registration_cites_the_state_value_carve_out_extent():

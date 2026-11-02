@@ -515,13 +515,6 @@ Exit 0 only when **all** of these hold:
    or a unit whose anchor carries no digit (so it excludes nothing), is a stale pin; and the split is
    a true partition of the 7 sessions. A corpus change therefore fails this check instead of silently
    re-basing the thresholds.
-6. **The step set is a partition, and it is the one the record declares.** The `steps:` block
-   (§11) must split §4.1's eight ids into `unconditional` and `conditional` with **no id missing, none
-   in both, none invented**, and `preregistration.json` must restate it byte-identically. Every
-   conditional entry must carry a `condition`, the `idle_evidence` a run has to show, and the
-   `evidence_issue` that measured it — an entry without them is a waiver with no content. This is the
-   rule that stops a step being quietly dropped from the capstone's gate (`#10215`).
-
 6. **No criterion claims to be unmeasured while a measurement for it is cited.** The record's
    `measurement_visible_to_author` field is a claim about **history**, and a history claim is the one
    kind a registry can get wrong without any number changing — which is exactly what happened to E5
@@ -575,6 +568,13 @@ Exit 0 only when **all** of these hold:
    class-set arm of an E3 row that names at least one graph class, and an arm that is not applied is
    **printed** (`registry arm NOT applied — …`) and carried in the JSON as `registry_scopes`. An
    undeclared skip would be the silent-green shape this very section exists to refuse.
+
+7. **The step set is a partition, and it is the one the record declares.** The `steps:` block
+   (§11) must split §4.1's eight ids into `unconditional` and `conditional` with **no id missing, none
+   in both, none invented**, and `preregistration.json` must restate it byte-identically. Every
+   conditional entry must carry a `condition`, the `idle_evidence` a run has to show, and the
+   `evidence_issue` that measured it — an entry without them is a waiver with no content. This is the
+   rule that stops a step being quietly dropped from the capstone's gate (`#10215`).
 
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.
@@ -967,8 +967,8 @@ The reason is measurable rather than stylistic: E4's field was **right**, and it
 reviewer reading three files to establish that — with the reason unstated, no reader and no arm could
 tell it from a `false` nobody had revalidated. A claim about history has to carry its evidence in the
 place a machine reads it.
-### 10.5 — the step set: "all eight observed" became "seven required + S2.3 conditional" (2026-11-01, `#10215`)
 
+### 10.5 — the step set: "all eight observed" became "seven required + S2.3 conditional" (2026-11-01, `#10215`)
 
 - **Original rule** (§4.1 as V5/G5 read it): *"ALL eight steps observed in one pass"* —
   `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5 both required the eight
@@ -999,6 +999,7 @@ place a machine reads it.
   appearance) and refuses when that commit postdates a scored log while this section is absent or
   empty. Where the checkout is too shallow to establish the order it returns no verdict at all
   rather than falling back to asking the record to assert it.
+
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
@@ -1055,7 +1056,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:9223`, `classify(S2) failed` / `:9353`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:10323`, `classify(S2) failed` / `:10453`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
