@@ -294,8 +294,9 @@ just E1b.
 **E2a, the value-bearing class (14 units).** The gold has no `state_value` kind, so the class is
 **derived by rule, not by hand**: a planted unit is value-bearing iff its `verbatim_anchor` contains a
 digit (**16** units), **minus two exclusions**, each argued against `STATE_VALUE_CARVE_OUT`'s own text
-(`tortoise/extractor_v2.py:278`, which keeps *"measurements, deadlines/freezes, thresholds/TTLs,
-versions, and counts"* and drops only *"ids, hashes, and ephemeral counters"*):
+(`tortoise/extractor_v2.py:294-310`, the constant's own extent, which keeps *"measurements,
+deadlines/freezes, thresholds/TTLs, versions, and counts"* and drops only *"ids, hashes, and
+ephemeral counters"*):
 
 | excluded unit id | anchor | why it is not a state value |
 |---|---|---|

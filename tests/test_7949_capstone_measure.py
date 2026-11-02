@@ -2410,6 +2410,50 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
                 f"non-empty, which is the whole of S2.3's conditionality")
 
 
+def test_the_pre_registration_cites_the_state_value_carve_out_extent():
+    """§7 argues E2a's two exclusions from the carve-out's own text — so ITS cite is derived too.
+
+    The same merge that re-pointed this bundle's cites left this one behind: `:278`
+    was the carve-out's opening COMMENT before the merge and is a BLANK LINE at the
+    head, so the audit trail for the two exclusions pointed at nothing while the
+    clauses the sentence quotes live eight lines below it. Nothing pinned it — the
+    leg above reads §10's three classify sites only — and this is the same class
+    (`#10377`, `#5095`): a typed number is repaired only by another hand
+    re-derivation. The constant's extent comes from `ast`, and the quoted clauses are
+    required to fall INSIDE it, so a cite that resolves to the wrong neighbours reds
+    even when the number happens to exist in the file.
+
+    Non-vacuity: at `68b2e617d` the document cited `:278` while the constant begins at
+    `:294`, and this leg reds on it.
+    """
+    node = next(
+        node for node in ast.walk(
+            ast.parse((_REPO / _EXTRACTOR).read_text()))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name)
+                and target.id == "STATE_VALUE_CARVE_OUT"
+                for target in node.targets))
+    start, end = node.lineno, node.end_lineno
+    # The constant is an implicitly concatenated literal, so a clause can straddle
+    # a source line ("ids, hashes, and " / "ephemeral counters"). Compare against
+    # the VALUE, whitespace-collapsed and case-folded — that is what the sentence
+    # quotes, and reading the source text instead would red on a line wrap.
+    value = " ".join(str(node.value.value).split()).lower()
+    for quoted in ("measurements, deadlines/freezes, thresholds/ttls, versions, "
+                   "and counts",
+                   "ids, hashes, and ephemeral counters"):
+        assert quoted in value, (
+            f"the carve-out at tortoise/extractor_v2.py:{start}-{end} no longer "
+            f"carries the clause §7 quotes as its authority: {quoted!r}")
+    text = (_REPO / "docs/evidence/7949-capstone/PRE-REGISTRATION.md").read_text(
+        encoding="utf-8")
+    assert f"tortoise/extractor_v2.py:{start}-{end}" in text, (
+        f"PRE-REGISTRATION.md does not cite the carve-out as "
+        f"tortoise/extractor_v2.py:{start}-{end} — §7's two E2a exclusions are "
+        "argued against that text, so a cite that lands anywhere else hands the "
+        "auditor a rule it cannot find")
+
+
 #: A bare CONTINUATION cite in either backtick spelling: the probes are
 #: docstrings, so they write ``:13334`` (RST) where the markdown writes `:13334`.
 _BARE_CONTINUATION = re.compile(r"`{1,2}(:\d+(?:-\d+)?)`{1,2}")
