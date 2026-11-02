@@ -119,6 +119,12 @@ KNOWN_UNCOVERED = {
     # These jobs run `*.test.sh` harnesses, which install a STUB `gh` on PATH
     # (`.github/scripts/ai-review-gate.test.sh:416` writes `$T/bin/gh`). A harness that
     # stubs its tool is not a hazard; giving it the real one would mask the stub.
+    #
+    # These two are also why the POOL-ONLY arm above is load-bearing rather than
+    # decorative: `repo-harnesses` pins `runs-on: [self-hosted, self-hosted-x64]`, so a
+    # predicate that answered only for hosted labels would skip it (and every future
+    # pool pin) before looking for a `gh` hazard at all — the silent-skip direction this
+    # file's docstring calls unsafe.
     "ci.yml": {
         "ops-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
         "repo-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
@@ -456,6 +462,27 @@ _SCRIPT_GLOBS = (
 #: Labels the fallback pool has been observed to serve. Not `ubuntu-latest` only:
 #: the 2026-10-24 measurement shows the pool serving `ubuntu-24.04` as well.
 _POOLABLE_LABEL = re.compile(r"ubuntu-(latest|\d+\.\d+)")
+#: The pool's OWN labels — a POOL-ONLY pin, in the runbook's vocabulary
+#: (`docs/ops/ci-runner-x64.md:62`: "not a spelling but a CLASS — any POOL-ONLY label:
+#: `self-hosted`, and equally the bare custom `self-hosted-x64`").
+#:
+#: WHY THIS ARM EXISTS. Until it, the predicate answered only for a hosted label, so a job
+#: pinned to the pool BY NAME — the most direct route onto a bare box, and the shape a
+#: `self-hosted` job actually takes — was invisible to the scan and skipped before its `gh`
+#: hazards were ever looked for. `ci.yml`'s #10237 canary is the tree's FIRST literal such pin,
+#: and deleting its provisioning steps left the whole suite green (#10511 review). The blind
+#: spot was not inherited: it was being introduced.
+#:
+#: FOLDED CASE, deliberately: GitHub matches runner labels without regard to case, and the
+#: three spellings the pool carries are lowercase (`self-hosted`, `self-hosted-x64`,
+#: `self-hosted-arm64`). Folding can only admit MORE jobs into the scan, never fewer — the
+#: safe direction, because a false positive asks for a declaration and a false negative is the
+#: silent skip this whole file exists to prevent.
+#:
+#: BOUNDARY-MATCHED, not substring: `self-hosted-arm64` must match as one label, and
+#: `self-hosted-x65` (the typo `workflow-lint` catches separately) must not be read as the
+#: pool marker. A truncated read would admit the typo'd job as pool-eligible.
+_POOL_ONLY_LABEL = re.compile(r"(?<![\w-])self-hosted(?:-(?:x64|arm64))?(?![\w-])", re.IGNORECASE)
 #: A `runs-on` VALUE the workflow text cannot resolve to a label: GitHub supports
 #: `runs-on: ${{ matrix.os }}` (its own matrix example), and the label is then
 #: decided per leg at run time. `_poolable_label` fails CLOSED on it — see the
@@ -540,7 +567,7 @@ def _looks_poolable(value: str) -> bool:
     """
     if _EXPRESSION in value:
         return True
-    return bool(_POOLABLE_LABEL.search(value))
+    return bool(_POOLABLE_LABEL.search(value) or _POOL_ONLY_LABEL.search(value))
 
 
 def _poolable_label(text: str) -> bool:
@@ -586,7 +613,8 @@ def _poolable_label(text: str) -> bool:
     inline arm text-searches the whole rest of the line, while the BLOCK one stops at
     `group:` — no `- ` item matches, the item loop breaks, and the job comes back
     invisible although `ubuntu-24.04` is named one line below in `labels:`. None is
-    used in the tree today — all 86 `runs-on:` keys are inline scalars, so the miss is
+    used in the tree today — all 86 `runs-on:` keys are single-line values (one of
+    them, `ci.yml:1534`, an inline FLOW list the inline arm answers), so the miss is
     latent, not live — and they are named here so the next author writing one of them
     knows the scan is a text reader rather than a YAML parser, and adds the shape
     instead of assuming coverage.
@@ -732,7 +760,7 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
     """
     inline = "    runs-on: ubuntu-latest\n    steps:\n"
     block = "    runs-on:\n      - self-hosted\n      - ubuntu-24.04\n    steps:\n"
-    block_pool_free = "    runs-on:\n      - self-hosted\n      - linux\n    steps:\n"
+    block_pool_only = "    runs-on:\n      - self-hosted\n      - linux\n    steps:\n"
     expression = "    runs-on: ${{ fromJSON(matrix.runner) }}\n    steps:\n"
     expression_in_list = (
         "    runs-on:\n      - self-hosted\n      - ${{ matrix.arch }}\n    steps:\n"
@@ -747,7 +775,12 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
     )
     assert _poolable_label(inline)
     assert _poolable_label(block)
-    assert not _poolable_label(block_pool_free)
+    # …and a block list that names ONLY the pool's own markers is pool-eligible, which the
+    # pre-fix reader answered False for — the #9018 scan's blind spot, pinned here so the
+    # next edit cannot restore it. `[self-hosted, linux]` is a POOL-ONLY pin in the
+    # runbook's sense (`docs/ops/ci-runner-x64.md:62`): no GitHub-hosted runner carries
+    # `self-hosted`, so every leg is a bare box.
+    assert _poolable_label(block_pool_only)
     # An expression is UNRESOLVABLE from the text, so it must not be skipped: on the
     # pre-fix reader both of these answered False (#10186 review).
     assert _poolable_label(expression)
@@ -756,10 +789,10 @@ def test_the_poolable_label_reader_sees_every_yaml_shape():
     # comment arm — the same silent skip, one shape further out.
     assert _poolable_label(block_after_inline_comment)
     assert _poolable_label(block_after_item_comment)
-    # …and a pool-free list stays pool-free whichever way the comments fall, so the
-    # arm cannot be satisfied by simply always answering True.
+    # …and the pool arm cannot be satisfied by simply always answering True: a value naming
+    # neither class stays out.
     assert not _poolable_label(
-        "    runs-on:  # hosted class\n      - self-hosted\n      - linux\n    steps:\n"
+        "    runs-on:  # hosted class\n      - linux\n      - macOS\n    steps:\n"
     )
 
 
