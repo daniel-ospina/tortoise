@@ -113,3 +113,55 @@ def test_call_failure_keeps_exit_one(monkeypatch, capsys):
     monkeypatch.setattr(cli, "call_tool", boom)
     assert cli.main(["call", "some_tool"]) == 1
     assert "call failed" in capsys.readouterr().err
+
+
+def test_call_prints_the_payload_even_with_a_trailing_block(monkeypatch, capsys):
+    """`call` must emit the PAYLOAD as pretty JSON, not a join of every block.
+
+    MEASURED REGRESSION this pins: the dispatch seam appends content blocks LAST
+    (a retired-name warning, #10084's graph disclosure), so a caller that joined
+    all blocks and `json.loads`-ed them got `Extra data: line 1 column 8825` for
+    every write tool on every transport. `structured_content` is preferred, and
+    `content[0]` is the payload when there is none — a second block must never be
+    concatenated into the machine-readable output a script pipes to `jq`.
+    """
+    from types import SimpleNamespace
+
+    payload = {"id": "pt_1", "status": "live"}
+    trailing = "Graph disclosure: this write named no `graph`, so its target is …"
+
+    def fake_call_tool(*_a, **_k):
+        return SimpleNamespace(
+            is_error=False,
+            structured_content=payload,
+            content=[SimpleNamespace(text=json.dumps(payload)),
+                     SimpleNamespace(text=trailing)],
+        )
+
+    monkeypatch.setattr(cli, "call_tool", fake_call_tool)
+    assert cli.main(["call", "tortoise_create_point"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == payload, out
+
+
+def test_call_falls_back_to_the_first_block_when_there_is_no_structured_payload(
+        monkeypatch, capsys):
+    """No `structured_content` (a tool with no output schema) → `content[0]`.
+
+    The trailing block stays out of it: the same join bug, one layer down.
+    """
+    from types import SimpleNamespace
+
+    payload = {"id": "pt_2"}
+
+    def fake_call_tool(*_a, **_k):
+        return SimpleNamespace(
+            is_error=False,
+            structured_content=None,
+            content=[SimpleNamespace(text=json.dumps(payload)),
+                     SimpleNamespace(text="trailing disclosure")],
+        )
+
+    monkeypatch.setattr(cli, "call_tool", fake_call_tool)
+    assert cli.main(["call", "tortoise_create_point"]) == 0
+    assert json.loads(capsys.readouterr().out) == payload

@@ -506,6 +506,34 @@ async def test_a_read_tool_gets_no_disclosure(probe, monkeypatch):
     assert (result.meta or {}).get("tortoise") is None, result.meta
 
 
+def test_every_served_write_tool_keeps_its_payload_at_content_zero():
+    """The append convention, pinned over the REAL served write names.
+
+    `content[0]` is the payload and the disclosure is `content[-1]` for EVERY
+    write tool this seam discloses on — not just the in-process probe. This is
+    the property three consumers in the tree depend on (they were joining every
+    block and `json.loads`-ing the result, which broke: see
+    `tests/test_mcp_client.py`, `tests/test_cursor_mcp_exit_evidence.py` and
+    `client/tortoise_client/cli.py`).
+    """
+    from fastmcp.tools import ToolResult
+
+    disclosed = sorted(ms.WRITE_TOOL_NAMES - mcp_auth.GRAPH_ARGUMENT_EXCLUDED)
+    assert len(disclosed) > 20, "the served write set collapsed — re-derive this pin"
+    for name in disclosed:
+        payload = ToolResult(
+            content=[type("B", (), {"text": '{"id": "pt_1", "status": "live"}'})()],
+            structured_content={"id": "pt_1", "status": "live"},
+            is_error=False,
+        )
+        with _workspace():
+            out = ms._disclose_graph_resolution(payload, name, None)
+        assert out.content[0].text == payload.content[0].text, name
+        assert out.structured_content == payload.structured_content, name
+        assert len(out.content) == 2, name
+        assert "Graph disclosure:" in out.content[-1].text, name
+
+
 def test_the_real_write_set_covers_the_tool_this_issue_is_about():
     """A guard on the set the seam reads: the tool #10084 measured must be in it,
     or the disclosure would silently not fire for the exact call in the report."""

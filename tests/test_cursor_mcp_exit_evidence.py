@@ -190,8 +190,17 @@ def _mcp_call(mcp_tc, name: str, arguments: dict):
 
 
 def _result_text(body: dict) -> str:
-    return "".join(c.get("text", "") for c in
-                   body.get("result", {}).get("content", []))
+    """The PAYLOAD block: `content[0]`.
+
+    Extra blocks are appended LAST by the dispatch seam (#10084's graph
+    disclosure, `_warn_retired_result`'s retired-name warning before it), so a
+    join over every block is not the payload — the retired filter below exists
+    for exactly that reason and this is the same class, generalised.
+    """
+    content = body.get("result", {}).get("content", [])
+    if not content:
+        return ""
+    return content[0].get("text", "")
 
 
 def _authorize_and_consent(tc, *, client_id: str,

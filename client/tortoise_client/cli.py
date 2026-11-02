@@ -148,7 +148,16 @@ def _cmd_call(args: argparse.Namespace) -> int:
     if getattr(result, "is_error", None):
         print(json.dumps({"is_error": True, "result": str(result)}, indent=2))
         return _EXIT_ERR
-    text = "".join(getattr(b, "text", "") for b in (result.content or []))
+    # The PAYLOAD is `structured_content` when the server sends one, else
+    # `content[0]`. Joining EVERY content block and parsing the result is not a
+    # contract: the dispatch seam appends blocks LAST (a retired-name warning,
+    # the #10084 graph disclosure), and a join turns valid JSON into
+    # "Extra data: line 1 …" for every scripted caller of a write tool.
+    payload = getattr(result, "structured_content", None)
+    if payload is not None:
+        print(json.dumps(payload, indent=2))
+        return _EXIT_OK
+    text = getattr((getattr(result, "content", None) or [None])[0], "text", "")
     try:
         print(json.dumps(json.loads(text), indent=2))
     except json.JSONDecodeError:
