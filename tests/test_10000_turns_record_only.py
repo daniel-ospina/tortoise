@@ -2430,9 +2430,12 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     ⛔ IT TAKES NO SEAM, AND THAT IS NOT AN OMISSION. A seam's
     `point_contents()` reports what the record was **offered**, not what it
     **committed** — `_RecordSeam(None)` appends the record and then refuses it.
-    So the record half is asserted by the CALLER, against the seam's own
-    `outcome`; this function owns only the graph population, which is the half
-    no mock can speak for.
+    So the record half is asserted by the CALLER, and it asserts one of two
+    things: the presence of the `TurnsRecorded` carrier, or a specific
+    `point_contents()` value. ⛔ The seam's `outcome` is its CONSTRUCTOR
+    ARGUMENT (`_RecordSeam.__init__`), so asserting on it proves nothing about
+    the code under test — a round-1 fix removed exactly that tautology, and this
+    sentence used to point a reader back at it.
 
     ⚠️ **The population is FIVE PROPERTY NAMES, not "every property"**: `c`,
     `content`, `text`, `payload`, `props` — the ones the writers in this tree
@@ -2466,30 +2469,45 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
 def test_an_unarmed_capture_puts_the_turn_text_in_the_graph(sdk, monkeypatch):
     """The capability fallback, stated as a PRESENCE, not as an absence.
 
-    ⛔ THIS IS THE TRIPWIRE FOR THE `#9548` DELETION, and that claim is measured,
-    not asserted: forcing `_record_first` true (the simulated deletion) reddens
-    this test — `assert graph_hits` fails with `[]` — because the graph write it
-    relies on is the one that gets deleted. Deleting the fallback therefore
-    redirects this test, on purpose, instead of passing silently.
+    ⛔ THIS IS THE TRIPWIRE FOR THE `#9548` DELETION, AND THE MUTATION THAT
+    PROVES IT IS A SPECIFIC ONE. Deleting the graph write — `if not
+    _record_first:` → `if False:` at `sdk.py`, with `_record_first` left REAL —
+    reddens this test at `assert graph_hits` with `[]`. That is measured, not
+    asserted.
 
-    ⛔ THE NAME SAYS ONLY WHAT IS ASSERTED. It deliberately does NOT claim
-    "…and not the record": with no DSN there are no record rows to inspect, and
-    a stub can only LIE about this arm — measured, a blind-`APPLIED` seam on an
-    unarmed capture produces a genuine DOUBLE store (contents in both the seam
-    and the graph), so a stubbed exclusivity assertion here would pass while the
-    defect it named was happening. The record half of this arm is therefore
-    **unasserted here and unassertable here**; `test_unarmed_record_keeps_turns_
-    in_the_graph` pins the id space and has no record-side assertion either. It
-    is not claimed anywhere else.
+    ⚠️ **Forcing `_record_first` TRUE does NOT redirect this test, and the
+    earlier version of this docstring claimed it did.** Measured on this head:
+    that mutation leaves all five related tests green, because an unarmed record
+    yields `_record_outcome = None` for every turn, `_landed(None)` is False, and
+    the `#10000` OUTCOME fallback then writes `_TURN_WRITE_CYPHER` — so the text
+    is still in the graph and green is the CORRECT verdict. Naming the wrong
+    mutation as proof is the round-1 "claimed a measurement, made an assertion"
+    defect; the arm guard below is what actually pins this test to its arm.
+
+    ⛔ THE RECORD HALF **IS** ASSERTED, and only the ROW half is unassertable.
+    With no DSN there are no record rows to inspect, but the JOURNAL is readable
+    and the carrier is what turns into rows on an armed replay: an unarmed
+    capture that journalled a `TurnsRecorded` would ship the transcript to the
+    graph AND to record rows — the double store D1 forbids — and would be
+    invisible to a text-only assertion. So the carrier's ABSENCE is asserted
+    here, in the idiom the sibling arms already use. What is genuinely
+    unassertable is the rows, and it is named rather than pretended.
 
     The sibling `test_unarmed_record_keeps_turns_in_the_graph` pins the same arm
     by id space; this one pins it by the TEXT, so it is the arm that can tell a
     transcript that moved from a transcript that vanished.
     """
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
     needle = "the unarmed transcript line that the graph must still hold"
     _capture(sdk, "unarmed-property", [{"role": "user", "content": needle},
                                        {"role": "assistant", "content": "ok"}])
+    assert [r for r in seam.records if r.get("type") == "TurnsRecorded"] == [], (
+        "the record cannot hold the turns on this arm, yet the capture "
+        "journalled a `TurnsRecorded` carrier — an armed replay would turn it "
+        "into record rows while the graph keeps the turns, which is the double "
+        "store D1 forbids")
     _assert_the_text_is_in_exactly_one_store(
         sdk._get_proj(), needle, in_graph=True)
 
