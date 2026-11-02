@@ -869,13 +869,28 @@ def score_path_bullet() -> Row:
     # PARTIAL below, because re-classing a writer does not make the vocabulary
     # resolve it. (An earlier draft read this as "a complete measurement" and
     # flipped the row to MET, breaking bullet 2's own falsifier; reverted.)
-    unclassified = sorted(fn for fn in unknown if _census_class(fn) is None)
+    #
+    # ⛔ The population is `unresolved_write`, NOT `unknown`: `unknown` also
+    # carries the `duplicate` identities, a DIFFERENT defect (a label was LOST
+    # when the later definition overwrote the earlier one) that has no entry in
+    # WRITER_CENSUS and no class in #10541's vocabulary — there is no surviving
+    # writer identity to class. Iterating `unknown` here made a duplicate read
+    # as `UNCLASSIFIED writers (… #10541's own defect)` and printed a census
+    # note of `recognised_producer=0 | exempt=0 | bypass=0` over it, i.e. it
+    # attributed an identity hole to a census that cannot have a key for it.
+    # It is the SAME population the falsifier
+    # `test_every_unresolved_writer_carries_a_census_class` measures, so the
+    # instrument and its pin cannot disagree about what is being censused.
+    unresolved_writers = sorted(
+        fn for fn, d in writers.items() if d["kind"] == "unresolved_write")
+    unclassified = sorted(
+        fn for fn in unresolved_writers if _census_class(fn) is None)
     by_class: dict[str, list[str]] = {}
-    for fn in unknown:
+    for fn in unresolved_writers:
         cls = _census_class(fn)
         if cls in CENSUS_CLASSES:
             by_class.setdefault(cls, []).append(fn)
-    if unknown:
+    if unresolved_writers:
         notes.append(
             "#10541 census over the unresolved set: "
             + " | ".join(
