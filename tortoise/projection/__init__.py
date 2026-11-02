@@ -387,9 +387,23 @@ _FALKORDB_VERSION_CACHE: dict[tuple, tuple[int, int, int] | None] = {}
 # it while the client reports an error and retries). After #2850 no health
 # check waits on the DB at all, so the read timeout no longer sits in the
 # liveness budget; it is now configurable for operators who need a tighter
-# loop-stall ceiling (pair a lower value with a lower
-# TORTOISE_LOOP_STALL_EXIT_S, see monitoring.start_stall_watchdog — note that
-# self-kill is OPT-IN and disabled by default).
+# loop-stall ceiling.
+#
+# The knob that SIZES that ceiling — and the only one the HOSTED deployment
+# arms (``TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"`` in ``fly.toml`` ``[env]``)
+# — is ``TORTOISE_LOOP_STALL_HARD_EXIT_S``: it fires on the first poll and
+# deliberately BYPASSES the in-flight gauge and the hysteresis, because an
+# open ``GET /mcp`` SSE stream is an in-flight request, so an idle-gated exit
+# could never fire on the wedge it guards. A request in flight does not stop
+# the loop ticking, so a MISSING TICK is the evidence of a wedge.
+# ``TORTOISE_LOOP_STALL_EXIT_S`` is its SOFT, idle-gated sibling and is
+# deliberately UNSET on the hosted deployment (see
+# ``hosted_api._start_liveness``); pointing an operator at it would hand them
+# the knob production does not run (#10585 review P2 — the sixth copy of this
+# stale belief). Both are DISABLED BY DEFAULT (``0``) in the PRODUCT, so a
+# self-hoster opts in; "disabled by default" is the shipped default, not a
+# description of what the hosted deployment runs. See
+# ``monitoring.start_stall_watchdog``.
 _DB_CONNECT_TIMEOUT_DEFAULT = 2.0
 _DB_SOCKET_TIMEOUT_DEFAULT = 10.0
 #: Sanity ceiling on a configured DB socket timeout (round-3 review P2).
@@ -9562,6 +9576,64 @@ def _apply_one(points: dict[str, dict], ev: dict,
             for _pk in _REVISION_PROVENANCE_PROPS:
                 if _pk in ev and _store_holds_prop_value(ev[_pk]):
                     p[_pk] = ev[_pk]
+            # #10523 review (P2): fold the ``embeddingText`` CLEAR — parity with
+            # ``_revise_point`` (its ABSOLUTE clear, inside the ``new_content``
+            # re-encode branch, plus the PRESENCE-conditional caller-vector
+            # clause emitted after it). Both journaled clear paths write the key
+            # into the record (`update_point(embedding=…)`/`embedding=None` and
+            # the content-edit re-encode branch), and the GRAPH fold honours
+            # both, but this arm folded neither — so ``check_consistency`` (whose
+            # reference view IS this function, `consistency.py::_fold_journal`)
+            # kept the creation's enriched text and reported a FALSE
+            # ``divergence="content"`` naming ``embeddingText`` on a graph the
+            # live path itself wrote, with an `action` ("replay the journal")
+            # that reproduces exactly that graph and so could never clear it —
+            # the #8317/#5048/#3817 class, one field over.
+            #
+            # Two arms, mirroring the graph fold rather than inventing a rule:
+            #
+            #   1. a CONTENT EDIT re-encodes the vector from the new content, so
+            #      the text the OLD vector described is gone — ABSOLUTE (not
+            #      presence-conditional), exactly like the graph's clause, which
+            #      clears even for a record that does not state the key. ⛔ The
+            #      WRITABILITY gate is the graph's gate, and it is applied HERE:
+            #      ``_revise_point`` NULLS its ``new_content`` local before its
+            #      re-encode, so an unwritable value never reaches that branch —
+            #      but this arm leaves the local alone (the guard above is an
+            #      inline conjunction), so the bar has to be restated in
+            #      ``_content_edit`` itself. #10523 review (P2): a bare
+            #      ``is not None`` made an UNWRITABLE ``new_content`` (a
+            #      NUL/lone-surrogate str, a map, a non-finite float — the #3689
+            #      class) count as a content edit here while the graph fold
+            #      dropped it and emitted no clear — so the pure fold REMOVED
+            #      ``embeddingText`` and the graph fold KEPT it, and
+            #      ``check_consistency`` reported a divergence, with an `action`
+            #      that reproduces the graph already on disk, on a faithful
+            #      graph.
+            #   2. a CALLER-VECTOR write (`embedding=[…]` / `embedding=None`)
+            #      journals ``embeddingText: None`` and no ``new_content``. Here
+            #      live is a bare ``SET n += $props``, so PRESENCE-conditional is
+            #      the faithful shape — an unrelated revision does not speak
+            #      about the key and must not clear a writer-minted value — and
+            #      `_store_holds_prop_value` is the shared write bar: a value the
+            #      transport refuses is what live nulls, so it removes the
+            #      property here too.
+            #
+            # ⛔ This fold never SETS a real value: neither does the graph fold
+            # (`_revise_point` emits only ``= NULL`` for this key; the value
+            # write is the carrier's ``n.embeddingText=$et`` in
+            # ``_upsert_point_props``). Writing one here would be the opposite
+            # divergence.
+            # The two arms are NAMED rather than nested, so a reader can tell
+            # which one fired (and why they are not the same rule).
+            _content_edit = (new_content is not None
+                             and _annotator_value_ok(new_content))
+            _caller_vector_clear = (
+                "embeddingText" in ev
+                and (ev["embeddingText"] is None
+                     or not _store_holds_prop_value(ev["embeddingText"])))
+            if _content_edit or _caller_vector_clear:
+                p.pop("embeddingText", None)
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
         # rebuild_all pass-1b. A plain property write on the operator's
@@ -20025,6 +20097,11 @@ class FalkorProjection(
         # for why.
         embed_clear = ""
         wrote_content_hash = False
+        # #10523 review (P2): did the re-encode branch below already emit the
+        # absolute `n.embeddingText = NULL`? The caller-vector clause further
+        # down emits the SAME SET for the same field, and one statement must not
+        # carry it twice.
+        reencode_cleared_embedding_text = False
 
         # #4042: `n.content` is written UNCONDITIONALLY by
         # `_upsert_point_props`, so a creation that superseded this revision
@@ -20226,6 +20303,18 @@ class FalkorProjection(
                 embed_clear = clear_then_set_prefix("n")
                 set_clauses.append(
                     set_embedding_clause("n", preserve_on_null=False))
+                # #8488 scope 1 (review round 2, P1): this branch re-encodes the
+                # vector from `content`, so the node must not keep the OLD
+                # enriched text — `embeddingText` describes the vector that was
+                # just replaced. Mirrors `update_point`'s re-derive branch
+                # exactly, so a rebuild and the live write agree (#4194).
+                # ABSOLUTE (not presence-conditional) on purpose: this clause
+                # must clear even for a hand-written record that omits the key,
+                # because the vector it described is gone either way. The
+                # caller-vector door's presence-conditional clause is emitted
+                # after this block and skipped here (`reencode_cleared_…`).
+                set_clauses.append("n.embeddingText = NULL")
+                reencode_cleared_embedding_text = True
                 wrote_embedding = True
             if not skip_hash:
                 # #2795: content_hash is derived from content — mirror the live
@@ -20248,6 +20337,41 @@ class FalkorProjection(
         if set_updated_at and not skip_content:
             set_clauses.append("n.updatedAt = $now")
             params["now"] = _now_iso()
+        # #10523 review (P2): the CALLER-VECTOR door's enrich-text clear.
+        #
+        # `update_point(embedding=[…])` / `update_point(embedding=None)` journals
+        # a `PointRevised` with `embeddingText: None` (the writer sets it beside
+        # `embedding_verbatim`, and `emit_props` carries it). The
+        # only clause that folded that field sat INSIDE the
+        # `new_content is not None` re-encode branch above, so this door's clear
+        # was journalled and never replayed: `rebuild()` restored a text the LIVE
+        # graph no longer holds — the opposite of what that branch's own comment
+        # promises ("so a rebuild and the live write agree").
+        #
+        # Shape is the `tags` / `validToPrecision` one: PRESENCE-conditional
+        # (mirroring live's `SET n += $props`), with `_store_holds_prop_value` as
+        # the shared write bar — a value the transport gate refuses is what live
+        # nulls, so it REMOVES the property here too. On `skip_embedding` the
+        # paired half was superseded by a later same-file creation, and the text
+        # describes THIS revision's vector, so it shares that boundary exactly.
+        # The re-encode branch keeps its ABSOLUTE `n.embeddingText = NULL` (it
+        # must clear even for a record that does not state the key); this clause
+        # is skipped there, since it would restate the same SET.
+        # ⚠️ Not the record lane's rule: `_upsert_statement`'s `props = point.props
+        # || EXCLUDED.props` makes an OMITTED key preserve a stale text, which is
+        # why the carrier's own clause is unconditional (`SET n.embeddingText=$et`),
+        # not conditional.
+        # ⚠️ Residual, stated rather than implied: this fold closes the TEXT half
+        # only. The caller's vector itself is still not replayed on this door (the
+        # clause set is built from `new_content`, and a caller vector arrives with
+        # `new_content=None`), so a rebuild after `update_point(embedding=[…])`
+        # leaves live and rebuilt agreeing on "no text" and disagreeing on WHICH
+        # vector — the declared #5046 gap acknowledged above, not a new one.
+        if (not skip_embedding and not reencode_cleared_embedding_text
+                and "embeddingText" in ev
+                and (ev["embeddingText"] is None
+                     or not _store_holds_prop_value(ev["embeddingText"]))):
+            set_clauses.append("n.embeddingText = NULL")
         # #3689: fold the annotator dims carried as PointRevised extras
         # (update_point's emit) — apply()/rebuild previously dropped them, so
         # rebuild_all silently erased annotate_operator's write. Presence-

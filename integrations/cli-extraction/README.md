@@ -29,6 +29,32 @@ turns live in the Postgres record rather than the graph (record armed,
 `#10000`) has no turn nodes for this graph-only read to find — use
 `sdk.get_session()`, which serves record-held turns.
 
+⚠️ **"The turns live in the record" is not all-or-nothing.** With
+`TORTOISE_RECORD_DSN` armed the writer decides **per turn** which store takes it
+(`sdk._write_capture_turns` writes a refused record turn to the GRAPH) while
+this read covers the graph for **the whole session**, so a mid-capture refusal
+leaves part of the transcript in each store. `dump` therefore reads the
+`:Session`'s own account of what it holds (`turn_count`, `turn_max_index`) and
+a PARTIAL transcript **fails instead of being written** — `run` would otherwise
+extract claims from a truncated session and `write` would land them as that
+session's durable output. The refusal writes nothing; an existing
+`turns_raw.jsonl` from an earlier dump (possibly an `--allow-partial` one) is
+left as it is, and `run` reads it without a freshness check, so delete it when
+the dump refuses.
+
+A partial dump has **three admitted causes** and the message does not pick one
+for you: the split store above (`sdk.get_session()` serves the UNION of both
+stores **when the record is armed**); a capture whose turn write was refused
+**after** the `:Session` MERGE, so the session declares turns that never landed
+(the writer's MERGE precedes its turn write, `sdk._write_session_and_turns`);
+or a turn row a purge, a backfill copy or a hand edit removed. The last two
+leave one store, so `get_session()` cannot settle them either — it reconciles
+against the same marks this read already has.
+
+`--allow-partial` writes what the graph holds when that is what you want. Rows
+ABOVE `turn_max_index` are residue from a shorter re-capture whose surplus
+sweep did not land: they are dropped and reported, never written.
+
 ## How it works
 
 ```text
@@ -47,7 +73,7 @@ capture (tortoise/sdk.py: _TURN_WRITE_CYPHER)  (s:Session)-[:CONTAINS]->(t:Point
 Three composable phases, one file:
 
 ```bash
-python3 extract_turns.py dump                       # turns -> turns_raw.jsonl (fails on 0 rows; --allow-empty to accept)
+python3 extract_turns.py dump                       # turns -> turns_raw.jsonl (fails on 0 rows, and on a PARTIAL one; --allow-empty / --allow-partial to accept)
 python3 extract_turns.py run --transcript <session-id> --out ex.json
                                                     # prefix is fine if unambiguous; defaults: claude-haiku-5-5 @ high
 python3 extract_turns.py write --extraction ex.json \

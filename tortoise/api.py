@@ -416,6 +416,11 @@ class EventAPI:
                           # model change that never happened.
                           "embedding_model", "embedding_revision",
                           "embedding_text_hash",
+                          # #8488 scope 1: the enriched text is writer-minted
+                          # and no `PointRevised` arm replays it — a caller-set
+                          # value would be a live-only write a rebuild drops,
+                          # and would forge the #4194 text↔vector identity.
+                          "embeddingText",
                           # #5256: the `extractedFrom` read-version anchor is
                           # server-derived (resolved from the :Source below).
                           # Accepting it would let this non-SDK seam forge the
