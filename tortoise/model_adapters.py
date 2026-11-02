@@ -630,12 +630,19 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 #:   2. in `_ASK_PROVIDERS`, absent from `_SPEC_FAMILY_PROVIDERS` →
 #:      `ValueError: … cannot serve <model> — the <family> family is served
 #:      only by deepseek-direct, openrouter, venice`;
-#:   3. also in `_SPEC_FAMILY_PROVIDERS`, absent from `keyed` (i.e. its key var
-#:      is not in THIS map) → `KeyError`, which the ask lane's own build
-#:      wrapper surfaces as `AskReaderUnavailable` (`reader_unavailable`, HTTP
-#:      502 — there is no `/v1/ask` route since #3849, so it is never a 500;
-#:      measured, review cycle 4). Step 3 is now reachable only by removing a
-#:      provider from this map, because `keyed` is derived from it.
+#:   3. also in `_SPEC_FAMILY_PROVIDERS` but its key env var is NOT in THIS
+#:      map → the `_PROVIDER_KEY_ENV[explicit]` lookup raises `KeyError`, which
+#:      the ask lane's own build wrapper surfaces as `AskReaderUnavailable`
+#:      (`reader_unavailable`, HTTP 502 — there is no `/v1/ask` route since
+#:      #3849, so it is never a 500; measured, review cycle 4). NOTE (review
+#:      cycle 8): "absent from `keyed`" is NOT the trigger — `keyed` now gives
+#:      every `_ASK_PROVIDERS` name a `False` default, so nothing can be absent
+#:      from it. The trigger is the MAP not carrying an entry, and the AUTO
+#:      path has the mirror of it in the `missing=` lookup — which is why BOTH
+#:      lookups use `.get` (a registry edit must be a refusal or a routing
+#:      answer, never a bare `KeyError` out of the ask lane).
+#: `test_ask_lane_provider_set_is_registered_in_the_key_registry` pins the
+#: invariant that keeps step 3 unreachable in the committed tree.
 #: `test_resolve_reader_provider_derives_its_keys_from_the_registry` pins that
 #: derivation; `test_no_routing_lane_names_a_provider_key_literal` pins it
 #: structurally for every `os.environ`-reading function in this module.
@@ -862,18 +869,26 @@ def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
                 f"— the {model_id.split('/', 1)[0]} family is served only by "
                 f"{', '.join(sorted(servable))}")
         if not keyed[explicit]:
+            # `.get`: a provider dropped from the registry is absent from
+            # `keyed` AND from this map, so a direct `_PROVIDER_KEY_ENV[explicit]`
+            # would turn the fail-closed ValueError into a bare KeyError out of
+            # the ask lane (review cycle 8, P3 — the same "a registry edit is a
+            # refusal, not a crash" rule the capture lane got).
+            key_env = _PROVIDER_KEY_ENV.get(explicit)
+            unset = (f"{key_env} is not set" if key_env else
+                     f"{explicit} has no key env var (absent from "
+                     f"_PROVIDER_KEY_ENV)")
             raise ValueError(
-                f"TORTOISE_ASK_PROVIDER={explicit} but "
-                f"{_PROVIDER_KEY_ENV[explicit]} is not set — an explicit "
+                f"TORTOISE_ASK_PROVIDER={explicit} but {unset} — an explicit "
                 f"provider names a key that isn't configured; never "
                 f"silently routing elsewhere (#1530 fail-closed)")
         chain = _ASK_PROVIDER_CHAIN[explicit]
-        pool = [p for p in chain if p in servable and keyed[p]]
+        pool = [p for p in chain if p in servable and keyed.get(p, False)]
         return (explicit, pool)
 
     # auto mode: ordered servable providers that have keys configured.
     pool = [p for p in _ASK_PROVIDER_CHAIN["deepseek-direct"]
-            if p in servable and keyed[p]]
+            if p in servable and keyed.get(p, False)]
     if pool:
         return (pool[0], pool)
     # Empty intersection. The deepseek family keeps the lenient no-key
@@ -881,8 +896,8 @@ def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
     # every other family fails LOUD at build time naming the key it needs.
     if "deepseek-direct" in servable and not any(keyed.values()):
         return (None, ["openrouter"])
-    missing = sorted({_PROVIDER_KEY_ENV[p] for p in servable
-                      if not keyed[p]})
+    missing = sorted({_PROVIDER_KEY_ENV.get(p, f"{p} (no key env var)")
+                      for p in servable if not keyed.get(p, False)})
     raise ValueError(
         f"no configured provider can serve {model_id!r}: the "
         f"{', '.join(sorted(servable))} lane(s) need "
