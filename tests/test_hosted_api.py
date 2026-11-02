@@ -13342,6 +13342,13 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # customer ceiling. Offering the upgrade path here would promise a
         # plan that cannot lift a data fault.
         "unreadable for resource",
+        # #4051: `_resolve_count_sdk`'s own construction fault. The gate-sdk
+        # could not be BUILT, so the count was never taken — the same
+        # SERVER-fault category as "quota count failed" directly above (that is
+        # the arm `_count_resource` raises when the count itself fails; this is
+        # the arm that fires one step earlier, when the handle a graph-scoped
+        # count reads through cannot be made). No plan lifts it.
+        "quota count sdk unavailable",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",

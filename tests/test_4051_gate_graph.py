@@ -25,10 +25,13 @@ import os
 import pytest
 from fastapi import HTTPException
 
+from tortoise import quota as quota_mod
+
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.hosted_api import (
+import tortoise.hosted_api as ha  # noqa: E402  (env above must be set first)
+from tortoise.hosted_api import (  # noqa: E402
     _check_org_limit,
     _data_graph_name,
     _gate_sdk_for,
@@ -204,6 +207,79 @@ def test_a_gate_that_never_counts_never_builds_a_sdk(monkeypatch):
     # `documents` derives its cap from `max_points`; an explicit None returns too.
     ha._check_org_limit({**GRAPH_BOUND_ORG, "max_points": None}, "documents")
     assert calls == [], calls
+
+
+def test_the_gate_set_is_DERIVED_from_quota_not_hand_copied():
+    """DRIFT GUARD (round-3 P2): the split is declared ONCE, in `quota`.
+
+    `quota._count_resource`'s tenant-graph branch is its catch-all `else`: every
+    resource outside the registry-scoped three is counted against a tenant
+    graph. So the truthful set is DERIVED, not enumerated — and this gate used
+    to hold a hand-copied literal that equalled it only on the day it was
+    written.
+
+    The failure that made this gate-able: add one gate-able resource to
+    `quota._RESOURCE_LIMIT_KEYS` and a literal set returns `None` here, so
+    `_count_resource` falls back to the org's DEFAULT graph and a graph-bound key
+    is again gated on a graph it does not write — the #4051 defect exactly —
+    with nothing red, because the new test pins three names and no test ties the
+    set to `quota`. This is that test.
+    """
+    gateable = frozenset(quota_mod._RESOURCE_LIMIT_KEYS) | {"documents"}
+    expected = gateable - quota_mod.REGISTRY_SCOPED_RESOURCES
+
+    # 1. the declaration IS the derivation (not a literal that happens to match)
+    assert quota_mod.TENANT_GRAPH_RESOURCES == expected
+
+    # 2. exhaustive and disjoint: every gate-able resource is classified ONCE, so
+    #    a new resource cannot land in neither half (silently unscoped) or both.
+    assert (
+        quota_mod.TENANT_GRAPH_RESOURCES | quota_mod.REGISTRY_SCOPED_RESOURCES
+        == gateable
+    )
+    assert not (quota_mod.TENANT_GRAPH_RESOURCES & quota_mod.REGISTRY_SCOPED_RESOURCES)
+
+    # 3. the gate holds THAT object — identity, not a copy. A copy is the drift.
+    assert ha._GRAPH_SCOPED_QUOTA_RESOURCES is quota_mod.TENANT_GRAPH_RESOURCES
+
+
+@pytest.mark.parametrize("resource", sorted(quota_mod.TENANT_GRAPH_RESOURCES))
+def test_every_declared_graph_resource_is_counted_through_a_graph_sdk(
+        monkeypatch, resource):
+    """`_count_resource` branches on the SAME declaration the gate reads.
+
+    For every resource the declaration calls graph-scoped, the count must build
+    the tenant-graph SDK and take the graph branch. A fake SDK (returning 0) is
+    enough: the claim under test is WHICH branch ran, not what it returned. If
+    `_count_resource` went back to its own hardcoded tuple, a resource that this
+    declaration calls graph-scoped would take the control-plane branch instead
+    and no graph SDK would be built — red here.
+    """
+    built = []
+
+    class _Result:
+        result_set = [[0]]
+
+    class _Graph:
+        def query(self, *a, **k):
+            return _Result()
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+
+        def _get_proj(self):
+            return _Proj()
+
+    monkeypatch.setattr(quota_mod, "_make_sdk", lambda **kw: _FakeSDK(**kw))
+    assert quota_mod._count_resource("org_test_4051", resource) == 0
+    assert built == [{"namespace": "org_test_4051"}], (
+        f"{resource} is declared graph-scoped but was not counted in a tenant "
+        f"graph — `_count_resource` branched away from the declaration"
+    )
 
 
 def test_a_factory_failure_is_fail_closed_and_attributable(monkeypatch, caplog):
