@@ -1100,6 +1100,131 @@ def test_a_duplicate_writer_identity_holds_bullet_two_at_partial(monkeypatch):
     assert probe.written_labels()["tortoise.y::_upsert_point"].startswith("UNKNOWN")
 
 
+def test_a_duplicate_identity_ALONE_takes_no_census_note(monkeypatch):
+    """#10541's census walks the UNRESOLVED-WRITE set, never `unknown`.
+
+    A `duplicate` identity has NO key it could ever have in `WRITER_CENSUS`:
+    the later definition overwrote the earlier one's label, so there is no
+    unresolved PRODUCER to classify. While the census iterated `unknown` it
+    printed `recognised_producer=0, exempt=0, bypass=0` — a census over a
+    population of ZERO — and then blamed the duplicate on "#10541's own
+    defect", in the row `#5090` quotes as evidence (review, blocking).
+
+    The direction here is the one that matters: a note about a population that
+    does not exist is worse than no note, because it reads as measured.
+    """
+    writers = {
+        "tortoise.x::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "Point",
+        },
+        "tortoise.y::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/y.py:2",
+            "kind": "duplicate", "label": "UNKNOWN(duplicate writer name)",
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()
+    assert not any("#10541 census" in n for n in row.notes), row.notes
+    assert not any("UNCLASSIFIED writers" in n for n in row.notes), row.notes
+    # The duplicate is still REPORTED — it holds its own note and the verdict.
+    assert any("duplicate writer identities" in n for n in row.notes), row.notes
+    assert row.verdict == "PARTIAL", row.observed
+
+
+def test_the_census_names_the_classed_producer_and_not_the_duplicate(monkeypatch):
+    """The census names exactly the writers it can classify — and no others.
+
+    A duplicate identity must never be listed under a #10541 class defect it
+    cannot possibly have, while a genuine unresolved producer in the same row
+    IS classified. Both directions, in one injected map.
+    """
+    classed = "tortoise.vector_write::set_embedding_clause"
+    assert classed in probe.WRITER_CENSUS, (
+        f"{classed} left WRITER_CENSUS — pick the census entry this test means")
+    dup = "tortoise.y::_upsert_point"
+    writers = {
+        classed: {
+            "callee": "unrecognised", "at": "tortoise/vector_write.py:200",
+            "kind": "unresolved_write",
+            "label": "UNKNOWN(unresolved producer)",
+        },
+        dup: {
+            "callee": probe.SEAM_CALL, "at": "tortoise/y.py:2",
+            "kind": "duplicate", "label": "UNKNOWN(duplicate writer name)",
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()
+    census = [n for n in row.notes if "#10541 census" in n]
+    assert len(census) == 1, row.notes
+    assert classed in census[0], census[0]
+    assert dup not in census[0], (
+        "a duplicate identity has no census class it could ever carry, so it "
+        f"must not appear in the census: {census[0]}")
+    assert not any("UNCLASSIFIED writers" in n for n in row.notes), row.notes
+
+
+def test_an_unclassified_unresolved_writer_holds_the_row_at_partial(monkeypatch):
+    """The census's OWN hole is reported, on an INJECTED map.
+
+    This is the durable half of the pair: `test_every_unresolved_writer_carries
+    _a_census_class` walks the LIVE tree, so it is vacuously true the day `#5090`
+    resolves every writer. This one pins the property itself, forever — a writer
+    that is unresolved and absent from `WRITER_CENSUS` must be named as
+    UNCLASSIFIED (a hole in the measurement, not a class) and must hold the row
+    at `PARTIAL` (review, blocking).
+    """
+    absent = "tortoise.z::_store_without_a_census_entry"
+    assert absent not in probe.WRITER_CENSUS, (
+        f"{absent} is now classed — this test needs a name the census does NOT hold")
+    writers = {
+        absent: {
+            "callee": "unrecognised", "at": "tortoise/z.py:3",
+            "kind": "unresolved_write",
+            "label": "UNKNOWN(unresolved producer)",
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()
+    assert any("UNCLASSIFIED writers" in n and absent in n for n in row.notes), row.notes
+    assert row.verdict == "PARTIAL", row.observed
+
+
+def test_a_pipe_in_a_note_cannot_open_a_spurious_table_column():
+    """The tool's own markdown table must stay 4 columns.
+
+    `Row.observed` is emitted into a 4-column row, and the #10541 census note
+    joined its classes with `" | "` — measured at the pre-fix head, bullet 2's
+    line carried SEVEN pipes (six cells) while the header carried five: three
+    spurious columns on the row holding the most evidence (review, minor).
+    Pressed twice: `_table` escapes the cell, and the census joins with `", "`.
+    """
+    def cells(line: str) -> list[str]:
+        # Mask escaped pipes so an ESCAPED `\|` cannot be counted as a cell edge.
+        return [c.strip() for c in line.replace("\\|", "\x00").split("|")[1:-1]]
+
+    synthetic = probe.Row(
+        bullet=2, text="a | b", verdict="PARTIAL", command="cmd",
+        observed="x | y", notes=["x | y"],
+    )
+    lines = [ln for ln in probe._table([synthetic]).splitlines()
+             if ln.startswith("| 2 |")]
+    assert len(lines) == 1, probe._table([synthetic])
+    assert len(cells(lines[0])) == 4, lines[0]
+
+    # The real tree, end to end: bullet 2 carries the census note today, so this
+    # is the line a reader of the published table actually sees.
+    rendered = probe._table([
+        probe.Row(bullet=r["bullet"], text=r["text"], verdict=r["verdict"],
+                  command=r["command"], observed=r["observed"])
+        for r in probe.measure()["rows"]
+    ])
+    for line in rendered.splitlines():
+        if line.startswith("| ") and not line.startswith("|---"):
+            assert len(cells(line)) == 4, line
+
+
 def _pre_312_interpreter() -> str | None:
     """A real `python3` older than the floor, or None (as the guard suite does)."""
     for candidate in ("/usr/bin/python3", shutil.which("python3")):
@@ -1161,9 +1286,13 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
         w for w, d in probe.embedding_writers().items()
         if d["kind"] == "unresolved_write"
     )
-    assert unresolved, (
-        "the instrument resolved every writer — this falsifier is no longer "
-        "exercising the case, so it proves nothing")
+    # ⛔ NO `assert unresolved` here. Resolving every writer IS `#5090`'s stated
+    # remainder, so pinning today's set would red on a CORRECT change and its
+    # cheapest-looking repair would be to delete this test — the guard disarming
+    # itself exactly when the epic completes. This test is an IMPLICATION over
+    # whatever the tree holds (vacuously true on an empty set); the durable,
+    # non-vacuous half is `test_an_unclassified_unresolved_writer_holds_the_row_
+    # at_partial` below, which injects the map (review, blocking).
     unclassified = [w for w in unresolved if w not in census]
     assert not unclassified, (
         f"unclassified by the #10541 census: {unclassified}")

@@ -869,16 +869,31 @@ def score_path_bullet() -> Row:
     # PARTIAL below, because re-classing a writer does not make the vocabulary
     # resolve it. (An earlier draft read this as "a complete measurement" and
     # flipped the row to MET, breaking bullet 2's own falsifier; reverted.)
-    unclassified = sorted(fn for fn in unknown if _census_class(fn) is None)
+    #
+    # ⛔ The population is the UNRESOLVED-WRITE set, taken from the writer map
+    # itself — never `unknown`. `unknown` is the union of `unresolved_write` and
+    # `duplicate`, and a `duplicate` identity has NO key it could ever have in
+    # `WRITER_CENSUS` (the later definition overwrote the earlier one's label;
+    # there is no unresolved PRODUCER to classify). Iterating `unknown` printed
+    # a census over a population of ZERO whenever the only unknown was a
+    # duplicate, and then reported that duplicate under "#10541's own defect" —
+    # in the very row `#5090` quotes as evidence (this tool's own review,
+    # blocking).
+    census_set = sorted(w for w, d in writers.items()
+                        if d["kind"] == "unresolved_write")
+    unclassified = sorted(fn for fn in census_set if _census_class(fn) is None)
     by_class: dict[str, list[str]] = {}
-    for fn in unknown:
+    for fn in census_set:
         cls = _census_class(fn)
         if cls in CENSUS_CLASSES:
             by_class.setdefault(cls, []).append(fn)
-    if unknown:
+    if census_set:
+        # ⛔ `", "`, NOT `" | "`: `Row.observed` is emitted RAW into a 4-column
+        # markdown row (`_table`), so a pipe here adds spurious columns to the
+        # one artifact a reader actually looks at (this tool's own review).
         notes.append(
             "#10541 census over the unresolved set: "
-            + " | ".join(
+            + ", ".join(
                 f"{cls}={len(by_class.get(cls, []))}"
                 + (f" ({', '.join(sorted(by_class[cls]))})" if by_class.get(cls) else "")
                 for cls in CENSUS_CLASSES
@@ -1624,7 +1639,15 @@ def _head() -> str:
 def _table(rows: list[Row]) -> str:
     out = ["| # | bullet | verdict | evidence |", "|---|---|---|---|"]
     for r in rows:
-        out.append(f"| {r.bullet} | {r.text} | **{r.verdict}** | {r.observed} |")
+        # ⛔ A cell must not be able to open a new column: `observed` is built
+        # from notes that quote sorted name lists, and any note that joins with
+        # a pipe rendered three spurious cells on the row carrying the most
+        # evidence (this tool's own review, minor). Escape rather than rely on
+        # every future note remembering — the table is the one artifact a
+        # reader actually looks at.
+        cell = r.observed.replace("|", "\\|")
+        text = r.text.replace("|", "\\|")
+        out.append(f"| {r.bullet} | {text} | **{r.verdict}** | {cell} |")
     # The command is NOT decoration: `#10465` scores a bullet WITH its command,
     # so a row printed without one would be unscored evidence in the one place
     # a reader actually looks.
