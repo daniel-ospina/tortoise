@@ -42,6 +42,7 @@ import json
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from tortoise.coverage_loop import facet_window_bounds
 from tortoise.temporal_leg import (
     DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
     DEFAULT_TEMPORAL_LEG_LIMIT,
@@ -96,7 +97,39 @@ def replay(questions: list[dict], *, window: int,
         sim = cosine_similarity(matrix[-1], matrix[:-1])[0]
         base_order = sorted(range(len(contents)), key=lambda i: (-sim[i], i))
 
-        constraint = detect_time_constraint(q["question"])
+        # #10538: the SHIPPED wiring resolves the question's own date range
+        # with the ONE resolver (``retrieve.py`` passes
+        # ``anchor=question_date``) and hands it to the leg. Without this the
+        # proxy is inert on exactly the anchor-less ``interval``/``recency``
+        # class the window arm targets — the leg promotes on session
+        # clustering inside the window when NO anchor matched — so an ON/OFF
+        # reading taken through it would attribute nothing to the arm while
+        # ``temporal_leg.py``'s measured budget table cites this file as its
+        # source (review cycle 5, #10549). ``ordering`` has no computable
+        # bound (``facet_window_bounds`` returns ``None``) → ``None`` → the
+        # pre-#10538 replay.
+        #
+        # BOTH halves of the mirror, not just the bounds call (the review at
+        # ``871b7561f``, #10549): the resolver's month-name ``interval``
+        # branch takes its YEAR from ``default_year`` and falls back to ``2026``
+        # when it is omitted, so a 2023 question phrased "between April 10 and
+        # April 20" built a 2026 window here while the shipped path built 2023
+        # — the arm inert, no ``leg_fired``, again. ``retrieve.py:1891-1896``
+        # derives the year from ``question_date`` (unparseable → ``None``,
+        # never a guess) and this file now does the same, so the two seams
+        # resolve identical bounds. Pinned by
+        # ``test_the_proxy_resolves_the_month_name_year_from_the_question_date``.
+        _qdate = q.get("question_date") or None
+        try:
+            year = int(_qdate[:4]) if _qdate else None
+        except ValueError:
+            year = None
+        constraint = detect_time_constraint(q["question"], default_year=year)
+        date_window = None
+        if constraint.kind in ("interval", "recency"):
+            date_window = facet_window_bounds(
+                constraint.kind, constraint.start, constraint.end, None,
+                anchor=q.get("question_date") or None)
         candidates = [
             {"id": str(i), "session_date": date_of[i],
              "session_id": sid_of[i], "content": contents[i]}
@@ -107,7 +140,7 @@ def replay(questions: list[dict], *, window: int,
         order_ids, picks = temporal_leg_fusion_order(
             candidates, anchors=constraint.anchors, window=window,
             limit=limit, bucket_cap=bucket_cap, weight=weight,
-            placement=placement)
+            placement=placement, date_window=date_window)
         leg_order = [int(pid) for pid in order_ids]
         if picks:
             fired += 1
