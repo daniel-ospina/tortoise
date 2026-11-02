@@ -64,17 +64,25 @@ def _isolate_atexit_budget():
     embedded_lifecycle._atexit_deadline = None
 
 
-def _count_redis_servers() -> int:
-    """Count live redislite redis-server processes (pgrep)."""
-    import subprocess
+def _server_cmdline(pid: int) -> str | None:
+    """The ``pid``'s command line, or ``None`` when that pid is gone.
+
+    Linux ``/proc`` read, deliberately: the only questions this module asks
+    about a server are "is THIS pid still there?" and "is it still the
+    redislite server we started?" (the second guards pid recycling).
+    """
     try:
-        out = subprocess.run(
-            ["pgrep", "-f", "redislite/bin/redis-server"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return -1
-    return len([l for l in out.stdout.splitlines() if l.strip().isdigit()])  # noqa: E741
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return fh.read().replace(b"\0", b" ").decode(
+                "utf-8", "replace").strip()
+    except OSError:
+        return None
+
+
+def _server_still_alive(pid: int) -> bool:
+    """True when ``pid`` is a LIVE redislite server (not a recycled pid)."""
+    cmdline = _server_cmdline(pid)
+    return cmdline is not None and "redislite/bin/redis-server" in cmdline
 
 # Files that legitimately construct FalkorDB / FalkorProjection / Redislite
 # directly. Epic #1647 P4 (Task 10): the list IS the embedded surface —
@@ -231,34 +239,89 @@ def test_projection_context_manager_closes_db(monkeypatch, tmp_path):
     assert calls == ["close"]
 
 
-def test_falkordb_atexit_closes_server_on_process_exit(tmp_path):
-    """End-to-end: a bare FalkorDB client whose process exits normally must
-    NOT leave a server behind (atexit close). Skips the strict count
-    assertion when other test suites are running concurrently (their server
-    churn makes the global count noisy) — the check is only meaningful on a
-    quiet machine."""
-    import subprocess  # noqa: I001
-    import sys as _sys
-    from tortoise.embedded_reaper import active_suite_tokens
+def _spawn_atexit_probe(tmp_path: Path, *, bypass_atexit: bool) -> int:
+    """Run a bare FalkorDB client in a CHILD process; return its server pid.
+
+    The child prints the pid of the redislite server its construction started
+    and then exits. ``bypass_atexit`` makes it leave via ``os._exit`` — the
+    exit seam's own bypass — so the positive control can prove a leaked
+    server is VISIBLE to this probe.
+
+    Attribution is by PID on purpose. The previous form counted every
+    ``redislite/bin/redis-server`` on the machine and allowed a ``+1``
+    tolerance, skipping only when another *pytest suite marker* was live:
+    that reads other lanes' servers as this suite's leak, so it measured 6 ->
+    8 on a shared CI runner and reddened a required check on a diff that
+    touches no embedded code at all. A pid names exactly one server.
+    """
+    db_path = tmp_path / ("atexit-bypass.db" if bypass_atexit else "atexit.db")
     script = (  # noqa: UP031
-        "import sys; sys.path.insert(0, %r); "
+        "import os, sys; sys.path.insert(0, %r); "
         "from tortoise import FalkorDB; "
-        "import tempfile, os; "
-        "FalkorDB(os.path.join(tempfile.mkdtemp(), 'atexit.db'))\n"
-    ) % str(Path(__file__).resolve().parent.parent)
+        "c = FalkorDB(%r); "
+        "pid = c.client.pid; "
+        "os.kill(pid, 0); "  # the server is REAL — non-vacuity for the parent
+        "print('SERVER_PID', pid, flush=True); "
+        "%s"
+    ) % (str(Path(__file__).resolve().parent.parent), str(db_path),
+         "os._exit(0)" if bypass_atexit else "")
     env = dict(os.environ)
     env.pop("TORTOISE_DB_URI", None)
-    before = _count_redis_servers()
-    subprocess.run([_sys.executable, "-c", script], capture_output=True,
-                   text=True, timeout=120, env=env)
-    time.sleep(3)  # let the server shut down + count settle
-    after = _count_redis_servers()
-    other_suites = len(active_suite_tokens()) > 1
-    if other_suites:
-        pytest.skip("other suites active — server-count assertion invalid")
-    # atexit closed the server: the count must not grow (tolerance 1 for
-    # races with unrelated background processes).
-    assert after <= before + 1, f"server leaked: {before} -> {after}"
+    run = _subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, timeout=120, env=env)
+    assert run.returncode == 0, f"probe child failed: {run.stderr[-2000:]}"
+    reported = [ln for ln in run.stdout.splitlines()
+                if ln.startswith("SERVER_PID")]
+    assert reported, f"probe child never reported a server pid: {run.stdout!r}"
+    server_pid = int(reported[-1].split()[1])
+    assert server_pid > 0, f"probe reported a non-pid: {server_pid}"
+    return server_pid
+
+
+def test_falkordb_atexit_closes_server_on_process_exit(tmp_path):
+    """End-to-end: a bare FalkorDB client whose process exits normally must
+    NOT leave a server behind (atexit close).
+
+    The measurement is THIS client's server pid, not a host-global process
+    count, so it needs no "quiet machine" precondition and cannot skip — see
+    :func:`_spawn_atexit_probe` for why the count form was wrong. The child
+    asserts the pid it reports is live, so a construction that started no
+    server fails here rather than passing vacuously.
+    """
+    server_pid = _spawn_atexit_probe(tmp_path, bypass_atexit=False)
+    # atexit close is asynchronous (SIGTERM, then a grace window): poll, do
+    # not sleep-and-hope.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and _server_still_alive(server_pid):
+        time.sleep(0.25)
+    leaked = _server_still_alive(server_pid)
+    if leaked:  # never leave the leak behind for the reaper to find
+        with contextlib.suppress(OSError):
+            os.kill(server_pid, _signal.SIGKILL)
+    assert not leaked, (
+        f"atexit did not close the embedded server: pid {server_pid} still "
+        f"alive after the owning process exited")
+
+
+def test_atexit_probe_reports_a_bypassed_close_as_a_leak(tmp_path):
+    """Positive control for the probe above: the measurement can SEE a leak.
+
+    ``os._exit`` skips atexit handlers, so the daemonized server survives its
+    owner. If this test ever stops seeing the leak, the sibling test's
+    ``assert not leaked`` has stopped discriminating and passes for the wrong
+    reason. The control's own server is killed here.
+    """
+    server_pid = _spawn_atexit_probe(tmp_path, bypass_atexit=True)
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not _server_still_alive(server_pid):
+            time.sleep(0.25)
+        assert _server_still_alive(server_pid), (
+            "the probe cannot see a server that os._exit() left behind — the "
+            f"atexit assertion in this module is vacuous (pid {server_pid})")
+    finally:
+        with contextlib.suppress(OSError):
+            os.kill(server_pid, _signal.SIGKILL)
 
 
 def test_no_new_raw_embedded_constructions():

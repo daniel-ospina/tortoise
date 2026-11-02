@@ -438,6 +438,8 @@ contract; single-source the chunk kind and the `match_source` leg across the eva
   enumerated keys `{on, seed_window, seed_limit, seed_sessions: [str], seeded: int,
   injected_per_session: {sid: int}, injected_total: int,
   injected_per_session_merged: {sid: int}, injected_merged: int, dropped_by_cap: int,
+  reader_window_displacement: {window, injected_in_window, base_displaced,
+  sessions_lost: [str], sessions_before, sessions_after, measured},
   fetch_ok: bool, total_cap_hit: bool, guard: bool, latency_ms, tr_excluded}`
   (per-session dicts + `injected_merged` are the non-derivable signals; `seeded`/
   `injected_total` are documented reader conveniences, never a second source of
