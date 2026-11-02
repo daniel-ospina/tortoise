@@ -604,7 +604,19 @@ def main_leg_coverage(runner: "Runner", provenance: Path, tested: int,
         raise Unmeasured(
             f"main's leg dimension: no --provenance file at {provenance} — the examined "
             "run set is unreadable, so leg coverage cannot be claimed")
-    for line in provenance.read_text(encoding="utf-8").splitlines():
+    # ⛔ AN UNREADABLE RUN SET IS UNMEASURED, NEVER A TRACEBACK (#10564 review). Every
+    # other read this PR adds is wrapped (`Runner.jobs`, `counter()`); this one was not,
+    # so a `PermissionError`/`UnicodeDecodeError` escaped `main()` — which maps only
+    # `Unmeasured`/`_Blocked` — and the process exited 1, the code that means "NEW
+    # FAILURE — introduced by this PR". A thing we could not read must never become
+    # that, which is the same contract `counter()`'s docstring states.
+    try:
+        text = provenance.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Unmeasured(
+            f"main's provenance file at {provenance} is UNREADABLE ({exc}) — the "
+            "examined run set cannot be read, so leg coverage cannot be claimed") from exc
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue

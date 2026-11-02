@@ -84,9 +84,16 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:            the test now also pins the `e.g.` / ILLUSTRATIVE MARKERS (until then a
 #:            mutation that dropped them passed), and the history block was re-attributed
 #:            line by line.
-#:            No logic change in any re-cut: no new branch, no exit-code change, no
-#:            polarity change.
-_GATE_MODULE_SHA256 = "f4108e2e3d4db724a2b046f4ccd18e060a8652f21676d838b4c6f1889cb1886b"
+#:   #10564 (provenance-read wrap) — re-cut IN THE SAME COMMIT as the change it
+#:            describes: `main_leg_coverage` now wraps its provenance read
+#:            (`OSError`/`UnicodeDecodeError` -> `Unmeasured`), because an unreadable
+#:            run set escaped `main()` as a traceback and exited 1 — the code that
+#:            means "NEW FAILURE — introduced by this PR". This is the ONE re-cut that
+#:            changes control flow (a `try/except` around an existing read); it adds no
+#:            branch on a verdict, no exit code, and no polarity change.
+#:            No logic change in any other re-cut: no new branch, no exit-code change,
+#:            no polarity change.
+_GATE_MODULE_SHA256 = "2f40f7dd1d630fb9969c0445e00fd13f5b45c3c856bf6a9b0db6fdb9c9b55965"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box
@@ -210,6 +217,13 @@ if [ -n "$report" ] && [ "${STUB_NO_REPORT:-0}" != "1" ]; then
 fi
 # The examined FAILING runs of the same window (#10289) — the leg dimension's run set.
 [ -n "$prov" ] && printf '%s' "${STUB_PROV:-}" > "$prov"
+# An UNREADABLE run set: the file exists but is not valid UTF-8. The read must refuse
+# with UNMEASURED — never traceback into exit 1 ("introduced by this PR").
+# ⚠️ Written with python, NOT printf: measured, bash's printf re-encodes `\xff` to
+# UTF-8 (`c3 bf`, i.e. a VALID file) in this locale, and a bare `\377` is emitted
+# literally — either way the case would quietly test nothing.
+[ -n "$prov" ] && [ "${STUB_PROV_BAD_UTF8:-0}" = "1" ] && \
+  python3 -c 'import sys; open(sys.argv[1], "wb").write(bytes([97,97,97,58,255,254,10]))' "$prov"
 [ "${STUB_RC:-0}" = "0" ] || { echo "ci-failure-set: stub failure" >&2; exit "${STUB_RC}"; }
 if [ "$mode" = "rates" ]; then printf '%s' "${STUB_RATES:-}"; else printf '%s' "${STUB_SIGS:-}"; fi
 """
@@ -1121,6 +1135,30 @@ def test_a_green_run_in_the_window_covers_the_leg_without_a_jobs_call(tmp_path):
                    STUB_PROV=_STUB_PROV["STUB_PROV"])
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "leg coverage: test-slow=executed (green-run)" in proc.stdout
+
+
+def test_an_unreadable_provenance_file_is_unmeasured_never_a_traceback(tmp_path):
+    """A run set we cannot READ is UNMEASURED (exit 2) — never exit 1 ("introduced").
+
+    The file exists, so the absent-file refusal does not cover this: a `PermissionError` or
+    a `UnicodeDecodeError` would escape `main()`, which maps only `Unmeasured`/`_Blocked`,
+    and the process would exit 1 — the code this whole gate exists to stop emitting about
+    a measurement it never took. Every OTHER read this change adds is wrapped
+    (`Runner.jobs`, `counter()`); this pins the third.
+    """
+    box = Sandbox(tmp_path, copy_exemption=False)
+    (box.agent_infra / "scripts" / "ci_exemption.py").write_text(
+        _decision_stub(rc=1, verdict="VERDICT\tBLOCK\ttest_brand_new introduced it\n"),
+        encoding="utf-8")
+    proc = box.run(jobs=_jobs((900, "test-slow (d)", "failure")), logs={900: NEW_LOG},
+                   red_legs="test-slow", main_jobs={},
+                   STUB_TESTED="3", STUB_EXAMINED="3",
+                   STUB_PROV=_STUB_PROV["STUB_PROV"], STUB_PROV_BAD_UTF8="1")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "VERDICT: UNMEASURED" in proc.stdout
+    assert "is UNREADABLE" in proc.stdout
+    assert "Traceback" not in proc.stderr, (
+        "an unreadable run set must refuse, not crash: " + proc.stderr)
 
 
 def test_a_missing_main_job_listing_is_unmeasured_never_unexecuted(tmp_path):
