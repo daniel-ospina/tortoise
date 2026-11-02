@@ -6064,8 +6064,8 @@ def test_the_changes_job_carries_no_job_scope_env():
     `env: {CI_SHARD_ROUTING: ...}` and NEITHER emitter step carried it, so both
     assertions below fail on that tree.
 
-    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:866`
-    and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1682`)
+    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:869`
+    and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1825`)
     both send an operator here by name, and both advertised
     `test_the_changes_job_carries_no_job_scope_env` while the function carried a
     longer, unrelated name — so `pytest -k test_the_changes_job_carries_no_job_scope_env`
@@ -8974,6 +8974,241 @@ def test_workflow_lint_pins_the_actionlint_image_and_its_scope():
         "workflow-lint must expand the glob array quoted (\"${files[@]}\"); a "
         "bare `$files` is a new SC2086 in a tree pinned to -shellcheck="
     )
+
+
+# actionlint 1.7.12's OWN list of known `runs-on:` labels, copied VERBATIM from
+# its `[runner-label]` message (the message prints the whole set when it
+# rejects one). Pinned rather than derived, because the pin IS the point: a
+# label that is neither here nor in `.github/actionlint.yaml` reddens the
+# REQUIRED `workflow-lint` leg. An actionlint upgrade that adds hosted labels
+# can only make this list STALE, and the resulting failure says exactly what to
+# do — the safe direction of drift.
+_ACTIONLINT_KNOWN_LABELS = frozenset({
+    "windows-latest", "windows-latest-8-cores", "windows-2025",
+    "windows-2025-vs2026", "windows-2022", "windows-11-arm", "ubuntu-slim",
+    "ubuntu-latest", "ubuntu-latest-4-cores", "ubuntu-latest-8-cores",
+    "ubuntu-latest-16-cores", "ubuntu-24.04", "ubuntu-24.04-arm",
+    "ubuntu-22.04", "ubuntu-22.04-arm", "macos-latest", "macos-latest-xlarge",
+    "macos-latest-large", "macos-26-intel", "macos-26-xlarge", "macos-26-large",
+    "macos-26", "macos-15-intel", "macos-15-xlarge", "macos-15-large",
+    "macos-15", "macos-14-xlarge", "macos-14-large", "macos-14",
+    "self-hosted", "x64", "arm", "arm64", "linux", "macos", "windows",
+})
+
+
+# The Actions-expression opener. A `runs-on:` member containing it is not a
+# label NAME at lint time (actionlint declines to verdict such a value).
+_EXPR_OPEN = "$" + "{{"
+
+
+def _runs_on_labels(workflow: dict) -> list[str]:
+    """Every STATIC label a workflow's jobs name in `runs-on:`.
+
+    Static means literal. A member carrying `${{ … }}` is not a label NAME at
+    lint time (actionlint declines to verdict such a value), so it is skipped
+    rather than guessed at; the mapping form is read for its `labels` half, and
+    only when that half is literal too. Both spellings are how a job escapes
+    this check, which is why both are handled instead of assuming a list.
+    """
+    labels: list[str] = []
+    jobs = workflow.get("jobs") if isinstance(workflow, dict) else None
+    for job in (jobs or {}).values():
+        runs_on = job.get("runs-on") if isinstance(job, dict) else None
+        if isinstance(runs_on, str):
+            candidates: list = [runs_on]
+        elif isinstance(runs_on, list):
+            candidates = runs_on
+        elif isinstance(runs_on, dict):
+            inner = runs_on.get("labels")
+            candidates = [inner] if isinstance(inner, str) else (
+                inner if isinstance(inner, list) else [])
+        else:
+            continue
+        labels.extend(c for c in candidates
+                      if isinstance(c, str) and _EXPR_OPEN not in c)
+    return labels
+
+
+def _undeclared_custom_labels(
+    used: set[str],
+    known: frozenset[str] = _ACTIONLINT_KNOWN_LABELS,
+    declared: set[str] | frozenset[str] = frozenset(),
+) -> set[str]:
+    """The labels actionlint would REJECT, in their original spelling.
+
+    CASE-FOLDED FOR THE PRESETS ONLY, because actionlint folds only those.
+    `rule_runner_label.go::verifyRunnerLabel` (1.7.12) matches hosted labels through
+    `defaultRunnerOSCompats[strings.ToLower(l)]` and the preset self-hosted labels
+    through `strings.EqualFold` (over `self-hosted, x64, arm, arm64`), so
+    `runs-on: [self-hosted, Linux, X64, self-hosted-x64]` — the spelling #10237's
+    ask 1 prescribes, and the label set `ci.yml`'s own comment quotes as the
+    runners' VERBATIM labels — is ACCEPTED by the linter. An exact set difference
+    answered `{Linux, X64}` for it and sent the author to declare two labels that
+    are not custom at all (a claim that they do not exist), while reddening a
+    spelling the gate accepts.
+
+    The asymmetry is the whole point, and it was taken from the primary source:
+    after the preset loop, `verifyRunnerLabel` runs `path.Match(k, l)` over the
+    names declared in `actionlint.yaml` against the UNFOLDED `l`. A custom name is
+    therefore matched case-SENSITIVELY, and folding the DECLARED set here would
+    report `runs-on: [self-hosted, Self-Hosted-X64]` CLEAN while the linter
+    REJECTS it — a false PASS that reds the REQUIRED `workflow-lint` leg instead
+    of this test, the exact inversion this check exists to prevent. Fold the
+    preset arm; compare the declared arm exactly.
+    """
+    known_folded = {name.lower() for name in known}
+    declared_exact = set(declared)
+    return {label for label in used
+            if label.lower() not in known_folded and label not in declared_exact}
+
+
+def test_every_custom_runs_on_label_is_declared_to_actionlint():
+    """A custom self-hosted label must be DECLARED, or `workflow-lint` reds the gate.
+
+    actionlint verdicts `runs-on:` labels against a BAKED-IN GitHub-hosted list,
+    so a pool label is a hard error — `label "self-hosted-x64" is unknown … set
+    list of labels in actionlint.yaml config file`. That is MEASURED on this
+    repo, not hypothetical: `.github/workflows/ci.yml`'s #10237 canary job
+    (`runs-on: [self-hosted, self-hosted-x64]`, ci.yml:1534) redded the REQUIRED
+    `python-ci-gate` through `workflow-lint` on its own first run, for a diff
+    that was correct. The remedy actionlint names is `.github/actionlint.yaml`.
+
+    WHY PIN IT OFFLINE. The declaration is otherwise checked in exactly one
+    place — inside the required CI leg, on a push, behind a ~16-minute hosted
+    wait. This test reads the same two files locally, so the next literal custom
+    label reds at test time instead of on the gate.
+
+    Mutation: delete `.github/actionlint.yaml` (or a label from it) -> RED on the
+    label ci.yml still uses. Mutation: a scan that stops SEEING `runs-on:` ->
+    RED on the positive control below, which requires the canary's custom label
+    to be found. Mutation: a declared glob (`self-hosted-*`) -> RED, because a
+    glob would silently accept the typo (`self-hosted-x65`) that this whole
+    check exists to catch. Mutation: fold the DECLARED names like the presets
+    (`Self-Hosted-X64` against declared `self-hosted-x64`) -> RED on the
+    false-PASS arm below, because actionlint folds only its own presets.
+    """
+    wf_dir = REPO / ".github" / "workflows"
+    workflows = _workflow_files(wf_dir)
+    assert workflows, "no workflow files found — the scan would pass vacuously"
+    used = {label for path in workflows
+            for label in _runs_on_labels(yaml.safe_load(path.read_text()) or {})}
+
+    # POSITIVE CONTROL: the #10237 canary pins the pool's own marker, so a
+    # scanner that silently found no custom label must not read as "nothing to
+    # declare" — that is the vacuous pass this leg would otherwise hide in.
+    custom = _undeclared_custom_labels(used)
+    assert custom, (
+        "no custom `runs-on:` label found in any workflow, though ci.yml's "
+        "#10237 canary pins [self-hosted, self-hosted-x64] — the scan is "
+        "vacuous, not clean"
+    )
+    # NON-VACUITY for the case fold: the pool marker paired with the runners' own
+    # UPPERCASE arch/OS labels is what ask 1 prescribes and what actionlint
+    # accepts. Before the fold this answered {Linux, X64} and redded a correct
+    # diff; the converse keeps a real typo catching.
+    assert _undeclared_custom_labels(
+        {"self-hosted", "Linux", "X64", "self-hosted-x64"}, declared={"self-hosted-x64"}
+    ) == set(), (
+        "a `runs-on:` of [self-hosted, Linux, X64, self-hosted-x64] must be clean: "
+        "actionlint folds case for its PRESET labels, so reddening it sends the "
+        "author to declare `Linux`/`X64` as custom — a false claim"
+    )
+    assert _undeclared_custom_labels(
+        {"self-hosted", "Linux", "self-hosted-x65"}, declared={"self-hosted-x64"}
+    ) == {"self-hosted-x65"}, (
+        "the case fold must not swallow a genuinely custom label (`self-hosted-x65` "
+        "is the typo this whole check exists to catch)"
+    )
+    # NON-VACUITY for the DECLARED half's case sensitivity: actionlint matches a
+    # custom name with `path.Match` against the UNFOLDED label, so folding this
+    # side reported `Self-Hosted-X64` clean and let the linter reject it at gate
+    # time (`workflow-lint` reds a REQUIRED leg) — the false-PASS inversion of
+    # the check's purpose. Declared `self-hosted-x64` does NOT admit this case.
+    assert _undeclared_custom_labels(
+        {"self-hosted", "Self-Hosted-X64"}, declared={"self-hosted-x64"}
+    ) == {"Self-Hosted-X64"}, (
+        "a declared label must be matched case-SENSITIVELY: actionlint's own "
+        "`path.Match(k, l)` runs against the unfolded `runs-on:` value, so "
+        "`Self-Hosted-X64` is REJECTED there and must red HERE, not on the gate"
+    )
+
+    config_path = REPO / ".github" / "actionlint.yaml"
+    assert config_path.is_file(), (
+        f"{config_path.relative_to(REPO)} is missing: `workflow-lint` will reject "
+        "every custom runner label it reads in `runs-on:` and red the REQUIRED "
+        "python-ci-gate (actionlint names this file as the fix)"
+    )
+    config = yaml.safe_load(config_path.read_text()) or {}
+    declared = set(((config.get("self-hosted-runner") or {}).get("labels")) or [])
+    globs = sorted(d for d in declared if set(d) & set("*?["))
+    assert not globs, (
+        "actionlint.yaml declares a GLOB runner label " + repr(globs) + ": it "
+        "covers label names nobody checked, including a typo in `runs-on:` — "
+        "spell every label in full, as that file's own header states"
+    )
+    undeclared = sorted(_undeclared_custom_labels(used, declared=declared))
+    assert not undeclared, (
+        "these custom runner labels are used in a workflow `runs-on:` but are "
+        "not declared in .github/actionlint.yaml, so `workflow-lint` reds the "
+        "REQUIRED python-ci-gate on that head: " + ", ".join(undeclared)
+    )
+
+
+def test_the_pool_canary_provisions_before_a_failed_step_can_skip_it():
+    """A later `!cancelled()` harness needs a provisioner that is ALSO `!cancelled()`.
+
+    `repo-harnesses` is the tree's only job pinned to the pool's own labels
+    (`ci.yml`, #10237 canary), so every one of its steps runs on a bare agent and
+    the job carries a tool contract ahead of the harnesses. Two polarities in that
+    contract are easy to get wrong and neither is visible on the hosted image
+    these were written against:
+
+    1. `actions/setup-python` and the `agent-infra-guard` checkout default to the
+       implicit `success()`. Every harness step below carries
+       `if: ${{ !cancelled() }}`, which is TRUE AFTER A FAILURE — so one red
+       upstream (the jq assert, the SIGPIPE guard) SKIPPED both provisioners and
+       then ran the harnesses anyway, against no `python3` and no
+       `.agent-infra-guard`. One named failure became 2-4 that read as real
+       defects (a missing interpreter, a missing guard tree). Measured class:
+       #9018's "exit 127 that READS as a test failure", reintroduced one layer up.
+    2. the `ensure jq` assert is UNCONDITIONAL while its only consumer is gated on
+       the driver surface. jq cannot be provisioned by that script
+       (`runner-tools.sh::ensure_one` installs `gh` and nothing else, then fails
+       closed), so an absent jq would red EVERY PR — including the large majority
+       whose diff cannot touch the driver — for a tool nothing would have used.
+
+    Mutation: drop either `if:` -> RED below. Mutation: ungate the jq assert ->
+    RED on the consumer-parity arm. Verified pre-fix (all three steps had no
+    `if:`): the first assertion fails, so this is not a vacuous pin.
+    """
+    ci = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text())
+    steps = ci["jobs"]["repo-harnesses"]["steps"]
+
+    def _cond(step: dict) -> str:
+        return str(step.get("if") or "")
+
+    setup = [s for s in steps if str(s.get("uses", "")).startswith("actions/setup-python")]
+    guard = [s for s in steps if (s.get("with") or {}).get("path") == ".agent-infra-guard"]
+    assert setup, "the canary job no longer provisions `python3` — its harnesses need it (#9018)"
+    assert guard, "the canary job no longer checks out .agent-infra-guard — its guard step needs it"
+    for step in (*setup, *guard):
+        assert "!cancelled()" in _cond(step), (
+            f"step {step.get('uses') or step.get('name')} in ci.yml::repo-harnesses has no "
+            "`if: ${{ !cancelled() }}`: it defaults to `success()`, so a FAILING step above "
+            "skips it — while every harness below runs under `!cancelled()` and would then "
+            "red on a missing tool / missing guard tree instead of on the real defect"
+        )
+
+    jq_assert = [s for s in steps if "runner-tools.sh ensure jq" in str(s.get("run", ""))]
+    consumer = [s for s in steps if "registry-cron.test.sh" in str(s.get("run", ""))]
+    assert jq_assert, "the canary job no longer asserts jq beside its harnesses"
+    assert consumer, "the canary job no longer runs the one harness that invokes real jq"
+    for step in (jq_assert[0], consumer[0]):
+        assert "needs.changes.outputs.driver_scripts == 'true'" in _cond(step), (
+            "the jq assert must be gated EXACTLY as its consumer is (`driver_scripts`): "
+            "`runner-tools.sh ensure_one` cannot install jq (it installs `gh` only and then "
+            "fails closed), so an ungated assert reds every PR for a tool it would not use"
+        )
 
 
 def _extract_pytest_marker(run_script: str) -> str:
