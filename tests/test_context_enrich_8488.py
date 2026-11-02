@@ -562,12 +562,12 @@ def _attestable(point: dict) -> bool:
          branch that writes the journalled vector
          (``projection/entities.py:2508-2509``). This clause tests only that
          the FIELD carries a value; production additionally requires the value
-         to be *restorable* (`_writable_journalled_vector`) and, at the call
-         site, of the store's WIDTH (`:2483` for restorability, `:2488-2508` for
-         the width branch). Both are unrepresentable in
-         this fixture, so the predicate below is exactly production's
-         population — and the mismatch test PINS that with a premise assertion
-         rather than making this pure predicate store-dependent. A future
+         to be *restorable* (`_writable_journalled_vector`, `:2483`) and, at
+         the call site, of the store's WIDTH (`:2488-2508`). Neither is
+         representable in this fixture, so the predicate below is exactly
+         production's population — and the mismatch test PINS that with a
+         premise assertion rather than making this pure predicate
+         store-dependent. A future
          fixture that journals a refused width or a non-finite value reds that
          premise instead of silently counting a record the replay never
          attests (last-review non-blocking note 2);
