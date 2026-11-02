@@ -12,7 +12,7 @@ aboutObjects: "#7949, #9080, #9116, #9736, #9738, #9775, #5333, #8503, #9596, #7
 # E1–E5 — which criterion is PROVEN by an executable test, and which is not
 
 **Question this file answers.** The scoreboard beside it
-(`capstone-measured-e0fc940b.log`, and the `#7949` comments that carry later stamps)
+(`capstone-measured-9152448d.log` — re-measured 2026-11-02; the superseded `e0fc940b5`, `8a8bbcba2`, `6020cbd5f` stamps live in `#7949`'s comments)
 says what was **measured**. This file answers a different, stricter question, which
 the epic's closing rule actually needs:
 
@@ -225,7 +225,7 @@ what would have to move:
 | E2 | `#10360` — the **render half is fixed** (PR `#10382` on `#9775`: every render path carries the carve-out, the compact one included, pinned by `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires` and `::test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly`), so what remains is the OTHER half: nothing in the write path *enforces* retention (`#10360`), and the surviving-value loss (1 of 14) is upstream of the filter, so the row needs the extraction loss fixed, not the gate | `#9775` render half **fixed** (PR `#10382`) / `#10360` **OPEN** |
 | E3 | `#9736` — the denominator as registered on 2026-10-21 counted `:Object` mention links, which carry no anchor **by design** (owner option A, `#5199`). **AMENDED 2026-11-01:** `PRE-REGISTRATION.md` §10.1 re-registers the class set to `Point`+`Event`+`Document` (re-derived `148/383 = 0.38642`, still RED; no threshold moved) as the reopen — following `#5199`, not choosing over it — and the probe derives the same set from `_DERIVATION_REFERENCES_LABELS`. The residual (188 of 338 `Point`s can never carry the link) stays this issue's attribution | **OPEN — owner-gated** |
 | E4 | the planted edges are not formed: 5 of 15 wired-and-persisted on the frozen corpus (`#8503`'s own criterion reports 5/14 with `wp02` excluded as the pre-registered exclusion, `#9873`; the frozen denominator is **15** and every receipt reads `planted=15` — the remaining misses are content-level as well as connect-level), and the receipt's retrievability rate is still unmeasured (`#9596`) | `#8503` CLOSED / `#9596` **OPEN** |
-| E5 | the epic's own wording is **met** (falsifier run + written back; both halves now test-pinned). The **pre-registered** outcome floor is not: raw recovery 0.4800 against a `>= 0.80` bar, on an n of 25 that must be reconciled with the record's 29 marker sentences (`#9738`). Reporting that as GREEN is the one thing this bundle exists to refuse | `#9738` **OPEN** |
+| E5 | the epic's own wording is **met** (falsifier run + written back; both halves now test-pinned). The **pre-registered** outcome floor is not: raw recovery 0.4800 against a `>= 0.80` bar, on an n of 25 that must be reconciled with the record's 29 marker sentences (`#9738`). Reporting that as GREEN is the one thing this bundle exists to refuse | `#5087` **OPEN** (`#9738` closed 2026-11-02 on its own §10 record correction, which is NOT a measurement of this number) |
 
 ### One measured correction to the scoreboard's E4 row, not applied to it
 

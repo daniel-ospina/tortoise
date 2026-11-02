@@ -711,11 +711,11 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         row("E4", verdict=e4["verdict"], evidence=E4_RECEIPT, sha=e4["sha"],
             numerator=e4["numerator"], denominator=e4["denominator"],
             corpus_sha256=e4["corpus_sha256"],
-            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#8503",
+            artifact_corpus_sha256=e4["corpus_sha256"], blocked_by="#9596",
             note=e4["note"]),
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
-            corpus_sha256=log_corpus_sha, blocked_by="#9738", note=e5["note"]),
+            corpus_sha256=log_corpus_sha, blocked_by="#5087", note=e5["note"]),
     ]
 
 

@@ -64,6 +64,19 @@ marked green off closed children, with no artifact at all. This closes that.
         copy of this rule: change `check_ordering` and let this row reference it.
     V6  non-green requires a named blocker (``#NNN``) — *name the blocking issue*;
         a ``refusal`` row must cite a capstone log that carries that row
+    V12 a cited blocker that the blocker-state record reports **CLOSED** is a
+        finding, and so is one the record does not report at all. ``#NNN`` is a
+        provenance POINTER, and V6 checked only its FORM — so three rows of the
+        shipped table went on naming #9775 / #8503 / #9738 for up to nine days
+        after those issues closed, with this gate printing "structurally
+        sound" over them (#10537). A pointer at closed work is stale evidence BY
+        CONSTRUCTION: nobody has to judge it, only look the state up. The states
+        come from ``--blocker-states`` (default:
+        ``docs/evidence/7949-capstone/blocker-states.json``), a COMMITTED record
+        refreshed from the tracker by a lane — so this tool stays offline and
+        deterministic. With no record on disk the arm does not apply and the run
+        says so on stdout; a record that is present but malformed is a usage
+        error (exit 2), never a silent disarm.
     V7  a measurement row's ``corpus_sha256`` equals the log's corpus sha —
         "every green row cites an evidence file whose before/after denominators
         are the same corpus" — and the LOG must name a corpus to compare with.
@@ -129,6 +142,16 @@ END = "=== CAPSTONE-VERDICT-END ==="
 
 _SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 _BLOCKER_RE = re.compile(r"^#\d+$")
+
+#: The committed record V12 reads the cited blockers' tracker state out of.
+#: COMMITTED, not fetched: this tool must stay a pure, offline, deterministic
+#: check (it runs in CI on every PR). A lane refreshes the file from the tracker
+#: and commits it with the measurement it verifies — see
+#: ``docs/evidence/7949-capstone/README.md``. The state that decides a row is
+#: therefore reviewed in the same diff as the row it decides.
+BLOCKER_STATES_DEFAULT = Path("docs/evidence/7949-capstone/blocker-states.json")
+BLOCKER_STATES_SCHEMA = "capstone-blocker-states-v1"
+BLOCKER_STATE_WORDS = ("OPEN", "CLOSED")
 
 #: The nested blocks ``check()`` reads as OBJECTS. Declared so the type guard is
 #: derived from one list rather than repeated per call site.
@@ -214,6 +237,72 @@ def _same_corpus(a: object, b: object) -> bool:
     if left is not None and right is not None:
         return left == right
     return a == b
+
+
+def _blocker_exempt(run: dict, kind: object, num: object, den: object) -> bool:
+    """Is this row outside V12 — a REFUSAL record's HISTORICAL cause?
+
+    ⛔ ONE PREDICATE, ONE PLACE (#10537 review P2): the arm below and the OK
+    line above both ask this question, and a second copy of it would let the
+    line claim a verification the arm did not perform. It takes all three
+    conditions, and the `evidence_kind == "refusal"` leg is what closes the
+    hole a REFUSED status alone left: measured on the review, flipping
+    `run.status` to REFUSED and nulling two measured rows' counts made the gate
+    print "structurally sound" over two CLOSED blockers — V6 passed, V7's
+    measurement arm passed (the corpus digest was present), and only V10's
+    E4-specific arm redded. A row that says `evidence_kind: "measurement"` is
+    not a refusal, whatever the run block says.
+    """
+    return (run.get("status") == "REFUSED"
+            and kind == "refusal"
+            and not _count(num) and not _count(den))
+
+
+def load_blocker_states(path: Path) -> dict:
+    """Load the committed blocker-state record V12 reads (#10537).
+
+    Shape (``capstone-blocker-states-v1``)::
+
+        {"schema": "capstone-blocker-states-v1",
+         "checked_at": "2026-11-02T12:41:00Z",
+         "source": "gh issue view <N> --json state,closedAt  (one call per issue)",
+         "blockers": {"#5333": {"state": "OPEN", "closed_at": null,
+                                "title": "..."},
+                      "#9775": {"state": "CLOSED",
+                                "closed_at": "2026-10-31T14:44:43Z", ...}}}
+
+    Returns ``{"#NNN": {...}, ..., "_checked_at": <iso>}`` — the ``_checked_at``
+    key is not a ``#NNN`` and is read only for the OK line, never as a state.
+
+    Every malformation raises ``ValueError`` (``main()`` turns it into exit 2):
+    the one thing this loader must never do is answer "no V12" for a record it
+    could not read, because that would make a one-character edit (or a truncated
+    file) a way to switch the arm off.
+    """
+    raw = json.loads(path.read_text())
+    if not isinstance(raw, dict):
+        raise ValueError(f"the record is a {type(raw).__name__}, not an object")
+    if raw.get("schema") != BLOCKER_STATES_SCHEMA:
+        raise ValueError(f"schema is {raw.get('schema')!r}, expected "
+                         f"{BLOCKER_STATES_SCHEMA!r}")
+    checked_at = raw.get("checked_at")
+    if not (isinstance(checked_at, str) and checked_at.strip()):
+        raise ValueError("checked_at is missing — a state record with no read "
+                         "time cannot be told from a fresh one")
+    blockers = raw.get("blockers")
+    if not isinstance(blockers, dict):
+        raise ValueError(f"blockers is a {type(blockers).__name__}, not an object")
+    states: dict = {"_checked_at": checked_at.strip()}
+    for key, value in blockers.items():
+        if not (isinstance(key, str) and _BLOCKER_RE.match(key)):
+            raise ValueError(f"blocker key {key!r} is not '#NNN'")
+        if not isinstance(value, dict):
+            raise ValueError(f"blocker {key} is a {type(value).__name__}, not an object")
+        if value.get("state") not in BLOCKER_STATE_WORDS:
+            raise ValueError(f"blocker {key} state is {value.get('state')!r}, not "
+                             f"one of {BLOCKER_STATE_WORDS}")
+        states[key] = value
+    return states
 
 
 def _non_object_blocks(record: dict) -> list[tuple[str, str]]:
@@ -305,6 +394,11 @@ class Findings:
         #: every PR after merge (V11, and `--require-resolvable` for the lane
         #: that still carries the commit).
         self.unresolved: list[tuple[str, str, str]] = []
+        #: Rows V12 did NOT evaluate because they are a refusal record's
+        #: historical cause (`_blocker_exempt`). Counted here so `main()` can
+        #: say so instead of claiming "every cited blocker verified" over rows
+        #: it never looked at (#10537 review P2).
+        self.blockers_exempt = 0
 
     def add(self, code: str, where: str, msg: str) -> None:
         self.items.append((code, where, msg))
@@ -548,13 +642,19 @@ def _is_ancestor(repo: Path, maybe_ancestor: str, of: str) -> bool | None:
 
 
 def check(record: dict, *, repo: Path,
-          require_green: bool, require_resolvable: bool = False) -> Findings:
-    """Apply V1–V11 to a parsed verdict table.
+          require_green: bool, require_resolvable: bool = False,
+          blocker_states: dict | None = None) -> Findings:
+    """Apply V1–V12 to a parsed verdict table.
 
-    ``repo`` is the checkout the evidence paths and shas are resolved against —
-    the ONLY input besides the record. (A ``log_path`` parameter used to be
-    threaded here and never read; a dead parameter in a gate reads as if the
-    path took part in the verdict, so it is gone rather than documented away.)
+    ``repo`` is the checkout the evidence paths and shas are resolved against.
+    (A ``log_path`` parameter used to be threaded here and never read; a dead
+    parameter in a gate reads as if the path took part in the verdict, so it is
+    gone rather than documented away.)
+
+    ``blocker_states`` is the tracker state of the issues the rows cite, keyed
+    ``"#NNN"`` (``{"state": "OPEN"|"CLOSED", "closed_at": ...}``) — see V12.
+    ``None`` means the record was not supplied at all, and V12 does not apply;
+    ``main()`` loads the committed default when it is present.
     """
     f = Findings()
 
@@ -773,6 +873,56 @@ def check(record: dict, *, repo: Path,
                 f.add("V6", where, f"verdict {verdict!r} must name the blocking "
                                    f"issue as '#NNN' (got {blocker!r}) — the "
                                    "epic asks for a red row WITH its cause")
+            elif blocker_states is not None and not (
+                    _blocker_exempt(run, kind, num, den)):
+                # ── V12 the blocker must still BE a blocker ───────────────
+                # ⛔ ONE EXEMPTION, BY SEMANTICS, NOT BY CONVENIENCE: a REFUSAL
+                # row of a REFUSED run that measured nothing records the
+                # HISTORICAL cause of the refusal (`capstone.log` is the shipped
+                # "G0 refused before any model call" record, five rows, no
+                # numbers). Its blocker closing is what the refusal was FOR, so
+                # demanding an OPEN blocker there would make the bundle rewrite
+                # history by re-running a refusal that can no longer happen. A
+                # row that CARRIES A NUMBER, or a BLOCKED row of a completed run,
+                # asserts a live cause — that is what V12 checks. All three legs
+                # live in `_blocker_exempt`, and the `evidence_kind` leg is the
+                # one that matters: a REFUSED status on its own was measured to
+                # carry two CLOSED blockers past every other arm (#10537 review
+                # P2), so the run block's word is not enough.
+                #
+                # V6 checks the POINTER, never the thing it points at: `#NNN`
+                # with a space removed is not a stale blocker, and a squash-merge
+                # leaves the number untouched. So a CLOSED issue kept closing the
+                # row in FORM while closing nothing in FACT — measured on the
+                # shipped table, three of five rows cited issues that had already
+                # closed (E2←#9775 two days, E4←#8503 nine days, E5←#9738 that
+                # morning) and this gate still printed "structurally sound".
+                # The states are looked up, not judged: no model, no threshold.
+                state = blocker_states.get(blocker)
+                if not isinstance(state, dict):
+                    f.add("V12", where,
+                          f"blocked_by {blocker} is not in the blocker-state "
+                          "record — a row's blocker has to be VERIFIED open, "
+                          "or the row is pointing at work nobody looked up "
+                          "(refresh the record, or name a blocker it covers)")
+                elif state.get("state") == "CLOSED":
+                    f.add("V12", where,
+                          f"blocked_by {blocker} is CLOSED"
+                          + (f" ({state['closed_at']})" if state.get("closed_at")
+                             else "")
+                          + " — a pointer at closed work is stale evidence by "
+                          "construction, so this row is BLOCKED by something "
+                          "that no longer blocks. Re-measure the row at a head "
+                          "where that work landed, or name the blocker that "
+                          "still holds")
+                # V12 EVALUATED this row and found the blocker live.
+                else:
+                    pass
+            elif blocker_states is not None and _blocker_exempt(
+                    run, kind, num, den):
+                # Exempt, and COUNTED so the OK line cannot claim a
+                # verification it did not perform (#10537 review P2).
+                f.blockers_exempt += 1
             if kind == "refusal" and ev_path is not None:
                 # A refusal row cites the RUN LOG that records the refusal.
                 # Checked by CONTENT rather than by path equality so the log
@@ -1060,6 +1210,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="the EPIC's closing rule: exit 0 only when 5/5 rows "
                          "are green (without this, an honest all-blocked table "
                          "is clean)")
+    ap.add_argument("--blocker-states", default=None, metavar="PATH",
+                    help="JSON record of the tracker state of the issues the "
+                         f"rows cite (default: {BLOCKER_STATES_DEFAULT}, when "
+                         "it exists). A row citing a CLOSED blocker is a "
+                         "finding (V12). The record is refreshed by a lane, "
+                         "never by this tool: the check stays offline")
     args = ap.parse_args(argv)
 
     log_path = Path(args.log).resolve()
@@ -1095,6 +1251,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     repo = Path(args.repo).resolve()
+    blocker_states = None
+    states_path = (Path(args.blocker_states) if args.blocker_states
+                   else repo / BLOCKER_STATES_DEFAULT)
+    if args.blocker_states or states_path.is_file():
+        # A record that is PRESENT but unreadable is exit 2, never "no V12".
+        # Downgrading a malformed record to "not applicable" would make
+        # `{"blockers": []}` a way to disarm the arm the bundle depends on.
+        try:
+            blocker_states = load_blocker_states(states_path)
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            print(f"capstone-verdict-check: cannot use blocker states "
+                  f"{states_path}: {e}", file=sys.stderr)
+            return 2
     if not repo.is_dir():
         # Exit 1 means "the table has findings" and a lane reads it as a
         # verdict on the evidence. An unreadable `--repo` is usage error 2;
@@ -1104,7 +1273,8 @@ def main(argv: list[str] | None = None) -> int:
               "directory", file=sys.stderr)
         return 2
     findings = check(record, repo=repo, require_green=args.require_green,
-                     require_resolvable=args.require_resolvable)
+                     require_resolvable=args.require_resolvable,
+                     blocker_states=blocker_states)
     rows = record.get("rows")
     # `record.get("rows") or []` handed a truthy non-list (`"rows": 5`) to the
     # tally loop below, which raised TypeError — exit 1 on a traceback after the
@@ -1134,8 +1304,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"❌ {len(findings.items)} finding(s):", file=sys.stderr)
         print(findings.render(), file=sys.stderr)
         return 1
+    # ⛔ The OK line is where this gate LIED (#10537): it named four properties
+    # and said nothing about the one nobody had checked — whether the blockers
+    # those rows lean on still exist. It now states which V12 arm ran, so
+    # "structurally sound" can no longer be read as "the blockers are live".
+    # ⛔ "EVERY cited blocker verified" was itself a small version of the lie this
+    # arm exists to remove: a REFUSAL record's rows are EXEMPT from V12, and the
+    # first version of this line said "every cited blocker verified" over them
+    # anyway — `capstone.log` cites five issues that are all CLOSED and got that
+    # sentence (#10537 review P2). The exempt rows are counted by the arm itself
+    # (`Findings.blockers_exempt`), so the line cannot disagree with it.
+    if blocker_states is None:
+        blockers_note = (
+            f"⚠️ blocker states NOT verified — no {BLOCKER_STATES_DEFAULT} and no "
+            "--blocker-states, so no cited blocker was looked up")
+    elif findings.blockers_exempt:
+        blockers_note = (
+            f"blockers checked against the record read {blocker_states['_checked_at']}, "
+            f"BUT {findings.blockers_exempt} row(s) are EXEMPT — a REFUSED run's "
+            "refusal row names the HISTORICAL cause, so its blocker's state says "
+            "nothing about that row")
+    else:
+        blockers_note = (
+            f"every cited blocker verified {blocker_states['_checked_at']} "
+            f"({sum(1 for k in blocker_states if k.startswith('#'))} on record)")
     print("✅ verdict table is structurally sound: 5/5 rows carry an evidence "
-          "artifact + sha, denominators agree, no row is green without a file")
+          "artifact + sha, denominators agree, no row is green without a file; "
+          f"blocker states: {blockers_note}")
     return 0
 
 
