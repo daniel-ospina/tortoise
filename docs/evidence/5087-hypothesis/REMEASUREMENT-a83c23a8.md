@@ -66,9 +66,10 @@ contribution.
 **Why that head and not `main`.** The registration's §6 pin refuses a head where production code moved. Since
 the **`--prereg` commit `a1075dfc2` / the pinned `source_sha` `718ee3b4`**, `tortoise/` has moved by 24 files —
 **including `extractor_v2.py`, which implements the treatment** — and both metric-definition files
-(`capstone_measure.py`, `capstone_run.py`) have moved too. (Measured against `cfa3de857` instead, the count is 4
-files and `extractor_v2.py` is *not* among them — the 24-file figure is against the pinned tree, which is the
-baseline the pin actually uses.) The pin therefore refuses `origin/main` at exit 3 (`35 production file(s)
+(`capstone_measure.py`, `capstone_run.py`) have moved too. (Measured against `cfa3de857` instead, only **4** files
+under `tortoise/` differ and `extractor_v2.py` is *not* among them — the 24-file figure is against the pinned tree,
+which is the baseline the pin actually uses. The `tortoise/` prefix is the filter: by the pin's own production
+definition the count against `cfa3de857` is **5**, the fifth being `config/ci-surfaces.yml`.) The pin therefore refuses `origin/main` at exit 3 (`35 production file(s)
 differ …`), and that refusal is correct: measuring today's tree measures a different system, not the registered
 experiment. `a83c23a85` is a retained commit that carries the pinned production tree **and** a probe that can
 witness the arms, which is what makes a re-measurement on the registered tree possible at all.
@@ -219,4 +220,4 @@ one sample, not as the effect size.
 - **Not** that this run supersedes the recorded one as *the* measurement. Two draws on one corpus, 10.9 % apart
   on the untreated arm, agree on the verdict and disagree on the magnitude. That disagreement is the finding.
 - **Not** a promotion of this bundle over the withdrawn log: that file is untouched, and the withdrawal ordered by
-  the ruling is carried by its own lane (`#10544`).
+  the ruling is carried by its own lane (`#10544`, merged as `108cec779`).
