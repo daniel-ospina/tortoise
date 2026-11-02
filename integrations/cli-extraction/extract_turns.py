@@ -238,14 +238,32 @@ def dump(out: Path, allow_empty: bool = False):
                          "— is the container healthy?") from exc
     rows = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip()]
     turns = [row for row in rows if _is_turn_of(row)]
+    rejected = len(rows) - len(turns)
     out.write_text("".join(json.dumps(_turn_record(row)) + "\n"
                            for row in sorted(turns, key=_turn_order)))
     with out.open() as fh:
         n = sum(1 for _ in fh)
     if n == 0 and not allow_empty:
+        # The two empty cases have DIFFERENT causes and the old one-line
+        # message named neither of them: it sent every operator to their
+        # capture setting (#9932), which is the wrong cause in both. `rows`
+        # is what the query actually returned, so the split below is measured
+        # rather than guessed: rows>0 means the predicate matched and the ID
+        # shape moved; rows==0 means the predicate matched nothing at all.
+        if rows:
+            raise SystemExit(
+                f"dump: 0 turns captured — the query MATCHED {len(rows)} turn-shaped "
+                f"point(s) under a :Session and all {rejected} were rejected: none "
+                "carried the `{session}_t<i>` id this lane reads (`_is_turn_of`). "
+                "Capture is therefore ON — the ID DERIVATION has moved "
+                "(`sdk._capture_turn_id`). (pass --allow-empty to accept an empty dump)")
         raise SystemExit(
-            "dump: 0 turns captured — is TORTOISE_CAPTURE on and are there captured "
-            "sessions? (pass --allow-empty to accept an empty dump)")
+            "dump: 0 turns captured — the query matched NO point at all, so this is "
+            "not the id filter. Either TORTOISE_CAPTURE was off for the sessions you "
+            "expect, or the turns live in the Postgres RECORD: with "
+            "TORTOISE_RECORD_DSN armed (#10000) capture is ON and this lane's "
+            "graph-only read legitimately finds nothing — `sdk.get_session()` serves "
+            "those. (pass --allow-empty to accept an empty dump)")
     keys = ", ".join(build_transcripts(out)) or "(none)"
     print(f"dumped {n} turns -> {out}")
     print(f"transcripts: {keys}")
@@ -256,7 +274,8 @@ def build_transcripts(turns_path: Path):
 
     Two keyings, one per source shape. A `session://<id>` source (what `dump`
     emits from the capture lanes) keys by the **capture session id**, so
-    `--transcript <session-id>` works. A `codex://threads/<id>` source keys by
+    `--transcript <session-id>` works — in EITHER spelling, `session://<id>` or
+    the canonical single-colon `session:<id>`. A `codex://threads/<id>` source keys by
     the FULL thread id and raises on any other `codex://` shape. Any other src
     (a hand-built turns file) keeps its full tail id with the fragment stripped.
 
@@ -286,7 +305,17 @@ def build_transcripts(turns_path: Path):
                 # `#message=` fragment is the HAND-BUILT file form and is
                 # stripped (one session, many message fragments) — the capture
                 # writer never appends one.
-                raw = t["src"].split("://", 1)[-1]
+                #
+                # BOTH spellings must key to the same session id: `dump`
+                # emits `session://<id>`, while the repo's canonical identity
+                # is the SINGLE-colon `session:<session_id>`
+                # (`derive_session_source_url`, ONTOLOGY §4.6) — a hand-built
+                # turns file uses that one. Splitting on `://` alone left
+                # `session:abc123` keyed as `session:abc123`, so
+                # `--transcript abc123` reported `have: ['session:abc123']`.
+                raw = t["src"].split(":", 1)[-1]
+                if raw.startswith("//"):
+                    raw = raw[2:]
                 key = raw.split("#message=", 1)[0]
             else:
                 # hand-built turns files: full tail id, fragment stripped —
