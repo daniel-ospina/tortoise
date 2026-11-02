@@ -394,6 +394,40 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         self.assertNotIn("extractedFrom", _DUMP_QUERY)
         self.assertNotIn("authoredBy", _DUMP_QUERY)
 
+    def test_the_completeness_check_is_coupled_to_the_writers_declaration(self):
+        # `_dump_shortfall` reads the session's DECLARATION, so the two names it
+        # reads must be the ones the writer SETS — the same seam as the
+        # predicate coupling above, one level up. Without this pin a writer
+        # rename leaves `_session_marks` returning `None`, which deliberately
+        # degrades to "cannot be shown" rather than refusing (so an old graph is
+        # not refused for a mark it never had) — and the split-store partial run
+        # then walks through again with every other test in this file green.
+        # Measured: dropping `s.turn_count, s.turn_max_index` from `_DUMP_QUERY`
+        # reds this pin and the arity pin, and NOT the refusal pins.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import inspect
+
+        from tortoise.sdk import _write_capture_turns, _write_session_and_turns
+
+        # The declaration is set by the :Session MERGE in the shared Session
+        # writer; `_write_capture_turns` is where the SAME call decides which
+        # STORE takes each turn — the two facts the split state is made of.
+        writer = inspect.getsource(_write_session_and_turns)
+        for set_clause in ("s.turn_count=$tc", "s.turn_max_index=$tmi"):
+            self.assertIn(set_clause, writer,
+                          "dump reads a declaration the writer no longer "
+                          f"makes: {set_clause}")
+        # ⛔ and they are NOT interchangeable (#10021): `$tc` is a WINDOW
+        # LENGTH while `$tmi` is the ID SPACE's end — a reader that treats one
+        # as the other either reports a healthy append as partial or misses a
+        # refused tail.
+        self.assertIn('"tc": turn_count', writer)
+        self.assertIn('"tmi": turn_offset + turn_count - 1', writer)
+        # ...and the per-TURN store decision the split state comes from at all.
+        self.assertIn("_record_first", inspect.getsource(_write_capture_turns))
+        self.assertIn("s.turn_count", _DUMP_QUERY)
+        self.assertIn("s.turn_max_index", _DUMP_QUERY)
+
     def test_turn_order_is_the_turn_index_not_the_batch_timestamp(self):
         # the writer stamps a whole capture batch with ONE `$now`, so
         # `createdAt` cannot order a session's turns. The index in the id is
