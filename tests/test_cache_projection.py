@@ -1016,30 +1016,35 @@ def _project_journal_rows(sql: str, rows, params):
     # narrow every row away (measured — five read-door legs red).
     _id_clauses = list(_ID_CLAUSE_RE.finditer(sql))
     id_key = _id_clauses[-1].group(1) if _id_clauses else None
-    # The id narrowing's event-TYPE set, also read out of the statement (review
-    # round 2, P2): a hardcoded set let the fake keep matching a birth row whose
-    # type the SQL had stopped selecting. ⚠️ The LAST `event_type IN (...)` in the
-    # statement, not the first — the full statement's WHERE already carries the
-    # birth leg's own `IN ('ObjectRegistered', 'SubjectAdded')`, so a naive first
-    # match would model the narrowing as birth-only and drop every `restatus`.
+    # TWO different event-type predicates live in this text, and modelling them
+    # as ONE was a measurable bug twice over (review rounds 2 and 4): the BASE
+    # statement's SELECTION (`event_type = '...'` and `event_type IN (...)`) and
+    # the id NARROWING's own `IN (...)`, which is appended after the `@>`
+    # containment clause. The split point is that clause.
+    #
+    # * base sets → what the SELECTION can return. Round 4 (P2) measured the
+    #   superset bug: unioning the narrowing set in meant the fake kept a
+    #   `SubjectAdded` row on the NARROWED statement that the base WHERE excludes
+    #   and Postgres drops — the same "models a selection the statement does not
+    #   make" class, surviving on the `read_node` door this file exists to keep in
+    #   step.
+    # * the narrowing set → the types the ID leg matches.
+    #
+    # Round 3 (P2) measured the original defect: with no base modelling at all,
+    # shrinking `IN ('ObjectRegistered', 'SubjectAdded')` to `IN
+    # ('ObjectRegistered')` left every leg green while Postgres drops every
+    # `SubjectAdded` row (a Subject born terminal rebuilds with no status and
+    # reads LIVE — #9974's harm one label over).
     _type_sets = list(_EVENT_TYPE_SET_RE.finditer(sql))
-    _type_sets = list(_EVENT_TYPE_SET_RE.finditer(sql))
-    id_event_types = (frozenset(_QUOTED_RE.findall(_type_sets[-1].group(1)))
-                      if _type_sets else frozenset())
-    # #9974 review round 3 (P2): the BASE statement's event-type selection is a
-    # SEPARATE predicate from the narrowing's, and it was unmodelled — MEASURED,
-    # shrinking the base set to `IN ('ObjectRegistered')` left 130/130 green while
-    # Postgres drops every `SubjectAdded` row (a Subject born terminal then
-    # rebuilds with no status and reads LIVE, #9974's harm one label over). The
-    # fake now models the SELECTION the statement declares: every
-    # `event_type = '<X>'` literal plus every `IN (...)` set, so a row type the
-    # statement cannot select never reaches the fold. A statement that names no
-    # type at all selects everything — the honest reading of an unpredicated
-    # stream.
+    _narrow_at = sql.index("to_jsonb(") if "to_jsonb(" in sql else len(sql)
+    _base_sets = [m for m in _type_sets if m.start() < _narrow_at]
+    _narrow_sets = [m for m in _type_sets if m.start() >= _narrow_at]
+    id_event_types = (frozenset(_QUOTED_RE.findall(_narrow_sets[-1].group(1)))
+                      if _narrow_sets else frozenset())
     selectable = (frozenset(m.group(1) for m in
                             re.finditer(r"event_type = '([^']*)'", sql))
-                  | frozenset(lit for s in _type_sets
-                              for lit in _QUOTED_RE.findall(s.group(1))))
+                  | frozenset(lit for m in _base_sets
+                              for lit in _QUOTED_RE.findall(m.group(1))))
     out = []
     for row in rows:
         payload = row.get("payload")
@@ -2305,29 +2310,40 @@ def test_a_nested_creation_record_is_read_by_the_id_narrowing():
 
 
 def test_the_birth_column_guards_a_non_string_status():
-    """The birth column must be guarded, not merely filtered in the FAKE.
+    """The birth column must be guarded IN THE STATEMENT, not only in the fake.
 
     Review round 3 (P2) measured the shape this pin exists for: the batch-2 fix
     described a `CASE WHEN jsonb_typeof(...) = 'string'` guard that never reached
-    the STATEMENT — the fake applied it alone, so the fake and Postgres disagreed
-    on the exact input round 2 named: on postgres:16 `{"status": 5}` selects
-    `birth_status = '5'` (a JSON number textifies), while the fake returned none.
+    the STATEMENT — the fake applied it alone, so Postgres textified a JSON number
+    (`{"status": 5}` selects `birth_status = '5'`) while the fake returned none.
     A fake-only guard cannot pin a statement the fake itself invents.
 
-    The assertion mirrors the DB-free pin the `restatus` leg already has: the
-    column expression must carry the type guard, so a bare `->> 'status'` reds
-    here instead of relying on a faked cursor.
+    ⚠️ The FIRST draft of this pin could not fail (review round 4, P2, measured):
+    its window was the 160 characters before `birth_status`, which
+    `_PAYLOAD_EVENT`'s own `jsonb_typeof(payload -> 'event')` already satisfies,
+    and its negative leg was a NON-f-string containing the literal
+    `{_PAYLOAD_EVENT}`, so it compared text that can never appear in the
+    interpolated statement. Both are fixed by INTERPOLATING the expected column and
+    asserting it verbatim.
     """
     sql = cp._LIFECYCLE_EVENTS_SQL
-    assert "jsonb_typeof(" in sql[sql.index("birth_status") - 160:
-                                  sql.index("birth_status")], (
-        "the birth column has no `jsonb_typeof(...) = 'string'` guard — "
-        "Postgres textifies a JSON number, so `create_object(name, status=5)` "
-        "would fold the STRING '5' the live graph stores as the int 5"
+    pae = cp._PAYLOAD_EVENT
+    # Asserted as PIECES, because the source's f-string concatenation puts
+    # run-length whitespace between them (the first draft compared a
+    # single-space render and could not match either).
+    assert f"jsonb_typeof({pae} -> 'status') = 'string'" in sql, (
+        "the birth column has no `jsonb_typeof(… -> 'status') = 'string'` "
+        "test — Postgres textifies a JSON number, so `create_object(name, "
+        "status=5)` would fold the STRING '5' the live graph stores as the int 5"
     )
-    bare = "       , {_PAYLOAD_EVENT} ->> 'status'  AS birth_status"
+    assert f"THEN {pae} ->> 'status' END AS birth_status" in sql, (
+        "the guarded CASE does not yield the birth column — the guard must pass "
+        "the value through, not replace it (`''` is a legal stored status and "
+        "must still fold)"
+    )
+    bare = f", {pae} ->> 'status'  AS birth_status"
     assert bare not in sql, (
-        "the unguarded birth column is back — the guard lives in the FAKE only"
+        "the UNGUARDED birth column is back — the guard exists in the FAKE only"
     )
 
 
