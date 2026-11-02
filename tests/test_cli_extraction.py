@@ -744,7 +744,60 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         self.assertNotIn("SPLIT STORE", refused,
                          "a mark-less session cannot have hit the split store")
         self.assertIn("NO `turn_max_index`", refused)
+        # ⛔ AND `get_session()` MUST NOT BE OFFERED AS THE ARBITER. The mark-less
+        # population IS the pre-#10000 population, and on a graph-only
+        # deployment the door publishes the session's count over the copy
+        # (`sdk._read_captured_session`: `served_turn_count(answer=None, …)`
+        # returns `declared`, no refusal) — so "it reports this same shortfall"
+        # is FALSE exactly where these sessions live. It may say the door cannot
+        # settle the question and WHY; it may not promise it refuses.
+        self.assertIn("cannot settle this either", refused)
+        self.assertIn("serves these same graph rows", refused,
+                      "the reason it cannot settle is that on that arm the door "
+                      "serves this same copy — it does not report short")
         self.assertIn("--allow-partial", refused)
+
+    def test_a_marked_partial_names_every_cause_it_admits(self):
+        # ⛔ A MARK IS NOT A VERDICT. `turn_max_index is not None` witnesses that
+        # the session was captured under #10000, NOT that the record was armed —
+        # so the split store is one ADMITTED cause, never "the" cause. The shape
+        # below is the writer's own documented residual, not a split store:
+        # capture 1 landed (`_t0`/`_t1`), capture 2 appended `_t2`/`_t3`, its
+        # :Session MERGE landed (count 2, mark 3) and its turn write was refused
+        # (`sdk._write_session_and_turns`: the MERGE precedes the turn write).
+        # There is no record on that deployment, so there is no union for
+        # `get_session()` to serve — and the door cannot arbitrate a one-store
+        # cause at all. The old text asserted the split store categorically and
+        # offered `get_session()` unconditionally.
+        rows = [_mark("s1", i, 2, 3) for i in (0, 1)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        refused = str(cm.exception)
+        self.assertIn("TAIL", refused)
+        self.assertIn("SPLIT STORE", refused,
+                      "the split store is still one admitted cause")
+        self.assertNotIn("The cause is the SPLIT STORE", refused,
+                         "no single-cause verdict from a measurement that "
+                         "admits three")
+        self.assertIn("TURN write failed AFTER", refused,
+                      "the refused-write cause must be named beside the split "
+                      "store — this shape is exactly what it produces")
+        self.assertIn("purge, a backfill copy or a hand edit", refused,
+                      "and the removed-row cause too: the review asked for "
+                      "every cause the measurement admits, and a mark proves "
+                      "the store was SPLIT-capable, never that it split")
+        self.assertIn("only where that record is armed", refused,
+                      "the union remedy is conditional: with one store there "
+                      "is nothing to union")
+        self.assertIn("cannot separate", refused,
+                      "the door is not offered as the arbiter of a one-store "
+                      "cause")
 
     def test_an_all_residue_dump_names_the_residue_cause_not_the_id_shape(self):
         # Every matched row is a TURN whose index sits above the session's live
