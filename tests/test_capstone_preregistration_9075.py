@@ -3391,6 +3391,8 @@ def test_the_ordering_readers_see_an_add_hidden_behind_a_merge(tmp_path, monkeyp
     # Branch `late`: the same path, after the registration, and the merge keeps THIS copy. It
     # branches from the PUBLISHED registration commit, not from `early`.
     _git(repo, "checkout", "-q", "-b", "late", "origin/main")
+    # Leaving `early` removed the now-empty directory, so re-create it before writing the copy.
+    log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text("measured after the thresholds\n")
     _git(repo, "add", str(log.relative_to(repo)))
     _git(repo, "commit", "-q", "-m", "log again", epoch=1_700_004_000)
@@ -3445,3 +3447,58 @@ def test_an_ordering_violation_is_not_reported_as_a_verified_claim(tmp_path, mon
     assert "machine record run-order claim: verified" not in out, out
     assert check.ORDERING_UNMEASURED not in out, ("a VIOLATION is not an UNMEASURED outcome — it "
                                                   "was measured, and it failed")
+
+
+def test_the_base_read_sees_an_add_hidden_behind_a_merge(tmp_path, monkeypatch):
+    """T3 on the BASE side: the flag that makes the base read honest had NO witness.
+
+    `test_the_ordering_readers_see_an_add_hidden_behind_a_merge` publishes the base BEFORE the log
+    exists, so `base_log_epochs == []` and the epoch under test comes from `_added_epochs` — the
+    contribution reader. Deleting `--full-history` from `_added_epochs_on` therefore changed
+    nothing: the whole file stayed green while the base reader could accept a log whose earlier add
+    the merge hid. That is the half this PR's squash-invariance argument rests on, so it gets its
+    own fixture: the criss-cross merge is what the BASE carries, and the contribution adds nothing.
+
+    Measured both ways: with the flag the ordering is REFUSED at the hidden epoch; without it the
+    same tree is ACCEPTED, silently.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    rel = "docs/evidence/7949-capstone/capstone.log"
+    log = repo / rel
+    log.parent.mkdir(parents=True, exist_ok=True)
+
+    # `early` adds the log at 1_700_000_100; `late` adds the same path at 1_700_000_400; the merge
+    # into `late` keeps late's copy, so git's default walk sees only the later add.
+    _git(repo, "checkout", "-q", "-b", "early")
+    log.write_text("measured before the thresholds\n")
+    _git(repo, "add", rel)
+    _git(repo, "commit", "-q", "-m", "log first", epoch=1_700_000_100)
+    _git(repo, "checkout", "-q", "-b", "late", "origin/main")
+    # Leaving `early` removed the now-empty directory, so re-create it before writing the copy.
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("measured after the thresholds\n")
+    _git(repo, "add", rel)
+    _git(repo, "commit", "-q", "-m", "log again", epoch=1_700_000_400)
+    _git(repo, "merge", "-q", "-s", "ours", "-m", "merge early, keep late's copy", "early",
+         epoch=1_700_000_500)
+
+    # The registration lands on the base AFTER that merge, so BOTH artefacts are published there
+    # and the comparison is a base-side one — which is the reader under test.
+    prereg = _commit_prereg(repo, epoch=1_700_000_300)
+    _publish_base(repo)
+
+    default_epochs = [int(x) for x in _git_out(
+        repo, "log", "--diff-filter=A", "--format=%ct", "origin/main", "--", rel).split()]
+    full_epochs = [int(x) for x in _git_out(
+        repo, "log", "--full-history", "--diff-filter=A", "--format=%ct", "origin/main", "--",
+        rel).split()]
+    assert min(default_epochs) == 1_700_000_400, default_epochs
+    assert min(full_epochs) == 1_700_000_100, full_epochs
+    assert check._added_epochs_on("origin/main", log) == sorted(full_epochs), (
+        "the BASE reader must see every add the merge hid, not just the surviving copy")
+
+    failures = check.check_ordering(prereg, [log], {})
+    assert failures, (
+        "a log whose earlier add on the BASE is hidden behind a merge was accepted — the base "
+        "reader is history-simplified, and `min()` is then later than the truth")
+    assert "not strictly after" in failures[0], failures[0]
