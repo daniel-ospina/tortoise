@@ -6281,9 +6281,10 @@ def reader_prompt_source() -> str:
         "abstention) appended to EVERY question: " + _a1 +
         "; conditional aggregation clause (#10539: enumerate, dedupe by "
         "identity, count, session-date-aware so two purchases in different "
-        "sessions are two items and only a same-session restatement is a "
-        "duplicate) appended when the aggregative-intent detector fires "
-        "for the question: " + _agg
+        "sessions are two items, and only a restatement — same-session, or "
+        "an explicit back-reference to the earlier occurrence — is a "
+        "duplicate) composed by _system_prompt_for_question when the "
+        "aggregative-intent detector fires for the question: " + _agg
     )
 
 def _print_summary(report: dict[str, Any]) -> None:
