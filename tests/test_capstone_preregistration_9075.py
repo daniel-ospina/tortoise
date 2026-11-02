@@ -2789,7 +2789,7 @@ def test_the_base_ref_refusal_names_the_cause_that_actually_fired(tmp_path, monk
     assert "no --base-ref" not in str(exc.value), str(exc.value)
 
 
-def test_the_measured_base_is_printed_for_a_human_not_only_for_json(capsys):
+def test_the_measured_base_is_printed_for_a_human_not_only_for_json(capsys, monkeypatch):
     """REGRESSION (#10463 review cycle 4/5): the reporting field must reach the line a human reads.
 
     `ordering_base` was added so a green line could not read the same whether it measured the
@@ -2806,6 +2806,12 @@ def test_the_measured_base_is_printed_for_a_human_not_only_for_json(capsys):
     base — the depth-1 shape the sibling test below commits as LEGITIMATE — and the tool prints
     `(unresolved)` there, so a second resolve reds a correctly-ordered tree.
     """
+    # ⛔ One resolution, not two (review cycle 7, finding 3): `main()` honours
+    # `$PREREG_ORDERING_BASE_REF` and `check.run()` does not, so an ambient value would make the
+    # print and the expectation come from different code paths — and the test would red a
+    # legitimate, documented configuration. The env var is cleared so both sides ask the same
+    # question, and the explicit-ref path is covered by its own test.
+    monkeypatch.delenv(check.BASE_REF_ENV, raising=False)
     assert check.main(["--dir", str(PREREG_DIR), "--no-corpus"]) == 0
     out = capsys.readouterr().out
     report = check.run(PREREG_DIR, use_git=True, use_corpus=False)
@@ -2824,6 +2830,12 @@ def test_a_skipped_git_half_says_the_base_was_never_measured(capsys):
     assert "ordering measured against: (not measured)" in out, out
     report = check.run(PREREG_DIR, use_git=False, use_corpus=False)
     assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    # …and the MACHINE surface, through the CLI, which is what the docstring claims (review cycle 7,
+    # finding 2: the sentence said `--json` was pinned while the test never passed `--json`, so the
+    # claim guarded nothing). Asserted, so the claim is now the check it describes.
+    assert check.main(["--dir", str(PREREG_DIR), "--no-corpus", "--no-git", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ordering_base"] == "(not measured)", payload["ordering_base"]
 
 # ── #10463 review cycle 3: the arms the tests must actually discriminate ───────────────────────
 #
@@ -2956,3 +2968,42 @@ def test_a_squash_collapsed_pair_names_the_withdrawal_remedy(tmp_path, monkeypat
     assert "SAME commit" in failures[0], failures[0]
     # It names the offending commit, so the operator can look at what collapsed.
     assert _git_out(repo, "rev-parse", "--short=12", "HEAD") in failures[0], failures[0]
+
+
+def test_a_squash_collapsed_base_refuses_even_when_the_contribution_is_ordered(tmp_path, monkeypatch):
+    """THE LOG-SIDE HALF of the squash-invariance rule (#10463 review cycle 7, finding 1).
+
+    WHY THIS IS THE SHAPE. The rule reads each log's add-commit **on the base** when the log is
+    already merged there, and in the contribution when it is not. That log-side read had NO witness:
+    forcing `base_log_epochs = []` (so every log is read from the contribution) left all 212 tests
+    green, and on the real #10468 shape it flipped a REFUSAL into a silent PASS. The registration
+    side was covered; the log side — half the predicate — was not.
+
+    The shape that discriminates: the base carries the registration and the log in ONE squash commit
+    (equal epochs), while THIS contribution carries them in order. Reading the log from the
+    contribution alone therefore ACCEPTS it; reading it from the base REFUSES it. Only a test built
+    on `_squashed_base` can tell those two implementations apart, which is what its docstring claims
+    it is for.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/x.git")
+    # The contribution: registration first, log second — ORDERED, and provably so.
+    prereg = _commit_prereg(
+        repo, epoch=1_700_001_000, text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    log = _write_and_commit(repo, "capstone.log", epoch=1_700_002_000)
+    # The base: the same two artefacts in ONE commit, on a ref that is NOT an ancestor of this branch.
+    base_sha = _squashed_base(repo, epoch=1_700_001_500)
+    _git(repo, "update-ref", "refs/remotes/origin/main", base_sha)
+
+    # The discrimination, asserted FIRST so the test states what it is about: the contribution's own
+    # ordering is strict (log 1_700_002_000 > prereg 1_700_001_000), so a contribution-only reading
+    # would pass this tree. It must not.
+    assert min(check._added_epochs(log)) > min(check._added_epochs(prereg))
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, (
+        "the log was accepted from the contribution's own ordering — the log-side base read is not "
+        "load-bearing, which is the exact regression #10463 exists to prevent")
+    assert "not strictly after" in failures[0], failures[0]
+    # …and the squash-collapse diagnostic names the withdrawal, because that is the only remedy.
+    assert "SAME commit" in failures[0] and "WITHDRAWAL" in failures[0], failures[0]
