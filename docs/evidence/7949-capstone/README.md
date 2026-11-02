@@ -562,9 +562,12 @@ prints the ref it actually compared on its `ordering measured against:` line —
 this note and not the registration's item 2.
 
 ⛔ **The registration is NOT edited to say this, and its own terms are why.** `preregistration.json`
-pins the document by BYTES (`document_sha256`, asserted by
-`tests/test_s3_prior_ablation.py::test_the_frozen_pre_registration_is_still_the_document_its_record_pins`), and an amendment is a
-NEW linked record — never an edit to the frozen one, which is the `#10463` ruling and the reason a
+pins the document by BYTES (`document_sha256`), asserted for **this** bundle by
+`tests/test_capstone_preregistration_9075.py::test_the_real_record_pins_the_real_document` (its
+`PREREG_DIR` is `docs/evidence/7949-capstone`, so an edited registration reds there at any checkout
+depth — the test reads no history), and enforced in the required CI step by the gate's own
+`DOCUMENT_SHA_PIN` arm in `tools/capstone_preregistration_check.py::check_machine_record`. An
+amendment is a NEW linked record — never an edit to the frozen one, which is the `#10463` ruling and the reason a
 silent edit is the failure the gate exists to catch in the first place. Leaving item 2 as the only
 statement of the rule is the other failure: a lane that reads the authoritative protocol, orders its
 two commits inside one PR exactly as criterion 2 asks, and lands is refused by a requirement the
@@ -572,6 +575,19 @@ registration never states. **This section is the changes record that closes that
 what the registering author wrote, base ancestry is what the gate enforces today, and
 `tests/test_capstone_preregistration_9075.py::test_the_bundle_records_the_superseded_ordering_rule_its_registration_states`
 keeps this record here (and the registration unedited).
+
+⚠️ **This sentence must cite a test that pins THIS bundle's bytes, not merely a test that exists.**
+An earlier revision of it cited
+`tests/test_s3_prior_ablation.py`'s `test_the_frozen_pre_registration_is_still_the_document_its_record_pins`
+(named, not addressed — it is a historical mention, not a command to run)
+— a real name in a real file, which pins the **5087** document (`tools/s3_prior_ablation.py`'s
+`PREREG_REL`) and therefore stays GREEN on an edited 7949 registration. That is worse than citing
+nothing: it turns "unchecked" into "checked and green" for exactly the lane this paragraph is
+warning. `test_every_test_name_the_evidence_bundles_cite_exists` resolves a citation's *existence*
+and structurally cannot see its *subject*, so this one is held by
+`tests/test_capstone_preregistration_9075.py::test_the_supersession_record_cites_the_pin_that_guards_this_bundles_bytes`
+instead — and reproduce it by hand by appending a byte to `PRE-REGISTRATION.md` and running the cited
+test (it must FAIL) before changing this line.
 
 ## The gate: two questions, two exits
 

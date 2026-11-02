@@ -389,6 +389,78 @@ def test_every_test_name_the_evidence_bundles_cite_exists():
         "Repair the citation to the real symbol (or rename the test): " + "; ".join(missing))
 
 
+#: The citation the supersession record carried before #10548's r10 review, kept as a literal so the
+#: subject guard below can be shown REJECTING it in-test. It is the reason the guard exists: both
+#: halves of it are REAL — the file exists and the symbol is defined in it — so the existence pin
+#: above passes, while the test it names pins the **5087** bundle's document
+#: (`tools/s3_prior_ablation.py`'s `PREREG_REL`) and stays green on an edit to THIS one.
+_WRONG_SUBJECT_REF = (
+    "tests/test_s3_prior_ablation.py",
+    "test_the_frozen_pre_registration_is_still_the_document_its_record_pins",
+    "",
+)
+
+#: The symbol that pins THIS bundle's `PRE-REGISTRATION.md` bytes against `preregistration.json`
+#: without reading history — so it reds on an edit at any checkout depth, unlike the
+#: `@requires_history` real-artefact pass above (#10548 r10: a depth-1 shard SKIPS those).
+_THIS_BUNDLE_DIGEST_PIN = "test_the_real_record_pins_the_real_document"
+
+
+def test_the_supersession_record_cites_the_pin_that_guards_this_bundles_bytes():
+    """⛔ EXISTENCE IS NOT SUBJECT — the class `test_every_test_name_…_cite_exists` cannot see.
+
+    The changes record below `_SUPERSESSION_HEADING` exists to tell a lane *"do not edit this
+    registration; the bytes are pinned, run the pin"*. It cited
+    `tests/test_s3_prior_ablation.py::test_the_frozen_pre_registration_is_still_the_document_its_record_pins`
+    for that (#10548 r10 F1): a real file, a real symbol, and the WRONG bundle — it pins the 5087
+    document, so it is GREEN on an edited 7949 registration. A citation that exists but names the
+    wrong subject is worse than no citation: it converts "unchecked" into "checked and green" at
+    exactly the moment a lane consults it.
+
+    Scope, deliberately narrow: every `tests/<file>::<test>` the record ADDRESSES must live in THIS
+    file, whose `PREREG_DIR` is this bundle, and the record must name the digest pin explicitly.
+    A wrong subject is not mechanically inferable from a module's declared bundle roots — this very
+    file's sibling `tests/test_s3_prior_ablation.py` mentions `7949-capstone` too, so a
+    module-scope check would pass the pre-fix citation. A historical mention belongs in prose,
+    unaddressed (no `tests/<file>::` form), which is where the wrong-subject note now sits.
+
+    Non-vacuity, asserted rather than claimed: the pre-fix sentence is reconstructed by
+    substituting the old citation back in, and the guard is required to REJECT it.
+    """
+    readme = (PREREG_DIR / "README.md").read_text(encoding="utf-8")
+    parts = readme.split(_SUPERSESSION_HEADING, 1)
+    assert len(parts) == 2, f"the changes record is gone ({_SUPERSESSION_HEADING!r})"
+    record = parts[1].split("\n## ", 1)[0]
+
+    this_file = f"tests/{Path(__file__).name}"
+    good_ref = f"{this_file}::{_THIS_BUNDLE_DIGEST_PIN}"
+    wrong_ref = f"{_WRONG_SUBJECT_REF[0]}::{_WRONG_SUBJECT_REF[1]}"
+
+    def cites_a_wrong_subject(text: str) -> list[str]:
+        """The addresses in `text` that cannot be pinning THIS bundle's registration."""
+        cited = _BUNDLE_TEST_REF.findall(text)
+        if not any(f"{rel}::{name}" == good_ref for rel, name, _ in cited):
+            return [f"{this_file}::{_THIS_BUNDLE_DIGEST_PIN} (not cited at all)"]
+        return [f"{rel}::{name}" for rel, name, _ in cited if rel != this_file]
+
+    # Non-vacuity: rewrite the record the way it read before the fix, and require the refusal.
+    assert good_ref in record, (
+        f"the changes record no longer cites {good_ref!r} — the pin that reds on an edit to THIS "
+        "bundle's registration is what the paragraph promises a reader")
+    pre_fix = record.replace(good_ref, wrong_ref)
+    assert pre_fix != record, "the rewrite for the non-vacuity leg did not change the record"
+    assert cites_a_wrong_subject(pre_fix), (
+        "the subject guard ACCEPTED the pre-fix citation it was written to refuse — a guard that "
+        "passes over the defect it records is measuring nothing")
+
+    wrong = cites_a_wrong_subject(record)
+    assert not wrong, (
+        "the changes record addresses a test that is not in the file pinning THIS bundle's "
+        "registration — it will read as confirmation while staying green on the edit it warns "
+        "against. Cite the pin that guards these bytes, or drop the address and name the old "
+        "symbol as prose (a historical mention is not a command to run): " + "; ".join(wrong))
+
+
 def test_a_mutated_pin_fails_instead_of_re_basing_the_thresholds():
     pins = check.parse_pins(PREREG.read_text())
     pins["corpus"]["planted_units"] = 91
