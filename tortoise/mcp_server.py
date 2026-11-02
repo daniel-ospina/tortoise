@@ -2343,6 +2343,11 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # stored verbatim; the writer marks it `embedding_verbatim` instead.
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_verbatim", "embedding_preserved",
+    # #8488 scope 1: the enriched text a turn's vector describes (schema A′ on
+    # #8932) is writer-minted by the capture path and replayed from the
+    # journaled snapshot; no `PointRevised` arm carries a caller-set value, so
+    # accepting it here would persist live and vanish on a rebuild.
+    "embeddingText",
     # #3998 (D30): the absent-raw state is server-managed — minted only by
     # `_upsert_source`'s fixed clauses and validated by `validate_raw_state`.
     # The SDK rejects these on a `:Source` through the generic entity route

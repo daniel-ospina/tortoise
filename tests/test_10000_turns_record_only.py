@@ -1061,7 +1061,11 @@ class _RlsCursor:
             self._rows = list(self._conn.narrative)
         elif "FROM public.point" in flat and "is_episodic IS TRUE" in flat:
             self._rows = list(self._conn.turn_rows)
-        elif "SELECT node_key, content, embedding, created_at, status" in flat:
+        elif ("SELECT node_key, content, embedding, created_at, status"
+              in flat):
+            # #8488 scope 1: the prior read also carries ``props->>'embeddingText'``
+            # (the enriched text the vector describes), so the configured rows
+            # carry it as their sixth column.
             self._rows = list(self._conn.prior_rows)
         else:
             self._rows = []
@@ -1515,6 +1519,177 @@ def test_the_prior_vector_read_is_scoped_and_returns_what_the_record_holds():
         created_at="2026-01-01T00:00:00+00:00", status="established")}, got
     # The scope is what the read asked for, and it asked on ITS OWN connection.
     assert any("set_config" in s for s in conn.statements), conn.statements
+
+
+def test_the_prior_read_carries_the_enriched_text_the_vector_describes():
+    """#8488 scope 1 (review round 3, P1): the OTHER half of the preserve rule.
+
+    ``_TURN_WRITE_CYPHER``'s preserve arm compares ``coalesce(prior_et,'')`` as
+    well as ``prior_ch``, because since schema A′ the vector is a function of
+    ``embeddingText`` when the row holds one. The record lane reads its prior
+    values instead of reading them back, so this read is the only source of
+    ``prior_et`` there — without it the record lane can compare content alone
+    and keep a vector for a text it no longer stores.
+    """
+    rows = (("sess_t0", "[user] hi", [0.5, 0.5], "T", "established",
+             "[user] the auth flow broke"),)
+    got = record_read.turn_prior_vectors(
+        _RlsConn(org_id="org-1", prior_rows=rows),
+        org_id="org-1", graph_id="g-1", session_id="sess",
+        turn_ids=["sess_t0"])
+    assert got["sess_t0"].embedding_text == "[user] the auth flow broke", got
+    # A row that carries none (the flag was off) is ``None``, never ``""`` —
+    # the writer distinguishes them exactly as the Cypher's coalesce does.
+    erased = record_read.turn_prior_vectors(
+        _RlsConn(org_id="org-1",
+                 prior_rows=(("sess_t0", "[user] hi", None, "T", "draft",
+                              None),)),
+        org_id="org-1", graph_id="g-1", session_id="sess",
+        turn_ids=["sess_t0"])
+    assert erased["sess_t0"].embedding_text is None, erased
+
+
+def test_a_record_recapture_with_a_different_rewrite_clears_the_vector(
+        sdk, monkeypatch):
+    """#4194 on the RECORD lane: a vector for a text the row no longer holds is
+    the dense-leg lie — the record is the system of record, so it may not keep
+    what the graph lane clears (review round 3, P1).
+
+    Reachable exactly as the graph-lane twin is: ``content`` unchanged, the
+    embedder unavailable for the re-capture, and the rewrite DIFFERENT. Pre-fix
+    the record arm compared content alone, so it preserved the stored vector
+    beside a NEW ``embeddingText`` — and ``embedding_preserved`` then withholds
+    the identity stamps, so nothing downstream could notice.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text="[user] rewrite A")})
+    _bind_tenant(sdk)
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None],
+             enrich_fn=lambda texts: ["[user] rewrite B"])
+    snapshot = seam.snapshots()
+    assert snapshot and snapshot[0]["embeddingText"] == "[user] rewrite B"
+    assert snapshot[0]["embedding"] is None, (
+        "the record kept a vector computed from the PREVIOUS rewrite beside the "
+        "new embeddingText — the #4194 lie (prior_et half missing from the "
+        "record arm)")
+    assert snapshot[0].get("embedding_preserved") is None
+
+
+def test_the_record_preserve_arm_still_holds_when_BOTH_halves_are_unchanged(
+        sdk, monkeypatch):
+    """The other direction of the same guard: identical rewrite ⇒ PRESERVE.
+
+    Without this, the leg above is satisfied by clearing unconditionally — which
+    would throw away a perfectly valid vector on every keyword-only install.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text="[user] rewrite A")})
+    _bind_tenant(sdk)
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None],
+             enrich_fn=lambda texts: ["[user] rewrite A"])
+    snapshot = seam.snapshots()
+    assert snapshot and snapshot[0]["embedding"] == [0.1, 0.2, 0.3], snapshot
+    assert snapshot[0].get("embedding_preserved") is True
+
+
+def test_a_record_ON_to_OFF_recapture_journals_the_enriched_texts_REMOVAL(
+        sdk, monkeypatch):
+    """#10523 review round 4 (P1): the record lane must be able to REMOVE it.
+
+    The graph lane is absolute — `t.embeddingText = turn.et` with `et` NULL
+    removes the property — so an ON→OFF re-capture reverts the node to the
+    raw-only shape. The record's upsert MERGES its `props` tail
+    (`point.props || EXCLUDED.props`), and an ABSENT key leaves the left value
+    intact, so OMITTING `embeddingText` (what this arm used to do) cannot
+    remove it: the row kept the previous capture's enriched text beside a
+    vector computed from the raw `content`, which is the #4194 lie the whole
+    schema A′ design exists to prevent — on the store that IS the system of
+    record for these turns.
+
+    So the writer journals the key EXPLICITLY as JSON null for a turn whose row
+    holds one: `jsonb ||` overrides a present key with null, and
+    `props->>'embeddingText'` then reads SQL NULL, which the replay's
+    `n.embeddingText=$et` treats as a removal — the same absolute shape the
+    graph lane's `SET …=NULL` has.
+
+    Pre-fix this is red with no such key in the snapshot at all, and the row
+    keeps text no vector describes.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text="[user] rewrite A")})
+    _bind_tenant(sdk)
+    # ON → OFF: the gate is off (or the extractor model could not be built and
+    # `_capture_enriched_texts` answered ``None``) while the row holds the
+    # previous capture's enriched text. The embedder is gone too, so the write's
+    # preserve arm is the one that decides the vector.
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None], enrich_fn=lambda texts: None)
+    snapshot = seam.snapshots()
+    assert snapshot, "the capture journalled no turn at all — not a test"
+    assert "embeddingText" in snapshot[0], (
+        "the OFF snapshot OMITTED embeddingText, and the record's tail is "
+        "MERGED — so the previous capture's enriched text survives beside a "
+        "vector computed from the raw content (the #4194 lie the graph lane "
+        "clears)")
+    assert snapshot[0]["embeddingText"] is None, snapshot[0]
+    # …and the vector half agrees: the stored vector described a text the row
+    # no longer claims, so it is CLEARED rather than preserved.
+    assert snapshot[0]["embedding"] is None, snapshot[0]
+    assert snapshot[0].get("embedding_preserved") is None, snapshot[0]
+
+
+def test_a_record_OFF_capture_emits_no_embeddingText_for_a_row_with_none(
+        sdk, monkeypatch):
+    """The other half of the same arm: OFF stays byte-identical when the row
+    never carried an enriched text.
+
+    Without this, the leg above is satisfied by journalling `embeddingText:
+    null` unconditionally — which would put a key on the OFF snapshot that
+    pre-#8488 never had, in the exact shape this writer's OFF path promises to
+    keep byte-identical (`TURNS_SNAPSHOT_OPTIONAL_KEYS`).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(_APPLIED)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    monkeypatch.setattr(
+        sdk_mod, "_record_prior_vectors",
+        lambda *a, **k: {"kept_t0": record_read.PriorTurn(
+            content="[user] same text", embedding=[0.1, 0.2, 0.3],
+            created_at="2026-01-01T00:00:00+00:00", status="established",
+            embedding_text=None)})
+    _bind_tenant(sdk)
+    _capture(sdk, "kept", [{"role": "user", "content": "same text"}],
+             turn_embs=[None], enrich_fn=lambda texts: None)
+    snapshot = seam.snapshots()
+    assert snapshot, "the capture journalled no turn at all — not a test"
+    assert "embeddingText" not in snapshot[0], (
+        "the OFF snapshot named embeddingText for a row that never held one — "
+        "the record lane's OFF shape is no longer the pre-#8488 key set")
+    # The vector is still preserved: nothing about it changed.
+    assert snapshot[0]["embedding"] == [0.1, 0.2, 0.3], snapshot[0]
 
 
 def _imported_from(target: str) -> dict[str, set[str]]:
