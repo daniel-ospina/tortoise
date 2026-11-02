@@ -611,38 +611,50 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     # ── tamper the record: the enriched text no longer matches its hash ─────
     events = [json.loads(line) for line in
               Path(log_path).read_text().splitlines() if line.strip()]
-    # PREMISE for leg 1 (review P2): the ABSENCE of a divergence is only
-    # discriminating if some record's vector describes text that DIFFERS from
-    # `content` — otherwise a check re-pointed at `content` agrees by accident
-    # and leg 1 cannot tell the two spellings apart. Derived, never assumed: a
-    # later edit to CONV/the rewriter that left every turn an identity rewrite
-    # would silently remove one of the two mutation kills and keep the suite
-    # green, which is the exact false confidence this test exists to prevent.
+    points = [ev.get("point") or {} for ev in events]
+
+    # ⛔ ONE predicate, used by EVERY derivation below so they cannot SKEW
+    # (review cycle 3, P3). A record is attestable only if
+    # `_record_embedding_identity` can actually reach its text comparison: it
+    # returns EARLY when `embedding_text_hash` is not a string
+    # (`projection/entities.py:963-968`) and when no model identity is recorded
+    # (`:937-946`, ahead of the text check). A re-emitted snapshot —
+    # `stamp_journal_embedding(creating=False)` — deliberately carries NEITHER a
+    # hash nor an identity (its own docstring says so), so counting it here
+    # would demand a contract production never makes and would false-red on a
+    # legitimate record.
+    def _attestable(point):
+        return (isinstance(point.get("embedding_text_hash"), str)
+                and point.get("embedding") is not None
+                and bool(point.get("embeddingText")))
+
+    # PREMISE for leg 1 (review cycle 1, P2): the ABSENCE of a divergence is
+    # only discriminating if some attestable record's vector describes text that
+    # DIFFERS from `content` — otherwise a check re-pointed at `content` agrees
+    # by accident and leg 1 cannot tell the two spellings apart. Derived, never
+    # assumed: a later edit to CONV/the rewriter that left every turn an
+    # identity rewrite would silently remove one of the two mutation kills and
+    # keep the suite green — the exact false confidence this test prevents.
     differing_from_content = [
-        p.get("id") for ev in events for p in [ev.get("point") or {}]
-        if p.get("embeddingText") and p.get("embedding") is not None
-        and p.get("embeddingText") != p.get("content")]
+        p.get("id") for p in points
+        if _attestable(p) and p.get("embeddingText") != p.get("content")]
     assert differing_from_content, (
         "premise: no journalled record has embeddingText != content, so leg 1 "
         "cannot distinguish an embeddingText check from a `content` check — "
         "the faithful leg would pass against the pre-#8488 spelling")
     tampered_ids = []
-    for ev in events:
-        point = ev.get("point") or {}
-        if point.get("embeddingText") and point.get("embedding") is not None:
-            point["embeddingText"] = point["embeddingText"] + " (tampered)"
-            tampered_ids.append(point.get("id"))
+    for p in points:
+        if _attestable(p):
+            p["embeddingText"] = p["embeddingText"] + " (tampered)"
+            tampered_ids.append(p.get("id"))
     assert tampered_ids, (
-        "premise: the journal carried no enriched PointAdded record, so this "
+        "premise: the journal carried no attestable enriched record, so this "
         "test would be vacuous")
-    # DERIVED, not assumed (review P3): the ids whose stored hash no longer
-    # matches the (now tampered) text. Every one of them must be REPORTED —
-    # `_record_embedding_identity`'s contract is that each DISTINCT divergence
-    # is recorded, so a regression that reported only the first would pass an
-    # `any(...)` assertion while silently dropping the rest.
+    # DERIVED, not assumed (review cycle 1, P3): the ids whose stored hash no
+    # longer matches the (now tampered) text.
     mismatched_ids = [
-        str(p.get("id")) for ev in events for p in [ev.get("point") or {}]
-        if p.get("embeddingText") and p.get("embedding") is not None
+        str(p.get("id")) for p in points
+        if _attestable(p)
         and p.get("embedding_text_hash") != content_hash(p["embeddingText"])]
     assert mismatched_ids, (
         "premise: tampering did not produce a hash mismatch, so leg 2 has "
@@ -670,9 +682,19 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
         # fixture whose turns share a text — a legitimate, intended de-dup.
         pairs = {
             (p.get("embedding_text_hash"), content_hash(p["embeddingText"]))
-            for ev in events for p in [ev.get("point") or {}]
-            if p.get("embeddingText") and p.get("embedding") is not None
+            for p in points
+            if _attestable(p)
             and p.get("embedding_text_hash") != content_hash(p["embeddingText"])}
+        # PREMISE (review cycle 3, P3): `len(messages) == len(pairs)` can only
+        # catch "report only the FIRST" when there are at least TWO distinct
+        # pairs. A later edit to CONV/the rewriter that left both turns with the
+        # same enriched text collapses this to 1 and the mutation kill vanishes
+        # silently, with the suite still green — the same reasoning leg 1's
+        # premise assertion carries above.
+        assert len(pairs) >= 2, (
+            "premise: the fixture produces fewer than 2 distinct (journal hash, "
+            "text hash) pairs, so this assertion cannot catch 'report only the "
+            "first' — it would pass vacuously")
         assert len(messages) == len(pairs), (
             "one warning per DISTINCT (journal hash, text hash) pair is the "
             f"contract — got {len(messages)} warning(s) for {len(pairs)} "
