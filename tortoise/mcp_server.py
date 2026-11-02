@@ -1454,6 +1454,176 @@ def _take_graph_argument(name: str,
     return ref
 
 
+# ── #10084: DEFAULT-GRAPH-WITH-DISCLOSURE ─────────────────────────────
+#
+# The owner ruling on #10084 (2026-11-02) is **default-graph-with-disclosure**:
+# a write that names no `graph` RESOLVES to the workspace default graph — and
+# that resolution is DISCLOSED to the caller instead of happening silently.
+#
+# Why the disclosure is the load-bearing half, in the ruling's own terms. The
+# #9340 decision made the graph a tool argument so the target is visible at the
+# call site (#9340); on the ChatGPT venue a write that CARRIES the argument is
+# refused by the host, so the only form that arrives there is the OMITTED one —
+# which lands on the default graph with nothing in the result to say so. That is
+# the pre-#9340 defect reappearing on one venue, and the ruling accepts the
+# resolution while refusing its SILENCE: the write result must name the graph it
+# landed in. This is the same failure #9340 names ("a write whose target graph is
+# invisible to the caller"), and the surface principle it rests on — "anything
+# that changes what happens to the caller's data must be legible at the call
+# site" (`docs/product/vision-mcp-sdk-surface.md`).
+#
+# ⛔ NOT a surface change, and it must stay that way: no tool is added, removed
+# or renamed, no parameter or SDK method is touched, and the RESOLVED behaviour
+# is unchanged — omission already resolved to the workspace default before this
+# code existed. What changes is that the resolution is now reported. The
+# disclosure rides the two channels `_warn_retired_result` already established
+# for exactly this shape (see that function): an extra `TextContent` appended
+# LAST, so the tool's own payload stays `content[0]` and `structured_content` is
+# byte-identical — which is what keeps every declared `outputSchema` (including
+# the `x-fastmcp-wrap-result` array envelope of a `-> list[dict]` tool) intact.
+# A dict field on `structured_content` would violate those schemas on the tools
+# that declare one; the envelope is a promise about the success shape and a
+# conforming client enforces it (#8482 is the incident).
+_GRAPH_DISCLOSURE_KEY = "graph_resolution"
+
+
+def _graph_disclosure(graph_ref: str | None,
+                      *, dry_run: bool = False) -> dict[str, Any] | None:
+    """What graph THIS dispatch targets, for a write that named none (#10084).
+
+    Read at the seam, from the scope the CREDENTIAL resolution already applied:
+
+    * no workspace at all (`_current_org_id` unset — stdio / a bare self-host
+      server) — there is no "workspace default" to name: `_get_org_sdk`
+      delegates to `_get_base_sdk`, which opens the graph the SERVER is
+      configured with (the URI's graph, else `tortoise`). Naming `"default"`
+      there would be a graph id that does not exist on that surface, so the arm
+      reports `server-configured` with no id rather than inventing one.
+    * `_current_graph_id` is None for an org-wide credential (OAuth, a workspace
+      key, session) — `mcp_auth._get_org_sdk` then opens `namespace=<org>`,
+      i.e. the workspace DEFAULT graph, whose id the readers spell `"default"`
+      (`mcp_auth._DEFAULT_GRAPH_ID`) and which `graph="default"` names as a
+      no-op. That is the case this feature exists for.
+    * `_current_graph_id` is SET for a graph-BOUND key, and omission opens that
+      key's OWN graph — never the workspace default (`mcp_auth._get_org_sdk`,
+      the `gid and ns` branch). Disclosing "default" here would be a lie, so the
+      two arms are reported as the different facts they are.
+
+    A CALLER-NAMED graph is reported AS GIVEN — never canonicalised: the resolver
+    accepts an id, a `stable_id`, a namespace or a name (`resolve_graph_target`),
+    and the resolved plan lives inside the DISPATCH task (`_scoped_dispatch`,
+    #9762), so its ContextVar is not readable from this one (#9762 confinement is
+    also what stops the omitted arm inheriting a previous call's graph). The
+    value is therefore documented as the ACCEPTED REF, which is what the caller
+    can check its own request against.
+
+    `dry_run` never changes WHAT is disclosed, only whether the reply may say the
+    write happened (see `_graph_disclosure_message`) — a preview targets the same
+    graph and must not read as a completed write.
+    """
+    if graph_ref is not None:
+        if not isinstance(graph_ref, str):
+            return None
+        info = {"graph": graph_ref, "requested": graph_ref,
+                "defaulted": False, "source": "argument"}
+    elif not _mcp_auth._current_org_id.get():
+        info = {"graph": None, "requested": None,
+                "defaulted": True, "source": "server-configured"}
+    else:
+        bound = _mcp_auth._current_graph_id.get()
+        landed = bound or _mcp_auth._DEFAULT_GRAPH_ID
+        info = {"graph": landed, "requested": None, "defaulted": True,
+                "source": "credential-graph" if bound else "workspace-default"}
+    if dry_run:
+        # A preview's landing has not happened. Recorded as its own fact so a
+        # consumer (and the prose below) cannot read a dry run as a completed
+        # write — `tortoise_delete`'s FIRST call changes nothing by default.
+        info["preview"] = True
+    return info
+
+
+def _graph_disclosure_message(info: dict[str, Any]) -> str:
+    """The one sentence a caller (and the model) reads about the resolution.
+
+    It states the FACT and never an instruction: it does not tell the model to
+    omit `graph`, because `tortoise_list_graphs()` returns flat names with no
+    `is_default`, so an "omit it" rule makes a model in a two-graph workspace
+    guess — and the guess it rewards is the default graph (#10504's re-brief
+    removed exactly that imperative from `GRAPH_ARGUMENT_DESCRIPTION`).
+
+    The tense is the CALL's target, not a completed write, on purpose: seven
+    served write tools take `dry_run` and `tortoise_delete`'s default FIRST call
+    changes nothing (`confirmation is None`), so "it landed in" would tell an
+    agent a preview had executed. Where the call says it was a preview, the
+    sentence says so too.
+    """
+    graph = info["graph"]
+    source = info["source"]
+    preview = " Nothing was written: this call was a preview (dry run)." \
+        if info.get("preview") else ""
+    if source == "server-configured":
+        return (
+            "Graph disclosure: this write named no `graph`, and this transport "
+            "has no workspace — so its target is the graph this server is "
+            "configured with." + preview)
+    if source == "workspace-default":
+        return (
+            f"Graph disclosure: this write named no `graph`, so its target is "
+            f"this workspace's default graph ({graph!r}). If another graph was "
+            f"meant, pass `graph` with that graph's id or name." + preview)
+    if source == "credential-graph":
+        return (
+            f"Graph disclosure: this write named no `graph`, so its target is "
+            f"this credential's own graph ({graph!r}) — not the workspace "
+            f"default. A graph-bound credential cannot be re-targeted." + preview)
+    return (f"Graph disclosure: this write's target is the graph you named "
+            f"({graph!r})." + preview)
+
+
+def _disclose_graph_resolution(result: Any, name: str,
+                               graph_ref: str | None,
+                               *, dry_run: bool = False) -> Any:
+    """Attach the #10084 disclosure to a successful WRITE's result.
+
+    Writes only: a read's target is not a change to the caller's data, and the
+    GROUP that must be excluded from it is `GRAPH_ARGUMENT_EXCLUDED` — the
+    registry's own declaration that a tool "targets the WORKSPACE or names its
+    graph explicitly". Those are writes (`tortoise_org_create` provisions a
+    workspace, `tortoise_graph_set_recording` takes its own `graph_id`) and
+    naming the credential's graph on them would assert a target the call never
+    had: the wrong-graph claim this issue exists to remove, emitted by us.
+    `WRITE_TOOL_NAMES` is the registry's DERIVED write set (`risk in
+    write|destructive|admin`), so neither side can drift from the surface.
+
+    Anything that is not a plain successful `ToolResult` is returned untouched —
+    a refusal, a `_safe`-answered failure and a schema-repaired payload all
+    already say what happened, and a disclosure on top of them would be noise
+    claiming a landing that may not have occurred.
+    """
+    if name not in WRITE_TOOL_NAMES or name in _mcp_auth.GRAPH_ARGUMENT_EXCLUDED:
+        return result
+    if not isinstance(result, ToolResult) or getattr(result, "is_error", False):
+        return result
+    info = _graph_disclosure(graph_ref, dry_run=dry_run)
+    if info is None:
+        return result
+    from mcp.types import TextContent
+
+    meta = dict(getattr(result, "meta", None) or {})
+    tortoise_meta = meta.get("tortoise")
+    meta["tortoise"] = {
+        **(tortoise_meta if isinstance(tortoise_meta, dict) else {}),
+        _GRAPH_DISCLOSURE_KEY: info,
+    }
+    return ToolResult(
+        content=[*list(getattr(result, "content", None) or []),
+                 TextContent(type="text", text=_graph_disclosure_message(info))],
+        structured_content=getattr(result, "structured_content", None),
+        meta=meta,
+        is_error=False,
+    )
+
+
 #: #9762: the slice of the transport's residual budget the graph lookup must
 #: leave on the clock, so its own refusal wins the race against the seam's
 #: generic one deterministically (both deadlines are otherwise the same absolute
@@ -1661,6 +1831,12 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # the transport's own refusal into a graph `ToolError` (a false
         # `exec_error` row in the `mcp_tool_call` series), and it left the scope
         # set in the CALLER's context after the dispatch.
+        # #10084: bound defensively. Every fall-through branch from the refusal
+        # arm below classifies non-`ok` (the `raise`, or a wait-bound refusal
+        # whose meta marker sets `refused`/`timeout`), so the disclosure guard at
+        # the return can never read an unbound name — this is belt-and-braces
+        # against a future reordering, not a live path.
+        graph_ref: str | None = None
         try:
             graph_ref = _take_graph_argument(name, arguments)
         except ToolError:
@@ -1767,6 +1943,15 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
                     # SAME pair this line produces, so the two producers of one
                     # failure class agree on what it is called.
                     status, error_kind = "exec_error", "safe_error"
+        # #10084 (owner ruling: default-graph-with-disclosure): a WRITE that
+        # named no `graph` has just landed somewhere, and until now nothing in
+        # the result said where. Applied LAST — after every classification and
+        # after the envelope repair — so it can neither mask a refusal nor claim
+        # a landing on a dispatch that failed, and only on an `ok` row.
+        if status == "ok":
+            result = _disclose_graph_resolution(
+                result, name, graph_ref,
+                dry_run=bool((arguments or {}).get("dry_run")))
         return result
     except asyncio.CancelledError:
         # A cancelled dispatch is neither an "ok" nor an exec error — classifying
