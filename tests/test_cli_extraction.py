@@ -28,13 +28,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
                                 "integrations", "cli-extraction"))
 
 from extract_turns import (
+    _DUMP_QUERY,
     KIND_MAP,
     PROMPT,
     WRITER_SCRIPT,
-    _DUMP_QUERY,
+    _is_turn_of,
     _parse_json_block,
     _sum_usage,
-    _is_turn_of,
     _turn_order,
     _turn_record,
     _wrap_transcript,
@@ -322,6 +322,7 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         # (`turn_rows[...] = {"k": "event", ...}`): a changed literal would
         # leave the name-level assertion green while dump returned 0 rows.
         import inspect
+
         from tortoise.sdk import _write_capture_turns
         self.assertIn('"k": "event"', inspect.getsource(_write_capture_turns))
 

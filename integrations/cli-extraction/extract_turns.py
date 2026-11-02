@@ -127,25 +127,26 @@ def state_dir() -> Path:
 #: names is what broke the documented dump→run→write workflow.
 #:
 #: The `session://` prefix makes a transcript key the CAPTURE session id — the
-#: id the operator passed to `capture_session`, and the same tail-key rule
-#: `build_transcripts` already applies to a hand-built `session://` file.
+#: id the operator passed to `capture_session`. `build_transcripts` keys a
+#: `session://` source by the WHOLE remainder (never a tail split, which would
+#: merge `teamA/run-7` and `teamB/run-7`).
 _DUMP_QUERY = (
     "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
     "WHERE t.is_episodic = true AND t.pointKind = 'event' "
-    "RETURN 'session://' + s.id, t.pointKind, t.speaker, t.content, t.createdAt, t.id "
-    "ORDER BY t.id"
+    # No ORDER BY: the graph's order is discarded — `dump` re-sorts by the
+    # integer turn index (`_turn_order`), because the server's lexicographic
+    # order puts `t10` before `t2`.
+    "RETURN 'session://' + s.id, t.pointKind, t.speaker, t.content, t.createdAt, t.id"
 )
 
 
 def _is_turn_of(row) -> bool:
     """`{session}_t{i}` — the id shape the one turn store derives.
 
-    A bare `is_episodic`/`pointKind='event'` filter is not enough: any other
-    episodic Point wired to the Session would be spliced into the transcript.
     The suffix must be DECIMAL, mirroring `sdk._capture_turn_ids`' own
-    `isdecimal()` guard, so this filter and `_turn_order` can never disagree
-    about what a turn is (an id `_is_turn_of` admitted but `_turn_order` could
-    not index would abort the whole dump).
+    `isdecimal()` guard, so this filter and `_turn_order` agree about what a
+    turn is (an id this filter admitted but `_turn_order` could not index
+    would abort the whole dump).
     """
     sid = str(row[0]).split("://", 1)[-1]
     tail = str(row[5])[len(sid) + 2:]
@@ -178,7 +179,11 @@ def _turn_order(row) -> tuple:
         # An id that carries no turn index is not a turn: it cannot be
         # ordered, and defaulting to 0 would splice it in front of turn 0.
         raise ValueError(f"turn id carries no index: {row[5]!r}")
-    return (sid, int(m.group(1)))
+    try:
+        index = int(m.group(1))
+    except (TypeError, ValueError) as exc:      # >4300 digits: not an index
+        raise ValueError(f"turn id index is not an integer: {row[5]!r}") from exc
+    return (sid, index)
 
 
 #: One graph row -> one turns-file record. The `by` key carries the turn ROLE
