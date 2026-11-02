@@ -1152,8 +1152,9 @@ def score_path_bullet() -> Row:
     # row listed four notes up is the same defect shape the population fix
     # above removes.
     # An out-of-vocabulary class (a typo'd or retired entry) is NOT a class: it
-    # would otherwise fall through BOTH `by_class` (gated on CENSUS_CLASSES) and
-    # `unclassified` (gated on `is None`), leaving the writer named nowhere and
+    # would otherwise fall through BOTH `by_class` (gated on CENSUS_CLASSES) and a
+    # `unclassified` gated only on `is None` — the shape this code had before the
+    # `not in CENSUS_CLASSES` gate below — leaving the writer named nowhere and
     # every class total reading 0 over a non-empty population. The sibling
     # falsifier catches the typo in CI; the instrument must not lie meanwhile.
     unclassified = sorted(fn for fn in unresolved_writers
