@@ -1003,8 +1003,13 @@ def test_the_canned_census_transcribes_the_committed_log_it_cites(monkeypatch):
     statements these tests exercise, not every one — so each field it DOES answer must
     be the log's.
     """
-    text = (_REPO / "docs/evidence/7949-capstone"
-            / "capstone-measured-9152448d.log").read_text()
+    # ⛔ DISCOVERED, NOT NAMED (#10601 review P2, same class as the OK-line pin).
+    # The bundle's own rule is that a re-run writes `capstone-measured-<new
+    # head8>.log` and DELETES the file it supersedes, so a hardcoded name here
+    # turns the next CORRECT artifact into a red on a filename. `_newest_log`
+    # orders by the log's own `# generated:` stamp, which is what the rest of
+    # this file already uses.
+    text = _newest_log(_scored_logs()).read_text()
     begin, end = "=== CAPSTONE-VERDICT-BEGIN ===", "=== CAPSTONE-VERDICT-END ==="
     assert begin in text and end in text, "the shipped log lost its verdict block"
     record = json.loads(text.split(begin, 1)[1].split(end, 1)[0])
