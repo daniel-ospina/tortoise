@@ -971,7 +971,17 @@ def _add_commits_on(ref: str, path: Path) -> dict[str, int]:
         rel = path.resolve().relative_to(REPO_ROOT)
     except ValueError:
         return {}
-    code, out = _git_stdout(["log", "--diff-filter=A", "--format=%H %ct", ref, "--", str(rel)])
+    code, out = _git_stdout(
+        # `--full-history`: the same hazard as `_added_epochs`/`_added_epochs_on`, which carry it
+        # because git's history simplification follows only the TREESAME parent at a merge and
+        # never walks the other side, hiding an add-commit that lives there (git's own
+        # `--full-history` / `--dense` note: "if one of the parents is TREESAME, we follow only
+        # that one"). This reader decides no epoch, but it decides WHICH refusal text the operator
+        # reads — `shared = prereg_add_commits & _add_commits_on(base, log)` gates the
+        # squash-collapse remedy — so a hidden add here silently downgrades the one refusal whose
+        # remedy is a withdrawal to the bare "not strictly after" text (review F2).
+        ["log", "--full-history", "--diff-filter=A", "--format=%H %ct", ref, "--", str(rel)]
+    )
     if code != 0:
         return {}
     found: dict[str, int] = {}
@@ -2018,8 +2028,9 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     prereg_epoch = min(prereg_epochs)
     # The commit(s) that published the registration on the base — used only to diagnose, never to
     # decide: a shared add-commit means the two artefacts landed in ONE squash merge, and the
-    # refusal's remedy is then a withdrawal rather than a re-ordering.
-    prereg_add_commits = set(_add_commits_on(base, prereg))
+    # refusal's remedy is then a withdrawal rather than a re-ordering. Kept as a MAPPING (not a
+    # set) so the collapse can be named by EPOCH below; `min()` over the shas is not that.
+    prereg_add_commits = _add_commits_on(base, prereg)
     # How many (registration, log) pairs actually got compared. ⛔ Tracked because `unmeasured == []`
     # is NOT the same fact as "an epoch pair was compared": a bundle with zero logs, or whose only
     # logs are untracked, walks the loop and compares NOTHING, and the caller would then print
@@ -2091,10 +2102,15 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             # measures the OLD add (cycle 7, finding F1). So the remedy is a new artefact at a new
             # path, never a re-ordering and never the forbidden re-add. That shape is precisely what
             # redded `main` at cfa3de857 (#10468).
-            shared = prereg_add_commits & set(_add_commits_on(base, log))
+            shared = set(prereg_add_commits) & set(_add_commits_on(base, log))
             if shared:
+                # ⛔ Name the collapse by EPOCH, not by sha: `sorted(shared)[0]` sorts HEX STRINGS,
+                # so with more than one shared commit the sha printed is arbitrary and can name a
+                # later commit than the collapse (review F2). The collapsed epoch is the fact the
+                # refusal is about, and it is what the remedy tells the operator to look at.
+                collapsed = min(shared, key=lambda s: (prereg_add_commits[s], s))
                 failure += SQUASH_COLLAPSE_REMEDY.format(
-                    base=base, sha=sorted(shared)[0][:12]
+                    base=base, sha=collapsed[:12]
                 )
             failures.append(failure)
     if compared == 0 and unmeasured is not None:

@@ -5155,3 +5155,143 @@ def test_the_base_read_sees_an_add_hidden_behind_a_merge(tmp_path, monkeypatch):
         "a log whose earlier add on the BASE is hidden behind a merge was accepted — the base "
         "reader is history-simplified, and `min()` is then later than the truth")
     assert "not strictly after" in failures[0], failures[0]
+
+
+def test_the_squash_diagnosis_sees_a_collapsed_add_hidden_behind_a_merge(tmp_path, monkeypatch):
+    """F2: the SQUASH diagnosis reads history too, and it was the one reader left simplified.
+
+    `_add_commits_on` decides no epoch, so `--full-history` was never added to it — but it decides
+    WHICH refusal an operator reads, because `shared = prereg_add_commits & _add_commits_on(base,
+    log)` gates `SQUASH_COLLAPSE_REMEDY`: the only refusal text that names a withdrawal. Where the
+    merge hid the collapsed commit, `shared` was empty and the operator got the bare "not strictly
+    after" — the defect this same PR fixed as cycle-3 finding 1c, reintroduced on the one shape
+    whose remedy is a withdrawal.
+
+    The fixture is the criss-cross shape with BOTH artefacts in the collapsed commit: `early` adds
+    the registration and the log in ONE commit, `late` adds the same log path later, and the merge
+    (`-X ours`) resolves the log conflict to `late`'s copy while keeping the registration from
+    `early`. That asymmetry is what makes the two readers disagree: the log path is TREESAME to
+    `late` and its earlier add is pruned, while the registration path is TREESAME to `early` and
+    is walked — so without the flag `shared` is empty and the remedy is absent, even though
+    `_added_epochs_on` (which has the flag) correctly refuses at the collapsed epoch.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    rel_prereg = "docs/evidence/7949-capstone/" + check.PREREG_NAME
+    rel_log = "docs/evidence/7949-capstone/capstone.log"
+    prereg = repo / rel_prereg
+    log = repo / rel_log
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+
+    # `early`: the registration AND its log in ONE commit — the squash-collapse shape.
+    _git(repo, "checkout", "-q", "-b", "early")
+    prereg.write_text("x\n")
+    log.write_text("measured before the thresholds\n")
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "registration and log in one commit", epoch=1_700_000_100)
+    collapsed = _git_out(repo, "rev-parse", "HEAD")
+
+    # `late`: the same log path, later, and the merge keeps THIS copy for that path.
+    _git(repo, "checkout", "-q", "-b", "late", "origin/main")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("measured after the thresholds\n")
+    _git(repo, "add", rel_log)
+    _git(repo, "commit", "-q", "-m", "log again", epoch=1_700_000_400)
+    # `-X ours`, not `-s ours`: a real merge keeps the registration (only `early` has it) while
+    # resolving the add/add log conflict to `late`'s copy.
+    _git(repo, "merge", "-q", "-X", "ours", "-m", "merge early, keep late's log", "early",
+         epoch=1_700_000_500)
+    _publish_base(repo)
+
+    # Premise, measured on the raw walks: the log path loses the collapsed commit to
+    # simplification, while the registration path keeps it.
+    default_log = _git_out(
+        repo, "log", "--diff-filter=A", "--format=%H", "origin/main", "--", rel_log).split()
+    full_log = _git_out(
+        repo, "log", "--full-history", "--diff-filter=A", "--format=%H", "origin/main", "--",
+        rel_log).split()
+    assert collapsed not in default_log, (
+        "the fixture no longer hides the collapsed add from the default walk — it would not "
+        f"discriminate: {default_log}")
+    assert collapsed in full_log, full_log
+    assert collapsed in _git_out(
+        repo, "log", "--diff-filter=A", "--format=%H", "origin/main", "--", rel_prereg).split(), (
+        "the registration path must still be WALKED by the default read — the two readers have to "
+        "disagree for this test to witness the flag")
+
+    failures = check.check_ordering(prereg, [log], {})
+    assert failures, "an equal-epoch base must still be refused"
+    assert "not strictly after" in failures[0], failures[0]
+    assert "WITHDRAWAL plus a NEW artefact" in failures[0], (
+        "the refusal lost the squash-collapse remedy because the diagnosis reader is "
+        "history-simplified (`_add_commits_on` without `--full-history`) — the operator then gets "
+        f"a bare 'not strictly after' and hunts an ordering that does not exist: {failures[0]}"
+    )
+    assert collapsed[:12] in failures[0], (
+        "the remedy must name the collapsed add-commit, which the diagnosis reader can only see "
+        f"with `--full-history`: {failures[0]}"
+    )
+
+
+def test_the_collapse_is_named_by_epoch_not_by_the_sha_text(tmp_path, monkeypatch):
+    """F2 (nit): `sorted(shared)[0]` sorted HEX STRINGS, so the sha the remedy named was arbitrary.
+
+    `shared` is a set of add-commits, and the remedy names one of them as "the SAME commit
+    ({sha})" that collapsed the pair. When a bundle has more than one shared add-commit — a
+    collapsed pair that was withdrawn and re-added is still measured against BOTH, because a
+    deletion does not remove an earlier add — `sorted(shared)[0]` picks the lexicographically
+    smallest sha, which is unrelated to which commit is the collapse. The operator is then sent to
+    look at the wrong commit. The collapsed EPOCH is the fact the refusal is about, so the sha is
+    selected by epoch.
+
+    The fixture forces the discriminating case deterministically: two shared add-commits whose
+    hex order is INVERTED relative to their epochs (the later commit sorts first), which is the
+    only shape on which a sha sort and an epoch sort disagree.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    rel_prereg = "docs/evidence/7949-capstone/" + check.PREREG_NAME
+    rel_log = "docs/evidence/7949-capstone/capstone.log"
+    prereg = repo / rel_prereg
+    log = repo / rel_log
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+
+    # The first collapsed pair: the EARLIEST add, and the one the remedy must name.
+    prereg.write_text("x\n")
+    log.write_text("measured\n")
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "collapse one", epoch=1_700_000_100)
+    earliest = _git_out(repo, "rev-parse", "HEAD")
+
+    # Withdrawn, then re-added as a second collapsed pair at a LATER epoch. The nonce is varied
+    # until this commit's sha sorts BEFORE the earliest one — the inversion that makes a sha sort
+    # name the wrong commit. Deterministic: the same nonce is found on every run.
+    _git(repo, "rm", "-rq", "docs")
+    _git(repo, "commit", "-q", "-m", "withdraw the pair", epoch=1_700_000_200)
+    later = ""
+    for nonce in range(200):
+        prereg.parent.mkdir(parents=True, exist_ok=True)
+        prereg.write_text("x\n")
+        log.write_text(f"measured again {nonce}\n")
+        _git(repo, "add", "docs")
+        _git(repo, "commit", "-q", "-m", f"collapse two {nonce}", epoch=1_700_000_300)
+        later = _git_out(repo, "rev-parse", "HEAD")
+        if later < earliest:
+            break
+        _git(repo, "reset", "-q", "--hard", "HEAD~1")
+        _git(repo, "clean", "-qfd", "docs")
+    assert later < earliest, (
+        "could not build the inverted-sha fixture — the two commits must differ in hex order for "
+        "this test to tell a sha sort from an epoch sort")
+    _publish_base(repo)
+
+    # Premise: BOTH adds are shared, and only their epochs order them.
+    assert set(check._add_commits_on("origin/main", log)) == {earliest, later}
+    assert check._added_epochs_on("origin/main", log) == [1_700_000_100, 1_700_000_300]
+
+    failures = check.check_ordering(prereg, [log], {})
+    assert failures, "an equal-epoch base must still be refused"
+    assert earliest[:12] in failures[0], (
+        "the remedy must name the commit that actually collapsed the pair — the EARLIEST "
+        f"add-commit — not the sha that happens to sort first: {failures[0]}")
+    assert later[:12] not in failures[0], (
+        "the remedy named the LATER add-commit because `shared` was sorted as hex text rather "
+        f"than by epoch — the operator is sent to the wrong commit: {failures[0]}")
