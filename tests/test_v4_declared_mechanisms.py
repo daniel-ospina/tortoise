@@ -1041,6 +1041,119 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                     f"(got {issue!r}) — an unbuilt mechanism needs a home"
                 )
 
+            # ⭐ THE ARTIFACT FIELDS, WHEN PRESENT (review P2, #5064). A
+            # `not-implemented` row may still declare the half that IS built —
+            # `span_link` names its schema file, its test and its symbol, which
+            # is how a reader learns WHAT the absence excludes. Before this
+            # rule those three fields were checked only under `implemented`, so
+            # the flip that recorded the absence silently turned three verified
+            # declarations into inert prose: the file could be deleted, the test
+            # renamed and the symbol removed with this gate green, while the row
+            # still claimed the test pins the built half. Judged by the SAME
+            # rules the `implemented` branch applies (path kind, containment,
+            # existence, module-level definition), because one validator is the
+            # only way the two branches cannot drift — presence is what makes a
+            # field a claim, and a claim this gate cannot verify is the
+            # fail-open this registry exists to close.
+            declared_code = row.get("code")
+            declared_tests = row.get("tests")
+            declared_symbols = row.get("symbols")
+            for field, value, kind in (
+                ("code", declared_code, "code"),
+                ("tests", declared_tests, "test"),
+            ):
+                # Review cycle 3 (P3): PRESENCE is `field in row`, not
+                # `row.get(field) is not None` — an explicit `code:` with no
+                # value is a declaration of nothing that looks like a
+                # declaration, and the same function already reads
+                # `preconditions:` by membership for exactly that reason. A null
+                # falls through to the "not a list" verdict below.
+                if field not in row:
+                    continue
+                if not isinstance(value, list):
+                    errors.append(
+                        f"{mid}: `{field}` is declared on a not-implemented "
+                        f"row but is not a list (got {value!r}) — name the "
+                        f"artifact(s) as a list, or omit the field"
+                    )
+                    continue
+                if not value:
+                    errors.append(
+                        f"{mid}: `{field}` is declared on a not-implemented "
+                        f"row but is empty (got {value!r}) — either name the "
+                        f"artifact or omit the field; an unverifiable claim is "
+                        f"not a record of what is built"
+                    )
+                    continue
+                errors.extend(_path_violations(mid, field, value, root, kind))
+            if "symbols" in row:
+                if (
+                    not isinstance(declared_symbols, list)
+                    or not declared_symbols
+                    or not all(
+                        isinstance(s, str) and s.strip() for s in declared_symbols
+                    )
+                ):
+                    errors.append(
+                        f"{mid}: `symbols` is declared on a not-implemented "
+                        f"row but is not a non-empty list of names (got "
+                        f"{declared_symbols!r})"
+                    )
+                elif not (isinstance(declared_code, list) and declared_code):
+                    # Review cycle 2 (P2): `symbols:` with no `code:` names a
+                    # home it never gives. Nothing can then check the claim, and
+                    # the IMPLEMENTED branch refuses exactly this shape — a
+                    # branch that passes what the other refuses is the drift the
+                    # shared-rule comment above claims is impossible.
+                    errors.append(
+                        f"{mid}: `symbols` is declared on a not-implemented "
+                        f"row but `code:` names no non-empty file list (got "
+                        f"{declared_code!r}) — the symbol's home is unnamed, so "
+                        f"the claim cannot be verified"
+                    )
+                else:
+                    defined: set[str] = set()
+                    resolved_entries: list[str] = []
+                    unreadable: list[str] = []
+                    for rel in declared_code:
+                        if not isinstance(rel, str) or not rel:
+                            continue
+                        if _path_violations(mid, "code", [rel], root, "code"):
+                            continue
+                        resolved = _resolve_in_repo(rel, root)
+                        if resolved is None:
+                            continue
+                        resolved_entries.append(rel)
+                        names = _defined_names(resolved)
+                        if names is None:
+                            unreadable.append(rel)
+                        else:
+                            defined |= names
+                    if unreadable:
+                        errors.append(
+                            f"{mid}: declared `code:` source(s) {unreadable} "
+                            f"could not be read or parsed, so `symbols: ` cannot "
+                            f"be verified in them — an unreadable source is "
+                            f"not the record of what is built"
+                        )
+                    # Review cycle 2 (P2): the absence check runs over a
+                    # COMPLETE read, keyed on `resolved_entries` — NOT on
+                    # `defined` being non-empty, which skipped the check for a
+                    # file that defines no module-level name (an empty file, or
+                    # a re-export module whose only binding is `__all__`). The
+                    # IMPLEMENTED branch keys on the same pair for the same
+                    # reason: "not found in what I could read" is evidence only
+                    # when everything was read.
+                    elif resolved_entries:
+                        missing = sorted(s for s in declared_symbols if s not in defined)
+                        if missing:
+                            errors.append(
+                                f"{mid}: symbol(s) {missing} are not defined at "
+                                f"module level in the `code:` file(s) this row "
+                                f"declares ({declared_code}) — the half the row "
+                                f"says is built is not where the row says it is"
+                            )
+
     # ── the ordering must itself be orderable: a cycle is not an ordering ────
     # Judged over the SET, after the rows: `a → b → a` satisfies every per-row
     # rule, so no single row can report it. Unknown ids and self-references are
@@ -1795,6 +1908,171 @@ def test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render() -> No
         "#5095's remaining-slices list"
     )
     assert row.get("tracking_issue") == 5087, row
+
+
+def test_the_span_link_row_records_the_widening_as_unbuilt() -> None:
+    """The `span_link` row's state is read off the LIVE WRITE PATH, not a helper.
+
+    `STORAGE-ARCHITECTURE.md` §9.4 says it in these words: *"Every committed
+    `Point`/`Object` must walk up to its `Source`"*. `EXTRACTOR-V4-ARCHITECTURE.md`
+    §2.4.1 rule 1 states the same requirement as *"must carry a reachable link to
+    its `Source` span"*, and §2.4 records the widening — from `#2684`'s
+    value-bearing points to ALL points — as a deliberate decision. What the write path actually does is narrower:
+    `_value_verbatim_span` stamps offsets only when the anchor is VERBATIM **and**
+    the text it addresses carries a value, so an ordinary point is written with
+    no address at all.
+
+    ⇒ The row must not read `implemented`. A `validate_span` that checks a
+    SUPPLIED pair never produces one, so marking the row implemented publishes
+    exactly the "a declared mechanism reads like a shipped one" this registry
+    exists to stop — and only a STATE assertion can see it, because the
+    behavioural probes below stay green either way.
+
+    Both directions are pinned, so the test also tells the next lane when to
+    flip the row: build the every-point stamping and the first half goes red.
+    """
+    from tortoise import extractor_v2 as v2
+
+    quoted = "the p99 under load test was 480 ms on 2026-09-19"
+    edus = [
+        {"index": 0, "role": "user", "text": quoted, "turn_id": 1},
+        {"index": 1, "role": "user", "text": "Ravi is the release manager",
+         "turn_id": 2},
+    ]
+    written = v2.execute_embed(
+        {"entities": [], "events": [], "operators": [], "chain_notes": [],
+         "points": [
+             # value-bearing + a verbatim anchor → the one shape that gets a span
+             {"content": "p99 was 480 ms on 2026-09-19",
+              "pointKind": "statement", "quote": quoted, "source_turn_id": 0},
+             # content carries no value → refused at the VALUE gate, so the
+             # route that actually fires is `_carries_value`, not the anchor
+             {"content": "Ravi is the release manager", "pointKind": "statement"},
+             # same route: neither the content nor the quote carries a value
+             {"content": "the deployment slipped to November",
+              "pointKind": "statement", "quote": "nothing verbatim here"},
+         ]},
+        {}, session_id="s1", edus=edus)
+    points = written["payload"]["points"]
+    assert len(points) == 3, points
+    spanned = [p for p in points if p.get("span_start") is not None]
+    unspanned = [p for p in points if p.get("span_start") is None]
+
+    # The ADDRESS half is real: the offsets slice the quote back out of the
+    # source turn, and the verbatim TEXT is never copied onto the point.
+    assert len(spanned) == 1, (
+        "the live write path's span coverage moved — re-measure before touching "
+        f"the `span_link` row: {[(p['content'], p.get('span_start')) for p in points]!r}"
+    )
+    address = spanned[0]
+    start, end = address["span_start"], address["span_end"]
+    assert edus[0]["text"][start:end] == quoted, (start, end)
+
+    # …and the EVERY-POINT half is not: two of three committed points walk up to
+    # nothing. That is the absence the row's state has to record.
+    assert len(unspanned) == 2, (
+        "every committed point now carries a span — §2.4.1 rule 1 is met, so the "
+        f"`span_link` row is stale and should be re-measured and flipped: {points!r}"
+    )
+
+    row = {r["id"]: r for r in load_registry()["mechanisms"]}["span_link"]
+    assert row["state"] == NOT_IMPLEMENTED, (
+        "`span_link` was flipped to `implemented`, but the live write path stamps "
+        "a span only for a value-bearing point with a VERBATIM anchor — §2.4.1 "
+        "rule 1's every-committed-Point widening is not built (see the row note)"
+    )
+    assert row.get("tracking_issue") == 2684, row
+    # Review cycle 3 (P2): the flip makes these three fields OPTIONAL on a
+    # `not-implemented` row, so nothing above stops them being deleted — and the
+    # row's note would go on claiming the built half is pinned. The same
+    # precedent as the carve-out row: name the artifacts, not just the state.
+    for field in ("code", "tests", "symbols"):
+        assert row.get(field), (
+            f"`span_link` dropped `{field}:` when it was flipped — the row's note "
+            "still says the address half is built and pinned, so the fields that "
+            "record it are part of the claim"
+        )
+    assert "tests/test_verbatim_span.py" in row["tests"], row["tests"]
+    assert "validate_span" in row["symbols"], row["symbols"]
+
+
+def test_the_artifact_fields_of_a_not_implemented_row_are_still_verified(
+    tmp_path,
+) -> None:
+    """Review P2 (#5064): presence of `code:`/`tests:`/`symbols:` is a claim.
+
+    A `not-implemented` row that names the half which IS built publishes an
+    anchor a reader relies on (“the built half is at this file, pinned by this
+    test”). The fields used to be verified only under `implemented`, so ONE
+    state flip turned three verified declarations into inert prose — the file
+    could be deleted and the symbol renamed with the gate green. Both directions
+    are pinned here, and they are the same rules the other branch applies.
+    """
+    (tmp_path / "src.py").write_text("def present_symbol():\n    return 1\n")
+    (tmp_path / "test_x.py").write_text("def test_ok():\n    assert True\n")
+    (tmp_path / FIXTURE_DECLARED_DOC).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / FIXTURE_DECLARED_DOC).write_text("# declaration\n")
+    good = dict(
+        _row("mid"),
+        state=NOT_IMPLEMENTED,
+        tracking_issue=2684,
+        code=["src.py"],
+        tests=["test_x.py"],
+        symbols=["present_symbol"],
+    )
+    assert gate_errors([good], root=tmp_path) == []
+
+    missing_file = dict(good, code=["nope.py"], symbols=[])
+    assert any("nope.py" in e for e in gate_errors([missing_file], root=tmp_path))
+
+    wrong_symbol = dict(good, symbols=["absent_symbol"])
+    errors = gate_errors([wrong_symbol], root=tmp_path)
+    assert any("absent_symbol" in e for e in errors), errors
+
+    wrong_kind = dict(good, tests=["src.py"])
+    assert any(
+        "not a test file" in e for e in gate_errors([wrong_kind], root=tmp_path)
+    )
+
+    # Review cycle 2 pinned two fail-open routes the first version left, both of
+    # which let a `symbols:` claim go unverified — the exact inert-declaration
+    # shape this rule exists to close.
+    symbols_without_code = {k: v for k, v in good.items() if k != "code"}
+    errors = gate_errors([symbols_without_code], root=tmp_path)
+    assert any("the symbol's home is unnamed" in e for e in errors), errors
+
+    (tmp_path / "empty.py").write_text("__all__ = []\n")
+    defines_nothing = dict(good, code=["empty.py"], symbols=["absent_symbol"])
+    errors = gate_errors([defines_nothing], root=tmp_path)
+    assert any("absent_symbol" in e for e in errors), errors
+
+    not_a_list = dict(good, code="src.py")
+    errors = gate_errors([not_a_list], root=tmp_path)
+    assert any("is not a list" in e for e in errors), errors
+
+    # Review cycle 3 (P3): an explicit null is a declaration of nothing that
+    # looks like a declaration — refused, never read as an omission.
+    for field in ("code", "tests", "symbols"):
+        explicit_null = dict(good, **{field: None})
+        errors = gate_errors([explicit_null], root=tmp_path)
+        # The PER-FIELD message, not just "some error": with `cross` fields
+        # present, `code: None` would otherwise error only via the symbols-home
+        # rule and the assertion would survive a revert to `is None -> continue`
+        # (review cycle 4, P3).
+        assert any(
+            f"`{field}` is declared on a not-implemented row but" in e
+            for e in errors
+        ), f"{field}: null was read as an omission ({errors})"
+
+    # An unreadable source keeps its own verdict: "not found in what I could
+    # read" is not evidence of absence, so the absence check must NOT fire too
+    # (review cycle 4, P3 — the same one-defect-one-verdict rule the
+    # IMPLEMENTED branch has its own test for).
+    (tmp_path / "broken.py").write_text("def broken(:\n")
+    unreadable = dict(good, code=["broken.py"], symbols=["ANYTHING"])
+    errors = gate_errors([unreadable], root=tmp_path)
+    assert any("could not be read or parsed" in e for e in errors), errors
+    assert not any("not defined at module level" in e for e in errors), errors
 
 
 # ── THE DDL SCAN, as a function so it can be TESTED ─────────────────────────
