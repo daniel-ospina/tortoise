@@ -2897,6 +2897,9 @@ _BUNDLE_STALE_STEP_PREDICTION = (
     # "cannot move") and so survived the guard written for the class of
     # "the bundle states a step prediction its own artifact refutes".
     "S2.3` is IDLE on this corpus",
+    "S2.3`, which the measured corpus' idle classify pass does not",
+    "the classify pass is IDLE on it, so S2.3",
+    "on the measured corpus the pass is IDLE",
     "Until such a re-run is committed",
     "What still has to land is a **committed post-seam re-run**",
     "The two unwitnessed steps stay unwitnessed for THIS run",
@@ -2912,6 +2915,22 @@ def _flat(text: str) -> str:
     which is how a guard like this passes over the very sentence it exists for.
     """
     return re.sub(r"\s+", " ", text)
+
+
+#: Table rows are STRUCTURED, so they can be checked without guessing at prose. A row that
+#: names the classify step and also asserts an idle/unwitnessed state is the defect in its
+#: machine-shaped form; the one allowlisted spelling is the REFUTATION itself.
+_STALE_STATE_ROW = re.compile(r"\bidle\b|not witnessed|never observed", re.IGNORECASE)
+_STALE_STATE_ROW_REFUTED = re.compile(
+    # The refutation ("not an idle pass", "does work", "witnessed by"), OR `#10215`'s general
+    # idle-ACCOUNTING rule — which is TRUE of any corpus and must stay sayable in a row
+    # ("seven unconditional + S2.3 conditional", "accounted as a witnessed idle"). Measured
+    # while tuning: without these two frames the check false-reds BOTH a real rule row in
+    # `E1-E5-PROOFS.md` and the `#9116` row here — the wrongly-brittle guard this repo keeps
+    # paying for. With them it still reds the pre-fix `S2.3 CLASSIFY` row at `7caace29c` and
+    # at `27808f958`, which is the discrimination the pin exists for.
+    r"not an idle|not idle|does work|witnessed by|accounted|conditional|witnessed idle",
+    re.IGNORECASE)
 
 
 def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
@@ -2969,6 +2988,31 @@ def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
                 "reading that sentence concludes a re-run cannot move S2.3 and "
                 "never runs one — say what the SHIPPED log measured, and keep the "
                 "6-of-8 count as the SUPERSEDED run's history")
+
+        # ⛔ The phrase list above is spelling-based, and a spelling is the thing a
+        #    paraphrase walks around: measured at `27808f958`, round 3 added the
+        #    "`S2.3` is IDLE on this corpus" spelling while the SAME claim survived
+        #    in three other shapes ("the measured corpus' idle classify pass does
+        #    not", "the classify pass is IDLE on it", "on the measured corpus the
+        #    pass is IDLE"). Two of those are prose, and prose cannot be parsed
+        #    honestly — but the third lived in a TABLE, and a table row is
+        #    machine-shaped. So rows that name the classify step are checked
+        #    structurally, which catches the paraphrase the spellings cannot.
+        #    (A sentence-level prose regex was tried here first and REJECTED: it
+        #    false-red on `#10215`'s general idle-accounting rule in
+        #    `E1-E5-PROOFS.md`, i.e. the wrongly-brittle doc guard this repo keeps
+        #    paying for. Structured rows do not have that failure mode.)
+        for line in path.read_text().splitlines():
+            if not line.lstrip().startswith("|") or "S2.3" not in line:
+                continue
+            assert not (_STALE_STATE_ROW.search(line)
+                        and not _STALE_STATE_ROW_REFUTED.search(line)), (
+                f"{name} has a TABLE ROW naming S2.3 while asserting an idle/"
+                f"unwitnessed state: {line[:300]!r} — {shipped.name} WITNESSES S2.3 "
+                "(assigned_llm: 7), so the row states what this bundle's own "
+                "artifact refutes. Say what the shipped log measured (the witness "
+                "is non-empty and why), or state the general idle-accounting rule "
+                "without claiming THIS corpus is idle")
 
 
 #: The `e1-aux` triple of the SUPERSEDED run — `capstone-measured-e0fc940b.log`
