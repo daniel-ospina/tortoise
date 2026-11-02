@@ -28,16 +28,56 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
                                 "integrations", "cli-extraction"))
 
 from extract_turns import (
+    _DUMP_QUERY,
     KIND_MAP,
     PROMPT,
     WRITER_SCRIPT,
+    _is_turn_of,
     _parse_json_block,
     _sum_usage,
+    _turn_order,
+    _turn_record,
     _wrap_transcript,
     build_transcripts,
     call_engine,
+    dump,
     resolve_transcript,
 )
+
+
+def _turn_id(session: str, index: int) -> str:
+    """A turn Point id, built by the WRITER's own derivation.
+
+    `_is_turn_of` and `_turn_order` both key on this id shape, so a fixture
+    written as a literal (`f"{session}_t{index}"`) would stay green after
+    `sdk._capture_turn_id` moved — and the lane would silently return to 0
+    rows, the exact regression #9932 fixes. The fixture is therefore written
+    in the WRITER's terms, not in `dump`'s expectation of them. Imported
+    lazily: `_turn_id` is only needed once the sdk path is live.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from tortoise.sdk import _capture_turn_id
+
+    return _capture_turn_id(session, index)
+
+
+def _frame(role, body: str) -> str:
+    """A turn's stored `content`, built by the WRITER's own frame.
+
+    The same argument as `_turn_id`, applied to the other half of the
+    coupling: `_turn_record` inverts `[role] body` and `dump` maps rows on the
+    HOST, where `tortoise` is not necessarily importable — so `extract_turns`
+    keeps a LOCAL copy of the inverse and NOTHING but a writer-derived fixture
+    can catch the two drifting. Measured: spelling these fixtures as literals
+    and mutating the writer's frame to `f"[{role}]: {content}"` left all 12
+    `TestDumpReadsTheCaptureShape` tests green while `_FRAME_RE` would consume
+    `[user]` and emit `": hello"` for every real turn.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from tortoise.sdk import _capture_turn_frame
+
+    return _capture_turn_frame({"role": role, "content": body})
+
 
 # The prompt is the cross-model contract the benchmark depends on; pin its
 # exact bytes so any edit is a visible, benchmark-relevant change.
@@ -250,7 +290,9 @@ class TestBuildTranscripts(unittest.TestCase):
             build_transcripts(p)
 
     def test_non_codex_source_falls_back_to_tail_key(self):
-        p = self._write([{"src": "session://my-manual-session", "kind": "decision",
+        # a plain hand-built src (NOT `session:`, which has its own branch)
+        # reaches the documented tail-key fallback.
+        p = self._write([{"src": "manual/my-manual-session", "kind": "decision",
                           "by": None, "content": "Hello.", "at": None}])
         ts = build_transcripts(p)
         self.assertEqual(list(ts), ["my-manual-session"])
@@ -259,16 +301,30 @@ class TestBuildTranscripts(unittest.TestCase):
     def test_non_codex_fragments_do_not_split_one_session(self):
         # a hand-built file's src carries per-message fragments: stripping
         # them keeps one session one transcript (and no length cut silently
-        # merges distinct sessions the way the codex lane raises loudly on)
+        # merges distinct sessions the way the codex lane raises loudly on).
+        # A non-`session:` src, so it exercises the FALLBACK branch.
         p = self._write([
-            {"src": "session://my-session#message=1", "kind": "decision",
+            {"src": "manual/my-session#message=1", "kind": "decision",
              "by": None, "content": "one", "at": None},
-            {"src": "session://my-session#message=2", "kind": "decision",
+            {"src": "manual/my-session#message=2", "kind": "decision",
              "by": None, "content": "two", "at": None},
         ])
         ts = build_transcripts(p)
         self.assertEqual(list(ts), ["my-session"])
         self.assertEqual(ts["my-session"].count("\n"), 1)
+
+    def test_session_source_strips_only_the_message_fragment(self):
+        # the `session:` branch's OWN contract: one session, many message
+        # fragments, keyed by the whole id.
+        p = self._write([
+            {"src": "session://teamA/run-7#message=1", "kind": "event",
+             "by": "user", "content": "one", "at": None},
+            {"src": "session://teamA/run-7#message=2", "kind": "event",
+             "by": "user", "content": "two", "at": None},
+        ])
+        ts = build_transcripts(p)
+        self.assertEqual(list(ts), ["teamA/run-7"])
+        self.assertEqual(ts["teamA/run-7"].count("\n"), 1)
 
     def test_selector_exact_unique_prefix_and_ambiguity(self):
         p = self._write([
@@ -285,6 +341,274 @@ class TestBuildTranscripts(unittest.TestCase):
             resolve_transcript("aaaaaaaa", ts)
         with self.assertRaises(SystemExit):  # no such thread
             resolve_transcript("dddddddd", ts)
+
+
+class TestDumpReadsTheCaptureShape(unittest.TestCase):
+    """#9932: `dump` must read the shape a capture lane actually writes.
+
+    The regression this pins: `dump` used `p.extractedFrom STARTS WITH
+    'codex://'` + `p.authoredBy`, and the ONE turn store writes neither — it
+    MERGEs `(s:Session)-[:CONTAINS]->(t:Point)` and stores the role as
+    `speaker`. Against a real capture the documented dump→run→write workflow
+    therefore started at 0 rows.
+    """
+
+    def test_predicate_is_coupled_to_the_turn_writers_real_properties(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from tortoise.sdk import _TURN_WRITE_CYPHER
+
+        writer = _TURN_WRITE_CYPHER
+        # every node property the dump query filters on or returns is SET by
+        # the writer, so a renamed property reds HERE and not at 0 rows.
+        for prop in ("is_episodic", "pointKind", "speaker", "content",
+                     "createdAt"):
+            self.assertIn(f"t.{prop}=", writer,
+                          f"dump reads t.{prop}, the turn store never sets it")
+        # the two names the old predicate used: absent from the writer by
+        # construction, which is why the query matched nothing.
+        self.assertNotIn("extractedFrom", writer)
+        self.assertNotIn("authoredBy", writer)
+        self.assertIn("MATCH (s:Session {id:$sid}) ", writer)
+        # the pointKind VALUE the query filters on is built outside that string
+        # (`turn_rows[...] = {"k": "event", ...}`): a changed literal would
+        # leave the name-level assertion green while dump returned 0 rows.
+        import inspect
+
+        from tortoise.sdk import _write_capture_turns
+        self.assertIn('"k": "event"', inspect.getsource(_write_capture_turns))
+
+        # ...and the query walks the wiring the writer creates.
+        self.assertIn("CONTAINS", _DUMP_QUERY)
+        self.assertNotIn("extractedFrom", _DUMP_QUERY)
+        self.assertNotIn("authoredBy", _DUMP_QUERY)
+
+    def test_turn_order_is_the_turn_index_not_the_batch_timestamp(self):
+        # the writer stamps a whole capture batch with ONE `$now`, so
+        # `createdAt` cannot order a session's turns. The index in the id is
+        # the order, parsed as an integer: `t10` must sort AFTER `t2`.
+        ts = "2026-11-02T00:00:00+00:00"
+        rows = [["session://s1", "event", f"r{i}", _frame(f"r{i}", f"m{i}"), ts, _turn_id("s1", i)]
+                for i in range(11)]
+        got = [r[5] for r in sorted(reversed(rows), key=_turn_order)]
+        self.assertEqual(got, [_turn_id("s1", i) for i in range(11)])
+        # two sessions never interleave
+        mixed = [["session://b", "event", "r", _frame("r", "x"), ts, _turn_id("b", 0)],
+                 ["session://a", "event", "r", _frame("r", "x"), ts, _turn_id("a", 1)],
+                 ["session://a", "event", "r", _frame("r", "x"), ts, _turn_id("a", 0)]]
+        self.assertEqual([r[5] for r in sorted(mixed, key=_turn_order)],
+                         [_turn_id("a", 0), _turn_id("a", 1), _turn_id("b", 0)])
+
+    def test_turn_record_unframes_the_written_turn_text(self):
+        # `content` holds the writer's own `[role] body` frame and `speaker`
+        # holds the role, so passing content through verbatim says it twice.
+        rec = _turn_record(["session://s1", "event", "user", _frame("user", "hello"), None])
+        self.assertEqual(rec["by"], "user")
+        self.assertEqual(rec["content"], "hello")
+        # an EMPTY role still unframes (the SDK inverse uses `*`, not `+`)
+        empty = _turn_record(["session://s1", "event", "", _frame("", "hi"), None])
+        self.assertEqual(empty["content"], "hi")
+        # an unframed / hand-built record is passed through unchanged
+        plain = _turn_record(["session://s1", "event", None, "hello", None])
+        self.assertEqual(plain["content"], "hello")
+
+    def test_two_sessions_with_a_shared_tail_never_merge(self):
+        # a tail split would collapse these into one transcript; the key is the
+        # WHOLE session id (minus only the writer's own `#message=` fragment).
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            for src in ("session://teamA/run-7", "session://teamB/run-7",
+                        "session://x#message=1"):
+                f.write(json.dumps({"src": src, "kind": "event", "by": "user",
+                                    "content": "x", "at": None}) + "\n")
+        self.addCleanup(os.unlink, f.name)
+        self.assertEqual(list(build_transcripts(Path(f.name))),
+                         ["teamA/run-7", "teamB/run-7", "x"])
+
+    def test_the_canonical_single_colon_session_source_keys_by_the_session_id(self):
+        # the repo's canonical identity is `session:<session_id>` with NO
+        # slashes (`derive_session_source_url`, ONTOLOGY §4.6), which is the
+        # spelling a HAND-BUILT turns file uses; `dump` itself emits
+        # `session://<id>`. Only the `://` spelling was stripped, so a
+        # single-colon source keyed as `session:abc123` and
+        # `--transcript abc123` exited `transcript key not found;
+        # have: ['session:abc123']`. Both spellings are ONE session, so they
+        # must key identically — and never merge two DIFFERENT sessions.
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            for src in ("session:abc123", "session://abc123#message=2",
+                        "session:xyz789"):
+                f.write(json.dumps({"src": src, "kind": "event", "by": "user",
+                                    "content": "x", "at": None}) + "\n")
+        self.addCleanup(os.unlink, f.name)
+        got = build_transcripts(Path(f.name))
+        self.assertEqual(list(got), ["abc123", "xyz789"])
+        self.assertEqual(len(got["abc123"].splitlines()), 2,
+                         "both spellings of one session are ONE transcript")
+
+    def test_an_empty_dump_names_the_cause_that_actually_applies(self):
+        # #9932 named the defect as the OPERATOR MESSAGE: `0 turns captured — is
+        # TORTOISE_CAPTURE on…` points at capture in the one case it cannot be
+        # (the query matched rows and the ID shape rejected them) and misses
+        # the record-armed deployment entirely (#10000: capture is ON and the
+        # turns live in Postgres, not the graph). Rejected rows were dropped
+        # with no count, so "0 turns" covered both facts.
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            payload = "\n".join([
+                json.dumps(["session://s1", "event", "user", _frame("user", "hi"), None,
+                            "s1_note"]),
+                json.dumps(["session://s1", "event", "user", _frame("user", "hi"), None,
+                            "s1_other"]),
+            ])
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n",
+                                                         stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+        matched = str(cm.exception)
+        self.assertIn("MATCHED 2", matched,
+                      "the count of rejected rows must reach the operator")
+        self.assertIn("_capture_turn_id", matched,
+                      "the id derivation is the cause this case rules out")
+        # ...but it is ONE of two, not the cause. `_is_turn_of` rejecting a row
+        # proves the row is not a turn of this session, never WHY: `pointKind`'s
+        # vocabulary is OPEN (`create_point` takes any registered kind), so a
+        # caller-minted `is_episodic` `event` Point under the Session matches
+        # `_DUMP_QUERY` and is not a turn — `session_reinjection`'s own
+        # `_TURN_SHAPE_FILTER` exists because of exactly that (#2517 review).
+        # Naming only the id derivation sends that operator to
+        # `sdk._capture_turn_id`, a place that is not at fault: #9932's defect
+        # one layer down.
+        for fragment in ("NOT turns", "open vocabulary", "_TURN_SHAPE_FILTER"):
+            self.assertIn(fragment, matched,
+                          "a matched-but-rejected row need not be a turn at all "
+                          "— that cause needs naming too")
+        self.assertNotIn("is TORTOISE_CAPTURE on", matched,
+                         "capture is ON here — that is what MATCHED rows prove")
+
+        # ...and NO rows is the other case: name the record-armed deployment.
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout="", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+        absent = str(cm.exception)
+        for fragment in ("matched NO point", "TORTOISE_RECORD_DSN",
+                         "get_session", "--allow-empty"):
+            self.assertIn(fragment, absent)
+        # ...and the predicate-mismatch cause is named TOO. That is the cause
+        # #9932 itself was, and the first cut of this message offered only two
+        # (capture off / the record), sending the operator to a setting that
+        # was not the cause — the same defect in a new coat. The named remedy
+        # must be the one that actually backfills `(s:Session)-[:CONTAINS]->`
+        # turns, so the fix is executable rather than merely mentioned.
+        for fragment in ("is_episodic", "backfill_is_episodic.py"):
+            self.assertIn(fragment, absent,
+                          "a pre-#947 graph has no `is_episodic` flag, so the "
+                          "predicate matches nothing — that cause needs naming")
+
+    def test_dump_payload_round_trips_six_columns(self):
+        # the container emitter and `_DUMP_QUERY`'s RETURN arity must agree;
+        # a short row is an IndexError inside the sort, not a red test, unless
+        # this drives `dump()` itself with the subprocess mocked.
+        emitted = json.dumps(["session://s1", "event", "user",
+                              _frame("user", "hello"), "2026-11-02T00:00:00Z", _turn_id("s1", 0)])
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=emitted + "\n", stderr="")
+                dump(out)
+            self.assertEqual(build_transcripts(out), {"s1": "[2026-11-02] user: hello"})
+            # the emitter and the query's RETURN arity must agree: a column
+            # added to (or dropped from) either side is the cycle-2 P0
+            # (`IndexError` inside the sort), so assert the two counts here
+            # rather than trusting the mocked payload.
+            script = run.call_args[0][0][-1]
+            ret = _DUMP_QUERY.split("RETURN ", 1)[1].split(" ORDER BY ", 1)[0]
+            cols = len([c for c in ret.split(",")])
+            self.assertEqual(cols, 6)
+            self.assertIn("r[5]", script)
+            for i in range(cols):
+                self.assertIn(f"r[{i}]", script,
+                              f"the emitter must print column {i}")
+
+    def test_dump_writes_the_file_in_turn_index_order_not_the_graph_order(self):
+        # `_turn_order` alone is NOT enough: it is only ever called by the test
+        # that exercises it directly, so deleting the `sorted(...)` around
+        # `dump`'s own write (or re-adding an ORDER-BY-shaped reorder) left the
+        # whole suite green and restored the cycle-1 bug — a scrambled
+        # transcript. Assert the FILE `dump` writes, from a payload the graph
+        # returns deliberately out of order, so the wiring is falsifiable and
+        # not just the comparator.
+        #
+        # The rows carry ONE identical `createdAt` (what the writer does: it
+        # stamps a capture batch with one `$now`), so a timestamp sort cannot
+        # rescue this the way the old predicate did. `s1_t10` must come last:
+        # a lexicographic sort would put it between t0/t1 and before t2.
+        ts = "2026-11-02T00:00:00+00:00"
+        rows = [
+            ["session://s1", "event", "assistant", _frame("assistant", f"m{i}"), ts,
+             _turn_id("s1", i)]
+            for i in (10, 2, 0)
+        ] + [
+            # a turn-shaped point whose id is NOT a turn: it must be dropped,
+            # not spliced in by the sort.
+            ["session://s1", "event", "user", _frame("user", "claim"), ts, "s1_note"],
+        ]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n",
+                                                         stderr="")
+                dump(out)
+            written = [json.loads(ln) for ln in out.read_text().splitlines() if ln]
+            # ...and the file is the transcript the operator actually reads.
+            transcripts = build_transcripts(out)
+        self.assertEqual([r["content"] for r in written],
+                         ["m0", "m2", "m10"],
+                         "dump must write the turn INDEX order, and t10 last")
+        self.assertNotIn("claim", [r["content"] for r in written],
+                         "a non-turn id is rejected, never sorted in")
+        self.assertEqual(
+            transcripts,
+            {"s1": "[2026-11-02] assistant: m0\n"
+                   "[2026-11-02] assistant: m2\n"
+                   "[2026-11-02] assistant: m10"})
+
+    def test_turn_order_refuses_a_turn_id_with_no_index(self):
+        with self.assertRaises(ValueError):
+            _turn_order(["session://s1", "event", "r", _frame("r", "x"), None, "no-index"])
+
+    def test_a_non_turn_point_is_not_spliced_into_the_transcript(self):
+        # `is_episodic` + `pointKind='event'` is not enough: only the derived
+        # `{session}_t{i}` id is a turn.
+        self.assertTrue(_is_turn_of(["session://s1", "event", "r", "x", None, _turn_id("s1", 0)]))
+        self.assertFalse(_is_turn_of(["session://s1", "event", "r", "x", None, "s1_note"]))
+        # the prefix hazard: `s10`'s session row must not admit `s1`'s turn id
+        self.assertFalse(_is_turn_of(["session://s10", "event", "r", "x", None,
+                                      _turn_id("s1", 0)]))
+
+    def test_turn_record_carries_speaker_as_the_role(self):
+        rec = _turn_record(["session://s1", "event", "user", "hello", None])
+        self.assertEqual(rec["src"], "session://s1")
+        self.assertEqual(rec["by"], "user", "the role is `speaker`, not `authoredBy`")
+        self.assertEqual(rec["kind"], "event")
+        self.assertEqual(rec["content"], "hello")
+
+    def test_dumped_record_keys_a_transcript_by_session_id(self):
+        # the dumped shape must flow through build_transcripts to one
+        # transcript keyed by the capture session id — the whole point of the
+        # lane is that this chain starts at non-zero rows.
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(_turn_record(["session://s1", "event", "user",
+                                             "hello", "2026-11-02T00:00:00Z"])) + "\n")
+            f.write(json.dumps(_turn_record(["session://s1", "event", "assistant",
+                                             "hi", "2026-11-02T00:00:01Z"])) + "\n")
+        self.addCleanup(os.unlink, f.name)
+        ts = build_transcripts(Path(f.name))
+        self.assertEqual(list(ts), ["s1"])
+        self.assertIn("[2026-11-02] user: hello", ts["s1"])
+        self.assertIn("[2026-11-02] assistant: hi", ts["s1"])
 
 
 class TestPromptContract(unittest.TestCase):
