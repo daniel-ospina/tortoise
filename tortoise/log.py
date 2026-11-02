@@ -1208,6 +1208,81 @@ def read_for_replay(log) -> list[dict]:
     return read_all()
 
 
+class MentionScan:
+    """One RESUMABLE, bounded-memory byte scan of a journal (#10515 / #10543 r8).
+
+    Iterating yields the raw journal lines whose bytes contain ``needle`` (or
+    EVERY line when ``needle`` is ``None``) — the contract
+    :meth:`EventLog.mention_lines` already had. What this ADDS is
+    :attr:`resume_offset`: the byte offset just past the last COMPLETE line it
+    consumed, which a LATER scan may start from, because a journal is
+    append-only — nothing before that offset can change.
+
+    ⛔ WHY IT EXISTS (review round 8, finding 2). The caller's memo was keyed on
+    the whole ``os.stat`` identity, so ANY journal append invalidated it and the
+    next distinct absent id re-scanned from byte 0. That made the presence probe
+    O(journal) on **every absent write** on the live lane #7405 describes, and
+    the cost grows monotonically with tenant age (the journal is append-only and
+    never rotated): ~97.5 ms at the measured 23.7 MB is ~1 s at 240 MB and
+    several seconds for the 1.2 GB a 1M-record journal occupies — paid
+    SYNCHRONOUSLY inside ``update_point``, which is HTTP-exposed. QUIESCENT
+    journals were never the problem; appends were.
+
+    ⚠️ A TRAILING PARTIAL LINE IS DELIBERATELY NOT COUNTED. If the journal ends
+    in an unterminated line, ``resume_offset`` points at that line's FIRST byte,
+    so the next scan re-reads it WHOLE. A record that was mid-write at the first
+    read is then folded once, complete, instead of being read as two
+    unparseable fragments — the one way resuming could LOSE a record rather
+    than merely re-read one (a re-read is safe: the fold is last-record-wins).
+
+    ``start`` is taken as given. Only an offset that came from ``resume_offset``
+    is guaranteed to sit on a line boundary; a caller that invents one may read
+    a fragment (which fails its parse and is skipped there, never here). A
+    ``start`` past EOF yields nothing and leaves ``resume_offset`` beyond the
+    file — the caller owns the truncation check, because only it knows which
+    journal state its own memo describes.
+    """
+
+    __slots__ = ('_chunk', '_needle', '_path', '_start', 'resume_offset')
+
+    def __init__(self, path, needle: bytes | None = None, start: int = 0,
+                 chunk: int | None = None):
+        self._path = path
+        self._needle = needle
+        self._start = max(0, int(start))
+        self._chunk = chunk
+        self.resume_offset = self._start
+
+    def __iter__(self) -> Iterator[bytes]:
+        chunk_size = self._chunk or EventLog.MENTION_SCAN_CHUNK
+        consumed = self._start
+        tail = b''
+        self.resume_offset = self._start
+        with open(self._path, 'rb') as fh:
+            if self._start:
+                fh.seek(self._start)
+            while True:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+                consumed += len(chunk)
+                buf = tail + chunk
+                lines = buf.split(b'\n')
+                tail = lines.pop()      # a partial line — carried, never parsed
+                # everything before `tail` ended at a ``\n``: a safe resume point
+                self.resume_offset = consumed - len(tail)
+                for line in lines:
+                    for sub in line.split(b'\r'):
+                        if sub and (self._needle is None or self._needle in sub):
+                            yield sub
+        # the carried partial line (no terminator at EOF) is folded too — a
+        # COMPLETE record may simply lack its trailing newline — but it is never
+        # counted in `resume_offset`, so the next scan re-reads it whole
+        for sub in tail.split(b'\r'):
+            if sub and (self._needle is None or self._needle in sub):
+                yield sub
+
+
 class EventLog:
     #: Is this log a JOURNAL — a durable, replayable truth set — or a scratch
     #: buffer that must never feed the record? ``record_writer.write_live_record``
@@ -2002,8 +2077,13 @@ class EventLog:
     #: budget rather than a starting point.
     MENTION_SCAN_CHUNK: int = 1 << 20
 
-    def mention_lines(self, needle: bytes) -> Iterator[bytes]:
-        """Yield the raw journal lines whose bytes contain *needle* (#10515).
+    def mention_lines(self, needle: bytes | None = None,
+                      start: int = 0) -> MentionScan:
+        """Scan the journal for *needle*, resumably from *start* (#10515).
+
+        ``needle=None`` yields EVERY line — the caller folds them all (see
+        :func:`tortoise.sdk._journal_presence_state`, which retains a prefix map
+        of every id so a later call can resume).
 
         The bounded-memory half of "does the journal name this id at all", for a
         caller that must NOT pay :meth:`read_all`'s full parse (measured on a
@@ -2030,26 +2110,19 @@ class EventLog:
         it could still answer for. A caller that needs the parsed record gets it
         by parsing what is yielded.
 
+        ⛔ RESUMABLE (review round 8, finding 2). The returned :class:`MentionScan`
+        is an iterable of the same lines, and after iteration its
+        ``resume_offset`` names the end of the last COMPLETE line consumed — the
+        position a later scan of the SAME append-only journal may start from, so
+        a caller that retains what it has folded pays only for bytes appended
+        since, instead of re-reading the whole journal on every append.
+        ``start=0`` (the default) is the full scan, unchanged.
+
         Raises ``FileNotFoundError`` for a configured path nothing has written
         yet — the caller decides whether that is an error or ordinary early life;
         this method does not invent an empty answer for it.
         """
-        tail = b''
-        with open(self.path, 'rb') as fh:
-            while True:
-                chunk = fh.read(self.MENTION_SCAN_CHUNK)
-                if not chunk:
-                    break
-                buf = tail + chunk
-                lines = buf.split(b'\n')
-                tail = lines.pop()          # a partial line — carried, never parsed
-                for line in lines:
-                    for sub in line.split(b'\r'):
-                        if needle in sub:
-                            yield sub
-        for sub in tail.split(b'\r'):
-            if needle in sub:
-                yield sub
+        return MentionScan(self.path, needle, start, self.MENTION_SCAN_CHUNK)
 
     def carried_records(self) -> bool:
         """Did this journal demonstrably carry at least one RECORD? (#10543 r7)

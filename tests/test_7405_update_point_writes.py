@@ -1485,6 +1485,178 @@ def test_a_journal_removed_mid_flight_is_unreadable_not_a_typo(tmp_path, caplog)
             sdk.close()
 
 
+def test_a_non_point_record_naming_the_id_is_not_journal_presence(tmp_path, caplog):
+    """#10543 review round 8, finding 1: presence is a KIND question, both ways.
+
+    Round 4 gated the DELETE arm on ``_record_owns_point`` and left the presence
+    arm kind-blind (``else: state[point_id] = True``), so ANY record carrying the
+    id folded it to "the journal holds this POINT" — whatever entity it belongs
+    to. The flat-``id`` writers are real: ``EventAPI._emit`` splats its payload at
+    the TOP level, so ``add_object`` / ``add_subject`` / ``add_event`` /
+    ``add_document`` all land a top-level ``id``. An Object id that coincides with
+    a TYPO'd point id therefore made the typo answer ``journal_known``: a WARNING
+    claiming a lost revision plus a ``silent_revision_losses`` increment on
+    ordinary typo traffic — the counter that must stay alertable, grown by the
+    path #10515 indicator 2 says must stay silent.
+
+    The control at the end proves the gate did not simply switch presence OFF: a
+    real ``PointAdded`` for the same id still confers it, last-record-wins.
+    """
+    from tortoise import monitoring
+
+    sdk, _journal = _sdk_journaled(tmp_path, "nonpointkind")
+    try:
+        typo = str(uuid.uuid4())
+        log = sdk._get_event_log()
+        # the OTHER kinds' own records, in the producers' shape
+        log.append({"type": "ObjectRegistered", "id": typo, "name": "collides"})
+        log.append({"type": "EntityMutated", "id": typo,
+                    "label": "Object", "op": "update"})
+        before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(typo, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == before, (
+            "an Object/Entity record naming the id does NOT put a POINT in the "
+            "journal — counting it turns every typo into a lost revision on a "
+            "lane whose journal mentions other kinds")
+        assert not any("will not be replayed" in r.getMessage()
+                       for r in caplog.records), (
+            "a typo must not warn, whatever kinds share the journal")
+
+        # ── the control: a POINT record for the same id still confers presence ──
+        log.append({"type": "PointAdded", "point": {"id": typo}})
+        after_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(typo, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == after_before + 1, (
+            "the kind gate must not silence a REAL point record — a journal "
+            "that does hold the point is exactly the #7405 shape")
+        assert any("will not be replayed" in r.getMessage()
+                   for r in caplog.records)
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_the_presence_memo_resumes_and_answers_a_never_seen_id(
+        tmp_path, monkeypatch, caplog):
+    """#10543 review round 8, finding 2: appends must not force a re-read.
+
+    The memo was keyed on the whole ``os.stat`` identity, so ANY journal append
+    invalidated it and the next absent id re-scanned from byte 0 — O(journal) per
+    absent write on exactly the LIVE lane #7405 describes, growing with tenant
+    age. The fix retains a presence map complete for ``[0, resume_offset)`` and
+    folds only the appended range.
+
+    Three properties are pinned, because two of them are the ways a resuming memo
+    can be WRONG rather than merely slow:
+
+    * the second absent id RESUMES (its scan starts past byte 0);
+    * an id whose only record sits BEFORE the resume offset is still answered
+      from the map — a shared offset with a needle-filtered scan would answer a
+      fabricated ``False`` for it, which is the dangerous silence;
+    * the retained map answers an id that was never asked about while it was
+      being built, without reading the journal again.
+    """
+    from tortoise import monitoring
+    from tortoise.log import EventLog
+
+    sdk, journal = _sdk_journaled(tmp_path, "resume")
+    try:
+        # an OLD point: its record sits at the head of the journal, long before
+        # any offset a later scan resumes from
+        old = _pid(sdk)
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) DETACH DELETE n", {"id": old})
+        assert not sdk.get_point(old)
+        log = sdk._get_event_log()
+        for i in range(200):
+            log.append({"type": "PointAdded", "point": {"id": f"bulk-{i:04d}"}})
+
+        scans: list[tuple[int | None, int]] = []
+        real = EventLog.mention_lines
+
+        def spy(self, needle=None, start=0):
+            scans.append((needle, start))
+            return real(self, needle, start)
+
+        monkeypatch.setattr(EventLog, "mention_lines", spy)
+
+        # ── the first absent write builds the map: one pass from byte 0 ──
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert scans == [(None, 0)], (
+            f"the first absent id pays one full pass, saw {scans}")
+        first_resume = sdk._journal_presence_memo['folded_to']
+        assert first_resume == os.path.getsize(journal), (
+            "the memo must record how far it folded, or it cannot resume")
+
+        # ── one append later: the next absent id resumes from that offset ──
+        log.append({"type": "PointAdded", "point": {"id": "after-the-scan"}})
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert len(scans) == 2, f"one pass per absent write, saw {scans}"
+        assert scans[1][1] == first_resume, (
+            "the second absent id must RESUME at the offset the first pass "
+            f"reached ({first_resume}), not re-read the journal: {scans[1]}")
+        assert scans[1][1] < os.path.getsize(journal), (
+            "the resumed pass must start before EOF — resuming at EOF would "
+            "mean it read nothing at all")
+
+        # ── a record that predates the resume offset is still found ──
+        known_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(old, confidence=0.9) == {}
+        assert len(scans) == 2, (
+            "an id the retained map already covers must cost NO journal read — "
+            f"a resuming memo that re-reads is the defect it exists to remove: {scans}")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == known_before + 1, (
+            "the map must be complete for the bytes it folded, so a record that "
+            "PREDATES the resume offset still answers presence — a shared offset "
+            "over a needle-filtered scan answers a fabricated False here, which "
+            "is the silence #10515 exists to remove")
+        assert any("will not be replayed" in r.getMessage()
+                   for r in caplog.records)
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_an_empty_id_does_not_scan_the_journal_at_all(tmp_path, monkeypatch):
+    """An EMPTY id can never be a journaled point, and its needle is every line.
+
+    ``b''`` is a substring of every record, so the scan would JSON-parse the WHOLE
+    journal to answer a typo — the same cheap-request → full-journal-I/O amplifier
+    review round 8, finding 2 names, in its worst form. Answering directly is both
+    correct and free.
+    """
+    from tortoise.log import EventLog
+
+    sdk, _journal = _sdk_journaled(tmp_path, "emptyid")
+    try:
+        sdk._get_event_log().append({"type": "PointAdded", "point": {"id": "x"}})
+        scans: list[tuple[int | None, int]] = []
+        real = EventLog.mention_lines
+
+        def spy(self, needle=None, start=0):
+            scans.append((needle, start))
+            return real(self, needle, start)
+
+        monkeypatch.setattr(EventLog, "mention_lines", spy)
+        assert sdk._journal_knows_point("") is False, (
+            "an empty id is not a journaled point")
+        assert scans == [], (
+            f"an empty id must not read the journal at all, saw {scans}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 class TestJournalMentionScan:
     """The journal byte-scan's MECHANICS, pinned where they now live (#10543).
 
@@ -1556,6 +1728,52 @@ class TestJournalMentionScan:
         seen = list(EventLog(journal).mention_lines(b"crsplit"))
         assert len(seen) == 1, f"saw {seen!r}"
         assert b"unrelated" not in seen[0]
+
+    def test_a_later_scan_resumes_at_a_line_boundary(self, tmp_path):
+        """Resuming is what makes the memo O(appended) — and it must not split a line.
+
+        ``resume_offset`` is the end of the last COMPLETE line, so a caller that
+        retains presence for ``[0, resume_offset)`` and starts again there reads
+        every record exactly once. A record that was MID-WRITE at the first pass
+        is the one shape that can go wrong: resuming past it would read its tail
+        as a whole line, fold nothing, and lose its presence. So the offset is
+        deliberately held before an unterminated tail, and the next pass re-reads
+        that record whole.
+        """
+        from tortoise.log import EventLog
+
+        journal = str(tmp_path / "resume.jsonl")
+        log = EventLog(journal)
+        # through the PRODUCER: `append` is what terminates a record, and it
+        # repairs an unterminated tail before writing
+        log.append({"type": "PointAdded", "point": {"id": "one"}})
+        log.append({"type": "PointAdded", "point": {"id": "two"}})
+        first = log.mention_lines(None)
+        assert len(list(first)) == 2
+        assert first.resume_offset == os.path.getsize(journal), (
+            "a journal ending on a terminator resumes at EOF")
+
+        log.append({"type": "PointAdded", "point": {"id": "three"}})
+        resumed = log.mention_lines(None, start=first.resume_offset)
+        lines = [json.loads(line.decode("utf-8")) for line in resumed]
+        assert [r["point"]["id"] for r in lines] == ["three"], (
+            f"a resumed scan must yield ONLY the appended records, saw {lines}")
+
+        # ── the torn-tail rule ──
+        torn = json.dumps({"type": "PointAdded",
+                           "point": {"id": "four"}}).encode("utf-8")
+        with open(journal, "ab") as fh:
+            fh.write(torn)                      # no terminator yet
+        partial = log.mention_lines(None, start=resumed.resume_offset)
+        assert len(list(partial)) == 1, "a complete-but-unterminated record is read"
+        assert partial.resume_offset < os.path.getsize(journal), (
+            "an unterminated tail must NOT be counted as folded: the next pass "
+            "has to re-read it whole, or a record could be lost")
+        again = log.mention_lines(None, start=partial.resume_offset)
+        assert [json.loads(line.decode("utf-8"))["point"]["id"]
+                for line in again] == ["four"], (
+            "re-reading the tail yields the same record, whole — never two "
+            "unparseable fragments")
 
     def test_a_missing_journal_raises_rather_than_answering(self, tmp_path):
         """The silent early-life path belongs to the CALLER, not to this reader."""

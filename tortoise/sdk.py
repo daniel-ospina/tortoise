@@ -4153,14 +4153,22 @@ def _record_owns_point(label) -> bool:
                 and label in _NON_POINT_ENTITY_LABELS_CACHE)
 
 
-def _apply_journal_presence(line: bytes, point_id: str,
-                            state: dict[str, bool]) -> None:
-    """Fold ONE journal line into *state* for *point_id* (#10515 review B1).
+def _apply_journal_presence(line: bytes, state: dict[str, bool]) -> None:
+    """Fold ONE journal line into *state* for EVERY id it changes (#10515 B1).
 
     Presence is LAST-RECORD-WINS per id, and only the record types that change
     it are applied — see :meth:`TortoiseSDK._journal_knows_point` for why a bare
     "does the journal mention this id" is the wrong question (a hard delete
     journals the id too, and would make every write-after-delete look lost).
+
+    ⛔ EVERY ID, not one caller-supplied id (review round 8, finding 2). The scan
+    used to be needle-FILTERED for the id being asked, so an answer was only ever
+    learned for that id: the memo could not resume a shared journal prefix (a
+    never-seen id would have to re-read the file from byte 0, and a shared offset
+    WOULD have fabricated ``False`` for an id whose only record predates it).
+    Folding every record instead makes the retained state a plain prefix map —
+    complete for ``[0, resume_offset)`` — so ANY id, seen or not, is answered
+    from it, which is what turns the steady state into O(bytes appended).
     """
     try:
         rec = _json.loads(line.decode('utf-8', 'replace'))
@@ -4186,17 +4194,38 @@ def _apply_journal_presence(line: bytes, point_id: str,
     # id` on a healthy lane). The projection's own presence scan folds it the same
     # way (`projection/__init__.py:8060`).
     if kind == 'PointsMerged':
-        if rec.get('keep_id') == point_id:
-            state[point_id] = True
-        elif point_id in (rec.get('merge_ids') or ()):
-            state[point_id] = False
+        keep = rec.get('keep_id')
+        if keep is not None:
+            state[str(keep)] = True
+        merged = rec.get('merge_ids') or ()
+        if isinstance(merged, str):
+            # ONE id written as a bare string is not an iterable of characters.
+            # `api.py::merge_points` normalizes, so no in-repo writer emits this
+            # — but the fold now reads every record for every id, so a shape that
+            # used to be protected by the needle filter is guarded here.
+            merged = (merged,)
+        for mid in merged:
+            if mid is not None:
+                state[str(mid)] = False
         return
-    if _rec_point_id(rec) != point_id:
+    rec_id = _rec_point_id(rec)
+    if rec_id is None:
         return
-    if kind == 'EntityMutated' and rec.get('op') == 'delete':
+    rec_id = str(rec_id)
+    if kind == 'EntityMutated':
+        # ⛔ THE KIND GATE RUNS IN BOTH DIRECTIONS (review round 8, finding 1).
+        # Round 4 gated the DELETE arm on `_record_owns_point` and left the
+        # presence arm kind-blind, so ANY record carrying the id folded it to
+        # "the journal holds this POINT" — whatever entity it belongs to. The
+        # flat-`id` writers are real (`EventAPI._emit` splats its payload at the
+        # TOP level: `add_object` / `add_subject` / `add_event` / `add_document`
+        # all land a top-level `id`), so an Object/Subject/Event id that
+        # coincides with a TYPO'd point id made the typo answer `journal_known`:
+        # the counter that has to stay alertable grew on ordinary typos —
+        # indicator 2, in the direction round 4 did not close.
         if not _record_owns_point(rec.get('label')):
-            return          # a delete of another KIND never owns a Point
-        state[point_id] = False
+            return          # another KIND's record owns no Point, either way
+        state[rec_id] = rec.get('op') != 'delete'
     elif kind == 'PointRetracted' and rec.get('deleted'):
         # The HARD delete (`_deleted_point_payload` writes `deleted`
         # unconditionally). A `retract_point` TOMBSTONE keeps the node, so it is
@@ -4204,57 +4233,55 @@ def _apply_journal_presence(line: bytes, point_id: str,
         # marker existed (`{"id": …}` only) folds to presence — the marker's own
         # docstring records that those rows read as tombstones, so this inherits
         # that ambiguity rather than inventing one.
-        state[point_id] = False
+        state[rec_id] = False
+    elif kind in _NON_POINT_RECORD_TYPES:
+        # A NON-Point entity's own record (`ObjectRegistered`, `SubjectAdded`, …)
+        # names its id at the top level too — the rest of round 8's finding 1.
+        # Skipped rather than folded, so the id keeps the last answer a POINT
+        # record gave it; it neither confers nor removes Point presence.
+        return
     else:
-        state[point_id] = True
+        state[rec_id] = True
 
 
-def _journal_presence_mentions(log, point_id: str) -> dict[str, bool]:
-    """Presence state for *point_id* from the journal *log* (#10515).
+def _journal_presence_state(log, state: dict[str, bool], start: int = 0,
+                           needle: bytes | None = None) -> int:
+    """Fold journal presence into *state* from *start*, returning the resume offset.
 
-    One bounded-memory pass over the journal, folding ONLY the records that name
-    the id at all — a journal with 100k records about other points costs a byte
-    scan, not 100k object constructions. The id is the needle rather than the
-    ``"id": "…"`` form so a writer's separator choice cannot defeat it; a false
-    positive is filtered by the parse (:func:`_apply_journal_presence` requires
-    the record's OWN id to match).
+    One bounded-MEMORY pass: a window plus one partial line, never the journal
+    (`EventLog.read_all` materializes every record — 136 MB peak on the 100k
+    record / 23.7 MB journal this was measured on). What is RETAINED between
+    calls is *state*, a plain prefix map ``{id: present}`` covering
+    ``[0, resume_offset)``, which is what makes a repeat call pay only for bytes
+    appended since (review round 8, finding 2):
 
-    Returns a ``{point_id: present}`` dict — ``{}`` when the journal never names
-    it (the typo shape). A record naming the id that no rule can classify leaves
-    it absent, which is the same answer as today.
+    * ``needle=None`` folds EVERY line, so the map is complete for the prefix and
+      ANY id — including one never asked about before — is answered from it;
+    * *needle* narrows the pass to the lines naming that id, which is the
+      DEGRADED path a caller takes when it will not retain a map at all (no
+      ``os.stat`` identity, or a map past its bound). It fills the same dict for
+      whatever record it sees; only the bytes read are fewer.
 
-    SPLIT OF DUTIES (why this takes a LOG and not a path): the byte mechanics —
-    the window, the ``\\n``/``\\r`` separators :meth:`EventLog.read_all`
-    documents, the carried partial line — are the journal's own contract and live
-    in :meth:`EventLog.mention_lines`. The RECORD VOCABULARY is this module's, and
-    stays here in :func:`_apply_journal_presence`. ⛔ The SDK must not open the
-    journal file itself: ``_NON_FS_RECEIVERS`` in the capability model
-    (``tests/tool_surface_capabilities.py``) already declares that a read through
-    the LOG HANDLE is not "reaching a filesystem path" for the HTTP-exclusion
-    guard, while a bare ``open()`` in an SDK method body is — and this scan sits
-    under the ABSENT arm of ``update_point``, so a direct ``open()`` here
-    re-classified ``update_point``, ``create_point``, ``ingest`` and eight other
-    HTTP-EXPOSED writes as operator-only filesystem operations and redded
-    ``test_tool_registry.py`` (measured: 33 fs methods against ``main``'s 12).
+    ``resume_offset`` comes from :class:`tortoise.log.MentionScan` and is the end
+    of the last COMPLETE line consumed, so resuming there can never split a
+    record.
 
-    RESIDUALS, named rather than claimed away (review round 2):
+    MEMORY, stated rather than implied: *state* holds one entry per distinct id
+    the journal names. The caller owns that bound
+    (:data:`_JOURNAL_PRESENCE_MAP_MAX`), because only it knows how long the map
+    is worth retaining.
 
-    * the needle is the raw id bytes, so an id containing ``"``, ``\\`` or a
-      control character is JSON-ESCAPED in the record and never matches its own
-      line — that id reads as a typo. SDK-minted ids are hex-and-dash tokens, so
-      this needs a caller-supplied id; it is bounded and stated, not silent
-      reasoning;
-    * the memory bound follows the separator: for a ``\\n``/``\\r\\n`` journal the
-      peak is one window, but a journal with NO ``\\n`` at all makes the carried
-      partial line the whole file, so memory is linear in journal size there (the
-      ANSWER stays correct — the run of ``\\r``-separated records is still
-      folded).
+    RESIDUAL, still true on the *needle* path only (it was the round-2 note on
+    the always-needle scan): the needle is the raw id bytes, so an id containing
+    ``"``, ``\\`` or a control character is JSON-ESCAPED in the record and never
+    matches its own line — that id reads as a typo. SDK-minted ids are
+    hex-and-dash tokens, and the MAP path parses the record instead of matching
+    bytes, so this needs a caller-supplied id AND a lane that dropped the map.
     """
-    needle = str(point_id).encode('utf-8')
-    state: dict[str, bool] = {}
-    for line in log.mention_lines(needle):
-        _apply_journal_presence(line, point_id, state)
-    return state
+    scan = log.mention_lines(needle, start=start)
+    for line in scan:
+        _apply_journal_presence(line, state)
+    return getattr(scan, 'resume_offset', start)
 
 
 def _change_feed_enabled() -> bool:
@@ -5251,6 +5278,41 @@ def _payload_entity_kind(e: dict) -> str | None:
 _JOURNALED_ENTITY_EVENT_TYPES = (
     "ObjectRegistered", "SubjectAdded", "EventRecorded", "DocumentCreated",
 )
+
+#: Record types that carry a top-level ``id`` belonging to an entity that is NOT
+#: a ``:Point`` — the OTHER half of `_apply_journal_presence`'s kind gate (#10543
+#: review round 8, finding 1; the delete arm's half is `_record_owns_point`).
+#:
+#: Built FROM `_JOURNALED_ENTITY_EVENT_TYPES` rather than re-spelling its four
+#: names, so a canonical entity type added there is excluded here automatically —
+#: the drift a second list would invite. The four extras are the remaining
+#: top-level-``id`` writers for a non-Point kind, each named with its producer:
+#:
+#: * ``ObjectSuperseded`` (#1350) — an Object's status transition;
+#: * ``SourceCreated`` — ``sdk.py`` ``_upsert_source`` journals ``id=url``;
+#: * ``SessionRecorded`` — the ``:Session`` MERGE's record carries ``id=session_id``;
+#: * ``CalibrationRecorded`` — the gate-B marker, ``id=<meta key>``.
+#:
+#: RESIDUAL, named rather than claimed closed: this is a DENY list, so a
+#: non-Point record type that is NOT listed here and carries a colliding id still
+#: folds the id to presence — a false ALARM (a typo reported as a lost revision),
+#: never a false silence, which is the direction the fold must not fail in.
+_NON_POINT_RECORD_TYPES = frozenset(_JOURNALED_ENTITY_EVENT_TYPES) | frozenset({
+    "ObjectSuperseded", "SourceCreated", "SessionRecorded", "CalibrationRecorded",
+})
+
+#: How many ids the retained journal-presence prefix map may hold before it is
+#: dropped (#10543 review round 8, finding 2).
+#:
+#: The map is what makes a repeat presence probe pay only for bytes APPENDED
+#: since (it is complete for ``[0, resume_offset)``, so any id is answered from
+#: it). Its cost is one entry per distinct id the journal names — small next to
+#: the 136 MB ``read_all()`` spike the scan replaced, but RETAINED on a long-lived
+#: SDK in an HTTP-exposed path, so it is bounded CONSCIOUSLY rather than left to
+#: the tenant's history. Past the bound the map is released and the probe falls
+#: back to the needle-filtered pass: the answer is unchanged, only the cost — a
+#: bounded-memory degradation, never a wrong verdict.
+_JOURNAL_PRESENCE_MAP_MAX = 200_000
 
 
 def _journal_record_payload(event: dict) -> dict:
@@ -9768,12 +9830,27 @@ class TortoiseSDK:
         **136 MB** RSS spike. This scan measured **97.5 ms** for a miss (the typo
         shape) and **115.5 ms** for a hit, with a **4.6 MB** peak — 6.5x faster
         and 30x lighter, and linear in journal size (97.5 ms / 100k records =
-        ~1 ms per 1k records). The result is memoised on the journal file's
-        ``os.stat`` identity (inode + size + mtime_ns): repeats of the SAME id pay
-        nothing for the SCAN while the journal is unchanged, and a DIFFERENT id
-        pays one scan per journal state. (The scan is not the whole per-call cost:
+        ~1 ms per 1k records). (The scan is not the whole per-call cost:
         `_report_absent_revision` also issues one `EXISTS` probe first, which is a
         round trip — O(1), but counted here rather than left implicit.)
+
+        ⛔ COST, THE PART THAT GROWS (review round 8, finding 2). The memo used to
+        be keyed on the whole ``os.stat`` identity, so ANY journal append
+        invalidated it and the next distinct absent id re-read from byte 0 —
+        O(journal) on every absent write on exactly the LIVE lane #7405 describes,
+        growing monotonically with tenant age (the journal is append-only and
+        never rotated): ~97.5 ms at the measured 23.7 MB is ~1 s at 240 MB and
+        several seconds for the 1.2 GB a 1M-record journal occupies, paid
+        SYNCHRONOUSLY inside an HTTP-exposed ``update_point``. The memo is now
+        RESUME-ON-THE-SAME-JOURNAL: it retains a presence PREFIX MAP
+        (``{id: present}`` complete for ``[0, resume_offset)``) plus that offset,
+        and a call folds only the bytes appended since — O(bytes appended), which
+        is the reviewer's target. The FIRST absent write on a lane pays one full
+        pass (the 97.5 ms above when it is a miss), and every later one pays the
+        delta. Retained memory becomes the MAP rather than one window, so it is
+        bounded explicitly: past ``_JOURNAL_PRESENCE_MAP_MAX`` ids the map is
+        DROPPED and the call takes the needle-filtered pass instead (today's
+        cost, bounded memory) — a degradation, never a wrong answer.
 
         ⛔ NOT ``EventLog.position()`` (review B2). That read takes the
         process-wide append lock AND the cross-process ``flock``, opens the
@@ -9784,23 +9861,32 @@ class TortoiseSDK:
         5006 ms and degraded every writer on that journal. ``os.stat`` is O(1),
         takes no lock and needs no write permission.
 
-        ⛔ THE MEMO IS PER ID, AND A MISS EXTENDS IT (review round 2, finding 1).
-        The first cut cached a SINGLE id's answer under a journal-wide key, so the
-        next absent write for a DIFFERENT id read a fabricated ``False`` — and in
-        the #7405 window the journal does not change while the arm refuses, so the
-        key never moved: the FIRST loss was reported and every later one went
-        silent, which is the defect this fix exists to remove. The memo now holds
-        ``{id: present}`` and an id it has not seen forces its own scan, so the
-        cost is one scan per DISTINCT absent id per journal state (stated, not
-        hidden — repeats of the same id are free).
+        ⛔ EVERY ID, NOT JUST THE ONE ASKED ABOUT (round 2 finding 1, round 8
+        finding 2). The first cut cached a SINGLE id's answer under a
+        journal-wide key, so the next absent write for a DIFFERENT id read a
+        fabricated ``False`` — in the #7405 window the journal does not change
+        while the arm refuses, so the key never moved: the FIRST loss was reported
+        and every later one went silent. The fix is a map, but a map that only
+        recorded answerED ids could not resume a shared offset either: a
+        never-seen id would have to re-read from 0, and a shared offset WOULD
+        fabricate ``False`` for an id whose only record predates it. So the scan
+        folds EVERY record into the prefix map, and the guarantee is structural
+        rather than incidental: the map is complete for the bytes it has read, so
+        any id — new, old or typo — is answered from it.
 
-        RESIDUAL, named rather than claimed closed (review round 2, finding 2): the
-        stat identity is ``dev+ino+size+mtime_ns``, so a same-inode, same-SIZE
-        rewrite whose ``mtime_ns`` lands in the SAME tick is indistinguishable and
-        the memo answers stale. ``EventLog``'s own position block names the same
-        residual for the same reason. It needs a same-size in-place journal swap
-        inside one clock tick; it is not covered by a record-count stamp either,
-        which is the hole it was chosen over.
+        ⛔ RESUMING CANNOT LOSE A RECORD. ``resume_offset`` sits after the last
+        COMPLETE line, so a record that was mid-write at the first pass is
+        re-read whole next time (a re-read is safe: the fold is
+        last-record-wins). Without that rule a torn record could be split across
+        two passes into two unparseable fragments and its presence lost — the one
+        direction this fold must never fail in.
+
+        RESIDUAL, named rather than claimed closed (review round 2, finding 2): a
+        same-inode, same-SIZE rewrite whose ``mtime_ns`` lands in the SAME tick is
+        indistinguishable from no change and the memo answers stale. ``EventLog``'s
+        own position block names the same residual for the same reason. It needs a
+        same-size in-place journal swap inside one clock tick; it is not covered by
+        a record-count stamp either, which is the hole it was chosen over.
         """
         log = self._get_event_log()
         if log is None:
@@ -9809,16 +9895,47 @@ class TortoiseSDK:
             # (round 3, finding 1 — `None` here alarmed every typo on the default
             # `event_log_path=None` configuration).
             return False
+        if not point_id:
+            # NOTHING can be a journaled point under an EMPTY id, and the needle
+            # would be ``b''`` — a substring of every line, so the scan would
+            # PARSE the whole journal to answer a typo (review round 8, finding
+            # 2's sub-case). Answer the typo directly; a refused write must not
+            # buy a full journal read.
+            return False
         stat_key = self._journal_stat_key(log)
-        cache = getattr(self, '_journal_presence_memo', None)
+        # ── the retained presence PREFIX MAP, if this call may resume from it ──
+        # A NAMED record, not a tuple: every field here is load-bearing and one
+        # of them is the LOG IDENTITY (`is`), which a positional index silently
+        # compared against the wrong element (measured while writing this).
         known: dict[str, bool] = {}
-        if cache is not None and stat_key is not None and cache[0] == stat_key \
-                and cache[2] is log:
-            known = cache[1]
-            if point_id in known:
-                return known[point_id]
+        folded_to = 0
+        memo = getattr(self, '_journal_presence_memo', None)
+        if memo is not None and stat_key is not None and memo['log'] is log:
+            dev, ino, size, stat_mtime = stat_key
+            # A journal this memo does not describe any more is a REPLACEMENT
+            # (inode), a TRUNCATION (below the folded offset) or an IN-PLACE
+            # REWRITE at the same size in a later tick. A map folded from a
+            # different file is not a prefix of this one, so it is discarded —
+            # a full re-fold, never a guess.
+            if memo['ident'] == (dev, ino) and size >= memo['folded_to'] and (
+                    size > memo['folded_to']
+                    or stat_mtime == memo['mtime_ns']):
+                known, folded_to = memo['known'], memo['folded_to']
+                if folded_to >= size:
+                    # the map already covers every byte: no read at all
+                    return known.get(point_id, False)
+        # Past the bound the map is NOT extended: memory stays bounded and the
+        # call takes the needle-filtered pass instead (today's cost). The answer
+        # is the same either way — only how many bytes are read differs.
+        resume_from_map = stat_key is not None \
+            and len(known) <= _JOURNAL_PRESENCE_MAP_MAX
+        narrowed: dict[str, bool] = {}
         try:
-            seen = _journal_presence_mentions(log, point_id)
+            if resume_from_map:
+                resume = _journal_presence_state(log, known, folded_to)
+            else:
+                resume = _journal_presence_state(
+                    log, narrowed, 0, needle=str(point_id).encode('utf-8'))
         except FileNotFoundError:
             # ⛔ A MISSING FILE IS TWO FACTS, and the vocabulary above already
             # names one of them (review round 7, finding 2):
@@ -9843,7 +9960,7 @@ class TortoiseSDK:
                     "asserted to be a typo (#10515)",
                     getattr(log, 'path', None))
                 return None
-            seen = {}
+            return narrowed.get(point_id, False)
         except Exception:  # noqa: BLE001, RUF100 — reported by the caller
             _logger.warning(
                 "journal could not be read to check whether %r is a known "
@@ -9851,10 +9968,23 @@ class TortoiseSDK:
                 "than asserted to be a typo (#10515)",
                 point_id, exc_info=True)
             return None
-        known[point_id] = seen.get(point_id, False)
-        if stat_key is not None:
-            self._journal_presence_memo = (stat_key, known, log)
-        return known[point_id]
+        if not resume_from_map:
+            # no map retained: the narrowed pass answers this id and nothing is
+            # cached, so the next call pays the same bounded price
+            self._journal_presence_memo = None
+            return narrowed.get(point_id, False)
+        if len(known) > _JOURNAL_PRESENCE_MAP_MAX:
+            # the bound was crossed while folding: release it rather than keep
+            # growing, and answer from what was folded (still correct for THIS
+            # call — the map covers [0, resume))
+            self._journal_presence_memo = None
+            return known.get(point_id, False)
+        dev, ino, size, stat_mtime = stat_key
+        self._journal_presence_memo = {
+            'log': log, 'ident': (dev, ino), 'folded_to': resume,
+            'mtime_ns': stat_mtime, 'known': known,
+        }
+        return known.get(point_id, False)
 
     @staticmethod
     def _journal_carried_records(log) -> bool:
