@@ -735,13 +735,39 @@ def no_base_ref_message(explicit: str | None) -> str:
     return NO_BASE_REF + _NO_BASE_REF_TAIL
 
 
+#: The equal-epoch refusal's remedy — and it must name only a path that CAN clear the check.
+#: ⛔ It used to end "…and re-add the log in a PR of its own, after the registration is published
+#: there", which is wrong twice over (#10463 review cycle 7, finding F1):
+#:
+#: 1. It cannot work — measured. `_added_epochs_on` is `git log --diff-filter=A <base> -- <path>`,
+#:    and a later DELETION does not remove the earlier add from that ref's history. So after a
+#:    withdrawal AND a re-add, the base reports BOTH add-commits and `min()` is still the collapsed
+#:    one (probe: add @1700000000 → withdraw → re-add @1700000300 ⇒ min() = 1700000000), which takes
+#:    `log_epoch <= prereg_epoch` again and re-emits this same refusal, forever. The instruction
+#:    rejects the very path it names.
+#: 2. It is the move the recorded ruling forbids: #10463 comment 6564634454 item 2 — "**Do not
+#:    re-add the log in a fresh commit to obtain a later add-commit.** That satisfies the letter of
+#:    the check while the real ordering is unchanged — it is precisely the fabrication the guard
+#:    exists to prevent." The refusal text is what an operator reads, so instructing it is adopting
+#:    the forbidden move in the one surface they act on.
+#:
+#: What is left is the honest one: a squash-collapsed log has NO provable ordering to recover, and
+#: the collapsed add-commit is permanent for its PATH — so the path forward is a new artefact at a
+#: new path, whose own add-commit the base can distinguish.
 SQUASH_COLLAPSE_REMEDY = (
     " Both artefacts were added on {base} by the SAME commit ({sha}), i.e. they landed there in ONE "
     "squash merge — so this history cannot be edited into an ordering, and re-running will not "
-    "change the answer. The remedy is a WITHDRAWAL: take the log out of the checked directory in "
-    "its own PR (move it under `withdrawn/` with a one-line note of why — do not delete it, and do "
-    "not edit its contents), let that land on {base}, and re-add the log in a PR of its own, after "
-    "the registration is published there."
+    "change the answer. This log has NO provable ordering left to recover: its add-commit on "
+    "{base} IS the collapsed one, and because a deletion does not remove an earlier add from a "
+    "ref's history, a deleted-then-re-added copy is still measured against that same collapsed "
+    "epoch. ⛔ Do NOT re-add this log in a fresh commit to obtain a later add-commit: that "
+    "satisfies the letter of the check while the real ordering is unchanged, which is the "
+    "fabrication this guard exists to prevent. The path forward is a WITHDRAWAL plus a NEW "
+    "artefact at a NEW path: withdraw this log from the checked directory (move it under "
+    "`withdrawn/` with a one-line note of why — do not delete it, and do not edit its contents) so "
+    "this directory stops claiming a measurement whose ordering cannot be shown — the withdrawal "
+    "alone does not clear THIS refusal — then take a fresh registration and a fresh evidence log "
+    "at new paths, whose add-commits {base} can tell apart."
 )
 SAME_PR_REFUSAL = (
     "{prereg} is not on the merge base ({base}): this change adds {n} evidence log(s) against a "
@@ -1224,9 +1250,11 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             )
             # ⛔ The remedy text must match CAUSE (review cycle 3, finding 1c). "Not strictly after"
             # alone sends an operator looking for an ordering to fix, and in the squash-collapsed
-            # shape there is none to fix: the two artefacts share their add-commit on the base, so
-            # the only path to green is to withdraw the log and re-add it after the registration is
-            # published. That is precisely what redded `main` at cfa3de857 (#10468).
+            # shape there is none to fix: the two artefacts share their add-commit on the base, and
+            # that collapsed epoch is permanent for the path — a withdrawal plus a re-add still
+            # measures the OLD add (cycle 7, finding F1). So the remedy is a new artefact at a new
+            # path, never a re-ordering and never the forbidden re-add. That shape is precisely what
+            # redded `main` at cfa3de857 (#10468).
             shared = prereg_add_commits & set(_add_commits_on(base, log))
             if shared:
                 failure += SQUASH_COLLAPSE_REMEDY.format(
@@ -1634,13 +1662,20 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
     if use_git:
         try:
             content_exempt: list[str] = []
-            # The base the ordering was measured against is REPORTED, not implied: a verdict whose
-            # subject ref is invisible reads the same whether it measured `origin/main` or this
-            # branch's own HEAD, and that difference is the whole point of #10463.
-            report["ordering_base"] = resolve_base_ref(base_ref) or UNRESOLVED_BASE
+            # The base the ordering WOULD be measured against. ⛔ It is deliberately NOT written
+            # into `ordering_base` here: `check_ordering` may raise before it reads a single epoch
+            # (the shallow `HistoryUnavailable` arm), and publishing the resolved ref under
+            # "ordering measured against" would then say a measurement happened when none did —
+            # the same silent-green `ordering_base` exists to remove, one polarity over (#10463
+            # review cycle 7, finding F2). Measured on a depth-1 clone of `main`, `origin/main`
+            # DOES resolve, so this is the CI shape that prints a base it never used.
+            candidate = resolve_base_ref(base_ref) or UNRESOLVED_BASE
+            report["ordering_base_candidate"] = candidate
             failures += check_ordering(prereg, logs, pins, content_exempt, base_ref=base_ref)
             report["ordering_exempt"] = sorted(content_exempt)
             ordering = "verified"
+            # Only NOW is the base a fact about this verdict rather than an intention.
+            report["ordering_base"] = candidate
         except HistoryUnavailable as exc:
             # The THIRD outcome: neither a pass nor an ordering failure. Folding it into either is
             # what reds a correctly ordered tree in every CI test job (#9075 r4 P1). The git-FREE
@@ -1661,7 +1696,9 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
     # `--json`, so the CI log a human reads could not tell a verdict measured against `origin/main`
     # from one measured against the local `HEAD` fallback — which IS the PR-internal rule #10463
     # removes. A green line that reads the same either way is the silent-green this field exists to
-    # remove, and it must not be visible only to machines.
+    # remove, and it must not be visible only to machines. ⛔ The fallback is `(not measured)`, not
+    # the resolved candidate: an ordering that raised before reading an epoch measured nothing, and
+    # a field named for what was measured may not carry what was merely intended (cycle 7, F2).
     report.setdefault("ordering_base", "(not measured)")
     report["ordering"] = ordering
     failures += check_machine_record(directory, pins)
@@ -1804,6 +1841,14 @@ def main(argv: list[str] | None = None) -> int:
         # finding 1). A verdict against the local `HEAD` fallback is the PR-internal rule this
         # change removes, and the log must not read identically to one against the published base.
         print(f"ordering measured against: {report['ordering_base']}")
+        # …and when nothing was measured, name the ref that WOULD have been — separately worded, so
+        # the measured/unmeasured distinction is unreadable-mistake-proof in the log (cycle 7, F2):
+        # "measured against: (not measured)" for the measured line, and the intention on its own
+        # line. Without this the candidate is lost and an operator cannot tell a wiring fault from
+        # a shallow checkout.
+        candidate = report.get("ordering_base_candidate")
+        if report["ordering"] != "verified" and candidate and candidate != UNRESOLVED_BASE:
+            print(f"would be measured against: {candidate}")
     return exit_code
 
 
