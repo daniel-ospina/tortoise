@@ -1728,3 +1728,55 @@ def test_a_SCALE_word_is_compared_across_the_pair_rather_than_dropped():
     assert v2._value_slot_divergence("we have 12 million events",
                                      "we have 13 million events")
     assert v2._value_slot_divergence("we sold 12 events", "we sold 13 things")
+
+
+def test_a_BARE_parenthetical_numeral_is_still_judged():
+    """Review cycle-20 P2: the paren exclusion was WIDER than it claimed.
+
+    The first cut of `_PAREN_NUMERAL_RE` made every element optional
+    (``\\(\\s*[-$€£¥]?\\s*-?\\d``), so it matched a BARE parenthetical numeral as
+    well as the accounting shape — and `_value_slots_scaled` returns ``()`` for
+    a text carrying a match, so ``the audit (2019) says 12 events`` became
+    WHOLLY unjudgeable: a real ``12`` -> ``13`` rewrite in that text was NOT
+    refused, while the constant's own note, `_refuse_rewritten_value`'s
+    docstring and the registry row all claimed "the exclusion is the accounting
+    SHAPE only". A prose parenthetical year is a common shape, and the loss was
+    in the DETECTION direction — the guarantee quietly not applying rather than
+    a truthful point being withheld.
+
+    ⛔ The accounting reading has to be AVAILABLE before the token can be
+    ambiguous: a currency symbol, an explicit sign, or an inner separator is
+    what makes it so. `(2019)`, `(1)` and `(see 2019)` carry none of the three,
+    so they keep their slots.
+    """
+    # the accounting SHAPE is still excluded, every spelling of it
+    for excluded in ("($4)", "(-4)", "($-4.2m)", "(4.2)", "(1,200)",
+                     "(\u20ac4)", "(-\u00a350)"):
+        assert v2._PAREN_NUMERAL_RE.search(excluded), excluded
+    # …and a BARE parenthetical numeral is NOT the accounting shape
+    for judged in ("(2019)", "(1)", "(see 2019)", "( 4 )", "(2019-2020)"):
+        assert not v2._PAREN_NUMERAL_RE.search(judged), judged
+    # the side keeps its slots, so the rewrite below can be caught at all
+    assert v2._value_slots("the audit (2019) says 12 events")
+    # DETECTION: a real rewrite in a text carrying a prose paren numeral
+    assert v2._value_slot_divergence("the audit (2019) says 12 events",
+                                     "the audit (2019) says 13 events")
+    # …and the truthful pair still agrees (the exclusion did not simply move)
+    assert not v2._value_slot_divergence("the audit (2019) says 12 events",
+                                         "the audit (2019) says 12 events")
+    # POSITIVE CONTROL, the class the exclusion EXISTS for: one value in two
+    # spellings stays unjudged, so the narrowing did not re-open the false
+    # accusation cycle 18 fixed.
+    assert not v2._value_slot_divergence("the shortfall was ($4)",
+                                         "the shortfall was -4")
+    assert v2._value_core("($4)") is None
+    # …and the SECOND arm agrees with the text scan (#10513's own "two lists
+    # that must agree" pattern): a wrapped BARE numeral is not the accounting
+    # shape, so `_value_core` must not swallow it either.
+    assert v2._value_core("(2019)") == ("", "2019", None)
+    # END TO END: the write path refuses the rewrite, not just the predicate.
+    result = _write("the audit (2019) says 12 events",
+                    "the audit (2019) says 13 events")
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]

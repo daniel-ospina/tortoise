@@ -1562,6 +1562,24 @@ rather than a guess. The cost is stated as residual (l): a REAL thousands rewrit
 `6,000`) is unjudged too. Because this complies with `#2817`, it needs no second `OVERRIDES:` record;
 what it removes is the unrecorded departure.
 
+**Two more false-accusation classes the SAME doctrine closed, and one it OVER-CLOSED.** A leading
+currency symbol sat where `_value_core` read its sign, so `$-4` reduced to `4`: that REFUSED
+`$-4` against `-4` (one value, two spellings) while WRITING `$-4` against `$4` (a sign the model
+dropped) with no warning — both directions, one root. The sign is now read from the first
+sign-bearing character after the decoration run, in the single predicate `_reads_as_sign`. A
+paren-wrapped numeral is the reading `($4)` needs — accounting's `-4` or a prose aside — so the
+class is OUTSIDE the judged set, the same answer `#2817` point 1 gives a separator-bearing numeral
+(never invent a second reading of one token). ⛔ **The first cut of that exclusion was WIDER than
+its own note claimed**: every element of the pattern was optional, so it also matched a BARE
+parenthetical numeral, and a text carrying `(2019)` became wholly unjudgeable — a real `12` → `13`
+rewrite in it was NOT refused. That is the DETECTION direction of this entry's own promise, and it
+went unnoticed because the note, the code comment and the row all described the NARROW rule. The
+accounting reading has to be AVAILABLE before a token can be ambiguous, so the class now requires
+one of the three things that make it so (a currency symbol, an explicit sign, or an inner
+separator), and `_value_core`'s wrapped-token arm asks the SAME pattern rather than its own wider
+`startswith("(")` — two rules for one question is how the wider one survives review. Stated cost: a
+rewrite between TWO accounting numerals (`($4)` against `($6)`) is unjudged.
+
 **A change that is NOT local to this rule, stated because the row did not say so.**
 `_keeps_numeric_edge` now keeps a leading `Pd` (an en/em dash is a MINUS in every spelling), and
 `_keeps_numeric_edge` feeds `_leading_symbol_run` → `_strip_edges` → `_guard_token_seq` →

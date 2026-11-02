@@ -898,9 +898,24 @@ mechanisms:
       `"the shortfall was ($4)"` against `"the shortfall was -4"`; the raw text is
       now asked, and the exclusion is the accounting SHAPE only, so a prose
       `(see 2019)` keeps its slot and a rewrite in that text is still refused.
-      Pinned both ways by
-      `test_a_currency_symbol_does_not_swallow_the_SIGN` and
-      `test_an_accounting_PAREN_numeral_is_outside_the_judged_set`.
+      ⛔ THE FIRST CUT OF THAT PATTERN WAS WIDER THAN THIS SENTENCE CLAIMED
+      (#10513 review cycle-20 P2, measured): every element was optional, so it
+      matched a BARE parenthetical numeral too and `the audit (2019) says 12
+      events` became wholly unjudgeable — the `12` -> `13` rewrite in that text
+      was NOT refused, in the DETECTION direction, while this row and the code's
+      own note said "the accounting SHAPE only". The accounting reading has to be
+      AVAILABLE before a token can be ambiguous, so the class now REQUIRES one of
+      the three things that make it so — a currency symbol, an explicit sign, or
+      an inner separator — and `_value_core`'s wrapped-token arm asks the SAME
+      pattern instead of the wider `startswith("(")` it used, because two rules
+      for one question is how the wider one survives. `(2019)`, `(1)` and
+      `(see 2019)` keep their slots; `($4)`, `(-4)`, `(4.2)` and `(1,200)` do not.
+      The cost, stated: a real rewrite between TWO accounting numerals
+      (`($4)` against `($6)`) is unjudged, because either side alone takes the
+      pair out of the judged set. Pinned both ways by
+      `test_a_currency_symbol_does_not_swallow_the_SIGN`,
+      `test_an_accounting_PAREN_numeral_is_outside_the_judged_set` and
+      `test_a_BARE_parenthetical_numeral_is_still_judged`.
       (n) A NUMERAL SPLIT AT THE CAP MOVES THE STORED TEXT OFF THE LEGACY KEY
       (#10513 review cycle-18 P1, measured). The `_MAX_CONTENT` sites store
       `x[:1000]` — the identity key `_endpoint_keys`, `_merge_verdict_keys` and

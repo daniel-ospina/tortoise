@@ -4375,8 +4375,14 @@ def _value_core(token: str) -> tuple[str, str, str | None] | None:
     # `_value_bindings` reads strips the parens first (`($4)` arrives as `$4`),
     # so the reachable shape is caught at `_value_slots`, which asks the raw text
     # (`_PAREN_NUMERAL_RE`) rather than the token.
-    _paren = raw.strip()
-    if _paren.startswith("(") and _paren.endswith(")"):
+    #
+    # ⛔ THE SAME PREDICATE AS THE TEXT SCAN, not a second one (#10513 review
+    # cycle 20 P2, measured). This arm used to be `startswith("(") and
+    # endswith(")")`, i.e. EVERY wrapped token, which is WIDER than the accounting
+    # shape the text scan is meant to exclude — two rules for one question, and
+    # the wider one is what let a bare `(2019)` swallow a whole side (see
+    # `_PAREN_NUMERAL_RE`).
+    if _PAREN_NUMERAL_RE.fullmatch(raw.strip()):
         return None
     raw = _LEADING_DOT.sub(r"0.\1", raw)
     matches = list(_VALUE_DECIMALS.finditer(raw))
@@ -4526,15 +4532,28 @@ def _value_identity_matches(a: tuple[str, str, str | None],
     return a[2] == b[2]
 
 
-#: A PAREN-WRAPPED NUMERAL — the accounting negative (`($4)`) and the prose
-#: parenthetical (`(2019)`) are one SHAPE with two readings, and telling them
-#: apart is a reader property this path does not have (#10513 review cycle 18
-#: P2, measured). A text carrying one is therefore OUTSIDE the judged set on
-#: that side, which fails open at the layout guard rather than reading it as a
-#: POSITIVE (`($4)` against `-4` is one value and was REFUSED). Deliberately
-#: narrow: the decoration between `(` and the digit is limited to whitespace and
-#: a currency sign, so a prose citation like `(see 2019)` is NOT swallowed.
-_PAREN_NUMERAL_RE = re.compile(r"\(\s*[-$\u20ac\u00a3\u00a5]?\s*-?\d")
+#: The ACCOUNTING shape of a parenthetical numeral — `($4)`, `(-4)`, `(4.2)`,
+#: `(1,200)`. `($4)` is `-4` in accounting and a prose aside in a sentence, and
+#: WHICH ONE APPLIES IS A READER PROPERTY this path does not have (#10513 review
+#: cycle 18 P2, measured), so a text carrying one is OUTSIDE the judged set on
+#: that side: it fails open at the layout guard rather than being read as a
+#: POSITIVE, which REFUSED `($4)` against `-4` (one value, two spellings).
+#:
+#: ⛔ NARROW ON PURPOSE, AND NARROWER THAN THE FIRST CUT (#10513 review cycle 20
+#: P2, measured). The first pattern was `\(\s*[-$\u20ac\u00a3\u00a5]?\s*-?\d`, whose
+#: every element is OPTIONAL — so it matched a BARE parenthetical numeral too,
+#: and `the audit (2019) says 12 events` became wholly unjudgeable: a real
+#: `12` -> `13` rewrite in that text was NOT refused, while both this constant's
+#: note and the registry row claimed "the exclusion is the accounting SHAPE
+#: only". A currency symbol, an explicit sign, or an inner separator is what
+#: makes the accounting reading available at all, so the class is defined by
+#: requiring one of them. `(2019)`, `(1)` and `(see 2019)` keep their slots.
+_PAREN_NUMERAL_RE = re.compile(
+    r"\(\s*(?:"
+    r"[-$\u20ac\u00a3\u00a5]+\s*\d[^\s)]*"      # a sign/currency DECORATION: `($4)`, `(-4)`, `($-4.2m)`
+    r"|\d[\d.,]*[.,]\d[^\s)]*"                  # …or an inner separator: `(4.2)`, `(1,200)`
+    r")\s*\)"
+)
 
 
 #: The scale words that make a numeral's VALUE a reading rather than an
