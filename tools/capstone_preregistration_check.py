@@ -1689,8 +1689,11 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             ordering = HISTORY_UNAVAILABLE if str(exc) == HISTORY_UNAVAILABLE else str(exc)
     else:
         ordering = "UNVERIFIED (--no-git)"
-    # Present on EVERY path: a consumer that reads `ordering_exempt` must be able to tell "nothing
-    # was exempted" from "the arm that fills it never ran" (review cycle 1, finding 2).
+    # Present on EVERY path so no consumer has to handle an absent key. ⛔ `[]` does NOT mean the
+    # arm ran — it is the same value whether nothing was exempted or the arm never executed
+    # (`--no-git` does not run it at all). A reader that needs "did it run" must read `ordering`,
+    # not this list; the earlier wording here claimed the opposite and was wrong (review cycle 7,
+    # finding 4).
     report.setdefault("ordering_exempt", [])
     # …and so is the BASE, on every path (review cycle 4, finding 1). It was reported only in
     # `--json`, so the CI log a human reads could not tell a verdict measured against `origin/main`
