@@ -884,15 +884,78 @@ def _event_row_exists(proj, event_id: str) -> bool | None:
     return bool(rows and rows[0][0] > 0)
 
 
+#: The page bound `read_after` enforces. It is the SAME domain `GET /v1/events`
+#: already declares — `Query(100, ge=1, le=MAX_PAGE)` (`hosted_api.events_poll`)
+#: — and the one `read_after`'s own docstring states. It was declared in
+#: two places (#8447 row #6) and silently clamped in two others: this seam
+#: (`max(1, min(int(limit), 1000))`, the defect) and the `webhook_delivery`
+#: page read, which carried its own copy of the literal.
+#:
+#: OVERRIDES: AIP-158's coerce-down for a `page_size` above the declared maximum
+#: (the Google-approved default — an over-max ask is coerced DOWN to the
+#: maximum, and only a NEGATIVE one is an INVALID_ARGUMENT). Coercing here
+#: would be the silent truncation #8447 forbids: `read_after` returns a bare
+#: `list[dict]` and `poll_events`' `next_cursor` is never empty, so a coerced
+#: page is indistinguishable from a drained stream — which is exactly why
+#: AIP-158 permits coerce-down only alongside an empty `next_page_token` that
+#: marks end-of-collection. An out-of-domain ask is REFUSED instead. The
+#: ruling is recorded on #8447.
+MAX_PAGE = 1000
+
+
 def read_after(proj, after_seq: int, types: list[str] | None = None,
                limit: int = 100) -> list[dict]:
     """Return events with seq > after_seq, ordered seq ASC, deduped by event_id.
 
-    `types` filters by event type if provided. `limit` caps the page
-    (default 100, max 1000). Dedup: a duplicate event_id (defense in depth —
-    the unique constraint normally prevents them) keeps the FIRST occurrence.
+    `types` filters by event type if provided. `limit` caps the page and must
+    be an integer in ``1 .. MAX_PAGE`` (default 100).
+
+    ⚠️ ``len(page) < limit`` is NOT evidence that the stream is drained — page
+    by ``seq``, passing the last ``seq`` you received as ``after_seq``. Two
+    reasons, and only the first is #8447's: an out-of-domain ask is REFUSED
+    (see below), and a duplicate ``event_id`` is dropped AFTER the query's
+    ``LIMIT`` (defense in depth), so a page of ``limit`` rows can legitimately
+    come back with fewer distinct rows while more remain beyond it (pinned by
+    ``test_a_duplicate_event_id_inside_a_full_page_shrinks_it``).
+
+    #8447 row #6: an ask OUTSIDE that domain is REFUSED (``ValueError``) rather
+    than clamped. It used to be ``max(1, min(int(limit), 1000))`` — so a caller
+    asking for 5000 got 1000 rows and was told nothing, and because
+    ``len(page) < limit`` the short page read as *the stream is drained* while
+    4000 events were still undelivered (the contract #8447 pins: a bounded
+    operation returns complete results or says it is incomplete, never a
+    silently truncated page indistinguishable from a complete one). Refusing
+    at the reference point — rather than capping the caller's ask — is the same
+    instrument ``next_seq`` uses for an out-of-domain ``seq`` (#5379). It also
+    departs from AIP-158's coerce-down default; see the ``OVERRIDES:`` line
+    above ``MAX_PAGE`` for why that departure is deliberate.
+
+    Dedup: a duplicate event_id (defense in depth — the unique constraint
+    normally prevents them) keeps the FIRST occurrence.
     """
-    limit = max(1, min(int(limit), 1000))
+    raw = limit
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        # `int()` alone leaves the seam's own refusal un-named: `inf` used to
+        # escape as OverflowError, which a caller catching ValueError (the
+        # documented answer) would miss.
+        raise ValueError(f"limit must be a whole number, got {raw!r}") from None
+    if limit != raw:
+        # A VALUE comparison, not an isinstance check: `int()` also floors
+        # `Decimal('2.9')` and `np.float32(2.9)`, which are not `float`
+        # instances — the silent shrink this refuses. `"5000"` is refused too:
+        # reporting the converted 5000 would describe a call that never
+        # happened (the same rule as the range message below).
+        raise ValueError(f"limit must be a whole number, got {raw!r}")
+    if not 1 <= limit <= MAX_PAGE:
+        raise ValueError(
+            f"limit must be between 1 and {MAX_PAGE}, got {limit}. "
+            "An out-of-domain page size is REFUSED rather than clamped: a "
+            "silently clamped page is indistinguishable from a complete one, "
+            f"so the caller cannot tell {MAX_PAGE} rows from \"the stream ends "
+            "here\". Ask for a page within the bound and continue from the "
+            "last seq you received (#8447).")
     params: dict = {"after": int(after_seq), "limit": limit}
     if types:
         params["types"] = list(types)

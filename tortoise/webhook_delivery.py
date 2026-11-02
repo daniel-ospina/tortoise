@@ -1198,19 +1198,33 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
         return summary
     ensure_subscription_schema(proj)
     from .crypto import decrypt_token
-    from .event_store import read_after
+    from .event_store import MAX_PAGE, read_after
 
     for sub in subs:
         summary["subscriptions"] += 1
         try:
             types = list(sub.get("types") or []) or None
+            # #8447 row #6: the page bound is `read_after`'s, and the SAME value
+            # is the completeness test below. Comparing the page against the
+            # UNCLAMPED `batch` (the pre-#8447 form) meant a batch above the
+            # bound could never set `more_pending` — a short page read as
+            # drained, the identical DEFECT one layer out. No code BRANCHES on
+            # `more_pending` today (the retry sweep aggregates only
+            # `delivered`/`failed`, and the dream path's wrapper LOGS the whole
+            # summary rather than reading the field — `hosted_api.py:3005` is
+            # exactly where the wrong backlog count was visible), and the only
+            # production caller passes no `batch`, so `page == DEFAULT_BATCH ==
+            # 50` there and both comparison forms agree. That is why this is the
+            # measurement being right rather than a live behaviour change:
+            # nothing was delivered wrongly, a backlog count lied.
+            page = max(1, min(int(batch), MAX_PAGE))
             events = read_after(proj, int(sub.get("cursor") or 0), types=types,
-                                limit=max(1, min(int(batch), 1000)))
+                                limit=page)
         except Exception as e:
             logger.warning("webhook_delivery: event read failed for %s: %s",
                            sub.get("sub_id"), redact_error(e))
             continue
-        if len(events) >= max(1, int(batch)):
+        if len(events) >= page:
             summary["more_pending"] += 1
         if not events:
             continue
