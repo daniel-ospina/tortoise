@@ -180,8 +180,11 @@ def _run_record_step(cwd: Path, *, git_available: bool, stamp: Path | None = Non
     """Execute the workflow's OWN `record the built tree` step and return the stamp
     file's contents.
 
-    `PATH` carries `bash` plus the real git binaries when `git_available`, and
-    nothing but the system dirs otherwise. ⚠️ `git_available=False` reaches the
+    `PATH` carries the real git binaries' directory when `git_available`, and a
+    SINGLE NON-EXISTENT directory otherwise (`/nonexistent-bin`) — so every
+    external command fails, which is what routes `git_available=False` to the
+    HEAD-guard arm. `bash` is invoked by absolute path (`_BASH`), never resolved
+    from `PATH`. ⚠️ `git_available=False` reaches the
     HEAD-GUARD arm (`git rev-parse HEAD` fails → `unknown`), NOT the `git status`
     failure arm — the guard runs first. The `git status` arm needs a git that can
     `rev-parse` but not `status`, which is what `path_prefix` is for (a shim dir).

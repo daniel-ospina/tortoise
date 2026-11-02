@@ -75,8 +75,9 @@ _ARRAY_PAIR = re.compile(r'([A-Z0-9_]+)="\$\{?([A-Z0-9_]+)\}?"')
 # (#10447) and can never be empty (the payload defaults to `unknown`, which /health
 # reads as null). Exempted BY NAME, so the parser can accept the brace spelling
 # without the exemption depending on a regex that misses it — and this set also
-# authorises an UNCONDITIONALLY staged value (no `-n` guard), so the count in
-# `test_optional_fly_appends_are_n_guarded`'s docstring must track it.
+# authorises an UNCONDITIONALLY staged value (no `-n` guard); the exemptions are
+# NAMED in `test_optional_fly_appends_are_n_guarded`'s docstring, so keep the two
+# in step (a numbered count is what drifted twice already).
 _NON_SECRET_PAIRS = {("TORTOISE_GIT_SHA", "GITHUB_SHA"),
                      # #10447: workflow-COMPUTED from the build's own tree, never an
                      # env-bound secret, and never empty — an unreadable tree stages
@@ -324,8 +325,10 @@ def test_every_env_bound_secret_reaches_fly(workflow_text):
     reads — or a declared `_FLY_RENAMES` rename, whose presence is asserted too,
     since a de-renamed key would otherwise ship the secret under a name nothing
     reads while the gate passes. ``FLY_API_TOKEN`` (flyctl consumes it from the
-    environment, never as argv) and the `TORTOISE_GIT_SHA="${GITHUB_SHA}"`
-    built-in pair (`_NON_SECRET_PAIRS`) are the two exemptions."""
+    environment, never as argv) and the `_NON_SECRET_PAIRS` entries
+    (`TORTOISE_GIT_SHA`←`GITHUB_SHA`, and `TORTOISE_GIT_DIRTY`←
+    `TORTOISE_GIT_DIRTY_STAMP`, which the payload defaults to `unknown` so it is
+    never empty) are the exemptions."""
     step = _steps()[_SET_STEP]
     run = step.get("run", "")
     bindings = set(_env_bindings(step))
