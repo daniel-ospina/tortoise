@@ -449,9 +449,12 @@ mechanisms:
       route by `test_a_band_resolved_value_is_REPORTED_not_silently_unspanned`,
       and the verbatim-but-value-free route by
       `test_a_value_free_quote_gets_no_span_and_is_REPORTED`. One more absence
-      class sits OUTSIDE `_value_verbatim_span` altogether — an empty quote with
-      a resolved index — reported by the resolver's own "unverified (empty
-      quote)" step and pinned by
+      class REACHES `_value_verbatim_span` and is refused at the THIRD gate,
+      but reports nothing there: an empty quote with a resolved index
+      (`_verbatim_span_in_turn` returns None, and the `if quote:` guard
+      suppresses the band warning because the band was never consulted). Its
+      only report is therefore the resolver's "unverified (empty quote)" step —
+      OUTSIDE `_value_verbatim_span` — pinned by
       `test_empty_quote_model_index_path_carries_no_span`. NONE of these four
       appears in the row test above, so do not read its 2 unspanned points as
       coverage of them. A `validate_span`

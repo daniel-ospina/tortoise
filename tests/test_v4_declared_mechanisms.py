@@ -1062,7 +1062,8 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
             # is the only way the two branches cannot drift", which is the goal
             # and not yet the fact. The two copies are decision-equivalent
             # today and `test_the_artifact_fields_of_a_not_implemented_row_are_`
-            # `still_verified` pins both, but a rule added to ONE copy later
+            # `still_verified` pins THIS branch, while the `implemented` branch's
+            # own tests pin the other; but a rule added to ONE copy later
             # would not reach the other: that is the same drift-shaped defect
             # this PR closes, so the extraction to one helper is tracked rather
             # than assumed (#10650).
@@ -2060,6 +2061,24 @@ def test_the_artifact_fields_of_a_not_implemented_row_are_still_verified(
     not_a_list = dict(good, code="src.py")
     errors = gate_errors([not_a_list], root=tmp_path)
     assert any("is not a list" in e for e in errors), errors
+
+    # #10636 review round 3 (P3, after the 5 pre-flip cycles): the EMPTY-list
+    # refusal is the ONLY thing rejecting `code: []` / `tests: []` on a
+    # not-implemented row — `_path_violations` returns `[]` for an empty list,
+    # so nothing else fires — and NOTHING pinned it. Mutating `if not value:` to
+    # `if False:` left the rest of this test GREEN while a row with
+    # `code: [], tests: ["test_x.py"], tracking_issue: 2684` produced
+    # `gate_errors() == []`: a GREEN gate on an inert declaration, which is
+    # exactly the shape this PR exists to close. The assertion names the
+    # per-field message, so the guard is pinned per field rather than by the
+    # `symbols:`-home rule that also happens to fire for `code: []`.
+    for field in ("code", "tests"):
+        empty_list = dict(good, **{field: []})
+        errors = gate_errors([empty_list], root=tmp_path)
+        assert any(
+            f"`{field}` is declared on a not-implemented row but is empty" in e
+            for e in errors
+        ), f"{field}: an empty list was not refused ({errors})"
 
     # Review cycle 3 (P3): an explicit null is a declaration of nothing that
     # looks like a declaration — refused, never read as an omission.
