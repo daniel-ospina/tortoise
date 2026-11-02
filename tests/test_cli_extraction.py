@@ -45,6 +45,18 @@ from extract_turns import (
 )
 
 
+def _mark(session: str, index: int, count, mark, role: str = "assistant") -> list:
+    """A dump row carrying the `:Session`'s OWN account (columns 6/7).
+
+    `turn_count` is the WINDOW length the writer stores and `turn_max_index` the
+    session's live inclusive id-space end (`sdk._write_session_and_turns`) — the
+    two witnesses a PARTIAL dump is decided from, so a fixture that leaves them
+    out cannot exercise that decision at all.
+    """
+    return ["session://" + session, "event", role, _frame(role, f"m{index}"),
+            "2026-11-02T00:00:00+00:00", _turn_id(session, index), count, mark]
+
+
 def _turn_id(session: str, index: int) -> str:
     """A turn Point id, built by the WRITER's own derivation.
 
@@ -506,26 +518,33 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
                           "a pre-#947 graph has no `is_episodic` flag, so the "
                           "predicate matches nothing — that cause needs naming")
 
-    def test_dump_payload_round_trips_six_columns(self):
+    def test_dump_payload_round_trips_eight_columns(self):
         # the container emitter and `_DUMP_QUERY`'s RETURN arity must agree;
         # a short row is an IndexError inside the sort, not a red test, unless
         # this drives `dump()` itself with the subprocess mocked.
+        #
+        # Columns 6/7 are the `:Session`'s own account (`turn_count`,
+        # `turn_max_index`) — the witness a partial dump is detected from. A
+        # column added to (or dropped from) EITHER side is an `IndexError` in
+        # the middle of a dump, so the count is asserted here rather than
+        # trusted.
         emitted = json.dumps(["session://s1", "event", "user",
-                              _frame("user", "hello"), "2026-11-02T00:00:00Z", _turn_id("s1", 0)])
+                              _frame("user", "hello"), "2026-11-02T00:00:00Z",
+                              _turn_id("s1", 0), 1, 0])
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "turns.jsonl"
             with mock.patch("extract_turns.subprocess.run") as run:
                 run.return_value = types.SimpleNamespace(stdout=emitted + "\n", stderr="")
                 dump(out)
             self.assertEqual(build_transcripts(out), {"s1": "[2026-11-02] user: hello"})
-            # the emitter and the query's RETURN arity must agree: a column
-            # added to (or dropped from) either side is the cycle-2 P0
-            # (`IndexError` inside the sort), so assert the two counts here
-            # rather than trusting the mocked payload.
             script = run.call_args[0][0][-1]
             ret = _DUMP_QUERY.split("RETURN ", 1)[1].split(" ORDER BY ", 1)[0]
             cols = len([c for c in ret.split(",")])
-            self.assertEqual(cols, 6)
+            self.assertEqual(cols, 8)
+            for column in ("s.turn_count", "s.turn_max_index"):
+                self.assertIn(column, ret,
+                              "the session's declared count and id-space end are "
+                              "the witness a PARTIAL dump is detected from (#10000)")
             self.assertIn("r[5]", script)
             for i in range(cols):
                 self.assertIn(f"r[{i}]", script,
@@ -544,11 +563,17 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         # stamps a capture batch with one `$now`), so a timestamp sort cannot
         # rescue this the way the old predicate did. `s1_t10` must come last:
         # a lexicographic sort would put it between t0/t1 and before t2.
+        #
+        # ⛔ THE IDS ARE CONTIGUOUS 0..10, because that is what a capture
+        # mints (`_capture_turn_id`, a running index). A sparse fixture
+        # (t0, t2, t10) is a session with two REFUSED turns — the partial shape
+        # `dump` now refuses — so it cannot double as an ordering fixture.
         ts = "2026-11-02T00:00:00+00:00"
+        order = [10, 2, 0, 7, 4, 9, 1, 8, 3, 6, 5]
         rows = [
             ["session://s1", "event", "assistant", _frame("assistant", f"m{i}"), ts,
              _turn_id("s1", i)]
-            for i in (10, 2, 0)
+            for i in order
         ] + [
             # a turn-shaped point whose id is NOT a turn: it must be dropped,
             # not spliced in by the sort.
@@ -565,19 +590,135 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
             # ...and the file is the transcript the operator actually reads.
             transcripts = build_transcripts(out)
         self.assertEqual([r["content"] for r in written],
-                         ["m0", "m2", "m10"],
+                         [f"m{i}" for i in range(11)],
                          "dump must write the turn INDEX order, and t10 last")
         self.assertNotIn("claim", [r["content"] for r in written],
                          "a non-turn id is rejected, never sorted in")
         self.assertEqual(
             transcripts,
-            {"s1": "[2026-11-02] assistant: m0\n"
-                   "[2026-11-02] assistant: m2\n"
-                   "[2026-11-02] assistant: m10"})
+            {"s1": "\n".join(f"[2026-11-02] assistant: m{i}" for i in range(11))})
 
     def test_turn_order_refuses_a_turn_id_with_no_index(self):
         with self.assertRaises(ValueError):
             _turn_order(["session://s1", "event", "r", _frame("r", "x"), None, "no-index"])
+
+    # ── THE SPLIT STORE: a dump can be PARTIAL (#10574 review P1) ─────────────
+    #
+    # `dump` read the graph for the whole session while the WRITER decides each
+    # turn's store per turn (`sdk._write_capture_turns`: a refused record write
+    # goes to the graph), so a mid-capture refusal leaves part of the transcript
+    # in each store. `rows` was the only witness, so a graph holding the failed
+    # subset was indistinguishable from a complete session and `dump` reported
+    # success over a truncated transcript — which `run`+`write` then landed as
+    # that session's durable output. The witness is the `:Session`'s OWN account
+    # (`turn_count`, `turn_max_index`), the same reconciliation
+    # `record_read._shortfall` performs on the read door.
+
+    def test_a_partial_dump_refuses_and_writes_no_file(self):
+        # The tail is gone in the shape `turn_count` CANNOT see: `_t0.._t2` held
+        # against a `turn_count` of 2 (a window length, so 3 rows is not "short")
+        # and a `turn_max_index` of 3 — an append window whose `_t3` was refused.
+        # Three contiguous rows, a satisfied count, and a missing HIGHEST turn.
+        rows = [_mark("s1", i, 2, 3) for i in (0, 1, 2)]
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(
+                    stdout="\n".join(json.dumps(r) for r in rows) + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists(),
+                             "a refused dump must leave NO file: `run` would "
+                             "otherwise consume the truncated transcript")
+        refused = str(cm.exception)
+        for fragment in ("PARTIAL", "TAIL", "#10000", "TORTOISE_RECORD_DSN",
+                        "PER TURN", "get_session", "--allow-partial"):
+            self.assertIn(fragment, refused,
+                          "the operator needs the cause and the remedy, not only "
+                          "the verdict")
+
+    def test_the_append_window_is_not_a_false_refusal(self):
+        # ⛔ THE TRAP `record_read.served_turn_count` DOCUMENTS, MEASURED: an
+        # APPEND at `turn_offset=2` leaves 4 rows `_t0.._t3` against a
+        # `turn_count` of 2 (a WINDOW length, not a running total). A
+        # `len(rows) < turn_count` rule refuses this HEALTHY, COMPLETE session —
+        # so the witness is the id-space COVERAGE, not a count comparison.
+        rows = [_mark("s1", i, 2, 3) for i in range(4)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out)
+            self.assertEqual(len(out.read_text().splitlines()), 4,
+                             "a complete append writes every turn")
+
+    def test_an_interior_hole_from_a_refused_record_write_is_caught(self):
+        # The append shape as a PARTIAL: `_t2`/`_t3` in the graph, `_t0`/`_t1`
+        # still in the record. The count (a window length) cannot see it and the
+        # tail is intact — only the coverage check can.
+        rows = [_mark("s1", i, 2, 3) for i in (2, 3)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        self.assertIn("no turn for index 0, 1", str(cm.exception))
+
+    def test_allow_partial_writes_the_transcript_and_says_so(self):
+        rows = [_mark("s1", i, 4, 3) for i in (0, 1)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            printed = io.StringIO()
+            with mock.patch("extract_turns.subprocess.run") as run, \
+                    contextlib.redirect_stdout(printed):
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out, allow_partial=True)
+            self.assertEqual(len(out.read_text().splitlines()), 2,
+                             "the flag is the declared escape hatch")
+        self.assertIn("WARNING", printed.getvalue(),
+                      "an accepted partial must never be silent")
+        self.assertIn("PARTIAL", printed.getvalue())
+
+    def test_residue_above_the_mark_is_dropped_not_written(self):
+        # A shorter re-capture (`_t0.._t1`) whose surplus sweep did not land: the
+        # rows above `turn_max_index` are the session's OLD turns, and the read
+        # door drops them (`record_read.merge_turn_payloads`). Writing them would
+        # publish turns the session no longer owns; SILENTLY writing them is what
+        # #10021 review P3 rejected.
+        rows = [_mark("s1", i, 2, 1) for i in range(4)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            printed = io.StringIO()
+            with mock.patch("extract_turns.subprocess.run") as run, \
+                    contextlib.redirect_stdout(printed):
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out)
+            written = [json.loads(ln) for ln in out.read_text().splitlines() if ln]
+        self.assertEqual([r["content"] for r in written], ["m0", "m1"])
+        self.assertIn("dropped 2 row(s)", printed.getvalue(),
+                      "a deletion the operator cannot see is not a report")
+
+    def test_a_session_with_no_declared_marks_degrades_rather_than_refuses(self):
+        # A pre-#10000 capture carries no `turn_max_index` (the property did not
+        # exist) and an older emitter carries neither column. `None` degrades to
+        # the checks that do not need it — the same rule `record_read._shortfall`
+        # states — so an old graph is not refused for a mark it never had.
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            payload = "\n".join(json.dumps(["session://s1", "event", "user",
+                                            _frame("user", f"m{i}"), None,
+                                            _turn_id("s1", i)])
+                                for i in (3, 0, 1, 2))
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out)
+            self.assertEqual(len(out.read_text().splitlines()), 4)
 
     def test_a_non_turn_point_is_not_spliced_into_the_transcript(self):
         # `is_episodic` + `pointKind='event'` is not enough: only the derived
