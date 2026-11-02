@@ -1203,9 +1203,12 @@ class TestInvestorsProgressCopy:
     EXPECTED_CELL_ORDER = ("Product & distribution", "Early demand")
     # The owner's sanctioned line, verbatim — entities decoded, so the curly
     # quotation marks are pinned too (ASCII quotes are NOT this copy).
-    EXPECTED_DEMAND_HEADLINE = "32 of 34 calls: \u201cwhen can I use it\u201d"
-    # What this PR replaced. It must not come back: "prospective" disclaims the
-    # noun it modifies and a bare count with no denominator is a headcount.
+    # Updated 2026-11-02 with the owner's wording from the submitted a16z
+    # Speedrun application video ("over 40 calls"); the earlier 32/34 pass rate
+    # is superseded by the owner's later figure.
+    EXPECTED_DEMAND_HEADLINE = "40+ calls: \u201cwhen can I use it\u201d"
+    # What an earlier revision carried. It must not come back: "prospective"
+    # disclaims the noun it modifies.
     RETIRED_LINE = "20+ prospective beta testers"
 
     def test_progress_opens_on_what_exists(self):
@@ -1245,11 +1248,9 @@ class TestInvestorsProgressCopy:
         """`20+ prospective beta testers` must not return anywhere in the section."""
         section_text = _beat_text(_investors_progress_section())
         assert self.RETIRED_LINE not in section_text, (
-            f"{self.RETIRED_LINE!r} is back in #progress. It was replaced by a "
-            "pass rate over the calls that actually happened: 'prospective' "
-            "disclaims the noun it modifies, a trailing '+' reads as a floor, "
-            "and a count with no denominator invites the reader to discount it "
-            "(PR #9283)")
+            f"{self.RETIRED_LINE!r} is back in #progress. 'prospective' "
+            "disclaims the noun it modifies; it was replaced by the owner's own "
+            "figures (PR #9283)")
 
 
 #: Directories under the website scan roots that hold BUILD OUTPUT or vendored code,
