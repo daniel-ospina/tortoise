@@ -366,9 +366,16 @@ def _checker():
 
     Loaded for ONE thing: `EVIDENCE_LOG_GLOB`, so the test below globs the same set the ordering
     half globs instead of a private copy of the literal. The glob is deliberately a named constant
-    in the guard (`tools/capstone_preregistration_check.py:134`, *"Widening it is a deliberate
-    act"*), and a second copy here would be exactly the two-copies-that-can-disagree shape this
-    file refuses for the bars.
+    in the guard — constant `EVIDENCE_LOG_GLOB`, whose comment says *"Widening it is a deliberate
+    act"* — and a second copy here would be exactly the two-copies-that-can-disagree shape this file
+    refuses for the bars.
+
+    ⛔ Cited by SYMBOL, not by `file:line`, and the history is the reason. The citation once spelled
+    `:134`, which was true on `origin/main` and was silently falsified by this branch's own module
+    header: the constant is at `:169` here, and `:134` is inside the 3.12 interpreter guard. Two
+    lanes re-derived that line independently (review cycles 8 and 11) — the third re-derivation is
+    the argument: a bare line number into a file this branch edits is asserted by nothing, so it goes
+    stale silently. The symbol does not. If you need to grep for it, `:169` is where it is today.
     """
     spec = importlib.util.spec_from_file_location(
         "_capstone_preregistration_check",
@@ -386,11 +393,28 @@ def test_the_withdrawn_log_is_not_back_in_the_checked_directory(probe):
     Ruling item 2 on #10463: *"Do not re-add the log in a fresh commit to obtain a later
     add-commit. That satisfies the letter of the check while the real ordering is unchanged — it is
     precisely the fabrication the guard exists to prevent."* That ruling is unenforced by
-    construction: the guard requires only `log_add_epoch > prereg_add_epoch` over every `*.log` it
-    globs NON-recursively (`EVIDENCE_LOG_GLOB`, `directory.glob(...)`), and the single-measured-log
-    rule counts only `capstone-measured-*.log`. A copy put back here in a FRESH commit therefore
-    has a LATER add-commit than the registration and is blessed — `evidence logs: 1`, ordering
-    "verified" — i.e. the exact fabrication, now wearing a green gate.
+    construction, but NOT for the reason an earlier version of this docstring gave. Two cases, and
+    they are not the same case:
+
+    * **A copy under a NEW name** — the hole this test closes. The guard globs `*.log`
+      NON-recursively (`EVIDENCE_LOG_GLOB`, `directory.glob(...)`) and the single-measured-log rule
+      counts only `capstone-measured-*.log`, so a renamed copy has NO add-commit on the base, its
+      epoch is therefore read from THIS contribution, it lands later than the registration's and is
+      blessed — `evidence logs: 1`, ordering "verified". That is the exact fabrication, now wearing
+      a green gate.
+    * **The original path** — already refused, and not by this test: the base still records the
+      collapsed add (`cfa3de857`, the registration's own add-commit), and a deletion does not remove
+      an earlier add from a ref's history, so a re-add here is measured against that same epoch and
+      the strict comparison refuses it. Pinned by
+      `test_a_withdrawn_log_cannot_be_reordered_by_re_adding_it` — with one caveat a reviewer
+      measured: that test's fixture publishes the base at the branch's own HEAD, so the
+      contribution-side fallback yields the same epoch and the refusal survives even with the
+      base-side log read removed. It pins the OUTCOME, not the base read; the base read's witnesses
+      are the three squash/predates tests in `test_capstone_preregistration_9075.py`.
+
+    So the open route is the rename, and the guard's rule is **base ancestry** (the registration's
+    add on the base must strictly precede the log's), not the PR-internal sibling comparison the
+    earlier version of this paragraph described.
 
     The temptation is real and this PR's own note invites it: `withdrawn/WITHDRAWN.md` says the
     claim stays PROVISIONAL until re-measured with the registration already on the base branch,

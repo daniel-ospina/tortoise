@@ -479,8 +479,20 @@ jobs:
         # `tests/test_capstone_preregistration_9075.py`, which is `core`+`tier1` — and the report
         # SAYS the half was skipped (`corpus pins NOT checked`), so a partial run can never read as
         # a verified one. The step fails closed: exit 1 on an ordering violation, 2 on an
-        # unreadable document/record.
-        run: python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis
+        # unreadable document/record (which includes a base ref that does not resolve — #10463
+        # review cycle 1, finding 1: that arm must NOT exit 0).
+        #
+        # `--base-ref origin/${{ github.base_ref }}` (#10463): the ordering claim is now "the
+        # pre-registration was PUBLISHED on the base before the evidence log's add-commit", so the
+        # base is an INPUT, not an inference. Without it the tool falls back to `origin/main`, which
+        # would answer the wrong question on a PR that targets another branch. `github.base_ref` is
+        # the branch this PR merges INTO, which is exactly the ref the claim is about.
+        #
+        # ⛔ `|| 'main'` is LOAD-BEARING, not decoration (review cycle 2, finding 2): on a `push`
+        # event `github.base_ref` is EMPTY, so the bare form renders `origin/` — a ref that can never
+        # resolve — and this step is unconditional, so it would exit 2 on EVERY push to `main`, i.e.
+        # red main on a branch name rather than on an ordering. On a push the base IS `main`.
+        run: python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis --base-ref "origin/${{ github.base_ref || 'main' }}"
       - name: Secrets scan (evidence artifacts, #1349)
         # Evidence commits (T8/T15/T16) must never carry live keys. The
         # provenance writer redacts (primary defense); this grep is the

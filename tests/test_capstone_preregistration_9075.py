@@ -91,6 +91,19 @@ def test_the_real_registration_is_complete_and_orders_against_its_logs():
     """
     report = check.run(PREREG_DIR, use_git=True, use_corpus=True)
     assert report["ok"], report["failures"]
+    # The base the verdict was measured against is REPORTED (#10463 review cycle 2, finding 5): a
+    # green line must not read the same whether it measured the published base or this branch's HEAD.
+    # ⛔ …but only where a base was MEASURED (review cycles 3 and 7, findings 2 and F2). In a depth-1
+    # checkout there is no history to order, so the ordering arm is the UNPROVABLE third outcome and
+    # nothing was measured — asserting a resolved base there would either red a correctly ordered
+    # tree or be satisfied by a base the tool never used. The two outcomes are asserted separately
+    # rather than lumped into one set of tolerated strings.
+    if check.history_unavailable():
+        assert report["ordering"] == check.HISTORY_UNAVAILABLE, report["ordering"]
+        assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    else:
+        assert report["ordering"] == "verified", report["ordering"]
+        assert report["ordering_base"] in {"origin/main", "main", "HEAD"}, report["ordering_base"]
     ids = [r["id"] for r in report["rows"]]
     assert "E1" in ids and "E4" in ids and "E5" in ids
     # E2 is allowed to be split; both halves must exist and be complete.
@@ -1551,8 +1564,16 @@ ORDERING_HALF_INVOCATION = (
     # slice) is exactly the change that can move a threshold after the numbers landed. `--dir` is
     # repeatable, so this stays ONE command on ONE line with no shell operator between two runs
     # (an `&&` chain would be a second command, and the pin refuses to describe two).
+    # Re-cut 2026-11 (#10463): `--base-ref` names the branch the PR merges INTO. The ordering claim
+    # is now "the registration was PUBLISHED on the base before the log's add-commit", so the base is
+    # an INPUT the step must pass — inferring `origin/main` would answer the wrong question on a PR
+    # that targets another branch, and a stale/absent base must reach the tool as such.
+    # `|| 'main'` is load-bearing (review cycle 2, finding 2): on a `push` event `github.base_ref` is
+    # empty, so the bare form renders `origin/` — unresolvable — and this unconditional step would
+    # exit 2 on every push to `main`.
     "python3 tools/capstone_preregistration_check.py "
-    "--dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis"
+    "--dir docs/evidence/7949-capstone --no-corpus --dir docs/evidence/5087-hypothesis "
+    '--base-ref "origin/${{ github.base_ref || \'main\' }}"'
 )
 
 #: The only `if:` forms that do not drop enforcement. Judged on its own (`_SAFE_STEP_KEYS`
@@ -2595,3 +2616,889 @@ def test_a_multi_bundle_json_error_names_the_bundle_it_came_from(tmp_path, capsy
     assert payload["reports"], "the readable bundle's report must survive the other's error"
     assert [e["directory"] for e in payload["errors"]] == [str(empty)]
     assert f"no {check.PREREG_NAME}" in payload["errors"][0]["error"]
+
+
+# ── #10463: the ordering is measured against the BASE, not against the contribution ────────────
+#
+# WHY THESE TESTS EXIST. The rule these replace compared two add-commits INSIDE one contribution,
+# which is not squash-invariant: a squash merge rewrites those commits into one, so the same tree
+# passed its PR checks and redded `main` minutes later (#10468). The property the epic wants —
+# "no number is scored against a threshold whose author could already see it" — survives the
+# change, because a registration on the base is a published artefact that a later squash cannot
+# rewrite. What must be tested is therefore (a) a registration that WAS published first passes,
+# (b) one added by the SAME change is REFUSED — that refusal is the whole point, since it is the
+# arm that fires at PR time instead of after the merge — and (c) the strictness survived: equal
+# epochs are still not "before".
+#
+# ⚠️ NOT covered, and not claimed: these arms read ADD commits only (`--diff-filter=A`), so a
+# contribution that rewrites a threshold in the registration AND lands a scored log in one commit is
+# accepted. Closing that needs a modification bound on the ordinary arm (the exemption arm already
+# has one, `_touch_epochs`) and is a new rule — tracked as **#10555**, not invented here.
+
+
+def _repo_with_published_base(tmp_path: Path, monkeypatch) -> Path:
+    """A throwaway repo carrying a PUBLISHED base ref (`origin/main`) the check can measure against.
+
+    The base is a remote-tracking ref on purpose: it does not move when the contribution commits, so
+    a test can land a registration, publish it, and then add a log — which is the shape a
+    two-PR contribution actually has.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    anchor = repo / "README.md"
+    anchor.write_text("base\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "base", epoch=1_700_000_000)
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    return repo
+
+
+def _publish_base(repo: Path) -> None:
+    """Advance the published base to the current commit — "the registration landed in an earlier PR"."""
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+
+def _commit_prereg(repo: Path, epoch: int, text: str = "x\n") -> Path:
+    target = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    _git(repo, "add", str(target.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "add prereg", epoch=epoch)
+    return target
+
+
+def test_a_registration_published_on_the_base_lets_a_later_log_pass(tmp_path, monkeypatch):
+    """The shape the rule ASKS FOR: the registration lands first, in its own PR; the log follows.
+
+    This is the case #10468 was: on the branch the two commits were ordered, and the squash merge
+    collapsed them. Here the registration is published (so a squash of the LOG's merge cannot touch
+    it), and the log's add-commit is measured in the contribution that carries it.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    _publish_base(repo)                       # the registration's own PR merged
+    log = _write_and_commit(repo, "s3-ablation.log", epoch=1_700_000_200)
+    assert check.check_ordering(prereg, [log]) == []
+
+
+def test_a_registration_added_by_the_same_change_is_refused(tmp_path, monkeypatch):
+    """THE NEW ARM (#10463): both artefacts in one contribution has nothing on the base to appeal to.
+
+    Refusing here is what makes this a gate rather than a red `main`: the merged history would carry
+    the two in one commit, where the ordering cannot be shown at all. The message must name the
+    remedy — land the registration alone, then add the log — not merely say "ordering violated".
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)   # NOT published: same change
+    log = _write_and_commit(repo, "s3-ablation.log", epoch=1_700_000_200)
+    failures = check.check_ordering(prereg, [log])
+    assert len(failures) == 1, failures
+    assert "not on the merge base" in failures[0], failures[0]
+    assert "origin/main" in failures[0], failures[0]
+    assert "own PR" in failures[0], failures[0]
+
+
+def test_the_refusal_is_not_a_no_op_when_the_base_is_missing(tmp_path, monkeypatch):
+    """A checkout WITH a remote but NO resolvable base FAILS CLOSED — exit 2, never green.
+
+    Losing this arm would let an environment change silently downgrade the check to the
+    PR-internal rule this change exists to remove — a gate that passes because it could not read its
+    subject. ⛔ It is a PLAIN `CheckError` (exit 2), deliberately NOT `HistoryUnavailable`: that
+    class IS the non-failing third outcome `run()` folds to `ok=True`, and raising it here made the
+    tool exit 0 on a full-history checkout that could not name its base (review cycle 1, finding 1).
+    `HistoryUnavailable` remains the shallow-clone answer only.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    # Force a branch name that is NOT `main`, so the only reason the base is unresolvable is the
+    # one under test, and give the repo a remote so the HEAD fallback must not apply.
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/contrib")
+    _git(repo, "remote", "add", "upstream", "https://example.invalid/x.git")
+    anchor = repo / "README.md"
+    anchor.write_text("base\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "base", epoch=1_700_000_000)
+    # The registration is the REAL document, not a stub (review cycle 2, finding 3): with `"x\n"`,
+    # `run()` refused on the missing pins block BEFORE reaching the base arm, so the test passed even
+    # with F1 fully reverted and could not tell the fail-open from the fix.
+    prereg = _commit_prereg(
+        repo, epoch=1_700_000_100,
+        text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_200)
+    # ⛔ Asserted through the ENTRY POINT, not just the raise (review cycle 1, finding 6): a previous
+    # version of this test asserted only `pytest.raises`, and the exception was one `run()` folded
+    # into the NON-FAILING third outcome — so the tool exited 0 while the test passed. The property
+    # is "the run does not report success", and only exit 2 can express it.
+    with pytest.raises(check.CheckError) as exc:
+        check.check_ordering(prereg, [log])
+    assert "no base ref" in str(exc.value), str(exc.value)
+    # …and it must NOT be the NON-FAILING third outcome: `HistoryUnavailable` subclasses CheckError,
+    # so `pytest.raises(CheckError)` alone cannot distinguish the fail-open from the fix.
+    assert not isinstance(exc.value, check.HistoryUnavailable), type(exc.value).__name__
+    # …and the ENTRY POINT must not report success either: 2 ("cannot read my subject"), never 0.
+    assert check.main(["--dir", str(repo / "docs" / "evidence" / "7949-capstone"),
+                       "--no-corpus"]) == 2
+
+
+def test_equal_epochs_on_the_base_are_still_not_before(tmp_path, monkeypatch):
+    """The STRICTNESS survives the change: "same second is not before…" is not relaxed by it.
+
+    Both artefacts already published, added at the same epoch — the squash-merged shape that redded
+    `main` (#10468) and the reason the log was withdrawn. A registration that cannot be shown to
+    precede its log is not a registration that preceded it.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    same = 1_700_000_100
+    log = _write_and_commit(repo, "capstone.log", epoch=same)
+    _publish_base(repo)
+    failures = check.check_ordering(prereg, [log])
+    assert failures, "equal epochs must not pass as 'before'"
+    assert "not strictly after" in failures[0], failures[0]
+
+    # ⛔ …and the arm must DISCRIMINATE (review cycle 3, finding 3). The shape above cannot: its two
+    # add-commits are equal in HEAD's history too, so the pre-fix PR-internal predicate refuses it as
+    # well. This second shape can. The base added BOTH artefacts in ONE commit while the
+    # contribution's own history has them ordered, so the pre-fix reading passes it and the base
+    # reading refuses it — the measured difference between the two rules.
+    (tmp_path / "squashed").mkdir()
+    repo = _repo_with_published_base(tmp_path / "squashed", monkeypatch)
+    base = _squashed_base(repo, epoch=1_700_000_100)
+    squashed_prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    squashed_log = _write_and_commit(repo, "capstone.log", epoch=1_700_000_200)
+    # the PRE-FIX predicate is satisfied here, which is what makes the refusal below evidence
+    assert check._added_epochs(squashed_prereg)[0] < check._added_epochs(squashed_log)[0]
+    strict = check.check_ordering(squashed_prereg, [squashed_log], base_ref=base)
+    assert strict, "the base's equal epochs must still refuse an ordered-looking contribution"
+    assert "not strictly after" in strict[0], strict[0]
+    # …and it names the remedy that can actually clear it (finding 1c), not an ordering to fix.
+    assert "WITHDRAWAL" in strict[0], strict[0]
+
+
+def test_the_base_ref_refusal_names_the_cause_that_actually_fired(tmp_path, monkeypatch):
+    """BOTH branches of `no_base_ref_message`, because the explicit one is the CI shape.
+
+    The CI step ALWAYS passes `--base-ref "origin/<branch>"`, so the operator's most likely failure
+    is "that ref is not fetched here" — not "you forgot the flag". The shared message told them the
+    flag was absent (it was not) and that `origin/main`/`main` did not resolve (they do), sending
+    them to debug flag wiring instead of fetching the branch. Asserted in BOTH directions: naming
+    the cause is only worth anything if the other cause's text is absent (#10463 review cycle 4).
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/contrib")
+    _git(repo, "remote", "add", "upstream", "https://example.invalid/x.git")
+    (repo / "README.md").write_text("base\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "base", epoch=1_700_000_000)
+    prereg = _commit_prereg(
+        repo, epoch=1_700_000_100, text=(PREREG_DIR / check.PREREG_NAME).read_text())
+
+    explicit = check.no_base_ref_message("origin/nope")
+    assert "origin/nope" in explicit, explicit
+    assert "no --base-ref" not in explicit, explicit
+    assert "exit 2" in explicit and "third outcome" in explicit, explicit
+
+    implicit = check.no_base_ref_message(None)
+    assert "no --base-ref" in implicit, implicit
+    assert "origin/nope" not in implicit, implicit
+    assert "exit 2" in implicit and "third outcome" in implicit, implicit
+
+    # …and the caller really does pass the explicit ref through, so the branch above is reachable.
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_200)
+    with pytest.raises(check.CheckError) as exc:
+        check.check_ordering(prereg, [log], base_ref="origin/nope")
+    assert "origin/nope" in str(exc.value), str(exc.value)
+    assert "no --base-ref" not in str(exc.value), str(exc.value)
+
+
+def test_the_measured_base_is_printed_for_a_human_not_only_for_json(capsys, monkeypatch):
+    """REGRESSION (#10463 review cycle 4/5): the reporting field must reach the line a human reads.
+
+    `ordering_base` was added so a green line could not read the same whether it measured the
+    published base or this branch's own `HEAD` fallback — which IS the PR-internal rule #10463
+    removes. It lived only in `--json`, so the CI log still could not tell them apart, and deleting
+    the print restored that silent-green with the whole suite green (measured by a reviewer: a
+    mutant, no test moved). THIS test is what makes deleting the PRINT red; the `setdefault` is
+    guarded one test below (`test_a_skipped_git_half_says_the_base_was_never_measured`) — on every
+    `use_git=True` path the key is assigned in the `try` before this print is reached, so it is
+    legitimately a no-op here (review cycle 6, finding 2).
+
+    The expectation is read from the REPORT, not from a second `resolve_base_ref()` call (review
+    cycle 6, finding 1): re-resolving renders the literal `None` in a checkout with no resolvable
+    base — the depth-1 shape the sibling test below commits as LEGITIMATE — so a second resolve reds
+    a correctly-ordered tree. Careful with the two strings, which are NOT interchangeable:
+    `ordering_base_candidate` carries `(unresolved)` when the candidates are checked and rejected,
+    while `ordering_base` — the base the ordering was actually MEASURED against — says
+    `(not measured)`, and the candidate line is suppressed rather than printed when it is
+    UNRESOLVED. Asserting `(unresolved)` against `ordering_base` reds an ordered tree.
+    """
+    # ⛔ One resolution, not two (review cycle 7, finding 3): `main()` honours
+    # `$PREREG_ORDERING_BASE_REF` and `check.run()` does not, so an ambient value would make the
+    # print and the expectation come from different code paths — and the test would red a
+    # legitimate, documented configuration. The env var is cleared so both sides ask the same
+    # question, and the explicit-ref path is covered by its own test.
+    monkeypatch.delenv(check.BASE_REF_ENV, raising=False)
+    assert check.main(["--dir", str(PREREG_DIR), "--no-corpus"]) == 0
+    out = capsys.readouterr().out
+    report = check.run(PREREG_DIR, use_git=True, use_corpus=False)
+    assert f"ordering measured against: {report['ordering_base']}" in out, out
+
+
+def test_a_skipped_git_half_says_the_base_was_never_measured(capsys):
+    """`--no-git` skips the ordering, so the base is `(not measured)` — never an implied one.
+
+    The `setdefault` is what carries this: without it the key is simply ABSENT, and a consumer (or a
+    human) reads "no base" as "the default base", which is the same silent-green one field over. The
+    field is asserted through `--json` here so the machine surface is pinned too.
+    """
+    assert check.main(["--dir", str(PREREG_DIR), "--no-corpus", "--no-git"]) == 0
+    out = capsys.readouterr().out
+    assert "ordering measured against: (not measured)" in out, out
+    report = check.run(PREREG_DIR, use_git=False, use_corpus=False)
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    # …and the MACHINE surface, through the CLI, which is what the docstring claims (review cycle 7,
+    # finding 2: the sentence said `--json` was pinned while the test never passed `--json`, so the
+    # claim guarded nothing). Asserted, so the claim is now the check it describes.
+    assert check.main(["--dir", str(PREREG_DIR), "--no-corpus", "--no-git", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ordering_base"] == "(not measured)", payload["ordering_base"]
+
+# ── #10463 review cycle 3: the arms the tests must actually discriminate ───────────────────────
+#
+# WHAT CHANGED AND WHY THESE EXIST. Cycle 3 found (1) an acceptance assertion that cannot hold in a
+# depth-1 checkout, (3) two added tests that a full revert of the new predicate still passes, and
+# (1c) an equal-epoch refusal that names no remedy. Each test below fails on the pre-fix code.
+# (Cycle 3's finding 4 — the base-ref refusal misstating its own cause — is pinned by
+# `test_the_base_ref_refusal_names_the_cause_that_actually_fired` above; cycle 4 landed it with
+# both branches asserted, so it is deliberately not duplicated here.)
+
+
+def _git_out(repo: Path, *args: str) -> str:
+    """stdout of a read-only git call, stripped."""
+    out = subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def _write_prereg_uncommitted(repo: Path, text: str = "x\n") -> Path:
+    target = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    return target
+
+
+def _stage_log(repo: Path, name: str, body: str = "x\n") -> Path:
+    target = repo / "docs" / "evidence" / "7949-capstone" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body)
+    return target
+
+
+def _commit_together(repo: Path, epoch: int, names: tuple[str, ...] = ("capstone.log",)) -> None:
+    """Add the registration AND its logs in ONE commit — the shape a squash merge produces."""
+    _write_prereg_uncommitted(repo)
+    for name in names:
+        _stage_log(repo, name)
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "the registration and its log in one commit", epoch=epoch)
+
+
+def _squashed_base(repo: Path, epoch: int, names: tuple[str, ...] = ("capstone.log",)) -> str:
+    """A ref adding the registration AND its log in ONE commit, NOT an ancestor of the contribution.
+
+    That is what a squash-merged `main` looks like to a branch that has not been rebased: equal
+    epochs on the base, so the base reading refuses while the contribution's own ordering may be
+    strict. ⛔ NOT the only such shape (review cycle 8, finding 1, measured): a base whose log
+    predates its registration — two separate commits — discriminates the two readings just as well,
+    and is witnessed separately by
+    `test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contribution`. A future
+    lane tempted to delete this helper because "the other test covers it" should know both exist.
+    """
+    branch = _git_out(repo, "symbolic-ref", "--short", "HEAD")
+    _git(repo, "checkout", "-q", "--orphan", "squashed-base")
+    _git(repo, "rm", "-rq", "--cached", "--ignore-unmatch", ".")
+    _commit_together(repo, epoch=epoch, names=names)
+    sha = _git_out(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-qf", branch)
+    return sha
+
+
+def test_a_depth_one_checkout_without_a_base_reports_the_unresolved_base(tmp_path, monkeypatch):
+    """REGRESSION (#10463 review cycle 3, finding 2): the reported base must tolerate depth 1.
+
+    The acceptance test asserts `report["ordering_base"]` is one of the resolved candidates. In a
+    depth-1 checkout of a single branch there is no `origin/main` and no local `main`, so the honest
+    report is `(not measured)` — with `(unresolved)` recorded separately as the candidate — and an
+    assertion that insists on a resolved ref reds a correctly
+    ordered tree from inside the test written to prevent exactly that. The value must stay a
+    reported fact; what it must NOT do is turn the unprovable third outcome into a failure.
+    """
+    origin = _repo(tmp_path, monkeypatch)
+    bundle = origin / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True, exist_ok=True)
+    for item in PREREG_DIR.iterdir():
+        if item.is_file():
+            (bundle / item.name).write_bytes(item.read_bytes())
+    _git(origin, "add", "docs")
+    _git(origin, "commit", "-q", "-m", "the real bundle", epoch=1_700_000_100)
+    _git(origin, "branch", "-m", "contrib")
+
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "-q", "--depth", "1", "--single-branch", "--branch", "contrib",
+         f"file://{origin.resolve()}", str(shallow))
+    monkeypatch.setattr(check, "REPO_ROOT", shallow.resolve())
+    assert check.history_unavailable() is True, "the fixture must really be a depth-1 checkout"
+
+    report = check.run(shallow / "docs" / "evidence" / "7949-capstone", use_git=True,
+                       use_corpus=False)
+    assert report["ok"], report["failures"]
+    # ⛔ `(not measured)`, NOT the resolved-if-it-were base (review cycle 7, finding F2): this
+    # fixture has no `origin/main` at all, so the CANDIDATE is unresolved — but the field is named
+    # for what was measured, and in a shallow checkout nothing is. Both facts are asserted so this
+    # test can no longer be satisfied by the fixture's absent ref alone (see the sibling test below,
+    # whose depth-1 clone of `main` DOES carry `origin/main`).
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["ordering_base_candidate"] == check.UNRESOLVED_BASE, \
+        report["ordering_base_candidate"]
+    # …and the third outcome is what it is: UNPROVABLE, never "violated".
+    assert report["ordering"] == check.HISTORY_UNAVAILABLE, report["ordering"]
+
+
+def test_the_base_ref_is_what_decides_the_pass_not_the_contribution(tmp_path, monkeypatch):
+    """The PASS arm, made discriminating by its SUBJECT (review cycle 3, finding 3).
+
+    A pass arm alone cannot tell the two predicates apart: adds on the base are a subset of the adds
+    on the contribution, so `min(base) >= min(HEAD)` and the pre-fix PR-internal predicate accepted
+    every tree the base predicate accepts. What does distinguish them is which ref the verdict was
+    measured against — so the same tree is asked twice: against the published base it passes, and
+    against a base that predates the registration it REFUSES. The pre-fix code had no base at all,
+    so both answers were identical, which is the defect.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    stale = _git_out(repo, "rev-parse", "HEAD")   # the base BEFORE the registration is published
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    _publish_base(repo)                           # the registration's own PR merged
+    log = _write_and_commit(repo, "s3-ablation.log", epoch=1_700_000_200)
+
+    assert check.check_ordering(prereg, [log]) == []
+    pinned = check.check_ordering(prereg, [log], base_ref=stale)
+    assert len(pinned) == 1, pinned
+    assert "not on the merge base" in pinned[0], pinned[0]
+    assert stale in pinned[0], f"the refusal must name the base it measured: {pinned[0]}"
+
+
+def test_a_squash_collapsed_pair_names_the_withdrawal_remedy(tmp_path, monkeypatch):
+    """The equal-epoch refusal must name the remedy that can actually clear it (cycle 3, 1c).
+
+    When both artefacts share their add-commit on the base, no re-ordering can help — this is what
+    redded `main` at `cfa3de857` (#10468), and the only path back to green is a WITHDRAWAL of the
+    log (#10544). A message that only says "not strictly after" sends the operator hunting for an
+    ordering to fix that does not exist.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    _commit_together(repo, epoch=1_700_000_100)
+    _publish_base(repo)                     # both landed on the base in ONE squash commit
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    log = repo / "docs" / "evidence" / "7949-capstone" / "capstone.log"
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, failures
+    assert "not strictly after" in failures[0], failures[0]
+    assert "WITHDRAWAL" in failures[0], failures[0]
+    assert "SAME commit" in failures[0], failures[0]
+    # It names the offending commit, so the operator can look at what collapsed.
+    assert _git_out(repo, "rev-parse", "--short=12", "HEAD") in failures[0], failures[0]
+
+
+# ── #10463 review cycle 7: the remedy that could not work, and a base that was never measured ──
+#
+# TWO findings, both in surfaces an operator or a consumer READS rather than in the comparison:
+#   F1  the equal-epoch refusal ended by naming "re-add the log in a PR of its own" — a move that
+#       cannot clear the check (the collapsed add-commit stays in the base's history, so `min()` is
+#       still the collapsed epoch) AND that the ruling forbids (#10463 comment 6564634454 item 2).
+#   F2  `ordering_base` was assigned the RESOLVED candidate before `check_ordering` ran, so a
+#       shallow checkout that raised before reading an epoch still printed "measured against:
+#       origin/main" — a measurement that did not happen. The sibling depth-1 test could not catch
+#       it because its fixture clones a branch with no `origin/main` at all.
+# Each test below fails on the pre-fix code.
+
+
+def test_a_withdrawn_log_cannot_be_reordered_by_re_adding_it(tmp_path, monkeypatch):
+    """F1: the recipe the old refusal named cannot clear the check — measured, all the way through.
+
+    `_added_epochs_on` is `git log --diff-filter=A <base> -- <path>`, and a later DELETION does not
+    remove the earlier add from that ref's history. So the operator follows the old instruction to
+    the end — withdraw the log in its own PR, let it land, re-add the log in a PR of its own, let
+    THAT land — and the base still reports the collapsed add-commit, `min()` is still the collapsed
+    epoch, and the ref emits the same refusal. There is no later state to reach, which is why the
+    only honest remedy is a new artefact at a new path.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    _commit_together(repo, epoch=1_700_000_100)     # both artefacts in ONE squash commit
+    _publish_base(repo)                            # …which is what `origin/main` carries
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    prereg, log = bundle / check.PREREG_NAME, bundle / "capstone.log"
+
+    # Step 1 — the withdrawal (#10544): the log leaves the checked directory, kept under `withdrawn/`.
+    (bundle / "withdrawn").mkdir()
+    (bundle / "withdrawn" / "capstone.log").write_text("x\n")
+    log.unlink()
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "withdraw the log, keep it under withdrawn/", epoch=1_700_000_200)
+    _publish_base(repo)
+
+    # Step 2 — the old instruction's next step: "re-add the log in a PR of its own", and let it land.
+    log.write_text("x\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "re-add the log to obtain a later add-commit", epoch=1_700_000_300)
+    _publish_base(repo)
+
+    # The premise, as a fact about git rather than prose: the base now holds BOTH adds, and the
+    # epoch the tool takes is the COLLAPSED one.
+    base_adds = check._added_epochs_on("origin/main", log)
+    assert len(base_adds) == 2, base_adds
+    assert min(base_adds) == 1_700_000_100, base_adds
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, "a re-added log must not turn the refusal green"
+    assert "not strictly after" in failures[0], failures[0]
+    assert "WITHDRAWAL" in failures[0], failures[0]
+    # ⛔ …and the message must not instruct the move it just refuted, nor the one the ruling forbids.
+    assert "re-add the log in a PR of its own" not in failures[0], failures[0]
+    assert "Do NOT re-add" in failures[0], failures[0]
+    assert "NEW artefact at a NEW path" in failures[0], failures[0]
+
+
+def test_a_depth_one_clone_of_main_reports_no_measured_base_even_though_one_resolves(
+        tmp_path, monkeypatch, capsys):
+    """F2: `ordering_base` must not name a base on a tree where nothing was measured.
+
+    ⛔ The shape matters, and this is the one the previous fixture could not build: a `--depth 1`
+    clone of `main` DOES carry `refs/remotes/origin/main` (measured — `resolve_base_ref` returns it),
+    while `history_unavailable()` is True so `check_ordering` raises before reading a single epoch.
+    The pre-fix code assigned the resolved ref to `ordering_base` BEFORE that raise, so the CI log —
+    the surface a human reads — printed `ordering measured against: origin/main` for a run that
+    measured nothing. The resolved ref is now reported as a CANDIDATE, on its own line, and the
+    measured line says what actually happened.
+    """
+    origin = _repo(tmp_path, monkeypatch)
+    bundle = origin / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True, exist_ok=True)
+    for item in PREREG_DIR.iterdir():
+        if item.is_file():
+            (bundle / item.name).write_bytes(item.read_bytes())
+    _git(origin, "add", "docs")
+    _git(origin, "commit", "-q", "-m", "the real bundle", epoch=1_700_000_100)
+    _git(origin, "branch", "-m", "main")
+
+    shallow = tmp_path / "shallow-main"
+    _git(tmp_path, "clone", "-q", "--depth", "1", "--branch", "main",
+         f"file://{origin.resolve()}", str(shallow))
+    monkeypatch.setattr(check, "REPO_ROOT", shallow.resolve())
+    assert check.history_unavailable() is True, "the fixture must really be a depth-1 checkout"
+    # ⛔ The property the old fixture lacked: the candidate RESOLVES here.
+    assert check.resolve_base_ref() == "origin/main", "a depth-1 clone of main carries origin/main"
+
+    shallow_bundle = shallow / "docs" / "evidence" / "7949-capstone"
+    report = check.run(shallow_bundle, use_git=True, use_corpus=False)
+    assert report["ok"], report["failures"]
+    assert report["ordering"] == check.HISTORY_UNAVAILABLE, report["ordering"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["ordering_base_candidate"] == "origin/main", report["ordering_base_candidate"]
+
+    assert check.main(["--dir", str(shallow_bundle), "--no-corpus"]) == 0
+    out = capsys.readouterr().out
+    assert "ordering measured against: (not measured)" in out, out
+    assert "would be measured against: origin/main" in out, out
+    # ⛔ The pre-fix line, verbatim: a base named as measured when none was.
+    assert "ordering measured against: origin/main" not in out, out
+
+
+def test_an_uncommitted_registration_reports_no_measured_base(tmp_path, monkeypatch, capsys):
+    """Follow-up 3 (review cycle 8): the RETURN arms measured nothing either, and said otherwise.
+
+    The cycle-7 F2 fix closed the arm that RAISES (`HistoryUnavailable`): the base was no longer
+    named as measured. It did not close the arms that RETURN early — `check_ordering` leaves before
+    the per-log loop when the registration is not committed (`_is_tracked`) or when it is absent
+    from the base, and `run()` then set `ordering = "verified"` plus `ordering_base = <resolved>`
+    unconditionally. So the log printed `machine record run-order claim: verified` and
+    `ordering measured against: origin/main` for a run that compared zero epochs — the same
+    silent-green the field exists to remove, one polarity over.
+
+    ⛔ The refusal below is CORRECT and stays: an unprovable ordering is not an ordering. What is
+    asserted is only that the report does not claim to have measured one.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    _write_and_commit(repo, "s3-ablation.log", epoch=1_700_000_200)
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    # The real document, so completeness/E4 pass and the ONLY finding is the uncommitted one.
+    (bundle / check.PREREG_NAME).write_text((PREREG_DIR / check.PREREG_NAME).read_text())
+    prereg = bundle / check.PREREG_NAME
+    assert check.history_unavailable() is False, "the fixture must carry real history"
+    assert check._is_tracked(prereg) is False, "the fixture's registration must be uncommitted"
+    assert check.resolve_base_ref() == "origin/main", "a base DOES resolve here — that is the trap"
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert any("not committed" in f for f in report["failures"]), report["failures"]
+    assert report["ok"] is False, report
+    # ⛔ The pre-fix values, verbatim: a base named and a claim verified for a run that read no epoch.
+    assert report["ordering"].startswith(check.ORDERING_UNMEASURED), report["ordering"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["ordering_base_candidate"] == "origin/main", report["ordering_base_candidate"]
+
+    assert check.main(["--dir", str(bundle), "--no-corpus"]) == 1
+    out = capsys.readouterr().out
+    assert "ordering measured against: (not measured)" in out, out
+    assert "ordering measured against: origin/main" not in out, out
+    assert f"machine record run-order claim: {check.ORDERING_UNMEASURED}" in out, out
+    assert "would be measured against: origin/main" in out, out
+
+
+def test_a_squash_collapsed_base_refuses_even_when_the_contribution_is_ordered(tmp_path, monkeypatch):
+    """THE LOG-SIDE HALF of the squash-invariance rule (#10463 review cycle 7, finding 1).
+
+    WHY THIS IS THE SHAPE. The rule reads each log's add-commit **on the base** when the log is
+    already merged there, and in the contribution when it is not. That log-side read had NO witness:
+    at the head that finding was made, forcing `base_log_epochs = []` (so every log is read from
+    the contribution) left all 212 tests green, and on the real #10468 shape it flipped a REFUSAL
+    into a silent PASS. The registration side was covered; the log side — half the predicate — was
+    not. (That count is historical: the same mutation now reds three tests, this one among them.)
+
+    The shape that discriminates: the base carries the registration and the log in ONE squash commit
+    (equal epochs), while THIS contribution carries them in order. Reading the log from the
+    contribution alone therefore ACCEPTS it; reading it from the base REFUSES it.
+
+    ⛔ "Only a `_squashed_base` shape can discriminate" was FALSE (review cycle 8, finding 1): a base
+    where the log predates the registration — two separate commits — discriminates just as well, and
+    is witnessed by `test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contribution`
+    below. Both are kept because they are different paths through the same base read.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/x.git")
+    # The contribution: registration first, log second — ORDERED, and provably so.
+    prereg = _commit_prereg(
+        repo, epoch=1_700_001_000, text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    log = _write_and_commit(repo, "capstone.log", epoch=1_700_002_000)
+    # The base: the same two artefacts in ONE commit, on a ref that is NOT an ancestor of this branch.
+    base_sha = _squashed_base(repo, epoch=1_700_001_500)
+    _git(repo, "update-ref", "refs/remotes/origin/main", base_sha)
+
+    # The discrimination, asserted FIRST so the test states what it is about: the contribution's own
+    # ordering is strict (log 1_700_002_000 > prereg 1_700_001_000), so a contribution-only reading
+    # would pass this tree. It must not.
+    assert min(check._added_epochs(log)) > min(check._added_epochs(prereg))
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, (
+        "the log was accepted from the contribution's own ordering — the log-side base read is not "
+        "load-bearing, which is the exact regression #10463 exists to prevent")
+    assert "not strictly after" in failures[0], failures[0]
+    # …and the squash-collapse diagnostic names the withdrawal, because that is the only remedy.
+    assert "SAME commit" in failures[0] and "WITHDRAWAL" in failures[0], failures[0]
+
+
+def test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contribution(
+        tmp_path, monkeypatch):
+    """The SECOND shape that discriminates the base reading from the PR-internal one.
+
+    The squash-collapse shape (equal epochs on the base) is one; this is the other, and it needs no
+    squash at all: on the base the log was added BEFORE the registration (two separate commits),
+    while THIS contribution adds them in the correct order. A contribution-only reading accepts the
+    tree (the ordering here is strict); the base reading refuses it, correctly — the log was already
+    published when the registration was not.
+
+    Measured by the reviewer as the counterexample to a `_squashed_base`-only claim (review cycle 8,
+    finding 1). Kept because it exercises the log-side base read through axes the squash test does
+    not: the epochs on the base are NOT equal, and there is NO shared add-commit (the log lands
+    first, in its own commit, before the registration). ⛔ It does NOT differ by "no orphan branch" —
+    an earlier version of this line said so and was false; both witnesses build their base on an
+    orphan branch. A future change that special-cases the squash shape cannot pass both.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/x.git")
+    # The contribution: registration FIRST, log second — strictly ordered HERE.
+    prereg = _commit_prereg(
+        repo, epoch=1_700_001_000, text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    log = _write_and_commit(repo, "capstone.log", epoch=1_700_002_000)
+    assert min(check._added_epochs(log)) > min(check._added_epochs(prereg)), (
+        "the contribution must be ordered, or this test cannot discriminate")
+
+    # The base: the LOG first (1_700_000_100), the registration later (1_700_000_300) — separate
+    # commits, on a ref that is not an ancestor of this branch.
+    branch = _git_out(repo, "symbolic-ref", "--short", "HEAD")
+    _git(repo, "checkout", "-q", "--orphan", "base-order")
+    _git(repo, "rm", "-rq", "--cached", "docs")
+    # ⛔ The registration is still on DISK from the branch checkout, so `git add docs` would put it
+    # in the log's commit — collapsing the two into one and measuring nothing (the first version of
+    # this test did exactly that, and its own "no SAME commit" assertion caught it). Remove it first.
+    (repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME).unlink()
+    _stage_log(repo, "capstone.log")
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "the log lands first", epoch=1_700_000_100)
+    _write_prereg_uncommitted(repo)
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "the registration lands later", epoch=1_700_000_300)
+    base_sha = _git_out(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-qf", branch)
+    _git(repo, "update-ref", "refs/remotes/origin/main", base_sha)
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, (
+        "the log was accepted from the contribution's own ordering — the log-side base read is not "
+        "load-bearing on the non-squash path either")
+    assert "not strictly after" in failures[0], failures[0]
+    # No squash collapse here, so the withdrawal diagnostic must NOT fire: the remedy is a proper
+    # ordering, not a withdrawal.
+    assert "SAME commit" not in failures[0], failures[0]
+
+
+# ── cycle 12: "no pair was compared" is not "verified" ───────────────────────
+
+
+def _bundle_with_published_registration(tmp_path, monkeypatch):
+    """A repo whose registration is on `origin/main`, and the bundle directory.
+
+    Two obligations of `run()` are irrelevant to what these tests measure — the corpus half and the
+    machine record — so they are satisfied rather than exercised (see `_measurement_only`).
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    # The REAL document, so the completeness half passes and the only subject under test is the
+    # ordering report. Its pins block is supplied by `_measurement_only` instead of read from the
+    # file, because the real pins exempt a log these fixtures deliberately do not create.
+    prereg = _commit_prereg(repo, epoch=1_700_000_100,
+                            text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    _publish_base(repo)
+    return repo, prereg.parent
+
+
+def _measurement_only(monkeypatch):
+    """Strip the two halves that are not under test, so the ORDERING claim is the only variable."""
+    monkeypatch.setattr(check, "parse_pins", lambda text: {"e4_denominator": 15})
+    monkeypatch.setattr(check, "check_machine_record", lambda directory, pins: [])
+
+
+def test_a_bundle_with_no_log_does_not_claim_a_measured_ordering(tmp_path, monkeypatch, capsys):
+    """A registration on the base and ZERO logs: the loop compares nothing, so nothing was measured.
+
+    ⛔ The `if not logs:` guard in `check_ordering` sits INSIDE `if not prereg_epochs:` — it fires
+    only when the registration is ABSENT from the base. With the registration published and no
+    evidence log, control reaches the per-log loop, the loop body never runs, `unmeasured` stayed
+    empty, and `run()` therefore took the `else` branch: `ordering = "verified"` and
+    `ordering_base = origin/main`, over zero comparisons. Measured on this PR's own CI command, half
+    of it (the `docs/evidence/5087-hypothesis` bundle, after its log was withdrawn) printed
+
+        evidence logs: 0
+        machine record run-order claim: verified
+        ordering measured against: origin/main
+
+    That is the silent-green `ordering_base` exists to remove — the same lie the RETURN arms told,
+    one step outside every one of them. A withdrawn log is an honest end state for a bundle, so the
+    bundle must be able to say "there is nothing here to order" without saying "I measured it".
+    """
+    repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    assert list(bundle.glob(check.EVIDENCE_LOG_GLOB)) == [], "the fixture must carry NO evidence log"
+    _measurement_only(monkeypatch)
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering"].startswith(check.ORDERING_UNMEASURED), report["ordering"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["ordering_base_candidate"] == "origin/main", report["ordering_base_candidate"]
+
+    assert check.main(["--dir", str(bundle), "--no-corpus"]) == 0
+    out = capsys.readouterr().out
+    assert "ordering measured against: origin/main" not in out, out
+    assert "ordering measured against: (not measured)" in out, out
+    assert "would be measured against: origin/main" in out, out
+    assert f"machine record run-order claim: {check.ORDERING_UNMEASURED}" in out, out
+
+
+def test_a_bundle_whose_only_log_is_untracked_does_not_claim_a_measured_ordering(
+        tmp_path, monkeypatch, capsys):
+    """"Every log is untracked" is the other way to walk the loop and compare nothing.
+
+    The untracked-log skip is CORRECT — an uncommitted file cannot predate a commit that already
+    exists, and it re-enters the gate the moment it is committed. What was wrong was the report:
+    the comparison counter never advanced, so the bundle was announced as measured. Same defect as
+    the zero-log case, reached through the `continue` rather than through an empty list — which is
+    why the counter is incremented where an epoch is ESTABLISHED, not derived from `len(logs)`.
+    """
+    repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    scratch = bundle / "brand-new.log"
+    scratch.write_text("x\n")  # written, never `git add`-ed
+    assert check._is_tracked(scratch) is False, "the log must be untracked"
+    _measurement_only(monkeypatch)
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering"].startswith(check.ORDERING_UNMEASURED), report["ordering"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+
+    assert check.main(["--dir", str(bundle), "--no-corpus"]) == 0
+    out = capsys.readouterr().out
+    assert "ordering measured against: origin/main" not in out, out
+    assert "ordering measured against: (not measured)" in out, out
+
+
+def test_one_comparable_pair_is_enough_to_report_the_bundle_as_measured(tmp_path, monkeypatch):
+    """⛔ The counter is bundle-level on purpose: a measured pair is NOT reported as unmeasured.
+
+    A per-log `unmeasured` append would report this bundle — one ordered log plus one untracked
+    log, i.e. a REAL measurement — as `UNMEASURED`, which is the same class of lie in the other
+    direction, and it would make the arm useless the first time a lane had a scratch log open.
+    """
+    repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    ordered = bundle / "a-ordered.log"
+    ordered.write_text("x\n")
+    _git(repo, "add", str(ordered.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "log after the registration", epoch=1_700_000_200)
+    (bundle / "scratch.log").write_text("x\n")  # untracked, and irrelevant
+    _measurement_only(monkeypatch)
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering"] == "verified", report["ordering"]
+    assert report["ordering_base"] == "origin/main", report["ordering_base"]
+
+
+# ── cycle 13: the readers must see an add hidden behind a merge ───────────────
+
+
+def test_the_ordering_readers_see_an_add_hidden_behind_a_merge(tmp_path, monkeypatch):
+    """FAIL-OPEN, measured (review cycle 13, finding 1): simplification can hide the EARLIER add.
+
+    `git log --diff-filter=A` follows only the TREESAME parent at a merge. So when one branch adds
+    the log at T1 (before the registration) and a sibling adds the same path at T2 (after it), and
+    the merge is resolved to the sibling's copy, the default read returns **[T2] only** — `min()`
+    is then later than the truth and a log that predates the registration is ACCEPTED. That is
+    precisely the fabricated ordering the gate exists to refuse, passing silently.
+
+    The file already knew this hazard: `_touch_epochs` carries `--full-history` for it, with a
+    comment saying git's simplification can drop a merge commit that touched the log, and a test
+    (`test_the_touch_history_sees_a_merge_commit`). The lesson had been applied to a DIAGNOSTIC
+    and not to the two readers that decide the VERDICT — which is exactly why it went unnoticed.
+
+    The fixture is the criss-cross shape, and the assertion is on the ACCEPT it used to produce.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_003_000)
+    _publish_base(repo)
+    log = prereg.parent / "capstone.log"
+
+    # Branch `early`: the log lands BEFORE the registration was published.
+    _git(repo, "checkout", "-q", "-b", "early")
+    log.write_text("measured before the thresholds\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "log first", epoch=1_700_000_100)
+
+    # Branch `late`: the same path, after the registration, and the merge keeps THIS copy. It
+    # branches from the PUBLISHED registration commit, not from `early`.
+    _git(repo, "checkout", "-q", "-b", "late", "origin/main")
+    # Leaving `early` removed the now-empty directory, so re-create it before writing the copy.
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("measured after the thresholds\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "log again", epoch=1_700_004_000)
+    _git(repo, "merge", "-q", "-s", "ours", "-m", "merge early, keep late's copy", "early",
+         epoch=1_700_005_000)
+
+    # The premise: the DEFAULT read is blind to the earlier add, `--full-history` is not.
+    default_epochs = [int(x) for x in _git_out(
+        repo, "log", "--diff-filter=A", "--format=%ct", "--", "docs/evidence/7949-capstone/"
+        "capstone.log").split()]
+    full_epochs = [int(x) for x in _git_out(
+        repo, "log", "--full-history", "--diff-filter=A", "--format=%ct", "--",
+        "docs/evidence/7949-capstone/capstone.log").split()]
+    assert min(default_epochs) == 1_700_004_000, default_epochs
+    assert min(full_epochs) == 1_700_000_100, full_epochs
+
+    failures = check.check_ordering(prereg, [log], {})
+    assert failures, (
+        "a log whose EARLIER add is hidden behind a merge was accepted — the ordering readers are "
+        "history-simplified again, and `min()` is then later than the truth")
+    assert "not strictly after" in failures[0], failures[0]
+
+
+def test_an_ordering_violation_is_not_reported_as_a_verified_claim(tmp_path, monkeypatch, capsys):
+    """A VIOLATED ordering must not print `run-order claim: verified` (review cycle 13, finding 2).
+
+    `run()` took `ordering = "verified"` whenever `unmeasured` was empty, without looking at what
+    `check_ordering` returned. So on a tree with two "not strictly after" failures — a real
+    violation — the two fields a consumer keys on reported the opposite of the measurement, while
+    `ok`/exit were correctly 1. The exit code saved it, and that is exactly why it survived: every
+    test of the report ran on a PASSING tree.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_003_000,
+                            text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    _publish_base(repo)
+    log = prereg.parent / "capstone.log"
+    log.write_text("x\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "log BEFORE the registration", epoch=1_700_000_100)
+    monkeypatch.setattr(check, "check_machine_record", lambda directory, pins: [])
+
+    report = check.run(prereg.parent, use_git=True, use_corpus=False)
+    assert report["ok"] is False, report
+    assert any("not strictly after" in f for f in report["failures"]), report["failures"]
+    assert report["ordering"] != "verified", report["ordering"]
+    assert report["run_order_claim"] != "verified", report["run_order_claim"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+
+    assert check.main(["--dir", str(prereg.parent), "--no-corpus"]) == 1
+    out = capsys.readouterr().out
+    assert "machine record run-order claim: verified" not in out, out
+    assert check.ORDERING_UNMEASURED not in out, ("a VIOLATION is not an UNMEASURED outcome — it "
+                                                  "was measured, and it failed")
+
+
+def test_the_base_read_sees_an_add_hidden_behind_a_merge(tmp_path, monkeypatch):
+    """T3 on the BASE side: the flag that makes the base read honest had NO witness.
+
+    `test_the_ordering_readers_see_an_add_hidden_behind_a_merge` publishes the base BEFORE the log
+    exists, so `base_log_epochs == []` and the epoch under test comes from `_added_epochs` — the
+    contribution reader. Deleting `--full-history` from `_added_epochs_on` therefore changed
+    nothing: the whole file stayed green while the base reader could accept a log whose earlier add
+    the merge hid. That is the half this PR's squash-invariance argument rests on, so it gets its
+    own fixture: the criss-cross merge is what the BASE carries, and the contribution adds nothing.
+
+    Measured both ways: with the flag the ordering is REFUSED at the hidden epoch; without it the
+    same tree is ACCEPTED, silently.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    rel = "docs/evidence/7949-capstone/capstone.log"
+    log = repo / rel
+    log.parent.mkdir(parents=True, exist_ok=True)
+
+    # `early` adds the log at 1_700_000_100; `late` adds the same path at 1_700_000_400; the merge
+    # into `late` keeps late's copy, so git's default walk sees only the later add.
+    _git(repo, "checkout", "-q", "-b", "early")
+    log.write_text("measured before the thresholds\n")
+    _git(repo, "add", rel)
+    _git(repo, "commit", "-q", "-m", "log first", epoch=1_700_000_100)
+    _git(repo, "checkout", "-q", "-b", "late", "origin/main")
+    # Leaving `early` removed the now-empty directory, so re-create it before writing the copy.
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("measured after the thresholds\n")
+    _git(repo, "add", rel)
+    _git(repo, "commit", "-q", "-m", "log again", epoch=1_700_000_400)
+    _git(repo, "merge", "-q", "-s", "ours", "-m", "merge early, keep late's copy", "early",
+         epoch=1_700_000_500)
+
+    # The registration lands on the base AFTER that merge, so BOTH artefacts are published there
+    # and the comparison is a base-side one — which is the reader under test.
+    prereg = _commit_prereg(repo, epoch=1_700_000_300)
+    _publish_base(repo)
+
+    default_epochs = [int(x) for x in _git_out(
+        repo, "log", "--diff-filter=A", "--format=%ct", "origin/main", "--", rel).split()]
+    full_epochs = [int(x) for x in _git_out(
+        repo, "log", "--full-history", "--diff-filter=A", "--format=%ct", "origin/main", "--",
+        rel).split()]
+    assert min(default_epochs) == 1_700_000_400, default_epochs
+    assert min(full_epochs) == 1_700_000_100, full_epochs
+    assert check._added_epochs_on("origin/main", log) == sorted(full_epochs), (
+        "the BASE reader must see every add the merge hid, not just the surviving copy")
+
+    failures = check.check_ordering(prereg, [log], {})
+    assert failures, (
+        "a log whose earlier add on the BASE is hidden behind a merge was accepted — the base "
+        "reader is history-simplified, and `min()` is then later than the truth")
+    assert "not strictly after" in failures[0], failures[0]
