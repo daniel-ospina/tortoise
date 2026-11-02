@@ -433,12 +433,23 @@ mechanisms:
       *"must carry a reachable link to its `Source` span"* — §2.4 records the
       widening from `#2684`'s value-bearing points to ALL points as deliberate.
       The live write path does not do it:
-      `extractor_v2._value_verbatim_span` stamps offsets only when the anchor is
-      VERBATIM and the text it addresses CARRIES A VALUE, so a point with no
-      verbatim quote, or with a quote that omits the value, is written with no
-      address at all (MEASURED: 3 points through `execute_embed`, 1 span — see
-      `test_the_span_link_row_records_the_widening_as_unbuilt` in
-      `tests/test_v4_declared_mechanisms.py`). A `validate_span`
+      `extractor_v2._value_verbatim_span` stamps offsets only when the point's
+      own content/quote CARRIES A VALUE **and** a source turn resolves **and**
+      the quote is VERBATIM in it **and** the text the span addresses itself
+      carries a value — so every other committed point is written with no
+      address at all. MEASURED, and WHICH result was measured matters: of 3
+      points through `execute_embed` exactly 1 is spanned, and both unspanned
+      points stop at the FIRST of those four gates — the shape *a point whose
+      content and quote carry no value* — which is the only absence
+      `test_the_span_link_row_records_the_widening_as_unbuilt`
+      (`tests/test_v4_declared_mechanisms.py`) actually pins. The other two
+      refusal routes are pinned ELSEWHERE, not by it: the band-resolved route by
+      `tests/test_extractor_v2.py::TestValueVerbSpan2684::`
+      `test_a_band_resolved_value_is_REPORTED_not_silently_unspanned`, and the
+      verbatim-but-value-free route by the same class's
+      `test_a_value_free_quote_gets_no_span_and_is_REPORTED`. Neither of those
+      two appears in the row test above, so do not read its 2 unspanned points
+      as coverage of them. A `validate_span`
       that validates a SUPPLIED pair is not a producer: a row marked
       `implemented` here would recreate exactly the declared-implies-present
       defect this registry exists to catch, so the absence is recorded against
