@@ -952,7 +952,7 @@ def run_ask_assembled(sdk: TortoiseSDK, question: str, *,
         try:
             raw, _out_tokens = _ask_reader_complete(
                 model,
-                system=system_prompt_for(qtype, question=question),
+                system=system_prompt_for(qtype),
                 user=build_reader_user_message(evidence, question))
         except AskReaderUnavailable:
             raise
