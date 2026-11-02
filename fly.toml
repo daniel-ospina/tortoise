@@ -202,8 +202,8 @@ kill_timeout = 30
   # a MACHINE attribute, not a fly.toml key (this file has no `[[restart]]`
   # block), so a machine recreated without it turns this exit into a STOPPED
   # machine. Re-check it after any recreate before trusting the self-heal.
-  # 600s is ~5x the enabled-threshold floor (120s), ~68x the observed p99 loop
-  # lag (8.8s), and far above any legitimate
+  # 600s is ~3.3x the enabled-threshold floor (_loop_stall_floor_s() = max(120,
+  # 2*LOOP_STALE_AFTER) = 180s), ~68x the observed p99 loop lag (8.8s), far above any legitimate
   # synchronous handler, so it cannot fire on load. `0` disables it.
   TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"
   # ⛔ TORTOISE_RECORD_DSN is a Fly SECRET, not an [env] key (#9548, epic #7879

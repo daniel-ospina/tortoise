@@ -4245,8 +4245,9 @@ LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before jud
 #: recoverable (the platform replaces the process); NOT killing is unbounded
 #: and silent.
 #:
-#: The hosted 600s is ~5x the enabled-threshold floor (120s), ~68x the observed
-#: p99 loop lag (8.8s), and far above the
+#: The hosted 600s is ~3.3x the enabled-threshold floor (``_loop_stall_floor_s``
+#: = max(120s, 2 * LOOP_STALE_AFTER) = 180s), ~68x the observed p99 loop lag
+#: (8.8s), and far above the
 #: slowest legitimate synchronous handler, so it cannot fire on load; the
 #: measured wedge exceeded it (696s max lag) within minutes.
 #:
@@ -4255,6 +4256,48 @@ LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before jud
 #: arms it at 600s in ``fly.toml`` ``[env]`` — a deployment-configuration
 #: decision, so the product default is unchanged and a self-hoster opts in.
 LOOP_STALL_HARD_EXIT_S = 0.0       # 0 == hard ceiling DISABLED (the default)
+
+#: Set when the heartbeat TASK is known to have died (see
+#: ``note_heartbeat_task``). A dead task freezes the heartbeat while the loop is
+#: perfectly healthy, which would make the hard ceiling below ``os._exit`` a
+#: HEALTHY process every ``LOOP_STALL_HARD_EXIT_S`` until the platform's
+#: ``max_retries`` are spent and the machine is left STOPPED — a silent hang
+#: replaced by a silent stop. So the ceiling must be able to tell "the loop is
+#: wedged" from "the ticker is gone", and refuse to act in the second case.
+_HEARTBEAT_TASK_DEAD = False
+
+
+def note_heartbeat_task(task) -> None:
+    """Mark ``task`` as the heartbeat ticker; record its death, loudly.
+
+    Call this with the object returned by ``loop.create_task(
+    loop_heartbeat_task())``. The callback only ever flips a module flag: a
+    dead ticker is an operator signal (logged at CRITICAL), never permission
+    for the destructive path to fire.
+    """
+    def _done(t) -> None:
+        global _HEARTBEAT_TASK_DEAD
+        if t.cancelled():
+            return  # an orderly shutdown cancels it; not a fault
+        exc = None
+        with contextlib.suppress(BaseException):
+            exc = t.exception()
+        if exc is None:
+            return  # returned cleanly; treat like a stop, not a fault
+        _HEARTBEAT_TASK_DEAD = True
+        logger.critical(
+            "#2850: the event-loop heartbeat TASK died (%r) while the loop may "
+            "still be healthy — the hard stall ceiling is DISARMED for this "
+            "process so a dead ticker cannot be mistaken for a wedge",
+            exc)
+
+    with contextlib.suppress(BaseException):
+        task.add_done_callback(_done)
+
+
+def heartbeat_task_is_dead() -> bool:
+    """True once the heartbeat ticker has died of an exception."""
+    return _HEARTBEAT_TASK_DEAD
 
 
 # ── #2850 P0 review: workload-in-flight gauge for the idle gate ───────────
@@ -4454,8 +4497,13 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
     # promise ("a non-finite value DISABLES").
     # The HARD ceiling is honoured even when the soft (idle-gated) path is
     # disabled: it is the only mechanism that can end a wedge the in-flight
-    # gauge vetoes forever. When only the hard ceiling is armed, the soft
-    # threshold is raised to it so the age comparison below can reach it.
+    # gauge vetoes forever. When only the hard ceiling is armed we still need a
+    # non-zero threshold to get past the early return above and to size
+    # poll_interval; the ceiling value is used for that. It also leaves the
+    # idle-gated SOFT path armed at the same value, which the hard branch
+    # dominates for ages past the ceiling — harmless, and stated so nobody
+    # reads the assignment as what makes the ceiling reachable (it does not:
+    # the hard branch compares `age >= hard_exit_s` directly).
     hard_exit_s = _loop_stall_hard_exit_s()
     if not math.isfinite(threshold_s) or threshold_s <= 0:
         if hard_exit_s <= 0:
@@ -4512,6 +4560,18 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
             # deliberately NOT consulted: it is TRUE by construction during
             # this failure (an open SSE stream, then the wedge itself), so
             # consulting it here is what made the outage permanent and silent.
+            if (hard_exit_s > 0 and age is not None and age >= hard_exit_s
+                    and heartbeat_task_is_dead()):
+                # The ticker itself died: the heartbeat is stale but the LOOP
+                # may be fine. Exiting here would restart-loop a healthy
+                # process. Report instead.
+                logger.critical(
+                    "#2850 loop-stall HARD ceiling reached (age=%s) but the "
+                    "heartbeat TASK is dead, so this is not provably a wedge "
+                    "— NOT exiting (a dead ticker must not restart a healthy "
+                    "process)", f"{age:.1f}s")
+                stale_windows = 0
+                continue
             if hard_exit_s > 0 and age is not None and age >= hard_exit_s:
                 logger.critical(
                     "#2850 loop-stall HARD ceiling: the event loop has not "

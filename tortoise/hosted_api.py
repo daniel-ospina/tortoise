@@ -160,6 +160,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     run_on_daemon_worker,
     start_health_listener,
     start_stall_watchdog,
+    note_heartbeat_task,
     workload_enter,
     workload_exit,
 )
@@ -1957,6 +1958,9 @@ def _start_liveness(app) -> None:
             prev.cancel()
     heartbeat_record()
     app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    # #2850: record that ticker's death, so the hard stall ceiling can tell a
+    # wedged LOOP from a dead TICKER and never restart-loop a healthy process.
+    note_heartbeat_task(app.state._loop_heartbeat_task)
     # #3944: the analytics canary heartbeat. Armed with the liveness block
     # (cheap, synchronous, no I/O at arm time — the coroutine sleeps first).
     app.state._analytics_canary_task = loop.create_task(_analytics_canary_loop())

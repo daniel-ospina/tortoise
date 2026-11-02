@@ -3454,6 +3454,39 @@ class TestStallWatchdog:
                 thread.join(timeout=2)
         assert fired == [], "a busy loop must not be killed without a ceiling"
 
+    def test_hard_ceiling_refuses_to_fire_when_the_ticker_itself_died(
+            self, monkeypatch):
+        """The crash-loop this MUST not add (review P2): if the heartbeat TASK
+        dies while the loop is healthy, the heartbeat is stale forever and the
+        ceiling would ``os._exit`` a HEALTHY process every threshold until the
+        platform's ``max_retries`` are spent and the machine is left STOPPED.
+        A dead ticker is an operator signal, never permission to kill."""
+        import threading
+        import time
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.1")
+        monkeypatch.setattr(monitoring, "_HEARTBEAT_TASK_DEAD", True)
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop, poll_interval=0.05)
+            assert thread is not None
+            time.sleep(0.6)
+        finally:
+            monitoring._reset_workload()
+            stop.set()
+            if thread is not None:
+                thread.join(timeout=2)
+        assert fired == [], (
+            "a dead heartbeat ticker must NOT be treated as a wedge — this "
+            "would restart-loop a healthy process")
+
     def test_hard_ceiling_parser_is_fail_closed(self, monkeypatch):
         """Every unusable value must DISABLE the ceiling (fail closed) — a
         parsed-but-unusable ceiling is the restart-loop this file guards."""
