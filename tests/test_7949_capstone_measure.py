@@ -491,26 +491,93 @@ def test_the_e1_e2_record_refuses_a_denominator_the_record_did_not_freeze(tmp_pa
     assert refused.value.code == 2, refused.value
 
 
+def _e2a_result(*, survived: int, units: int, bars: dict) -> dict:
+    """An E2a result shaped like `e2a_outcome`'s own, without the record."""
+    required = bars["E2a"]["required"]
+    return measure.outcome(
+        measured=True, below_floor=units == 0, passed=survived >= required,
+        bar=f"{required} of {bars['E2a']['of']}",
+        value=f"value_units {survived}/{units} survived")
+
+
+def _e2b_result(*, fused: int, atomic: int, bars: dict) -> dict:
+    """An E2b result shaped like `main`'s own, without the run."""
+    share = fused / atomic if atomic else 1.0
+    return measure.outcome(
+        measured=True,
+        below_floor=atomic < bars["floors"]["e2b_surviving_units"],
+        passed=share <= bars["E2b"]["max_fused_share"],
+        bar=f"fused share <= {bars['E2b']['max_fused_share']}",
+        value=f"fused={fused}/{atomic} = {share:.6f}")
+
+
 def test_the_e2_row_is_the_composite_and_not_e2a_alone():
     """P1: a record whose fused half fails must not render a GREEN row.
 
     E2 is `E2a AND E2b`. Deriving the row from E2a alone would let a failing
     proxy through — the row and the record it cites would disagree.
+
+    ⚠️ This pin used to build the composite INLINE (`measure.outcome(...)` over
+    an expression it had just written) and never reached the production path, so
+    reverting `main` to `verdict_word(e2a_result)` left it green (#10610 review
+    issue 1). It now calls `measure.e2_outcome` — the function `main` itself
+    calls — and `test_the_e2_row_verdict_is_the_composite_main_uses` holds the
+    wiring, so the mutant is killed from both ends.
     """
-    parsed = measure.measure_e1_e2(_REPO)
     bars = measure.parse_bars(json.loads(PREREG.read_text()))
-    e2a = measure.e2a_outcome(parsed, bars)
-    e2b_bad = measure.outcome(measured=True, below_floor=False, passed=False,
-                              bar="fused share <= 0.05", value="fused=7/114")
-    composite = measure.outcome(
-        measured=True, below_floor=False,
-        passed=(e2a["outcome"] == "PASS" and e2b_bad["outcome"] == "PASS"),
-        bar="composite", value="x")
-    assert composite["outcome"] != "PASS"
+    e2a_green = _e2a_result(survived=13, units=14, bars=bars)
+    e2b_bad = _e2b_result(fused=7, atomic=114, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    assert e2a_green["outcome"] == "PASS", e2a_green
+    assert e2b_bad["outcome"] == "FAIL", e2b_bad
+
+    # 13/14 E2a beside a fused 7/114: the mutant (`verdict_word(e2a_result)`)
+    # reads GREEN here; the composite reads RED, and the record itself says FAIL.
+    composite = measure.e2_outcome(e2a_result=e2a_green, e2b_result=e2b_bad,
+                                   bars=bars)
+    assert composite["outcome"] == "FAIL", composite
+    assert measure.verdict_word(composite) == "RED", composite
+    # …and the success path IS reachable: 13/14 beside the committed fused 1/114.
+    green = measure.e2_outcome(e2a_result=e2a_green, e2b_result=e2b_good,
+                               bars=bars)
+    assert green["outcome"] == "PASS", green
+    assert measure.verdict_word(green) == "GREEN", green
     # and the record itself states which half decided it
     record = json.loads(SCORES.read_text())
     assert record["e2"]["outcome"] == "FAIL"
     assert record["e2"]["decided_by"] in {"E2a", "E2b", "both"}
+
+
+def test_the_e2_row_verdict_is_the_composite_main_uses():
+    """The WIRING half of the composite pin (#10610 review issue 1).
+
+    A pin that calls the helper proves the helper; it proves nothing about the
+    row unless `main` derives the row from it. This reads `main`'s own AST and
+    requires (a) a call to `e2_outcome` and (b) the `e2_row` dict's `verdict` to
+    be `verdict_word(e2_result)` — the exact expression a revert to
+    `verdict_word(e2a_result)`, or to a bare `e2_result = e2a_result`, breaks.
+    """
+    tree = ast.parse(PROBE.read_text())
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    calls = {node.func.id for node in ast.walk(main)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+    assert "e2_outcome" in calls, (
+        "main no longer derives E2 through e2_outcome — the composite is inline "
+        "again and no pin can reach it")
+    row = next(node for node in ast.walk(main)
+               if isinstance(node, ast.Assign)
+               and any(isinstance(t, ast.Name) and t.id == "e2_row"
+                       for t in node.targets)
+               and isinstance(node.value, ast.Dict))
+    keys = [key.value for key in row.value.keys
+            if isinstance(key, ast.Constant)]
+    verdict = row.value.values[keys.index("verdict")]
+    assert isinstance(verdict, ast.Call) and getattr(verdict.func, "id", None) \
+        == "verdict_word", ast.dump(verdict)
+    assert [getattr(arg, "id", None) for arg in verdict.args] == ["e2_result"], (
+        "the E2 row's verdict is no longer verdict_word(e2_result) — a revert to "
+        "e2a_result would show the 13/14 E2a beside a fused 7/114 as GREEN")
 
 
 def test_the_e1_e2_record_refuses_a_denominator_the_record_did_not_freeze_meta(
@@ -616,12 +683,21 @@ def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
 
 
 def _e1_kwargs() -> dict:
+    """`main`'s own E1 call — the population it FLOORS is the one it SCORES.
+
+    `objects` is the AFTER arm's Objects, because that is the population E1's
+    criterion is written over and the one the row's count slots carry. It used
+    to be `objects_total` (the BEFORE arm), which made the row's floor arm
+    unreachable — `read_off_arms` already refuses a before arm under the floor —
+    and left the after arm the row floors unfloored (#10610 review issue 2).
+    """
     parsed = measure.measure_e1_e2(_REPO)
     bars = measure.parse_bars(json.loads(PREREG.read_text()))
     return {"before_share": parsed["before_share"],
             "after_share": parsed["after_share"],
-            "objects": parsed["objects_total"], "bars": bars,
-            "decidable": parsed["decidable"]}
+            "objects": parsed["after_objects"], "bars": bars,
+            "decidable": parsed["decidable"],
+            "below_floor": parsed["below_floor"]}
 
 
 def test_the_table_is_five_rows_in_the_gates_order():
@@ -721,6 +797,162 @@ def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():
     assert "sibling" not in rows["E1"] and "sibling" not in rows["E2"]
     assert parsed["e2a_units"] != parsed["after_objects"], (
         "the two populations are the same number — re-derive this pin")
+
+
+def test_the_e1_floor_is_applied_to_the_arm_the_row_counts():
+    """#10610 review issue 2: the row's floor arm was unreachable.
+
+    `main` passed `objects=e1["objects_total"]` — the BEFORE arm, which
+    `read_off_arms` has already refused below the floor, so `objects < floor`
+    could never be true — while the row's count slots carried `after_objects`, and
+    the after arm's own floor finding was folded into `decidable` and lost. Two
+    DERIVED assertions, both non-vacuous against the pre-fix call:
+
+    (1) the population `main` scores is the AFTER arm, read off `main`'s AST, so a
+        revert to `objects_total` reds here rather than at run time; and
+    (2) an under-floor after arm is REFUSED **as a floor finding**, not reported as
+        a pairing disagreement it does not have (the pre-fix `e1_outcome` returned
+        BLOCKED with "the pairings DISAGREE" for this input).
+    """
+    parsed = measure.measure_e1_e2(_REPO)
+    bars = measure.parse_bars(json.loads(PREREG.read_text()))
+    assert _e1_kwargs()["objects"] == parsed["after_objects"]
+    assert parsed["after_objects"] != parsed["objects_total"], (
+        "the two arms are the same size here — re-derive this pin")
+
+    # (1) the production call, off `main`'s own AST: `objects=e1["after_objects"]`.
+    tree = ast.parse(PROBE.read_text())
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    call = next(node for node in ast.walk(main)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "e1_outcome")
+    objects = next(kw.value for kw in call.keywords if kw.arg == "objects")
+    assert isinstance(objects, ast.Subscript), ast.dump(objects)
+    assert objects.value.id == "e1" and objects.slice.value == "after_objects", (
+        "main floors the wrong arm — E1's criterion is written over the AFTER "
+        "arm's Objects, and that is the population the row's count slots carry")
+    assert any(kw.arg == "below_floor" for kw in call.keywords), (
+        "main drops the record's own floor finding, so an under-floor after arm "
+        "is narrated as a pairing disagreement")
+
+    # (2) the arithmetic: floor FIRST, decidability second.
+    floor = bars["floors"]["e1_objects"]
+    refused = measure.e1_outcome(before_share=0.3590, after_share=0.0500,
+                                 objects=floor - 5, bars=bars,
+                                 decidable=False, below_floor=True)
+    assert refused["outcome"] == "REFUSED", refused
+    assert refused["below_floor"] is True, refused
+    assert f"under the frozen floor of {floor}" in refused["value"], refused
+    assert "DISAGREE" not in refused["value"], refused
+    # The disagreement arm still reports the disagreement (non-vacuity both ways).
+    disagreed = measure.e1_outcome(before_share=0.3590, after_share=0.2131,
+                                   objects=parsed["after_objects"], bars=bars,
+                                   decidable=False, below_floor=False)
+    assert disagreed["outcome"] == "BLOCKED", disagreed
+    assert "DISAGREE" in disagreed["value"], disagreed
+
+
+def test_the_e1_note_narrates_the_state_the_row_is_in():
+    """#10610 review issue 3: the refusal sentence was unconditional.
+
+    Every scored log would have carried "the pairings do not agree, so the row is
+    REFUSED" — so the first run that DECIDES E1 writes that sentence beside its own
+    `PASS`. The note must state the state it is in, and the three states must stay
+    DISTINCT (floor ≠ disagreement ≠ decided).
+    """
+    parsed = measure.measure_e1_e2(_REPO)
+    bars = measure.parse_bars(json.loads(PREREG.read_text()))
+    decided = dict(parsed, decidable=True, below_floor=False)
+    decided_out = measure.e1_outcome(before_share=0.3590, after_share=0.2131,
+                                     objects=parsed["after_objects"], bars=bars,
+                                     decidable=True, below_floor=False)
+    assert decided_out["outcome"] in {"PASS", "FAIL"}, decided_out
+    note = measure.e1_row_note(decided, decided_out, bars)
+    assert "do not agree" not in note, note
+    assert "not RED and not GREEN" not in note, note
+    assert decided_out["outcome"] in note, note
+
+    refused_out = measure.e1_outcome(**_e1_kwargs())
+    refused_note = measure.e1_row_note(parsed, refused_out, bars)
+    assert "do not agree" in refused_note, refused_note
+
+    under = dict(parsed, decidable=False, below_floor=True,
+                 after_objects=bars["floors"]["e1_objects"] - 5)
+    floor_out = measure.e1_outcome(before_share=parsed["before_share"],
+                                   after_share=parsed["after_share"],
+                                   objects=under["after_objects"], bars=bars,
+                                   decidable=False, below_floor=True)
+    floor_note = measure.e1_row_note(under, floor_out, bars)
+    assert "do not agree" not in floor_note, floor_note
+    assert f"frozen floor of {bars['floors']['e1_objects']}" in floor_note, (
+        floor_note)
+
+
+def test_the_e2_note_never_claims_a_shortfall_that_did_not_happen():
+    """#10610 review issue 3, on the row this record exists to unbury.
+
+    "E2a falls short of 13 of 14" was hard-coded, so the 13/14 run — the one
+    where E2's row finally reads GREEN — would have printed the shortfall beside
+    its own GREEN verdict, in the log that IS the evidence.
+    """
+    parsed = measure.measure_e1_e2(_REPO)
+    bars = measure.parse_bars(json.loads(PREREG.read_text()))
+    e2a_green = _e2a_result(survived=13, units=14, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    green = measure.e2_outcome(e2a_result=e2a_green, e2b_result=e2b_good,
+                               bars=bars)
+    assert measure.verdict_word(green) == "GREEN", green
+    note = measure.e2_row_note(parsed, e2a_green, e2b_good, green)
+    assert "falls short" not in note, note
+    assert "meets the 13-of-14 bar" in note, note
+
+    e2a_red = _e2a_result(survived=8, units=14, bars=bars)
+    red = measure.e2_outcome(e2a_result=e2a_red, e2b_result=e2b_good, bars=bars)
+    assert measure.verdict_word(red) == "RED", red
+    red_note = measure.e2_row_note(parsed, e2a_red, e2b_good, red)
+    assert "falls short of 13 of 14" in red_note, red_note
+
+
+def test_the_record_does_not_narrate_an_under_floor_after_arm_as_a_disagreement(
+        tmp_path):
+    """#10610 review issue 2, third consequence: `why` contradicted `outcome`.
+
+    `e1_pairings` folds the floor into `decidable`, so a below-floor after arm had
+    `outcome: REFUSED` beside a `why` reading "every before realization agrees on
+    the pairing" — a pass condition printed against a refusal. The floor is now
+    narrated as the floor, on the record itself. Non-vacuity: the pre-fix `why`
+    for this input is asserted absent.
+    """
+    repo = _copied_bundle(tmp_path)
+    log = repo / "docs/evidence/9889/on-arm.log"
+    log.write_text(re.sub(r"^e1-aux objects_in_graph=61",
+                          "e1-aux objects_in_graph=25", log.read_text(),
+                          count=1, flags=re.MULTILINE))
+    e1 = scores_probe.score(repo)["e1"]
+    assert e1["below_floor"] is True, e1
+    assert e1["outcome"] == "REFUSED", e1
+    assert "under the frozen" in e1["why"], e1["why"]
+    assert "paired against two independent before" not in e1["why"], e1["why"]
+    assert "agrees on the pairing" not in e1["why"], e1["why"]
+
+
+def test_the_durations_map_carries_one_row_per_file():
+    """A DUPLICATE key is a stale claim that YAML silently keeps only half of.
+
+    The `p0-measure` merge left two `test_7949_capstone_measure.py` rows in
+    `durations:` — one describing 79 cases, one describing 75 — and every reader
+    (YAML keeps the LAST; the count pin takes the FIRST) saw a different one. A
+    pin that reads one line of a file that carries two cannot claim the file is
+    clean (the manifest's own 51st pin names this class).
+    """
+    manifest = (_REPO / "config" / "ci-surfaces.yml").read_text()
+    rows = [line for line in manifest.splitlines()
+            if line.strip().startswith("test_7949_capstone_measure.py:")]
+    assert len(rows) == 1, (
+        f"the durations map carries {len(rows)} rows for this file — a duplicate "
+        "key is a claim YAML keeps only the last of:" + "".join(
+            f"\n  {row[:90]}" for row in rows))
 
 
 def _gate_codes(rows: list[dict]) -> list[str]:
@@ -838,6 +1070,40 @@ def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
     assert "capstone_on_54922a800_other" in capsys.readouterr().err
+
+
+def test_the_scores_probe_refuses_a_record_that_does_not_name_the_on_head(
+        tmp_path, capsys):
+    """#10610 review issue 1's 79th claim: the head loop had no pin at all.
+
+    `config/ci-surfaces.yml` states that a pin requires "every record the score
+    cites (E2a, falsifier, gate-drops) to name the ON run's head". The loop at
+    `e1_e2_scores.py` (`for name, record in ((E2A_RECORD, …), …)`) can be deleted
+    whole and every case stayed green.
+
+    The mutation moves ALL THREE cited records to the SAME foreign graph, so the
+    graph-IDENTITY check (`E2a` vs `gate_drops`) still passes and the ON-vs-E2a
+    check is not what refuses: the only arm that can refuse is the head loop, and
+    the assertion on its own reason text proves it is the arm that fired. Delete
+    the loop and this test reds (no refusal, or the wrong reason).
+    """
+    repo = _copied_bundle(tmp_path)
+    foreign = "capstone_ledger_deadbeef_1700000000"
+    for name in (scores_probe.E2A_RECORD, scores_probe.E2A_FALSIFIER,
+                 scores_probe.GATE_DROPS):
+        path = repo / "docs/evidence/9889" / name
+        record = json.loads(path.read_text())
+        record["graph"] = foreign
+        for block in ("with_anchor", "as_written"):
+            if isinstance(record.get(block), dict):
+                record[block]["graph"] = foreign
+        path.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "does not name head" in err, err
+    assert foreign in err, err
 
 
 def test_every_e1_key_the_renderer_reads_is_one_the_measure_returns():

@@ -549,13 +549,24 @@ def outcome(*, measured: bool, below_floor: bool, passed: bool,
 
 def e1_outcome(*, before_share: float | None, after_share: float | None,
                objects: int | None, bars: dict,
-               decidable: bool = True) -> dict:
+               decidable: bool = True,
+               below_floor: bool | None = None) -> dict:
     """E1: volume falls (``after <= multiplier x before``) over ALL Objects, floor 30.
 
     ⚠️ ``objects`` is the DENOMINATOR the criterion names ("**all** `:Object`
     nodes written by the run") — not a hand-picked population. A run under the
     frozen floor is REFUSED: with five Objects a single delete moves the share by
     20 points, which is what the floor exists to stop.
+
+    ⚠️ ``below_floor`` is the RECORD's own floor finding, and it is passed in
+    rather than re-derived, because the population that is floored and the one
+    that is scored are the same one: the AFTER arm. `e1_pairings` folds it into
+    ``decidable`` (`decidable = len(verdicts) == 1 and not below_floor`), so a
+    caller that reads only ``decidable`` reports an under-floor after arm as a
+    PAIRING DISAGREEMENT it does not have (#10610 review issue 2). The floor arm
+    is therefore checked BEFORE the decidability arm, and it has its own value
+    text: the pre-registration calls the floor `below_floor` and its verdict
+    "REFUSED, which is neither a pass nor a fail".
 
     ⚠️ ``decidable`` is the second refusal, and it is measured rather than
     assumed (`#9889`): where the after arm exists once and the before arm exists
@@ -572,6 +583,15 @@ def e1_outcome(*, before_share: float | None, after_share: float | None,
         return outcome(measured=False, below_floor=False, passed=False,
                        bar=bar, value="unmeasured")
     bound = multiplier * before_share
+    over_floor = (objects < floor) if below_floor is None else below_floor
+    if over_floor:
+        return outcome(measured=True, below_floor=True, passed=False, bar=bar,
+                       value=(f"before={before_share:.6f} after={after_share:.6f} "
+                              f"objects={objects} bound={bound:.6f} — but "
+                              f"{objects} Objects is under the frozen floor of "
+                              f"{floor}, so the population is too small to "
+                              "decide the bar and the row is REFUSED, which is "
+                              "neither a pass nor a fail"))
     if not decidable:
         return outcome(measured=False, below_floor=False, passed=False,
                        bar=bar,
@@ -579,10 +599,30 @@ def e1_outcome(*, before_share: float | None, after_share: float | None,
                               f"objects={objects} bound={bound:.6f} — but the "
                               "pairings DISAGREE across before realizations, so "
                               "the bar is not decided at n=1 per arm"))
-    return outcome(measured=True, below_floor=objects < floor,
+    return outcome(measured=True, below_floor=False,
                    passed=after_share <= bound, bar=bar,
                    value=f"before={before_share:.6f} after={after_share:.6f} "
                          f"objects={objects} bound={bound:.6f}")
+
+
+def e2_outcome(*, e2a_result: dict, e2b_result: dict, bars: dict) -> dict:
+    """E2 is the COMPOSITE — E2a AND E2b, floored — never E2a alone.
+
+    This function exists because the composite used to be assembled INLINE in
+    ``main``, so no pin could reach it: reverting the row's verdict to
+    ``verdict_word(e2a_result)`` — a 13/14 E2a beside a fused 7/114 reading GREEN
+    in the table and FAIL in the artifact the row cites — left every case green
+    (#10610 review issue 1). Extracting it is what makes that mutant killable, and
+    the pin calls THIS function while a second pin asserts ``main`` derives its
+    row from it (``test_the_e2_row_verdict_is_the_composite_main_uses``).
+    """
+    return outcome(
+        measured=True, below_floor=e2b_result["below_floor"],
+        passed=(e2a_result["outcome"] == "PASS"
+                and e2b_result["outcome"] == "PASS"),
+        bar=f"E2a {bars['E2a']['required']} of {bars['E2a']['of']} AND E2b "
+            f"fused <= {bars['E2b']['max_fused_share']}",
+        value=f"E2a {e2a_result['value']}; E2b {e2b_result['value']}")
 
 
 def e2a_outcome(e1: dict, bars: dict) -> dict:
@@ -743,6 +783,93 @@ def e1_pass_objects(e1: dict) -> int | None:
     if not isinstance(numerator, int) or not isinstance(denominator, int):
         return None
     return denominator - numerator
+
+
+def e1_row_note(e1: dict, e1_result: dict, bars: dict) -> str:
+    """E1's row note — the narration BRANCHES on the state the row is in.
+
+    The refusal sentence used to be unconditional (#10610 review issue 3): "the
+    pairings do not agree, so the row is REFUSED" rendered on every scored log,
+    so the first run where E1 became DECIDABLE would have written "… and the
+    pairings do not agree, so the row is PASS — not RED and not GREEN" into the
+    very log that is the evidence. A sentence no input can change is a decision
+    replaced by a constant, and the repo already holds a pin for this class (the
+    E3 narration defect, `#10525`); this is the same branch for E1, and
+    ``test_the_e1_note_narrates_the_state_the_row_is_in`` is its pin.
+
+    The two refusals are also kept DISTINCT here, not merged into "REFUSED": an
+    after arm under the frozen floor is a population finding, and a disagreement
+    between before realizations is an arm-count finding. Reporting the first as
+    the second is #10610 review issue 2.
+    """
+    pass_objects = e1_pass_objects(e1)
+    floor = bars["floors"]["e1_objects"]
+    if e1.get("below_floor"):
+        state = (
+            f"The AFTER arm carries {e1['after_objects']} Objects, under the "
+            f"frozen floor of {floor} — a population that small cannot decide "
+            f"the bar at any n, so the row is {e1_result['outcome']} (neither a "
+            f"pass nor a fail), not RED and not GREEN")
+    elif not e1["decidable"]:
+        state = (
+            f"The two before realizations are {e1['before_spread_pp']} pp apart "
+            f"and the pairings do not agree, so the row is "
+            f"{e1_result['outcome']} — not RED and not GREEN: at n=1 per arm the "
+            f"verdict would depend on which before run is chosen")
+    else:
+        state = (
+            f"Every before realization agrees on the pairing, so the row is "
+            f"{e1_result['outcome']} on the bar")
+    return (
+        f"E1 is scored from {E1_E2_SCORES} (one invocation over the #9889 "
+        f"probes), whose corpus IS the frozen one ({e1['corpus_sha256']}) because "
+        f"e1_paired_arm.py refuses any other. {e1_result['value']} vs bar "
+        f"{e1_result['bar']}. {state}. The deterministic mechanism check "
+        f"(e1_gate_drops) reports value_gate drops {e1['gate_drops_total']} of "
+        f"{e1['gate_drops_objects']} Objects with its positive controls alive, so "
+        f"the selection pass is not the mover — the removal/relocation ruling is "
+        f"(#5333). n >= 2 per arm is the next requirement. The row's count is "
+        f"that population — Objects that are NOT bare-definite over all Objects = "
+        f"{pass_objects}/{e1['after_objects']} — i.e. the PASS-direction half of a "
+        f"share the criterion MINIMISES (the measured bare-definite count is "
+        f"{e1['after_numerator']} of {e1['after_objects']}); E2 carries the "
+        f"planted-unit counts, over the frozen 14")
+
+
+def e2_row_note(e1: dict, e2a_result: dict, e2b_result: dict,
+                e2_result: dict) -> str:
+    """E2's row note — and `E2a falls short of …` only where it DID fall short.
+
+    The clause was hard-coded (#10610 review issue 3), so the 13-of-14 run this
+    record exists to unbury — the one where E2's row finally reads GREEN — would
+    have printed "E2a falls short of 13 of 14 on the run's own graph" beside its
+    own GREEN verdict. The row and the artifact it cites disagreeing, inside the
+    log that IS the evidence, is the class `#10525`'s narration pin closed for E3.
+    """
+    return (
+        f"E2a: {e2a_result['outcome']} — {e2a_result['value']} vs bar "
+        f"{e2a_result['bar']} (denominator = pre-registration §3.3's "
+        f"value-bearing planted units, read from "
+        f"docs/evidence/9889/e2a-value-units.json, and PROVEN live by the "
+        f"anchor-injection falsifier reaching "
+        f"{e1['e2a_falsifier_survived']}/{e1['e2a_units']} over the same "
+        f"population). E2b: "
+        f"{e2b_result['outcome']} — {e2b_result['value']} vs bar "
+        f"{e2b_result['bar']}. The E2 row is "
+        f"{verdict_word(e2_result)} on the COMPOSITE "
+        f"({e2_result['bar']}): "
+        + (f"E2a falls short of {e1['e2a_required']} of {e1['e2a_units']} on "
+           f"the run's own graph"
+           if e2a_result["outcome"] != "PASS" else
+           f"E2a meets the {e1['e2a_required']}-of-{e1['e2a_units']} bar on the "
+           f"run's own graph")
+        + f", and E2b's fused count is a proxy over atomic POINTS "
+        f"rather than surviving planted units. #10360 records that "
+        f"nothing enforces retention (the render half closed, #9775). "
+        f"The row's count slots carry the E2a count over the FROZEN "
+        f"denominator ({e1['e2a_survived']}/{e1['e2a_units']}), so a "
+        f"green row here states the number the bar is written over "
+        f"instead of leaving it empty")
 
 
 def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
@@ -2101,6 +2228,11 @@ def measure_e1_e2(repo: Path = ROOT) -> dict:
     return {
         "sha": record.get("head"),
         "decidable": bool(e1.get("decidable")),
+        # The record's own floor finding. `e1_pairings` folds it INTO `decidable`
+        # (`decidable = len(verdicts) == 1 and not below_floor`), so reading only
+        # `decidable` makes an under-floor after arm report a pairing
+        # disagreement it does not have — #10610 review issue 2.
+        "below_floor": bool(e1.get("below_floor")),
         "before_share": first["before_share"],
         "after_share": first["after_share"],
         "before_spread_pp": e1.get("before_spread_pp"),
@@ -2240,13 +2372,24 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             f"-> {'PASS' if pairing['passed'] else 'FAIL'} "
             f"ratio={pairing['ratio']:.6f} graph={pairing['before_graph']}")
     add(f"e1 outcome={e1_out['outcome']} {e1_out['value']} bar={e1_out['bar']}")
+    # The narration BRANCHES on the state — the same class as the row note
+    # (#10610 review issue 3). An unconditional "the pairings disagree" writes a
+    # contradiction into the log of the first run that decides E1.
     add("e1 note: both before realizations clear E1's own floors ("
         f"{bars['floors']['e1_objects']} Objects, e1_min_before_share "
         f"{bars['floors']['e1_min_before_share']}) and the record's corpus IS "
-        "the frozen fixtures_hash, so the shares are measurements. What they "
-        "cannot do is decide the bar: the two before shares are "
-        f"{e1['before_spread_pp']} pp apart and the pairings disagree, so the "
-        "row is REFUSED at n=1 per arm rather than RED or GREEN")
+        "the frozen fixtures_hash, so the shares are measurements. "
+        + (f"The AFTER arm carries {e1['after_objects']} Objects, under the "
+           f"frozen floor of {bars['floors']['e1_objects']}, so the row is "
+           f"REFUSED as a floor finding — neither a pass nor a fail, and not "
+           f"a pairing disagreement"
+           if e1.get("below_floor") else
+           "What they cannot do is decide the bar: the two before shares are "
+           f"{e1['before_spread_pp']} pp apart and the pairings disagree, so the "
+           "row is REFUSED at n=1 per arm rather than RED or GREEN"
+           if not e1["decidable"] else
+           "Every before realization agrees on the pairing, so the bar is "
+           f"DECIDED: the row is {e1_out['outcome']} rather than a refusal"))
     add(f"e1b outcome={e1b_out['outcome']} {e1b_out['value']} bar={e1b_out['bar']}")
     add(f"e1b note: the record reports real_facts={e1['real_facts']} on the "
         "scored arm; no committed artifact carries "
@@ -2514,8 +2657,9 @@ def main(argv: list[str] | None = None) -> int:
     # ── E1 / E1b / E2a / E2b (E1/E2 are the table's rows) ────────────────
     e1_result = e1_outcome(before_share=e1["before_share"],
                            after_share=e1["after_share"],
-                           objects=e1["objects_total"], bars=bars,
-                           decidable=e1["decidable"])
+                           objects=e1["after_objects"], bars=bars,
+                           decidable=e1["decidable"],
+                           below_floor=e1["below_floor"])
     e1b_result = outcome(measured=True, below_floor=False,
                          passed=e1["real_facts"] >= bars["E1b"]["required"],
                          bar=f"{bars['E1b']['required']} of {bars['E1b']['of']}",
@@ -2535,13 +2679,8 @@ def main(argv: list[str] | None = None) -> int:
                              f"(floor {e2b_floor} surviving units)",
                          value=f"fused={e1['fused']}/{e1['atomic_points']} = "
                                f"{e2b_share:.6f}")
-    e2_result = outcome(
-        measured=True, below_floor=e2b_result["below_floor"],
-        passed=(e2a_result["outcome"] == "PASS"
-                and e2b_result["outcome"] == "PASS"),
-        bar=f"E2a {bars['E2a']['required']} of {bars['E2a']['of']} AND E2b "
-            f"fused <= {bars['E2b']['max_fused_share']}",
-        value=f"E2a {e2a_result['value']}; E2b {e2b_result['value']}")
+    e2_result = e2_outcome(e2a_result=e2a_result, e2b_result=e2b_result,
+                           bars=bars)
 
     e1_row = {
         "verdict": verdict_word(e1_result),
@@ -2554,26 +2693,7 @@ def main(argv: list[str] | None = None) -> int:
         # count it minimises can legitimately be 0 — see `e1_pass_objects`.
         "numerator": e1_pass_objects(e1),
         "denominator": e1["after_objects"],
-        "note": (f"E1 is scored from {E1_E2_SCORES} (one invocation over the "
-                 f"#9889 probes), whose corpus IS the frozen one "
-                 f"({e1['corpus_sha256']}) because e1_paired_arm.py refuses any "
-                 f"other. {e1_result['value']} vs bar {e1_result['bar']}. "
-                 f"The two before realizations are {e1['before_spread_pp']} pp "
-                 f"apart and the pairings do not agree, so the row is "
-                 f"{e1_result['outcome']} — not RED and not GREEN: at n=1 per arm "
-                 f"the verdict would depend on which before run is chosen. The "
-                 f"deterministic mechanism check (e1_gate_drops) reports "
-                 f"value_gate drops {e1['gate_drops_total']} of "
-                 f"{e1['gate_drops_objects']} Objects with its positive controls "
-                 f"alive, so the selection pass is not the mover — the "
-                 f"removal/relocation ruling is (#5333). n >= 2 per arm is the "
-                 f"next requirement. The row's count is that population — "
-                 f"Objects that are NOT bare-definite over all Objects = "
-                 f"{e1_pass_objects(e1)}/{e1['after_objects']} — i.e. the "
-                 f"PASS-direction half of a share the criterion MINIMISES (the "
-                 f"measured bare-definite count is {e1['after_numerator']} of "
-                 f"{e1['after_objects']}); E2 carries the planted-unit counts, "
-                 f"over the frozen 14"),
+        "note": e1_row_note(e1, e1_result, bars),
     }
     e2_row = {
         "verdict": verdict_word(e2_result),
@@ -2581,25 +2701,7 @@ def main(argv: list[str] | None = None) -> int:
         "corpus_sha256": e1["corpus_sha256"],
         "numerator": e1["e2a_survived"],
         "denominator": e1["e2a_units"],
-        "note": (f"E2a: {e2a_result['outcome']} — {e2a_result['value']} vs bar "
-                 f"{e2a_result['bar']} (denominator = pre-registration §3.3's "
-                 f"value-bearing planted units, read from "
-                 f"docs/evidence/9889/e2a-value-units.json, and PROVEN live by the "
-                 f"anchor-injection falsifier reaching "
-                 f"{e1['e2a_falsifier_survived']}/{e1['e2a_units']} over the same "
-                 f"population). E2b: "
-                 f"{e2b_result['outcome']} — {e2b_result['value']} vs bar "
-                 f"{e2b_result['bar']}. The E2 row is "
-                 f"{verdict_word(e2_result)} on the COMPOSITE "
-                 f"({e2_result['bar']}): E2a falls short of "
-                 f"{e1['e2a_required']} of {e1['e2a_units']} on the run's own "
-                 f"graph, and E2b's fused count is a proxy over atomic POINTS "
-                 f"rather than surviving planted units. #10360 records that "
-                 f"nothing enforces retention (the render half closed, #9775). "
-                 f"The row's count slots carry the E2a count over the FROZEN "
-                 f"denominator ({e1['e2a_survived']}/{e1['e2a_units']}), so a "
-                 f"green row here states the number the bar is written over "
-                 f"instead of leaving it empty"),
+        "note": e2_row_note(e1, e2a_result, e2b_result, e2_result),
     }
 
     # ── E3 ────────────────────────────────────────────────────────────────

@@ -297,7 +297,18 @@ def e1_pairings(before_arms: list[dict], after: dict, floors: dict) -> dict:
         "pairings": pairings,
         "before_spread_pp": round(
             abs(pairings[0]["before_share"] - pairings[-1]["before_share"]) * 100, 1),
-        "why": ("one after realization paired against two independent before "
+        # `why` narrates the state the record is IN. The floor is checked FIRST
+        # because it is a different finding: an after arm under the frozen floor
+        # was never scoreable at any n, so saying "the pairings disagree" about it
+        # reports a disagreement that did not happen and hides the real cause
+        # (the pre-registration's own vocabulary: below_floor is "REFUSED, which
+        # is neither a pass nor a fail").
+        "why": (f"the after arm has {after['objects']} Objects, under the frozen "
+                f"floor of {floors['e1_objects']} — a population that small "
+                "cannot decide `after <= multiplier x before`, so the bar is "
+                "REFUSED and the pairings are not read as a verdict"
+                if below_floor else
+                "one after realization paired against two independent before "
                 "realizations gives both verdicts, so E1 is not decided at n=1 "
                 "per arm — n >= 2 per arm is the next requirement"
                 if not decidable else
