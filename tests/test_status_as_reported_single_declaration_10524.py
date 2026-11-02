@@ -41,6 +41,9 @@ Non-vacuity, both legs, against the pre-fix code:
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from tortoise import consistency
@@ -128,3 +131,106 @@ def test_an_absent_Object_status_still_reads_live(label):
     assert count == 1, (
         f"a :{label} buried behind an `archived` status is the failure this leg "
         "exists for; it must still be reported")
+
+
+# --- the changelog's consumer pointer (review at `22a448f3d`, ISSUE 1 P3) -----
+#
+# The v3.31 build record publishes a consumer TRAP (a literal `status:'live'`
+# filter now drops every status-less birth) and closes it with a scope carve-out
+# pointing at the Point idiom: "`MATCH (p:Point {status:'live'})` idiom printed
+# in §4.3 remains correct as written." The claim was true and the SECTION was
+# wrong — the idiom is printed in §5's `Point Status Vocabulary`. A lane
+# following that pointer lands in §4.3 (`### §4.3 Object`), reads the
+# pre-change `ObjectRegistered→live` cell, and does not find the Filter it was
+# told was there — the exact failure the preceding paragraph exists to prevent.
+#
+# Non-vacuity, against the pre-fix text (both legs red on it):
+#   * the section leg — pre-fix named `§4.3`, whose span is §4's (:385–:956),
+#     while the idiom is at :1149 inside §5 and that assertion reds;
+#   * the line leg — pre-fix carried no `ONTOLOGY.md:NNNN` citation at all.
+
+_DOCS = Path(__file__).resolve().parent.parent / "docs"
+_CHANGELOG = _DOCS / "ONTOLOGY-CHANGELOG.md"
+_ONTOLOGY = _DOCS / "ONTOLOGY.md"
+_POINT_IDIOM = "MATCH (p:Point {status:'live'})"
+
+
+def _pointer_text() -> str:
+    """The changelog passage that tells a consumer where the Point idiom lives.
+
+    Taken as a window from the idiom forward, because the sentence wraps: the
+    section name and the `ONTOLOGY.md:NNNN` citation can sit on either side of
+    the line break.
+    """
+    text = _CHANGELOG.read_text(encoding="utf-8")
+    start = text.index(_POINT_IDIOM)
+    window = text[start:start + 400]
+    assert "idiom printed in" in window, (
+        "the v3.31 block no longer points a consumer at the Point idiom — this "
+        "pin has lost its subject, re-anchor it rather than deleting it")
+    return window
+
+
+def _section_span(number: str) -> range:
+    """Line numbers (1-based) covered by `## §<number>` up to the next `## §`."""
+    lines = _ONTOLOGY.read_text(encoding="utf-8").splitlines()
+    head_pat = re.compile(r"^## §(\d+)\.")
+    headings = [(i + 1, m.group(1)) for i, line in enumerate(lines)
+                if (m := head_pat.match(line))]
+    for idx, (line_no, sec) in enumerate(headings):
+        if sec != number:
+            continue
+        end = headings[idx + 1][0] if idx + 1 < len(headings) else len(lines) + 1
+        return range(line_no, end)
+    raise AssertionError(f"`docs/ONTOLOGY.md` has no `## §{number}` section")
+
+
+def test_the_point_idiom_pointer_names_the_section_that_prints_it():
+    """The named § must actually CONTAIN the idiom it points at.
+
+    Section numbers drift; the claim that matters is "go here and you will find
+    it". Pre-fix this named §4.3 and red; §5 is where `:1149` lives.
+    """
+    window = _pointer_text()
+    named = re.search(r"§(\d+(?:\.\d+)?)", window)
+    assert named, f"the Point-idiom pointer names no section: {window[:160]!r}"
+    section = named.group(1)
+
+    idiom_lines = [
+        i + 1 for i, line in enumerate(_ONTOLOGY.read_text(encoding="utf-8").splitlines())
+        if _POINT_IDIOM in line
+    ]
+    assert idiom_lines, (
+        "`docs/ONTOLOGY.md` no longer prints the Point idiom — the changelog's "
+        "carve-out claims it still does")
+
+    span = _section_span(section.split(".")[0])
+    in_section = [n for n in idiom_lines if n in span]
+    assert in_section, (
+        f"the changelog points a consumer at §{section} for the Point idiom, but "
+        f"`ONTOLOGY.md` prints it at {idiom_lines} — outside §{section.split('.')[0]} "
+        f"({span.start}–{span.stop - 1}). A lane following the pointer lands in the "
+        "wrong section and does not find it (#10524 review ISSUE 1)")
+
+
+def test_the_point_idiom_pointer_line_number_lands_on_the_idiom():
+    """A `ONTOLOGY.md:NNNN` citation must resolve to a line carrying the idiom.
+
+    The line number is what makes the pointer actionable; pre-fix the sentence
+    cited no line at all, and a later edit can silently move it.
+    """
+    window = _pointer_text()
+    cited = re.search(r"ONTOLOGY\.md:(\d+)", window)
+    assert cited, (
+        "the Point-idiom pointer carries no `ONTOLOGY.md:NNNN` citation, so the "
+        f"consumer has a section number and no landmark: {window[:200]!r}")
+
+    line_no = int(cited.group(1))
+    lines = _ONTOLOGY.read_text(encoding="utf-8").splitlines()
+    assert 1 <= line_no <= len(lines), (
+        f"the changelog cites `ONTOLOGY.md:{line_no}`, but the file has "
+        f"{len(lines)} lines")
+    assert _POINT_IDIOM in lines[line_no - 1], (
+        f"the changelog cites `ONTOLOGY.md:{line_no}` for the Point idiom, but "
+        f"that line reads {lines[line_no - 1].strip()!r} — the landmark moved "
+        "and the pointer was not updated with it")

@@ -98,7 +98,8 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > on a value already read out — `live.status_as_reported`, the ONE declaration for what an ABSENT status
 > reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
 > `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
-> `MATCH (p:Point {status:'live'})` idiom printed in §4.3 remains correct as written.
+> `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
+> (`ONTOLOGY.md:1149`) remains correct as written.
 
 ---
 
