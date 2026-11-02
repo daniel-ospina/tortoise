@@ -103,6 +103,16 @@ _FAILED_CONCLUSIONS = frozenset({"failure", "timed_out"})
 # `ci-failure-set.sh` reads these three too; a leg that ended this way has no set.
 _UNCERTIFIABLE_CONCLUSIONS = frozenset({"cancelled", "startup_failure", "stale"})
 
+# A leg that EXECUTED: its job produced a VERDICT. `skipped`, `cancelled`, `stale`,
+# `neutral` and an absent job all mean the leg did not execute, so it measured nothing
+# (`timed_out` is a KILLED leg whose failure set IS read, so it counts — the membership is
+# the producer's `tested` arm byte for byte, which is what makes the counting argument in
+# `main_leg_coverage` hold). MEASUREDNESS, not redness — `cancelled`/`stale` stay NON-RED
+# (`_UNCERTIFIABLE_CONCLUSIONS` above, a recorded decision): a leg that never ran is not a
+# failure, and it is not a measurement either. Two different questions, and this set only
+# ever answers the second; no recorded polarity is flipped here.
+_EXECUTED_CONCLUSIONS = frozenset({"success", "failure", "timed_out"})
+
 
 class Unmeasured(Exception):
     """Anything we could not read. Always exit 2, never 0 (#9984 constraint 1)."""
@@ -219,9 +229,28 @@ class Runner:
         return proc.stdout
 
     def jobs(self, run_id: str, jobs_json: str | None) -> list[dict]:
-        """The run's job list. Injected from a recorded fixture in the tests."""
+        """The run's job list. Injected from a recorded fixture in the tests.
+
+        `jobs_json` may be a FILE (the PR run's listing, one `gh` call) or a DIRECTORY
+        holding `<run_id>.jsonl` (the main-window listings the leg dimension reads, one
+        file per run). A directory with no file for `run_id` is UNMEASURED, never an
+        empty job list: "we hold no listing" is not "the run had no jobs", and the leg
+        coverage a caller would derive from it would silently read as unexecuted.
+        """
         if jobs_json:
-            raw = Path(jobs_json).read_text(encoding="utf-8", errors="replace")
+            path = Path(jobs_json)
+            if path.is_dir():
+                path = path / f"{run_id}.jsonl"
+            if not path.is_file():
+                raise Unmeasured(
+                    f"no recorded job listing for run {run_id} at {path} — a listing "
+                    "we do not hold is not a run that had no jobs")
+            try:
+                raw = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise Unmeasured(
+                    f"the recorded job listing for run {run_id} is unreadable "
+                    f"({exc}) — never an empty listing") from exc
         else:
             raw = self._run(
                 [
@@ -474,8 +503,10 @@ def main_baseline(runner: Runner, failure_set: Path, head: str, runs: int,
         "bash", str(failure_set), "--repo", runner.repo,
         "--workflow", "python-ci.yml", "--exclude", head,
     ]
+    provenance_path = outdir / "main-provenance.txt"
     rates = runner.shell(
-        [*common, "--main-union-rates", str(runs), "--runs-report", str(report_path)],
+        [*common, "--main-union-rates", str(runs), "--runs-report", str(report_path),
+         "--provenance", str(provenance_path)],
         what="main's rate baseline (ci-failure-set.sh --main-union-rates)",
     )
     sigs = runner.shell(
@@ -496,7 +527,7 @@ def main_baseline(runner: Runner, failure_set: Path, head: str, runs: int,
             "(ci-failure-set.sh writes no report when the listing fails). A missing "
             "check is not a green check"
         )
-    tested = int(report.get("tested") or 0)
+    tested = counter(report, "tested")
     if tested <= 0:
         raise Unmeasured(
             "main's baseline window holds no run that finished a measurement "
@@ -509,6 +540,81 @@ def main_baseline(runner: Runner, failure_set: Path, head: str, runs: int,
             "refused rather than used"
         )
     return str(rates_path), str(sigs_path), report
+
+
+def counter(report: dict[str, str], key: str) -> int:
+    """A `<key>=<n>` counter from the shared producer's report, or refuse.
+
+    An unparsable counter is UNMEASURED, never 0 and never a traceback: `main()` maps
+    only `Unmeasured`/`_Blocked` to its three exits, so a `ValueError` here would leave
+    the process at exit 1 — i.e. it would report "NEW FAILURE — introduced by this PR"
+    for a malformed counter.
+    """
+    raw = (report.get(key) or "").strip()
+    try:
+        return int(raw or 0)
+    except ValueError as exc:
+        raise Unmeasured(
+            f"main's runs report carries {key}={raw!r}, which is not a number — the "
+            "window's counters are unreadable") from exc
+
+
+def main_leg_coverage(runner: "Runner", provenance: Path, tested: int,
+                      legs: list[str], main_jobs_dir: str | None
+                      ) -> tuple[str, set[str]]:
+    """(BASIS, covered legs) — did main's baseline window EXERCISE each leg?
+
+    `tested` is a RUN-level counter: a `completed` run that finished a measurement
+    credits it WITHOUT probing its jobs (agent-infra `ci-failure-set.sh`, "FINISHED IS
+    NOT TESTED" plus the `drop_superseded_runs` limit filed as agent-infra #1401). So a
+    window whose runs each had `test-slow` SKIPPED — the shape a failing `changes` job
+    produces, every dependent job skipped behind it — reads `tested=10, measured` while
+    that leg was never executed at all. Every PR failure from it then reads as NEW.
+
+    This is the extension of the existing `tested <= 0` refusal from the RUN dimension to
+    the LEG dimension: one instrument arriving one question deeper, not a second
+    predicate (constraint 7). The RUN SET is the shared producer's, never re-listed here:
+    `--provenance` emits the examined failing runs of the SAME widened window the rate
+    table came from, so a second window selector cannot drift from the rail's.
+
+    A GREEN RUN COVERS EVERY LEG, and that is measured rather than assumed: a `skipped`
+    leg the selector SELECTED fails closed in `python-ci-gate`'s own leg table (#5219), so
+    a `success` python-ci run is evidence that every selected leg executed and was clean.
+    `tested > len(examined)` proves such a run exists without a jobs call (`tested` =
+    success|failure|timed_out, `examined` = failure|timed_out|startup_failure, so the
+    excess can only be `success`). Without it the window is all-red and each failing
+    run's job listing is the only evidence there is — probed in order, stopping as soon
+    as every leg is covered, so the usual cost is one call.
+    THE BASIS IS RETURNED, not assumed: `green-run` is an INFERENCE from the aggregate's
+    own fail-closed leg table, and printing it as a mere "executed" would be the exact
+    misuse of that word this change exists to stop. An ABSENT provenance file is NOT the
+    all-green case — it is an unreadable run set, and it refuses.
+    """
+    examined: list[str] = []
+    if not provenance.is_file():
+        raise Unmeasured(
+            f"main's leg dimension: no --provenance file at {provenance} — the examined "
+            "run set is unreadable, so leg coverage cannot be claimed")
+    for line in provenance.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        _sha, _, run_id = line.rpartition(":")
+        if not run_id.strip():
+            raise Unmeasured(
+                f"main's baseline provenance line {line!r} names no run id — the "
+                "leg dimension cannot be read, so measuredness cannot be claimed")
+        examined.append(run_id.strip())
+    if tested > len(examined):
+        return "green-run", set(legs)
+    covered: set[str] = set()
+    for run_id in examined:
+        for job in runner.jobs(run_id, main_jobs_dir):
+            if job.get("conclusion") in _EXECUTED_CONCLUSIONS:
+                covered.add(leg_base(job.get("name")))
+        if covered.issuperset(legs):
+            break
+    return "probed", covered
 
 
 def evaluate(args: argparse.Namespace) -> int:
@@ -566,6 +672,26 @@ def evaluate(args: argparse.Namespace) -> int:
             runner, failure_set, args.head, args.main_runs, outdir)
         print("main baseline: window "
               + " ".join(f"{k}={v}" for k, v in sorted(report.items())))
+
+        # THE LEG DIMENSION (#9984/#10289 finding). `tested` says the WINDOW measured;
+        # it does not say the LEG this run failed in was ever executed on main. Refused
+        # per leg, so the message names the leg that was unmeasured instead of reading
+        # a stale baseline as fine.
+        pr_legs = sorted({leg_base(j.get("name")) for j in failed})
+        basis, covered = main_leg_coverage(
+            runner, outdir / "main-provenance.txt", counter(report, "tested"),
+            pr_legs, args.main_jobs_dir)
+        print("leg coverage: " + ", ".join(
+            f"{leg}=" + (f"executed ({basis})" if leg in covered else "NOT EXECUTED")
+            for leg in pr_legs))
+        never_ran = [leg for leg in pr_legs if leg not in covered]
+        if never_ran:
+            raise Unmeasured(
+                "leg(s) " + ", ".join(repr(leg) for leg in never_ran)
+                + " produced this run's failure(s), but main's baseline window holds no"
+                " run in which the leg EXECUTED (every examined run had it skipped,"
+                " cancelled or absent) — the rate is measured over the WINDOW, not over"
+                " this leg, so the failure cannot be certified as introduced here")
 
         blocked_path = outdir / "blocked.txt"
         verdict_path = outdir / "verdict.txt"
@@ -636,6 +762,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="test seam: a recorded jobs listing instead of the API")
     ev.add_argument("--logs-dir", default=None,
                     help="test seam: recorded <job_id>.log files instead of the API")
+    ev.add_argument("--main-jobs-dir", default=None,
+                    help="test seam: recorded <run_id>.jsonl main-window job listings "
+                         "instead of the API (the leg dimension's only input)")
     ev.set_defaults(func=evaluate)
     return parser
 
