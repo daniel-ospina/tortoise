@@ -10270,8 +10270,9 @@ async def list_points(
     rows = await asyncio.to_thread(
         lambda: sdk._get_proj().g.query(query, params=params).result_set)
     # The candidate set AS THE PROBE CAN SEE IT — capped at ``limit+1``, so the
-    # population is BOUNDED even though the verdict is exact: ``candidates >
-    # returned`` is true iff the store held more rows than the caller asked for.
+    # population is BOUNDED, while the VERDICT (``candidates > returned``) is
+    # decided rather than estimated: it is true iff the store held more rows
+    # than the caller asked for.
     # That boundedness is why ``exact=False`` below and why ``total_available``
     # is withheld — publishing ``limit+1`` as a total is a lower bound wearing a
     # total's clothes (``truncation.py``). Do NOT pass ``exact=True`` here.
