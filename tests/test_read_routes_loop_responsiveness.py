@@ -1388,7 +1388,16 @@ _GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "dream_health_che
 #: claimed to have off-loaded still built their SDK on the loop, and BOTH guards
 #: passed because this seam set did not exist and the behavioural probe only
 #: observed ``_get_proj``. It cost a reviewer reading the module to catch it.
-_SDK_CONSTRUCTION_SEAMS = frozenset({"_make_sdk", "_data_sdk"})
+_SDK_CONSTRUCTION_SEAMS = frozenset({
+    "_make_sdk", "_data_sdk",
+    # #10180: the default-graph resolvers are CONSTRUCTION seams too. They
+    # build the SDK through `_make_sdk`, so a body that opens its SDK through
+    # one of them constructs on the loop exactly as an inline `_make_sdk` does
+    # — scanning only the two spellings below would report the CORRECT shape
+    # as clean and make this class blind to every lane the default-graph
+    # resolver converted (`patch_onboarding_state` is the one that caught it).
+    "_org_sdk", "_org_sdk_for_credential", "_org_sdk_from_name",
+})
 #: Calls whose callable argument runs in a WORKER. ``_graph_offload`` was the
 #: missing member (#4660): it is the #3498 bounded graph-pool seam
 #: (``_graph_offload`` -> ``_cp_offload(pool="graph")``) and is how
@@ -2029,7 +2038,9 @@ def test_on_loop_sdk_construction_residual_is_named_head_on():
     entirely (empty seam set, boundary swallowing it) and every assertion above
     would go vacuously green.
     """
-    assert frozenset({"_make_sdk", "_data_sdk"}) == _SDK_CONSTRUCTION_SEAMS, (
+    assert frozenset({"_make_sdk", "_data_sdk", "_org_sdk",
+                      "_org_sdk_for_credential", "_org_sdk_from_name"}
+                     ) == _SDK_CONSTRUCTION_SEAMS, (
         "the #4660 construction seam set changed shape — re-derive the "
         "inventory before trusting this pin")
     assert "_graph_offload" in _OFFLOAD_BOUNDARY_CALLEES, (
@@ -2376,14 +2387,23 @@ def test_run_indexing_residual_is_named_head_on():
     # Off-loading or re-siting any of these fails here: update the pin WITH the
     # residual AND the docstring in `hosted_api._run_indexing`.
     inline = _inline_calls_to(node, frozenset({
-        "_make_sdk", "_data_sdk", "_get_proj", "_relink_sessions_after_index",
-        "backfill_legacy_closed",
+        "_make_sdk", "_data_sdk", "_org_sdk_from_name", "_get_proj",
+        "_relink_sessions_after_index", "backfill_legacy_closed",
     }))
-    assert inline.count("_make_sdk") == 1, (
-        f"#4709: `_run_indexing` has {inline.count('_make_sdk')} inline "
-        "`_make_sdk` construction(s); the single on-loop construction is the "
-        "documented tortoise#7500 residual (a worker-thread construction "
-        "resolves the per-test store from a stale pool-thread stem)")
+    assert inline.count("_org_sdk_from_name") == 1, (
+        f"#4709/#10180: `_run_indexing` has "
+        f"{inline.count('_org_sdk_from_name')} on-loop SDK construction(s); "
+        "there must be exactly ONE, and it must be CONSTRUCTED here — the "
+        "documented tortoise#7500 residual. The #10180 default-graph NAME "
+        "read may (and does) run in a worker via `_cp_offload`, but the "
+        "construction may not: in a pooled worker `_make_sdk` resolves the "
+        "per-test store from a stale pool-thread stem and the job writes "
+        "where the test's reader never looks (#7500). A count of 0 means the "
+        "construction was off-loaded; 2 means a second site appeared")
+    assert inline.count("_make_sdk") == 0, (
+        "#4709/#10180: `_run_indexing` builds its SDK inline again — go "
+        "through `_org_sdk_from_name` so the default-graph decision and the "
+        "#7500 construction constraint stay in ONE place")
     assert inline.count("_data_sdk") == 0, (
         "#4709: `_run_indexing` must not build its SDK through `_data_sdk` — "
         "that is the ROUTE tenancy resolver, not the job's construction seam")

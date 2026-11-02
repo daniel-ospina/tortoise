@@ -122,7 +122,10 @@ class TestEnumerationCompleteness:
         got = _run(monkeypatch, cp, require_complete=True)
         assert got is not None, "a complete 1000-org fleet must not be refused"
         assert len(got) == MAX
-        assert got[0] == {"org_id": "org-00000", "name": "O0"}
+        # #10180: the page also carries `graph_name` (the retention sweep's
+        # default-graph name, resolved without a second read per org).
+        assert got[0] == {"org_id": "org-00000", "name": "O0",
+                          "graph_name": None}
 
     def test_walks_past_the_first_page(self, monkeypatch):
         """1500 orgs = two pages; the walk must collect BOTH."""

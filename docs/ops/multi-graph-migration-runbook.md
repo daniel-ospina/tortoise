@@ -106,6 +106,52 @@ Consequences (E2E-5 exit gate):
 
 - **No data move** — tenant points/sessions never touch the registry
   migration; the default graph's namespace is unchanged.
+- **The default is movable, and moving it is one verb.** #10180's
+  `POST /v1/graphs/{graph_id}/promote` (migration `20261102000001`) moves the
+  `kind='default'` row and `organizations.graph_name` to an existing active graph
+  atomically — so "the default graph" in this runbook means *the current* one.
+  The demoted graph keeps its own namespace, so the move copies no tenant data;
+  what it changes is where an ORG-WIDE credential's next capture lands (its
+  record tenant is that row's id). Captures already in flight keep the graph they
+  resolved at admission. The ONE org-level record that lives inside a graph —
+  `:OnboardingState` — IS carried (see §6), and the response reports it.
+  ⛔ **The target's namespace must be one the org-wide lanes can FOLLOW.** The
+  verb writes the target row's `namespace` into `organizations.graph_name`, and
+  every resolver derives the default from that column through ONE shape test
+  (`supabase_control.per_graph_namespace_prefixes`): `org_{org_id}_{gid}` (what
+  `insert_graph`/`_provision_graph` mint) or the pre-#3543
+  `team_{org_id}_{gid}` that no data migration rewrites — plus the org's own
+  bare `org_{org_id}`, which the historical open already resolves (that is what
+  promoting the ORIGINAL graph back looks like, for an org whose graph 0 carries
+  the `org_` spelling — see the legacy note below). ⛔ The BARE `team_{org_id}` is
+  NOT accepted: it is a real stored value, but the historical open resolves
+  `org_{org_id}`, not `team_{org_id}`, so promoting a legacy org-level row would
+  point every lane at a third graph — neither the promoted one nor the demoted
+  one — and a legacy org reaches it by the ordinary un-promote flow. Any other
+  shape is refused `409 GRAPH_NAMESPACE_UNFOLLOWABLE`: accepting it would
+  succeed and then route every org-wide lane back to the graph the same call
+  demoted (records filed under the promoted graph, nodes written to the demoted
+  one). Check before you promote —
+  `SELECT id, name, namespace FROM public.graphs WHERE org_id = '<org>' AND status = 'active'`.
+  A target that is already the current default also refuses
+  `409 GRAPH_DEFAULT_DRIFT` when the org carries two ACTIVE default rows: that
+  arm returns before the demote, so it cannot be the call that converges the
+  drift — and neither can promoting either drifted row (both take that same arm
+  and get the same 409). The converging call is a promotion of a graph that is
+  **not currently a default** (its demote-then-promote clears the extra rows),
+  after which the intended graph promotes normally; or tombstone all but the
+  intended default row.
+  ⛔ **A legacy org's own original row cannot be promoted back** — a one-way door
+  worth knowing BEFORE the first promotion. For an org whose graph 0 still
+  carries a pre-#3543 namespace (`team_{org_id}`, or a pre-#1903 `org_{name}`),
+  promoting a modern graph forward works, but the un-promote is refused
+  `409 GRAPH_NAMESPACE_UNFOLLOWABLE`: the historical open resolves `org_{org_id}`,
+  not `team_{org_id}`, so the pointer would name a third graph, and following the
+  legacy spelling instead is #2023's pin. The graph stays fully addressable with
+  a graph-bound key; restoring it as the ORG default is an ops fix, tracked as
+  #10505. (For the same reason: the idempotent REPAIR arm is exempt from the
+  namespace guard — it converges whatever namespace the default row already
+  carries.)
 - **No key rotation** — every pre-epic key is `graph_id NULL` +
   `scopes []` + `delegation_depth NULL` = the `legacy_full_access` class
   (resolution derives full team/default-graph access; byte-identical
@@ -219,14 +265,17 @@ Local: `npm --prefix supabase/tests/pglite run validate`.
 - **docs:** schema details in `docs/registry-graph-schema.md`; the key
   permission model in `docs/auth-architecture.md` §6.
 
-## 6. The default graph is TWO facts, and nothing can move either (#10180)
+## 6. The default graph is TWO facts — and one verb now moves both (#10180)
 
-**Measured 2026-10-27, line numbers at the head that ships this section** (each
-row also names its symbol, so a later drift is visible rather than silent). #10180
+**Measured 2026-10-27, line numbers at the head that first shipped this section**
+(each row also names its symbol, so a later drift is visible rather than silent;
+⚠️ the row `file:line` values are that head's, not live). #10180
 asks for the one step a team needs
 to start using a new graph: a verb that moves the DEFAULT. Building it surfaced
 that "the default graph" is not one fact in this codebase — it is **two**,
-resolved in two unrelated ways — and that is why no verb exists.
+resolved in two unrelated ways — and that is why **no verb existed until
+`20261102000001`** (see the last subsection for what shipped and why it is not
+option 1 below).
 
 | # | reader (file:line) | the question it answers | its source |
 |---|---|---|---|
@@ -304,8 +353,12 @@ Every coherent promotion shape moves Fact A. A promotion that moves **only** Fac
 A leaves an org-wide credential **filing its record under the new graph while
 writing its data into the old graph's physical store** — the
 two-answers-to-one-question split #10025 exists to remove, one level up. So the
-verb cannot be added without deciding how Fact B follows Fact A, and that
-decision reopens #2023's pin.
+verb cannot be added without deciding how Fact B follows Fact A — and, as
+written, the obvious answer (option 1 below, Fact B reads the row
+**unconditionally**) reopens #2023's pin, which is an owner decision, not a
+lane's. That is why this was blocked, and the subsection at the end of §6 is the
+shape that gets past both: Fact B follows the row **only when the data has
+moved**, so no existing org is affected and no recorded decision is reversed.
 
 ### The options (owner decision on #10180)
 
@@ -401,3 +454,110 @@ resolved before the commit lands under the old graph, one after under the new.
 organization's own graph" — true at creation, false the moment Fact A and Fact B
 are allowed to diverge.** It now names the row instead (§6's #1), so the
 next lane reads the measured answer rather than the creation-time one.
+
+### What landed: the move is gated on the DATA, so no existing org changes
+
+The verb shipped as `POST /v1/graphs/{graph_id}/promote` (REST-only: no MCP tool,
+no public SDK method — #4282), backed by `public.promote_default_graph` in
+`supabase/migrations/20261102000001_graphs_promote_default.sql`. It moves Fact A
+**and** `organizations.graph_name` in one transaction, so Fact A and Fact B stay
+the same graph.
+
+None of options 1–4 above is what landed, and the difference matters: each of
+them changes the org-wide resolution **unconditionally**, and that is what the
+`hosted_api.py:9788` equality (and #2023's pin) could not survive. The shipped
+shape instead makes the flip **conditional on the DATA having moved**:
+`supabase_control.moved_default_namespace(org_id, namespace)` returns a namespace
+**only** when it is a per-graph namespace of that org — `org_{org_id}_{gid}`, the
+shape `insert_graph`/`_provision_graph` mint, which **only a promotion can put in
+`organizations.graph_name`**. Everything else keeps the historical open:
+
+| shape of `organizations.graph_name` | what the resolver does |
+|---|---|
+| `org_{org_id}` (every org that never promoted, incl. all five provisioning sites) | historical open — `namespace=org_id`, the same SDK shape as before |
+| `team_{org_id}` (pre-#3543) | historical open — #2023's pin holds |
+| `org_{name}` (registry `sdk.org_create`) | historical open, and registry mode never flips at all |
+| `org_{org_id}_{gid}` (a promotion) | opens the promoted graph |
+
+So the answer to the count above (`SELECT count(*) FROM organizations WHERE
+graph_name <> 'org_' || id`) no longer gates this change: a non-zero count
+describes orgs whose default namespace is a legacy name, and those keep the open
+they had. #10361 (nothing pins that equality) is still worth landing, but it is
+no longer a precondition.
+
+**The class is converted, not just the request path.** The inherited attempt
+converted `_data_sdk` alone, which the analysis above already names as worse than
+no verb: eleven other default-graph openers would have kept reading and writing
+the demoted graph while filing record rows under the promoted one. They now
+resolve through ONE function, `hosted_api._org_sdk` (REST: the event-retention
+sweep, the dream drain and its webhook dispatch, the Overview memory count, the
+pack catalog and manifest install, the onboarding-state lanes, the seed/indexing
+runners, and the points/sessions/documents quota count) plus
+`mcp_auth._get_org_sdk` (the MCP lane) — one decision,
+`moved_default_namespace`, shared by all of them.
+`tests/test_10180_promote_default_graph.py` pins the inventory with an AST scan:
+a new `_make_sdk(namespace=<org>)` fails the suite unless it is converted or its
+reason for staying historical is recorded there.
+
+⚠️ **One consequence worth naming for the switchover:** the MCP lane resolves a
+credential through a 60s cache, so a promotion becomes visible to MCP within that
+TTL; a capture admitted before it keeps the graph it resolved. Nothing is
+re-homed, copied or replayed.
+
+#### The org's onboarding record follows the move (it is the one org-level store kept INSIDE the default graph)
+
+The conversion above is right for graph DATA and wrong for `:OnboardingState`,
+the one org-level record stored in a tenant graph: every org-level reader now
+opens the promoted default, so a move that left the node behind would serve
+`flow_defaults()` over an org that had completed — `onboarding_complete` falls
+back to the legacy jsonb answer, the onboarding tool group is re-exposed to
+agents, the dashboard wizard re-opens, and the recorded `fork`/`compact` is lost.
+So the verb **carries** the record (`hosted_api._carry_onboarding_state` ->
+`onboarding.state.copy_org_state`) from the namespace of the row the same
+transaction demoted, and reports the outcome in the response:
+
+```json
+"onboarding_state": {"migrated": true, "reason": "copied",
+                     "from": "org_<org_id>", "to": "org_<org_id>_<gid>",
+                     "steps": 4, "status": "complete",
+                     "subject_anchor": "carried"}
+```
+
+It cannot join the SQL transaction (a graph is a second store), so the response
+is where its verdict lives. Read `reason` on every promotion. The values below
+are exactly the ones `hosted_api._carry_onboarding_state` RETURNS — pinned
+against the function's own return statements by
+`test_the_runbook_lists_exactly_the_carry_reasons_the_code_returns`, so a new
+arm cannot ship undocumented (and a documented arm cannot outlive its code):
+
+| `reason` | meaning | what to do |
+|---|---|---|
+| `copied` | the record moved | nothing |
+| `absent` | the previous default had no node (org never onboarded) | nothing |
+| `already_present` / `no_source` | nothing to carry (idempotent promote, or no historical graph listed) | nothing |
+| `no_namespace` | the promotion reported no target namespace, so there is nowhere to carry to (a defensive branch — the RPC names one for every real move) | nothing |
+| `carry_failed` | **the record is still in the demoted graph** | re-promote the CURRENT default (`POST /v1/graphs/default/promote`): the idempotent arm repairs an absent record from the listed historical name. It never overwrites a present node. |
+
+**`subject_anchor`** — the same response carries it on the `copied` arm, and it
+answers a question `reason` does not: the org's DM-1 identity anchor (the
+`:Subject` its onboarding node points at) is the OTHER org-level thing that
+lives inside a tenant graph, and a copy that left a nameless stub of it in the
+new default graph would be worse than one that carried nothing. Read it
+whenever `reason` is `copied`. The values below are exactly the ones the code
+can return — pinned against `onboarding.state.carry_onboards_edge`'s own return
+statements plus `copy_org_state`'s `absent` assignment by
+`test_the_runbook_documents_exactly_the_subject_anchor_states_the_code_returns`,
+so a new arm cannot ship undocumented (and a documented arm cannot outlive its
+code):
+
+| `subject_anchor` | meaning | what to do |
+|---|---|---|
+| `linked` | the new default graph already held the anchor, with its identity; the carried node now points at it | nothing |
+| `carried` | the new default graph held no anchor, so its identity (same `id`, same `name` / `subjectKind` / `org_id`) was copied over from the demoted graph | nothing |
+| `not_in_target` | **the new default graph holds no anchor** — the demoted graph had none to carry, or its name is already taken there under another id — so the node's `org_subject_id` is left UNSET rather than minting an anonymous `:Subject` | nothing, and nothing is broken: the next seed (`_run_onboarding_seed`, `import_org`, a re-seed after a restart) mints the real anchor. Until it runs, `find_subject_by_name` cannot resolve the org's subject in its DEFAULT graph, and `_count_resource("points")` does not count a phantom point |
+| `absent` | the onboarding node carried no `org_subject_id` at all (an org onboarded before the DM-1 anchor existed), so there was nothing to follow | nothing |
+
+`_graph_has_org_namespace` follows the default too (a promoted org's existence
+verdict is about its default namespace, not `org_{org_id}`), so deleting the
+demoted graph — an ordinary custom graph after the move — no longer sends the
+onboarding projection down its no-write defaults path.

@@ -10165,7 +10165,12 @@ class TestEmbeddedRegistryPathDivergence:
             teams = ha_mod._iter_registered_orgs()
         finally:
             ha_mod._FALLBACK_KEEPALIVE.clear()
-        assert teams == [{"org_id": "supa-team-1", "name": "Supa T"}], teams
+        assert teams == [{"org_id": "supa-team-1", "name": "Supa T",
+                          "graph_name": None}], teams
+        # `graph_name` is the #10180 addition: the page already selects it so the
+        # event-retention sweep can resolve each org's DEFAULT graph without a
+        # second read per org. Pinned exactly (not a subset) so a future field
+        # cannot arrive on this dict unnoticed by the consumers that unpack it.
         assert records == [], f"Supabase mode constructed {len(records)} SDKs"
 
     def test_iter_registered_teams_supabase_query_failure_returns_empty(

@@ -147,6 +147,12 @@ Default-graph semantics (the no-migration contract):
   `teams.graph_name`; registry mode has a `kind='default'` Graph node whose
   namespace IS that stored `graph_name` (the org namespace — `org_{org_id}` /
   `org_{name}`, see the `:Graph` cell above). **No backfill, no data move.**
+  ⚠️ The default is a **row that can be PROMOTED**, not a fixed pointer: since
+  #10180 `POST /v1/graphs/{graph_id}/promote` moves the `kind='default'` marker
+  AND `organizations.graph_name` to an existing active graph in ONE
+  transaction (migration `20261102000001`), so "graph 0" means *the default at
+  this moment*; the previous default is demoted to a normal custom graph with
+  its own namespace and its data untouched.
   ⚠️ Since #10025 supabase mode DOES materialize a `kind='default'`
   `graphs` row per organization (`20261028000001`), because the record's layer
   tables FK to `public.graphs.id` and needed the default graph to have a real,
