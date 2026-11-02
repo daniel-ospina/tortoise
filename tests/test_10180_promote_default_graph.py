@@ -27,6 +27,7 @@ What these tests pin, and what each one FAILS ON:
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -1411,6 +1412,25 @@ def test_a_failed_post_condition_is_a_retryable_conflict_not_a_500(monkeypatch):
     assert not isinstance(raw.value, PromoteDefaultGraphError)
 
 
+def _move_arm_post_condition(fn_text: str) -> tuple[bool, bool]:
+    """`(checks_never_zero, checks_never_two)` for the MOVE arm's post-condition.
+
+    Scoped to the span between the promote statement and the post-condition's
+    own RAISE, because the idempotent arm carries an IDENTICAL `count(*)` check
+    outside that span (#10452 review P3) — a whole-function substring assertion
+    cannot see the move arm lose its half.
+    """
+    guard = fn_text[fn_text.index("SET kind = 'default'"):
+                    fn_text.index("the default did not move")]
+    return "NOT EXISTS" in guard, "count(*)" in guard and "<> 1" in guard
+
+
+# The move arm's "never TWO" half, as the migration spells it. Used only to
+# REBUILD the pre-fix shape in the non-vacuity half below.
+_DROPPED_NEVER_TWO = re.compile(
+    r"OR\s*\(SELECT count\(\*\) FROM public\.graphs g.*?<> 1", re.S)
+
+
 def test_the_sql_locks_the_target_row_and_checks_the_post_condition():
     """(a), pinned where it is enforced. A real two-connection race is not
     expressible in PGlite (one session) or in the double (one thread), so the
@@ -1420,7 +1440,11 @@ def test_the_sql_locks_the_target_row_and_checks_the_post_condition():
     FAIL-ON: drop the `FOR UPDATE` from the target SELECT and a concurrent trash
     can empty the org's default pointer through the window between the read and
     the promote UPDATE; drop the post-condition and a zero-default state
-    returns `ok` (the index cannot see it — no row, no violation)."""
+    returns `ok` (the index cannot see it — no row, no violation); drop its
+    `count(*) <> 1` half and the "never TWO" defect returns (that half is
+    asserted INSIDE the promote→RAISE span, never over the whole function, since
+    `count(*)` also occurs in the idempotent arm's identical check — #10452
+    review P3)."""
     from pathlib import Path
 
     path = (Path(__file__).resolve().parent.parent / "supabase" / "migrations"
@@ -1435,12 +1459,28 @@ def test_the_sql_locks_the_target_row_and_checks_the_post_condition():
         "the organization lock must be taken BEFORE the graph row is read")
     # The post-condition: exactly one ACTIVE default, and it is the target.
     assert "the default did not move" in fn
-    assert "count(*)" in fn and "kind = 'default'" in fn
+    never_zero, never_two = _move_arm_post_condition(fn)
+    assert never_zero, ("the move arm must refuse a ZERO-default state (the "
+                        "index cannot see it — no row, no violation)")
+    assert never_two, ("the move arm must refuse a TWO-default state: its "
+                       "`count(*) <> 1` half is missing from the "
+                       "promote→RAISE span")
     post = fn.index("the default did not move")
     assert post > fn.index("SET kind = 'default'"), (
         "the post-condition must be checked AFTER the promote, not before")
-    # And it RAISEs, i.e. the transaction (including the demote) rolls back.
-    assert "RAISE EXCEPTION" in fn[post - 400:post]
+
+    # ── NON-VACUITY: the PRE-FIX shape of this pin, reproduced. `count(*)`
+    # occurs in BOTH arms, so the whole-function assertion this test used to
+    # make (`"count(*)" in fn`) stayed GREEN with the move arm's half deleted —
+    # the assertion is discriminating only because it is scoped to the span
+    # between the promote and its own RAISE.
+    prefix = _DROPPED_NEVER_TWO.sub("", fn)
+    assert "count(*)" in prefix, (
+        "the fixture is stale: the idempotent arm's identical `count(*)` check "
+        "is what made the whole-function assertion vacuous")
+    assert _move_arm_post_condition(prefix) == (True, False), (
+        "the scoped assertion no longer distinguishes the pre-fix shape — a "
+        "regression that deletes `count(*) <> 1` from the move arm would pass")
 
 
 def test_a_lost_unique_index_race_is_the_same_retryable_conflict():
@@ -2447,6 +2487,58 @@ def test_re_promoting_the_current_default_repairs_a_stranded_record(
     assert _read_onboarding(_NEW_NS)["status"] == "complete"
 
 
+def test_a_failed_registry_probe_is_not_reported_as_nothing_to_carry(
+        sb, monkeypatch):
+    """#10452 review P2: the idempotent REPAIR arm is the ONLY recovery path a
+    failed carry has, and the registry probe behind it is TRI-STATE. Collapsing
+    a failed probe (`None` = "could not look") into an empty listing (`set()` =
+    "the server lists no graph") reported `no_source` — "nothing to carry", the
+    verdict the runbook tells an operator to accept without acting — over a
+    probe that never looked, while the record was still stranded in the
+    DEMOTED graph. The two states need opposite operator actions, and this
+    receipt is the only evidence a caller ever gets.
+
+    FAIL-ON: `listed = _registry_existing_graphs() or set()` (the pre-fix
+    shape) answers `no_source` at the second promote, where this asserts
+    `probe_failed` — and the retry half below is then unreachable."""
+    tc, _, _ = sb
+    _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete")
+    # Strand the record exactly as a real failed carry does (the pre-fix state
+    # the sibling repair test reproduces): the move commits, the carry does not.
+    real_carry = ha._carry_onboarding_state
+    monkeypatch.setattr(ha, "_carry_onboarding_state", lambda *_a, **_k: {
+        "migrated": False, "reason": "carry_failed", "from": None,
+        "to": None, "steps": 0, "status": None})
+    _as_session()
+    r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding_state"]["reason"] == "carry_failed"
+    monkeypatch.setattr(ha, "_carry_onboarding_state", real_carry)
+    assert _read_onboarding(_NEW_NS) is None
+
+    # The recovery attempt runs while the registry probe CANNOT look.
+    real_probe = ha._registry_existing_graphs
+    monkeypatch.setattr(ha, "_registry_existing_graphs", lambda: None)
+    r = tc.post("/v1/graphs/default/promote?org_id=" + TEAM)
+    assert r.status_code == 200, r.text
+    state = r.json()["onboarding_state"]
+    assert state["reason"] == "probe_failed", state
+    assert state["migrated"] is False
+    # Nothing was written on the arm that could not look, and the record is
+    # still where it was — so the receipt says RETRY, not "fine".
+    assert _read_onboarding(_NEW_NS) is None
+    assert _read_onboarding(_OLD_NS)["status"] == "complete"
+
+    # The retry the runbook's `probe_failed` row prescribes, once the probe
+    # answers again: the repair converges and nothing is lost.
+    monkeypatch.setattr(ha, "_registry_existing_graphs", real_probe)
+    r = tc.post("/v1/graphs/default/promote?org_id=" + TEAM)
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding_state"]["reason"] == "copied"
+    assert r.json()["onboarding_state"]["from"] == _OLD_NS
+    assert _read_onboarding(_NEW_NS)["status"] == "complete"
+
+
 def test_the_existence_gate_follows_a_promoted_default(monkeypatch):
     """The projection's existence verdict is about the org's DEFAULT namespace,
     not `org_{org_id}`: the demoted graph is an ordinary custom graph and can be
@@ -2879,7 +2971,8 @@ def test_the_runbook_lists_exactly_the_carry_reasons_the_code_returns():
                         and isinstance(v.value, str)):
                     returned.add(v.value)
     assert returned == {"copied", "absent", "already_present", "no_source",
-                        "no_namespace", "carry_failed"}, returned
+                        "no_namespace", "carry_failed",
+                        "probe_failed"}, returned
 
     doc = (root / "docs" / "ops" / "multi-graph-migration-runbook.md").read_text(
         encoding="utf-8")

@@ -24245,15 +24245,26 @@ async def _apply_graph_rename(
     return {"graph_id": graph_id, "name": name}
 
 
-def _historical_onboarding_source(org_id: str, namespace: str) -> str | None:
+def _historical_onboarding_source(org_id: str, namespace: str,
+                                  listed: set[str]) -> str | None:
     """The graph an org's onboarding record may still be sitting in (#10180).
+
+    ``listed`` is the caller's ``_registry_existing_graphs()`` result and it is
+    REQUIRED to be a real listing, because that probe is TRI-STATE: ``None``
+    means "could not look", a listed empty set means "the server lists no
+    graph". This function used to collapse the two with ``or set()`` (#10452
+    review P2). On the idempotent REPAIR arm — the one path that recovers a
+    failed carry — that turned a graph-service hiccup into ``no_source``, i.e.
+    "nothing to carry", the verdict the runbook tells the operator to accept
+    without acting, while the record was still stranded in the demoted graph.
+    The tri-state is therefore decided by the caller, where the receipt is
+    written.
 
     Only the HISTORICAL tenant names are candidates, and only ones the server
     actually LISTS: ``_make_sdk(namespace=…)`` re-derives ``org_{org_id}`` and
     would MINT it, which is the pin-4 read-path write this tree bans. A name the
     probe never observed is never opened.
     """
-    listed = _registry_existing_graphs() or set()
     for candidate in (f"org_{org_id}", f"team_{org_id}"):
         if candidate != namespace and candidate in listed:
             return candidate
@@ -24293,6 +24304,13 @@ def _carry_onboarding_state(org_id: str, previous_ns: str | None,
        the current default, mirroring the RPC's own idempotent-arm repair
        (``namespace_repaired``). It never overwrites a present node.
 
+       The listing probe behind that name is TRI-STATE, and the arm keeps it:
+       when the probe FAILS it answers ``probe_failed`` (an instruction to
+       RETRY) rather than ``no_source`` (an instruction to do nothing). This is
+       the only recovery path a failed carry has, so collapsing "could not
+       look" into "nothing there" would let the recovery report success-by-
+       silence over a record that is still stranded (#10452 review P2).
+
     Best-effort by contract: the move has already COMMITTED when this runs, so
     a graph failure must not fail the verb — it is reported as
     ``carry_failed`` with its exception type (never silently reported as done).
@@ -24310,7 +24328,15 @@ def _carry_onboarding_state(org_id: str, previous_ns: str | None,
                 # Never overwrite: the idempotent arm only ever repairs an
                 # ABSENT record, so a repeated promote cannot churn state.
                 return {**report, "reason": "already_present"}
-            source = _historical_onboarding_source(org_id, namespace)
+            listed = _registry_existing_graphs()
+            if listed is None:
+                # TRI-STATE, kept (#10452 review P2): the probe could not look.
+                # "I could not look" is NOT "there is nothing to carry" — this
+                # is the only path that recovers a failed carry, so the one
+                # verdict the operator must RETRY gets its own reason instead of
+                # `no_source`, which the runbook says to accept.
+                return {**report, "reason": "probe_failed"}
+            source = _historical_onboarding_source(org_id, namespace, listed)
             if source is None:
                 return {**report, "reason": "no_source"}
         dst_sdk = dst_sdk or _make_sdk(graph_name=namespace)
