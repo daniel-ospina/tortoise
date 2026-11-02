@@ -54,6 +54,11 @@ from datetime import datetime, timezone
 from .cypher_guard import tolerates_altered_numbers
 from .exceptions import UnrepresentableNumberError
 
+# #10524 review ISSUE 3 (P3): ONE declaration for "what an absent status
+# reports", never a hand-rolled ``or "live"`` copy. `live` imports nothing, so
+# this cannot cycle.
+from .live import status_as_reported
+
 # #8864 review P1: the stub carrier's id is the SHARED deterministic mint
 # (`_event_plain_merge` / `_upsert_object` both use it), never a re-derivation.
 from .projection import (
@@ -2742,8 +2747,17 @@ def _compare_entities(journal_entities, graph_entities,
                 # every status-less birth is reported as `expected 'live', found
                 # None` — `divergence="content"` on a faithful journal — while a
                 # real out-of-band terminal write is still caught.
+                # ⛔ The effective value comes from `live.status_as_reported`, NOT
+                # an inline `gv if gv is not None else "live"` (#10524 review
+                # ISSUE 3): that inline copy is a SECOND spelling of the rule, and
+                # the two are not equivalent in general — the declaration carves
+                # out labels whose layer has no `status` family (`:Event` → ""),
+                # so a label widened into `_STATUS_COMPARED_LABELS` would silently
+                # take the wrong arm of whichever copy it hit. This file's own
+                # doctrine (:1835-1846) is that a hand-copied second list is
+                # exactly what to avoid.
                 gv = g.get("status")
-                if (gv if gv is not None else "live") != jv:
+                if status_as_reported(gv, label=label) != jv:
                     count += 1
                     if len(mismatches) < _MAX_DIVERGENT_POINTS:
                         mismatches.append({

@@ -33,38 +33,48 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
-> **Correction to v3.31 (2026-11-02 — #9974 R1 / PR #10524 — a CITATION correction: no model change, no version bump):**
+> **Build record for v3.31 (2026-11-02 — #9974 R1 / PR #10524 — `ONTOLOGY.md` is NOT modified; two texts are PARKED awaiting the owner's approval):**
 >
-> **What moved, and why this is a correction rather than a model change.** Three `ONTOLOGY.md` cells cited the
-> `status` fold's *implementation* and no longer matched the code: §2's `Procedural` layer row and §4.3's
-> `Object.status` row said `ObjectRegistered→live`, and §4.2's `Subject.status` row said `_upsert_subject`
-> *"SEEDS it ON CREATE (`status=coalesce($st,'live')`)"*. #9974 R1 (PR #10524) moved the fold to
-> `s.status=$st` / `o.status=$st` (`tortoise/projection/entities.py`) and deleted the create door's
-> fabricated `out["status"] = "live"` (`tortoise/sdk.py::_entity_door_props`), so a birth status is
-> **DERIVED-OR-ABSENT**: the record's own value where the record states one, and the property ABSENT where it
-> does not (`SET x = NULL` REMOVES a property — the #7936 rule the same `ON MATCH` arm already carries). An
-> absent status still READS live, which is existing doctrine and unchanged: `live._terminal_excluded`'s NULL
-> arm, §11's cache rule, and the decision at
+> **What the code now does (build record, no model change).** #9974 R1 (PR #10524) moved the status fold so a
+> birth status is **DERIVED-OR-ABSENT**: `projection/entities.py` `_upsert_subject` writes `s.status=$st` and
+> `_upsert_object` writes `o.status=$st` (was `status=coalesce($st,'live')` in both), and
+> `sdk.py::_entity_door_props` no longer fabricates `out["status"] = "live"` on the create door. So a birth
+> writes the record's OWN value where the record states one, and writes nothing where it does not
+> (`SET x = NULL` REMOVES a property — the #7936 rule the same `ON MATCH` arm already carries). An absent
+> status still READS live, which is existing doctrine and unchanged: `live._terminal_excluded`'s NULL arm,
+> §11's cache rule, and the decision at
 > `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md` §2.6 (*"`status` — DERIVED (a
-> cache) … projection-owned CACHE"*). **The model statement is untouched** — `status` was already ruled a
-> DERIVED cache; what was stale was the sentence describing how the code derives it. That is the header's
-> *factual error* exception, and this entry is the exception's record. No version bump and no `updated:`
-> change: no model statement moved.
+> cache) … projection-owned CACHE"*). **The model statement is untouched**: `status` was already ruled a
+> DERIVED cache. No version bump and no `updated:` change — no model statement moved, and (see below)
+> `ONTOLOGY.md` itself is byte-identical to `origin/main` in this PR.
 >
-> **⛔ Not landed here, and why.** An earlier draft of PR #10524 carried a new 37-line §4.3 note
-> (*"Querying liveness — do NOT filter the literal `status:'live'`"*). It added two things a reader would
-> take as **normative for consumers**: that a literal filter now matches zero rows, and that the supported
-> replacement is the four-value `:Object` predicate — i.e. a new rule, not a correction of a stale citation.
-> Under this document's CRITICAL RULE that needs Daniel Ospina's explicit approval of its exact text, and no
-> such approval is recorded anywhere reachable (PR body, PR comments, inline review comments, #9974 body and
-> its comments). It is therefore WITHDRAWN from `ONTOLOGY.md` by this correction and parked on **#9974** with
-> its verbatim text (comment on that issue, 2026-11-02), so the approval question arrives with the text in
-> hand rather than being re-derived by the next lane. **What a consumer needs is already stated by the
-> corrected cells above and nothing new is claimed there:** `status` is a cache of the event stream (§2's
-> Procedural row, the §4.2/§4.3 `status` cells, §11's derived-cache rule), and an absent status READS live (the
-> same cells). The predicate that implements "not terminal" — `live._terminal_excluded` /
-> `live.is_terminal_status`, never a literal — is stated where it lives, in `tortoise/live.py` and its §4.3
-> consumers; this document does not restate it as a consumer rule.
+> **⛔ `ONTOLOGY.md` is deliberately UNMODIFIED, and this is the second ruling on the question.** Two later
+> reviewers disagreed about this file, so both judgments are recorded here rather than left for the next lane
+> to re-derive:
+>
+> 1. Review round 2 (P2) asked for `ONTOLOGY.md` to move with the change, because §2's `Procedural` row and
+>    §4.3's `Object.status` row still print `ObjectRegistered→live`, and §4.2's `Subject.status` row still
+>    prints *"SEEDS it ON CREATE (`status=coalesce($st,'live')`)"*. Those three sentences are now STALE build
+>    record — they describe the fold as it was.
+> 2. The head-`45d004b9b` review (ISSUE 1, blocking) established that **correcting them in place is not a
+>    citation fix**. Two of the three replacement clauses asserted a *semantic* proposition — *"ABSENT when the
+>    record states none and ABSENT reads LIVE"* — that appears nowhere in `ONTOLOGY.md` on `main`, i.e. new
+>    normative text, not a restatement of a stale cite. That needs the owner's explicit approval of the exact
+>    text, and no such approval is recorded anywhere reachable.
+>
+> **The second ruling governs**, so the three cells were reverted to their `origin/main` text and this entry
+> carries the build record instead of the model file. ⛔ **The consequence is stated, not hidden: those three
+> sentences in `ONTOLOGY.md` are now WRONG about the code** and stay wrong until the owner approves a
+> replacement. Per this file's routing rule the *build* record belongs here, not in the model; per
+> `ONTOLOGY.md`'s own rule the *model* text cannot be edited without that approval. Both parked texts — the
+> three cell replacements and the 37-line §4.3 consumer note (*"Querying liveness — do NOT filter the literal
+> `status:'live'`"*, withdrawn for the same reason by the previous head) — carry their exact proposed wording
+> on **#9974** (comment, 2026-11-02), so the approval question arrives with the text in hand rather than being
+> re-derived. **What a consumer needs is already stated by the unmodified cells and the doctrine they cite:**
+> `status` is a cache of the event stream (§2's Procedural row, the §4.2/§4.3 `status` cells, §11's
+> derived-cache rule), and an absent status READS live (`live._terminal_excluded`'s NULL arm). The predicate
+> that implements "not terminal" — `live._terminal_excluded` / `live.is_terminal_status`, never a literal — is
+> stated where it lives, in `tortoise/live.py` and its §4.3 consumers.
 
 ---
 
