@@ -22,6 +22,9 @@ claims:
 | `test_every_embedded_label_has_a_query_path` | bullet 2 | an embedding write path serves a label `run_vector_query` cannot query |
 | `test_all_three_mechanisms_are_visible_to_the_caller` | bullet 3 (`#4999`) | the fallback stops announcing itself, or two paths report the same mechanism |
 | `test_the_census_refuses_to_report_zero_for_an_unreadable_store` | the 2026-09-24 error (`stored`-only / silent 0) | a store that could not be read is reported as `0` anything |
+| `test_the_census_reads_through_the_READ_ONLY_verb` | "the census stores nothing", enforced by the ENGINE | a census read goes back to the write-capable `graph.query` |
+| `test_a_backtick_in_a_graph_label_cannot_re_purpose_the_census_query` | a graph-controlled label is QUOTED, not concatenated | a label carrying a backtick closes the identifier and appends Cypher |
+| `test_the_TEXT_path_PRINTS_an_unreadable_catalogue_row` | the text path renders what `--json` renders | the printer raises `TypeError` on the `(label, why)` tuples and a measured census exits 2 |
 | `test_an_unmeasurable_run_exits_two` | the documented exit-code contract | a run that could not measure exits 0 or 1, so a caller reads "could not measure" as "a row was NOT MET" |
 | `test_the_instrument_is_selected_by_its_own_subjects` | the pins above actually RUN in CI | a subject diff stops selecting this file — a falsifier that never executes |
 | `test_two_package_inits_keep_distinct_writer_identities` | the writer map's exhaustiveness | two writers in one package collapse into one key, so a label bullet 2 compares vanishes |
@@ -377,6 +380,12 @@ class _UnreadableGraph:
     def query(self, cypher, params=None, timeout=None):
         raise RuntimeError("Timeout reading from socket")
 
+    # The census reads through the read-only verb (`GRAPH.RO_QUERY`); a fake that
+    # implements only `query` would let the tool quietly keep the write-capable
+    # one, so both verbs answer the same way here.
+    def ro_query(self, cypher, params=None, timeout=None):
+        raise RuntimeError("Timeout reading from socket")
+
 
 class _SpyDB:
     """A handle whose only job is to let `main` reach the census."""
@@ -454,6 +463,12 @@ class _MaterialisingGraph:
     a catalogue read on a missing graph name materialises an empty graph)."""
 
     def query(self, cypher, params=None, timeout=None):
+        raise AssertionError(
+            "a catalogue read was issued for a graph that does not exist — that "
+            "CREATES it server-side, and the census is read-only by doctrine"
+        )
+
+    def ro_query(self, cypher, params=None, timeout=None):
         raise AssertionError(
             "a catalogue read was issued for a graph that does not exist — that "
             "CREATES it server-side, and the census is read-only by doctrine"
@@ -611,7 +626,17 @@ class _CensusGraph:
         self._vectors = vectors  # {label: (count, [1.0]*width | None)}
         self._dim = dim
 
+    # ⛔ BOTH verbs answer through `_answer`, because the census must issue its
+    # reads through `ro_query` (the engine's read-only verb) and a fake that
+    # implemented only the write-capable `query` would make a revert invisible.
+    # Subclasses override `_answer`, never one verb, so neither can go untested.
     def query(self, cypher, params=None, timeout=None):
+        return self._answer(cypher)
+
+    def ro_query(self, cypher, params=None, timeout=None):
+        return self._answer(cypher)
+
+    def _answer(self, cypher):
         if "db.indexes()" in cypher:
             rows = self._catalogue
         elif "db.labels()" in cypher:
@@ -699,10 +724,10 @@ def test_the_census_does_not_claim_coverage_it_could_not_measure():
 
     # (b) the width probe RAISED — the same branch via the swallowed exception
     class _RaisingWidth(_CensusGraph):
-        def query(self, cypher, params=None, timeout=None):
+        def _answer(self, cypher):
             if "RETURN n.embedding" in cypher:
                 raise RuntimeError("Timeout reading from socket")
-            return super().query(cypher, params, timeout)
+            return super()._answer(cypher)
 
     graph = _RaisingWidth([_index_row("Point", "embedding", 384)], ["Point"],
                           {"Point": (5, [0.0] * 384)})
@@ -826,10 +851,10 @@ def test_a_failed_population_read_is_unmeasured_not_a_narrowed_population():
     """`CALL db.labels()` failing must not fall back to `indexed | served`."""
 
     class _NoLabels(_CensusGraph):
-        def query(self, cypher, params=None, timeout=None):
+        def _answer(self, cypher):
             if "db.labels()" in cypher:
                 raise RuntimeError("Timeout reading from socket")
-            return super().query(cypher, params, timeout)
+            return super()._answer(cypher)
 
     graph = _NoLabels([_index_row("Point", "embedding", 384)], ["Point"],
                       {"Point": (1, [0.0] * 384)})
@@ -850,6 +875,102 @@ def test_an_unreadable_catalogue_row_is_not_an_unindexed_label():
     row = census["labels"]["Point"]
     assert isinstance(row["indexed"], str) and row["indexed"].startswith("UNMEASURED"), row
     assert str(row["unindexed"]).startswith("UNMEASURED"), row
+
+
+def test_a_backtick_in_a_graph_label_cannot_re_purpose_the_census_query():
+    """A label is QUOTED by the repo's identifier rule, never concatenated raw.
+
+    `label` comes from `CALL db.labels()` / the index catalogue — the graph's own
+    schema, i.e. graph-controlled input reaching Cypher by interpolation (a label
+    cannot be a query parameter). The pre-fix `f"MATCH (n:`{label}`) …"` let a
+    label carrying a backtick close the quoted identifier and append Cypher of
+    its own. The repo's one rule for this shape is
+    `graph_key_restore._quote_identifier` (bare when bare, else backtick-quoted
+    with interior backticks DOUBLED) — round 15 review, P3.
+
+    The payload is EXECUTED through the census rather than read off a source
+    line, so a later rewrite that stops quoting reds here instead of shipping.
+    """
+    hostile = "x`) DETACH DELETE n //"
+    emitted: list[str] = []
+
+    class _Hostile(_CensusGraph):
+        def _answer(self, cypher):
+            emitted.append(cypher)
+            return super()._answer(cypher)
+
+    probe.vector_census(_Hostile([], [hostile], {}), "g", at="t",
+                        graph_names=["g"])
+    counts = [q for q in emitted if "RETURN count(n)" in q]
+    target = [q for q in counts if "x" in q]
+    assert target, counts
+    quoted = "`" + hostile.replace("`", "``") + "`"
+    assert quoted in target[0], (
+        f"the label reached Cypher unquoted — the payload's backtick closes the "
+        f"identifier: {target[0]}")
+    # ⛔ The RAW form is what closed the identifier, and it is emitted nowhere:
+    # the payload's backtick exists only inside a doubled pair.
+    assert f"`{hostile}`" not in " ".join(counts), counts
+    # …and the payload's own backtick is the ONLY doubled one, so the doubling is
+    # the escape and not an artefact of the payload happening to contain it.
+    assert target[0].count("``") == 1, target[0]
+
+
+def test_the_census_reads_through_the_READ_ONLY_verb():
+    """The census reads through `GRAPH.RO_QUERY`, not the write-capable verb.
+
+    "This module stores nothing" was a convention held only by writing
+    read-shaped statements through `graph.query` — the verb that CAN write.
+    `ro_query` is rejected server-side for a write, so the doctrine becomes the
+    engine's to enforce (round 15 review, P3). A fake that implemented only
+    `query` could never show this: the handle below REFUSES `query` and the
+    census must still measure it.
+    """
+
+    class _WriteVerbForbidden(_CensusGraph):
+        def query(self, cypher, params=None, timeout=None):
+            raise AssertionError(
+                f"the census read through the write-capable verb: {cypher}")
+
+    row = probe.vector_census(
+        _WriteVerbForbidden(catalogue=[_index_row("Point", "embedding", 384)],
+                            labels=["Point"],
+                            vectors={"Point": (3, [0.0] * 384)}),
+        "g", at="2026-11-01T00:00:00Z", graph_names=["g"],
+    )["labels"]["Point"]
+    assert row["stored"] == 3, row
+    assert row["indexed"] is True, row
+    assert row["payload"]["derived_payload_B"] == 3 * 384 * 4, row
+
+
+def test_the_TEXT_path_PRINTS_an_unreadable_catalogue_row(monkeypatch, capsys):
+    """A census that MEASURED fine must not exit 2 on its own print statement.
+
+    Measured failure this pins (round 15 review, P2):
+    `unreadable_catalogue_rows` holds `(label-or-None, why)` TUPLES and the text
+    printer joined them as if they were strings, so `TypeError: sequence item 0:
+    expected str instance, tuple found` unwound into `cli()`'s blanket handler —
+    a catalogue that was read perfectly reported `UNMEASURED(TypeError: …)` and
+    exit 2, the instrument's "could not measure" code. `--json` renders tuples
+    fine, and `test_an_unreadable_catalogue_row_is_not_an_unindexed_label` calls
+    `vector_census()` directly, which is why nothing caught it: the defect lives
+    on the PRINT path.
+    """
+
+    class _Db:
+        def select_graph(self, name):
+            return _CensusGraph(
+                catalogue=[["Point", ["embedding"], "not-a-dict"]],
+                labels=["Point"], vectors={"Point": (7, [0.0] * 384)},
+            )
+
+    monkeypatch.setattr(probe, "_connect", lambda uri: (_Db(), ["g"]))
+    rc = probe.cli(["--census", "--uri", "docker://:@127.0.0.1:1/g",
+                    "--graph", "g"])
+    out, err = capsys.readouterr()
+    assert "UNMEASURED(TypeError" not in err, err
+    assert "types cell is str" in out, out[-2000:]
+    assert rc == 0, (rc, err)
 
 
 def test_the_predicate_walk_follows_plain_import_and_multiline_from(

@@ -80,6 +80,13 @@ stated, or the label is `UNMEASURED`. Never `0`: an unreachable store and an
 empty one are different facts, and `#5090` is a measurement issue whose whole
 failure mode is a body that reads as measured without being measured.
 
+⛔ **The reads go through `GRAPH.RO_QUERY` and the labels are quoted.** A label
+cannot be a query parameter and its value comes from the graph's own schema, so
+it is quoted with the repo's one identifier rule
+(`graph_key_restore._quote_identifier`) rather than concatenated raw; and the
+read-only verb makes "this module stores nothing" the engine's rule instead of
+this file's memory.
+
 Usage::
 
     uv run python tools/dod_5090_probe.py                     # the four rows
@@ -1414,6 +1421,44 @@ def count_embed_predicates() -> dict:
 # ── The census ─────────────────────────────────────────────────────────────
 
 
+def _read(graph, cypher: str):
+    """Issue a census READ through the engine's read-only verb.
+
+    "Stores nothing" was this module's doctrine and only a convention in the
+    code: `graph.query` is the write-CAPABLE verb, so the doctrine rested on
+    every statement written here happening to be read-shaped (review round 15,
+    P3). `GRAPH.RO_QUERY` is rejected server-side for a write, which makes the
+    doctrine the engine's to enforce instead of this file's to remember.
+    Measured on falkordb-server 4.20.6: `CALL db.indexes()`, `CALL db.labels()`,
+    the per-label `count(n)` and the width probe answer identically through
+    `ro_query`.
+    """
+    return graph.ro_query(cypher)
+
+
+def _cypher_label(label: str) -> str:
+    """``label`` as a Cypher node label, quoted by the product's OWN rule.
+
+    ⛔ A label cannot be a query parameter, so it reaches Cypher by
+    interpolation — and its value comes from the graph's own schema
+    (`CALL db.labels()`, the index catalogue), i.e. from whatever a customer
+    wrote there. Interpolating it raw is the shape `tortoise/graph_key_restore.py`
+    already names (*"a label/property name reaches Cypher by interpolation and
+    comes from the graph's own schema"*) and `tortoise/security.py` answers with
+    an allowlist for the query runners. The census cannot allowlist (it reports
+    labels it has never seen — that is its job), so it uses the repo's one
+    identifier-quoting rule, `graph_key_restore._quote_identifier` (#7846):
+    bare when bare, else backtick-quoted with interior backticks DOUBLED.
+    IMPORTED, never copied — a second quoting rule would drift from the first.
+    Measured on falkordb-server 4.20.6: a doubled interior backtick is REJECTED
+    at parse time, so a backtick-bearing label fails closed into
+    `stored=UNMEASURED(...)` rather than forming a re-purposed query.
+    """
+    from tortoise.graph_key_restore import _quote_identifier
+
+    return _quote_identifier(str(label))
+
+
 def vector_census(graph, graph_name: str, at: str | None = None,
                   graph_names: list[str] | None = None,
                   uri_graph_name: str | None = None) -> dict:
@@ -1449,7 +1494,7 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                              f"this engine: {sorted(graph_names)})",
                 "command": CENSUS_COMMAND}
     try:
-        rows = graph.query("CALL db.indexes()").result_set
+        rows = _read(graph, "CALL db.indexes()").result_set
     except Exception as e:
         return {"graph": graph_name, "at": at, "labels": {},
                 "catalogue": f"UNMEASURED({type(e).__name__}: {e})",
@@ -1503,7 +1548,7 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 })
 
     try:
-        graph_labels = [r[0] for r in (graph.query("CALL db.labels()").result_set or [])]
+        graph_labels = [r[0] for r in (_read(graph, "CALL db.labels()").result_set or [])]
         population_source = "CALL db.labels()"
     except Exception as e:
         # ⛔ NOT a narrowed fallback to `indexed | served`: that is the very
@@ -1521,8 +1566,10 @@ def vector_census(graph, graph_name: str, at: str | None = None,
     labels: dict[str, dict] = {}
     for label in sorted(set(graph_labels) | set(indexed) | served_labels()):
         try:
-            res = graph.query(
-                f"MATCH (n:`{label}`) WHERE n.embedding IS NOT NULL RETURN count(n)"
+            res = _read(
+                graph,
+                f"MATCH (n:{_cypher_label(label)}) "
+                f"WHERE n.embedding IS NOT NULL RETURN count(n)",
             ).result_set
             stored = int(res[0][0])
         except Exception as e:
@@ -1547,9 +1594,10 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 # `size(n.embedding)` is REJECTED on a vecf32 column, so the
                 # vector is fetched and measured here (measured: every payload
                 # read UNMEASURED before this).
-                probe = graph.query(
-                    f"MATCH (n:`{label}`) WHERE n.embedding IS NOT NULL "
-                    f"RETURN n.embedding LIMIT 1"
+                probe = _read(
+                    graph,
+                    f"MATCH (n:{_cypher_label(label)}) "
+                    f"WHERE n.embedding IS NOT NULL RETURN n.embedding LIMIT 1",
                 ).result_set
                 if probe and probe[0] and probe[0][0] is not None:
                     width = len(probe[0][0])
@@ -1823,8 +1871,13 @@ def main(argv: list[str] | None = None) -> int:
         if c.get("population"):
             print(f"  population: {c['population']}")
         if c.get("unreadable_catalogue_rows"):
-            print("  unreadable catalogue rows: "
-                  + "; ".join(c["unreadable_catalogue_rows"][:3]))
+            # ⛔ The rows are `(label-or-None, why)` TUPLES (the per-label filter
+            # unpacks them), so joining them as strings raised `TypeError` and
+            # sent the whole run to `UNMEASURED(...)` with exit 2 — for a
+            # census that measured fine. The `--json` path hid it (`default=str`).
+            print("  unreadable catalogue rows: " + "; ".join(
+                f"{lab}: {why}" if lab is not None else why
+                for lab, why in c["unreadable_catalogue_rows"][:3]))
     return 2 if unmeasured else 0
 
 
