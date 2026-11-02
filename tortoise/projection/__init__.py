@@ -9469,6 +9469,48 @@ def _apply_one(points: dict[str, dict], ev: dict,
             for _pk in _REVISION_PROVENANCE_PROPS:
                 if _pk in ev and _store_holds_prop_value(ev[_pk]):
                     p[_pk] = ev[_pk]
+            # #10523 review (P2): fold the ``embeddingText`` CLEAR — parity with
+            # ``_revise_point`` (:20085 absolute, :20140-20143 presence-
+            # conditional). Both journaled clear paths write the key into the
+            # record (`update_point(embedding=…)`/`embedding=None` and the
+            # content-edit re-encode branch), and the GRAPH fold honours both,
+            # but this arm folded neither — so ``check_consistency`` (whose
+            # reference view IS this function, `consistency.py::_fold_journal`)
+            # kept the creation's enriched text and reported a FALSE
+            # ``divergence="content"`` naming ``embeddingText`` on a graph the
+            # live path itself wrote, with an `action` ("replay the journal")
+            # that reproduces exactly that graph and so could never clear it —
+            # the #8317/#5048/#3817 class, one field over.
+            #
+            # Two arms, mirroring the graph fold rather than inventing a rule:
+            #
+            #   1. a CONTENT EDIT re-encodes the vector from the new content, so
+            #      the text the OLD vector described is gone — ABSOLUTE (not
+            #      presence-conditional), exactly like the graph's clause, which
+            #      clears even for a record that does not state the key. The
+            #      ``new_content`` local is already nulled above for a value the
+            #      store cannot take (#3689), which is the same gate
+            #      ``_revise_point`` applies at :19852 before its re-encode.
+            #   2. a CALLER-VECTOR write (`embedding=[…]` / `embedding=None`)
+            #      journals ``embeddingText: None`` and no ``new_content``. Here
+            #      live is a bare ``SET n += $props``, so PRESENCE-conditional is
+            #      the faithful shape — an unrelated revision does not speak
+            #      about the key and must not clear a writer-minted value — and
+            #      `_store_holds_prop_value` is the shared write bar: a value the
+            #      transport refuses is what live nulls, so it removes the
+            #      property here too.
+            #
+            # ⛔ This fold never SETS a real value: neither does the graph fold
+            # (`_revise_point` emits only ``= NULL`` for this key; the value
+            # write is the carrier's ``n.embeddingText=$et`` in
+            # ``_upsert_point_props``). Writing one here would be the opposite
+            # divergence.
+            if new_content is not None:
+                p.pop("embeddingText", None)
+            elif "embeddingText" in ev and (
+                    ev["embeddingText"] is None
+                    or not _store_holds_prop_value(ev["embeddingText"])):
+                p.pop("embeddingText", None)
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
         # rebuild_all pass-1b. A plain property write on the operator's

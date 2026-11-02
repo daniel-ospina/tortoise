@@ -813,6 +813,88 @@ def test_a_caller_vector_does_not_resurrect_the_enriched_text_on_rebuild(
         s.close()
 
 
+def test_check_consistency_does_not_red_a_faithful_enriched_graph(
+        embedder, enrichment_on, tmp_path):
+    """#10523 review (P2): the PURE fold must clear `embeddingText` too.
+
+    `check_consistency`'s reference view is `projection._apply_one`
+    (`consistency._fold_journal`: *"Ground truth is `_apply_one`"*), and
+    `embeddingText` is a declared node property that is NOT in any exclusion
+    list — so both sides are supposed to carry it. Both journaled CLEAR paths
+    (`update_point(embedding=…)` / `embedding=None`, and the content-edit
+    re-encode branch) write the key into the record and the GRAPH fold
+    (`_revise_point`) honours both, but `_apply_one`'s `PointRevised` arm folded
+    neither: it kept the creation's enriched text while the live node cleared
+    it, and the checker reported a FALSE `divergence="content"` naming
+    `embeddingText` on a graph the live path itself wrote — with an `action`
+    ("reconcile by replaying the journal") that reproduces exactly that graph,
+    so it could never clear (#8317/#5048 class, one field over).
+
+    Non-vacuity, both halves:
+      * the CONTENT-EDIT leg asserts `ok` outright and reds with
+        `fields=["embeddingText"]` on the pre-fix fold (nothing else diverges
+        there — the re-encode branch also replays the vector);
+      * the CALLER-VECTOR leg asserts `embeddingText` is absent while asserting
+        the point IS still reported for the `embedding` key the PR already
+        documents as a residual (#5046: a caller vector is live-only), so a leg
+        that simply returned `ok` everywhere could not satisfy it.
+    """
+    from tortoise.consistency import check_consistency
+    from tortoise.log import EventLog
+
+    def _diverged_fields(result, pid):
+        for row in result.get("divergent_points") or []:
+            if row.get("id") == pid:
+                return list(row.get("fields") or [])
+        return []
+
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
+    try:
+        # ── the CONTENT-EDIT door: the graph fold clears ABSOLUTELY ────────
+        s.capture_session(CONV, session_id="sess-cc-edit")
+        t0 = _turn_rows(s, "sess-cc-edit")[0]
+        assert t0[2] is not None, t0
+        s.update_point(t0[0], content="the billing migration is blocked")
+        assert _turn_rows(s, "sess-cc-edit")[0][2] is None
+
+        result = check_consistency(log_path, s._get_proj())
+        assert result["ok"], (
+            "the reference fold disagrees with a FAITHFUL graph after a content "
+            "edit that cleared the enriched text: "
+            f"{result.get('divergent_points')}")
+
+        # ── the CALLER-VECTOR door: live clears PRESENCE-conditionally ─────
+        s.capture_session(CONV, session_id="sess-cc-vec")
+        t1 = _turn_rows(s, "sess-cc-vec")[0]
+        assert t1[2] is not None, t1
+        s.update_point(t1[0], embedding=[1.0, 0.0, 0.0, 0.0])
+        assert _turn_rows(s, "sess-cc-vec")[0][2] is None
+
+        result = check_consistency(log_path, s._get_proj())
+        fields = _diverged_fields(result, t1[0])
+        assert "embeddingText" not in fields, (
+            "the reference fold kept an embeddingText the LIVE graph cleared "
+            f"through the caller-vector door: {result.get('divergent_points')}")
+        # The declared #5046 residual, asserted so this leg cannot pass by the
+        # checker simply saying nothing about the point at all.
+        assert "embedding" in fields, (
+            "this leg no longer exercises the caller-vector door — the #5046 "
+            f"residual it leans on is gone: {result.get('divergent_points')}")
+
+        # ── an unrelated revision must NOT clear it (presence-conditional) ──
+        s.capture_session(CONV, session_id="sess-cc-ok")
+        t2 = _turn_rows(s, "sess-cc-ok")[0]
+        s.update_point(t2[0], status="live")
+        assert _turn_rows(s, "sess-cc-ok")[0][2] == t2[2], (
+            "a revision that never spoke about embeddingText cleared it in the "
+            "pure fold")
+        assert "embeddingText" not in _diverged_fields(
+            check_consistency(log_path, s._get_proj()), t2[0])
+    finally:
+        s.close()
+
+
 # ── 10. `embeddingText` is WRITER-minted at every intake door ──────────────
 #
 # Review round 1, item 3 claimed "rejected at all three boundaries" and nothing
