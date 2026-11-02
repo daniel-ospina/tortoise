@@ -3466,7 +3466,7 @@ def test_the_records_e3_rule_claims_no_enforcement_over_the_probe():
 
 
 def test_the_routing_index_carries_both_e3_readings():
-    """A reader arrives through `docs/00_index.md`, so the amendment has to reach that row too.
+    """A reader arrives through `docs/00_index.md`, so the amendment has to reach its rows too.
 
     #10525 review P2: §10.1, the README and the E-row audit were all extended with the amended
     reading, and the index row was not — it still published `148/433` and "the frozen `= 1.000` is
@@ -3474,12 +3474,25 @@ def test_the_routing_index_carries_both_e3_readings():
     DEFECT. The surface the repo routes readers through therefore said the amendment had not
     happened, which is the artefact-contradicts-artefact class §10 exists to remove.
 
-    Non-vacuity: the pre-fix row carried neither `148/383` nor the `OPEN` marker, so this reds.
+    #10525 review P2 (second round): the file carries TWO rows about this bundle, and the fix for
+    the first left the second stating the falsified history the amendment strikes —
+    `docs/00_index.md`'s PRE-REGISTRATION row still read "E3/E4/E5 have no measurement anywhere
+    and are genuinely pre-run", with no test referencing it, so nothing redded and it could not
+    re-stale visibly. §10.2 (E5's measurement precedes the record by two days), §10.3 (E3's
+    census postdates it) and §10.4 (E4's audit RAN, only its artefact landed late) are the record
+    of why that sentence is false for two of the three criteria. Both rows are read here, for the
+    reason the config note already records for #10382: a pin that reads one line of a file that
+    carries two cannot claim the file is clean.
+
+    Non-vacuity: the pre-fix `#9080` row carried neither `148/383` nor the `OPEN` marker, and the
+    pre-fix PRE-REGISTRATION row still carried "no measurement anywhere" with none of
+    `visible`/`ecc7bc8ca`/`d50217273`, so each leg reds on the head it was written against.
     """
-    row = next(
-        ln for ln in (REPO_ROOT / "docs" / "00_index.md").read_text().splitlines()
-        if ln.startswith("| **`#7949` / `#9080`")
-    )
+    index = (REPO_ROOT / "docs" / "00_index.md").read_text().splitlines()
+
+    e3_rows = [ln for ln in index if ln.startswith("| **`#7949` / `#9080`")]
+    assert e3_rows, "docs/00_index.md no longer routes readers to the #7949/#9080 capstone row"
+    row = e3_rows[0]
     assert "148/433" in row, "the AS-REGISTERED reading must stay published — it is not erased"
     assert "148/383" in row and "0.38642" in row, (
         "the index row publishes only the pre-amendment reading; §10.1 re-registers the denominator "
@@ -3488,6 +3501,32 @@ def test_the_routing_index_carries_both_e3_readings():
     assert "#9736" in row and "OPEN" in row, (
         f"the row must say #9736 remains OPEN and owner-gated — the amendment does not close it: {row[:200]!r}"
     )
+
+    # ⛔ The SECOND row of the same file, and the same defect class: the §0 history claim.
+    prereg_rows = [
+        ln for ln in index if ln.startswith("| **`#7949` capstone PRE-REGISTRATION")
+    ]
+    assert prereg_rows, (
+        "docs/00_index.md no longer routes readers to the PRE-REGISTRATION row — this leg would "
+        "pass on an index that stopped routing the bundle at all")
+    prereg = prereg_rows[0]
+    # The two sentences this row has carried — §0's original (verbatim in §10.2's "Old value") and
+    # the index's own restatement of it. Refused by their exact claim, not by the fragment: the
+    # corrected row may QUOTE the stale claim to say it was wrong.
+    for stale_claim in ("E3/E4/E5 have no measurement anywhere",
+                        "no measurement exists anywhere"):
+        assert stale_claim not in prereg, (
+            "the routing index still states the §0 claim this registration STRIKES — E5's "
+            f"measurement predates the record by two days (#9738, §10.2): {prereg[:400]}")
+    assert "visible" in prereg, (
+        "the row must say no measurement was VISIBLE to the author, not that none existed — the "
+        f"distinction is what §10.4 rests on: {prereg[:400]}")
+    assert "ecc7bc8ca" in prereg, (
+        "E5's prior measurement must be named on the row readers arrive through (§10.2). "
+        f"{prereg[:400]}")
+    assert "d50217273" in prereg, (
+        "E4's audit RAN before the record and only its artefact landed late (§10.4) — the row must "
+        f"carry that disclosure: {prereg[:400]}")
 
 
 def test_a_skipped_arm_names_the_bundle_that_skipped_it(tmp_path):

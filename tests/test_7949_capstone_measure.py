@@ -8,8 +8,19 @@ graph — cannot run here, so this module pins the half that CAN: the bar arithm
 measurement is not a RED row), the table shape the gate parses, and the two rules
 that stop a row from claiming a number its artifact does not carry.
 
-Every assertion is DB-free, network-free and LLM-free: the module imports no
-``tortoise`` symbol at import time, and the files it reads are the shipped
+Every assertion is DB-free, network-free and LLM-free — and that is MEASURED, not
+asserted from memory (#10525 review P3). ⛔ Importing this module DOES pull in
+``tortoise.projection.edges`` (27 ``tortoise.*`` modules, measured): ``measure =
+_load()`` at the bottom of the header executes the probe, which derives its class
+set from the writer's own constant at ITS import time (``DERIVED_LABELS``, #9736).
+What it pulls in NOTHING of is a driver, client or model SDK — no ``falkordb``, no
+``redis``, no ``psycopg2``, no ``httpx``, no ``openai``, no ``anthropic`` (all
+measured absent), so the slice is DB/network/LLM-free on the axis that matters to
+how this file is selected and weighted. The earlier wording claimed "the module
+imports no ``tortoise`` symbol at import time", which the tree refuted while no
+test could see it; ``test_the_import_claim_is_what_importing_actually_does`` now
+measures BOTH halves in a subprocess and requires this docstring to agree with the
+measurement, so the claim cannot re-stale silently. The files it reads are the shipped
 pre-registration, the landed E1/E2 log, the log the probe itself wrote, and —
 for the cite-resolution legs — the documents that print the bundle's
 ``file:line`` cites (`README.md`, both probes, the `docs/00_index.md` row) plus
@@ -23,6 +34,7 @@ import importlib.util as _ilu
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -2550,3 +2562,78 @@ def test_the_bundle_names_the_live_e2_blocker_and_no_closed_render_absence():
             "an index row still routes a reader to `#9775` as E2's blocker — "
             "#9775's render half is CLOSED (PR #10382), so the live blocker is "
             f"`#10360`: {row[:400]}")
+
+
+# ── the header's import claim, MEASURED (#10525 review P3) ───────────────────────────────────
+
+#: Modules a DB/network/LLM-free slice must never pull in. A driver, client or model SDK at import
+#: time is what would make this file's selection and shard weight a lie; the pure-Python `tortoise`
+#: package the probe derives its class set FROM is not (it opens no connection and calls no model).
+_FORBIDDEN_IMPORTS = ("falkordb", "redis", "psycopg2", "psycopg", "httpx", "requests",
+                      "openai", "anthropic")
+
+
+def _import_this_module_in_a_subprocess() -> dict:
+    """Import THIS module in a fresh interpreter and report what it pulled in.
+
+    A subprocess is the only honest instrument here: `sys.modules` in the running session already
+    carries whatever the other ~59 pin functions loaded, so an in-process read cannot tell this
+    module's own imports from its neighbours'.
+    """
+    code = (
+        "import importlib.util as ilu, json, sys\n"
+        f"spec = ilu.spec_from_file_location('t10525_import_probe', {str(Path(__file__).resolve())!r})\n"
+        "module = ilu.module_from_spec(spec)\n"
+        "sys.modules['t10525_import_probe'] = module\n"
+        "spec.loader.exec_module(module)\n"
+        "print(json.dumps({\n"
+        "  'tortoise': sorted(k for k in sys.modules if k.split('.')[0] == 'tortoise'),\n"
+        f"  'forbidden': [d for d in {list(_FORBIDDEN_IMPORTS)!r} if d in sys.modules],\n"
+        "}))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], cwd=str(_REPO),
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    return json.loads(proc.stdout)
+
+
+def test_the_import_claim_is_what_importing_actually_does():
+    """The header's import claim must agree with an executed import (#10525 review P3, MEASURED).
+
+    The docstring used to say *"the module imports no ``tortoise`` symbol at import time"* — the
+    file's whole justification for sitting in a DB-free slice. This module executes
+    ``measure = _load()`` in its own header, and the probe derives ``DERIVED_LABELS`` from
+    ``tortoise.projection.edges`` at import (``_derivation_label_classes``, #9736), so the claim
+    had been false since that amendment landed and nothing referenced it
+    (``grep "imports no"`` returned only the sentence itself).
+
+    This is the class the bundle exists to refuse — a committed claim the tree refutes, with no
+    number moving and no test revealing it. Both halves are measured rather than restated: what
+    DOES arrive (27 ``tortoise.*`` modules, ``projection.edges`` among them) and what does NOT
+    (every driver/client/model SDK), so the wording is pinned to the tree, not to memory.
+
+    Non-vacuity: at the pre-fix head the docstring names none of ``tortoise.projection.edges``,
+    ``falkordb`` or ``#10525``, and carries the bare stale sentence with nothing signalling it
+    is refuted, so all three assertions red.
+    """
+    payload = _import_this_module_in_a_subprocess()
+    assert "tortoise.projection.edges" in payload["tortoise"], (
+        "the probe's class set no longer comes from `tortoise.projection.edges` "
+        f"(#9736) — the docstring states it does, so one of the two moved: {payload['tortoise']}")
+    assert payload["forbidden"] == [], (
+        "importing this module now pulls in a DB/network/LLM dependency, which the slice's "
+        f"selection and shard weight assume it does not: {payload['forbidden']}")
+
+    doc = sys.modules[__name__].__doc__ or ""
+    assert "tortoise.projection.edges" in doc, (
+        "the docstring must state the import this module ACTUALLY performs, or a reader (and "
+        "the next lane) is told a DB-free slice imports nothing at all")
+    assert "falkordb" in doc and "redis" in doc, (
+        "the driver-free half is the load-bearing half now that a `tortoise` import is real — "
+        "the docstring must name what it checked for")
+    assert "#10525" in doc, "the corrected claim must name the finding that corrected it"
+    stale = "imports no ``tortoise`` symbol at import time"
+    if stale in doc:
+        assert "refuted" in doc or "earlier" in doc, (
+            "the stale claim is restated as current fact — if it is kept at all it must be "
+            "marked as the wording that was refuted")
