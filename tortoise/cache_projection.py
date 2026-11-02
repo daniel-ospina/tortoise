@@ -1267,20 +1267,29 @@ _PAYLOAD_EVENT = ("COALESCE(CASE WHEN jsonb_typeof(payload -> 'event') = 'object
 #: #9974 — the label each CREATION record types: the reader's half of the
 #: creation shape, and the reason the birth leg cannot write a `:Object` status
 #: onto a `:Subject` with the same id (ids are per-label).
-#: ⛔ IT IS A COPY, NOT THE ONE HOME, and it must not be described as one. The
-#: one home is `projection._ENTITY_CREATION_EVENT_LABEL` — the map
-#: `record_projection` materialises a snapshot from (`ObjectRegistered` is a
-#: snapshot of the `object` table, `SubjectAdded` of `subject`) — and this table
-#: is that map RESTRICTED to the labels that carry a §2.6 projection-owned status
-#: (:data:`EVENT_STREAM_FOLDS`: `Object`, `Subject`). `EventRecorded` is
-#: deliberately absent: `public.event`'s CHECK refuses only `confidence`, so
-#: `:Event` has no projection-owned `status` a birth record could carry.
-#: The copy is therefore only as good as the pin that binds it to the one home —
+#: ⛔ IT IS A COPY, NOT THE ONE HOME, and it must not be described as one.
+#: It mirrors TWO tables and owes both of them:
+#: * **the journal fold's home**, `projection._ENTITY_CREATION_EVENT_LABEL` — the
+#:   map the graph fold's creation shapes are declared in; and
+#: * **the record layer's own literal**, `record_projection.RECORD_MUTATIONS`
+#:   (`ObjectRegistered` / `SubjectAdded` are `NodeSnapshot`s of the `object` /
+#:   `subject` tables). ⚠️ That table does NOT read this one: it is written out
+#:   again at the record door, so "the map `record_projection` materialises a
+#:   snapshot from" would be FALSE — the record layer has its own copy and
+#:   nothing in it consults the fold's map.
+#: This table is both of them RESTRICTED to the labels that carry a §2.6
+#: projection-owned status (:data:`EVENT_STREAM_FOLDS`: `Object`, `Subject`).
+#: `EventRecorded` is deliberately absent: `public.event` carries an
+#: `event_status` COLUMN and its CHECK refuses only `confidence`, so `:Event`.
+#: `status` is record-held rather than a projection-owned cache (and its record
+#: key is `event_id`, not `id`).
+#: The copy is therefore only as good as the pin that binds it to BOTH homes —
 #: `tests/test_cache_projection.py::
-#: test_the_birth_event_labels_are_the_one_home_creation_map`. Without that pin, a
-#: creation type added or renamed in `_ENTITY_CREATION_EVENT_LABEL` would leave
-#: this table naming the old types, the birth leg would select NOTHING for the
-#: new one, and a born-terminal node would rebuild with NO status — which
+#: test_the_birth_event_labels_are_the_one_home_creation_map`, which asserts this
+#: table against the fold's map AND against `RECORD_MUTATIONS`' snapshot labels.
+#: Without that pin, a creation type added or renamed in either home and not here
+#: would leave this table naming the old types, the birth leg would select NOTHING
+#: for the new one, and a born-terminal node would rebuild with NO status — which
 #: `live._terminal_excluded` reads as LIVE. That is #9974's harm, silently, with
 #: every other pin green.
 _BIRTH_EVENT_LABELS = {"ObjectRegistered": "Object", "SubjectAdded": "Subject"}

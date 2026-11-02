@@ -1031,9 +1031,16 @@ def _project_journal_rows(sql: str, rows, params):
     # split filter IDENTICALLY and nothing pins the difference. Reintroducing the
     # union leaves the suite green (measured). The split is kept because it is the
     # modelling that stays correct if the base set is ever narrowed — NOT because
-    # it fixes an observed failure, and a future lane should not read this as
-    # evidence that the `read_node` door is protected against base-set shrinkage
-    # (it is not: no `read_node(label="Subject")` leg exists).
+    # it fixes an observed failure. ⚠️ CORRECTED (review round 5, P2): the note
+    # here used to end "a future lane should not read this as evidence that the
+    # `read_node` door is protected against base-set shrinkage (it is not: no
+    # `read_node(label=\"Subject\")` leg exists)". That leg NOW EXISTS
+    # (`test_a_born_terminal_object_rebuilds_terminal_not_live` reads the Subject
+    # at the same door), and it was measured against a shrink: narrowing the BASE
+    # selection to `IN ('ObjectRegistered')` reds that test. So base-set
+    # shrinkage IS caught today. What remains genuinely unpinned is only the
+    # union-vs-split modelling difference described in the sentence above, which
+    # stays green either way.
     #
     # The defect that IS measured, and pinned, is the one round 3 found: with NO
     # base modelling at all, shrinking `IN ('ObjectRegistered', 'SubjectAdded')`
@@ -2487,24 +2494,36 @@ def test_a_born_terminal_object_rebuilds_terminal_not_live():
 
 
 def test_the_birth_event_labels_are_the_one_home_creation_map():
-    """#9974 round 3 P2 — the birth label table is a COPY, so it needs a pin.
+    """#9974 — the birth label table is a COPY of TWO homes, so it needs a pin.
 
-    `_BIRTH_EVENT_LABELS` restates `projection._ENTITY_CREATION_EVENT_LABEL` for
-    the two labels that carry a §2.6 projection-owned `status`
-    (`EVENT_STREAM_FOLDS`: `Object`, `Subject`). `EventRecorded` is out by
-    construction — `public.event`'s CHECK refuses only `confidence`, so `:Event`
-    has no projection-owned `status` a creation record could carry.
+    `_BIRTH_EVENT_LABELS` restates BOTH of these, restricted to the two labels
+    that carry a §2.6 projection-owned `status` (`EVENT_STREAM_FOLDS`: `Object`,
+    `Subject`):
 
-    FAILS IF: a creation event type is added, renamed, or re-pointed in the ONE
-    HOME and this copy is not updated. The birth leg selects by the event type,
+    * the JOURNAL fold's home, `projection._ENTITY_CREATION_EVENT_LABEL`; and
+    * the RECORD layer's own literal, `record_projection.RECORD_MUTATIONS` —
+      `ObjectRegistered` / `SubjectAdded` are `NodeSnapshot`s of `object` /
+      `subject`. ⚠️ It does NOT read the fold's map (measured: the only
+      cross-check on it is `set(RECORD_MUTATIONS) == set(JOURNAL_EVENT_TYPES)`),
+      so "the one home" alone would NOT cover the table that actually decides
+      what the record materialises — this test therefore pins both.
+
+    `EventRecorded` is out by construction: `public.event` carries an
+    `event_status` COLUMN and its CHECK refuses only `confidence`, so `:Event`.
+    `status` is record-held, not a projection-owned cache (and its record key is
+    `event_id`, not `id`).
+
+    FAILS IF: a creation event type is added, renamed, or re-pointed in EITHER
+    home and this copy is not updated. The birth leg selects by the event type,
     so the new type would select NOTHING, the node would rebuild with NO status,
     and `live._terminal_excluded` would read it LIVE — #9974's harm returning
-    silently, with every other pin green. This is the same one-home discipline
-    the sibling copy uses (`tests/test_rebuild_parity_fail_loud_3585.py::
-    TestReferenceFoldEntityLabelSetHasOneHome`), and the reason the comment above
-    the table says it is a copy rather than claiming to be the one home.
+    silently, with every other pin green. Same one-home discipline the sibling
+    copy uses (`tests/test_rebuild_parity_fail_loud_3585.py::
+    TestReferenceFoldEntityLabelSetHasOneHome`), which compares LABELS only and
+    so would not catch a RENAME here — that is why this pin compares the full
+    event-type → label map.
     """
-    from tortoise.projection import _ENTITY_CREATION_EVENT_LABEL as one_home
+    from tortoise.projection import _ENTITY_CREATION_EVENT_LABEL as fold_home
 
     status_bearing = set(cp.EVENT_STREAM_FOLDS)
     assert status_bearing == {"Object", "Subject"}, (
@@ -2513,13 +2532,31 @@ def test_the_birth_event_labels_are_the_one_home_creation_map():
         "EventRecorded exclusion above before widening it"
     )
     assert cp._BIRTH_EVENT_LABELS == {
-        k: v for k, v in one_home.items() if v in status_bearing
+        k: v for k, v in fold_home.items() if v in status_bearing
     }, (
-        "the birth label table drifted from the one home "
-        f"(projection._ENTITY_CREATION_EVENT_LABEL={one_home!r}, "
+        "the birth label table drifted from the journal fold's home "
+        f"(projection._ENTITY_CREATION_EVENT_LABEL={fold_home!r}, "
         f"cache_projection._BIRTH_EVENT_LABELS={cp._BIRTH_EVENT_LABELS!r}) — a "
-        "creation type the one home names would select no birth record, so that "
+        "creation type that home names would select no birth record, so that "
         "node rebuilds with no status and reads LIVE"
+    )
+    # ⛔ The RECORD layer is a SECOND home, and it is the one that decides what a
+    # creation record MATERIALISES — `RECORD_MUTATIONS` is written out again at
+    # that door and never consults the fold's map. A type added there (plus its
+    # producer and `JOURNAL_EVENT_TYPES`) would leave the assertion above green
+    # while the birth leg named nothing for it: the exact drift, one door over.
+    record_home = {
+        k: m.effect.node.label
+        for k, m in rp.RECORD_MUTATIONS.items()
+        if isinstance(m.effect, rp.NodeSnapshot)
+        and m.effect.node.label in status_bearing
+    }
+    assert cp._BIRTH_EVENT_LABELS == record_home, (
+        "the birth label table drifted from the record layer's materialisation "
+        f"table (record_projection.RECORD_MUTATIONS snapshot labels={record_home!r}, "
+        f"cache_projection._BIRTH_EVENT_LABELS={cp._BIRTH_EVENT_LABELS!r}) — a "
+        "creation type the record materialises would select no birth record, so "
+        "that node rebuilds with no status and reads LIVE"
     )
 
 
