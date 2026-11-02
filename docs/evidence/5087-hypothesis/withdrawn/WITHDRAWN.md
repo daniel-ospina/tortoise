@@ -20,6 +20,8 @@ passed its PR checks and failed on `main` minutes later. That defect is **not fi
 withdrawal**: the guard repair ruled on #10463 (part 4 — the ordering claim becomes base ancestry,
 not PR-internal order) is a SEPARATE change; whether it is in force therefore depends on the tree
 you are reading, so check the gate's own `ordering measured against:` line rather than trusting this
-note. On a tree that carries it, the refusal described here cannot fire for this bundle at all,
-because the directory no longer holds a log to order. Withdrawing this
+note. On a tree that carries it, the refusal described here cannot fire for **this log** at all,
+because the directory no longer holds *this* log to order — the re-measurement's
+`s3-ablation-a83c23a8.log` sits at the top level of the same directory and IS ordered, from its own
+add-commit. Withdrawing this
 log is the deliberate act that restores `main` without touching a gate under pressure.

@@ -4648,6 +4648,12 @@ def test_an_ordering_violation_is_not_reported_as_a_verified_claim(tmp_path, mon
     violation — the two fields a consumer keys on reported the opposite of the measurement, while
     `ok`/exit were correctly 1. The exit code saved it, and that is exactly why it survived: every
     test of the report ran on a PASSING tree.
+
+    This test also pins the BASE on the same tree (#10548 r15 F3): the verdict went to `failed`,
+    but the base stayed `(not measured)` because it was assigned only on the `verified` path — so
+    the log said no measurement happened over a pair it had just refused at a named ref. Both
+    halves are measured here on the SAME fixture, which is the only shape that can catch a fix that
+    reports one without the other.
     """
     repo = _repo_with_published_base(tmp_path, monkeypatch)
     prereg = _commit_prereg(repo, epoch=1_700_003_000,
@@ -4664,13 +4670,26 @@ def test_an_ordering_violation_is_not_reported_as_a_verified_claim(tmp_path, mon
     assert any("not strictly after" in f for f in report["failures"]), report["failures"]
     assert report["ordering"] != "verified", report["ordering"]
     assert report["run_order_claim"] != "verified", report["run_order_claim"]
-    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    # ⛔ A VIOLATED pair WAS measured, so the field named for the measurement carries the ref that
+    # refused it (#10548 r15 F3). Pre-fix this asserted `"(not measured)"`, which put the log in
+    # the position of saying no comparison happened while the failure lines two rows above it
+    # named `origin/main` as the ref the pair was refused against — and two documents now tell a
+    # reader to trust precisely this line. `ordering` already carries the VERDICT (`failed`); the
+    # base may not be made to carry it a second time.
+    assert report["ordering_base"] == "origin/main", report["ordering_base"]
+    assert report["ordering_base_candidate"] == "origin/main", report["ordering_base_candidate"]
 
     assert check.main(["--dir", str(prereg.parent), "--no-corpus"]) == 1
     out = capsys.readouterr().out
     assert "machine record run-order claim: verified" not in out, out
     assert check.ORDERING_UNMEASURED not in out, ("a VIOLATION is not an UNMEASURED outcome — it "
                                                   "was measured, and it failed")
+    # The line a human reads must name the ref, and must not ALSO offer it as a mere intention.
+    assert "ordering measured against: origin/main" in out, out
+    assert "would be measured against" not in out, (
+        "a violated ordering WAS measured against a base, so offering that same ref as \"would "
+        f"be measured against\" contradicts the line directly above it: {out}"
+    )
 
 
 def test_the_base_read_sees_an_add_hidden_behind_a_merge(tmp_path, monkeypatch):

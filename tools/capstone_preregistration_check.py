@@ -2747,9 +2747,19 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
                 # absence of an `unmeasured` note alone (review cycle 13, finding 2). On a
                 # VIOLATING tree the arm compared its pairs and REFUSED, `unmeasured` stayed empty,
                 # and this field still read `verified` beside two "not strictly after" failures —
-                # the field a consumer keys on reporting the opposite of the measurement. The base
-                # is still not reported as measured: nothing about this ordering held.
+                # the field a consumer keys on reporting the opposite of the measurement.
                 ordering = "failed"
+                # …but the BASE is reported, because a violated pair WAS measured (#10548 r15 F3).
+                # Reaching this branch means `unmeasured` is empty, and `check_ordering` appends to
+                # it on EVERY arm that returns before an epoch comparison plus once more when
+                # `compared == 0` — so at least one (registration, log) pair really was compared
+                # against `candidate`. Printing `(not measured)` here said no measurement happened
+                # while two failure lines in the same output named `origin/main` as the ref they
+                # were refused against, and `docs/evidence/7949-capstone/README.md` + the withdrawn
+                # note now both tell a reader to trust precisely this line. The field is named for
+                # the MEASUREMENT, not for the verdict: it answers "what was this compared
+                # against", which on a refusal is the ref that did the refusing.
+                report["ordering_base"] = candidate
             else:
                 ordering = "verified"
                 # Only NOW is the base a fact about this verdict rather than an intention.
@@ -2944,7 +2954,12 @@ def main(argv: list[str] | None = None) -> int:
         # line. Without this the candidate is lost and an operator cannot tell a wiring fault from
         # a shallow checkout.
         candidate = report.get("ordering_base_candidate")
-        if report["ordering"] != "verified" and candidate and candidate != UNRESOLVED_BASE:
+        # ⛔ Keyed on whether anything was MEASURED, not on whether the verdict was `verified`
+        # (#10548 r15 F3). A violated pair now reports its base — the ref that did the refusing —
+        # so keying on the verdict would print "would be measured against" immediately under a
+        # line that already says it WAS measured against that ref.
+        if (report["ordering_base"] == "(not measured)"
+                and candidate and candidate != UNRESOLVED_BASE):
             print(f"would be measured against: {candidate}")
     return exit_code
 
