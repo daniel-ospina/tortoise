@@ -2917,6 +2917,16 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     pool size does not pass: ``_default_executor_width()`` derives the size the
     loop actually builds, so a bigger shared pool is occupied too (a bigger
     shared pool is the same defect with a longer fuse).
+
+    ⛔ SCOPE, stated because the name reads broader than what this measures:
+    the ``client`` fixture overrides ``get_current_org``, so the auth
+    DEPENDENCY never runs and ``_abuse_post_auth`` — the per-request abuse hook
+    that is still awaited on the SHARED default executor for EVERY
+    authenticated request (``hosted_api.py:2655``) — is not exercised here.
+    This test therefore proves the HANDLER's round trip does not queue on the
+    shared pool; it does NOT prove the whole request path is clear of it, and
+    it must not be cited as if it did. That pre-handler hop is a NAMED residual
+    of #10602, not a property of this change.
     """
     from tortoise.hosted_api import app
 
@@ -2936,7 +2946,17 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
         loop = asyncio.get_running_loop()
         blockers, occupied, release = _stall_the_default_executor(loop, width)
         try:
+            # BOUNDED occupancy wait: a stall that is never established must
+            # FAIL here, naming its own cause — not spin until the repo-wide
+            # ``pytest-timeout`` (300 s) kills the item and the shard with a
+            # message about a timeout instead of about the premise.
+            occupied_deadline = time.monotonic() + DEFAULT_EXECUTOR_STALL_S
             while not occupied.is_set():
+                if time.monotonic() >= occupied_deadline:
+                    raise AssertionError(
+                        f"the shared default executor never reached {width} "
+                        f"running blockers, so the pool was never full and this "
+                        f"run proves nothing about the read lane (#10602)")
                 await asyncio.sleep(0.01)
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport,
