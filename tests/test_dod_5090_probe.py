@@ -28,6 +28,7 @@ claims:
 | `test_a_duplicate_writer_identity_holds_bullet_two_at_partial` | bullet 2's honesty | a writer whose label could not be resolved stops holding the row, while bullet 1 still reports the same hole |
 | `test_a_duplicate_writer_identity_is_not_reported_as_a_census_defect` | #10541's census population | a `duplicate` identity — a different defect, with no key in `WRITER_CENSUS` — is counted as an UNCLASSIFIED #10541 census defect, and the census note is printed over a population of zero |
 | `test_the_census_counts_only_the_unresolved_producers` | the same population, in the other direction | the census stops naming a classed unresolved producer, or names a duplicate alongside it |
+| `test_the_census_carries_no_entry_for_a_writer_that_is_no_longer_unresolved` | the census has no STALE entry | a writer is fixed (or a typo'd key is added) and its entry keeps asserting a class for a hole that no longer exists |
 | `test_the_tool_parses_under_the_floor` | the `#5128` guard is PROTECTIVE, not documentary | 3.12-only syntax (PEP 701) creeps back in, so the file dies in the tokenizer before its own guard can refuse |
 | `test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default` | bullet 1's `on_by_default` input | a line that *documents* the flag (prose, a workflow step name, a commented list item) is scored as a shipped ON |
 | `test_every_real_assignment_shape_still_reads_as_shipped_ON` | the same input, in the other direction | tightening the test makes a REAL shipped ON (compose map/array, `.env`, Dockerfile, `export`) read as a false `False` |
@@ -1269,3 +1270,35 @@ def test_the_census_counts_only_the_unresolved_producers(monkeypatch):
     assert f"{cls}=1 (tortoise.consistency::_compare_views)" in census[0], census[0]
     assert "tortoise.y::_upsert_point" not in census[0], census[0]
     assert not [n for n in row.notes if "UNCLASSIFIED" in n], row.notes
+
+
+def test_the_census_carries_no_entry_for_a_writer_that_is_no_longer_unresolved():
+    """A census entry is a claim about a LIVE hole — it must not outlive it.
+
+    `test_every_unresolved_writer_carries_a_census_class` is one-directional by
+    design (`unresolved ⊆ census`): it proves every hole is classed, not that
+    every class still has a hole. A census keyed by writer NAME is therefore
+    never re-checked against the finding it was recorded for, so an entry whose
+    writer has since been fixed keeps asserting a class for nothing — the
+    `unused suppression` case the comparable registries report explicitly
+    (Semgrep keeps an ignored finding in the population as an `Ignored` triage
+    state; ESLint reports unused disable directives). Here there is no
+    re-check at all, and a dead entry would silently inflate the `exempt` count
+    a reader takes as "these are the instrument's false positives".
+
+    Bidirectional on purpose: equality, not containment. It goes RED on a stale
+    entry (delete it) and on a newly unresolved writer that no entry names —
+    which the other falsifier catches too, so the two cannot drift apart.
+    """
+    census = getattr(probe, "WRITER_CENSUS", {})
+    unresolved = {
+        w for w, d in probe.embedding_writers().items()
+        if d["kind"] == "unresolved_write"
+    }
+    assert unresolved, (
+        "the instrument resolved every writer — this falsifier is no longer "
+        "exercising the case, so it proves nothing")
+    stale = sorted(set(census) - unresolved)
+    assert not stale, (
+        "census entries with no unresolved writer behind them (a stale "
+        f"suppression — delete the entry, or explain the hole it names): {stale}")
