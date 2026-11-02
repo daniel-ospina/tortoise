@@ -586,7 +586,7 @@ def reader_window_displacement(
     ``injected_merged`` reports a healthy 10. With no injection the same
     measurement is 0, so the number is attributable to the injection.
 
-    Two residuals, stated so the number is not read as more than it is:
+    Three residuals, stated so the number is not read as more than it is:
 
     * ``base_pool`` is the RAW pre-merge list while ``merged`` has been
       through ``guard_and_recap_pool``, so ``base_displaced`` also counts
@@ -597,6 +597,17 @@ def reader_window_displacement(
     * When the base pool FILLS the window, ``base_displaced`` equals
       ``injected_in_window`` algebraically — one injected item in, one base
       item out. They are corroborating only in the partial-window case.
+    * The window counted here is the RAW prefix of ``merged``, while
+      ``assemble_context`` admits a SKIP-FILTERED subsequence: a
+      claim-text-less hit spends no item slot and a cap-failing hit is
+      skipped without one (``tortoise/retrieval.py``), and with the
+      evidence-package arm on, the reader gets a reordered, deduplicated
+      list. So "inside the window" is an UPPER BOUND on the delivered
+      surface, not the surface itself. This module already states the same
+      residual class for ``seeded_sessions`` (*"matches the reader MODULO
+      the budget caps"*); a reuse at a different window, or alongside the
+      packaging arm, needs the same ``admitted=``/counterfactual treatment
+      before the number is read as delivered evidence.
 
     ⛔ The TOP-5 is NOT where this happens, and a probe that counts base
     hits at final rank ``>= 5`` says otherwise: it reports 35 for that shape
