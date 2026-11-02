@@ -60,17 +60,24 @@ def test_the_description_states_the_parameter_is_optional_not_a_drop_tactic():
     GUESS — `tortoise_list_graphs()` carries no `is_default` — and the guess it
     rewarded landed the write on the default graph.
 
-    ⛔ The HEAD is pinned as an EXACT SENTENCE SET, not by a phrase blocklist: a
-    blocklist only catches the wordings we thought of, and a re-worded imperative
-    ("when in doubt, leave it out") appended alongside an intact anchor would pass
-    it — the same defect back in new words. An added, removed or replaced sentence
-    reds here whatever its wording."""
+    ⛔ The HEAD is pinned by its SENTENCE SET and by a HEDGE BLOCKLIST, not by a
+    phrase blocklist. A blocklist of historical wordings only catches what we
+    thought of; a count of sentences only catches an ADDED sentence — and the most
+    natural way to soften a rule is to append a hedge INSIDE an existing one ("…;
+    when in doubt, leave it out"), which neither reds. So all three are pinned:
+    sentence count, the fact-bearing sentences, and any drop-the-argument hedge."""
     head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
     sentences = [s for s in re.split(r"(?<=\.)\s+", head.strip()) if s]
     assert len(sentences) == 7, sentences
     assert sentences[0] == "Optional graph to act on: this parameter MAY be omitted.", sentences[0]
+    assert sentences[1] == (
+        "It is optional because a graph is working context, not an identity, so it "
+        "is stated here rather than bound into the connection (#9340)."), sentences[1]
     assert "that is what omission MEANS, not a form to prefer" in sentences[2], sentences[2]
     assert "never permission to drop the argument" in sentences[3], sentences[3]
+    for hedge in ("leave it out", "when in doubt", "drop it", "don't send",
+                  "do not send", "omit it", "should omit", "must omit"):
+        assert hedge not in head.lower(), (hedge, head)
     assert "OMIT IT" not in head, head
     assert "that is the form to send" not in head, head
 
