@@ -2377,8 +2377,11 @@ def retrieve_for_question(
     _sr_seed_limit = DEFAULT_REINJECTION_SEED_SESSIONS
     # The reader's item cap IS its window: ``reader_window_displacement``
     # measures crowding against the prefix the reader actually consumes, so
-    # the fallback is assemble_context's own documented default rather than
-    # an invented constant.
+    # the window is the caller's resolved cap. The branch below is a
+    # direct-caller fallback matching ``DEFAULT_CONTEXT_ITEM_CAP`` (40) — NOT
+    # ``assemble_context``'s own default, which is ``top_k``; and it is
+    # unreachable from here, because ``eff_item_cap`` is always resolved to an
+    # int above. Kept as a floor, not as a claim about the reader.
     _sr_reader_window = (eff_item_cap if eff_item_cap is not None
                          else DEFAULT_REINJECTION_SEED_WINDOW)
     # per-outcome census (§2): the OFF arm records the same zeroed shape so
