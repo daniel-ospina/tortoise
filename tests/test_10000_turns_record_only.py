@@ -2356,29 +2356,38 @@ class _RecordingSeam:
         return out
 
 
+_TEXT_PROPERTIES = ("c", "content", "text", "embeddingText", "payload", "props")
+# ONE list, used to BUILD the query below, so the scan cannot drift from the
+# population it claims. `tests/test_10017_record_carrier.py::_TEXT_SCAN` is the
+# second copy; a change here has to reach both.
+_TEXT_SCAN = (
+    "MATCH (n) WHERE "
+    + " OR ".join(f"n.{prop} CONTAINS $needle" for prop in _TEXT_PROPERTIES)
+    + " RETURN labels(n)[0], coalesce(n.id, '')")
+
+
 def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:
     """Every node whose stored text contains `needle`, with its label and id.
 
     The POPULATION is the point (acceptance bullet 5 — *"the property, not the
     call site"*): the scan is over every node, in every property the writers use
-    to carry text (`c` on a Point, `content`, `text`, the JSON `payload` a
-    `:GraphEvent` holds, and `props` — which no turn writer emits but which a
-    caller-supplied props map can land, see the five-name note below). It does
+    to carry text (`c` on a Point, `content`, `text`, `embeddingText` — the
+    enriched text the turn's vector describes, which `enrich_turn_texts`
+    falls back to the RAW stored text for — the JSON `payload` a `:GraphEvent`
+    holds, and `props` — which no turn writer emits but which a
+    caller-supplied props map can land, see the six-name note below). It does
     not depend on the turn id derivation, the `:Point` label, `is_episodic`, or
     the `CONTAINS` wiring: a write path that carries the text under one of those
-    five property NAMES is inside the population whatever label or wiring it
-    invents, and one that spells it under a SIXTH name is outside it.
+    six property NAMES is inside the population whatever label or wiring it
+    invents, and one that spells it under a SEVENTH name is outside it.
 
-    ⚠️ Read the population as five names, never as "any shape" —
+    ⚠️ Read the population as six names, never as "any shape" —
     `_assert_the_text_is_in_exactly_one_store` states it and names the escape.
     `sdk._capture_turn_ids` (the sibling assertion) is not in the population at
     all: it asks one id space on one edge.
     """
     return [tuple(row) for row in proj.g.query(
-        "MATCH (n) WHERE n.c CONTAINS $needle OR n.content CONTAINS $needle "
-        "OR n.text CONTAINS $needle OR n.payload CONTAINS $needle "
-        "OR n.props CONTAINS $needle "
-        "RETURN labels(n)[0], coalesce(n.id, '')",
+        _TEXT_SCAN,
         params={"needle": needle}).result_set]
 
 
@@ -2386,8 +2395,8 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
     """#10000 acceptance bullet 5 — the property, not the call site.
 
     The record is armed, so the graph must hold no node carrying a turn's text —
-    by any label, wiring or `pointKind` of its own, **among the five text
-    properties the helper below scans**. A sixth property name is outside that
+    by any label, wiring or `pointKind` of its own, **among the six text
+    properties the helper below scans**. A seventh property name is outside that
     population, and the helper says so; it is not extended here. The sibling pin
     asserts the id space this writer uses is empty, which a second writer with
     its own shape would not redden; this one scans the graph.
@@ -2432,7 +2441,7 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     sibling arms are pinned by id space (`_capture_turn_ids`), which asks one id
     derivation on one edge: a writer that invents its own shape would pass them
     while putting prose in the graph. The scan is a `CONTAINS` over EVERY NODE —
-    the properties it searches are the five named below — so it does not care
+    the properties it searches are the six named below — so it does not care
     which arm ran or who wrote the node.
 
     ⛔ IT TAKES NO SEAM, AND THAT IS NOT AN OMISSION. A seam's
@@ -2444,11 +2453,22 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     ARGUMENT (`_RecordSeam.__init__`), so no caller can assert anything with it;
     asserting on it proves nothing about the code under test.
 
-    ⚠️ **The population is FIVE PROPERTY NAMES, not "every property"**: `c`,
-    `content`, `text`, `payload`, `props` — the ones the writers in this tree
-    use. `props` is the weakest of the five and it is in the list for a
-    different reason than the rest: **no turn writer emits it**, but a writer
-    CAN land text there — the caller-supplied props map is written as given
+    ⚠️ **The population is SIX PROPERTY NAMES, not "every property"**: `c`,
+    `content`, `text`, `embeddingText`, `payload`, `props`. `embeddingText` is
+    the one this scan MISSED until the rebase that brought #8488/#10523 in:
+    `_TURN_WRITE_CYPHER` writes it (`t.embeddingText=turn.et`), and `turn.et`
+    is **the raw stored turn text** whenever enrichment had nothing to rewrite
+    with — `enrich_turn_texts` returns `list(windowed_texts)` for
+    `complete_fn is None`, and `_rewrite_one` falls back to the raw text on
+    every failure path. So on the arms that run this Cypher the transcript's
+    own text lands under a name the scan before this one did not look at;
+    measured at this head, a node written through the real writer path with
+    `embedding_texts=[<the needle>]` was invisible to the old query and is
+    found by this one.
+
+    `props` is the weakest of the six and it is in the list for a different
+    reason than the rest: **no turn writer emits it**, but a writer CAN land
+    text there — the caller-supplied props map is written as given
     (`create_point` folds it into the CREATE's property map, `update_point`
     merges it with `SET n += $props`), and `_coerce_props` re-stores a SCALAR
     `props` value as a literal property named `props`. Measured on this host at
@@ -2456,8 +2476,8 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     "needle-in-props"})` → `MATCH (n {id}) RETURN n.props` = `needle-in-props`,
     and the scan below finds it. So it is searched because a caller-named
     property can carry prose, not because a writer does. A writer that carried
-    turn text under a SIXTH name (`body`, `summary`, `raw`…) would be outside this
-    population. That is not hypothetical: this tree derives the session's first
+    turn text under a SEVENTH name (`body`, `summary`, `raw`…) would be outside
+    this population. That is not hypothetical: this tree derives the session's first
     substantive utterance into a `summary` (`sdk._session_source_metadata`) and
     writes it on the session `:Source` (`s.summary=$sum`), so a `:Source.summary`
     hit is a route this scan cannot see. The scan therefore guards against a
@@ -2466,8 +2486,9 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     wider than that.
 
     ⚠️ `tests/test_10017_record_carrier.py::_text_hits` is a SECOND copy of this
-    same query (both predate this diff). A change to the property list has to
-    reach both, or this helper and that one will disagree about the population.
+    same query, and this diff widens BOTH: two scans that disagree about the
+    population are how a renamed property stays invisible to one of them. A
+    further change to the property list has to reach both.
 
     `in_graph=False` asserts the text is absent from the graph, `in_graph=True`
     that it is present — a capture that lost the transcript reddens on both
@@ -2532,6 +2553,22 @@ def test_an_unarmed_capture_puts_the_turn_text_in_the_graph(sdk, monkeypatch):
         "journalled a `TurnsRecorded` carrier — an armed replay would turn it "
         "into record rows while the graph keeps the turns, which is the double "
         "store D1 forbids")
+    # ⚠️ THE POPULATION IS CHECKED AGAINST THE WRITER, not trusted to a list a
+    # later lane edits on its own: this arm is the one that runs
+    # `_TURN_WRITE_CYPHER`, so every property that statement writes a turn's
+    # text into must be a property the scan searches. `embeddingText` is the
+    # entry this check exists for — #8488/#10523 writes `turn.et` there, and on
+    # the enrichment fallback path (`enrich_turn_texts` with no complete_fn, or
+    # a rewrite that fails) `turn.et` IS the turn's raw stored text, so a
+    # five-name population was blind to the transcript in the one statement
+    # this test exists to watch.
+    text_from_turn = {
+        prop for prop, src in re.findall(
+            r"t\.(\w+)=turn\.(\w+)", sdk_mod._TURN_WRITE_CYPHER)
+        if src in {"c", "et"}}
+    assert text_from_turn <= set(_TEXT_PROPERTIES), (
+        "`_TURN_WRITE_CYPHER` writes the turn's text into a property this scan "
+        f"does not search: {sorted(text_from_turn - set(_TEXT_PROPERTIES))}")
     _assert_the_text_is_in_exactly_one_store(
         sdk._get_proj(), needle, in_graph=True)
 
