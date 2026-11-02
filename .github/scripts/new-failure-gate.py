@@ -121,6 +121,24 @@ _UNCERTIFIABLE_CONCLUSIONS = frozenset({"cancelled", "startup_failure", "stale"}
 # ever answers the second; no recorded polarity is flipped here.
 _EXECUTED_CONCLUSIONS = frozenset({"success", "failure", "timed_out"})
 
+# The legs `python-ci-gate` runs UNCONDITIONALLY: its own leg table's selector column is
+# `-` for these, not a `changes.outputs.*` diff gate (`.github/workflows/python-ci.yml`,
+# the LEGS heredoc). The distinction is LOAD-BEARING for `main_leg_coverage`, not
+# bookkeeping: the aggregate reds a `skipped` leg whose selector is anything but `false`
+# (#5219), so on a `-` row a green run PROVES the job executed — while on a diff-gated row
+# the selector may answer `false`, the leg is then `skipped`-BY-DECLINE and the aggregate
+# PASSES it (`python-ci.yml`, `skipped) -> continue` when selected=false). A `success`
+# python-ci run is therefore NO evidence about a diff-gated leg, which is why a run-level
+# counter may credit only the rows below (#10564 review P1; GitHub documents the same
+# asymmetry from the other side — a job skipped by an `if:` still reports SUCCESS to the
+# checks API, so the run conclusion cannot distinguish "ran" from "declined").
+# `ci-introduced-failure` is `-` in that table too and is deliberately ABSENT here: it is
+# the verdict job itself, and a verdict that credits itself measures nothing.
+_UNCONDITIONAL_LEGS = frozenset({
+    "changes", "manifest-integrity", "workflow-lint",
+    "test-d14-hosted-api", "test-record-postgres", "surface-guard",
+})
+
 
 class Unmeasured(Exception):
     """Anything we could not read. Always exit 2, never 0 (#9984 constraint 1)."""
@@ -569,8 +587,8 @@ def counter(report: dict[str, str], key: str) -> int:
 
 def main_leg_coverage(runner: Runner, provenance: Path, tested: int,
                       legs: list[str], main_jobs_dir: str | None
-                      ) -> tuple[str, set[str]]:
-    """(BASIS, covered legs) — did main's baseline window EXERCISE each leg?
+                      ) -> dict[str, str]:
+    """{leg: BASIS} for the legs main's window is MEASURED to have EXECUTED.
 
     `tested` is a RUN-level counter: a `completed` run that finished a measurement
     credits it WITHOUT probing its jobs (agent-infra `ci-failure-set.sh`, "FINISHED IS
@@ -585,25 +603,38 @@ def main_leg_coverage(runner: Runner, provenance: Path, tested: int,
     `--provenance` emits the examined failing runs of the SAME widened window the rate
     table came from, so a second window selector cannot drift from the rail's.
 
-    A GREEN RUN COVERS EVERY LEG, and that is measured rather than assumed: a `skipped`
-    leg the selector SELECTED fails closed in `python-ci-gate`'s own leg table (#5219), so
-    a `success` python-ci run is evidence that every selected leg executed and was clean.
-    `tested > len(examined)` proves such a run exists without a jobs call (`tested` =
+    ⛔ A RUN-LEVEL COUNTER PROVES NOTHING PER LEG ON ITS OWN (#10564 review, P1).
+    `tested > len(examined)` proves a `success` python-ci run EXISTS (`tested` =
     success|failure|timed_out, `examined` = failure|timed_out|startup_failure, so the
-    excess can only be `success`). That is a SUFFICIENT condition, not a necessary one:
-    it is an inequality over aggregate counters, so a small window can hold a `success`
-    run and still fail it (one `startup_failure`, or one red run that never expanded a
-    job, is enough to make `tested <= len(examined)`). The probe therefore reads the
-    EXAMINED (failing) runs only, and what its outcome states is exactly that: **no
-    examined run executed this leg** — never "no run in which the leg executed", which
-    is a claim about a run set this function did not read. That residual limit is filed
-    (#10567: coverage is inferred from aggregate counters, not probed over green runs)
-    rather than papered over. Each failing run's job listing is probed in order,
-    stopping as soon as every leg is covered, so the usual cost is one call.
-    THE BASIS IS RETURNED, not assumed: `green-run` is an INFERENCE from the aggregate's
-    own fail-closed leg table, and printing it as a mere "executed" would be the exact
-    misuse of that word this change exists to stop. An ABSENT provenance file is NOT the
-    all-green case — it is an unreadable run set, and it refuses.
+    excess can only be `success`). It does NOT prove every leg executed: the aggregate
+    reds only a `skipped` leg the selector SELECTED (#5219), and it deliberately PASSES
+    one the selector DECLINED (`skipped) -> continue` when selected=false). `test-slow`,
+    `test-carve-out`, `test`, `test-concurrency-falkor`, `packs-compile` and `test-track-b`
+    are diff-gated, so a green run in which the selector declined one of them is green
+    with that leg never having run — crediting it would be the very "measured" claim
+    this module exists to refuse. So a run-level counter credits ONLY
+    `_UNCONDITIONAL_LEGS` (selector `-`: the aggregate can never pass them skipped);
+    every other leg is covered only by PROBING a run's own job listing, where
+    `_EXECUTED_CONCLUSIONS` is read per job.
+
+    That is a SUFFICIENT condition, not a necessary one, so the probe runs whenever the
+    shortcut did not cover every leg: a small window can hold a `success` run and still
+    fail the inequality (one `startup_failure`, or one red run that never expanded a job,
+    is enough to make `tested <= len(examined)`). The probe reads the EXAMINED (failing)
+    runs only, and what its outcome states is exactly that: **no examined run executed
+    this leg** — never "no run in which the leg executed", which is a claim about a run
+    set this function did not read. On a full-matrix push lane (this repo's only
+    main-writing trigger, `on: push: branches: [main]`) a diff-gated leg DOES execute, so
+    one examined run normally covers it; the refusal fires when the window holds no
+    examined run to read. That residual limit is filed (#10567: coverage is inferred from
+    aggregate counters, not probed over green runs) rather than papered over. Each
+    failing run's job listing is probed in order, stopping as soon as every leg is
+    covered, so the usual cost is one call.
+    THE BASIS IS RETURNED PER LEG, not assumed: `green-run` is an INFERENCE from the
+    aggregate's own fail-closed leg table, `probed` is a reading, and printing either as
+    a mere "executed" would be the exact misuse of that word this change exists to stop.
+    An ABSENT provenance file is NOT the all-green case — it is an unreadable run set,
+    and it refuses.
     """
     examined: list[str] = []
     if not provenance.is_file():
@@ -632,16 +663,22 @@ def main_leg_coverage(runner: Runner, provenance: Path, tested: int,
                 f"main's baseline provenance line {line!r} names no run id — the "
                 "leg dimension cannot be read, so measuredness cannot be claimed")
         examined.append(run_id.strip())
+    bases: dict[str, str] = {}
     if tested > len(examined):
-        return "green-run", set(legs)
-    covered: set[str] = set()
-    for run_id in examined:
-        for job in runner.jobs(run_id, main_jobs_dir):
-            if job.get("conclusion") in _EXECUTED_CONCLUSIONS:
-                covered.add(leg_base(job.get("name")))
-        if covered.issuperset(legs):
-            break
-    return "probed", covered
+        # ONLY the selector-independent legs. See the docstring: a `success` run cannot
+        # have skipped them, and the aggregate could not have passed them skipped.
+        bases.update({leg: "green-run" for leg in legs if leg in _UNCONDITIONAL_LEGS})
+    uncovered = set(legs) - set(bases)
+    if uncovered:
+        # The counter proof does not reach these, so MEASURE them instead of inferring.
+        for run_id in examined:
+            for job in runner.jobs(run_id, main_jobs_dir):
+                if job.get("conclusion") in _EXECUTED_CONCLUSIONS:
+                    bases.setdefault(leg_base(job.get("name")), "probed")
+            uncovered = set(legs) - set(bases)
+            if not uncovered:
+                break
+    return bases
 
 
 def evaluate(args: argparse.Namespace) -> int:
@@ -705,14 +742,17 @@ def evaluate(args: argparse.Namespace) -> int:
         # per leg, so the message names the leg that was unmeasured instead of reading
         # a stale baseline as fine.
         pr_legs = sorted({leg_base(j.get("name")) for j in failed})
-        basis, covered = main_leg_coverage(
+        basis = main_leg_coverage(
             runner, outdir / "main-provenance.txt", counter(report, "tested"),
             pr_legs, args.main_jobs_dir)
         print("leg coverage: " + ", ".join(
-            f"{leg}=" + (f"executed ({basis})" if leg in covered else "NOT EXECUTED")
+            f"{leg}=" + (f"executed ({basis[leg]})" if leg in basis else "NOT EXECUTED")
             for leg in pr_legs))
-        never_ran = [leg for leg in pr_legs if leg not in covered]
+        never_ran = [leg for leg in pr_legs if leg not in basis]
         if never_ran:
+            # A diff-gated leg has a SECOND reason to be uncovered, and it is not the
+            # probe's outcome — the run-level counter was never allowed to reach it.
+            gated = [leg for leg in never_ran if leg not in _UNCONDITIONAL_LEGS]
             raise Unmeasured(
                 "leg(s) " + ", ".join(repr(leg) for leg in never_ran)
                 + " produced this run's failure(s), but no EXAMINED run of main's"
@@ -722,7 +762,15 @@ def evaluate(args: argparse.Namespace) -> int:
                 + " (e.g. skipped, cancelled, neutral, stale, startup_failure,"
                 " action_required — or no such job at all; the list is ILLUSTRATIVE,"
                 " not exhaustive) — the rate is measured over the WINDOW, not over this"
-                " leg, so the failure cannot be certified as introduced here")
+                " leg, so the failure cannot be certified as introduced here"
+                + ("; and a COMPLETED (green) main run credits only the legs"
+                   " `python-ci-gate` runs unconditionally ("
+                   + ", ".join(sorted(_UNCONDITIONAL_LEGS))
+                   + "), because the selector may DECLINE a diff-gated leg and a"
+                   " declined leg that is skipped still PASSES the aggregate — so a"
+                   " green run is no evidence that "
+                   + ", ".join(repr(leg) for leg in gated)
+                   + " ever executed" if gated else ""))
 
         blocked_path = outdir / "blocked.txt"
         verdict_path = outdir / "verdict.txt"

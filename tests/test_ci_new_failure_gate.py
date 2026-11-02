@@ -105,7 +105,14 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:            case stayed green. Unquoted; no executable behaviour moved.
 #:            No logic change in any other re-cut: no new branch, no exit-code change,
 #:            no polarity change.
-_GATE_MODULE_SHA256 = "83b4b79cc6ebd513c8bd0ee2bc3ddeab58b1a02ebdb5b9318068332be670621b"
+#:   #10564 (green-run shortcut) — re-cut IN THE SAME COMMIT: a `success` main run no
+#:            longer credits EVERY leg. `python-ci-gate` reds a `skipped` leg whose
+#:            selector is anything but `false`, so a run-level counter can only prove the
+#:            UNCONDITIONAL rows (`-`), never a diff-gated one the selector may DECLINE —
+#:            a declined leg that is skipped still passes the aggregate. The shortcut now
+#:            credits `_UNCONDITIONAL_LEGS` only and the rest are PROBED; the basis is
+#:            returned PER LEG. Verdict direction (fail-closed, exit 2) is unchanged.
+_GATE_MODULE_SHA256 = "32be7dadd68f32ff0e8455b6d84dffd3791fcfbbdce115c9bf3cfb69442c9d9d"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box
@@ -208,6 +215,36 @@ def _jobs(*rows: tuple[int, str, str]) -> str:
                    for i, n, c in rows)
 
 
+#: The default main-window run id (`Sandbox.env`'s provenance default names it).
+_MAIN_RUN = "2001"
+
+#: A main-window run that executed the FULL matrix — the push lane's shape. `python-ci.yml`
+#: is `on: push: branches:[main]` + `pull_request`, and `push` selects `tools/ci_selection`'s
+#: `_full_selection` (`slow_run`/`carve_out_run` true), so every leg runs. The rail fixtures
+#: below are about the shared DECISION, not the leg dimension — but the leg dimension puts
+#: its question first and refuses a window it cannot measure, so their recorded window has
+#: to be one the producer could actually emit: an examined failing run whose own listing
+#: shows each leg EXECUTED (this is what makes a diff-gated leg coverable at all — a
+#: run-level counter never credits one, #10564 review P1).
+_MAIN_PUSH_RUN_JOBS = _jobs(
+    (1, "changes", "success"),
+    (2, "manifest-integrity", "success"),
+    (3, "workflow-lint", "success"),
+    (4, "test (a)", "success"),
+    (5, "test (d)", "success"),
+    (6, "test (g)", "success"),
+    (7, "test-slow (d)", "success"),
+    (8, "test-carve-out (b)", "success"),
+    (9, "test-concurrency-falkor", "success"),
+    (10, "packs-compile", "success"),
+    (11, "test-track-b", "success"),
+    (12, "test-d14-hosted-api", "success"),
+    (13, "test-record-postgres", "success"),
+    (14, "surface-guard", "success"),
+    (15, "ci-introduced-failure", "success"),
+)
+
+
 _STUB = """#!/usr/bin/env bash
 # A recorded stand-in for `ci-failure-set.sh` (the rail's main-side producer). The
 # REAL producer calls the GitHub API; the gate's comparison logic is what is under
@@ -261,6 +298,15 @@ class Sandbox:
         import os
         env = dict(os.environ)
         env.update({"STUB_RATES": self.rates, "STUB_SIGS": self.sigs})
+        # A DEFAULT main window that is SELF-CONSISTENT, because the leg dimension refuses
+        # one it cannot measure: ONE examined failing run (so `examined` matches the
+        # provenance the real producer writes in the same pass) whose own listing shows
+        # the full matrix EXECUTED. An empty provenance + a non-empty rate table is a
+        # shape the producer cannot emit (the rates come from the examined runs), so
+        # leaving these unset would record a window that never exists in production and
+        # let a pre-leg-dimension fixture pass by accident. `extra` still wins, so the
+        # cases that pin a specific window are unaffected.
+        env.update({"STUB_PROV": f"ddd:{_MAIN_RUN}\n", "STUB_EXAMINED": "1"})
         env.update(extra)
         return env
 
@@ -273,10 +319,12 @@ class Sandbox:
             (self.logs / f"{job_id}.log").write_text(text, encoding="utf-8")
         # The main window's per-run job listings (the leg dimension). Always passed, so
         # a case that reaches the probe with no fixture records fails CLOSED instead of
-        # calling the live API from a test.
+        # calling the live API from a test. `None` means "the default full-matrix run";
+        # an explicit `{}` is a window whose listings the case deliberately withholds.
         main_dir = self.root / "main-jobs"
         main_dir.mkdir(exist_ok=True)
-        for run_id, listing in (main_jobs or {}).items():
+        listings = {_MAIN_RUN: _MAIN_PUSH_RUN_JOBS} if main_jobs is None else main_jobs
+        for run_id, listing in listings.items():
             (main_dir / f"{run_id}.jsonl").write_text(listing, encoding="utf-8")
         argv = [
             sys.executable, str(GATE), "evaluate",
@@ -1056,9 +1104,11 @@ _MAIN_WINDOW_LEG_EXECUTED = {
 
 #: The window's counters and its examined failing runs. `tested=3` EQUALS the examined
 #: count on purpose: `tested > len(examined)` is the SUFFICIENT proof that a GREEN run
-#: exists, and a green run covers every leg — so a window that fails it is the shape that
-#: probes (it does not have to be all-red; a `startup_failure` or a debited zero-job run
-#: is enough, which is why the refusal scopes its claim to the EXAMINED runs).
+#: exists, and a green run proves only the UNCONDITIONAL (selector-`-`) legs executed —
+#: a diff-gated leg must be probed — so a window that fails the inequality is the shape
+#: that probes every leg (it does not have to be all-red; a `startup_failure` or a
+#: debited zero-job run is enough, which is why the refusal scopes its claim to the
+#: EXAMINED runs).
 _STUB_PROV = {"STUB_PROV": "aaa:1001\nbbb:1002\nccc:1003\n",
               "STUB_TESTED": "3", "STUB_EXAMINED": "3"}
 
@@ -1166,15 +1216,24 @@ def test_a_leg_main_did_execute_still_blocks_a_genuinely_new_failure(tmp_path):
     assert "leg coverage: test-slow=executed (probed)" in proc.stdout
 
 
-def test_a_green_run_in_the_window_covers_the_leg_without_a_jobs_call(tmp_path):
-    """A `success` python-ci run IS leg evidence — no extra API call, and no probe.
+def test_a_green_window_does_not_cover_a_diff_gated_leg(tmp_path):
+    """A `success` main run is NO evidence for a leg the selector may DECLINE (#10564 P1).
 
-    A `skipped` leg the selector SELECTED fails closed in `python-ci-gate`'s own leg
-    table (#5219), so a green python-ci run means every selected leg executed. `tested >
-    len(examined)` proves one exists in the window (`tested` = success|failure|timed_out,
-    `examined` = failure|timed_out|startup_failure), so the no-fixture `main-jobs` dir
-    must never be consulted — asserted by the run NOT failing closed on a missing
-    listing while `tested` exceeds the examined count.
+    The pre-fix module returned `set(legs)` for `tested > len(examined)`: every leg the
+    PR failed in printed `executed (green-run)` WITHOUT reading a single job, and the
+    verdict reached the shared decision — `NEW FAILURE … this PR introduced it`, exit 1 —
+    for a leg main never executed. The shape is not exotic: an all-green window (empty
+    provenance) satisfies the inequality always.
+
+    `python-ci-gate` reds only a `skipped` leg whose selector is anything but `false`, and
+    `test-slow` is gated on `changes.outputs.slow_run` — a run whose selector DECLINED it
+    is `skipped` and still green, which is why a run-level counter proves nothing here
+    (GitHub's own docs: a job skipped by an `if:` still reports SUCCESS, so the run
+    conclusion cannot distinguish ran from declined). The honest answer is UNMEASURED.
+
+    `main_jobs={}` is load-bearing: the refusal must come from the leg dimension's own
+    reading of the counter, NOT from the probe's missing-listing refusal — an all-green
+    window must cost zero `gh api …/jobs` calls.
     """
     box = Sandbox(tmp_path, copy_exemption=False)
     (box.agent_infra / "scripts" / "ci_exemption.py").write_text(
@@ -1182,10 +1241,135 @@ def test_a_green_run_in_the_window_covers_the_leg_without_a_jobs_call(tmp_path):
         encoding="utf-8")
     proc = box.run(jobs=_jobs((900, "test-slow (d)", "failure")), logs={900: NEW_LOG},
                    red_legs="test-slow", main_jobs={},
-                   STUB_TESTED="4", STUB_EXAMINED="3",
+                   STUB_TESTED="4", STUB_EXAMINED="0", STUB_PROV="")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "VERDICT: UNMEASURED" in proc.stdout
+    assert "leg coverage: test-slow=NOT EXECUTED" in proc.stdout
+    assert "NEW FAILURE" not in proc.stdout
+    assert "'test-slow'" in proc.stdout, "the refusal must NAME the unmeasured leg"
+    # ...and it must say WHY the counter did not reach this leg, rather than leave a
+    # reader to assume the probe looked and found nothing (it never ran).
+    assert "may DECLINE a diff-gated leg" in proc.stdout, proc.stdout
+    assert "no recorded job listing for run" not in proc.stdout, (
+        "an all-green window must be refused from the counter alone, with no jobs call")
+
+
+def test_a_green_run_beside_a_skipped_leg_run_does_not_credit_the_leg(tmp_path):
+    """The reviewer's own reproduction (#10564 P1), pinned: green runs + `skipped` leg.
+
+    Nine of ten main runs green with `test-slow` SKIPPED-BY-DECLINE and one unrelated red
+    is a window the counter shortcut calls "a green run exists" — but no run in it ever
+    executed the leg, so crediting it produced `NEW FAILURE … this PR introduced it`
+    (exit 1) for a leg main never measured. Reproduced here with the failing run's own
+    listing present (so the probe has something to READ and cannot refuse for a missing
+    fixture): the leg is `skipped` there too, so the honest answer is UNMEASURED.
+    """
+    box = Sandbox(tmp_path, copy_exemption=False)
+    (box.agent_infra / "scripts" / "ci_exemption.py").write_text(
+        _decision_stub(rc=1, verdict="VERDICT\tBLOCK\ttest_brand_new introduced it\n"),
+        encoding="utf-8")
+    proc = box.run(jobs=_jobs((900, "test-slow (d)", "failure")), logs={900: NEW_LOG},
+                   red_legs="test-slow", main_jobs=_MAIN_WINDOW_LEG_SKIPPED,
+                   STUB_TESTED="10", STUB_EXAMINED="3",
                    STUB_PROV=_STUB_PROV["STUB_PROV"])
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "leg coverage: test-slow=NOT EXECUTED" in proc.stdout, proc.stdout
+    assert "NEW FAILURE" not in proc.stdout
+    assert "no EXAMINED run of main's" in proc.stdout, proc.stdout
+
+
+def test_a_green_window_still_credits_a_selector_independent_leg(tmp_path):
+    """The control: where the counter DOES prove execution, the shortcut still fires.
+
+    The unconditional rows (`-`) cannot be passed by the aggregate when skipped (#5219),
+    so a `success` run really did execute them — refusing those would be the over-block
+    the module's own docstring rejects ("a gate that refuses everything is not a gate").
+    Pinned separately from the diff-gated case so a fix cannot degenerate into "never
+    credit anything from a counter", which would hide the distinction it exists for.
+    """
+    box = Sandbox(tmp_path, copy_exemption=False)
+    (box.agent_infra / "scripts" / "ci_exemption.py").write_text(
+        _decision_stub(rc=1, verdict="VERDICT\tBLOCK\ttest_brand_new introduced it\n"),
+        encoding="utf-8")
+    proc = box.run(jobs=_jobs((900, "surface-guard", "failure")), logs={900: NEW_LOG},
+                   red_legs="surface-guard", main_jobs={},
+                   STUB_TESTED="4", STUB_EXAMINED="0", STUB_PROV="")
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "leg coverage: test-slow=executed (green-run)" in proc.stdout
+    assert "leg coverage: surface-guard=executed (green-run)" in proc.stdout, proc.stdout
+
+
+def test_a_green_run_no_longer_suppresses_the_probe_for_a_diff_gated_leg(tmp_path):
+    """`tested > len(examined)` is no longer an early RETURN — the probe still measures.
+
+    The pre-fix shortcut short-circuited the probe, so a window holding a failing run
+    whose own listing PROVES the leg executed was answered by inference (`green-run`) and
+    a green run that never ran the leg was answered the same way. Here `tested=4` exceeds
+    the one examined run, and that run's listing shows `test-slow (d) = success` (the push
+    lane's full selection): the leg IS measured, the basis says `probed`, and the
+    genuinely-new PR failure is still BLOCKED (exit 1) — the adjudication the module
+    exists for survives the fix.
+    """
+    box = Sandbox(tmp_path, copy_exemption=False)
+    (box.agent_infra / "scripts" / "ci_exemption.py").write_text(
+        _decision_stub(rc=1, verdict="VERDICT\tBLOCK\ttest_brand_new introduced it\n"),
+        encoding="utf-8")
+    proc = box.run(jobs=_jobs((900, "test-slow (d)", "failure")), logs={900: NEW_LOG},
+                   red_legs="test-slow",
+                   main_jobs={"1001": _jobs((1, "changes", "success"),
+                                             (2, "test-slow (d)", "success"))},
+                   STUB_TESTED="4", STUB_EXAMINED="1", STUB_PROV="aaa:1001\n")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "leg coverage: test-slow=executed (probed)" in proc.stdout, proc.stdout
+    assert "NEW FAILURE" in proc.stdout
+
+
+def test_the_unconditional_leg_set_matches_the_aggregates_leg_table():
+    """`_UNCONDITIONAL_LEGS` is pinned to the table it claims to read.
+
+    That set is what makes a run-level counter sound, so drift in EITHER direction
+    re-opens #10564's P1 silently: a row that becomes diff-gated while staying in the set
+    is credited from a green run that may have declined it (a false `executed`), and an
+    unconditional row MISSING from the set makes the gate refuse a leg it could prove (an
+    over-block). `ci-introduced-failure` is `-` in the table and deliberately absent: it
+    is the verdict job itself.
+    """
+    import importlib.util
+    import re
+
+    import yaml
+
+    spec = importlib.util.spec_from_file_location("new_failure_gate", GATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "python-ci.yml")
+                              .read_text(encoding="utf-8"))
+    script = "\n".join(str(s.get("run") or "")
+                       for s in workflow["jobs"]["python-ci-gate"]["steps"])
+    found = re.search(r"cat > \"\$LEGS_FILE\" <<'LEGS'\n(.*?)\nLEGS\n", script, re.S)
+    assert found, "the aggregate must declare its leg table as a LEGS heredoc"
+    selectors: dict[str, str] = {}
+    for row in found.group(1).splitlines():
+        row = row.strip()
+        if not row:
+            continue
+        leg, _result, selected = row.split("|")
+        selectors[leg.strip()] = selected.strip()
+    unconditional = {leg for leg, sel in selectors.items() if sel == "-"}
+    unconditional.discard("ci-introduced-failure")
+    assert unconditional, "the leg table must still carry selector-`-` rows"
+    assert unconditional == set(module._UNCONDITIONAL_LEGS), (
+        "a leg may be credited from a run-level counter ONLY while the aggregate runs it "
+        f"unconditionally (selector `-`); table={sorted(unconditional)} "
+        f"constant={sorted(module._UNCONDITIONAL_LEGS)}")
+    # The diff-gated rows must NOT be in the set — that is the P1 this pins.
+    for gated in ("test", "test-slow", "test-carve-out", "test-concurrency-falkor",
+                  "packs-compile", "test-track-b"):
+        assert selectors.get(gated, "-") != "-", (
+            f"{gated!r} is expected to be diff-gated in the leg table; a row that became "
+            "unconditional is fine, but then this test's expectation is stale")
+        assert gated not in module._UNCONDITIONAL_LEGS, (
+            f"{gated!r} is diff-gated, so a green run cannot prove it executed")
 
 
 def test_an_unreadable_provenance_file_is_unmeasured_never_a_traceback(tmp_path):
