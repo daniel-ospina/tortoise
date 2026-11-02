@@ -815,7 +815,9 @@ what a reader needs and what the field name alone cannot carry.
 
 **New value:** `"measurement_visible_to_author": true` for `E5`, with a
 `measurement_visible_to_author_basis` naming the artefact; §0's row is **struck, not deleted**, and
-replaced by two rows — `E3, E4` (still unmeasured) and `E5` (measured, post-visible).
+replaced by three rows — `E3` (no measurement at registration: the census postdates this record),
+`E4` (measured `2026-10-19T01:39:26Z`, its artefact only landed `d50217273` on 2026-10-22, so nothing
+was *visible* to this record's author — §10.4) and `E5` (measured, post-visible).
 
 The measurement: `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §10 — *the
 raw-vs-narrative measurement* — landed in **`ecc7bc8ca`, 2026-10-19** ("… (#7947) (#9071)"; #7947 CLOSED
@@ -883,9 +885,10 @@ blanking it to whitespace) reds the same way.
 `capstone-measured-e0fc940b.log` (head `e0fc940b`, generated **2026-10-23T23:16:55Z**, landed by
 `260903907`) is the first **scored** run against this registration, and it measures **more than the two
 criteria amended above**. Its verdict table reads: `E1 BLOCKED`, `E2 BLOCKED`, `E3 RED 148/433`,
-`E4 RED 2/15`, `E5 RED 12/25`. That is disclosed here so no reader concludes from §0's "no measurement
-existed at registration" row that E3 and E4 remain unmeasured today — they do not, and the distinction
-between *"unmeasured when registered"* and *"unmeasured"* is the whole subject of this section.
+`E4 RED 2/15`, `E5 RED 12/25`. That is disclosed here so no reader concludes from §0's
+"no at registration" and "no measurement was *visible* at registration" rows that E3 and E4 remain
+unmeasured today — they do not, and the distinction between *"unmeasured when registered"* and
+*"unmeasured"* is the whole subject of this section.
 
 **E4 is not amended, and this section says why.** The run scores E4 at **2 of 15** — `edge_correct=2`
 on receipt `tests/eval/write_path/receipts/w2b-operator-2026-10-19.json` — and the log's own E4 note

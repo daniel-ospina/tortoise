@@ -3232,6 +3232,149 @@ def test_section_10_restates_the_rule_section_7_states():
     )
 
 
+#: Number words §10.2's "replaced by N rows" sentence may use. The WORD is checked against the rows §0
+#: actually carries, so the sentence cannot quietly keep describing a table that has since been split.
+_COUNT_WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+}
+
+#: A double-quoted span presented as a CITATION of a table cell — it opens after whitespace and closes
+#: before whitespace or punctuation. `*"…"*` (the author's own term, emphasis) is excluded on both
+#: sides, because a term is not a claim about what a row says. Kept as a STRING so this module's import
+#: block does not grow: a sibling pin cites `tests/test_ci_selection.py`'s citation of a line in THIS
+#: file by NUMBER (`tests/test_ci_runner_x64_install.py::test_the_relays_a_sibling_test_file_makes_land…`),
+#: so one added import shifts that line and reds a file this suite does not own.
+_ROW_QUOTE_PATTERN = r'(?<=[\s(])"([^"]+)"(?=[\s.,;:)—])'
+
+
+def _section_0_rows() -> dict[str, str]:
+    """§0's REPLACEMENT rows as `{criterion id: its first cell}`.
+
+    §8's rule is that a protocol deviation strikes the original row rather than editing it, so the
+    live rows are the ones that FOLLOW the struck original — the rows before it (`E1`/`E1b`,
+    `E2a`/`E2b`) were never amended and are not what §10 describes. Hence: collect unstruck rows after
+    the first struck one.
+    """
+    import re
+
+    rows: dict[str, str] = {}
+    in_table = False
+    struck = False
+    for line in PREREG.read_text().splitlines():
+        if line.startswith("| criterion |"):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not line.startswith("|"):
+            break
+        if "~~" in line:
+            struck = True
+            continue
+        cell = line.split("|")[1].strip()
+        if not cell or set(cell) <= {"-"} or not struck:
+            continue
+        for cid in re.findall(r"\*\*(E\w+)\*\*", cell):
+            rows[cid] = cell
+    return rows
+
+
+def test_section_10_2_describes_the_section_0_rows_the_document_carries():
+    """§10.2's summary of §0 must describe the §0 that is on the page (#10525 review round 13 P2).
+
+    MEASURED at `66bcf2bff`: §10.2 read *"replaced by two rows — `E3, E4` (still unmeasured) and
+    `E5`"*, while §0 carried **three** replacement rows and E4's row said the opposite of "still
+    unmeasured" — *"⛔ not 'no measurement existed': the operator audit **ran** `2026-10-19T01:39:26Z`"*.
+    Round 1 split E4 out of the shared `E3, E4` row precisely because that claim was false for E4;
+    the summary was never re-read against the table it points at, so it republished the pre-split
+    shape AND the pre-split claim — in the section written to remove exactly that class of claim.
+
+    Every arm is DERIVED from the document, not restated: the count word from the rows §0 carries,
+    the ids from those rows' first cells, and the "still unmeasured" ground from the record's own
+    `post_registration_measurement` block. Add a fourth replacement row and this reds.
+
+    Non-vacuity: at the pre-fix head the sentence said `two` where §0 carries three rows, never named
+    `` `E4` `` (it sat inside `` `E3, E4` ``), and carried `still unmeasured` for two criteria the
+    shipped record measures — so all three assertions red on it.
+    """
+    import re
+
+    rows = _section_0_rows()
+    assert rows, "§0's replacement rows could not be parsed — this test is stale, not green"
+    assert len(rows) in _COUNT_WORDS, (
+        f"§0 now carries {len(rows)} replacement rows ({', '.join(sorted(rows))}) and this test can "
+        "only check a sentence that spells the count up to ten — extend `_COUNT_WORDS`"
+    )
+    text = PREREG.read_text()
+    start = text.index("§0's row is **struck, not deleted**")
+    paragraph = text[start:].split("\n\n", 1)[0]
+
+    counted = re.search(r"replaced by (\w+) rows", paragraph)
+    assert counted, (
+        f"§10.2 no longer states how many rows replace §0's struck row, so nothing can be compared "
+        f"with the table: {paragraph!r}"
+    )
+    assert counted.group(1) == _COUNT_WORDS[len(rows)], (
+        f"§10.2 says §0's row was replaced by {counted.group(1)!r} row(s), but §0 carries "
+        f"{len(rows)} ({', '.join(sorted(rows))}) — a reader following the pointer is told a "
+        f"different table from the one on the page"
+    )
+    for cid in sorted(rows):
+        assert f"`{cid}`" in paragraph, (
+            f"§0 carries a replacement row for {cid} that §10.2 never names — the summary still "
+            f"describes the shape the table had before the row was split: {paragraph!r}"
+        )
+
+    record = json.loads((PREREG_DIR / "preregistration.json").read_text())
+    measured = {
+        crit["id"] for crit in record["criteria"] if crit.get("post_registration_measurement")
+    }
+    assert measured & set(rows), (
+        "no §0 replacement row has a post_registration_measurement in the record — this test is "
+        "stale, not green"
+    )
+    assert "still unmeasured" not in paragraph, (
+        "§10.2 calls §0's replacement rows 'still unmeasured', but the record this bundle ships "
+        f"measures {', '.join(sorted(measured & set(rows)))} after registration — the summary "
+        "republishes the claim §10.3/§10.4 exist to correct"
+    )
+
+
+def test_section_10_quotes_section_0_as_section_0_now_reads():
+    """A section may not quote a §0 row that §0 no longer carries (#10525 review round 13 P3).
+
+    MEASURED at `66bcf2bff`: §10.3 said *"no reader concludes from §0's 'no measurement existed at
+    registration' row"* — and §0 contains no such row. E3's reads "no at registration"; E4's reads
+    "no measurement was *visible* at registration" with an explicit `⛔ not "no measurement
+    existed"` correction, added by §10.4. §10.3's SECOND paragraph and §10.4 were updated with that
+    rewrite; its first was not, so the document stated the conflated claim a page before the section
+    that corrects it — the #9738 defect inside the amendment written to remove it.
+
+    The quote set is DERIVED: every non-italicised quote in the paragraph is looked up in §0's table
+    (the struck original included, so quoting the preserved row is allowed). Pre-fix, the one quote
+    was a row the table does not carry, so this reds.
+    """
+    import re
+
+    text = PREREG.read_text()
+    table_start = text.index("| criterion |")
+    table_end = text.index("⇒ §0's table was wrong about E5", table_start)
+    table = text[table_start:table_end]
+
+    start = text.index("That is disclosed here so no reader concludes from §0's")
+    paragraph = text[start:].split("\n\n", 1)[0]
+    quotes = re.findall(_ROW_QUOTE_PATTERN, paragraph)
+    assert quotes, (
+        f"§10.3 quotes no §0 row at all, so this test is stale rather than green: {paragraph!r}"
+    )
+    missing = [q for q in quotes if q not in table]
+    assert not missing, (
+        f"§10.3 quotes {missing!r} as §0's, and §0's table carries no such text — the quote is "
+        "either a row that was rewritten (§10.4) or one that never existed"
+    )
+
+
 def test_a_source_spelled_e3_row_declares_the_probe_cannot_see_it():
     """The gate accepts `Source` and must SAY that it does not check the instrument (#10525 P2).
 
