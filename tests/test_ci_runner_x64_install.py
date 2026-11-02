@@ -4614,9 +4614,12 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # tests added above at the same head pushed it 1596 → 1673, then 1682 when the disagreement
         # case was widened from the two log-invisible bars to all seven, then 1693, and 1701 for the
         # base-ancestry tests this branch added, then 1703 when review cycle 7's `ordering_base`
-        # outcome assertions added two lines to the acceptance test — the pin landing rather than
-        # drifting, because a plausible offset is what it exists to refuse)
-        ("tests/test_capstone_preregistration_9075.py", 1703):
+        # outcome assertions added two lines to the acceptance test, then 1759 when a later commit
+        # appended 56 lines of cycle-11 tests to the same file — the pin landing rather than
+        # drifting, because a plausible offset is what it exists to refuse. That last shift is the
+        # argument for citing this symbol in PROSE by name: the anchor test catches the drift, but
+        # only after someone runs it)
+        ("tests/test_capstone_preregistration_9075.py", 1759):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
