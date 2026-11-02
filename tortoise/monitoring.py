@@ -3510,23 +3510,25 @@ LOOP_HEARTBEAT_INTERVAL = 0.25   # tick period of the loop-side heartbeat task
 #: Age (seconds) past which /healthz reports 503 "the loop is not currently
 #: scheduling".
 #:
-#: WHY 90s, and what the signal does NOT mean (review P2). This app still
-#: makes SYNCHRONOUS calls on the event loop, so "the loop did not tick" is
-#: NOT proof of a wedge — a busy loop looks identical to a hung one:
-#:   * the LLM extractor is called synchronously from ``_capture_session_impl``
-#:     with HTTP timeouts of 60s (``tortoise/models.py`` urlopen(timeout=60),
-#:     ``tortoise/model_adapters.py`` httpx timeout=(10, 60)), and the v2 path
-#:     runs several stages;
-#:   * the FalkorDB client's own socket timeouts are 2s connect / 10s read
-#:     (``projection._socket_timeouts``), and one request can run a per-turn
-#:     loop of synchronous queries.
+#: WHY 90s, and what the signal does NOT mean (review P2). The loop still runs
+#: SYNCHRONOUS work — no model call (every extraction lane is off the loop by
+#: the #3060 invariant: see the HARD ceiling's derivation below), but the
+#: handlers issue synchronous FalkorDB queries whose own socket timeouts are
+#: 2s connect / 10s read (``projection._socket_timeouts``), and a busy loop
+#: looks identical to a hung one from the outside:
+#:   * an ordinary request runs several such queries, back to back;
+#:   * a wedged request that BLOCKS the loop produces the same absent tick.
 #: A low threshold therefore flaps 503 on ordinary slow requests. The value is
-#: set ABOVE the longest single bounded on-loop operation (the 60s LLM call) so
-#: it distinguishes "wedged" from "busy" for the single-operation case. It is
-#: still not a load signal: multi-stage extraction can legitimately exceed it,
-#: which is exactly why the destructive self-kill below is opt-in and gated on
-#: an idle workload, and why the durable remedy is offloading these synchronous
-#: calls rather than tuning this number.
+#: set ABOVE the largest identified single bounded on-loop operation (a 10s
+#: socket read; 60s at the operator maximum) so it distinguishes "wedged" from
+#: "busy" for the single-operation case. It is still not a load signal: a
+#: request path can legitimately exceed it, which is exactly why the
+#: destructive self-kill below is opt-in and, on its
+#: SOFT path, gated on an idle workload (the HARD ceiling
+#: ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` is the exception and deliberately
+#: bypasses that gate — a request in flight does not stop the loop ticking, so
+#: a MISSING TICK is the evidence of a wedge), and why the durable remedy is
+#: keeping synchronous calls OFF the loop rather than tuning this number.
 LOOP_STALE_AFTER = 90.0
 
 #: monotonic timestamp of the last loop tick; 0.0 == the loop has NEVER ticked
@@ -4151,30 +4153,58 @@ def stop_health_listener(server: ThreadingHTTPServer | None = None) -> None:
 #
 # WHY the default flipped (review P0). The pre-review default (30s, exit on
 # the first stale poll) would have caused the very outage it was meant to
-# prevent. This app still performs UNBOUNDED synchronous work on the event
-# loop:
-#   * ``_capture_session_impl`` (hosted_api) calls the LLM extractor
-#     SYNCHRONOUSLY — not awaited, not offloaded — with HTTP timeouts of 60s
-#     (models.py urlopen(timeout=60); model_adapters httpx timeout=(10, 60)),
-#     and the v2 path runs several stages back to back;
-#   * the same handler runs a per-turn loop of synchronous
-#     ``proj.g.query()`` calls (up to 1000 turns; SessionRequest.conversation
-#     max_length=1000), i.e. thousands of sequential round trips with no
-#     ``await``.
-# So ONE authenticated request (free-tier signup is open) can stall the loop
-# for 60-180s+, and a heartbeat-age self-kill would ``os._exit`` the process
-# mid-request, killing every other tenant's in-flight work — repeatedly, in a
-# restart loop. That converts transient provider slowness into a total outage.
+# prevent, because at the time this app ran UNBOUNDED synchronous work on the
+# event loop: ``_capture_session_impl`` (hosted_api) called the LLM extractor
+# inline — not awaited, not offloaded — with HTTP timeouts of 60s (models.py
+# urlopen(timeout=60); model_adapters httpx timeout=(10, 60)) and several
+# stages back to back, and the same handler ran a per-turn loop of synchronous
+# ``proj.g.query()`` calls. ONE authenticated request (free-tier signup is
+# open) could therefore stall the loop for 60-180s+, and a heartbeat-age
+# self-kill would ``os._exit`` the process mid-request, killing every other
+# tenant's in-flight work — repeatedly, in a restart loop. That converts
+# transient provider slowness into a total outage.
+#
+# CORRECTION (#10585 review P2) — that work is no longer ON the loop, so do not
+# size a knob against it. Everything named above now runs on the capture pool
+# by the #3060 invariant: the window write + its scrub
+# (``hosted_api._write_session_and_turns``, #3551), the turn embeddings
+# (#4194), the tenant vocabulary compile (#3086), and BOTH extraction lanes
+# (``_run_capture_bounded`` -> ``_submit_off_loop``: M2 at the
+# ``sdk._extract_session_llm`` call, v2 at ``sdk._extract_session_v2``). The
+# window is capped at ``quota.MAX_SESSION_TURNS = 500`` (refused above it at
+# the top of ``_capture_session_impl``), not by ``SessionRequest.conversation``'s
+# ``max_length`` — and the per-turn queries the old text named are off the loop
+# too. What remains on the loop is graph I/O, bounded by its own socket
+# timeouts (see the HARD ceiling's derivation below).
+# The default stays OFF for the reason that SURVIVES: the idle gate is TRUE by
+# construction for the wedge it was built for (CONTRACT OF THE IDLE GATE,
+# below), and the hard ceiling below is the answer to that — as an opt-in
+# operator escape hatch, not as the shipped default.
 #
 # The correct split, therefore:
 #   * the /healthz signal (above) is the DETECTOR — it publishes staleness;
 #   * destructive action belongs OUT OF PROCESS (PR #3064's external watchdog,
 #     which is not stuck behind the same loop and can be given a real budget);
-#   * the in-process self-kill exists only as an operator escape hatch, and
-#     even then it demands (a) N CONSECUTIVE stale windows (hysteresis), (b) an
-#     IDLE WORKLOAD — never "the loop is busy serving a request" — and (c) at
-#     least one REAL heartbeat tick, so a slow boot can never be mistaken for a
-#     wedge. See ``start_stall_watchdog``.
+#   * the in-process self-kill exists only as an operator escape hatch, and on
+#     the SOFT path (``TORTOISE_LOOP_STALL_EXIT_S``) it demands (a) N
+#     CONSECUTIVE stale windows (hysteresis), (b) an IDLE WORKLOAD — never "the
+#     loop is busy serving a request" — and (c) TWO recorded heartbeat ticks,
+#     at least one of them REAL (``LOOP_STALL_EXIT_MIN_TICKS``), so a slow boot
+#     is never mistaken for a wedge. See ``start_stall_watchdog``.
+#     (c) is stated that way on purpose (#10585 review P3): the first of the
+#     two is the SYNTHETIC tick ``hosted_api._start_liveness`` records on the
+#     loop, so ``ticks >= 2`` means ONE real tick — which is what the
+#     constant's own comment and ``start_stall_watchdog``'s docstring say.
+#     The HARD ceiling (``TORTOISE_LOOP_STALL_HARD_EXIT_S``, defined below) is a
+#     DIFFERENT mechanism and does NOT inherit those conditions (review P2: this
+#     block, the contract an operator reads before arming a process-killing
+#     knob, still described the pre-ceiling behaviour): it IGNORES the in-flight
+#     gauge by design — that bypass IS the fix, because the gauge is true by
+#     construction during the outage it guards — needs no hysteresis, and
+#     reduces (c) to ONE recorded tick. It keeps only the dead-TICKER disarm (a
+#     dead heartbeat task is not a wedge), and past its age it depends on the
+#     deployment's restart policy to complete the recovery. Like its sibling it
+#     ships DISABLED; the HOSTED deployment arms it in ``fly.toml``.
 #
 # CONTRACT OF THE IDLE GATE (round-2 review P2) — read before enabling. The
 # gate is fed by an ASGI in-flight gauge that is incremented for the WHOLE
@@ -4190,11 +4220,16 @@ def stop_health_listener(server: ThreadingHTTPServer | None = None) -> None:
 #   * the wedge this escape hatch targets (thousands of synchronous on-loop
 #     queries from one request) is ITSELF an in-flight request, so the gate
 #     VETOES it by construction.
-# The in-process self-kill therefore cannot be relied on as wedge detection at
-# all: the mechanism that actually handles a wedge is the OUT-OF-BAND watchdog
-# (PR #3064), which is not stuck behind the same loop and does not share this
-# gauge. Enabling ``TORTOISE_LOOP_STALL_EXIT_S`` buys a GC-pause/hard-hang
-# backstop for the no-MCP-client case ONLY.
+# The SOFT in-process self-kill therefore cannot be relied on as wedge detection
+# at all — it is a backstop for the IDLE shape only. The mechanism that actually
+# handles a wedge out of process is the OUT-OF-BAND watchdog (PR #3064), which is
+# not stuck behind the same loop and does not share this gauge. Enabling
+# ``TORTOISE_LOOP_STALL_EXIT_S`` buys a GC-pause/hard-hang backstop for the
+# no-MCP-client case ONLY. In-process wedge detection IS now relied on, though:
+# the HARD ceiling below (``TORTOISE_LOOP_STALL_HARD_EXIT_S``) does not share
+# this gate or this failure mode — a request in flight does not stop the loop
+# ticking, so a MISSING TICK is the evidence of a wedge — and that ceiling is
+# what ``fly.toml`` arms in the hosted deployment.
 # A safe refinement (NOT implemented here — premature optimisation of a path
 # that is off by default) would be to exclude streaming responses from the
 # gauge: the SSE response's ``http.response.start`` fires once at stream open,
@@ -4221,6 +4256,187 @@ LOOP_STALL_EXIT_S = 0.0            # 0 == self-kill DISABLED (the default)
 LOOP_STALL_EXIT_FLOOR_S = 120.0    # lower bound on an ENABLED threshold
 LOOP_STALL_EXIT_WINDOWS = 3        # consecutive stale polls required to exit
 LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before judging
+#: (the HARD ceiling is exempt: past it, a startup wedge must still be replaced)
+
+#: HARD CEILING — the in-flight gauge CANNOT veto this one. 0 == disabled.
+#:
+#: WHY THIS EXISTS (measured 2026-11-02, tortoise-y4mjjq). The idle gate above
+#: is correct for "don't kill a merely BUSY loop", but `workload_in_flight`
+#: stays > 0 for the whole ASGI lifetime of an SSE stream on ``GET /mcp``, and
+#: the fleet's MCP clients hold those open continuously. So the gate is TRUE
+#: BY CONSTRUCTION for the very wedge it guards: measured on the live machine,
+#: ``loop_age_ms: 275117`` / ``loop_lag_max_ms: 696164`` (11.6 min) with
+#: ``workload_idle: false`` — the loop-stall self-kill could never fire, and
+#: Fly does not replace a hung process (its docs: a failing check "does NOT
+#: automatically restart or stop a Machine"; restart policies apply only when
+#: the main process EXITS). Result: a silent, permanent outage — 97 minutes
+#: with the machine reporting ``2/2 checks passing``.
+#:
+#: The gate conflates two different questions. A request in flight does NOT
+#: stop the loop ticking (it awaits, releasing the loop); only a BLOCKED loop
+#: stops it. So 'in flight' is not evidence of progress — a TICK is. Past this
+#: ceiling the loop has produced no tick for longer than any legitimate
+#: synchronous on-loop request can run, so the in-flight request is not
+#: progressing either: it is the wedge. Killing there is bounded and
+#: recoverable (the platform replaces the process); NOT killing is unbounded
+#: and silent.
+#:
+#: DERIVED, not asserted (review P2). The ceiling must sit above the longest
+#: BOUNDED operation that can run ON the loop. #10585 review P2: the first
+#: version of this derivation named the synchronous LLM call as that
+#: operation. It is NOT one — no model call runs on the loop on the hosted
+#: capture path: both extraction lanes are submitted through
+#: ``_run_capture_bounded`` (``_submit_off_loop`` -> ``_CAPTURE_EXECUTOR``) by
+#: the #3060 invariant, as are the turn write, its embeddings and the tenant
+#: vocabulary compile. So the LLM bounds do NOT size this ceiling for the
+#: deployment that arms it; they are stated for a SELF-HOSTER that drives the
+#: SDK synchronously on its own loop (the SDK itself has no loop), which is
+#: the only shape they apply to:
+#:   * 60s — ``OpenAICompatModel(timeout: int = 60)`` (``tortoise/models.py``),
+#:     issued by ``urlopen(req, timeout=self.timeout)``, plus
+#:     ``httpx timeout=(10, 60)`` (``tortoise/model_adapters.py``).
+#:   * 300s — ``OllamaModel(timeout: int = 300)`` (``tortoise/models.py``),
+#:     issued by the same ``urlopen``. Not reachable from the hosted loop (its
+#:     callers are ``ingest.py`` and ``session_indexer.py``, which passes
+#:     ``timeout=30``), but a self-hoster that runs ingest synchronously on the
+#:     loop owns this lane, and this constant is not hosted-only.
+#: What actually blocks THIS app's loop is graph I/O issued from async
+#: handlers, and each operation carries its own socket timeout:
+#: ``projection._socket_timeouts`` defaults to 2s connect / 10s read and
+#: clamps the read at ``projection._DB_TIMEOUT_MAX_S`` = 60s, and the embedded
+#: lane adds ONE retry (``projection._EMBEDDED_RETRY_COUNT``), so the worst
+#: single on-loop operation is ~2 x 60s = 120s at the operator maximum and
+#: ~2 x 10s = 20s at the defaults (both before the retry backoff).
+#: 600s is therefore conservative BY CONSTRUCTION:
+#:   * 5x the worst bounded on-loop operation at the operator-maximum socket
+#:     timeout (120s), and 30x it at the defaults (20s);
+#:   * 3.3x the enabled-threshold floor (``_loop_stall_floor_s`` = max(120s,
+#:     2 * LOOP_STALE_AFTER) = 180s) and 6.7x LOOP_STALE_AFTER itself, which is
+#:     where /healthz already declares the loop stale;
+#:   * 68x the observed p99 loop lag (8.8s) on the live machine.
+#: It is NOT above an unbounded model call: ``_scaled_deadline(600, max_tokens)``
+#: is ~819s at a 16K budget (``tortoise/extractor_v2.py``). That path is OFF
+#: the loop by the #3060 invariant (``_capture_session_impl``), so it cannot
+#: provide the tick-blocking bound either — but it is the reason this is a
+#: ceiling on the LOOP, not a general "operation is slow" timeout.
+#: The measured wedge exceeded 600s (696s max lag) within minutes, so it binds.
+#:
+#: DISABLED BY DEFAULT (``0``), preserving the shipped "no destructive action in
+#: process unless an operator asks for one" contract. The HOSTED deployment
+#: arms it at 600s in ``fly.toml`` ``[env]`` — a deployment-configuration
+#: decision, so the product default is unchanged and a self-hoster opts in.
+LOOP_STALL_HARD_EXIT_S = 0.0       # 0 == hard ceiling DISABLED (the default)
+
+#: The heartbeat TASK, recorded by ``note_heartbeat_task``; ``None`` == no
+#: ticker instrumented (embedded callers, tests, a bare watchdog). A ticker
+#: that can no longer tick freezes the heartbeat while the loop is perfectly
+#: healthy, which would make the hard ceiling below ``os._exit`` a HEALTHY
+#: process every ``LOOP_STALL_HARD_EXIT_S`` until the platform's
+#: ``max_retries`` are spent and the machine is left STOPPED (the restart
+#: policy is Fly's ``on-fail`` / 10 retries, and the hosted deployment now
+#: DECLARES it in ``fly.toml``'s ``[[restart]]`` block — versioned, and pinned
+#: by a test, instead of the earlier reading of one machine's
+#: ``fly machine status --display-config``) — a silent
+#: hang replaced by a silent stop. So the ceiling must be able to tell "the
+#: loop is wedged" from "the ticker is gone", and refuse to act in the
+#: second case.
+_HEARTBEAT_TASK = None
+_HEARTBEAT_TASK_LOCK = threading.Lock()
+
+
+def note_heartbeat_task(task) -> None:
+    """Record ``task`` as the heartbeat ticker; log its death, once, loudly.
+
+    Call this with the object returned by ``loop.create_task(
+    loop_heartbeat_task())``. The done-callback is an OPERATOR SIGNAL only
+    (CRITICAL, exactly once); the ceiling's verdict is derived from the task
+    itself by :func:`heartbeat_task_is_dead`, never from state this callback
+    latches — a latch is sticky and would outlive a re-armed ticker (#2850
+    R3 review P2).
+    """
+    global _HEARTBEAT_TASK
+    with _HEARTBEAT_TASK_LOCK:
+        _HEARTBEAT_TASK = task
+
+    def _done(t) -> None:
+        if t.cancelled():
+            return  # an orderly shutdown cancels it; not a fault
+        exc = None
+        with contextlib.suppress(BaseException):
+            exc = t.exception()
+        if exc is None:
+            return  # returned cleanly; the derived verdict still disarms
+        logger.critical(
+            "#2850: the event-loop heartbeat TASK died (%r) while the loop may "
+            "still be healthy — the hard stall ceiling is DISARMED so a dead "
+            "ticker cannot be mistaken for a wedge",
+            exc)
+
+    with contextlib.suppress(BaseException):
+        task.add_done_callback(_done)
+
+
+def _reset_heartbeat_task() -> None:
+    """Test seam: forget the recorded ticker (no cross-test latch to leak)."""
+    global _HEARTBEAT_TASK
+    with _HEARTBEAT_TASK_LOCK:
+        _HEARTBEAT_TASK = None
+
+
+def heartbeat_task_is_dead() -> bool:
+    """True when the ticker can no longer produce a tick — DISARM the ceiling.
+
+    DERIVED FROM THE TASK, never a module latch (#2850 R3 review P2): a latched
+    flag was STICKY, so one ticker death disarmed the ceiling for the rest of
+    the process even after ``_start_liveness`` re-armed a fresh ticker
+    (``hosted_api.py::_start_liveness`` cancels the previous ticker and
+    installs a fresh one), and it leaked across
+    tests. Here the verdict follows the ticker that is ACTUALLY recorded, and
+    a re-armed ticker re-arms the ceiling.
+
+    The question is "can this ticker still tick?", so every end state answers
+    True, not only the exception this guard is named after:
+
+    * done with an exception — the fault it names;
+    * ``cancelled()`` — orderly shutdown; no further ticks are coming;
+    * done cleanly — the coroutine returned; no further ticks are coming;
+    * UNREADABLE (``done()``/``cancelled()`` raised) — undetermined.
+
+    The last two are FAIL-CLOSED as *disarm*, which is the safe direction here
+    (review P2): this guard gates a process exit, so an unreadable ticker
+    must never be read as "clean stop, ceiling still armed" and a returned
+    ticker must never be read as a wedge. Worst case the ceiling declines to
+    act — the state the product ships in anyway (``LOOP_STALL_HARD_EXIT_S=0``).
+
+    ``None`` (nothing instrumented) is False: the ceiling then fires on
+    heartbeat age alone, unchanged for callers that never armed a task.
+
+    THREADING (checked against the primary source rather than assumed): this is
+    read from the WATCHDOG THREAD, i.e. from outside a Task or a callback, and
+    the Python docs warn that "almost all asyncio objects are not thread
+    safe". The methods used here are the exception that matters: ``done()`` /
+    ``cancelled()`` are plain ``_state`` reads, statically, and neither
+    schedules, awaits nor raises a task exception — the APIs the docs direct
+    through ``loop.call_soon_threadsafe`` are the SCHEDULING ones
+    (``call_soon``, ``Future.cancel``). The pre-existing hard branch already
+    read them this way; #10585 moved the call to once per poll, so the
+    invariant is written down instead of implied, and the ``except`` above
+    keeps any unexpected read failure fail-closed. (``Task.exception()`` is
+    NOT called here — it re-raises and would need the loop.)
+    """
+    with _HEARTBEAT_TASK_LOCK:
+        task = _HEARTBEAT_TASK
+    if task is None:
+        return False
+    try:
+        if task.cancelled():
+            return True
+        # ``not done`` == running == it can still tick. ``done`` == it cannot,
+        # whether it raised or returned; ``exception()`` cannot change that,
+        # and calling it on a cancelled task would itself raise.
+        return bool(task.done())
+    except BaseException:  # an unreadable ticker is UNKNOWN
+        return True   # fail-closed: disarm rather than authorise an exit
 
 
 # ── #2850 P0 review: workload-in-flight gauge for the idle gate ───────────
@@ -4285,6 +4501,36 @@ def _loop_stall_floor_s() -> float:
     (round-4 review P2) so the two cannot drift.
     """
     return max(LOOP_STALL_EXIT_FLOOR_S, LOOP_STALE_AFTER * 2.0)
+
+
+def _loop_stall_hard_exit_s() -> float:
+    """Resolve the hard ceiling (env ``TORTOISE_LOOP_STALL_HARD_EXIT_S``).
+
+    Fail-CLOSED to ``0`` (disabled) on anything unusable — blank, non-numeric,
+    NON-FINITE (``nan``/``inf``) or negative. Unlike the soft threshold this
+    does NOT get clamped to a floor: a value ABOVE the floor is the whole point
+    (it must sit above legitimate work), and a small value is the operator's
+    own bounded trade rather than an accident of parsing. ``nan``/``inf`` are
+    rejected for the same reason as the soft path: ``nan`` would make every
+    comparison False while looking armed, ``inf`` wedges the path in reverse.
+    """
+    raw = os.environ.get("TORTOISE_LOOP_STALL_HARD_EXIT_S")
+    if raw is None or not raw.strip():
+        return LOOP_STALL_HARD_EXIT_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "TORTOISE_LOOP_STALL_HARD_EXIT_S=%r is not a number — the hard "
+            "loop-stall ceiling stays DISABLED", raw)
+        return 0.0
+    if not math.isfinite(value):
+        logger.error(
+            "TORTOISE_LOOP_STALL_HARD_EXIT_S=%r is not finite — DISABLED", raw)
+        return 0.0
+    if value <= 0:
+        return 0.0
+    return value
 
 
 def _loop_stall_threshold() -> float:
@@ -4355,6 +4601,14 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
     /healthz 503 is the only signal, and destructive action stays out of
     process. Read the constant block above for why that is the safe default.
 
+    EXCEPTION — the hard ceiling (``TORTOISE_LOOP_STALL_HARD_EXIT_S``) bypasses
+    conditions 2 and 3 deliberately: past that age the in-flight request is not
+    evidence of progress but the measure of the wedge (see
+    ``LOOP_STALL_HARD_EXIT_S``), and the ``min_ticks`` boot rationale is about
+    the first seconds, not 600 of them — a loop that wedges before the real
+    ticker lands its second tick must still be replaced. Everything below
+    describes the SOFT path.
+
     When explicitly enabled, an exit requires ALL of:
 
     1. the heartbeat older than ``threshold_s`` for
@@ -4371,6 +4625,13 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
        legitimate work". A raising predicate is treated as NOT idle
        (fail-closed, i.e. no kill).
 
+    BOTH paths — the hard ceiling and the soft path — refuse to act when
+    :func:`heartbeat_task_is_dead` says the heartbeat TASK itself can no longer
+    tick: a stale heartbeat then measures the TICKER, not the loop, and exiting
+    would restart-loop a healthy process. #10585 review P2: the soft path used
+    to reach ``exit_fn`` without consulting the ticker at all, reachable
+    whenever an operator armed ``soft < hard``.
+
     ``exit_fn`` defaults to ``os._exit``; tests inject it so a test can never
     kill the test process. ``stop_event`` lets the lifespan stop the watchdog
     on shutdown — without it, a clean shutdown (which cancels the heartbeat
@@ -4383,12 +4644,45 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
     # a killer whose ``age <= nan`` comparison is False forever — the same
     # restart-loop the env parser rejects. This matches the docstring's
     # promise ("a non-finite value DISABLES").
-    if not math.isfinite(threshold_s) or threshold_s <= 0:
+    # The HARD ceiling is honoured even when the soft (idle-gated) path is
+    # disabled: it is the only mechanism that can end a wedge the in-flight
+    # gauge vetoes forever. When only the hard ceiling is armed we still need a
+    # non-zero threshold to get past the early return above and to size
+    # poll_interval; the ceiling value is used for that. It also leaves the
+    # idle-gated SOFT path armed at the same value, which the hard branch
+    # dominates for ages past the ceiling — harmless, and stated so nobody
+    # reads the assignment as what makes the ceiling reachable (it does not:
+    # the hard branch compares `age >= hard_exit_s` directly).
+    hard_exit_s = _loop_stall_hard_exit_s()
+    # #10585 review P2: the floor does NOT apply to this ceiling (see
+    # ``_loop_stall_hard_exit_s``: a value ABOVE the floor is the whole point,
+    # and a small one is the operator's own bounded trade). So a ceiling armed
+    # BELOW the floor must be reported as exactly what it is. The clamp below
+    # raises the SOFT threshold, and saying only "clamping" told an operator
+    # the process-killing path had been floored to 180s while the hard branch
+    # would still ``os._exit`` at the armed value.
+    hard_below_floor = 0 < hard_exit_s < _loop_stall_floor_s()
+    if hard_below_floor:
         logger.warning(
-            "#2850: in-process loop-stall self-kill DISABLED (threshold=%s). "
-            "The /healthz listener still reports staleness; destructive "
-            "action belongs to the out-of-band watchdog.", threshold_s)
-        return None
+            "start_stall_watchdog: the HARD loop-stall ceiling %.3fs is below "
+            "the safe floor (%.0fs) and is NOT clamped — the hard branch "
+            "compares the heartbeat age against the ARMED value, so the "
+            "process exits after %.3fs without a loop tick. The floor applies "
+            "to the SOFT path only, where a sub-second threshold turns a GC "
+            "pause into a crash loop",
+            hard_exit_s, _loop_stall_floor_s(), hard_exit_s)
+    if not math.isfinite(threshold_s) or threshold_s <= 0:
+        if hard_exit_s <= 0:
+            logger.warning(
+                "#2850: in-process loop-stall self-kill DISABLED (threshold=%s). "
+                "The /healthz listener still reports staleness; destructive "
+                "action belongs to the out-of-band watchdog.", threshold_s)
+            return None
+        logger.info(
+            "#2850: idle-gated self-kill disabled (threshold=%s); the HARD "
+            "loop-stall ceiling %.0fs is armed and cannot be vetoed by an "
+            "in-flight request", threshold_s, hard_exit_s)
+        threshold_s = hard_exit_s
     if exit_fn is None:
         # Round-4 review P2: the env path floors an enabled threshold, but a
         # PROGRAMMATIC finite-but-absurd value (``1e-9``) passed the
@@ -4402,9 +4696,12 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
         if threshold_s < floor:
             logger.warning(
                 "start_stall_watchdog: programmatic threshold %.3fs is below "
-                "the safe floor (%.0fs) for the destructive exit path — "
-                "clamping; a sub-second threshold turns a GC pause into a "
-                "crash loop", threshold_s, floor)
+                "the safe floor (%.0fs) for the SOFT exit path — clamping "
+                "that path; a sub-second threshold turns a GC pause into a "
+                "crash loop%s", threshold_s, floor,
+                "" if not hard_below_floor else
+                ("; the HARD ceiling is NOT clamped and still exits at "
+                 f"{hard_exit_s:.3f}s"))
             threshold_s = floor
         exit_fn = os._exit
     if stop_event is None:
@@ -4417,22 +4714,101 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
 
     def _watch() -> None:
         stale_windows = 0
+        dead_ticker_reported = False
         while not stop_event.wait(poll_interval):
+            # ONE consistent read of the heartbeat (review P2): a tick landing
+            # between two reads could pair a stale ``age`` with a fresh
+            # ``ticks`` or vice versa, and the pair is what the guards below
+            # reason about.
+            at, ticks = heartbeat_read()
+            age = None if ticks == 0 else max(0.0, time.monotonic() - at)
+            # (0) ONE read of the ticker verdict per poll, shared by both
+            # destructive paths (review P2): whether the heartbeat TASK can
+            # still tick is a property of the process, not of the branch.
+            ticker_dead = heartbeat_task_is_dead()
+            # (3a) HARD CEILING — evaluated BEFORE the soft threshold so it is
+            # a real CEILING and not `max(threshold_s, hard_exit_s)`: an
+            # operator who arms both (e.g. soft 900 beside a 600 ceiling) must
+            # still exit at 600. No tick for longer than any legitimate
+            # synchronous on-loop request can run. The in-flight gauge is
+            # deliberately NOT consulted: it is TRUE by construction during
+            # this failure (an open SSE stream, then the wedge itself), so
+            # consulting it here is what made the outage permanent and silent.
+            #
+            # It also runs BEFORE the ``ticks < min_ticks`` liveness gate
+            # (review P2): that gate exists so a slow BOOT is not mistaken for
+            # a wedge, and its rationale is about the first seconds — a loop
+            # that wedges during startup, before the real ticker lands its
+            # second tick (``hosted_api.py::_start_liveness`` calls the
+            # synthetic ``heartbeat_record()``, i.e. tick 1), never advances
+            # ``ticks`` and would otherwise hang forever with the ceiling
+            # armed.
+            # ``age is None`` (never ticked) is still excluded: with no
+            # timestamp at all there is nothing to measure.
+            if hard_exit_s > 0 and age is not None and age >= hard_exit_s:
+                if ticker_dead:
+                    # The ticker itself is gone: the heartbeat is stale but the
+                    # LOOP may be fine. Exiting here would restart-loop a
+                    # healthy process. Report ONCE (review P2: one CRITICAL per
+                    # poll is ~43k lines/day at the hosted interval) and keep
+                    # polling — a re-armed ticker re-arms the ceiling.
+                    if not dead_ticker_reported:
+                        dead_ticker_reported = True
+                        logger.critical(
+                            "#2850 loop-stall HARD ceiling reached (age=%s) but "
+                            "the heartbeat TASK is dead or unreadable, so this "
+                            "is not provably a wedge — NOT exiting (a dead "
+                            "ticker must not restart a healthy process; this "
+                            "is logged once per process)", f"{age:.1f}s")
+                    stale_windows = 0
+                    continue
+                logger.critical(
+                    "#2850 loop-stall HARD ceiling: the event loop has not "
+                    "ticked for %s (>= %.0fs, %d request(s) in flight) — no "
+                    "legitimate handler blocks the loop this long, so this "
+                    "is a wedge. Exiting so the platform replaces the "
+                    "process instead of hanging indefinitely.",
+                    f"{age:.1f}s", hard_exit_s, workload_in_flight())
+                with contextlib.suppress(BaseException):
+                    exit_fn(1)
+                return
             # (2) judge only a loop that has demonstrated liveness.
-            _, ticks = heartbeat_read()
             if ticks < min_ticks:
                 stale_windows = 0
                 continue
-            age = loop_heartbeat_age()
             if age is not None and age <= threshold_s:
                 stale_windows = 0
                 continue
-            # (3) never kill a loop that is busy doing work.
+            # (3b) never kill a loop that is busy doing work.
             try:
                 idle = bool(workload_idle_fn())
             except Exception:  # a broken predicate must not authorise a kill
                 idle = False
             if not idle:
+                stale_windows = 0
+                continue
+            # (3c) A dead TICKER is not a wedge, on THIS path too (review P2).
+            # The ticker verdict used to be consulted only inside the hard
+            # branch. Reachable ordering: soft and hard both armed with
+            # ``soft < hard`` (e.g. 300s beside the shipped 600s ceiling). A
+            # dead ticker freezes the heartbeat FOREVER while the loop is
+            # healthy; at ``age >= soft`` the hard branch is not true yet, so
+            # control reached here, the ticker was never consulted, and after
+            # ``consecutive_windows`` this branch called ``exit_fn(1)`` on a
+            # healthy process — repeatedly, until the platform's
+            # ``max_retries`` were spent. Exactly the restart-loop the
+            # hard-branch guard exists to prevent, which is why the verdict is
+            # now taken above and honoured by both.
+            if ticker_dead:
+                if not dead_ticker_reported:
+                    dead_ticker_reported = True
+                    logger.critical(
+                        "#2850 loop-stall watchdog reached the SOFT threshold "
+                        "(age=%s) but the heartbeat TASK is dead or "
+                        "unreadable, so this is not provably a wedge — NOT "
+                        "exiting (a dead ticker must not restart a healthy "
+                        "process; this is logged once per process)",
+                        "never" if age is None else f"{age:.1f}s")
                 stale_windows = 0
                 continue
             # (1) hysteresis.

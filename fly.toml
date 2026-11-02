@@ -186,7 +186,62 @@ kill_timeout = 30
   source = "tortoise_api_data"
   destination = "/data"
 
+# ── The HARD ceiling's precondition, VERSIONED (#10585 review P2) ──
+# `TORTOISE_LOOP_STALL_HARD_EXIT_S` in [env] makes a WEDGED event loop
+# `os._exit(1)`. That is only a SELF-HEAL because a NON-ZERO EXIT is what the
+# restart policy acts on; with no such policy the same exit leaves the machine
+# STOPPED — a silent hang replaced by a silent stop, the failure the ceiling
+# exists to prevent. It used to be a MACHINE attribute read by hand
+# (`fly machine status 8654509b634758 --display-config`, 2026-11-02:
+# `on-failure` / `max_retries 10`) and asserted nowhere, so any recreate could
+# drop it without a signal. The block below is the versioned form; see
+# https://fly.io/docs/machines/guides-examples/machine-restart-policy/ §"Set a
+# restart policy in your fly.toml" (`policy = "<never | always | on-failure>"`,
+# `retries`, `processes`), and `on-fail` with 10 retries is Fly's default for
+# deploy-created machines, so this block pins what production already runs and
+# makes the dependency reviewable instead of a past observation. Asserted by
+# `tests/test_monitoring.py::TestStallWatchdog
+# ::test_the_deployment_declares_the_restart_the_ceiling_needs`.
+# `processes = ["app"]` is this app's only process group (no [processes]).
+[[restart]]
+  policy = "on-failure"
+  retries = 10
+  processes = ["app"]
+
 [env]
+  # The loop-stall HARD ceiling (#2850, measured outage 2026-11-02). Arms the
+  # in-process watchdog so a WEDGED event loop exits non-zero and the machine's
+  # `on-failure` restart policy replaces the process. This is the ONLY self-heal
+  # available: Fly's own docs are explicit that a failing health check "does NOT
+  # automatically restart or stop a Machine" and that restart policies act only
+  # on process EXIT — and `[checks.loop_liveness]` cannot even go red here,
+  # because its predicate requires `stale AND idle` while a wedged app keeps an
+  # MCP stream counted as in flight (`workload_idle: false`). Measured: 97 min
+  # wedged, `loop_lag_max_ms` 696164, machine reporting 2/2 checks passing.
+  # DEPENDENCY, versioned rather than re-read by hand: the exit only becomes a
+  # RESTART because of the `[[restart]]` block ABOVE (`policy = "on-failure"`,
+  # `retries = 10`, covering the `app` process group). Delete that block and
+  # this exit turns into a STOPPED machine instead of a self-heal — the block,
+  # not a `fly machine status` reading of a machine that may since have been
+  # recreated, is the record. Pinned by a test, so its removal turns CI red.
+  # 600s is DERIVED, not asserted (#10585 review P2), and it is derived from
+  # what is actually ON the loop: graph I/O, bounded by its own socket timeouts
+  # (`projection._socket_timeouts` 2s connect / 10s read, read clamped at
+  # `_DB_TIMEOUT_MAX_S` = 60s; the embedded lane adds one retry) — ~120s worst
+  # case, ~20s at the defaults. No model call runs on the loop here: both
+  # extraction lanes are off it by the #3060 invariant, so the LLM bounds do
+  # not size this ceiling. 600s is then:
+  #   * 5x the worst bounded on-loop operation (120s), 30x the default (20s);
+  #   * 3.3x the enabled-threshold floor (max(120, 2*LOOP_STALE_AFTER) = 180s);
+  #   * 6.7x LOOP_STALE_AFTER, where /healthz already reports stale;
+  #   * 68x the observed p99 loop lag (8.8s).
+  # A SELF-HOSTER that drives the SDK synchronously on its own loop must ALSO
+  # clear the model bounds (`OpenAICompatModel(timeout=60)` / `httpx
+  # timeout=(10, 60)`, and `OllamaModel(timeout=300)`), which 600s does.
+  # It is NOT above the ~819s token-scaled model deadline (`extractor_v2`) —
+  # that path is OFF the loop by the #3060 invariant, so it cannot be the
+  # tick-blocking bound. `0` disables it.
+  TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"
   # ⛔ TORTOISE_RECORD_DSN is a Fly SECRET, not an [env] key (#9548, epic #7879
   # R1) — and must never be added here. Its value is a Postgres DSN carrying a
   # password, so an [env] entry would commit a credential; and a Fly secret
