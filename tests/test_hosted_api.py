@@ -5499,7 +5499,7 @@ class TestIssueInsightAPI:
         ⛔ The fixture must be a body the PRODUCER can emit (#10570 review, P3
         note). It was not: it paired `"at least 20 graph hit(s)"` with
         `total_available: 20`, and the producer never writes both —
-        `sdk.py:34077` prefixes `"at least "` only when `_exact` is False, and
+        `sdk.py:34085` prefixes `"at least "` only when `_exact` is False, and
         `truncation.py:196` sets `total_available` only when it is True. An
         impossible pair cannot catch a relay that mixed the two. This arm is now
         the EXACT case (20 matches at `limit=2`, pool bound 20 — the boundary
