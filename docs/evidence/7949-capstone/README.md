@@ -506,13 +506,13 @@ is closed (PR #10382); what still blocks E2 is `#10360`: nothing enforces retent
 value loss sits upstream of the filter.
 
 **What E1 would take, precisely.** The measurement run DOES produce a pre-registered-corpus
-population large enough to score E1 — **50 `:Object` nodes**, and this pass's bare-definite share
-is printed in the log as the `e1-aux` line (6/50 = 0.12, against the E1b proxy 90/90). What it does not
+population large enough to score E1 — **64 `:Object` nodes**, and this pass's bare-definite share
+is printed in the log as the `e1-aux` line (14/64 = 0.21875, against the E1b proxy 90/90). What it does not
 produce is a **before** arm: E1's criterion is a
 *ratio between two arms*, and two independent captures would confound the gate with LLM
 non-determinism — which is exactly why the bare-definite share is not quoted as a trend: the same
 probe on the same corpus has produced double-digit bare counts on one pass and zero on the next
-(6/50 in the shipped log; **0/59** at the superseded stamp `7c9c34d84`, whose log is not in the tree
+(14/64 = 0.21875 in the shipped log; **0/59** at the older stamp `7c9c34d84`, whose log is not in the tree
 — retrievable with `git show 8a8bbcba2:docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log`,
 because superseding DELETES the tree entry and not the history; what it costs is citability as a
 row's `evidence`, which V4 resolves against the tree. **That route is ref-qualified like the one
@@ -616,7 +616,7 @@ test (it must FAIL) before changing this line.
 uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log
 # → capstone-verdict-check: … GREEN=0, RED=3, BLOCKED=2, UNPREREGISTERED=0
 # → ✅ verdict table is structurally sound … blocker states: every cited blocker
-#   verified 2026-11-02T12:09:48Z (11 on record)   (exit 0)
+#   verified 2026-11-02T14:22:24Z (11 on record)   (exit 0)
 
 uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log --require-green
 # → [V9] epic #7949: --require-green: 5/5 rows are not green  (exit 1)
