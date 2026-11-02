@@ -6420,6 +6420,60 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
     assert "never correct a weight downward" in note, note
 
 
+def _indented_block_shape(text: str) -> tuple[int, int, int]:
+    """`(wrapped, preamble, column0)` for a map's `durations` block.
+
+    `wrapped` counts rows whose note `_row_continuation_lines` accepts a
+    continuation for, `preamble` the indented blocks beside a row (the map's
+    dominant convention: they document the row BELOW), and `column0` the column-0
+    `#` prose lines the span's indentation bound is what keeps out of a note.
+    """
+    lines = text.split("\n")
+    index, _entries = ci_timing._locate_durations_block(lines)
+    end = next((i for i in range(index + 1, len(lines))
+                if lines[i] and not lines[i][0].isspace()
+                and not lines[i].startswith("#")), len(lines))
+    wrapped = preamble = column0 = 0
+    for i in range(index + 1, end):
+        if lines[i].startswith("#"):
+            column0 += 1
+        if ci_timing._DURATION_LINE_RE.match(lines[i]) is None:
+            continue
+        if ci_timing._row_continuation_lines(lines, i):
+            wrapped += 1
+        if ci_timing._row_indented_comment_run(lines, i):
+            preamble += 1
+    return wrapped, preamble, column0
+
+
+def _assert_preamble_shape(wrapped: int, preamble: int) -> None:
+    """The claim `_row_continuation_lines`' rationale actually rests on.
+
+    Deliberately NO `wrapped >= 1` clause. The writer FLATTENS a wrapped note on a
+    CUT or a wholesale replacement — `lines[index] = f"{rendered_row}{tail}"` plus
+    `drop.update(continuation)`, because a survivor set cannot be mapped back onto
+    line breaks chosen for the clauses it dropped — so the committed map reaches
+    ZERO wraps as soon as one weekly sweep adopts a new reading for its last
+    wrapped row. Measured at `ce2f91428` with this module: committed
+    `(wrapped=1, preamble=74)` → after one adopting render `(0, 73)`.
+
+    A guard that demanded a committed wrap therefore went red on a HEALTHY map, on
+    the first adopting sweep, in whatever later unrelated leg selected `sdk` — the
+    red asserting that "the dominant convention is no longer the preamble" while 74
+    of the 74 indented blocks still were (#10575 review, P2). The wrapped re-emit
+    paths stay pinned by their own tests — `test_a_wrapped_rows_prior_basis_is_
+    pruned_wherever_it_sits` re-bases the committed wrapped row and asserts on the
+    flattened result, and the two `_WRAPPED_NOTE_MANIFEST` fixtures drive the CUT
+    and APPEND arms synthetically — so neither depends on a committed wrap
+    surviving, and the flatten is exactly what those tests assert.
+    """
+    assert preamble > 10 * wrapped, (
+        f"the block's dominant convention is no longer the preamble for the row "
+        f"below ({preamble} indented blocks beside a row, {wrapped} of them real "
+        f"wraps); the opener rule and `_row_continuation_lines`' rationale rest on "
+        f"that inversion")
+
+
 def test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped() -> None:
     """The distribution the writer's span rationale rests on, re-derived.
 
@@ -6432,38 +6486,41 @@ def test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped() -> None:
 
     Computed, not frozen: a refresh re-emits notes and moves these counts (this
     branch's own refresh flattened one wrapped row), so a hardcoded figure would
-    re-stale. What must hold is the SHAPE — at least one real wrap, so the wrapped
-    paths are exercised by committed data, and an order-of-magnitude gap between the
-    preambles and the wraps.
+    re-stale. What must hold is the SHAPE — an order-of-magnitude gap between the
+    preambles and the wraps — and it must hold on what the WRITER emits, not only on
+    the committed bytes, because the writer's CUT arm flattens a wrapped note.
+
+    Non-vacuity: restore a `wrapped >= 1` clause here (the shape this test shipped
+    at `ce2f91428`) and the post-sweep half fails — the render below returns 0
+    wraps — while the committed half passes. That is the false red the clause caused.
     """
     text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
-    lines = text.split("\n")
-    index, _entries = ci_timing._locate_durations_block(lines)
-    end = next(i for i in range(index + 1, len(lines))
-               if lines[i] and not lines[i][0].isspace()
-               and not lines[i].startswith("#"))
-    wrapped = preamble = column0 = 0
-    for i in range(index + 1, end):
-        if lines[i].startswith("#"):
-            column0 += 1
-        if ci_timing._DURATION_LINE_RE.match(lines[i]) is None:
-            continue
-        if ci_timing._row_continuation_lines(lines, i):
-            wrapped += 1
-        if ci_timing._row_indented_comment_run(lines, i):
-            preamble += 1
-    assert wrapped >= 1, (
-        "no committed row's note wraps any more, so the wrapped-note re-emit paths "
-        "would be pinned on synthetic fixtures alone — which is how the "
-        "half-parenthesis reached the required legs")
-    assert preamble > 10 * wrapped, (
-        f"the block's dominant convention is no longer the preamble for the row "
-        f"below ({preamble} indented blocks beside a row, {wrapped} of them real "
-        f"wraps); the opener rule and `_row_continuation_lines`' rationale rest on "
-        f"that inversion")
+    wrapped, preamble, column0 = _indented_block_shape(text)
+    _assert_preamble_shape(wrapped, preamble)
     assert column0 > 100, (
         f"the block carries only {column0} COLUMN-0 prose lines, so the "
         f"indentation bound the span relies on is no longer load-bearing")
+    # …and the same claim must hold on the map the writer emits from these bytes.
+    # The row is chosen dynamically: while the map still has a wrapped row the render
+    # flattens it (the case the removed clause went red on), and once it does not, the
+    # render still exercises a re-base — so this half does not itself re-stale.
+    lines = text.split("\n")
+    index, entries = ci_timing._locate_durations_block(lines)
+    keys = list(entries)
+    wrapped_keys = [k for k in keys
+                    if ci_timing._row_continuation_lines(lines, entries[k])]
+    key = (wrapped_keys or keys)[0]
+    reading = float(ci_timing._DURATION_LINE_RE.match(
+        lines[entries[key]]).group("value")) + 5.0
+    rendered, _ = ci_timing.render_refreshed_manifest(
+        text, {key: reading}, "2026-11-09T00:00:00Z",
+        coverage={key: (34, 34)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    after_wrapped, after_preamble, _after_column0 = _indented_block_shape(rendered)
+    assert after_wrapped <= wrapped, (
+        f"a re-base of {key} CREATED a wrapped note ({wrapped} → {after_wrapped}); "
+        f"the writer's CUT arm drops continuations rather than creating them")
+    _assert_preamble_shape(after_wrapped, after_preamble)
 
 
 def test_a_re_base_keeps_a_live_count_outside_the_stale_basis_claim() -> None:
