@@ -6426,7 +6426,7 @@ def _indented_block_shape(text: str) -> tuple[int, int, int]:
     `wrapped` counts rows whose note `_row_continuation_lines` accepts a
     continuation for, `preamble` the indented blocks beside a row (the map's
     dominant convention: they document the row BELOW), and `column0` the column-0
-    `#` prose lines the span's indentation bound is what keeps out of a note.
+    `#` prose lines that the span's indentation bound is what keeps out of a note.
     """
     lines = text.split("\n")
     index, _entries = ci_timing._locate_durations_block(lines)
@@ -6461,8 +6461,8 @@ def _assert_preamble_shape(wrapped: int, preamble: int) -> None:
     the first adopting sweep, in whatever later unrelated leg selected `sdk` — the
     red asserting that "the dominant convention is no longer the preamble" while 74
     of the 74 indented blocks still were (#10575 review, P2). The wrapped re-emit
-    paths stay pinned by their own tests — `test_a_wrapped_rows_prior_basis_is_
-    pruned_wherever_it_sits` re-bases the committed wrapped row and asserts on the
+    paths stay pinned by their own tests — the committed re-base
+    (`test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits`) asserts on the
     flattened result, and the two `_WRAPPED_NOTE_MANIFEST` fixtures drive the CUT
     and APPEND arms synthetically — so neither depends on a committed wrap
     surviving, and the flatten is exactly what those tests assert.
