@@ -2364,9 +2364,14 @@ def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:
     to carry text (`c` on a Point, `content`, `text`, and the JSON carriers
     `payload`/`props` a `:GraphEvent` holds). It therefore does not depend on the
     turn id derivation, the `:Point` label, `is_episodic`, or the `CONTAINS`
-    wiring — so a second write path that invents its own shape is inside the
-    population. `sdk._capture_turn_ids` (the sibling assertion) is not: it asks
-    one id space on one edge.
+    wiring: a write path that carries the text under one of those five property
+    NAMES is inside the population whatever label or wiring it invents, and one
+    that spells it under a SIXTH name is outside it.
+
+    ⚠️ Read the population as five names, never as "any shape" —
+    `_assert_the_text_is_in_exactly_one_store` states it and names the escape.
+    `sdk._capture_turn_ids` (the sibling assertion) is not in the population at
+    all: it asks one id space on one edge.
     """
     return [tuple(row) for row in proj.g.query(
         "MATCH (n) WHERE n.c CONTAINS $needle OR n.content CONTAINS $needle "
@@ -2380,9 +2385,11 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
     """#10000 acceptance bullet 5 — the property, not the call site.
 
     The record is armed, so the graph must hold no node carrying a turn's text —
-    by ANY route: a new label, a different wiring, a `pointKind` of its own. The
-    sibling pin asserts the id space this writer uses is empty, which a second
-    writer with its own shape would not redden; this one scans the graph.
+    by any label, wiring or `pointKind` of its own, **among the five text
+    properties the helper below scans**. A sixth property name is outside that
+    population, and the helper says so; it is not extended here. The sibling pin
+    asserts the id space this writer uses is empty, which a second writer with
+    its own shape would not redden; this one scans the graph.
 
     Non-vacuity is the record half: the capture must hand the text to the record
     seam, or "nothing in the graph" would be satisfied by a capture that stored
@@ -2441,8 +2448,12 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     use (`props` is in the list although no writer currently stores it; it is a
     Cypher parameter spelled `SET n += $props`). A writer that carried turn text
     under a SIXTH name (`body`, `summary`, `raw`…) would be outside this
-    population. The scan therefore guards against a changed label, id space or
-    wiring — the shapes the sibling id-space assertions cannot see — and not
+    population. That is not hypothetical: this tree derives the session's first
+    substantive utterance into a `summary`
+    (`sdk._session_source_metadata`) and writes it to the session `:Source`
+    (`sdk.py`, `s.summary=$sum`), so a `:Source.summary` hit is a route this
+    scan cannot see. The scan therefore guards against a changed label, id space
+    or wiring — the shapes the sibling id-space assertions cannot see — and not
     against a renamed property. Read the claim no wider than that.
 
     ⚠️ `tests/test_10017_record_carrier.py::_text_hits` is a SECOND copy of this
