@@ -360,22 +360,729 @@ def test_ordering_fails_when_the_log_predates_the_registration(tmp_path, monkeyp
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log])
     assert len(failures) == 1
-    assert "not strictly after" in failures[0], failures
+    assert "is an ANCESTOR of the pre-registration's add-commit" in failures[0], failures
 
 
-def test_ordering_is_not_satisfied_by_the_same_second(tmp_path, monkeypatch):
-    """'Same second' is not 'before' — the two files landing in one commit is not an ordering."""
+def _atomic_pins(name: str, **overrides) -> dict:
+    """A complete atomic-add disclosure for ``name``, as the MACHINE RECORD carries it.
+
+    The disclosure lives in `preregistration.json`, NOT in the pre-registration's pins block: that
+    block is inside the document `document_sha256` freezes, so adding to it re-cuts the digest and
+    the record then describes a document that post-dates the run (#10529 review cycle 2, P1).
+
+    ⛔ THE DEFAULTS RESOLVE (#10529 review cycle 14, P2). They used to be this repo's real shas
+    (`a1075dfc2` / `cfa3de857`), which exist in NO hermetic repo — so every disclosure here named
+    a commit its own tree did not have, and `squash_merge`'s resolvability could not be asserted
+    against a passing fixture at all. The default is now HEAD of whichever repo `_repo()` installed,
+    so a passing default is a disclosure a reader could actually follow; a test that wants an
+    unaddressable value passes `squash_merge=` explicitly.
+
+    ⛔ AND THE BRANCH COMMIT IS NOT HEAD (#10529 review cycle 15, P1). It used to be HEAD, i.e. the
+    SAME commit as `squash_merge` — which is the one shape a disclosure can never mean (a squash is
+    a new commit, not one of the commits it collapsed) and is exactly what a single laundering
+    commit writes when it cites itself as its own provenance. A hermetic repo whose pair landed in
+    ONE commit genuinely has no collapsed branch behind it, so the default names a commit a squash
+    left unreachable — the shape the disclosure field EXPRESSLY allows not to resolve (see
+    `test_branch_commits_need_not_resolve_because_a_squash_hides_them`). The faithful shape, whose
+    branch commits really do exist, is built by `_real_squash` and checked end to end in
+    `test_a_real_squash_disclosure_is_verified_and_a_forged_squash_is_refused`.
+    """
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(check.REPO_ROOT),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    entry = {
+        "reason": "the bars were committed before any arm ran",
+        "branch_commits": ["deadbeef1 the branch commit a squash left unreachable"],
+        "squash_merge": f"{head[:9]} the merged commit",
+    }
+    entry.update(overrides)
+    return {name: entry}
+
+
+def _two_commits_same_second(repo: Path, log_first: bool,
+                             epoch: int = 1_700_000_000) -> tuple[Path, Path]:
+    """Two DISTINCT commits with the SAME epoch — git can still order them by ANCESTRY.
+
+    Atomicity is identical-SHA, not equal-epoch (#10529 review cycle 4, P1): an `==` epoch test
+    admitted the attack shape (log commit is a true ancestor, hidden behind an equal second) and
+    accused the honest shape of being one commit.
+    """
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    log = repo / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+    first, second = (log, prereg) if log_first else (prereg, log)
+    for target in (first, second):
+        target.write_text("x\n")
+        _git(repo, "add", str(target.relative_to(repo)))
+        _git(repo, "commit", "-q", "-m", f"add {target.name}", epoch=epoch)
+    return prereg, log
+
+
+def test_a_same_second_attack_is_still_a_hard_failure(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-4 P1): the log's commit is a TRUE ancestor, one second shared.
+
+    An equal-epoch rule handed this to the atomic arm, where a disclosure would have waived a real
+    ordering violation. Identity + ancestry keeps it a hard failure — and undeclarable.
+    """
     repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _two_commits_same_second(repo, log_first=True)
+    failures = check.check_ordering(prereg, [log])
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
+    # A disclosure must not launder it.
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
+
+
+def test_a_correctly_ordered_same_second_pair_needs_no_disclosure(tmp_path, monkeypatch):
+    """The honest shape: two distinct commits, same second, registration the older one.
+
+    The equal-epoch rule called this "the SAME commit" and demanded a disclosure — a false record
+    entry, which is the mirror of the attack it was meant to stop (#10529 cycle-4 P1).
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _two_commits_same_second(repo, log_first=False)
+    added: list[str] = []
+    assert check.check_ordering(prereg, [log], None, None, added) == []
+    assert added == []  # ordered by ancestry, so nothing was disclosed
+
+
+def test_a_future_dated_log_that_is_a_true_ancestor_still_hard_fails(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-5 P1): `%ct` is attacker-controlled, so ancestry decides.
+
+    The log's add-commit is a TRUE ANCESTOR of the registration's, but its committer date was set
+    LATER. Gating the reverse-ancestry test behind `log_epoch <= prereg_epoch` let that tree pass
+    green with no disclosure and no failure — the exact route this guard exists to close.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_500)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
+    failures = check.check_ordering(prereg, [log])
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
+
+
+def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-5 P2): the print path re-read UNVALIDATED JSON and raised.
+
+    `atomic_add_ordering: {log: "yes"}` reached `run()`'s detail comprehension and escaped as
+    `AttributeError` — no failure text, nothing from `--json`, and the module's own exit-2 contract
+    bypassed on precisely the input the validator promises to refuse.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    for entry in ("yes", {"reason": "r", "branch_commits": 5, "squash_merge": "cfa3de857 x"}):
+        added: list[str] = []
+        detail: dict = {}
+        failures = check.check_ordering(prereg, [log], None, None, added, {log.name: entry}, detail)
+        assert failures, entry
+        assert any("not a usable disclosure" in f for f in failures), failures
+        assert added == [] and detail == {}, (added, detail)
+
+
+def test_a_proven_order_is_not_reported_as_a_content_waiver(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-6 P2): a waiver reported where none was granted teaches that they
+    are routine. Git PROVED the order, so no arm may record an exemption."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_000)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    exempted: list[str] = []
+    assert check.check_ordering(prereg, [log], None, exempted) == []
+    assert exempted == [], exempted
+
+
+def test_an_unreadable_record_does_not_add_a_wrong_instruction(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-6 P2): 'disclose it under X' is the wrong repair when X cannot be read."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    # `atomic_detail` is a DICT here, as `run()` always passes one — the earlier version of this
+    # test passed `None` and so could not see the KeyError the dict path raised (#10529 cycle 7, P1).
+    failures = check.check_ordering(prereg, [log], None, None, None, None, {},
+                                    record_unreadable=True)
+    assert not any("Disclose it under" in f for f in failures), failures
+    # And an UNREADABLE record must never be reported as a declaration either.
+    added: list[str] = []
+    check.check_ordering(prereg, [log], None, None, added, None, {}, record_unreadable=True)
+    assert added == [], added
+
+
+def test_a_content_decided_pass_is_not_dressed_as_a_declaration(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-7 P2): the pass is decided by the LOG'S CONTENT, so a disclosure
+    sitting in the same tree decided nothing and must not be reported as the GROUND of it.
+
+    The unscored arm appended to `atomic_added` whenever a disclosure existed, so the CLI claimed
+    `the ordering HOLDS BY DISCLOSURE` for a pass that deleting the disclosure leaves unchanged —
+    and, because `atomic_detail` was never filled on that arm, the ATOMIC-ADD block that followed
+    printed ZERO commit lines. Measured pre-fix: `added == ['e1-e2.log']`, `detail == {}`.
+
+    The waiver stays VISIBLE on the deciding evidence — `ordering_exempt` — so this asserts both
+    halves: nothing claimed as a declaration, and the content waiver still reported.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    added: list[str] = []
+    detail: dict = {}
+    exempted: list[str] = []
+    assert check.check_ordering(prereg, [log], None, exempted, added, _atomic_pins(log.name),
+                                detail) == []
+    assert added == [] and detail == {}, (added, detail)
+    assert exempted == [log.name], exempted
+
+
+def test_a_report_never_claims_a_declaration_the_record_does_not_carry(tmp_path, monkeypatch):
+    """An atomic + provably-unscored log with NO disclosure must not be reported as DECLARED."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    added: list[str] = []
+    exempted: list[str] = []
+    detail: dict = {}
+    assert check.check_ordering(prereg, [log], None, exempted, added, None, detail) == []
+    assert added == [] and detail == {}      # nothing was declared
+    assert exempted == [log.name]            # and the waiver is still visible
+
+
+def test_an_atomic_disclosure_does_not_cover_a_later_in_place_edit(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-8 P1): the add-commit is immutable, so it cannot see an edit.
+
+    A log re-committed with a rewritten number AFTER the bars passed green with
+    `verified (atomic-add DECLARED: …)` — a NEW silent-green path, invisible to every other check
+    (`document_sha256` covers only the registration). The disclosure covers the content that
+    entered WITH the registration, and nothing else.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo, epoch=1_700_000_000)
+    log.write_text("x\nthe number is now 0.100\n")           # an in-place edit, later
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "rewrite the number", epoch=1_700_086_400)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("not an ancestor of" in f for f in failures), failures
+
+
+def test_a_valid_json_non_object_record_is_a_parse_error_not_a_traceback(tmp_path):
+    """`record.get("schema")` on a list/str/int escaped run()/main() as AttributeError (cycle-8 P2)."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / check.PREREG_NAME).write_text("x\n")
+    for body in ("[]", '"hello"', "42"):
+        (bundle / check.MACHINE_RECORD).write_text(body)
+        with pytest.raises(check.CheckError):
+            check.check_machine_record(bundle, {})
+
+
+def test_a_backdated_edit_does_not_beat_the_touch_bound(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-9 P1): the touch bound must be TOPOLOGY, not `%ct`.
+
+    The cycle-8 bound compared `max(_touch_epochs(log)) > prereg_epoch` — a `%ct` comparison in a
+    module whose own cycle-5 finding says `%ct` is attacker-controlled. The forward-dated rewrite was
+    caught; the BACKDATED one passed green. Whether a touching commit is behind the registration is
+    a fact about the graph.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo, epoch=1_700_000_000)
+    log.write_text("x\nthe number is now 0.100\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    # BACKDATED: a committer date far EARLIER than the registration's.
+    _git(repo, "commit", "-q", "-m", "rewrite, backdated", epoch=1_600_000_000)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("not an ancestor of" in f for f in failures), failures
+
+
+def test_a_backdated_readd_cannot_choose_the_pair(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-10 P1): `%ct` may not decide WHICH add-commit is the pair.
+
+    `_added_commits` is sorted by epoch, so `log_adds[0]` — the representative — was chosen by the
+    one field this module has ruled attacker-controlled. A delete-and-re-add BACKDATED to look newer
+    became the representative, made the pair look ATOMIC, and a disclosure waived a tree whose other
+    add-commit is a strict ANCESTOR of the registration — the condition the docstring calls a HARD
+    FAIL that no disclosure can waive. The verdict is now taken over EVERY add-commit, fail-closed.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_900)
+    log.unlink()
+    _git(repo, "rm", "-q", "--cached", str(log.relative_to(repo)))
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    prereg.write_text("x\n")
+    log.write_text("x\n")
+    _git(repo, "add", ".")
+    # BACKDATED so the re-add looks NEWER than the original add.
+    _git(repo, "commit", "-q", "-m", "re-add beside the registration", epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
+
+
+def test_a_late_edit_cannot_erase_the_disclosure_requirement(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-10 P2): the content arm must not certify "measured nothing" over a
+    LATER edit — a post-green edit flipping the verdict is the silent-green class one arm earlier."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    assert check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name)) == []
+    log.write_text("x\nstripped\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "strip the numbers", epoch=1_700_086_400)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("is not an ancestor of" in f for f in failures), failures
+
+
+def test_a_late_strip_cannot_green_a_predating_log(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-11 P1): the predating arm was the last one with no topology bound.
+
+    A later commit stripping the numbers out of a predating log flipped the guard's central HARD
+    FAIL into green ("exempt by CONTENT, measured nothing") — the content read was no longer the
+    content that entered with the tree.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_000)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    # The strip: the same path, rewritten so any content reader would now see "no measurement".
+    log.write_text("x\nstripped\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "strip the numbers", epoch=1_700_000_200)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    failures = check.check_ordering(prereg, [log])
+    assert failures and "is not an ancestor of" in failures[0], failures
+
+
+def test_a_pins_exempt_atomic_log_does_not_claim_its_disclosure(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-11 P2): the pass is the EXEMPTION's, so the disclosure is not its
+    ground — deleting the disclosure from the identical tree yields the same verdict."""
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "capstone.log", epoch=1_700_000_000, body=_capstone_body())
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
+    with_disclosure: list[str] = []
+    check.check_ordering(prereg, [log], _exempt(), None, with_disclosure,
+                         _atomic_pins(log.name), {})
+    assert with_disclosure == [], with_disclosure
+
+
+def test_a_merge_landing_the_pair_unchanged_is_not_a_late_edit(tmp_path, monkeypatch):
+    """REGRESSION (#10529 cycle-12 P1): the fleet's own rail lands with `--merge`, not `--squash`.
+
+    `--full-history` lists the landing merge, and that merge is a DESCENDANT of the registration's
+    add-commit — so a commit-PRESENCE bound reported it as a "late edit", consulted it BEFORE the
+    disclosure was read, and left an atomic pair landed with `--no-ff` PERMANENTLY RED with no waiver
+    route. The merge changed nothing; the bound is CONTENT now.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    # `main` needs a commit of its own, so the merge is not a fast-forward.
+    (repo / "README").write_text("root\n")
+    _git(repo, "add", "README")
+    _git(repo, "commit", "-q", "-m", "root", epoch=1_700_000_000)
+    # A feature branch adds both files in ONE commit, then main merges it --no-ff.
+    _git(repo, "checkout", "-q", "-b", "feat")
+    prereg, log = _both_in_one_commit(repo, epoch=1_700_000_000)
+    _git(repo, "checkout", "-q", "-")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "land the pair", "feat", epoch=1_700_000_500)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert failures == [], failures
+
+
+def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
+    """The ATOMIC shape: the registration and the log land in the SAME commit.
+
+    This is what a squash merge produces — and it is also what one commit written after the numbers
+    were read produces. The git objects are identical, which is why the arm cannot compare them
+    (#10529).
+    """
     prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
     log = repo / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
     prereg.parent.mkdir(parents=True, exist_ok=True)
     prereg.write_text("x\n")
     log.write_text("x\n")
     _git(repo, "add", ".")
-    _git(repo, "commit", "-q", "-m", "both at once", epoch=1_700_000_000)
+    _git(repo, "commit", "-q", "-m", "both at once", epoch=epoch)
+    return prereg, log
+
+
+def test_an_undisclosed_atomic_add_fails(tmp_path, monkeypatch):
+    """Same commit + no disclosure is still a FAILURE, and it names the ORDINARY cause (#10529).
+
+    The pre-fix message read "not strictly after", which is what made #10468 permanently red: a
+    squash merge can never satisfy it. The verdict must stay a failure — a laundering commit has
+    this exact shape — but the diagnosis must name it.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
     failures = check.check_ordering(prereg, [log])
-    assert len(failures) == 1
-    assert "not strictly after" in failures[0], failures
+    assert len(failures) == 1, failures
+    assert "the SAME commit that added" in failures[0], failures
+    assert check.ATOMIC_ADD_KEY in failures[0], failures
+
+
+def test_a_disclosed_atomic_add_passes_and_is_reported(tmp_path, monkeypatch):
+    """The disclosure is what turns an unprovable pair into a DECLARED one — never a silent pass."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    added: list[str] = []
+    failures = check.check_ordering(prereg, [log], None, None, added, _atomic_pins(log.name))
+    assert failures == [], failures
+    assert added == [log.name]
+
+
+def test_the_three_argument_form_agrees_with_the_reported_one(tmp_path, monkeypatch):
+    """REGRESSION (#10529 review P1): the verdict must not depend on an OUT-PARAM.
+
+    Deferring the anti-rot rule to `atomic_added` made the same tree and pins green through `run()`
+    and red through the three-argument form every test and any future caller uses. An out-param
+    reports; it may not judge.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    pins = _atomic_pins(log.name)
+    assert check.check_ordering(prereg, [log], None, None, None, pins) == []
+    assert check.check_ordering(prereg, [log], None, None, [], pins) == []
+
+
+def test_an_atomic_and_unscored_log_may_be_disclosed(tmp_path, monkeypatch):
+    """A log that is BOTH atomic and provably unscored is honestly disclosable (#10529 review P1)."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    assert check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name)) == []
+
+
+def test_a_typed_shrug_is_not_a_disclosure(tmp_path, monkeypatch):
+    """REGRESSION (#10529 review P2): `str({})` is truthy, so a truthiness test let a shrug pass."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    bad = [
+        {"reason": {"a": 1}, "branch_commits": ["a1075dfc2 x"], "squash_merge": "cfa3de857 x"},
+        {"reason": "because", "branch_commits": [{}], "squash_merge": "cfa3de857 x"},
+        {"reason": "because", "branch_commits": ["a1075dfc2 x"], "squash_merge": "not a sha"},
+        # A commit entry that names no commit sha points at nothing a reader can resolve.
+        {"reason": "because", "branch_commits": ["some commit message"], "squash_merge": "cfa3de857 x"},
+    ]
+    for entry in bad:
+        failures = check.check_ordering(prereg, [log], None, None, None, {log.name: entry})
+        # EXACTLY one failure, and it is the field diagnosis — never the FALSE "not one" verdict
+        # beside it (the log IS atomic; only its disclosure is malformed). cycle-3 P2.
+        assert len(failures) == 1, (entry, failures)
+        assert "not a usable disclosure" in failures[0], failures
+        assert "not one" not in failures[0], failures
+    # The SAME entries are refused when the log is atomic AND provably unscored (cycle-2 P2).
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    for entry in bad:
+        assert check.check_ordering(prereg, [log], None, None, None, {log.name: entry}), entry
+
+
+def test_a_squash_merge_no_reader_can_resolve_is_a_refusal(tmp_path, monkeypatch):
+    """REGRESSION (#10529 review cycle 14, P2): `squash_merge` is required BECAUSE it resolves.
+
+    The field's whole justification is "a squash leaves the branch commits unreachable from main,
+    so the squash commit is the one pointer a reader can actually resolve". Checking only its
+    FORMAT made that a decoration: `deadbeef1` passed every arm, and the CLI printed it as
+    `squashed by deadbeef1` — the one line this change added to make the disclosure checkable,
+    presenting an address that names nothing. Non-vacuous against the pre-fix tool, which accepted
+    any 7-40 hex token here.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    pins = _atomic_pins(log.name, squash_merge="deadbeef1 measure: a merge that never landed")
+    failures = check.check_ordering(prereg, [log], None, None, None, pins)
+    assert len(failures) == 1, failures
+    assert "not a usable disclosure" in failures[0], failures
+    assert "squash_merge" in failures[0] and "does not have" in failures[0], failures
+    # The SAME disclosure is refused when the log is atomic AND provably unscored: the field rule
+    # belongs to the disclosure, not to whichever arm happens to run first (cycle-2 P2).
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    assert check.check_ordering(prereg, [log], None, None, None, pins) == failures
+
+
+def test_branch_commits_need_not_resolve_because_a_squash_hides_them(tmp_path, monkeypatch):
+    """The OTHER half of the asymmetry (#10529 review cycle 14, P2) — do not "fix" it into a trap.
+
+    A squash leaves the branch commits unreachable from `main`, so requiring the OBJECT here would
+    make the disclosure permanently red in exactly the case it exists for — the stuck light this
+    change removes. Format-only is deliberate; this test is what stops a later lane tidying the two
+    fields into one rule and re-creating the outage.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    pins = _atomic_pins(
+        log.name, branch_commits=["deadbeef1 the branch commit a squash made unreachable"]
+    )
+    assert check.check_ordering(prereg, [log], None, None, None, pins) == []
+
+
+def _rev(repo: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", ref], cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _real_squash(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path, str, list[str]]:
+    """A FAITHFUL squash: two branch commits, then ONE commit on main carrying both files.
+
+    `_both_in_one_commit` reproduces the git OBJECT a squash leaves behind, but not the history it
+    replaced — in a one-commit repo the "branch commits" a disclosure names cannot exist at all,
+    so the field could only ever be exercised in its unreachable form. This builds the real shape
+    (the bars frozen in one commit, the log added in a later one, both collapsed onto main), so the
+    disclosure's claim is one the tool CAN verify and a test can make it fail on.
+    """
+    (repo / "README").write_text("root\n")
+    _git(repo, "add", "README")
+    _git(repo, "commit", "-q", "-m", "root", epoch=epoch)
+    base = _rev(repo, "HEAD")
+    _git(repo, "checkout", "-q", "-b", "feat")
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    log = repo / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+    prereg.write_text("x\n")
+    _git(repo, "add", str(prereg.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "freeze the bars", epoch=epoch)
+    log.write_text("x\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "add the log", epoch=epoch + 1)
+    branch = [line for line in subprocess.run(
+        ["git", "rev-list", "--reverse", "feat", "--not", base],
+        cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.split() if line]
+    _git(repo, "checkout", "-q", "-")
+    _git(repo, "merge", "-q", "--squash", "feat")
+    _git(repo, "commit", "-q", "-m", "both at once", epoch=epoch + 2)
+    return prereg, log, _rev(repo, "HEAD"), branch
+
+
+def test_a_real_squash_disclosure_is_verified_and_a_forged_squash_is_refused(tmp_path, monkeypatch):
+    """The disclosure's claim is CHECKED when the history it names is still in the repo.
+
+    REGRESSION (#10529 review cycle 15, P1). The passing fixture used to cite HEAD as BOTH its
+    branch commit and its squash — a commit citing itself as its own provenance, which is the shape
+    a single laundering commit has. Here the honest disclosure (two real branch commits, the real
+    squash commit that collapsed them) passes, and a disclosure that names a commit which PREDATES
+    the pair as its squash is refused: that pointer resolves, so the addressability rule alone could
+    not tell it from an honest one. Non-vacuous — the pre-fix tool accepted both.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log, squash, branch = _real_squash(repo)
+    assert len(branch) == 2, branch
+    honest = _atomic_pins(
+        log.name,
+        branch_commits=[f"{sha[:9]} a branch commit the squash collapsed" for sha in branch],
+        squash_merge=f"{squash[:9]} the merged commit",
+    )
+    assert check.check_ordering(prereg, [log], None, None, None, honest) == []
+    # The commits it names are really here, so the CLI has nothing to disclaim.
+    assert check._unverified_history_note(honest[log.name]) == ""
+
+    forged = _atomic_pins(
+        log.name,
+        branch_commits=[f"{sha[:9]} a branch commit the squash collapsed" for sha in branch],
+        squash_merge=f"{_rev(repo, 'HEAD~1')[:9]} the commit main sat at BEFORE the landing",
+    )
+    failures = check.check_ordering(prereg, [log], None, None, None, forged)
+    assert len(failures) == 1, failures
+    assert "not a usable disclosure" in failures[0], failures
+    assert "nor a descendant of it" in failures[0], failures
+
+
+def test_a_squash_merge_cannot_be_one_of_its_own_branch_commits(tmp_path, monkeypatch):
+    """REGRESSION (#10529 review cycle 15, P1): a commit cannot collapse ITSELF.
+
+    The two halves of a disclosure assert different things — `branch_commits` is where the ordering
+    DID exist, `squash_merge` is the new commit that collapsed them — so naming one commit in both
+    is self-referential, and it is exactly what one laundering commit writes. Non-vacuous: the
+    pre-fix tool accepted this pair and passed it as a disclosed atomic add; it was the DEFAULT of
+    its own passing fixture.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    head = _rev(repo, "HEAD")
+    pins = _atomic_pins(log.name, branch_commits=[f"{head[:9]} the branch commit it collapsed"])
+    failures = check.check_ordering(prereg, [log], None, None, None, pins)
+    assert len(failures) == 1, failures
+    assert "not a usable disclosure" in failures[0], failures
+    assert "ALSO one of its branch_commits" in failures[0], failures
+    # A DIFFERENT, aborted-length spelling of the same commit is the same commit (#10529 c15 P1).
+    assert check._sha_prefix_agrees("cfa3de857", "cfa3de857ef2c") is True
+    assert check._sha_prefix_agrees("cfa3de857", "cfa3de858") is False
+
+
+def test_a_squash_merge_that_predates_the_pair_is_refused(tmp_path, monkeypatch):
+    """REGRESSION (#10529 review cycle 15, P1): the squash pointer must be able to carry the pair.
+
+    `squash_merge` is printed as the pointer ON MAIN a reader resolves, so an ancestor of the pair's
+    add-commit — the commit main sat at BEFORE the landing — describes a history in which the pair
+    is not in the tree. It resolves, so format and addressability both pass it; only ancestry can
+    tell. Non-vacuous: the pre-fix tool accepted this.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    (repo / "README").write_text("root\n")
+    _git(repo, "add", "README")
+    _git(repo, "commit", "-q", "-m", "root", epoch=1_700_000_000)
+    root = _rev(repo, "HEAD")
+    prereg, log = _both_in_one_commit(repo, epoch=1_700_000_100)
+    pins = _atomic_pins(log.name, squash_merge=f"{root[:9]} the commit before the landing")
+    failures = check.check_ordering(prereg, [log], None, None, None, pins)
+    assert len(failures) == 1, failures
+    assert "nor a descendant of it" in failures[0], failures
+
+
+def test_the_cli_says_when_a_disclosure_history_was_not_checked_here():
+    """A claim this tool could not check may not read as one it did (#10529 review cycle 15, P1).
+
+    `branch_commits` may legitimately not resolve — a squash leaves them unreachable from main —
+    so their absence is not a failure. Silence was: the block printed the commits and nothing said
+    none of them had been read. Where at least one DOES resolve the check ran, so there is nothing
+    to disclaim.
+    """
+    absent = check._unverified_history_note(
+        {"squash_merge": "cfa3de857 x", "branch_commits": ["deadbeef1 y"]}
+    )
+    assert "NOT checked here" in absent, absent
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(check.REPO_ROOT),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert check._unverified_history_note(
+        {"squash_merge": "cfa3de857 x", "branch_commits": [f"{head[:9]} y"]}
+    ) == ""
+    assert check._unverified_history_note({"squash_merge": "x", "branch_commits": []}) == ""
+
+
+def test_the_cli_prints_the_declared_atomic_add_and_its_commits(monkeypatch, capsys):
+    """A declared atomic add must reach the human path, and name the commits it rests on.
+
+    ⛔ NO LONGER DRIVEN BY THE 5087 BUNDLE (#10544). That bundle's log was WITHDRAWN on `main`
+    (`108cec779`, ruling item 3) before this PR could land, so the directory it is checked against
+    now holds ZERO evidence logs and the atomic arm cannot fire there — see
+    `test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure`. Printing the block is
+    therefore exercised on a report built here: the human path is what this test is about, and it
+    must not depend on a bundle's history to be covered.
+
+    ⛔ AND IT MUST NOT DEPEND ON FULL HISTORY EITHER (#10546 review cycle 16, IS-2). The fixture's
+    `branch_commits` used to be the REAL bundle's shas (`a1075dfc2`, `325f2a1a5`), and the
+    "nothing to disclaim" half then asserted `"NOT checked here" not in out`. Those commits exist
+    only in a FULL clone: the `test` shards check out at `fetch-depth: 1`
+    (`.github/workflows/python-ci.yml` — the only `fetch-depth: 0` checkout is `changes`), so
+    `_unverified_history_note` printed the disclaimer and the assertion failed on the shard that
+    runs this file. `main()` never consults `history_unavailable()` and `check.run` is
+    monkeypatched here, so nothing short-circuited it — the test would have red-ed `python-ci-gate`
+    in the very run that landed it. It now names HEAD, which exists in EVERY clone however shallow,
+    so the "resolves, so there is nothing to disclaim" half is depth-1-safe by construction — no
+    `@requires_history` skip, which would have dropped this coverage from CI entirely.
+    """
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(check.REPO_ROOT),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    report = {
+        "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
+        "rows": [{"id": "E1", "line": 1}],
+        "evidence_logs": ["e1-e2.log"],
+        "ok": True,
+        "failures": [],
+        "ordering": "verified (atomic-add DECLARED: e1-e2.log)",
+        "run_order_claim": "verified (atomic-add DECLARED: e1-e2.log)",
+        "ordering_exempt": [],
+        "ordering_atomic_add": ["e1-e2.log"],
+        "ordering_atomic_add_commits": {
+            "e1-e2.log": {
+                "squash_merge": "cfa3de857 measure(10463): … ratio 0.870 (#10468)",
+                "branch_commits": [f"{head[:9]} prereg(10463): the bars do not move"],
+            }
+        },
+    }
+    monkeypatch.setattr(check, "run", lambda *a, **k: report)
+    assert check.main(["--dir", "docs/evidence/7949-capstone"]) == 0
+    out = capsys.readouterr().out
+    assert "ATOMIC-ADD declared" in out, out
+    assert "squashed by cfa3de857" in out, out
+    assert head[:9] in out, out
+    # The CLAIM line is qualified — a consumer of `machine record run-order claim` must not read a
+    # disclosed ordering as one the gate compared.
+    assert "verified (atomic-add DECLARED" in out, out
+    # This commit DOES exist in this checkout — it is HEAD, so it resolves in a depth-1 clone too —
+    # so the block has nothing to disclaim.
+    assert "NOT checked here" not in out, out
+    # …and when it does NOT, the block says so instead of letting silence read as verification
+    # (#10529 review cycle 15, P1).
+    report["ordering_atomic_add_commits"]["e1-e2.log"]["branch_commits"] = [
+        "deadbeef1 the branch commit a squash left unreachable",
+    ]
+    assert check.main(["--dir", "docs/evidence/7949-capstone"]) == 0
+    out = capsys.readouterr().out
+    assert "deadbeef1" in out, out
+    assert "NOT checked here" in out, out
+
+
+def test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure():
+    """The withdrawal (#10544) left the 5087 bundle with no log, so no disclosure may name one.
+
+    ⛔ THIS IS THE `#10544` INTERACTION, PINNED (#10546 review cycle 14, P2 named it; cycle 15 saw
+    it land). `main` took the ruling's item 3 — the log moved under `withdrawn/`, outside the
+    guard's NON-RECURSIVE glob — so `evidence logs: 0` and an `atomic_add_ordering` entry naming it
+    would be a STALE WAIVER: the stale rule reports "discloses '…', which is not in this directory"
+    and `changes` goes red again on landing. The disclosure was removed WITH the log; this test is
+    what stops it being restored by someone re-reading this PR's earlier body, which described a
+    bundle state that no longer exists.
+    """
+    if check.history_unavailable():
+        pytest.skip("needs full history — CI test jobs check out at fetch-depth:1")
+    directory = PREREG_DIR.parent / "5087-hypothesis"
+    assert not sorted(directory.glob(check.EVIDENCE_LOG_GLOB)), (
+        "the measured log is back in the directory the ordering half reads — see #10544"
+    )
+    report = check.run(directory, use_corpus=False)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering_atomic_add"] == [], report["ordering_atomic_add"]
+    assert "ordering_atomic_add_commits" not in report, report.get("ordering_atomic_add_commits")
+    # A bare "verified" — the ordering half compared no log at all for this bundle.
+    assert report["ordering"] == "verified"
+    assert check._record_atomic_add(directory) == {}
+
+
+def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, monkeypatch):
+    """A shrug is not a disclosure — an empty `reason` or an empty `branch_commits` fails closed."""
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    for entry in ({"reason": "", "branch_commits": ["a1075dfc2 x"]},
+                  {"reason": "because", "branch_commits": [], "squash_merge": "cfa3de857 x"},
+                  {"reason": "because", "squash_merge": "cfa3de857 x"},
+                  # The squash commit is REQUIRED, not merely format-checked (cycle-4 P2): a squash
+                  # leaves the branch commits unreachable, so this is the only resolvable pointer.
+                  {"reason": "because", "branch_commits": ["a1075dfc2 x"]},):
+        failures = check.check_ordering(prereg, [log], None, None, None, {log.name: entry})
+        assert failures and "not a usable disclosure" in failures[0], failures
+
+
+def test_a_disclosure_for_a_normally_ordered_log_fails(tmp_path, monkeypatch):
+    """A waiver granted where none is needed is how a waiver set becomes routine (#10529).
+
+    The same anti-rot rule `pins.pre_existing_unscored_logs` applies: an atomic-add disclosure may
+    only be carried by a log whose add-commit IS the registration's, so it cannot be pre-granted to
+    a future log and quietly cover a real ordering failure.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert len(failures) == 1, failures
+    assert "not one" in failures[0], failures
+
+
+def test_a_disclosure_naming_an_absent_log_fails(tmp_path, monkeypatch):
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins("gone.log"))
+    assert any("stale waiver" in f for f in failures), failures
+
+
+def test_the_attack_is_still_undeclarable(tmp_path, monkeypatch):
+    """REGRESSION: #10529 must NOT weaken the `log_epoch < prereg_epoch` arm.
+
+    The log added first and the thresholds written afterwards is THE defect the guard exists for.
+    A disclosure must not launder it, and the message must stay the original one.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_000)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
+    assert any("not one" in f for f in failures), failures
 
 
 def test_an_uncommitted_registration_cannot_claim_ordering(tmp_path, monkeypatch):
@@ -641,7 +1348,7 @@ def test_an_exempted_log_edited_after_the_registration_fails(tmp_path, monkeypat
     _git(repo, "commit", "-q", "-m", "rewrite the log", epoch=1_700_000_200)
 
     failures = check.check_ordering(prereg, [log], _exempt())
-    assert failures and "MODIFIED at" in failures[0], failures
+    assert failures and "not an ancestor of" in failures[0], failures
 
 
 @pytest.mark.parametrize("old,new,bad", [
@@ -1175,16 +1882,18 @@ def test_the_touch_history_sees_a_merge_commit(tmp_path, monkeypatch):
     """
     repo = _repo(tmp_path, monkeypatch)
     log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000)
-    # A side branch edits the log, then main merges it with --no-ff.
+    # The registration lands FIRST, then a side branch edits the log and main merges it --no-ff.
+    # The bound is TOPOLOGY now (#10529 cycle-9), so the late commit must be a descendant of the
+    # registration: an edit that is an ANCESTOR of it was visible to its author and is not a defect.
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     _git(repo, "checkout", "-q", "-b", "side")
     log.write_text(UNSCORED_LOG.replace("after_share=0.6", "after_share=0.25"))
     _git(repo, "add", str(log.relative_to(repo)))
     _git(repo, "commit", "-q", "-m", "side edit", epoch=1_700_000_050)
     _git(repo, "checkout", "-q", "-")
     _git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side", epoch=1_700_000_200)
-    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log], _exempt())
-    assert failures and "MODIFIED at" in failures[0], failures
+    assert failures and "not an ancestor of" in failures[0], failures
 
 
 # ── round-5: shallow CI, glued markers, unreadable status, wrong-typed inputs ──
@@ -2505,7 +3214,7 @@ def test_the_content_arm_stops_covering_the_log_the_moment_it_could_score(
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log])
     assert len(failures) == 1, failures
-    assert "not strictly after" in failures[0], failures
+    assert "is an ANCESTOR of the pre-registration's add-commit" in failures[0], failures
     assert "does not prove it measured nothing" in failures[0], failures
 
 

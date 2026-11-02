@@ -4599,12 +4599,21 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
             r"from tortoise\.commit_schema import Point, point_content_id",
         # the reference-surface relay that drifted: the runbook sentence naming the test
         ("docs/ops/ci-runner-x64.md", 866): r"test_the_changes_job_carries_no_job_scope_env",
-        # the capstone pin's re-cut history, which names it too (re-derived at #10468's head: the
+        # the capstone pin's re-cut history, which names it too (re-derived at #10546's head: the
         # re-cut comments this PR added to that file pushed it 1590 → 1596, and the record↔bars
         # tests added above at the same head pushed it 1596 → 1673, then 1682 when the disagreement
-        # case was widened from the two log-invisible bars to all seven — the pin landing rather
-        # than drifting, because a plausible offset is what it exists to refuse)
-        ("tests/test_capstone_preregistration_9075.py", 1682):
+        # case was widened from the two log-invisible bars to all seven, then 2180 by #10546's
+        # ordering-arm split plus the ancestry/late-touch tests, then 2375 by its cycle-15
+        # disclosure rules (a `squash_merge` may not cite itself, and must be able to carry the
+        # pair) with the `_real_squash` fixture that verifies them, and by its cycle-15 settlement
+        # of the #10544 collision (the withdrawn bundle carries no disclosure), then 2391 by its
+        # cycle-16 fix of the one test that assumed FULL history (`test_the_cli_prints_the_declared_
+        # atomic_add_and_its_commits` now names HEAD, which resolves in a depth-1 clone, so the
+        # `test` shards stop red-ing on a shallow checkout) — the pin landing
+        # rather than drifting, because a plausible offset is what it exists to refuse. ⛔
+        # Re-derive this number, never delete the entry: the whole point is that a citation which
+        # names a line that does not say it is a dead pointer.
+        ("tests/test_capstone_preregistration_9075.py", 2391):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
