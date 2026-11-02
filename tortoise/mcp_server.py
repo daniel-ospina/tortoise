@@ -1496,9 +1496,11 @@ def _graph_disclosure(graph_ref: str | None,
     * **no hosted workspace** — `_current_org_id` unset (stdio), OR set to
       `SELFHOST_ORG_ID` by `TransportModeMiddleware` on the self-host daemon
       (`auth_mode in static|none`). Those two are ONE lane for this purpose and
-      the predicate here is the RESOLVER's own (`plan_graph_target` refuses any
-      named `graph` on `org_id in (None, SELFHOST_ORG_ID)`), so the disclosure
-      cannot tell a self-host caller to name a graph that lane would refuse.
+      the predicate here is the RESOLVER's own: `plan_graph_target` refuses every
+      named `graph` on `org_id in (None, SELFHOST_ORG_ID)` **except the
+      `"default"` no-op**, which it accepts there by design (`mcp_auth.py:515-538`,
+      #9340 review P2) — so this arm must not name `"default"` as the write's
+      target, and must not tell that caller to send a graph the lane would refuse.
       `_get_org_sdk` opens `namespace='selfhost'` (`org_selfhost`, else the URI's
       graph) — never an id spelled `"default"`, so this arm reports
       `server-configured` with NO id rather than inventing one.
@@ -1517,8 +1519,14 @@ def _graph_disclosure(graph_ref: str | None,
     and the resolved plan lives inside the DISPATCH task (`_scoped_dispatch`,
     #9762), so its ContextVar is not readable from this one (#9762 confinement is
     also what stops the omitted arm inheriting a previous call's graph). The
-    value is therefore documented as the ACCEPTED REF, which is what the caller
-    can check its own request against.
+    value is therefore the ACCEPTED REF, which is what the caller can check its
+    own request against.
+
+    `omitted` means **the CALLER named no graph** — never "the default graph was
+    used". Those are different facts and only `source` separates them: a
+    graph-bound credential's omission lands on that key's OWN graph, so a field
+    reading "defaulted" would say the exact opposite of the arm it sits on and
+    hand a connector the wrong-graph conclusion this feature exists to remove.
 
     `preview` never changes WHAT is disclosed, only whether the reply may say the
     write happened (see `_graph_disclosure_message`).
@@ -1527,16 +1535,16 @@ def _graph_disclosure(graph_ref: str | None,
         if not isinstance(graph_ref, str):
             return None
         info = {"graph": graph_ref, "requested": graph_ref,
-                "defaulted": False, "source": "argument"}
+                "omitted": False, "source": "argument"}
     else:
         org = _mcp_auth._current_org_id.get()
         if not org or org == _mcp_auth.SELFHOST_ORG_ID:
             info = {"graph": None, "requested": None,
-                    "defaulted": True, "source": "server-configured"}
+                    "omitted": True, "source": "server-configured"}
         else:
             bound = _mcp_auth._current_graph_id.get()
             info = {"graph": bound or _mcp_auth._DEFAULT_GRAPH_ID,
-                    "requested": None, "defaulted": True,
+                    "requested": None, "omitted": True,
                     "source": "credential-graph" if bound else "workspace-default"}
     if preview:
         # A preview's write has not happened. Recorded as its own fact so a
@@ -1549,11 +1557,13 @@ def _graph_disclosure(graph_ref: str | None,
 def _graph_disclosure_message(info: dict[str, Any]) -> str:
     """The one sentence a caller (and the model) reads about the resolution.
 
-    It states the FACT and never an instruction: it does not tell the model to
-    omit `graph`, because `tortoise_list_graphs()` returns flat names with no
-    `is_default`, so an "omit it" rule makes a model in a two-graph workspace
-    guess — and the guess it rewards is the default graph (#10504's re-brief
-    removed exactly that imperative from `GRAPH_ARGUMENT_DESCRIPTION`).
+    It states the FACT and never an OMIT instruction: it may tell the model to
+    SEND `graph` (half 1's ruled instruction, which is the whole point of the
+    anti-bypass clause) and it must never tell it to drop the argument —
+    `tortoise_list_graphs()` returns flat names with no `is_default`, so an "omit
+    it" rule makes a model in a two-graph workspace guess, and the guess it
+    rewards is the default graph (#10504's re-brief removed exactly that
+    imperative from `GRAPH_ARGUMENT_DESCRIPTION`).
 
     The tense is the CALL's target, not a completed write, on purpose: seven
     served write tools take `dry_run` and `tortoise_delete`'s default FIRST call
@@ -1647,10 +1657,10 @@ def _disclose_graph_resolution(result: Any, name: str,
     tool itself; a second statement here could only disagree with it. Disclosing
     for it would mean re-deriving a target this seam does not own.
 
-    Returns `None` for anything that is not a plain successful `ToolResult` —
-    a refusal, a `_safe`-answered failure and a schema-repaired payload all
-    already say what happened, and a disclosure on top of them would be noise
-    claiming a landing that may not have occurred.
+    Anything that is not a plain successful `ToolResult` is returned UNTOUCHED
+    (the same object, by identity): a refusal, a `_safe`-answered failure and a
+    schema-repaired payload all already say what happened, and a disclosure on
+    top of them would be noise claiming a landing that may not have occurred.
     """
     if name not in WRITE_TOOL_NAMES or name in _mcp_auth.GRAPH_ARGUMENT_EXCLUDED:
         return result

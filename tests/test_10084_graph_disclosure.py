@@ -144,7 +144,7 @@ async def test_a_write_naming_no_graph_lands_on_the_default_and_says_so(probe):
     # half 2 — the reply discloses it.
     disclosure = _disclosure(result)
     assert disclosure == {"graph": "default", "requested": None,
-                          "defaulted": True, "source": "workspace-default"}
+                          "omitted": True, "source": "workspace-default"}
     assert "'default'" in _text(result), _text(result)
     assert "its target is this workspace's default graph" in _text(result)
     assert "named no `graph`" in _text(result)
@@ -234,7 +234,7 @@ async def test_a_write_naming_a_reachable_graph_lands_there_and_says_so(probe):
                       "namespace": f"org_{ORG_A}_g_fund_b"}], probe
     assert _disclosure(result) == {"graph": "g_fund_b",
                                    "requested": "g_fund_b",
-                                   "defaulted": False,
+                                   "omitted": False,
                                    "source": "argument"}
     assert "the graph you named ('g_fund_b')" in _text(result)
 
@@ -249,7 +249,7 @@ async def test_the_redundant_default_ref_reports_the_default_it_names(probe):
             PROBE, {"graph": "default", "note": "hi"})
     assert probe == [{"graph_id": None, "namespace": None}], probe
     assert _disclosure(result) == {"graph": "default", "requested": "default",
-                                   "defaulted": False, "source": "argument"}
+                                   "omitted": False, "source": "argument"}
 
 
 # ── 4. the honest arm: a graph-bound credential's omission is NOT the default ──
@@ -268,7 +268,7 @@ async def test_a_bound_credentials_omission_discloses_its_own_graph(probe):
     disclosure = _disclosure(result)
     assert disclosure["graph"] == "g_fund_a"
     assert disclosure["source"] == "credential-graph"
-    assert disclosure["defaulted"] is True
+    assert disclosure["omitted"] is True
     assert "not the workspace default" in _text(result)
 
 
@@ -305,9 +305,16 @@ def test_every_served_excluded_writer_is_skipped_by_name():
 async def test_a_dry_run_is_disclosed_as_a_preview(monkeypatch):
     """Seven served write tools take `dry_run`, and `tortoise_delete`'s default
     FIRST call changes nothing. The disclosure must not read as a completed
-    write, or an agent believes a preview executed."""
+    write, or an agent believes a preview executed.
+
+    `_DRY_RUN_TOOLS` is pinned to the PROBE deliberately: it is registry-derived,
+    so without this the argument half of `_is_preview` is inert in every dispatch
+    test (the probe is not a registry row) and a mutation of `is True` back to
+    `bool(...)` would change no outcome.
+    """
     seen: list = []
     monkeypatch.setattr(ms, "WRITE_TOOL_NAMES", frozenset({PROBE}))
+    monkeypatch.setattr(ms, "_DRY_RUN_TOOLS", frozenset({PROBE}))
 
     def _preview(dry_run: bool = False) -> dict:
         seen.append(dry_run)
@@ -333,6 +340,30 @@ async def test_a_dry_run_is_disclosed_as_a_preview(monkeypatch):
     assert "preview" not in _disclosure(written)
     assert "preview" not in _disclosure(coerced), (
         'a string "false" was read as a preview while the write executed')
+
+
+@pytest.mark.parametrize(("payload", "expected"), [
+    # the bare shape a dict-returning preview tool produces
+    ({"dry_run": True}, True),
+    # the `x-fastmcp-wrap-result` shape `tortoise_delete_entity` (a dry_run
+    # WRITE tool) advertises: `{"result": {...}, "x-fastmcp-wrap-result": true}`
+    ({"result": {"dry_run": True, "token": "t"}}, True),
+    # ...and the shapes that must NOT read as a preview
+    ({"result": True}, False),
+    ({"result": [{"dry_run": True}]}, False),
+    ({"dry_run": "true"}, False),
+    ({"dry_run": 1}, False),
+    ({}, False),
+])
+def test_the_receipt_marker_is_read_in_both_envelope_shapes(payload, expected):
+    """`tortoise_delete_entity` is BOTH a `dry_run` tool and an array/wrap-envelope
+    tool; an unconfirmed delete sets no `dry_run` argument at all. The receipt
+    branch is the only one that can label either, so both shapes are pinned —
+    with the negatives that make it discriminating (`is True`, not truthiness)."""
+    from fastmcp.tools import ToolResult
+
+    result = ToolResult(content=[], structured_content=payload, is_error=False)
+    assert ms._payload_says_preview(result) is expected, payload
 
 
 @pytest.mark.asyncio
@@ -413,10 +444,10 @@ def test_the_disclosure_reports_the_arms_distinctly():
     with _workspace():
         omitted = ms._graph_disclosure(None)
     assert omitted == {"graph": "default", "requested": None,
-                       "defaulted": True, "source": "workspace-default"}
+                       "omitted": True, "source": "workspace-default"}
     named = ms._graph_disclosure("g_fund_b")
     assert named == {"graph": "g_fund_b", "requested": "g_fund_b",
-                     "defaulted": False, "source": "argument"}
+                     "omitted": False, "source": "argument"}
     # a non-string ref never reaches a dispatch (the resolver refuses it first),
     # so it discloses nothing rather than inventing a name.
     assert ms._graph_disclosure(7) is None
@@ -451,6 +482,37 @@ def test_the_excluded_writer_with_its_own_selector_is_skipped():
     assert "tortoise_graph_set_recording" in mcp_auth.GRAPH_ARGUMENT_EXCLUDED
     assert ms._disclose_graph_resolution(
         ok, "tortoise_graph_set_recording", None) is ok
+
+
+def test_no_disclosed_write_tool_carries_its_own_graph_selector():
+    """The invariant the disclosure's truthfulness RESTS on, derived rather than
+    assumed: a write tool that takes its own graph selector (`graph_id` /
+    `graph_name` / `namespace`) writes somewhere this seam cannot see, so it must
+    be in `GRAPH_ARGUMENT_EXCLUDED` or the disclosure would name the credential's
+    graph over a write that went elsewhere — the wrong-graph claim this feature
+    exists to remove, emitted by us.
+
+    The registry's own guard derives `GRAPH_ARGUMENT_EXCLUDED` from
+    `_reject_graph_bound_mcp_org_surface` CALLERS, which is a different
+    criterion, so it would not catch a new selector-taking write tool.
+    """
+    import inspect
+
+    selectors = {"graph_id", "graph_name", "namespace"}
+    offenders = []
+    for name in sorted(ms.WRITE_TOOL_NAMES - mcp_auth.GRAPH_ARGUMENT_EXCLUDED):
+        handler = getattr(ms, name, None)
+        if handler is None:
+            continue
+        try:
+            params = set(inspect.signature(handler).parameters)
+        except (TypeError, ValueError):  # pragma: no cover - non-callable
+            continue
+        if params & selectors:
+            offenders.append((name, sorted(params & selectors)))
+    assert offenders == [], (
+        "these write tools name their own graph and must be added to "
+        f"GRAPH_ARGUMENT_EXCLUDED: {offenders}")
 
 
 def test_an_error_result_is_not_disclosed():
