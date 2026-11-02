@@ -1257,9 +1257,9 @@ def get_capture_usage(org_id: str) -> dict:
     ``capture_extraction`` row in ``tortoise/cost_dimensions.py`` declared
     ``get_current_usage`` as its reader, and that function returns write-op
     fields only. So "tokens per team per period" was written and unreadable
-    from code — the state ``EXTRACTOR-V4-ARCHITECTURE.md`` §0 records as a
-    residual, and the ``#4493`` failure mode in which a recorded dimension with
-    no reader reads as a measurement that does not exist.
+    from code — the state ``EXTRACTOR-V4-ARCHITECTURE.md`` §0 recorded as a
+    residual (CLOSED by this change), and the ``#4493`` failure mode in which a
+    recorded dimension with no reader reads as a measurement that does not exist.
 
     ⛔ MEASUREMENT ONLY. Nothing here prices, caps, throttles or refuses, and
     no request path calls it: it is the read half the owner's post-beta

@@ -47,11 +47,14 @@ analytics row carries — `#5045`. The **ask** lane separately records
 token counters cannot change the cap's behaviour. That separation is deliberate: this ruling is about the **unit**,
 and the cap is a separate decision.
 
-**⚠️ Residual — the token counters have no production reader.** `get_current_usage` reads write-ops only, so
-"tokens per team per month" is written but not readable from code (the `#4493` lesson: a recorded dimension
-with no reader reads as a measurement that does not exist). The metric set itself — the per-call metrics, the
-disclosure counters, the attribution and the derived figures — is defined in `docs/ops/extraction-cost-metrics.md`
-(`#3840`).
+**The token counters are readable, and the spend ceiling stays blind to them.** `metering.get_capture_usage(org_id)`
+returns `capture_calls` / `capture_tokens_in` / `capture_tokens_out` / `capture_cost_usd` per org per metering
+window on BOTH substrates (`:MeteringRecord` in the registry, or `supabase.metering_records`), degrading to a zero
+view and never raising; `capture_extraction`'s declared `READER` binding in `tortoise/cost_dimensions.py` points at
+it. The reader is MEASUREMENT ONLY — no request path calls it, and the ceiling above still cannot see these columns
+by construction. The metric set itself — the per-call metrics, the disclosure counters, the attribution and the
+derived figures — is defined in `docs/ops/extraction-cost-metrics.md` (`#3840`); the consumption model that consumes
+the reader is `docs/architecture/CONSUMPTION-MODEL.md` (`#4051`).
 
 **⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same
 seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a

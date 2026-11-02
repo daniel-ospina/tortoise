@@ -36,8 +36,10 @@ Read alongside `docs/ops/cost-dimensions.md` (the coverage matrix — *is dimens
 ## 1 · What already exists, at `file:line`
 
 The premise that "nothing is metered" is false, and acting on it would build a second substrate beside one that
-already exists. **Six** of the ten rows below write **per-org** into one durable ledger (`:MeteringRecord` in the
-registry, mirrored to `supabase.metering_records`), keyed `(org_id, period_start)` — `tortoise/metering.py`;
+already exists. **Six** of the ten rows below write **per-org** into one durable ledger, in exactly ONE of two
+substrates selected by `metering._supabase_mode()` — `:MeteringRecord` in the graph registry, or
+`supabase.metering_records` post-`#669` (the flip DELETES the registry copy; neither is a mirror of the other),
+keyed `(org_id, period_start)` — `tortoise/metering.py`;
 **two** are per-org on **Prometheus** label sets rather than that ledger; and **two Postgres reads are SQL
 functions with no per-org *byte* figure at all** (one is exact per-org *rows*). The registry of what each dimension
 is, its unit, and its declared holes is `tortoise/cost_dimensions.py` (#5045), queryable with
