@@ -2043,19 +2043,47 @@ class _Done:
         self.returncode = returncode
 
 
-def test_a_queued_zero_job_run_is_cancelled_before_it_is_rerun(monkeypatch):
-    monkeypatch.setattr(R, "gh_json", lambda *a, **k: {"headRefOid": "a" * 40})
-    monkeypatch.setattr(R, "_sleep", lambda s: None)
-    verbs: list[str] = []
+def _gh_stub(run_reads, job_reads=None):
+    """A `gh` reader for the cancel path: `pr view`, the run re-measure, job counts.
 
+    `run_reads` is consumed in order (one entry per run re-measure), so a test can
+    make the state MOVE ON between the pass-start measurement and the act; the `pr
+    view` head read always answers the expected head.
+    """
+    runs = list(run_reads)
+    jobs = list(job_reads if job_reads is not None else [])
+    seen = {"runs": 0, "jobs": 0}
+
+    def read(a, **k):
+        if a[:1] == ["pr"]:
+            return {"headRefOid": "a" * 40}
+        if a[-1].endswith("/jobs?per_page=1"):
+            seen["jobs"] += 1
+            return jobs.pop(0) if jobs else {"total_count": 0}
+        seen["runs"] += 1
+        return runs.pop(0) if runs else {"status": "pending", "head_sha": "a" * 40}
+    read.seen = seen
+    return read
+
+
+def _run_stub(verbs, *, cancel_rc=0, rerun_rc=0):
     def fake(argv, **_kw):
-        verbs.append(argv[-1].rsplit("/", 1)[-1])
-        return _Done()
-    monkeypatch.setattr(R, "_run", fake)
-    # The settle wait polls the run; report it completed on the first poll.
-    monkeypatch.setattr(R, "gh_json",
-                        lambda a, **k: ({"headRefOid": "a" * 40} if a[:1] == ["pr"]
-                                        else {"status": "completed"}))
+        verb = argv[-1].rsplit("/", 1)[-1]
+        verbs.append(verb)
+        return _Done(cancel_rc if verb == "cancel" else rerun_rc)
+    return fake
+
+
+def test_a_queued_zero_job_run_is_cancelled_before_it_is_rerun(monkeypatch):
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_STALL_GUARDS", 0)
+    verbs = []
+    # The re-measure still sees a queued run with a MEASURED zero, then the settle
+    # poll reports it completed.
+    monkeypatch.setattr(R, "gh_json", _gh_stub(
+        [{"status": "pending", "head_sha": "a" * 40},
+         {"status": "completed", "head_sha": "a" * 40}]))
+    monkeypatch.setattr(R, "_run", _run_stub(verbs))
     state = R._rerun("o/r", run(41523739094, "python-ci.yml", "pending"), 1,
                      expected_head="a" * 40)
     assert state == "cancelled_rerun"
@@ -2066,13 +2094,12 @@ def test_a_queued_zero_job_run_is_cancelled_before_it_is_rerun(monkeypatch):
 
 def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
     """A cancel the API refuses must not be followed by a rerun it will refuse too."""
-    monkeypatch.setattr(R, "gh_json", lambda *a, **k: {"headRefOid": "a" * 40})
-    verbs: list[str] = []
-
-    def fake(argv, **_kw):
-        verbs.append(argv[-1].rsplit("/", 1)[-1])
-        return _Done(returncode=0 if argv[-1].endswith("/cancel") else 1)
-    monkeypatch.setattr(R, "_run", fake)
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_STALL_GUARDS", 0)
+    verbs = []
+    monkeypatch.setattr(R, "gh_json", _gh_stub(
+        [{"status": "pending", "head_sha": "a" * 40}]))
+    monkeypatch.setattr(R, "_run", _run_stub(verbs, cancel_rc=1))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
                     expected_head="a" * 40) == "failed"
     assert verbs == ["cancel"], "no rerun may be issued after a refused cancel"
@@ -2081,20 +2108,133 @@ def test_a_refused_cancel_does_not_spend_the_rerun(monkeypatch):
 def test_a_cancel_that_never_settles_is_not_followed_by_a_rerun(monkeypatch):
     """The settle wait is bounded, and an unsettled run is a failure, not a guess."""
     monkeypatch.setattr(R, "_sleep", lambda s: None)
-    verbs: list[str] = []
-
-    def fake(argv, **_kw):
-        verbs.append(argv[-1].rsplit("/", 1)[-1])
-        return _Done()
-    monkeypatch.setattr(R, "_run", fake)
-
-    def fake_json(a, **k):
-        return ({"headRefOid": "a" * 40} if a[:1] == ["pr"]
-                else {"status": "in_progress"})
-    monkeypatch.setattr(R, "gh_json", fake_json)
+    monkeypatch.setattr(R, "_STALL_GUARDS", 0)
+    verbs = []
+    monkeypatch.setattr(R, "gh_json", _gh_stub(
+        [{"status": "pending", "head_sha": "a" * 40}]
+        + [{"status": "in_progress", "head_sha": "a" * 40}] * 8))
+    monkeypatch.setattr(R, "_run", _run_stub(verbs))
     assert R._rerun("o/r", run(1, "ci.yml", "pending"), 1,
                     expected_head="a" * 40) == "failed"
     assert verbs == ["cancel"], "an unsettled run must not be re-run blindly"
+
+
+# ── 15b. A PASS-START MEASUREMENT IS NOT THE STATE AT ACTION TIME ─────────────
+#
+# `runs_at_head` measures once per pass and MEMOISES; `report` acts only after every
+# PR in the pass has been scanned — minutes later on a backlog. The cancel is a
+# DESTRUCTIVE act, and this module's own floor comment admits the hazard: 1200 s sits
+# INSIDE the repo's measured 51-minute progressive-job-creation lag, "so some runs
+# flagged here would have created jobs on their own". A stale zero is therefore a
+# live hazard, and each direction is pinned here.
+
+def test_a_run_that_created_jobs_since_the_pass_start_is_not_cancelled(monkeypatch):
+    """The run materialised its jobs between the measurement and the act."""
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_STALL_GUARDS", 0)
+    verbs = []
+    monkeypatch.setattr(R, "gh_json", _gh_stub(
+        [{"status": "pending", "head_sha": "a" * 40}], job_reads=[{"total_count": 22}]))
+    monkeypatch.setattr(R, "_run", _run_stub(verbs))
+    assert R._rerun("o/r", run(1, "python-ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "moved_on"
+    assert verbs == [], (
+        "cancelling on the pass-start reading kills a head's real in-flight CI — "
+        "a measurement artifact must not authorise a destructive act")
+
+
+def test_a_run_that_finished_since_the_pass_start_is_not_cancelled(monkeypatch):
+    """It went green/red in the window: the cancel is refused and would escalate."""
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_STALL_GUARDS", 0)
+    verbs = []
+    monkeypatch.setattr(R, "gh_json", _gh_stub(
+        [{"status": "completed", "conclusion": "success", "head_sha": "a" * 40}]))
+    monkeypatch.setattr(R, "_run", _run_stub(verbs))
+    assert R._rerun("o/r", run(1, "python-ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "moved_on"
+    assert verbs == [], (
+        "a run that finished inside the window must not be cancelled: the cancel "
+        "fails and the tool posts a false 'needs a user credential'")
+
+
+def test_the_action_time_re_measure_is_uncached(monkeypatch):
+    """The pass cache is exactly the value that may have gone stale."""
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_STALL_GUARDS", 0)
+    monkeypatch.setattr(R, "_READ_CACHE",
+                        {("jobs", "o/r", 1, 0): 0, ("runs", "o/r", "a" * 40): []})
+    monkeypatch.setattr(R, "gh_json", _gh_stub(
+        [{"status": "pending", "head_sha": "a" * 40}], job_reads=[{"total_count": 5}]))
+    monkeypatch.setattr(R, "_run", _run_stub([]))
+    assert R._rerun("o/r", run(1, "python-ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "moved_on", (
+        "a cached zero must never authorise the cancel")
+
+
+def test_an_unreadable_re_measure_abstains_and_acts_on_nothing(monkeypatch):
+    """Unreadable is not a zero — the module's rule, applied to the destructive act."""
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_STALL_GUARDS", 0)
+    verbs = []
+
+    def boom(a, **k):
+        if a[:1] == ["pr"]:
+            return {"headRefOid": "a" * 40}
+        raise R.MeasureError("refused")
+    monkeypatch.setattr(R, "gh_json", boom)
+    monkeypatch.setattr(R, "_run", _run_stub(verbs))
+    assert R._rerun("o/r", run(1, "python-ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "unverified"
+    assert verbs == []
+
+
+def test_the_head_is_re_asserted_at_action_time(monkeypatch):
+    """Cancel+settle widens the head-TOCTOU window; the fresh read closes it."""
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_STALL_GUARDS", 0)
+    verbs = []
+    monkeypatch.setattr(R, "gh_json", _gh_stub(
+        [{"status": "pending", "head_sha": "b" * 40}]))
+    monkeypatch.setattr(R, "_run", _run_stub(verbs))
+    assert R._rerun("o/r", run(1, "python-ci.yml", "pending"), 1,
+                    expected_head="a" * 40) == "head_moved"
+    assert verbs == []
+
+
+def test_the_action_time_re_measure_budget_is_per_pass(monkeypatch):
+    """A dozen stalled runs must not each spend reads inside a 15-min workflow."""
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_STALL_GUARDS", 0)
+    calls = {"n": 0}
+
+    def read(a, **k):
+        if a[:1] == ["pr"]:
+            return {"headRefOid": "a" * 40}
+        calls["n"] += 1
+        return ({"status": "pending", "head_sha": "a" * 40}
+                if a[-1].endswith("/jobs?per_page=1") else {"status": "in_progress"})
+    monkeypatch.setattr(R, "gh_json", read)
+    monkeypatch.setattr(R, "_run", _run_stub([]))
+    states = [R._rerun("o/r", run(i, "ci.yml", "pending"), 1, expected_head="a" * 40)
+              for i in range(R._STALL_GUARD_BUDGET + 3)]
+    assert states[-3:] == ["unverified"] * 3, (
+        "once the per-pass budget is spent the rest ABSTAIN — an unbounded probe "
+        "loop is what gets the job KILLED with no verdict at all")
+    assert calls["n"] <= R._STALL_GUARD_BUDGET * 2
+
+
+def test_a_skipped_re_measure_is_not_an_escalation(monkeypatch):
+    """`moved_on` / `unverified` are SKIPS: the next window decides."""
+    for state in ("moved_on", "unverified"):
+        monkeypatch.setattr(R, "_rerun", lambda *a, **k: state)
+        plan = _plan(absent=["python-ci-gate"],
+                     rerun=[run(1, "python-ci.yml", "pending")])
+        code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r",
+                              cooldown_min=60)
+        assert recs[0]["rerun"][0]["ok"] is False
+        assert recs[0]["rerun"][0]["skipped"] == state
+        assert code == 0, f"a {state} skip must not escalate"
 
 
 def test_a_cancelled_rerun_reports_success_and_does_not_escalate(monkeypatch):

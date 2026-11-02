@@ -173,6 +173,30 @@ class MeasureError(RuntimeError):
     """Could not measure. Fail closed: change nothing, exit 2."""
 
 
+def _env_number(name: str, default):
+    """An env override, or `default` when it is unset OR UNPARSEABLE.
+
+    ⛔ A BAD VALUE MUST NOT RAISE AT IMPORT. Every knob below is read while the
+    module is being imported, so a typo — `CI_REPAIR_ZERO_JOB_MIN_AGE_S=20m`,
+    `CI_REPAIR_RATE_LIMIT_RETRIES=2x` — raises `ValueError` from the import itself
+    and escapes as a TRACEBACK, which exits 1. Exit 1 is this module's one specific
+    claim ("measured, and it still needs a repair only a user credential can
+    perform", see `main`), so both consumers would report a token problem for a
+    mistyped number. The override is IGNORED with a named warning on stderr — never
+    silently substituted, and never on stdout, which carries the one `--json`
+    document — and the pass continues on the default.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return type(default)(raw)
+    except (TypeError, ValueError):
+        print(f"IGNORED-ENV({name}={raw!r}) is not a number "
+              f"— using the default {default}", file=sys.stderr)
+        return default
+
+
 #: The statuses in which a run EXISTS at the head and has NOT been given a
 #: runner slot. Named, never inferred: a status this tool has not seen is not
 #: evidence of queue starvation, and must not be classified as one.
@@ -192,7 +216,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: left a PR unmergeable and 1176 s of a rail waiting. Below the floor a zero-job run
 #: is indistinguishable from ordinary lag, and reporting it every window is the noise
 #: that gets a repair report muted.
-ZERO_JOB_MIN_AGE_S = float(os.environ.get("CI_REPAIR_ZERO_JOB_MIN_AGE_S") or 1200)
+ZERO_JOB_MIN_AGE_S = _env_number("CI_REPAIR_ZERO_JOB_MIN_AGE_S", 1200.0)
 
 #: Retries for a RATE-LIMITED read, and the sleep that paces them. A 403 from the
 #: secondary rate limiter is NOT an empty answer and NOT a permanent failure: the
@@ -202,9 +226,18 @@ ZERO_JOB_MIN_AGE_S = float(os.environ.get("CI_REPAIR_ZERO_JOB_MIN_AGE_S") or 120
 #: exponential with EQUAL jitter (`uniform(ceiling/2, ceiling)` — never below half
 #: the ceiling, which is what keeps a lane from retrying instantly), so a fleet of
 #: lanes does not retry in lockstep and re-create the burst that triggered the limiter.
-RATE_LIMIT_RETRIES = int(os.environ.get("CI_REPAIR_RATE_LIMIT_RETRIES") or 2)
-RATE_LIMIT_BASE_S = 2.0
-RATE_LIMIT_MAX_SLEEP_S = float(os.environ.get("CI_REPAIR_RATE_LIMIT_MAX_SLEEP_S") or 60.0)
+RATE_LIMIT_RETRIES = _env_number("CI_REPAIR_RATE_LIMIT_RETRIES", 2)
+#: ⛔ THE BACKOFF CARRIES THE WAIT, because the server's own hint cannot be SEEN.
+#: GitHub's secondary-rate-limit guidance is to wait at least a minute before
+#: retrying; `_rate_limit_sleep_s` prefers `Retry-After`/`X-RateLimit-Reset`, but
+#: `gh api` prints the response BODY unless `--include` is passed and no read here
+#: passes it, so in practice those branches never fire and this base does the work.
+#: A base of 2 s made attempt 0 wait 1-2 s and attempt 1 wait 2-4 s — two refusals
+#: inside a penalty window that is minutes wide, which is the amplification the
+#: jitter exists to prevent. 30 s puts the first attempt at 15-30 s and the second
+#: at 30-60 s: inside the documented minute, and bounded per read.
+RATE_LIMIT_BASE_S = 30.0
+RATE_LIMIT_MAX_SLEEP_S = _env_number("CI_REPAIR_RATE_LIMIT_MAX_SLEEP_S", 60.0)
 #: ⛔ NOT BATTERY: a bare `HTTP 403` is how a PERMISSION failure also arrives
 #: ("Resource not accessible by integration"), and retrying that sleeps up to two
 #: minutes and then diagnoses a token problem as a rate limit. Only these wordings
@@ -239,14 +272,29 @@ _READ_CACHE: dict[tuple, object] = {}
 #: Patched in tests so a rate-limit test never actually sleeps.
 _sleep = time.sleep
 
-#: How long to wait for a CANCELLED run to settle before re-running it. A
-#: non-completed run cannot be re-run in place (see `_cancel_rerun`), so the repair
-#: is cancel-then-rerun and the API needs a moment to mark the run completed.
-#: MEASURED 2026-11-02 on run 41523739094: `POST /cancel` → `completed/cancelled` at
-#: once, and `POST /rerun` accepted 8 s later. The bound is seconds on purpose — the
-#: consumer workflow's own `timeout-minutes` is 15, so this can never approach it.
+#: How long the cancel+settle may take IN TOTAL. Per-poll bounds alone do not bound
+#: the wait: `_CANCEL_SETTLE_POLLS` polls each paying a sleep AND a `gh` call, and the
+#: workflow that runs this module has `timeout-minutes: 15` — a run past it is KILLED
+#: "with the measuring step SKIPPED", so the whole pass exits with no verdict at all.
+#: That is the same trap `JOB_READ_FAILURE_LIMIT` exists for, so the settle is bounded
+#: by WALL CLOCK, and the action-time re-measure is capped per pass by
+#: `_STALL_GUARD_BUDGET`.
 _CANCEL_SETTLE_POLLS = 4
 _CANCEL_SETTLE_SLEEP_S = 3.0
+_CANCEL_SETTLE_MAX_S = 15.0
+
+#: How many action-time re-measures ONE PASS may spend. Every stalled run costs two
+#: reads to re-measure, and a measured head-set can hold a dozen of them; once the
+#: budget is spent the remaining runs ABSTAIN (`unverified`) — never a zero, never a
+#: cancel made from a stale reading.
+_STALL_GUARD_BUDGET = 6
+_STALL_GUARDS = 0
+
+#: Outcomes of `_rerun` that are SKIPS, not failures: the run moved on (it is
+#: executing or finished), nothing could be measured, or the head was replaced. None
+#: of them may escalate — escalating a repair that should not have happened is how a
+#: correct deferral becomes a false "needs a user credential".
+_SKIP_STATES = frozenset({"head_moved", "moved_on", "unverified"})
 
 
 @dataclass
@@ -806,19 +854,67 @@ def _timeline_reopen_state(repo: str, number: int, cooldown_min: int,
     return recent, total
 
 
-def _cancel(repo: str, run: Run) -> bool:
-    """Cancel a run we have MEASURED to have zero jobs, and wait for it to settle.
+def _stall_still_true(repo: str, run: Run, expected_head: str = "") -> str:
+    """Re-measure the stall AT ACTION TIME: still_stalled|moved_on|unverified|head_moved.
 
-    ⛔ THE SAFETY PROPERTY IS THE CALLER'S MEASUREMENT, NOT THIS FUNCTION. This is
-    reached only from the zero-job stall class, where `job_count == 0` was MEASURED:
-    the run has created no job, so there is no work to destroy and freeing its queue/
-    concurrency slot cannot lose a verdict. Cancelling a run that HAS jobs would be a
-    different act entirely, which is why the guard lives in the class, not here.
+    ⛔ A PASS-START MEASUREMENT IS NOT THE STATE AT ACTION TIME, AND THE NEXT ACT IS
+    DESTRUCTIVE. `runs_at_head` measures once per pass and MEMOISES, then `report`
+    acts only after every PR in the pass has been scanned — minutes later on a
+    backlog. The hazard is admitted by this module's own floor comment: 1200 s sits
+    INSIDE the 51-minute progressive-job-creation lag, "so some runs flagged here
+    would have created jobs on their own", and 5 of the 16 measured `pending` runs
+    already HAD jobs. Acting on the stale read would cancel a head's real in-flight
+    CI; and if that run finished GREEN inside the window, the cancel is refused, so
+    this tool posts a false "needs a user credential" and exits 1 — the loudest wrong
+    answer it can give. So the status AND the job count are re-read here, UNCACHED
+    (the pass cache is exactly the value that may have gone stale), and the caller
+    proceeds only on a fresh MEASURED zero.
+
+    `moved_on` and `unverified` are SKIPS, not failures: the run is progressing, or
+    nothing could be measured, and either way the next window decides.
+    """
+    global _STALL_GUARDS
+    if _STALL_GUARDS >= _STALL_GUARD_BUDGET:
+        return "unverified"
+    _STALL_GUARDS += 1
+    try:
+        fresh = gh_json(["api", f"repos/{repo}/actions/runs/{run.id}"], retries=0)
+    except (MeasureError, subprocess.TimeoutExpired):
+        return "unverified"
+    if not isinstance(fresh, dict):
+        return "unverified"
+    # The settle/re-measure read already carries `head_sha`, so the head guard costs
+    # nothing here — and it must be re-asserted because the cancel and the rerun now
+    # sit tens of seconds after `_rerun`'s own head read.
+    if expected_head and (fresh.get("head_sha") or "") not in ("", expected_head):
+        return "head_moved"
+    if (fresh.get("status") or "") not in QUEUED_STATUSES:
+        # completed (it may now carry the very verdict this tool was waiting for) or
+        # executing (its jobs are real work). Not a run that will never emit.
+        return "moved_on"
+    try:
+        data = gh_json(["api", f"repos/{repo}/actions/runs/{run.id}/jobs?per_page=1"],
+                       retries=0)
+    except (MeasureError, subprocess.TimeoutExpired):
+        return "unverified"
+    if not isinstance(data, dict) or not isinstance(data.get("total_count"), int):
+        return "unverified"
+    return "still_stalled" if data["total_count"] == 0 else "moved_on"
+
+
+def _cancel(repo: str, run: Run) -> bool:
+    """Cancel a run whose zero-job stall was re-measured AT ACTION TIME, then settle.
+
+    ⛔ THE SAFETY PROPERTY IS `_stall_still_true`'s FRESH MEASUREMENT, NOT THIS
+    FUNCTION. This is reached only after the run was observed *this pass, seconds
+    ago* to be in a QUEUED status with a MEASURED zero jobs: there is no job to
+    destroy. A pass-start reading is NOT that guard — see `_stall_still_true` — and
+    cancelling a run that HAS jobs would be a different act entirely.
 
     Returns True only when the run is OBSERVED `completed` — a rerun issued against a
     run the API still considers live is refused (`403 This workflow is already
     running`), and issuing it anyway would spend the attempt budget on a call that
-    cannot succeed.
+    cannot succeed. The wait is bounded by WALL CLOCK, not merely per poll.
     """
     try:
         if _run([GH_BIN, "api", "-X", "POST",
@@ -826,14 +922,16 @@ def _cancel(repo: str, run: Run) -> bool:
             return False
     except (OSError, subprocess.TimeoutExpired):
         return False
+    deadline = time.time() + _CANCEL_SETTLE_MAX_S
     for poll in range(_CANCEL_SETTLE_POLLS):
         try:
-            data = gh_json(["api", f"repos/{repo}/actions/runs/{run.id}"])
+            data = gh_json(["api", f"repos/{repo}/actions/runs/{run.id}"], retries=0)
         except (MeasureError, subprocess.TimeoutExpired):
             return False
         if isinstance(data, dict) and data.get("status") == "completed":
             return True
-        if poll + 1 < _CANCEL_SETTLE_POLLS:
+        if (poll + 1 < _CANCEL_SETTLE_POLLS
+                and time.time() + _CANCEL_SETTLE_SLEEP_S < deadline):
             _sleep(_CANCEL_SETTLE_SLEEP_S)
     return False
 
@@ -841,13 +939,14 @@ def _cancel(repo: str, run: Run) -> bool:
 def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
     """Re-run an EXISTING workflow run at the head it was measured at.
 
-    Returns 'rerun'|'cancelled_rerun'|'head_moved'|'failed'. The head is re-read
-    immediately before acting, the SAME load-bearing precondition `_reopen`
-    documents: a repair pass over many PRs takes minutes, so a run whose head has
-    already been replaced would be re-run on a superseded sha and burn a CI cycle.
-    If the head cannot be re-read the action is SKIPPED, never guessed.
+    Returns 'rerun'|'cancelled_rerun'|'head_moved'|'moved_on'|'unverified'|'failed'.
+    The head is re-read immediately before acting, the SAME load-bearing precondition
+    `_reopen` documents: a repair pass over many PRs takes minutes, so a run whose
+    head has already been replaced would be re-run on a superseded sha and burn a CI
+    cycle. If the head cannot be re-read the action is SKIPPED, never guessed.
     'head_moved' is a skip, not a failure — the new head's own CI is the repair
-    (mirrors `_reopen`).
+    (mirrors `_reopen`), and so are 'moved_on' and 'unverified' (see
+    `_stall_still_true`).
 
     ⛔ A NON-COMPLETED RUN CANNOT BE RE-RUN IN PLACE. MEASURED 2026-11-02 against run
     41523739094 while it was `pending` with zero jobs:
@@ -868,6 +967,13 @@ def _rerun(repo: str, run: Run, number: int, expected_head: str = "") -> str:
             return "head_moved"
     state = "rerun"
     if run.status != "completed":
+        # ⛔ THE PASS-START READING IS RE-MEASURED HERE, BEFORE ANY DESTRUCTIVE ACT:
+        # the run may have materialised jobs (or finished) since `runs_at_head`
+        # measured it, and the cancel below would then kill real CI — or, if it went
+        # green, be refused and be reported as a credential problem.
+        still = _stall_still_true(repo, run, expected_head)
+        if still != "still_stalled":
+            return still
         # The cancel must be OBSERVED to have settled first: a rerun of a still-live
         # run is refused, and the refusal is indistinguishable from a real failure.
         if not _cancel(repo, run):
@@ -956,10 +1062,13 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
                 queue_starved: bool = False) -> list[PrPlan]:
     plans: list[PrPlan] = []
     # A PASS IS THE CACHE SCOPE. Two passes in one process (a launcher that polls)
-    # must not reuse a verdict measured against a head that has since moved.
-    global _JOB_READ_FAILURES
+    # must not reuse a verdict measured against a head that has since moved — and the
+    # action-time re-measure budget below is a PER-PASS allowance, so a leaked count
+    # would silently stop every later pass from repairing anything.
+    global _JOB_READ_FAILURES, _STALL_GUARDS
     _READ_CACHE.clear()
     _JOB_READ_FAILURES = 0
+    _STALL_GUARDS = 0
     for pr in open_prs(repo, include_drafts):
         head = pr.get("headRefOid") or ""
         if not head:
@@ -1140,6 +1249,8 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                                          "ok": state in ("rerun", "cancelled_rerun"),
                                          **({"cancelled_first": True}
                                             if state == "cancelled_rerun" else {}),
+                                         **({"skipped": state}
+                                            if state in _SKIP_STATES else {}),
                                          **({"head_moved": True}
                                             if state == "head_moved" else {})})
                 else:
@@ -1153,7 +1264,8 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                 rec["needs_user_actor"] = True
                 if apply:
                     escalations += 1
-            if any(r["ok"] is False and not r.get("head_moved") for r in rec["rerun"]):
+            if any(r["ok"] is False and not r.get("head_moved") and not r.get("skipped")
+                   for r in rec["rerun"]):
                 escalations += 1
         records.append(rec)
     # exit 1 only when something needs acting on and we could not act.
