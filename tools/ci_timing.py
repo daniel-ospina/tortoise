@@ -2599,10 +2599,23 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     # new one. A measured key carries no `# unmeasured` marker by construction.
     new_keys = sorted(key for key in resolved if key not in entries)
     if new_keys:
-        last = _DURATION_LINE_RE.match(lines[max(entries.values())])
+        last_index = max(entries.values())
+        last = _DURATION_LINE_RE.match(lines[last_index])
         assert last is not None  # located by the same regex
         indent = last.group("indent")
-        insert_at = max(entries.values()) + 1
+        # …and the append point respects the SPAN, not the row line. A row's note
+        # is one paragraph wrapped across indented `#` lines (see
+        # `_row_continuation_lines`), so `last_index + 1` is the note's first
+        # continuation whenever the last row wraps — inserting there put the new
+        # row MID-SENTENCE, and the continuations that remained below it then read
+        # as the NEW row's note while the old row lost the half left behind. That
+        # is the same fragment damage this render exists to stop, produced by the
+        # registration path instead of the cut path. The block's last row carries
+        # no continuation in the committed map today, which is the only reason it
+        # never materialised; it is one wrapped last row away.
+        continuation_of_last = _row_continuation_lines(lines, last_index)
+        insert_at = (continuation_of_last[-1] if continuation_of_last
+                     else last_index) + 1
         rendered: list[str] = []
         for key in new_keys:
             line = (f"{indent}{key}: "
