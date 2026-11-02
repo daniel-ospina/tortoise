@@ -329,14 +329,22 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
             # same body parsed strictly, so a claim at column 0 passes and an
             # ambiguous one downgrades to a warning (review c5-2).
             if issue not in strict_refs:
+                # The message must not assert WHAT GitHub thinks: the strict parse
+                # differs from the lenient one only by ignoring four-space-indented
+                # lines, and such a line is a CODE BLOCK in one context and a list
+                # item's continuation — where GitHub DOES fire — in another (see
+                # `strip_code`, and the list-item cases pinned below). So the
+                # finding states what THIS tool can show, not a fact it cannot.
                 findings.append(Finding(
                     issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
                     carrier=pr.number,
-                    detail=(f"PR #{pr.number} targets `{default_branch}`, but the "
-                            f"`Closes #{issue}` in its body appears only on an "
-                            f"indented line (4+ spaces or a tab). That may be a code "
-                            f"block GitHub ignores — or a nested list item it acts "
-                            f"on; this tool will not guess. State it at column 0."),
+                    detail=(f"PR #{pr.number} targets `{default_branch}`, but its "
+                            f"`Closes #{issue}` survives only the LENIENT parse: a "
+                            f"four-space-indented line is a code block in one "
+                            f"context and a list item's continuation in another, "
+                            f"so a key word on one cannot be shown to fire and is "
+                            f"never counted as a pass. State `Closes #{issue}` at "
+                            f"the start of a line, in plain prose."),
                 ))
                 continue
             findings.append(Finding(
@@ -421,7 +429,7 @@ def _gh(args: list[str]) -> str:
     try:
         out = subprocess.run(["gh", *args], capture_output=True, text=True,
                              check=False)
-    except FileNotFoundError as exc:  # pragma: no cover - env-dependent
+    except FileNotFoundError as exc:
         raise Unmeasurable(f"`gh` is not installed: {exc}") from exc
     if out.returncode != 0:
         raise Unmeasurable(
@@ -632,8 +640,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f.annotation())
     else:
         if not findings:
-            print(f"closes_landing: no closing refs on a non-default base — "
-                  f"nothing to report (default branch: {default_branch})")
+            # NOT "on a non-default base": this branch is also reached by `--pr` on
+            # a PR whose base IS the default branch, and claiming otherwise puts a
+            # false statement about the PR in front of the reader.
+            print(f"closes_landing: no closing refs to judge — nothing to report "
+                  f"(default branch: {default_branch})")
         for f in findings:
             print(f"[{f.verdict:10s}] #{f.issue} via PR #{f.pr} (base {f.base}) "
                   f"-> carrier #{f.carrier}")

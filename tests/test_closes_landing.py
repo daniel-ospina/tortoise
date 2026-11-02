@@ -536,7 +536,20 @@ def test_a_default_base_pr_whose_keyword_is_only_in_a_code_block_is_unresolved()
     pr = _pr(110, DEFAULT, "fix: the thing\n\nOld body said, for context:\n\n    Closes #10541\n")
     (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
     assert finding.verdict == "unresolved"
-    assert "indented line" in finding.detail
+    assert "LENIENT parse" in finding.detail
+
+
+def test_the_c5_detail_does_not_claim_github_ignores_a_list_continuation():
+    """The strict/lenient difference is INDENTATION, and an indented line is a
+    list item's continuation — where GitHub DOES fire — as often as it is code
+    (see `test_indented_lines_that_continue_prose_are_still_claims`). So the
+    finding may not assert what GitHub does with it: that is a fact this tool
+    cannot see. Pre-fix wording did ("which GitHub does not act on")."""
+    pr = _pr(114, DEFAULT, "- fix it\n    - Closes #10541\n")
+    (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
+    assert finding.verdict == "unresolved"
+    assert "GitHub does not act on" not in finding.detail
+    assert "at the start of a line" in finding.detail
 
 
 def test_a_default_base_pr_with_a_plain_claim_still_lands():
@@ -556,3 +569,177 @@ def test_a_carrier_restating_the_keyword_in_a_quoted_paragraph_lands():
     carrier = _pr(113, DEFAULT, "> re-stated for clarity: Closes #100\n", head=SIBLING)
     (finding,) = cl.classify(subject, _by_head(subject, carrier), DEFAULT)
     assert finding.verdict == "lands"
+
+
+# ── the `gh` bridge: every failure is Unmeasurable, never a quiet empty answer ─
+
+class _Completed:
+    def __init__(self, rc, out="", err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+def test_gh_maps_a_nonzero_exit_to_unmeasurable(monkeypatch):
+    """`gh` exiting non-zero is the ONE bridge to reality. If `_gh` returned its
+    (empty) stdout instead, `json.loads` on "" would be the only thing standing
+    between a rate-limited API and a green step; the rc arm is pinned here."""
+    monkeypatch.setattr(cl.subprocess, "run",
+                        lambda *a, **k: _Completed(1, "", "rate limited"))
+    with pytest.raises(cl.Unmeasurable) as exc:
+        cl._gh(["pr", "view", "1"])
+    assert "exited 1" in str(exc.value)
+    assert "rate limited" in str(exc.value)
+
+
+def test_gh_maps_a_missing_binary_to_unmeasurable(monkeypatch):
+    def boom(*_a, **_k):
+        raise FileNotFoundError("gh")
+    monkeypatch.setattr(cl.subprocess, "run", boom)
+    with pytest.raises(cl.Unmeasurable) as exc:
+        cl._gh(["pr", "view", "1"])
+    assert "not installed" in str(exc.value)
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ("not json", "repo identity could not be read"),
+    ('{"defaultBranchRef": {"name": ""}, "nameWithOwner": "o/r"}',
+     "empty default branch"),
+    ('{"defaultBranchRef": {"name": "main"}, "nameWithOwner": ""}',
+     "no nameWithOwner"),
+])
+def test_fetch_identity_refuses_what_it_cannot_use(monkeypatch, payload, expected):
+    """An empty `nameWithOwner` must NOT degrade to `None`: that drops every
+    same-repo qualified claim as foreign — the false pass this read exists to
+    remove (#10597 review c3-5, previously asserted only in prose)."""
+    monkeypatch.setattr(cl, "_gh", lambda _a: payload)
+    with pytest.raises(cl.Unmeasurable) as exc:
+        cl.fetch_identity("o/r")
+    assert expected in str(exc.value)
+
+
+def test_fetch_pr_refuses_a_malformed_payload(monkeypatch):
+    monkeypatch.setattr(cl, "_gh", lambda _a: '{"baseRefName": "main"}')
+    with pytest.raises(cl.Unmeasurable):
+        cl.fetch_pr(1, "o/r")
+
+
+def test_fetch_prs_by_head_refuses_a_malformed_payload(monkeypatch):
+    monkeypatch.setattr(cl, "_gh", lambda _a: '{"number": 1}')
+    with pytest.raises(cl.Unmeasurable):
+        cl.fetch_prs_by_head("b", "o/r")
+
+
+def test_sweep_refuses_a_malformed_population(monkeypatch):
+    monkeypatch.setattr(cl, "_gh", lambda _a: "nope")
+    with pytest.raises(cl.Unmeasurable):
+        cl.sweep("o/r", DEFAULT)
+
+
+# ── the depth cap: the anti-infinite-loop arm must land, not pass ────────────
+
+def _stack(depth, keyword_on_top="Closes #100"):
+    """A subject on `s0 <- s1 <- … <- top(main)`: `depth` hops to the top PR."""
+    mid = [_pr(300 + i, f"s{i + 1}", "", head=f"s{i}") for i in range(depth)]
+    top = _pr(399, DEFAULT, keyword_on_top, head=f"s{depth}")
+    subject = _pr(299, "s0", "Closes #100", head="subj")
+    return subject, _by_head(subject, *mid, top)
+
+
+@pytest.mark.parametrize("depth,verdict", [
+    (cl.MAX_STACK_DEPTH - 2, "lands"),
+    (cl.MAX_STACK_DEPTH - 1, "unresolved"),
+])
+def test_the_stack_depth_cap_is_off_by_at_most_nothing(depth, verdict):
+    """`resolve_carrier` must return None — not loop, and not `lands` — when the
+    top of the stack sits beyond the cap. The boundary is pinned on BOTH sides so
+    an off-by-one in the loop cannot silently turn the deepest real stacks into
+    `unresolved`, or a runaway walk into a pass."""
+    subject, by_head = _stack(depth)
+    (finding,) = cl.classify(subject, by_head, DEFAULT)
+    assert finding.verdict == verdict
+
+
+# ── collect_stack: the LIVE walk (two hops, and a base with no PR) ───────────
+
+def _fake_gh_by_head(table):
+    import json as _json
+
+    def fake(args):
+        return _json.dumps(table.get(args[args.index("--head") + 1], []))
+    return fake
+
+
+def test_collect_stack_walks_more_than_one_hop(monkeypatch):
+    """`resolve_carrier` is pinned on in-memory records, but `collect_stack` is
+    what BUILDS them from `gh`: a two-hop live stack must terminate at the
+    default-branch PR, or `classify` is handed an incomplete map and reports
+    `unresolved` on a stack that is fine."""
+    monkeypatch.setattr(cl, "_gh", _fake_gh_by_head({
+        "s0": [{"number": 5, "baseRefName": "s1", "body": "", "headRefName": "s0",
+                "state": "OPEN", "mergedAt": None}],
+        "s1": [{"number": 6, "baseRefName": DEFAULT, "body": "Closes #100",
+                "headRefName": "s1", "state": "OPEN", "mergedAt": None}],
+    }))
+    subject = _pr(4, "s0", "Closes #100")
+    by_head = cl.collect_stack([subject], "owner/name", DEFAULT)
+    assert by_head["s1"].number == 6
+    (finding,) = cl.classify(subject, by_head, DEFAULT)
+    assert finding.verdict == "lands"
+    assert finding.carrier == 6
+
+
+def test_collect_stack_stops_when_a_base_branch_has_no_pr(monkeypatch):
+    monkeypatch.setattr(cl, "_gh", _fake_gh_by_head({}))
+    subject = _pr(7, "no-such-branch", "Closes #100")
+    by_head = cl.collect_stack([subject], "owner/name", DEFAULT)
+    assert "no-such-branch" not in by_head
+    (finding,) = cl.classify(subject, by_head, DEFAULT)
+    assert finding.verdict == "unresolved"
+
+
+def test_sweep_with_no_stacked_roots_reports_nothing(monkeypatch):
+    """The population query can come back with only default-branch PRs; that is
+    an empty report, and it must not reach `collect_stack` (which would then ask
+    `gh` about branches that were never in question)."""
+    import json as _json
+
+    def fake(args):
+        assert "--head" not in args, "sweep() walked a stack it had no root for"
+        return _json.dumps([
+            {"number": 90, "baseRefName": DEFAULT, "body": "Closes #100",
+             "headRefName": "on-main", "state": "OPEN", "mergedAt": None},
+        ])
+
+    monkeypatch.setattr(cl, "_gh", fake)
+    assert cl.sweep("owner/name", DEFAULT) == []
+
+
+# ── the two PROSE arms of `main` (the shapes a reader and the step see) ──────
+
+def test_annotate_suppresses_a_landing_finding(tmp_path, capsys):
+    """The workflow step prints `--annotate`; a `lands` ref must produce no
+    annotation at all, or every correct PR grows a warning and the step gets
+    muted — taking the real inert warning with it."""
+    body = tmp_path / "body.md"
+    body.write_text("Closes #10541\n", encoding="utf-8")
+    assert cl.main(["--body-file", str(body), "--base", DEFAULT, "--annotate"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_annotate_emits_the_unresolved_warning(tmp_path, capsys):
+    body = tmp_path / "body.md"
+    body.write_text("Closes #10541\n", encoding="utf-8")
+    assert cl.main(["--body-file", str(body), "--base", SIBLING, "--annotate"]) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("::warning title=Unresolved Closes #10541::"), out
+
+
+def test_the_empty_report_does_not_claim_a_non_default_base(tmp_path, capsys):
+    """The empty message is also reached by `--pr` on a PR whose base IS the
+    default branch; asserting "non-default base" there tells the reader a false
+    fact about the PR in front of them."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #10541 — no closure claimed\n", encoding="utf-8")
+    assert cl.main(["--body-file", str(body), "--base", DEFAULT]) == 0
+    out = capsys.readouterr().out
+    assert "no closing refs to judge" in out
+    assert "non-default base" not in out
