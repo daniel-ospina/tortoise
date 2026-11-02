@@ -2376,6 +2376,12 @@ def _seed_onboarding(namespace: str, *, steps=_COMPLETE_STEPS,
     try:
         proj = sdk._get_proj()
         _os.ensure_onboarding_state_node(proj, TEAM, fork=fork, compact=compact)
+        if fork is not None:
+            # `ensure_onboarding_state_node` sets the flow keys ON CREATE only,
+            # so seeding a fork into a graph that already holds a node (the
+            # second promotion of a chain) must go through the real set-once
+            # writer or the seed would silently be a no-op.
+            _os.write_fork(proj, TEAM, fork)
         for step in steps:
             _os.write_completed_step(proj, TEAM, step)
         if status is not None:
@@ -2472,7 +2478,7 @@ def test_re_promoting_the_current_default_repairs_a_stranded_record(
     """The pre-fix state, reproduced: a move whose carry did not run leaves the
     record behind and the projection loses it (asserted FIRST — that is the
     non-vacuity half). Re-promoting the CURRENT default is the repair lever: the
-    idempotent arm carries from the listed historical name."""
+    idempotent arm carries from the most-advanced listed candidate."""
     tc, _, _ = sb
     _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete")
     real_carry = ha._carry_onboarding_state
@@ -2571,6 +2577,135 @@ def test_the_existence_gate_follows_a_promoted_default(monkeypatch):
     assert ha._graph_has_org_namespace(TEAM, listed={_OLD_NS}) is True
     assert ha._graph_has_org_namespace(TEAM, listed={f"team_{TEAM}"}) is True
     assert ha._graph_has_org_namespace(TEAM, listed={_NEW_NS}) is False
+
+
+# ── 9b. The repair reads the LIVE record, not an older snapshot (#10452 P2)
+#
+# `copy_org_state` is a UNION-style merge that never deletes its SOURCE, so
+# every graph that was EVER the default keeps its own frozen copy. An org that
+# promoted more than once therefore holds a stale record in `org_{org_id}` and
+# the live one in a per-graph namespace, and the repair arm is the only path
+# that can tell them apart.
+
+_MID_ID = "g_10180middle0004"
+_MID_NS = f"org_{TEAM}_{_MID_ID}"
+
+
+def _seed_mid_graph(fake: FakeControlPlane) -> None:
+    """A SECOND custom graph, i.e. the second destination of a two-step move."""
+    fake.seed("graphs", [
+        {"id": _MID_ID, "org_id": TEAM, "name": "mid-extractor",
+         "kind": "custom", "namespace": _MID_NS, "status": "active",
+         "recording": None},
+    ])
+
+
+def _strand_the_record_in_a_per_graph_namespace(tc, fake, monkeypatch) -> None:
+    """The exact shape the defect needs: promote once (the record moves to a
+    per-graph namespace and `org_{org_id}` keeps a STALE copy), let the org make
+    progress in the NEW default, then promote again with the carry failing so
+    the live record stays behind in that per-graph namespace."""
+    _seed_mid_graph(fake)
+    # The ORIGINAL record, sparse — this is the snapshot `org_{org_id}` keeps.
+    _seed_onboarding(_OLD_NS, steps=("team-named",), status="active")
+    _as_session()
+    r = tc.post(f"/v1/graphs/{_MID_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding_state"]["from"] == _OLD_NS
+    # Progress made while `_MID_NS` IS the default — the state a repair that
+    # reads `org_{org_id}` would silently drop.
+    _seed_onboarding(_MID_NS,
+                     steps=("harness-connected", "first-points-filed",
+                            "decide-completed"),
+                     status="complete", fork="build")
+    # The second move commits, the carry does not (a graph hiccup).
+    real_carry = ha._carry_onboarding_state
+    monkeypatch.setattr(ha, "_carry_onboarding_state", lambda *_a, **_k: {
+        "migrated": False, "reason": "carry_failed", "from": None,
+        "to": None, "steps": 0, "status": None})
+    r = tc.post(f"/v1/graphs/{NEW_ID}/promote?org_id={TEAM}")
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding_state"]["reason"] == "carry_failed"
+    monkeypatch.setattr(ha, "_carry_onboarding_state", real_carry)
+    assert _read_onboarding(_NEW_NS) is None
+    assert _read_onboarding(_MID_NS)["status"] == "complete"
+    assert _read_onboarding(_OLD_NS)["status"] == "active"
+
+
+def test_the_repair_candidates_are_the_orgs_per_graph_namespaces_first():
+    """The candidate LIST, pinned directly: a record that moved more than once
+    lives in a per-graph namespace, while `org_{org_id}` holds a snapshot frozen
+    at the first promotion — so per-graph ranks FIRST, and another org's graphs
+    and the promotion target are never candidates."""
+    listed = {_OLD_NS, _MID_NS, f"team_{TEAM}", "org_someone-else_g_abc"}
+    assert ha._historical_onboarding_sources(TEAM, None, listed) == [
+        _MID_NS, _OLD_NS, f"team_{TEAM}"]
+    # The target is never a source of itself.
+    assert ha._historical_onboarding_sources(TEAM, _MID_NS, listed) == [
+        _OLD_NS, f"team_{TEAM}"]
+    # A pre-#3543 per-graph spelling is a candidate too.
+    legacy = f"team_{TEAM}_g_legacy"
+    assert ha._historical_onboarding_sources(TEAM, None, {legacy}) == [legacy]
+
+
+def test_the_repair_reads_the_live_record_not_an_older_snapshot(
+        sb, monkeypatch):
+    """FAIL-ON (#10452 review P2): the repair arm considered ONLY `org_{org_id}`
+    and `team_{org_id}`, so for an org that promoted twice it carried the census
+    frozen at the FIRST promotion into the new default and reported
+    `reason: copied, migrated: true` — a success receipt over every step,
+    member-progress entry and status gained in between being silently dropped.
+    Pre-fix this reads `from == org_{TEAM}` and a target holding one step in
+    `active`; post-fix it reads the per-graph namespace and `complete`.
+    """
+    tc, fake, _ = sb
+    _strand_the_record_in_a_per_graph_namespace(tc, fake, monkeypatch)
+
+    r = tc.post("/v1/graphs/default/promote?org_id=" + TEAM)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["already_default"] is True
+    carried = body["onboarding_state"]
+    assert carried["from"] == _MID_NS, (
+        f"the repair carried from {carried['from']} — the stale snapshot — "
+        "instead of the graph the record actually moved to")
+    assert carried["migrated"] is True
+    assert carried["reason"] == "copied"
+    assert carried["status"] == "complete", carried
+    assert carried["steps"] == len(_COMPLETE_STEPS), carried
+
+    repaired = _read_onboarding(_NEW_NS)
+    assert repaired is not None, "the repair wrote nothing into the new default"
+    assert repaired["status"] == "complete", repaired
+    assert set(repaired["completed_steps"]) == set(_COMPLETE_STEPS), repaired
+    assert repaired["fork"] == "build", repaired
+
+
+def test_the_repair_finds_the_record_when_the_historical_graph_is_gone(
+        sb, monkeypatch):
+    """FAIL-ON: the demoted graph is an ordinary custom graph the verb lets a
+    team list, read, back up — and therefore DELETE. Once `org_{org_id}` is gone
+    from the listing, the pre-fix candidate set was empty and the repair
+    answered `no_source`, the verdict the runbook tells the operator to ACCEPT
+    WITHOUT ACTING, over a record still stranded in the per-graph namespace.
+    """
+    tc, fake, _ = sb
+    _strand_the_record_in_a_per_graph_namespace(tc, fake, monkeypatch)
+
+    real_probe = ha._registry_existing_graphs
+    monkeypatch.setattr(
+        ha, "_registry_existing_graphs",
+        lambda: {g for g in (real_probe() or set()) if g != _OLD_NS})
+
+    r = tc.post("/v1/graphs/default/promote?org_id=" + TEAM)
+    assert r.status_code == 200, r.text
+    carried = r.json()["onboarding_state"]
+    assert carried["reason"] == "copied", carried
+    assert carried["from"] == _MID_NS, carried
+    assert carried["status"] == "complete", carried
+    repaired = _read_onboarding(_NEW_NS)
+    assert repaired is not None
+    assert set(repaired["completed_steps"]) == set(_COMPLETE_STEPS), repaired
 
 
 def test_the_projection_answers_both_questions_from_one_resolution(sb, monkeypatch):

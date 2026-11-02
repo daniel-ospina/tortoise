@@ -24245,30 +24245,111 @@ async def _apply_graph_rename(
     return {"graph_id": graph_id, "name": name}
 
 
-def _historical_onboarding_source(org_id: str, namespace: str,
-                                  listed: set[str]) -> str | None:
-    """The graph an org's onboarding record may still be sitting in (#10180).
+def _historical_onboarding_sources(org_id: str, namespace: str | None,
+                                   listed: set[str]) -> list[str]:
+    """The graphs an org's onboarding record may still be sitting in, in
+    PREFERENCE order (#10180, #10452 review P2).
 
     ``listed`` is the caller's ``_registry_existing_graphs()`` result and it is
     REQUIRED to be a real listing, because that probe is TRI-STATE: ``None``
     means "could not look", a listed empty set means "the server lists no
-    graph". This function used to collapse the two with ``or set()`` (#10452
-    review P2). On the idempotent REPAIR arm — the one path that recovers a
-    failed carry — that turned a graph-service hiccup into ``no_source``, i.e.
-    "nothing to carry", the verdict the runbook tells the operator to accept
-    without acting, while the record was still stranded in the demoted graph.
-    The tri-state is therefore decided by the caller, where the receipt is
-    written.
+    graph". This used to collapse the two with ``or set()`` (#10452 review P2).
+    On the idempotent REPAIR arm — the one path that recovers a failed carry —
+    that turned a graph-service hiccup into ``no_source``, i.e. "nothing to
+    carry", the verdict the runbook tells the operator to accept without
+    acting, while the record was still stranded in the demoted graph. The
+    tri-state is therefore decided by the caller, where the receipt is written.
 
-    Only the HISTORICAL tenant names are candidates, and only ones the server
-    actually LISTS: ``_make_sdk(namespace=…)`` re-derives ``org_{org_id}`` and
-    would MINT it, which is the pin-4 read-path write this tree bans. A name the
-    probe never observed is never opened.
+    TWO CLASSES of candidate, and the ORDER between them is itself a fix
+    (#10452 review P2):
+
+    1. This org's PER-GRAPH namespaces (``per_graph_namespace_prefixes``) that
+       the server lists. A record that moved more than once sits in the graph
+       that was the default MOST RECENTLY, and every graph that was EVER the
+       default keeps its own frozen copy — `copy_org_state` is a UNION-style
+       merge that never deletes its source. So after a promotion
+       ``org_{org_id}`` → A, then A → B whose carry FAILED, the live record is
+       in A while ``org_{org_id}`` holds a snapshot frozen at the first
+       promotion. Consulting only the historical names carried that STALE
+       snapshot into B and reported it as a successful repair, silently
+       dropping every step, member-progress entry and status gained in A.
+    2. The HISTORICAL tenant names, ``org_{org_id}`` then ``team_{org_id}``.
+       Along such a chain they are strictly OLDER than any per-graph namespace,
+       so they rank last.
+
+    Only names the server actually LISTS are candidates: ``_make_sdk(namespace=…)``
+    re-derives ``org_{org_id}`` and would MINT it, which is the pin-4 read-path
+    write this tree bans. A name the probe never observed is never opened.
+
+    The result is a RANKING, not the answer: the caller reads each candidate's
+    record and takes the most ADVANCED one (`_pick_onboarding_source`), because
+    a listing carries no order — ``graphs.created_at`` says when a graph was
+    minted, never when it last became the default.
     """
-    for candidate in (f"org_{org_id}", f"team_{org_id}"):
-        if candidate != namespace and candidate in listed:
-            return candidate
-    return None
+    from tortoise.supabase_control import per_graph_namespace_prefixes
+
+    per_graph = sorted(
+        name for name in listed
+        if name != namespace
+        and name.startswith(per_graph_namespace_prefixes(org_id)))
+    historical = [c for c in (f"org_{org_id}", f"team_{org_id}")
+                  if c != namespace and c in listed]
+    return per_graph + historical
+
+
+def _onboarding_progress(node: dict, steps: list[str]) -> tuple[int, int, int]:
+    """How far along an ``:OnboardingState`` record is — the only order this
+    tree can derive between two candidate SNAPSHOTS of it (#10180).
+
+    ``onboarding.state`` documents the record as MONOTONIC, and `copy_org_state`
+    is the writer that keeps it so: ``write_status`` never regresses from
+    ``complete``, the ``COMPLETED_STEP`` edge set only gains, and
+    ``member_progress`` only accumulates. A carry copies the source FORWARD and
+    leaves it in place, so along a promotion chain each snapshot is a SUBSET of
+    the next — which makes "most advanced" and "most recent" the same question,
+    answerable from the DATA rather than from a clock (``graphs.created_at``
+    records when a graph was minted, not when it last became the default).
+    """
+    status = 1 if node.get("status") == "complete" else 0
+    members = sum(len(steps_done or ()) for steps_done in
+                  _os.parse_member_progress(node.get("member_progress")).values())
+    return (status, len(steps), members)
+
+
+def _pick_onboarding_source(candidates: list[str], org_id: str) -> str | None:
+    """The candidate graph holding the MOST-ADVANCED onboarding record, or
+    ``None`` when none of them holds one (#10180, #10452 review P2).
+
+    Ties keep the EARLIER candidate, i.e. the preference order
+    `_historical_onboarding_sources` already established (a per-graph namespace
+    before the bare historical ones) — two snapshots of equal progress hold the
+    same state, so either carries the same thing.
+
+    A read FAILURE propagates, deliberately. This is the repair arm for a record
+    a failed carry stranded, so "I could not read this candidate" must never be
+    answered by carrying some older snapshot instead: the caller turns the
+    exception into ``carry_failed`` (the receipt's instruction to RETRY), the
+    same tri-state discipline that keeps ``probe_failed`` distinct from
+    ``no_source``.
+    """
+    best: str | None = None
+    best_key: tuple[int, int, int] | None = None
+    for candidate in candidates:
+        sdk = None
+        try:
+            sdk = _make_sdk(graph_name=candidate)
+            proj = sdk._get_proj()
+            node = _os.read_onboarding_node(proj, org_id)
+            if node is None:
+                continue
+            key = _onboarding_progress(node, _os.completed_steps(proj, org_id))
+        finally:
+            if sdk is not None:
+                with contextlib.suppress(Exception):
+                    sdk.close()
+        if best_key is None or key > best_key:
+            best, best_key = candidate, key
+    return best
 
 
 def _carry_onboarding_state(org_id: str, previous_ns: str | None,
@@ -24299,10 +24380,22 @@ def _carry_onboarding_state(org_id: str, previous_ns: str | None,
        instant), so it wins over a stale node a custom graph may have picked up.
     2. The IDEMPOTENT arm (the target is already the default, so the RPC reports
        no previous namespace) REPAIRS: if the target holds no node it carries
-       from the listed historical name. That is what makes a failed carry — and
-       an org promoted before this carry existed — recoverable by re-promoting
-       the current default, mirroring the RPC's own idempotent-arm repair
+       from the most-advanced listed candidate — this org's PER-GRAPH
+       namespaces first, then the bare historical ones, and among them the
+       record that got furthest (`_historical_onboarding_sources` /
+       `_pick_onboarding_source`). That is what makes a failed carry — and an
+       org promoted before this carry existed — recoverable by re-promoting the
+       current default, mirroring the RPC's own idempotent-arm repair
        (``namespace_repaired``). It never overwrites a present node.
+
+       ⛔ The candidate set is NOT just the two historical tenant names: every
+       graph that was EVER the default keeps a frozen copy (the merge never
+       deletes its source), so an org that promoted more than once holds a
+       STALE record in ``org_{org_id}`` and the LIVE one in a per-graph
+       namespace. Reading only the historical names repaired from the stale
+       copy and reported it as success, dropping everything gained in between
+       (#10452 review P2). Per-graph namespaces therefore rank first, and the
+       most-advanced record wins outright.
 
        The listing probe behind that name is TRI-STATE, and the arm keeps it:
        when the probe FAILS it answers ``probe_failed`` (an instruction to
@@ -24336,7 +24429,9 @@ def _carry_onboarding_state(org_id: str, previous_ns: str | None,
                 # verdict the operator must RETRY gets its own reason instead of
                 # `no_source`, which the runbook says to accept.
                 return {**report, "reason": "probe_failed"}
-            source = _historical_onboarding_source(org_id, namespace, listed)
+            source = _pick_onboarding_source(
+                _historical_onboarding_sources(org_id, namespace, listed),
+                org_id)
             if source is None:
                 return {**report, "reason": "no_source"}
         dst_sdk = dst_sdk or _make_sdk(graph_name=namespace)
