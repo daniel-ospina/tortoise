@@ -637,6 +637,28 @@ def test_a_pins_exempt_atomic_log_does_not_claim_its_disclosure(tmp_path, monkey
     assert with_disclosure == [], with_disclosure
 
 
+def test_a_merge_landing_the_pair_unchanged_is_not_a_late_edit(tmp_path, monkeypatch):
+    """REGRESSION (#10531 cycle-12 P1): the fleet's own rail lands with `--merge`, not `--squash`.
+
+    `--full-history` lists the landing merge, and that merge is a DESCENDANT of the registration's
+    add-commit — so a commit-PRESENCE bound reported it as a "late edit", consulted it BEFORE the
+    disclosure was read, and left an atomic pair landed with `--no-ff` PERMANENTLY RED with no waiver
+    route. The merge changed nothing; the bound is CONTENT now.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    # `main` needs a commit of its own, so the merge is not a fast-forward.
+    (repo / "README").write_text("root\n")
+    _git(repo, "add", "README")
+    _git(repo, "commit", "-q", "-m", "root", epoch=1_700_000_000)
+    # A feature branch adds both files in ONE commit, then main merges it --no-ff.
+    _git(repo, "checkout", "-q", "-b", "feat")
+    prereg, log = _both_in_one_commit(repo, epoch=1_700_000_000)
+    _git(repo, "checkout", "-q", "-")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "land the pair", "feat", epoch=1_700_000_500)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert failures == [], failures
+
+
 def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, Path]:
     """The ATOMIC shape: the registration and the log land in the SAME commit.
 

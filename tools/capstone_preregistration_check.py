@@ -745,14 +745,47 @@ def _touch_commits(path: Path) -> list[str]:
     return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
 
-def _late_touches(path: Path, prereg_sha: str) -> list[str]:
-    """Commit shas that touched ``path`` and are NOT ancestors of the registration's add-commit.
+def _blob_at(sha: str, rel: Path) -> str:
+    """The blob id of ``rel`` at ``sha``, or ``""`` when the path does not exist there."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{sha}:{rel}"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError:  # pragma: no cover - git absent
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
 
-    An EMPTY list means every change to the file is contained in the registration's own history, so
-    the file's content cannot postdate the thresholds. Any non-empty entry is a change the
-    registration could not have seen — the laundering shape, whatever the commit's dates say.
+
+def _late_touches(path: Path, prereg_sha: str) -> list[str]:
+    """Commits that changed ``path``'s CONTENT outside the registration's ancestry.
+
+    ⛔ CONTENT, NOT COMMIT-PRESENCE (#10531 review cycle 12, P1). `--full-history` deliberately lists
+    a MERGE commit that carried the path in from a branch side, and that merge is a DESCENDANT of the
+    registration's add-commit — so a commit-presence test reported the landing merge as a "late
+    edit". The merge changed nothing (same blob), yet the bound is consulted BEFORE the disclosure is
+    even read, so an atomic pair landed with `--merge`/`--no-ff` — which is exactly what this repo's
+    own merge rail does — was PERMANENTLY RED with no waiver route, and would have red-ed `main` on
+    landing: the #10468 outage class this change exists to end, re-created one shape over.
+
+    A touching commit therefore counts only when it actually CHANGED the file relative to the
+    registration's own snapshot. An in-place rewrite, a backdated edit, a stripped number and a
+    delete-and-re-add all change the blob and stay red; a merge that carries the pair through
+    unchanged does not.
     """
-    return [sha for sha in _touch_commits(path) if not _is_ancestor(sha, prereg_sha)]
+    try:
+        rel = path.resolve().relative_to(REPO_ROOT)
+    except ValueError:
+        return []
+    base = _blob_at(prereg_sha, rel)
+    late: list[str] = []
+    for sha in _touch_commits(path):
+        if _is_ancestor(sha, prereg_sha):
+            continue
+        if base and _blob_at(sha, rel) == base:
+            continue  # the commit touched the path but left its content identical (a landing merge)
+        late.append(sha)
+    return late
 
 
 def _atomic_detail_entry(block: dict) -> dict:
