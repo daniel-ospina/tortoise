@@ -2895,12 +2895,19 @@ def test_every_readme_line_cite_carries_the_sentence_it_quotes():
     The first version skipped a cite with no quote (`continue`) and then asserted
     `checked >= 1` — satisfied by the single quoted cite — so three of the four
     cites in this document were resolved by nothing, in the one file whose thesis
-    is that unwatched claims rot. The guard is now `checked == len(found)`, so a
-    dropped quote reds instead of silently shrinking coverage.
+    is that unwatched claims rot. EVERY cite is now visited — but read the guard
+    for what it is: `checked == len(found)` increments before either branch, so it
+    cannot fail, and it guards VISITATION, not coverage. What reds is the check
+    each visited cite must pass: a cite that QUOTES a sentence must carry that
+    sentence inside the range it names. A cite that quotes nothing is anchored by
+    a case token instead — a weaker anchor, and the honest limitation of this pin:
+    a quote DELETED from a cite degrades to that anchor rather than redding, so the
+    pin proves every cite names something real, never that a cite meant to quote.
 
     Non-vacuity: at the pre-fix head this pin reds, because the cited range no
-    longer carries the quote it names; re-pointing any surviving cite at the
-    wrong range reds too. (The failing range is not re-quoted here for the same
+    longer carries the quote it names. Re-pointing a QUOTED cite at the wrong
+    range reds; an UNQUOTED cite reds only when the wrong range carries none of
+    the case tokens its citing line names (the weaker anchor, stated above). (The failing range is not re-quoted here for the same
     reason as above — it is the drift, not the spec.)
     """
     import re as _re
