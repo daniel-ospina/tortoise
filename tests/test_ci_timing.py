@@ -6505,7 +6505,7 @@ def test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped() -> None:
     # flattens it (the case the removed clause went red on), and once it does not, the
     # render still exercises a re-base — so this half does not itself re-stale.
     lines = text.split("\n")
-    index, entries = ci_timing._locate_durations_block(lines)
+    _index, entries = ci_timing._locate_durations_block(lines)
     keys = list(entries)
     wrapped_keys = [k for k in keys
                     if ci_timing._row_continuation_lines(lines, entries[k])]
