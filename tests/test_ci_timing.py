@@ -6118,8 +6118,8 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
 # A row's note is not the tail on its row line: the map wraps long notes across
-# indented `#` continuation lines (76 rows), and the guard that judges a written
-# map joins them before judging (`tests/test_ci_selection.py`
+# indented `#` continuation lines (72 rows at the 2026-11-02 head), and the guard
+# that judges a written map joins them before judging (`tests/test_ci_selection.py`
 # `_durations_row_comments`). The renderer used to reason about the row-line
 # FRAGMENT only, so a cut on the fragment dropped half a sentence and
 # `_balance_cut_parens` — seeing an unclosed `(` whose `)` sat on a continuation —
@@ -6276,3 +6276,95 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
     assert lines.index("  test_newly_registered.py: 5.0") == wrap + 1, (
         "the appended row was spliced into the last row's note: "
         f"{lines[row:row + 4]}")
+
+
+# ── …and the OTHER convention: a block that OPENS a note is not the row above's ──
+#
+# This map's dominant convention is the block that PRECEDES the row it documents
+# (71 of the 72 blocks beside a row at the 2026-11-02 head open a note of their own),
+# and nothing in YAML says which row a comment belongs to — §3.2.3.3 of the spec:
+# comments are “a presentation detail … not associated with a particular node”.
+#
+# The re-emit paths are DESTRUCTIVE (an APPEND writes into the last continuation; a
+# CUT re-emits the joined note on the row line and DROPS the continuations), so a
+# block claimed from the wrong side is folded into the row ABOVE and deleted from
+# where it documents its own row — which is left with no note at all. Measured on
+# the real map at this head, every row re-based once: **36 rows lost their block,
+# 349 lines folded into row lines**. The committed instance is the
+# `355.0 IS A DELIBERATE CAP … #9172` block: it lies directly under
+# `test_work_claim.py: 3.8` and documents `test_lane_stash.py: 25.4`.
+_NOTE_BLOCK_FOR_THE_ROW_BELOW_MANIFEST = """\
+surfaces:
+  core:
+    - test_above.py
+    - test_below.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations_held_equal: {}
+surfaces_x: []
+durations:
+  test_above.py: 3.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (2.5s) is a LOWER bound; kept 3.8
+  # #8051: LOCAL readings on this fleet-loaded host — 366.4s, 422.9s, 216.6s.
+  #
+  # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING. Raising it is a CI-budget
+  # decision recorded on #9172 rather than smuggled in with a weight.
+  test_below.py: 25.4  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 355.0
+"""
+
+
+#: The block above `test_below.py`'s row — a NEIGHBOUR's note, byte-for-byte.
+_NOTE_BLOCK_FOR_THE_ROW_BELOW = [
+    "  # #8051: LOCAL readings on this fleet-loaded host — 366.4s, 422.9s, 216.6s.",
+    "  #",
+    "  # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING. Raising it is a CI-budget",
+    "  # decision recorded on #9172 rather than smuggled in with a weight.",
+]
+
+
+def test_a_note_block_that_opens_of_its_own_is_never_this_rows() -> None:
+    """A HELD row must not write its basis into a neighbour's block (nor eat it).
+
+    The row above the block has no declared testcase count, so it is HELD on every
+    refresh — and a HELD row's basis is APPENDED, which is the path that wrote
+    `… kept 3.8` onto the last line of the `355.0` cap block. One refresh later the
+    prior basis sits at the end of the joined “note”, `_strip_prior_held_basis`
+    leaves a survivor set that is not a prefix of it, and the CUT branch folds the
+    whole block into the row line and drops the continuation lines.
+
+    Non-vacuity (measured against the pre-fix module at this commit's parent, the
+    two refreshes below, each with its OWN run label as a weekly sweep has):
+    refresh 1 emits `  # decision recorded on #9172 rather than smuggled in with a
+    weight. — ci-timing junit-census+top-15 2026-11-09 …` (the decision text now
+    carries a 3.8 row's provenance), and refresh 2 emits a single 653-char
+    `test_above.py` row line with all four block lines gone. On the real map the
+    same two refreshes fold 36 rows and 349 lines, the largest a 2512-char row.
+    """
+    held = {"test_above.py": 2.5}
+    coverage = {"test_above.py": (0, 0)}  # UNKNOWN denominator: cannot prove coverage
+    first, _ = ci_timing.render_refreshed_manifest(
+        _NOTE_BLOCK_FOR_THE_ROW_BELOW_MANIFEST, held, "2026-11-02T00:00:00Z",
+        coverage=coverage,
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert _NOTE_BLOCK_FOR_THE_ROW_BELOW == [
+        ln for ln in first.splitlines() if ln in _NOTE_BLOCK_FOR_THE_ROW_BELOW], (
+        "a refresh wrote into a block that documents another row: "
+        f"{first.splitlines()[11:18]}")
+    # The HELD basis still lands on the row it belongs to.
+    row = next(ln for ln in first.splitlines() if ln.startswith("  test_above.py:"))
+    assert row.endswith("kept 3.8"), row
+    assert "#9172" not in row, row
+    # …and the NEXT week's refresh (a new run, so a new basis) does not fold the
+    # block into that row either.
+    second, _ = ci_timing.render_refreshed_manifest(
+        first, held, "2026-11-09T00:00:00Z", coverage=coverage,
+        sample_label="ci-timing junit-census+top-15 2026-11-16 (run 41379999998)")
+    assert _NOTE_BLOCK_FOR_THE_ROW_BELOW == [
+        ln for ln in second.splitlines() if ln in _NOTE_BLOCK_FOR_THE_ROW_BELOW], (
+        "the next week's render folded the neighbour's block into the row above: "
+        f"{second.splitlines()[11:18]}")
+    assert "355.0 IS A DELIBERATE CAP" not in next(
+        ln for ln in second.splitlines() if ln.startswith("  test_above.py:"))
+
+

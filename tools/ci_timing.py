@@ -2037,11 +2037,16 @@ def _balance_cut_parens(text: str) -> str:
 # ── a row's NOTE is one paragraph, WRAPPED across physical lines ──────────
 #
 # `_DURATION_LINE_RE` reads a row's note as the tail on its own line, but this
-# map's long notes are wrapped: an indented `#` line under a row continues THAT
-# row's note (76 rows in the committed map), which is exactly how the guard that
-# judges the written map reads it (`tests/test_ci_selection.py`
-# `_durations_row_comments` joins a row's tail with its continuations before it
-# judges a note).
+# map's long notes are wrapped: an indented `#` line under a row can continue THAT
+# row's note (72 rows at the 2026-11-02 head), and the guard that judges the
+# written map joins a row's tail with its continuations before it judges a note
+# (`tests/test_ci_selection.py::_durations_row_comments`).
+#
+# ⛔ …but “under a row” is NOT “belongs to that row”, and the difference is the
+# whole of `_row_continuation_lines`' third condition. See its docstring: this
+# map's dominant convention is the OPPOSITE one — an indented block PRECEDES the
+# row it documents — and nothing in YAML says which. The writer must therefore
+# only ever carry a block it can read as a continuation of the row's sentence.
 #
 # Every clause cutter in this module decides what to drop by MATCHING and CUTTING
 # text, so handing it the fragment on the row line made it judge half a sentence —
@@ -2074,22 +2079,95 @@ def _comment_body(line: str) -> str:
     return stripped[1:].strip() if stripped.startswith("#") else stripped
 
 
+#: A comment line that OPENS a note of its own instead of continuing the one above
+#: it. TWO shapes, both measured in the committed map: an issue anchor at the start
+#: (`#8135: …`, `3400 trap: …`, `#3400/#4221 …`, `#9078's guard …`) and a capitalised
+#: sentence start (`The two rows below …`, `Measured locally …`, `A YAML mapping …`).
+#:
+#: A NUMBER that continues a measurement is deliberately NOT an opener: `\d{3,5}`
+#: has to be followed by `:`, `/`, `'` or space for the anchor reading, so a wrapped
+#: `# 198s at 79, 223s at 82 …` or `# 422.9s and 216.6s …` stays a continuation.
+_NOTE_OPENER_RE = re.compile(r"^(?:#?\d{3,5}(?:/\d{3,5})*(?=[\s:/'\u2019])|[A-Z])")
+
+
+def _starts_a_new_note(line: str) -> bool:
+    """Does this indented `#` line open a note, rather than continue the one above?"""
+    body = _comment_body(line).lstrip("# \t")
+    return bool(body) and _NOTE_OPENER_RE.match(body) is not None
+
+
 def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
     """Indices of the indented `#` lines that CONTINUE `lines[index]`'s note.
 
-    TWO conditions, and the second is not decoration. A continuation must be
-    INDENTED: this block also carries COLUMN-0 prose (199 lines at the 2026-11-02
-    head — the `# #3395: per-file CI wall time …` method note sits between rows),
-    and attaching that to the row above it made one row's "note" 122 lines of the
-    map's own header. A rewrite that cut such a "note" would delete the header
-    with it.
+    THREE conditions, and only the first is about layout.
 
-    What remains mirrors the READER that judges a written map
-    (`tests/test_ci_selection.py::_durations_row_comments`): a blank line does not
-    end a note and any other non-comment line does. Keeping the renderer's notion
-    of a note's span IDENTICAL to the reader's is the point — a writer reasoning
-    about a different span than the guard is how a cut came to orphan a
-    parenthesis the guard was counting.
+    1. A continuation must be INDENTED. This block also carries COLUMN-0 prose (186
+       lines at the 2026-11-02 head — the `# #3395: per-file CI wall time …` method
+       note sits between rows), and attaching that to the row above it made one
+       row's "note" 122 lines of the map's own header. A rewrite that cut such a
+       "note" would delete the header with it.
+
+    2. A blank line does not end a note and any other non-comment line does. This
+       mirrors the READER that judges a written map
+       (`tests/test_ci_selection.py::_durations_row_comments`): a writer reasoning
+       about a different span than the guard is how a cut came to orphan a
+       parenthesis the guard was counting.
+
+    3. ⛔ The block must actually CONTINUE the row's sentence — its first line must
+       not OPEN a note (`_starts_a_new_note`). This is the condition YAML cannot
+       supply an answer for, so it is the one the writer has to be conservative
+       about: §3.2.3.3 of the spec says comments are "a presentation detail … not
+       associated with a particular node", so *nothing* in the file says which row
+       an indented block documents. This map's DOMINANT convention is the opposite
+       of the one the previous two conditions imply — an indented block PRECEDES
+       the row it documents (measured at this head: 71 of the 72 such blocks open a
+       new note, and the ones sampled document the row BELOW — `# #4071: …` sits
+       above `test_embedded_lane_canonical_store_4071.py`, `# #5612: …` above
+       `test_journal_growth.py`, and the `355.0 IS A DELIBERATE CAP … #9172` block
+       above `test_lane_stash.py` while lying directly under `test_work_claim.py`).
+
+       WHY IT IS THE WRITER'S PROBLEM AND NOT A TIDINESS NIT. The re-emit paths
+       below are DESTRUCTIVE: an APPEND appends to the last continuation, and a CUT
+       re-emits the joined note on the row line and DROPS the continuation lines.
+       Treating a neighbour's block as this row's note therefore folds it into the
+       row above and deletes it from where it documents its own row — and the value
+       it was written for is left with no note at all. Measured on the REAL map
+       (this head, every row re-based once, which is what a weekly refresh does):
+       **36 rows lost their block, 349 lines were folded into row lines**. The text
+       survives but the ATTRIBUTION does not, and two MERGE-GATING guards read prose
+       off whichever row line it sits on (`_durations_rows_claiming_the_flat_default`,
+       `_durations_rows_stating_a_stale_watchdog_floor`) — a swallowed block carrying
+       one of those claim shapes is judged against the wrong row's value, i.e. a
+       false red or a false green in a required leg.
+
+       So: a block that opens a note is NOT this row's note. It is not joined, not
+       appended into, and not dropped — the row line is rewritten and the block is
+       left byte-identical. `test_a_note_block_that_opens_of_its_own_is_never_this_rows`
+       pins the behaviour on a synthetic map;
+       `tests/test_ci_selection.py::test_the_cap_block_is_not_read_as_the_row_aboves_note`
+       pins it on the real one.
+    """
+    out: list[int] = []
+    for j in range(index + 1, len(lines)):
+        stripped = lines[j].strip()
+        if stripped.startswith("#") and lines[j][:1].isspace():
+            if not out and _starts_a_new_note(lines[j]):
+                return []
+            out.append(j)
+        elif stripped:
+            break
+    return out
+
+
+def _row_indented_comment_run(lines: list[str], index: int) -> list[int]:
+    """Every indented `#` line below `lines[index]`, opener or not.
+
+    The REGISTRATION append point's span, and deliberately WIDER than
+    `_row_continuation_lines`: a block below the block's LAST row has no row below
+    it to document, so it cannot be a preamble and is that row's note whatever it
+    opens with. Appending inside it would put the new row mid-note; appending before
+    it would put the new row between the last row and its own note, and the block
+    would then read as the NEW row's.
     """
     out: list[int] = []
     for j in range(index + 1, len(lines)):
@@ -2563,7 +2641,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             if survivors == note_body:
                 # The note is UNTOUCHED by this render: write only the value and
                 # keep the writer's own line breaks (re-wrapping here would
-                # reformat 76 rows for a refresh that changed none of their
+                # reformat 72 rows for a refresh that changed none of their
                 # prose).
                 lines[index] = f"{rendered_row}{row_tail}"
             elif note_body and survivors.startswith(note_body):
@@ -2613,7 +2691,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # registration path instead of the cut path. The block's last row carries
         # no continuation in the committed map today, which is the only reason it
         # never materialised; it is one wrapped last row away.
-        continuation_of_last = _row_continuation_lines(lines, last_index)
+        continuation_of_last = _row_indented_comment_run(lines, last_index)
         insert_at = (continuation_of_last[-1] if continuation_of_last
                      else last_index) + 1
         rendered: list[str] = []
