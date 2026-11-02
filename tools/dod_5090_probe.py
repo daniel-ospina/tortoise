@@ -869,44 +869,35 @@ def score_path_bullet() -> Row:
     # PARTIAL below, because re-classing a writer does not make the vocabulary
     # resolve it. (An earlier draft read this as "a complete measurement" and
     # flipped the row to MET, breaking bullet 2's own falsifier; reverted.)
-    #
-    # ⛔ The population is `unresolved_write`, NOT `unknown`. `unknown` is
-    # keyed on the LABEL (`label.startswith("UNKNOWN")`), so it is strictly
-    # wider than this census in TWO ways that the census has no vocabulary for:
-    #
-    #   · `duplicate` identities — a DIFFERENT defect (a label was LOST when
-    #     the later definition overwrote the earlier one). The surviving
-    #     identity is not the one an entry would name and there is no writer to
-    #     class; the duplicate is already reported by its own note above.
-    #   · `gated`/`ungated` writers whose label derivation still failed
-    #     (`UNKNOWN`, or the `UNKNOWN(two labels: …)` shape). Their ROUTE is
-    #     resolved — that is exactly what `kind` records — so the three #10541
-    #     route classes do not apply to them either; they are a label defect,
-    #     not a census subject.
-    #
-    # #10541's census asks which of the three honest classes an unresolved
-    # PRODUCER is in, so that is the population. Iterating `unknown` here made
-    # a duplicate read as `UNCLASSIFIED writers (… #10541's own defect)` and
-    # printed a census note of `recognised_producer=0 | exempt=0 | bypass=0`
-    # over it, i.e. it attributed an identity hole to a census that cannot have
-    # a key for it. It is the SAME population the falsifier
-    # `test_every_unresolved_writer_carries_a_census_class` measures, so the
-    # instrument and its pin cannot disagree about what is being censused.
-    # Because the two populations CAN differ, the note below names the one it
-    # counted (`N of M UNKNOWN-labelled writers`) instead of claiming "the
-    # unresolved set": a total that silently omits a writer listed four notes
-    # up is the same defect shape this whole block exists to remove.
-    unresolved_writers = sorted(
-        fn for fn, d in writers.items() if d["kind"] == "unresolved_write")
+    # ⛔ The census population is the `unresolved_write` set — the SAME set
+    # `test_every_unresolved_writer_carries_a_census_class` walks — and NOT
+    # `unknown`, which also carries the `duplicate` identities. A duplicate is
+    # a DIFFERENT defect (two definitions collided, so the later one's label
+    # overwrote the earlier one) and has no key it could EVER have in
+    # `WRITER_CENSUS`, so iterating `unknown` printed a census over a
+    # population of ZERO whenever a duplicate was the only unresolved entry,
+    # and reported a collision as "#10541's own defect". This row is quoted
+    # into #5090's body as evidence, so the misattribution is what a reader
+    # sees (review at `adde2763f`, blocking).
+    unresolved_writers = {fn: d for fn, d in writers.items()
+                          if d["kind"] == "unresolved_write"}
+    # `unknown` is wider than this population by TWO label-keyed groups, and
+    # neither is a census subject: the `duplicate` identities above, and
+    # `gated`/`ungated` writers whose label derivation still failed (`UNKNOWN`,
+    # or the `UNKNOWN(two labels: …)` shape) — those have their ROUTE resolved,
+    # which is what `kind` records, so the three #10541 route classes cannot
+    # apply to them. Because the two populations CAN differ, the note below
+    # names the one it counted (`N of M UNKNOWN-labelled writers`) rather than
+    # claiming "the unresolved set": a total that silently omits a writer this
+    # row listed four notes up is the same defect shape the population fix
+    # above removes.
     # An out-of-vocabulary class (a typo'd or retired entry) is NOT a class: it
     # would otherwise fall through BOTH `by_class` (gated on CENSUS_CLASSES) and
     # `unclassified` (gated on `is None`), leaving the writer named nowhere and
-    # the per-class totals summing to 0 over a non-empty population. The
-    # sibling falsifier catches the typo in CI; the instrument must not lie
-    # about it in the meantime.
-    unclassified = sorted(
-        fn for fn in unresolved_writers
-        if _census_class(fn) not in CENSUS_CLASSES)
+    # every class total reading 0 over a non-empty population. The sibling
+    # falsifier catches the typo in CI; the instrument must not lie meanwhile.
+    unclassified = sorted(fn for fn in unresolved_writers
+                          if _census_class(fn) not in CENSUS_CLASSES)
     by_class: dict[str, list[str]] = {}
     for fn in unresolved_writers:
         cls = _census_class(fn)
@@ -914,10 +905,15 @@ def score_path_bullet() -> Row:
             by_class.setdefault(cls, []).append(fn)
     if unresolved_writers:
         notes.append(
-            "#10541 census over the unresolved PRODUCERS "
-            f"({len(unresolved_writers)} of {len(unknown)} UNKNOWN-labelled "
-            "writers): "
-            + " | ".join(
+            "#10541 census over the writers labelled UNKNOWN(unresolved "
+            f"producer) — {len(unresolved_writers)} of {len(unknown)} "
+            "UNKNOWN-labelled writers: "
+            # ⛔ NOT `" | "`: `Row.observed` joins these notes and `_table`
+            # emits the result RAW into a 4-column markdown row, so one pipe in
+            # one note adds spurious columns to the one artifact a reader
+            # actually looks at (GFM: an unescaped `|` is a cell separator).
+            # A middle dot separates the counts without escaping anything.
+            + " · ".join(
                 f"{cls}={len(by_class.get(cls, []))}"
                 + (f" ({', '.join(sorted(by_class[cls]))})" if by_class.get(cls) else "")
                 for cls in CENSUS_CLASSES
