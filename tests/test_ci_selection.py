@@ -6957,8 +6957,21 @@ _ROW_LEADS_WITH_UNMEASURED = re.compile(r"[ \t]*#\s*unmeasured\b")
 
 
 def _durations_row_tail(key: str) -> str:
-    """The tail comment of a `durations:` row, or "" when the row is absent."""
-    for line in cs.MANIFEST.read_text(encoding="utf-8").splitlines():
+    """The tail comment of a `durations:` row, or "" when the row is absent.
+
+    Scoped to the `durations:` block, NOT the whole file: a floored/capped key is
+    also declared in `durations_floors` ABOVE the block, and a whole-file scan takes
+    that declaration for the row — returning its (empty) tail while the real row
+    carries the note the caller is asking about (#10575 delta review, P3).
+    """
+    lines = cs.MANIFEST.read_text(encoding="utf-8").splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
+    except StopIteration:  # pragma: no cover — the map always declares the block
+        return ""
+    end = next((i for i in range(start + 1, len(lines))
+                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
+    for line in lines[start + 1:end]:
         m = _DURATIONS_ROW_RE.match(line)
         if m is not None and m.group("key") == key:
             return m.group("tail")

@@ -54,6 +54,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 SCHEMA_VERSION = 1
 MAX_HISTORY_DEFAULT = 52
@@ -2434,7 +2435,21 @@ def _strip_unmeasured_marker(tail: str) -> str:
     return f"  # {rest}" if rest else ""
 
 
-def _declared_floors(manifest_text: str) -> dict[str, float]:
+class DeclaredFloor(NamedTuple):
+    """One `durations_floors` declaration: the value, and whether it is a CAP.
+
+    `pinned=False` is a FLOOR (a MINIMUM): a reading may raise the row above it and
+    never lower it below. `pinned=True` is a CAP: the declared value is the weight in
+    BOTH directions, because the rows that carry one record a weighing choice rather
+    than a reading (#6133/#9172), so a sweep may neither discount it nor smuggle in
+    a raise of it (`erring high is the rule` is not `erring higher is fine`).
+    """
+
+    value: float
+    pinned: bool
+
+
+def _declared_floors(manifest_text: str) -> dict[str, DeclaredFloor]:
     """`durations_floors` — rows whose weight is a DECLARED FLOOR, not a reading.
 
     Some rows in this map do not record what the file cost; they record what the
@@ -2456,8 +2471,23 @@ def _declared_floors(manifest_text: str) -> dict[str, float]:
     above it stayed byte-identical (#10575 review, P1). A decision the writer
     cannot honour is a decision the next sweep re-decides.
 
-    A floor is a MINIMUM: a reading may raise the row above it and never lower it
-    below. Absent or unreadable → no floors, so every caller and fixture that
+    TWO DECLARATION SHAPES, because the same prose records two different
+    decisions and only one of them is one-directional:
+
+    * a bare number is a FLOOR — a MINIMUM. A reading may RAISE the row above it
+      and never lower it below. This is the shape for a row that records what the
+      pack SHALL assume *at least*;
+    * `{value: 355.0, pinned: true}` is a CAP — the declared value IS the weight,
+      in BOTH directions, so a sweep may neither discount it NOR raise it. The
+      three rows above are caps, and they say so in their own notes (`⛔ 390.0 is
+      the file's real cost … do not read 355.0 as a measurement of this file`,
+      `355.0 IS A DELIBERATE CAP`). One-directional was measured to be WRONG for
+      them (#10575 delta review, P2): an ordinary sweep that measured 390.0 for
+      `test_calibration.py` was adopted, leaving a row that states a CEILING beside
+      the very reading its note says must not become the weight — the hand-edit a
+      human had already made once, done silently by the sweep instead.
+
+    Absent or unreadable → no declarations, so every caller and fixture that
     carries no such key keeps its output.
     """
     import yaml
@@ -2466,15 +2496,50 @@ def _declared_floors(manifest_text: str) -> dict[str, float]:
     except yaml.YAMLError:
         return {}
     floors = data.get("durations_floors") if isinstance(data, dict) else None
-    if not isinstance(floors, dict):
+    if floors is None:
         return {}
-    out: dict[str, float] = {}
-    for row, floor in floors.items():
+    if not isinstance(floors, dict):
+        # Fail CLOSED on the CONTAINER too: `durations_floors:` written as a LIST
+        # (a one-character mis-indent, or a "tidy" away from a mapping) used to read
+        # as "no floors" on BOTH sides — the writer and `floor_issues` — so every
+        # declared cap reverted on the next sweep with no signal anywhere. That is
+        # the exact #10575 P1 this mechanism exists to prevent, reached through a
+        # shape the mechanism itself could not see (#10575 review, F2).
+        raise DurationsBridgeError(
+            f"`durations_floors` is a {type(floors).__name__}, not a mapping — a "
+            "declaration block the writer cannot read is one it must refuse rather "
+            "than silently treat as absent, or every declared cap reverts on the "
+            "next sweep"
+        )
+    out: dict[str, DeclaredFloor] = {}
+    for row, declaration in floors.items():
         if not isinstance(row, str):
             continue
-        try:
-            out[row] = float(floor)
-        except (TypeError, ValueError):
+        if isinstance(declaration, dict):
+            unknown = sorted(set(declaration) - {"value", "pinned"})
+            if unknown:
+                # Fail CLOSED on a container shape this reader does not know: a
+                # key it ignores is a declaration the writer would silently drop.
+                raise DurationsBridgeError(
+                    f"`durations_floors` declares {row!r} with the unknown key(s) "
+                    f"{', '.join(map(repr, unknown))} — the only accepted keys are "
+                    "`value` and `pinned`, and a declaration this reader cannot "
+                    "fully honour is one it must refuse rather than partly apply"
+                ) from None
+            pinned = declaration.get("pinned", False)
+            if not isinstance(pinned, bool):
+                raise DurationsBridgeError(
+                    f"`durations_floors` declares {row!r} with `pinned: "
+                    f"{pinned!r}`, which is not a boolean — a cap the writer "
+                    "cannot classify is a cap it would silently downgrade to a "
+                    "one-directional floor"
+                ) from None
+            floor = declaration.get("value")
+        else:
+            pinned = False
+            floor = declaration
+        if isinstance(floor, bool) or not isinstance(floor, (int, float)) \
+                or not math.isfinite(float(floor)):
             # Fail CLOSED on a floor nobody can read: a typo must not silently
             # become "no floor", which is the state this mechanism exists to end.
             raise DurationsBridgeError(
@@ -2482,6 +2547,7 @@ def _declared_floors(manifest_text: str) -> dict[str, float]:
                 "a number — a floor the writer cannot compare against is a floor "
                 "the writer would silently ignore"
             ) from None
+        out[row] = DeclaredFloor(float(floor), pinned)
     return out
 
 
@@ -2611,6 +2677,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         coverage_by_key = dict(coverage)
     floors = _declared_floors(manifest_text)
     kept_as_lower_bound = 0
+    kept_at_declared_cap = 0
     drop: set[int] = set()
     for key in sorted(resolved):
         if key not in entries:
@@ -2674,11 +2741,19 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # above it is adopted normally, so the row still tracks a genuinely more
         # expensive file.
         floor = floors.get(key)
-        below_floor = floor is not None and measured < floor
-        kept = kept or below_floor
+        below_floor = floor is not None and measured < floor.value
+        # A CAP is two-sided: the declared value is the weight, so a reading ABOVE
+        # it is refused exactly like a discount. Adopting it would leave the row
+        # stating a CEILING beside the reading its own note says must not become
+        # the weight (#10575 delta review, P2).
+        above_cap = floor is not None and floor.pinned and measured > floor.value
+        kept = kept or below_floor or above_cap
         new_value = previous if kept else measured
         if kept:
-            kept_as_lower_bound += 1
+            if above_cap:
+                kept_at_declared_cap += 1
+            else:
+                kept_as_lower_bound += 1
         # An ADOPTED row's `# unmeasured` marker is FALSIFIED by the adoption, so
         # the marker goes — but the note behind it is the row's record, and the
         # old `tail = ""` here deleted it along with the marker (#9134 review,
@@ -2710,8 +2785,11 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                 # that leads with "no declared testcase count" would read as though
                 # a provable reading could have taken the row — which is the exact
                 # false confidence this mechanism removes.
-                reason = (f"this row's weight is a DECLARED FLOOR ({floor:.1f}), not "
-                          f"a reading; a sweep may RAISE it but never lower it")
+                reason = (f"this row's weight is a DECLARED FLOOR ({floor.value:.1f}), "
+                          f"not a reading; a sweep may RAISE it but never lower it")
+            elif above_cap:
+                reason = (f"this row's weight is a DECLARED CAP ({floor.value:.1f}), not "
+                          f"a reading; a sweep may neither RAISE nor LOWER it")
             elif declared <= 0:
                 reason = ("no declared testcase count for this file (UNKNOWN), so "
                           "the reading cannot prove it saw the whole file")
@@ -2743,6 +2821,10 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                 basis = (f"{sample_label}: {reason}; the reading "
                          f"({measured:.1f}s) is carried as evidence and refused "
                          f"as a discount; kept {previous:.1f}")
+            elif above_cap:
+                basis = (f"{sample_label}: {reason}; the reading "
+                         f"({measured:.1f}s) is carried as evidence and refused "
+                         f"as a raise; kept {previous:.1f}")
             elif reason is None:
                 basis = (f"{sample_label}: the reading saw {observed} of {declared} "
                          f"testcases = {measured:.1f}s in the largest single job "
@@ -2909,6 +2991,12 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # Rows a partial reading would have LOWERED: the recorded value stands
         # and the reading is written as the floor it is (#9134 review, P1).
         "kept_as_lower_bound": kept_as_lower_bound,
+        # Rows a reading would have RAISED above a declared CAP: the declared value
+        # stands, because a cap is a weighing choice and raising it is a CI-budget
+        # decision recorded on #9172, never a side effect of a sweep (#10575 delta
+        # review, P2). Counted apart from `kept_as_lower_bound`, which means the
+        # opposite direction, so neither number can be read as the other.
+        "kept_at_declared_cap": kept_at_declared_cap,
         "captured_at": captured_at,
     }
     text = "\n".join(lines)

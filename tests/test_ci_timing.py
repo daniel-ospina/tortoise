@@ -797,6 +797,7 @@ def test_refresh_durations_is_text_preserving_and_carries_forward(tmp_path: Path
     assert 'durations_captured_at: "2026-09-28T00:00:00Z"' in text
     assert stats == {"sampled_keys": 2, "manifest_keys": 3, "added_keys": 0,
                      "carried_forward": 1, "kept_as_lower_bound": 0,
+                     "kept_at_declared_cap": 0,
                      "captured_at": "2026-09-28T00:00:00Z"}
     # the result is still valid YAML and still passes the manifest-side gate
     manifest = yaml.safe_load(text)
@@ -6119,7 +6120,7 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 #
 # A row's note is not the tail on its row line: a note CAN wrap across indented `#`
 # continuation lines (measured at this head: 1 row of 1222 — the block's
-# dominant shape is the PREAMBLE for the row below, 72 of its 73 indented blocks),
+# dominant shape is the PREAMBLE for the row below, 73 of its 74 indented blocks),
 # and the guard that judges a written map joins them before judging
 # (`tests/test_ci_selection.py`
 # `_durations_row_comments`). The renderer used to reason about the row-line
@@ -6157,8 +6158,8 @@ durations:
 def test_a_cut_on_a_wrapped_note_does_not_orphan_a_parenthesis() -> None:
     """The renderer joins the span before cutting it, and re-emits the survivor.
 
-    Non-vacuity (measured against the pre-fix renderer at this commit's parent): the
-    cut ran on the row-line fragment, `_balance_cut_parens` deleted the `(` whose
+    Non-vacuity (measured against the renderer before `50f60d5f8`, which introduced
+    the span join): the cut ran on the row-line fragment, `_balance_cut_parens` deleted the `(` whose
     `)` was on a continuation, and the emitted row was
     `test_wrapped_cut.py: 3.1  # ci-timing … ; was 9.5` followed by the orphaned
     `# never ran cannot appear in an artifact), …` lines — an unbalanced note and
@@ -6335,8 +6336,9 @@ def test_a_note_block_that_opens_of_its_own_is_never_this_rows() -> None:
     leaves a survivor set that is not a prefix of it, and the CUT branch folds the
     whole block into the row line and drops the continuation lines.
 
-    Non-vacuity (measured against the pre-fix module at this commit's parent, the
-    two refreshes below, each with its OWN run label as a weekly sweep has):
+    Non-vacuity (measured against the module before `66c88704b`, which introduced
+    the opener rule, and against the two refreshes below, each with its OWN run
+    label as a weekly sweep has):
     refresh 1 emits `  # decision recorded on #9172 rather than smuggled in with a
     weight. — ci-timing junit-census+top-15 2026-11-09 …` (the decision text now
     carries a 3.8 row's provenance), and refresh 2 emits a single 653-char
@@ -6400,7 +6402,14 @@ def _durations_row_note(text: str, key: str) -> str:
     note the cutters see — a wrapped note is ONE note.
     """
     lines = text.split("\n")
-    index = next(i for i, ln in enumerate(lines) if ln.startswith(f"  {key}: "))
+    # Look INSIDE the `durations:` block: a declared floor/cap RESTATES the same key
+    # above the block (`durations_floors`), and a whole-file scan takes that
+    # declaration for the row — reporting a weight and a note that belong to the
+    # declaration, with nothing to trip on (#10575 delta review, P3).
+    block_start, _ = ci_timing._locate_durations_block(lines)
+    assert block_start is not None, "the map declares no `durations:` block"
+    index = next(i for i in range(block_start + 1, len(lines))
+                 if lines[i].startswith(f"  {key}: "))
     match = ci_timing._DURATION_LINE_RE.match(lines[index])
     assert match is not None, lines[index]
     continuation = ci_timing._row_continuation_lines(lines, index)
@@ -6410,8 +6419,16 @@ def _durations_row_note(text: str, key: str) -> str:
 
 
 def _durations_row_value(text: str, key: str) -> float:
-    """`key`'s committed weight, at the precision the map stores it."""
-    line = next(ln for ln in text.split("\n") if ln.startswith(f"  {key}: "))
+    """`key`'s committed weight, at the precision the map stores it.
+
+    Scoped to the `durations:` block for the same reason as `_durations_row_note`:
+    a floored/capped key is also declared in `durations_floors` ABOVE the block.
+    """
+    lines = text.split("\n")
+    block_start, _ = ci_timing._locate_durations_block(lines)
+    assert block_start is not None, "the map declares no `durations:` block"
+    line = next(lines[i] for i in range(block_start + 1, len(lines))
+                if lines[i].startswith(f"  {key}: "))
     match = ci_timing._DURATION_LINE_RE.match(line)
     assert match is not None, line
     return round(float(match.group("value")), 1)
@@ -6466,7 +6483,8 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
     (`… deliverable 3: 34 tests — ci-timing … 2026-11-02 …; was 3.2 embedded (…)
     lane …`), where an end-anchored match finds nothing.
 
-    Non-vacuity, measured against the pre-fix module at this commit's parent: the
+    Non-vacuity, measured against the module before `643bbaf12` (which introduced
+    the mid-note prune): the
     re-base emitted the stale `2026-11-02 …; was 3.2` clause on the row line and the
     new basis on the last continuation — two bases in one note, so both "the
     superseded basis survived" and `len(bases) <= len(committed_bases)` fail.
@@ -6637,9 +6655,10 @@ def test_a_re_base_keeps_a_live_count_outside_the_stale_basis_claim() -> None:
     This is the #9134 "a live instruction went with the falsified claim" shape, and
     the repair is that the count now sits in its own clause, ahead of any dated one.
 
-    Non-vacuity: on the PRE-FIX map (this commit's parent) the same render emits no
-    `N of them` at all and the first assertion fails — that is exactly the red the
-    guard in `tests/test_ci_catch_history.py` reported.
+    Non-vacuity: on the map before `42a624e02` (which re-stated the count in its own
+    clause) the same render emits no `N of them` at all and the first assertion
+    fails — that is exactly the red the guard in
+    `tests/test_ci_catch_history.py` reported.
     """
     text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
     key = "test_ci_catch_history.py"
@@ -6674,6 +6693,7 @@ surfaces:
     - test_plain.py
     - test_other.py
 durations_held_equal: {}
+# a BARE NUMBER is a FLOOR only: a reading may raise the row above it
 durations_floors:
   test_capped.py: 355.0
 durations_captured_at: "2026-10-26T04:45:51Z"
@@ -6683,6 +6703,24 @@ durations:
   test_capped.py: 355.0
   test_plain.py: 4.0  # a normal row, no floor declared
   test_other.py: 2.0
+"""
+
+_CAP_MANIFEST = """\
+# hand-curated sweep-basis header
+surfaces:
+  core:
+    - test_capped.py
+    - test_plain.py
+# a `pinned` declaration is a CAP: the weight in BOTH directions
+durations_held_equal: {}
+durations_floors:
+  test_capped.py: {value: 355.0, pinned: true}
+durations_captured_at: "2026-10-26T04:45:51Z"
+durations:
+  # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING — the loaded post-#8423 reading is
+  # ABOVE it and a quiet-host one below; erring high is the rule.
+  test_capped.py: 355.0
+  test_plain.py: 4.0  # a normal row, no declaration
 """
 
 
@@ -6806,6 +6844,35 @@ def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
         {"durations": {"test_a.py": 355.0},
          "durations_floors": {"test_a.py": "a lot"}})
     assert len(unreadable) == 1 and "not a number" in unreadable[0], unreadable
+    # A CAP (`pinned`) is TWO-SIDED: a row ABOVE the declaration is a red, not a
+    # raise the sweep may take (#10575 delta review, P2).
+    assert ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0},
+         "durations_floors": {"test_a.py": {"value": 355.0, "pinned": True}}}) == []
+    above_cap = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 390.0},
+         "durations_floors": {"test_a.py": {"value": 355.0, "pinned": True}}})
+    assert len(above_cap) == 1 and "390.0" in above_cap[0], above_cap
+    assert "CAP" in above_cap[0], above_cap
+    # an UNPINNED declaration keeps the one-directional meaning: 390.0 over a 355.0
+    # minimum is exactly what a floor permits
+    assert ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 390.0},
+         "durations_floors": {"test_a.py": {"value": 355.0}}}) == []
+    # …and every shape that could silently mean "no declaration" is a red instead
+    # (#10575 review, F2): a per-row list, a non-numeric value, a non-boolean
+    # `pinned`, an unknown key, and a whole block written as a list.
+    for bad in ({"test_a.py": [355.0]},
+                {"test_a.py": {"value": "a lot"}},
+                {"test_a.py": {"value": 355.0, "pinned": "yes"}},
+                {"test_a.py": {"value": 355.0, "cap": True}}):
+        red = ci_manifest.floor_issues({"durations": {"test_a.py": 355.0},
+                                        "durations_floors": bad})
+        assert len(red) == 1, (bad, red)
+    block_as_list = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0},
+         "durations_floors": ["test_a.py"]})
+    assert len(block_as_list) == 1 and "mapping" in block_as_list[0], block_as_list
     # An ABSENT map is `check`'s UNKNOWN, not this check's red: there is no map for
     # a floor to be inconsistent with, and one red per declared floor would turn
     # that UNKNOWN into a wall of reds.
@@ -6820,18 +6887,112 @@ def test_the_real_maps_cap_is_a_declared_floor_and_is_never_lowered(
     `eval/write_path/test_write_path_operator_lane.py` all carry a 355.0 cap whose
     rationale sits in prose above a row. The declaration is what makes it binding —
     and this pin is deliberately NON-vacuous in the way that matters: it drives the
-    real map with a discount reading for each floored key and requires every one to
-    survive.
+    real map with BOTH defeat directions (a discount reading and a raise reading)
+    for every declared key and requires every one to survive at its cap. The raise
+    half is the delta review's P2: each of those rows states a CEILING and says not
+    to read 355.0 as a measurement, so a sweep adopting the 390.0/386.2/366.4
+    readings the notes cite would leave the row contradicting its own note.
     """
     text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
     floors = ci_timing._declared_floors(text)
     assert floors, "the committed map declares no floors any more"
-    assert floors["test_lane_stash.py"] == 355.0
-    rendered, stats = ci_timing.render_refreshed_manifest(
-        text, {key: 1.0 for key in floors}, "2026-11-09T00:00:00Z",
-        coverage={key: (115, 115) for key in floors},
+    assert floors["test_lane_stash.py"].value == 355.0
+    # These three are CAPS, not floors: the notes record a weighing choice, and
+    # raising one is a #9172 CI-budget decision, never a sweep's side effect.
+    assert all(decl.pinned for decl in floors.values()), floors
+    for weights in ({key: 1.0 for key in floors},
+                    {"test_lane_stash.py": 366.4, "test_calibration.py": 390.0,
+                     "eval/write_path/test_write_path_operator_lane.py": 386.2}):
+        rendered, stats = ci_timing.render_refreshed_manifest(
+            text, weights, "2026-11-09T00:00:00Z",
+            coverage={key: (400, 400) for key in floors},
+            sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+        durations = yaml.safe_load(rendered)["durations"]
+        for key, declared in floors.items():
+            assert durations[key] == declared.value, (key, durations[key], declared)
+        assert sum((stats["kept_as_lower_bound"], stats["kept_at_declared_cap"])) \
+            == len(floors)
+        assert ci_timing.validate_refreshed_manifest(rendered) == []
+
+
+def test_a_capped_row_is_held_in_BOTH_directions(tmp_path: Path) -> None:
+    """A `pinned` declaration is the weight, not a one-way boundary.
+
+    The three committed caps record a weighing choice (#6133/#9172) over a
+    measurement their own notes say must NOT become the weight. A one-directional
+    floor thereby let an ordinary sweep write `test_calibration.py: 390.0` beside a
+    note reading `#6133 CEILING, not a reading … do not read 355.0 as a measurement
+    of this file` — the hand-edit a human had already made once, done silently
+    (#10575 delta review, P2). This drives the writer with a RAISE and requires the
+    row to hold, and with a DISCOUNT to show the same declaration still bounds the
+    other direction.
+    """
+    path = _bridge_manifest(tmp_path, _CAP_MANIFEST)
+    text = path.read_text()
+    raised, up = ci_timing.render_refreshed_manifest(
+        text, {"test_capped.py": 390.0}, "2026-11-09T00:00:00Z",
+        coverage={"test_capped.py": (126, 126)},
         sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
-    durations = yaml.safe_load(rendered)["durations"]
-    for key, floor in floors.items():
-        assert durations[key] >= floor, (key, durations[key], floor)
-    assert stats["kept_as_lower_bound"] == len(floors)
+    assert yaml.safe_load(raised)["durations"]["test_capped.py"] == 355.0
+    assert up["kept_at_declared_cap"] == 1, up
+    assert up["kept_as_lower_bound"] == 0, up
+    row = _row_inside_the_block(raised, "test_capped.py")
+    assert "DECLARED CAP (355.0)" in row, row
+    assert "refused as a raise" in row, row
+    # the value did not move, so no `; was 355.0` — that is the ADOPTED shape
+    assert "; was 355.0" not in row, row
+    assert ci_timing.validate_refreshed_manifest(raised) == []
+    # A cap is a CEILING, not a blanket freeze: the discount direction is still
+    # refused, and it is refused by the floor half of the same declaration.
+    lowered, down = ci_timing.render_refreshed_manifest(
+        text, {"test_capped.py": 25.4}, "2026-11-09T00:00:00Z",
+        coverage={"test_capped.py": (115, 115)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert yaml.safe_load(lowered)["durations"]["test_capped.py"] == 355.0
+    assert down["kept_as_lower_bound"] == 1, down
+    assert down["kept_at_declared_cap"] == 0, down
+    # …and the declared value itself is not a hold: nothing was refused.
+    same, flat = ci_timing.render_refreshed_manifest(
+        text, {"test_capped.py": 355.0}, "2026-11-09T00:00:00Z",
+        coverage={"test_capped.py": (126, 126)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert yaml.safe_load(same)["durations"]["test_capped.py"] == 355.0
+    assert sum((flat["kept_as_lower_bound"], flat["kept_at_declared_cap"])) == 0, flat
+    # A second hold states ONE basis: a weekly sweep cannot grow the note.
+    again, _ = ci_timing.render_refreshed_manifest(
+        raised, {"test_capped.py": 390.0}, "2026-11-16T00:00:00Z",
+        coverage={"test_capped.py": (126, 126)},
+        sample_label="ci-timing junit-census+top-15 2026-11-16 (run 41399999999)")
+    second = _row_inside_the_block(again, "test_capped.py")
+    assert second.count("DECLARED CAP") == 1, second
+    assert again.count("ci-timing junit-census+top-15") == 1, again
+
+
+def _row_inside_the_block(text: str, key: str) -> str:
+    """`key`'s `durations:` row, read INSIDE the block (the declaration restates it)."""
+    block = text.split("\ndurations:\n", 1)[1]
+    return next(ln for ln in block.split("\n") if ln.strip().startswith(f"{key}:"))
+
+
+def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
+    """The WRITE side fails closed on every shape that could mean "no cap".
+
+    A per-row list, a non-numeric value, a non-boolean `pinned`, an unknown key and
+    a whole block written as a list each either silently disabled the mechanism or
+    downgraded a cap to a one-directional floor, on BOTH sides at once (#10575
+    review, F2 and delta review, P2).
+    """
+    header = "durations:\n  test_capped.py: 355.0\n"
+    for bad in ("durations_floors: [test_capped.py]\n",
+                "durations_floors:\n  test_capped.py: [355.0]\n",
+                'durations_floors:\n  test_capped.py: "a lot"\n',
+                "durations_floors:\n  test_capped.py: {value: 355.0, pinned: maybe}\n",
+                "durations_floors:\n  test_capped.py: {value: 355.0, cap: true}\n"):
+        with pytest.raises(ci_timing.DurationsBridgeError):
+            ci_timing._declared_floors(f"{bad}{header}")
+    # …and the shapes that ARE readable parse to what they say
+    parsed = ci_timing._declared_floors(
+        "durations_floors:\n  a.py: 355.0\n  b.py: {value: 12.5, pinned: true}\n"
+        f"{header}")
+    assert parsed["a.py"] == ci_timing.DeclaredFloor(355.0, False), parsed
+    assert parsed["b.py"] == ci_timing.DeclaredFloor(12.5, True), parsed
