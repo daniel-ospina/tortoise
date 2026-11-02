@@ -2823,8 +2823,12 @@ def test_the_measured_base_is_printed_for_a_human_not_only_for_json(capsys, monk
 
     The expectation is read from the REPORT, not from a second `resolve_base_ref()` call (review
     cycle 6, finding 1): re-resolving renders the literal `None` in a checkout with no resolvable
-    base — the depth-1 shape the sibling test below commits as LEGITIMATE — and the tool prints
-    `(unresolved)` there, so a second resolve reds a correctly-ordered tree.
+    base — the depth-1 shape the sibling test below commits as LEGITIMATE — so a second resolve reds
+    a correctly-ordered tree. Careful with the two strings, which are NOT interchangeable:
+    `ordering_base_candidate` carries `(unresolved)` when the candidates are checked and rejected,
+    while `ordering_base` — the base the ordering was actually MEASURED against — says
+    `(not measured)`, and the candidate line is suppressed rather than printed when it is
+    UNRESOLVED. Asserting `(unresolved)` against `ordering_base` reds an ordered tree.
     """
     # ⛔ One resolution, not two (review cycle 7, finding 3): `main()` honours
     # `$PREREG_ORDERING_BASE_REF` and `check.run()` does not, so an ambient value would make the
@@ -2921,7 +2925,8 @@ def test_a_depth_one_checkout_without_a_base_reports_the_unresolved_base(tmp_pat
 
     The acceptance test asserts `report["ordering_base"]` is one of the resolved candidates. In a
     depth-1 checkout of a single branch there is no `origin/main` and no local `main`, so the honest
-    report is `(unresolved)` — and an assertion that insists on a resolved ref reds a correctly
+    report is `(not measured)` — with `(unresolved)` recorded separately as the candidate — and an
+    assertion that insists on a resolved ref reds a correctly
     ordered tree from inside the test written to prevent exactly that. The value must stay a
     reported fact; what it must NOT do is turn the unprovable third outcome into a failure.
     """
@@ -3111,9 +3116,10 @@ def test_a_squash_collapsed_base_refuses_even_when_the_contribution_is_ordered(t
 
     WHY THIS IS THE SHAPE. The rule reads each log's add-commit **on the base** when the log is
     already merged there, and in the contribution when it is not. That log-side read had NO witness:
-    forcing `base_log_epochs = []` (so every log is read from the contribution) left all 212 tests
-    green, and on the real #10468 shape it flipped a REFUSAL into a silent PASS. The registration
-    side was covered; the log side — half the predicate — was not.
+    at the head that finding was made, forcing `base_log_epochs = []` (so every log is read from
+    the contribution) left all 212 tests green, and on the real #10468 shape it flipped a REFUSAL
+    into a silent PASS. The registration side was covered; the log side — half the predicate — was
+    not. (That count is historical: the same mutation now reds three tests, this one among them.)
 
     The shape that discriminates: the base carries the registration and the log in ONE squash commit
     (equal epochs), while THIS contribution carries them in order. Reading the log from the

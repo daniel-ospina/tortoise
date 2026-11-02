@@ -366,9 +366,11 @@ def _checker():
 
     Loaded for ONE thing: `EVIDENCE_LOG_GLOB`, so the test below globs the same set the ordering
     half globs instead of a private copy of the literal. The glob is deliberately a named constant
-    in the guard (`tools/capstone_preregistration_check.py:134`, *"Widening it is a deliberate
-    act"*), and a second copy here would be exactly the two-copies-that-can-disagree shape this
-    file refuses for the bars.
+    in the guard (constant `EVIDENCE_LOG_GLOB`, *"Widening it is a deliberate act"*), and a second
+    copy here would be exactly the two-copies-that-can-disagree shape this file refuses for the bars.
+    ⛔ Cited by SYMBOL, not by `file:line` — an earlier version spelled `:134`, which was true on
+    `origin/main` and was silently falsified by this branch's own import hunk (the constant is at
+    `:169` here). A line ref into a file this branch edits is a citation that this branch invalidates.
     """
     spec = importlib.util.spec_from_file_location(
         "_capstone_preregistration_check",
@@ -399,7 +401,11 @@ def test_the_withdrawn_log_is_not_back_in_the_checked_directory(probe):
       collapsed add (`cfa3de857`, the registration's own add-commit), and a deletion does not remove
       an earlier add from a ref's history, so a re-add here is measured against that same epoch and
       the strict comparison refuses it. Pinned by
-      `test_a_withdrawn_log_cannot_be_reordered_by_re_adding_it`, not by this one.
+      `test_a_withdrawn_log_cannot_be_reordered_by_re_adding_it` — with one caveat a reviewer
+      measured: that test's fixture publishes the base at the branch's own HEAD, so the
+      contribution-side fallback yields the same epoch and the refusal survives even with the
+      base-side log read removed. It pins the OUTCOME, not the base read; the base read's witnesses
+      are the three squash/predates tests in `test_capstone_preregistration_9075.py`.
 
     So the open route is the rename, and the guard's rule is **base ancestry** (the registration's
     add on the base must strictly precede the log's), not the PR-internal sibling comparison the

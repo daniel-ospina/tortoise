@@ -766,7 +766,7 @@ SQUASH_COLLAPSE_REMEDY = (
     "artefact at a NEW path: withdraw this log from the checked directory (move it under "
     "`withdrawn/` with a one-line note of why — do not delete it, and do not edit its contents) so "
     "this directory stops claiming a measurement whose ordering cannot be shown. Withdrawing it "
-    "DOES clear THIS refusal — the gate then has no log to order at all — but it does not restore "
+    "DOES clear THIS refusal — the gate no longer sees this log at all — but it does not restore "
     "this log's ordering, so it must not come back as evidence; then take a fresh registration and "
     "a fresh evidence log at new paths, whose add-commits {base} can tell apart."
 )
