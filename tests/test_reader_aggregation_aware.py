@@ -264,3 +264,70 @@ def test_aggregation_fragment_is_recorded_for_prompt_drift_reporting():
     _system, fragments = reader_prompt_constants()
     assert fragments["aggregation"] == _AGGREGATION_FRAGMENT
     assert DISCIPLINE_MARKER in fragments["aggregation"].lower()
+
+
+# ── The WIRING pins for the two call sites the eval measurement path uses ──
+# `system_prompt_for` gaining an aggregation clause is worthless if the caller
+# stops passing the question. `run_ask_lane` (ask_lane.py) is pinned in
+# `tests/test_ask_eval_only.py`; these two were NOT, and dropping `question=`
+# at either left the ENTIRE suite green — measured:
+#
+#   reader.py  `answer_with_evidence`  -> 212 passed, 2 skipped
+#   ask_lane.py `run_ask_assembled`    ->  33 passed   (tests/test_assembly_sdk.py)
+#
+# That matters because `tools/longmem_eval/run.py` calls
+# `reader.answer(context_hits=…, question=…)` -> `LLMReader.answer` ->
+# `answer_with_evidence`, i.e. EVERY eval-lane measurement — including the
+# exact-count acceptance test #10553 carries for this issue. An unpinned
+# wiring there lets a later edit silently delete the delivered behaviour from
+# the path that is supposed to prove it.
+
+
+class _CapturingModel:
+    """The minimal ``complete(system, user)`` model ``LLMReader`` drives."""
+
+    def __init__(self, reply: str = "stub answer") -> None:
+        self.reply = reply
+        self.systems: list[str] = []
+
+    def complete(self, *, system: str, user: str) -> str:
+        self.systems.append(system)
+        return self.reply
+
+    def close(self) -> None:  # pragma: no cover - parity with the model seam
+        pass
+
+
+def test_llmreader_answer_with_evidence_passes_the_question_to_the_prompt():
+    """RED mutation: drop ``question=question`` from
+    ``LLMReader.answer_with_evidence`` -> the aggregative arm stops carrying
+    ``_AGGREGATION_FRAGMENT`` while the non-aggregative control still matches
+    exactly, so the assertion (not the fixture) is what fails.
+    """
+    from tortoise.reader import LLMReader
+
+    agg_model = _CapturingModel()
+    LLMReader(agg_model, "stub-model").answer_with_evidence(
+        evidence="[session 1] bought a coat\n[session 2] bought boots",
+        question="How many clothing items did I buy last month?",
+        question_date="2026-08-29",
+    )
+    assert agg_model.systems, "the reader never called the model"
+    agg_system = agg_model.systems[-1]
+    assert _AGGREGATION_FRAGMENT and _AGGREGATION_FRAGMENT in agg_system, \
+        "LLMReader sent an aggregative question without counting discipline"
+
+    # control: the same reader, same evidence, a non-aggregative question
+    plain_model = _CapturingModel()
+    LLMReader(plain_model, "stub-model").answer_with_evidence(
+        evidence="[session 1] bought a coat",
+        question="What did I buy at the hardware store?",
+        question_date="2026-08-29",
+    )
+    plain_system = plain_model.systems[-1]
+    assert _AGGREGATION_FRAGMENT not in plain_system, \
+        "a non-aggregative question must get no counting discipline"
+    # ...and the two differ ONLY because of the question: same evidence shape,
+    # same resolved type (None), so a stub that ignored `question` would make
+    # these equal.
+    assert agg_system != plain_system

@@ -1421,3 +1421,101 @@ def test_ago_relative_ask_assembled_contract(sdk, monkeypatch):
     empty = run_ask_assembled(sdk, "what did I do 2 weeks ago?",
                               question_date=Q_DATE)
     assert empty.fired is False and empty.evidence == ""
+
+
+
+class _CapturingSystemReader:
+    """FakeReader-shaped stub that ALSO captures the system prompt.
+
+    ``FakeReader`` (tests/test_ask_sdk.py) records only ``last_user`` — which is
+    precisely why a mutation dropping ``question=`` from ``run_ask_assembled``'s
+    reader call was invisible: no assertion in this file could see the system
+    prompt it was meant to check.
+    """
+
+    def __init__(self, reply: str = "READER ANSWER", tokens_out: int = 6):
+        self.reply = reply
+        self.tokens_out = tokens_out
+        self.calls = 0
+        self.last_system: str | None = None
+        self.last_user: str | None = None
+
+    def complete(self, *, system: str, user: str) -> str:
+        self.calls += 1
+        self.last_system = system
+        self.last_user = user
+        return self.reply
+
+    def close(self) -> None:
+        pass
+
+
+def _fired_block():
+    """A minimal FIRED assembly block.
+
+    Stubbed deliberately: the defect this pins is the READER CALL's wiring, not
+    the assembler's shape routing, and a real question would have to satisfy
+    both at once — coupling the pin to the shape classifier would let a routing
+    change quietly weaken it. The real assembly path stays covered by the rest
+    of this file.
+    """
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        fired=True,
+        shape="current-state",
+        subjects=["couch"],
+        slices={"state_rows": ["couch: green"]},
+        post_cap_lines=[{"content": "the couch is green",
+                          "session_id": "s1", "session_date": "2026-09-01"}],
+        admission={"rows_admitted": 1},
+    )
+
+
+def test_10539_run_ask_assembled_passes_the_question_to_the_prompt(
+        sdk, monkeypatch):
+    """WIRING pin for the second of the two unpinned call sites (#10550 review P1).
+
+    ``run_ask_assembled`` is the EVAL ARM's reader path (#2165 Task 6):
+    ``tools/longmem_eval`` drives the reader through this shape. Dropping
+    ``question=question`` from its reader call left this entire file green
+    (measured: 33 passed) — so a later edit could silently delete #10539's
+    counting discipline from an eval path with no test red.
+
+    RED mutation: drop ``question=question`` at ``ask_lane.py``'s
+    ``run_ask_assembled`` reader call -> the aggregative arm stops carrying
+    ``_AGGREGATION_FRAGMENT`` while the non-aggregative control still matches.
+    """
+    import tortoise.ask_lane as _al
+    import tortoise.assembly as _assembly
+    import tortoise.reader as _reader
+
+    fragment = getattr(_reader, "_AGGREGATION_FRAGMENT", "")
+    assert fragment, \
+        "the aggregation fragment must exist for this pin to mean anything"
+    monkeypatch.setattr(_assembly, "_assemble_connected",
+                        lambda *a, **k: _fired_block())
+
+    # Aggregative question. It resolves to `temporal-reasoning`, i.e. a type
+    # fragment that does NOT itself imply counting discipline — so the fragment
+    # can only be present because the question crossed the call site.
+    agg_reader = _CapturingSystemReader()
+    run_ask_assembled(
+        sdk, "How many clothing items did I buy last month?",
+        question_date=Q_DATE,
+        _reader_factory=lambda: agg_reader)
+    assert agg_reader.calls == 1, "the reader was not called"
+    assert fragment in agg_reader.last_system, \
+        "run_ask_assembled sent an aggregative question without counting discipline"
+
+    # control: same evidence, same stubbed block, non-aggregative question.
+    # The per-namespace reader cache would otherwise hand the control arm the
+    # FIRST reader, so its own stub would never be called (measured: 0 calls).
+    _al._reset_ask_reader_cache_for_tests()
+    plain_reader = _CapturingSystemReader()
+    run_ask_assembled(
+        sdk, "What did I buy at the hardware store?",
+        question_date=Q_DATE,
+        _reader_factory=lambda: plain_reader)
+    assert plain_reader.calls == 1, "the reader was not called"
+    assert fragment not in plain_reader.last_system, \
+        "a non-aggregative question must get no counting discipline"
