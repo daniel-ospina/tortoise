@@ -1479,11 +1479,13 @@ def _take_graph_argument(name: str,
 # disclosure rides the two channels `_warn_retired_result` already established
 # for exactly this shape (see that function): an extra `TextContent` appended
 # LAST, so the tool's own payload stays `content[0]` and `structured_content` is
-# byte-identical — which is what keeps every declared `outputSchema` (including
-# the `x-fastmcp-wrap-result` array envelope of a `-> list[dict]` tool) intact.
-# A dict field on `structured_content` would violate those schemas on the tools
-# that declare one; the envelope is a promise about the success shape and a
-# conforming client enforces it (#8482 is the incident).
+# byte-identical — which is what keeps every declared `outputSchema` intact. On
+# the write surface that is ONE tool: `tortoise_delete_entity` advertises
+# `{result: object | boolean}` under `x-fastmcp-wrap-result`, and a dict field
+# merged into `structured_content` would sit beside `result` and violate the
+# `required`/`additionalProperties` contract of that envelope. The envelope is a
+# promise about the success shape and a conforming client enforces it (#8482 is
+# the incident: a failure delivered in the success channel).
 _GRAPH_DISCLOSURE_KEY = "graph_resolution"
 
 
@@ -1657,10 +1659,14 @@ def _disclose_graph_resolution(result: Any, name: str,
     tool itself; a second statement here could only disagree with it. Disclosing
     for it would mean re-deriving a target this seam does not own.
 
-    Anything that is not a plain successful `ToolResult` is returned UNTOUCHED
-    (the same object, by identity): a refusal, a `_safe`-answered failure and a
-    schema-repaired payload all already say what happened, and a disclosure on
-    top of them would be noise claiming a landing that may not have occurred.
+    It leaves an `is_error` result and a non-`ToolResult` UNTOUCHED (the same
+    object, by identity). ⚠️ It does NOT catch a `_safe`-answered failure: that is
+    a plain `ToolResult` with `is_error=False`, so the thing that keeps a failure
+    from being disclosed is the CALLER's gate — `if status == "ok":` in
+    `_wrapped_call_tool`, which is where `exec_error`/`safe_error` is already
+    classified. Pinned by
+    `test_a_safe_answered_failure_is_not_disclosed`, because a reader (or a
+    mutant) that believes this function is the guard would be wrong.
     """
     if name not in WRITE_TOOL_NAMES or name in _mcp_auth.GRAPH_ARGUMENT_EXCLUDED:
         return result

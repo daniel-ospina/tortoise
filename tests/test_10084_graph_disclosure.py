@@ -345,8 +345,8 @@ async def test_a_dry_run_is_disclosed_as_a_preview(monkeypatch):
 @pytest.mark.parametrize(("payload", "expected"), [
     # the bare shape a dict-returning preview tool produces
     ({"dry_run": True}, True),
-    # the `x-fastmcp-wrap-result` shape `tortoise_delete_entity` (a dry_run
-    # WRITE tool) advertises: `{"result": {...}, "x-fastmcp-wrap-result": true}`
+    # the `x-fastmcp-wrap-result` shape `tortoise_delete_entity` (the ONE write
+    # tool that declares a wrap envelope: `result: object | boolean`) advertises
     ({"result": {"dry_run": True, "token": "t"}}, True),
     # ...and the shapes that must NOT read as a preview
     ({"result": True}, False),
@@ -356,10 +356,12 @@ async def test_a_dry_run_is_disclosed_as_a_preview(monkeypatch):
     ({}, False),
 ])
 def test_the_receipt_marker_is_read_in_both_envelope_shapes(payload, expected):
-    """`tortoise_delete_entity` is BOTH a `dry_run` tool and an array/wrap-envelope
-    tool; an unconfirmed delete sets no `dry_run` argument at all. The receipt
-    branch is the only one that can label either, so both shapes are pinned —
-    with the negatives that make it discriminating (`is True`, not truthiness)."""
+    """`tortoise_delete_entity` advertises `x-fastmcp-wrap-result` with
+    `result: object | boolean`; an unconfirmed delete sets no `dry_run` argument
+    at all. The receipt branch is the only one that can label either, so both
+    shapes are pinned — with the negatives that make it discriminating (`is True`,
+    not truthiness). The `result`-as-ARRAY case below is a future-proofing
+    negative, not an advertised write shape."""
     from fastmcp.tools import ToolResult
 
     result = ToolResult(content=[], structured_content=payload, is_error=False)
@@ -460,6 +462,42 @@ def test_the_named_arm_reports_the_ref_as_given_not_a_canonical_id():
     caller can check its request against — and must not be presented as an id."""
     for ref in ("g_fund_b", f"org_{ORG_A}_g_fund_b", "Fund B / Research"):
         assert ms._graph_disclosure(ref)["graph"] == ref
+
+
+@pytest.mark.asyncio
+async def test_a_safe_answered_failure_is_not_disclosed(monkeypatch):
+    """The seam's `status == "ok"` gate is what stops a `_safe`-answered failure
+    (a plain `ToolResult` with `is_error=False`) from being disclosed — NOT the
+    helper, which cannot tell one apart. Without this case the gate can be
+    replaced by `if True:` and the suite stays green (measured), which is exactly
+    a check that cannot fail."""
+    monkeypatch.setattr(ms, "WRITE_TOOL_NAMES", frozenset({PROBE}))
+
+    def _failing() -> dict:
+        # A REAL `_safe` failure: it records the failure in the dispatch holder
+        # the seam's classification reads (`_dispatch_safe_failures`), which is
+        # why an arbitrary `{"error": ...}` dict is NOT a substitute.
+        return ms._safe(_boom)
+
+    ms.mcp.add_tool(FunctionTool.from_function(_failing, name=PROBE,
+                                               description=PROBE))
+    tokens = [mcp_auth._transport_mode.set("http")]
+    try:
+        with _workspace():
+            result = await ms.mcp.call_tool(PROBE, {})
+    finally:
+        mcp_auth._transport_mode.reset(tokens[0])
+        with contextlib.suppress(Exception):
+            ms.mcp.local_provider.remove_tool(PROBE)
+
+    assert result.is_error is False, "a `_safe` failure is NOT an error result"
+    assert "boom" in _text(result), _text(result)
+    assert (result.meta or {}).get("tortoise") is None, (
+        "a failed write was stamped with the graph it 'targeted'")
+
+
+def _boom() -> None:
+    raise RuntimeError("boom")
 
 
 def test_a_bare_return_is_not_wrapped():
