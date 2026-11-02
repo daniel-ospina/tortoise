@@ -107,7 +107,7 @@ def _cmdline_from_ps(pid: int) -> str | None:
 
 
 def _server_cmdline(pid: int) -> str | None:
-    """The ``pid``'s command line, or ``None`` when that pid is gone.
+    """The ``pid``'s command line, or ``None`` when no argv could be read.
 
     Two source questions are asked of a server pid — "is THIS pid still
     there?" (liveness) and "is it still the redislite server we started?"
@@ -126,10 +126,6 @@ def _server_cmdline(pid: int) -> str | None:
       vacuously and its positive control reddened after a full 30 s.
       ``tests/test_fork_slot_wedge_3845.py``'s ``_ps_command`` keeps the same
       fallback for the same reason.
-
-    The arms are NOT interchangeable, which is why they are separate
-    functions: on a host WITH ``/proc`` an ``OSError`` means the pid is gone,
-    and falling through to ``ps`` would fork per poll to re-learn it.
 
     ``None`` from the ``ps`` arm means "no argv available" — the pid is gone
     (``ps`` rc 1) or ``ps`` itself could not answer. A host with neither
