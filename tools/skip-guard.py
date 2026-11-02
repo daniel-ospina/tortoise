@@ -943,6 +943,50 @@ def _parse_hook_nodeids(text: str) -> tuple[list[str], int | None]:
     return nodeids, errors
 
 
+def _selection_confcutdir(files: list[str]) -> str:
+    """The directory `--confcutdir` must be pinned to for this selection.
+
+    pytest resolves `conftest.py` by walking EVERY ancestor of each selected
+    path (`PytestPluginManager._loadconftestmodules` iterates
+    `(directory, *directory.parents)` and only skips dirs in
+    `confcutdir.parents`), so a selection living under a shared directory
+    inherits whatever `conftest.py` happens to sit above it. Measured on a
+    self-hosted runner: the shared `/tmp` carried a leaked `conftest.py`, the
+    fixture files these tests pass live under `/tmp/tt_*`, and every
+    collect-only in `emit_manifest` died at import of that foreign conftest
+    (`rc=4`, "ImportError while loading conftest '/tmp/conftest.py'" — the
+    `test-slow (d)` red of PR #10636). A conftest ABOVE the selection is not
+    part of the selection's tree and must never be loaded.
+
+    The pin respects the run step's own chain:
+
+    * selection INSIDE the invocation directory (every CI caller — `$FILES` is
+      repo-relative) -> the invocation directory, i.e. exactly the repo-wide
+      conftest chain the plain run step sees. Pinning to the files' deepest
+      common ancestor instead would DROP `tests/conftest.py` for a selection
+      made of deep files alone (`tests/eval/retrieval/test_x.py`), making the
+      manifest disagree with the run.
+    * selection OUTSIDE it (a temp tree, a test fixture) -> the selection's own
+      deepest common ancestor, so no shared ancestor (`/tmp`, `$HOME`) can
+      contribute a conftest.
+    """
+    invocation = os.path.abspath(os.getcwd())
+    roots = []
+    for entry in files:
+        path = Path(entry)
+        try:
+            roots.append(os.path.abspath(path if path.is_dir() else path.parent))
+        except OSError:  # pragma: no cover — an unreadable path is not a dir
+            roots.append(os.path.abspath(path.parent))
+    try:
+        deepest = os.path.commonpath(roots)
+    except ValueError:  # pragma: no cover — mixed drives on Windows
+        return invocation
+    if deepest == invocation or deepest.startswith(invocation + os.sep):
+        return invocation
+    return deepest
+
+
 def emit_manifest(files: list[str], marker: str, output: Path,
                   runner=None, ignores: tuple[str, ...] = ()) -> int:
     """Generate the expected-nodeid manifest for the given file list.
@@ -956,6 +1000,16 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     passed through as --ignore=<path> so a manifest can replicate its run's
     own excludes (the post-merge-validation full-`tests/` run ignores
     tests/e2e + the slow_files list).
+
+    The ONE deliberate difference from the run step is `--confcutdir`: pytest
+    resolves `conftest.py` by walking every ANCESTOR of each selected path, so
+    a selection under a shared directory imports whatever conftest sits above
+    it. `_selection_confcutdir` pins that chain to the selection's own tree —
+    the invocation directory for a repo-relative `$FILES` (i.e. exactly the
+    run step's chain, `tests/conftest.py` included), the selection's deepest
+    common ancestor for an out-of-tree one. Without it, a leaked
+    `/tmp/conftest.py` on a self-hosted runner turned every collect-only into
+    `rc=4` ("ImportError while loading conftest '/tmp/conftest.py'").
 
     Fail-closed corners:
     - empty files -> exit 0, NO output file (the CI guard skips manifest
@@ -991,7 +1045,8 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     collect_errors: int | None = None
     cmd = [sys.executable, "-m", "pytest", *files, "--collect-only", "-q",
            "-m", marker, "-p", "no:cacheprovider",
-           *[f"--ignore={ig}" for ig in ignores]]
+           *[f"--ignore={ig}" for ig in ignores],
+           f"--confcutdir={_selection_confcutdir(files)}"]
     if runner is None:
         # The hook is delivered out-of-tree via -p + PYTHONPATH so the run's
         # own conftest is untouched and nothing is written into the repo.
