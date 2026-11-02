@@ -4373,13 +4373,7 @@ def _apply_journal_presence(line: bytes, state: dict[str, bool]) -> None:
     # back to presence through its `PointAdded` record (review round 3, finding 2;
     # measured: a merged loser's `update_point` warned `journal still holds the
     # id` on a healthy lane). The projection's own presence scan folds it the same
-    # way — `plan_point_restamp_folds` puts every `merge_ids` entry into its
-    # `pending_deleted` set, the same verdict by a different route. Cited by
-    # SYMBOL, not by line (PR #10543 review): nothing sweeps a `projection/` line
-    # cite, so the number here was correct when written and had drifted into
-    # `plan_point_restamp_folds`'s own docstring at this head while the scan it
-    # names had moved. `tests/test_7405_update_point_writes.py::
-    # test_the_presence_fold_cites_the_projection_by_symbol_not_by_line` holds it.
+    # way — `plan_point_restamp_folds` folds `merge_ids` to NOT-present (symbol, not line).
     if kind == 'PointsMerged':
         keep = rec.get('keep_id')
         if keep is not None:
@@ -8340,9 +8334,9 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # then REBUILD-DURABLE via the PointPromoted event (review P1): the
         # raw status flip alone would revert on JSONL replay (the #548 log
         # snapshotted the draft state at PointAdded) — the projection's
-        # PointPromoted replay upserts the full live snapshot (the `PointPromoted`
-        # arm of `FalkorProjection.apply`). Snapshot AFTER the SET so the event
-        # carries the live state. Capture auto-promotion is NOT reviewer-gated — the
+        # PointPromoted replay upserts the full live snapshot (its arm in
+        # `FalkorProjection.apply`). Snapshot AFTER the SET so the event carries the
+        # live state. Capture auto-promotion is NOT reviewer-gated — the
         # snapshot carries the point's own props (no fabricated reviewed).
         # Candidate read FIRST (the SET below destroys the draft evidence):
         # MINTED ids only (#1088), non-operator, draft-or-unset status.
@@ -8364,8 +8358,7 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
                 sdk._emit_event("PointPromoted", point=sdk.get_point(pid))
         # 2. Operators of the captured claims -> live (draft-only guard),
         # then REBUILD-DURABLE via OperatorPromoted (the R16 shape — its arm in
-        # `FalkorProjection.apply` restores live on replay, through
-        # `_promotion_point_with_operator`). Mirror
+        # `FalkorProjection.apply` restores live on replay). Mirror
         # promote_point's _promote_incident_operators event exactly.
         # #1088: promote the operators THIS capture created (operator_ids) as
         # well as those wired to a promoted claim (promote_ids). The CLAIM
@@ -20506,8 +20499,7 @@ class TortoiseSDK:
                 # `r.source_version`, so the entry could never match and only
                 # implied a carry that never happened. It is also the one key the
                 # record contract forbids re-applying on a re-link ("a re-link must
-                # not ADVANCE a recorded version" — `_relation_upsert_statement`'s
-                # "ON CONFLICT is a REPLAY, not a re-link", `record_projection.py`).
+                # not ADVANCE a recorded version" — `_relation_upsert_statement`).
                 # ⚠️ SCOPE: `extractedFrom`'s `sourceVersion` anchor is therefore
                 # STILL dropped on transfer — a separate, pre-existing loss this
                 # vocabulary does not own. Stated here rather than letting the

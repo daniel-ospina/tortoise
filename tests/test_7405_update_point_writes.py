@@ -4429,7 +4429,6 @@ def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
     for symbol, owner, source in (
         ("plan_point_restamp_folds", "projection/__init__.py", proj),
         ("FalkorProjection", "projection/__init__.py", proj),
-        ("_promotion_point_with_operator", "projection/__init__.py", proj),
         ("_anchor_on_create", "projection/edges.py", edges),
         ("_relation_upsert_statement", "record_projection.py", record),
     ):
