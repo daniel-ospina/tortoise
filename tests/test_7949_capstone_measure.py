@@ -3803,8 +3803,8 @@ def test_every_readme_line_cite_carries_the_sentence_it_quotes():
     that named it. NO numbers are repeated here on purpose: a quoted line number
     is the very drift this pin exists to catch, and the LIVE cite lives in the
     document that carries it, re-derived from the file. Nothing could see it: `_BUNDLE_CITE` resolves only
-    `sdk|edges|extractor_v2`, `_BUNDLE_CITE_PREFIX` requires the file to be one
-    of those three, and the bundle's own docs are not sources. A document whose
+    `sdk|edges|extractor_v2` (the constraint lives in `_BUNDLE_CITE`'s own capture
+    group and in `_BUNDLE_SOURCES`), and the bundle's own docs are not sources. A document whose
     thesis is "a claim nothing re-checks can rot silently" leaves its
     `README.md:<line>` cites unwatched, so this pin resolves EVERY one of them —
     either the sentence the cite QUOTES must appear inside the lines it names, or
