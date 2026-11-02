@@ -2361,12 +2361,13 @@ def _graph_text_hits(proj, needle: str) -> list[tuple[str, str]]:
 
     The POPULATION is the point (acceptance bullet 5 — *"the property, not the
     call site"*): the scan is over every node, in every property the writers use
-    to carry text (`c` on a Point, `content`, `text`, and the JSON carriers
-    `payload`/`props` a `:GraphEvent` holds). It therefore does not depend on the
-    turn id derivation, the `:Point` label, `is_episodic`, or the `CONTAINS`
-    wiring: a write path that carries the text under one of those five property
-    NAMES is inside the population whatever label or wiring it invents, and one
-    that spells it under a SIXTH name is outside it.
+    to carry text (`c` on a Point, `content`, `text`, the JSON `payload` a
+    `:GraphEvent` holds, and `props` — which no turn writer emits but which a
+    caller-supplied props map can land, see the five-name note below). It does
+    not depend on the turn id derivation, the `:Point` label, `is_episodic`, or
+    the `CONTAINS` wiring: a write path that carries the text under one of those
+    five property NAMES is inside the population whatever label or wiring it
+    invents, and one that spells it under a SIXTH name is outside it.
 
     ⚠️ Read the population as five names, never as "any shape" —
     `_assert_the_text_is_in_exactly_one_store` states it and names the escape.
@@ -2445,9 +2446,17 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
 
     ⚠️ **The population is FIVE PROPERTY NAMES, not "every property"**: `c`,
     `content`, `text`, `payload`, `props` — the ones the writers in this tree
-    use (`props` is in the list although no writer currently stores it; it is a
-    Cypher parameter spelled `SET n += $props`). A writer that carried turn text
-    under a SIXTH name (`body`, `summary`, `raw`…) would be outside this
+    use. `props` is the weakest of the five and it is in the list for a
+    different reason than the rest: **no turn writer emits it**, but a writer
+    CAN land text there — the caller-supplied props map is written as given
+    (`create_point` folds it into the CREATE's property map, `update_point`
+    merges it with `SET n += $props`), and `_coerce_props` re-stores a SCALAR
+    `props` value as a literal property named `props`. Measured on this host at
+    this head: `create_point("statement", "hello", props={"props":
+    "needle-in-props"})` → `MATCH (n {id}) RETURN n.props` = `needle-in-props`,
+    and the scan below finds it. So it is searched because a caller-named
+    property can carry prose, not because a writer does. A writer that carried
+    turn text under a SIXTH name (`body`, `summary`, `raw`…) would be outside this
     population. That is not hypothetical: this tree derives the session's first
     substantive utterance into a `summary` (`sdk._session_source_metadata`) and
     writes it on the session `:Source` (`s.summary=$sum`), so a `:Source.summary`
