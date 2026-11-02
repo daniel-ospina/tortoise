@@ -34,11 +34,14 @@ import importlib.util as _ilu
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import types
 from pathlib import Path
+
+import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
@@ -48,6 +51,10 @@ from tools import capstone_verdict_check as cvc  # noqa: E402
 
 PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
 PREREG = _REPO / "docs/evidence/7949-capstone/preregistration.json"
+SCORES = _REPO / "docs/evidence/9889/e1-e2-scores.json"
+SCORES_PROBE = (_REPO / "docs/evidence/7949-capstone/probes/e1_e2_scores.py")
+#: The SUPERSEDED artifact. It is still in the tree — it is a record of what a
+#: one-arm run measured — but no row may cite it any more (`#9889` item 5).
 E1E2 = _REPO / "docs/evidence/7949-capstone/e1-e2.log"
 
 
@@ -225,7 +232,16 @@ def _load():
     return module
 
 
+def _load_scores():
+    spec = _ilu.spec_from_file_location("e1_e2_scores_pure", str(SCORES_PROBE))
+    assert spec and spec.loader
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 measure = _load()
+scores_probe = _load_scores()
 
 
 def _prereg() -> dict:
@@ -417,20 +433,71 @@ def test_the_table_admits_only_the_gates_four_verdicts():
 
 # ── the artifacts the probe parses ───────────────────────────────────────
 
-def test_the_e1_e2_artifact_parses_to_the_numbers_the_table_uses():
+def test_the_e1_e2_record_parses_to_the_numbers_the_table_uses():
+    """E1/E2 come off the `#9889` record now — not off the superseded log.
+
+    The numbers asserted here are the ones `docs/evidence/9889/README.md`
+    publishes, so a probe that silently starts reading something else reds this
+    test rather than the table.
+    """
     parsed = measure.measure_e1_e2(_REPO)
-    assert parsed["before_share"] == 0.6
-    assert parsed["after_share"] == 0.6
-    assert parsed["objects_total"] == 25
-    assert parsed["objects_numerator"] == 15
+    assert parsed["before_share"] == 0.358974358974359
+    assert parsed["after_share"] == 0.21311475409836064
+    assert parsed["objects_total"] == 78
+    assert parsed["after_objects"] == 61
     assert parsed["real_facts"] == 90
     assert parsed["atomic_points"] == 114
     assert parsed["fused"] == 1
-    assert parsed["corpus_sha256"] == measure.corpus_sha_of_log(E1E2.read_text())
-    assert re.fullmatch(r"[0-9a-f]{7,40}", parsed["sha"] or ""), parsed["sha"]
-    # The artifact declares ITSELF unscored — which is why E1 cannot be RED.
-    assert parsed["declared_prereg"] == "UNPREREGISTERED"
-    assert parsed["declared_result"] == "UNPREREGISTERED"
+    # E2a's frozen denominator is CARRIED — the acceptance item that was open.
+    assert parsed["e2a_units"] == 14
+    assert parsed["e2a_survived"] == 8
+    # The record's corpus IS the pre-registration's frozen pin (G1 enforced it).
+    assert parsed["corpus_sha256"] == measure.normalise_corpus(
+        json.loads(PREREG.read_text())["corpus"]["fixtures_hash"])
+    assert re.fullmatch(r"[0-9a-f]{40}", parsed["sha"] or ""), parsed["sha"]
+    # One after arm against two before realizations DISAGREES, so E1 is not
+    # decided — the row is REFUSED, never the convenient pairing.
+    assert parsed["decidable"] is False
+    assert [pairing["passed"] for pairing in parsed["pairings"]] == [False, True]
+
+
+def test_no_row_cites_the_superseded_e1_e2_log():
+    """`#9889` item 5: the hard-coded log name is gone from the row builder."""
+    assert measure.E1_E2_SCORES == "docs/evidence/9889/e1-e2-scores.json"
+    assert not hasattr(measure, "E1E2_LOG")
+    rows = {row["criterion"]: row for row in _rows(out_path="x.log")}
+    for criterion in ("E1", "E2"):
+        assert rows[criterion]["evidence"] == measure.E1_E2_SCORES, criterion
+
+
+def test_the_e1_e2_record_refuses_when_the_falsifier_is_inert(tmp_path):
+    """A counter nothing moves is not a measurement — the record must refuse."""
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    falsifier = repo / "docs/evidence/9889/e2a-value-units-falsifier.json"
+    record = json.loads(falsifier.read_text())
+    record["with_anchor"]["value_survived"] = 8      # injection moves nothing
+    falsifier.write_text(json.dumps(record))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    # A refusal is exit 2 (not 1, which would read as a crash) and the reason is
+    # printed on stderr — asserted on the CODE because the text went to stderr.
+    assert refused.value.code == 2, refused.value
+
+
+def test_the_e1_e2_record_refuses_a_corpus_off_the_frozen_pin(tmp_path):
+    repo = tmp_path / "repo"
+    shutil.copytree(_REPO / "docs/evidence/9889", repo / "docs/evidence/9889")
+    shutil.copytree(_REPO / "docs/evidence/7949-capstone",
+                    repo / "docs/evidence/7949-capstone")
+    log = repo / "docs/evidence/9889/on-arm.log"
+    log.write_text(log.read_text().replace(
+        "fixtures_hash=sha256:dd7e8520", "fixtures_hash=sha256:00000000"))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
 
 
 def test_the_parse_reads_arms_not_a_fixed_line():
@@ -453,13 +520,15 @@ def test_the_parse_reads_arms_not_a_fixed_line():
 
 # ── the table shape, and the two rules that keep a row honest ────────────
 
-def _rows(out_path: str = "docs/evidence/7949-capstone/e1-e2.log") -> list[dict]:
+def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json") -> list[dict]:
     return measure.build_rows(
         head="a" * 40, out_path=out_path, log_corpus_sha="sha256:" + "d" * 64,
-        e1={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
-            "note": "E1 note"},
-        e2={"verdict": "BLOCKED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
-            "note": "E2 note"},
+        e1={"verdict": measure.verdict_word(measure.e1_outcome(**_e1_kwargs())),
+            "sha": "c" * 40, "corpus_sha256": "e" * 64,
+            "numerator": None, "denominator": None, "objects_numerator": 28,
+            "objects_total": 78, "note": "E1 note"},
+        e2={"verdict": "RED", "sha": "c" * 40, "corpus_sha256": "e" * 64,
+            "numerator": 8, "denominator": 14, "note": "E2 note"},
         e3={"verdict": "RED", "numerator": 23, "denominator": 70,
             "note": "E3 note"},
         e4={"verdict": "RED", "numerator": 2, "denominator": 15,
@@ -467,6 +536,15 @@ def _rows(out_path: str = "docs/evidence/7949-capstone/e1-e2.log") -> list[dict]
             "note": "E4 note"},
         e5={"verdict": "RED", "numerator": 12, "denominator": 25,
             "note": "E5 note"})
+
+
+def _e1_kwargs() -> dict:
+    parsed = measure.measure_e1_e2(_REPO)
+    bars = measure.parse_bars(json.loads(PREREG.read_text()))
+    return {"before_share": parsed["before_share"],
+            "after_share": parsed["after_share"],
+            "objects": parsed["objects_total"], "bars": bars,
+            "decidable": parsed["decidable"]}
 
 
 def test_the_table_is_five_rows_in_the_gates_order():
@@ -502,37 +580,92 @@ def test_a_row_cites_the_artifact_it_was_written_to():
     out = "docs/evidence/7949-capstone/capstone-measured-deadbeef.log"
     rows = {row["criterion"]: row for row in _rows(out_path=out)}
     assert rows["E3"]["evidence"] == out
-    assert rows["E1"]["evidence"] == measure.E1E2_LOG
+    assert rows["E1"]["evidence"] == measure.E1_E2_SCORES
     assert rows["E4"]["evidence"] == measure.E4_RECEIPT
     assert rows["E5"]["evidence"] == measure.E5_RESCORE
 
 
-def test_a_row_measured_on_another_corpus_declares_it():
-    """E1/E2/E4 cite artifacts on other corpus revisions — and say so.
+def test_a_row_measured_on_another_corpus_declares_it(tmp_path):
+    """E4 cites an artifact on another corpus revision — and says so.
 
-    The declaration is what V7 checks against the artifact's own text, so a row
-    that carries ``corpus_sha256`` differing from the log's must also carry
-    ``artifact_corpus_sha256``. A row that tried to look like the run's own corpus
-    instead would be claiming a measurement it did not take.
+    E1/E2 no longer take this path: they measure the FROZEN corpus, so their
+    artifact digest IS the run's and the V7 declaration must be ABSENT (a
+    declaration nothing needs is a claim the gate would then check). E4 does
+    still cite a receipt from another revision, and must declare it.
     """
     rows = {row["criterion"]: row for row in _rows()}
-    for criterion in ("E1", "E2", "E4"):
+    for criterion in ("E1", "E2"):
         row = rows[criterion]
-        assert measure.normalise_corpus(row["corpus_sha256"]) != \
-            measure.normalise_corpus("sha256:" + "d" * 64), criterion
-        assert row.get("artifact_corpus_sha256") == row["corpus_sha256"], criterion
+        # E1/E2 now measure the FROZEN corpus, so their artifact digest IS the
+        # run's — the V7 declaration is no longer needed and must not appear.
+        assert "artifact_corpus_sha256" not in row, criterion
+    row = rows["E4"]
+    assert measure.normalise_corpus(row["corpus_sha256"]) != \
+        measure.normalise_corpus("sha256:" + "d" * 64), "E4"
+    assert row.get("artifact_corpus_sha256") == row["corpus_sha256"], "E4"
     for criterion in ("E3", "E5"):
         assert rows[criterion]["corpus_sha256"] == "sha256:" + "d" * 64, criterion
         assert "artifact_corpus_sha256" not in rows[criterion], criterion
 
 
 def test_the_e1_and_e2_siblings_carry_the_same_denominator():
-    """V8's rule: the composite pair is carried, not restated differently."""
+    """V8's rule: the composite pair is carried, not restated differently.
+
+    Both rows score SHARES, so both leave the count slots empty and V8's
+    agreement is trivially satisfied. What must hold is the thing V8 protects: a
+    gate run over these rows reports NO V8 finding — and the E2 population is
+    still stated, in the row's note, where a reader will find it.
+    """
     rows = {row["criterion"]: row for row in _rows()}
     assert rows["E1"]["sibling"] == "E2"
     assert rows["E2"]["sibling"] == "E1"
-    assert (rows["E1"]["numerator"], rows["E1"]["denominator"]) == \
-        (rows["E2"]["numerator"], rows["E2"]["denominator"])
+    assert (rows["E1"]["numerator"], rows["E1"]["denominator"]) == (None, None)
+    assert (rows["E2"]["numerator"], rows["E2"]["denominator"]) == (None, None)
+    record = {"schema": cvc.SCHEMA, "prereg": {"sha": "a" * 40, "status": "OK"},
+              "corpus": {"sha256": "sha256:" + "e" * 64},
+              "run": {"status": "COMPLETED",
+                      "steps_observed": list(cvc.STEPS)},
+              "rows": list(rows.values())}
+    codes = [code for code, _w, _m in
+             cvc.check(record, repo=_REPO, require_green=False).items]
+    assert "V8" not in codes, codes
+    # The E2 population itself is pinned by the record-parse test (8 of 14).
+
+
+def test_every_e1_key_the_renderer_reads_is_one_the_measure_returns():
+    """P1 regression: `render_log` crashed AFTER the 7-session LLM measurement.
+
+    The E1/E2 re-point removed keys `render_log` still subscripted
+    (`declared_prereg` / `declared_result`), so a real run burned its cost and
+    wrote nothing. No test rendered a log, so 70 green cases could not see it.
+    This asserts the SHAPE statically: every `e1["k"]` the renderer and the
+    machine-record builder read must be a key `measure_e1_e2` returns.
+    """
+    returned = set(measure.measure_e1_e2(_REPO))
+    tree = ast.parse(PROBE.read_text())
+    watched = {"render_log", "main"}
+    read: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in watched:
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Subscript)
+                        and isinstance(inner.value, ast.Name)
+                        and inner.value.id == "e1"
+                        and isinstance(inner.slice, ast.Constant)
+                        and isinstance(inner.slice.value, str)):
+                    read.add(inner.slice.value)
+    assert read, "the scan found no e1[...] reads — it would prove nothing"
+    assert not (read - returned), sorted(read - returned)
+
+
+def test_the_committed_score_record_is_what_the_probe_produces():
+    """P2-10: the committed record may not drift from its own inputs.
+
+    Without this, `e1b`, `e2b`, `gate_drops` and `denominators` could be
+    hand-edited (or fall behind a probe change) while every other pin stayed
+    green — the artifact would then be a claim, not a measurement.
+    """
+    assert scores_probe.score(_REPO) == json.loads(SCORES.read_text())
 
 
 #: The scored-measurement logs, by the name the probe writes (`--out` default).

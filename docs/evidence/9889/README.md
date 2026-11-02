@@ -11,11 +11,13 @@ aboutObjects: "#9889, #7949, #9080, #9116, EXTRACTOR-V4-ARCHITECTURE.md §S2.2, 
 
 # `#9889` — the capstone's three E1/E2 probes, and what they measured
 
-`#7949`'s capstone can only score E1 and E2 by parsing **one fixed artifact**
+`#7949`'s capstone could only score E1 and E2 by parsing **one fixed artifact**
 (`docs/evidence/7949-capstone/e1-e2.log`), so both rows reported `BLOCKED` /
-`REFUSED` whatever a fresh run held — and `probes/capstone_measure.py` **forces the
-measured arm ON**, so E1's *before* half (`after <= 0.50 x before`) could not be
-produced by it at all.
+`REFUSED` whatever a fresh run held — and `probes/capstone_measure.py` **forced
+the measured arm ON**, so E1's *before* half (`after <= 0.50 x before`) could not
+be produced by it at all. **That parse path is now gone:** the rows read
+`e1-e2-scores.json` from this directory (see "The score record" below), so the
+sentence above is the history this directory closes.
 
 This directory holds the artifact of the three **additive** probes that close
 both gaps, plus the numbers they measured. No `tortoise/` file changed.
@@ -253,12 +255,14 @@ metric's own precision.
 3. **The ON arm here is n=1.** Two OFF runs, one ON run. A second ON run was not
    taken inside this pass, so the ON arm's own spread is unmeasured — read the
    ON share as one realization, not as the arm's value.
-4. **The E1/E2 rows in the verdict table still parse `e1-e2.log`.** These probes
-   make the artifacts exist; re-pointing the row builder at them is a change to
-   `capstone_measure.py`'s row contract plus the README pins it carries, and it
-   is left out of this PR deliberately (it is not additive, and the issue itself
-   measures that a second scored log in the bundle reds every number the README
-   quotes).
+4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; they no
+   longer do.** This was written as an open limitation when the probes landed
+   (#10342); the re-point followed and is landed
+   (`docs/evidence/7949-capstone/probes/capstone_measure.py` cites
+   `E1_E2_SCORES` for both rows, and `E1E2_LOG` no longer exists there). Kept as
+   history because the reason the re-point was staged separately still holds: it
+   is not additive, it changes the row contract, and a second scored log in the
+   bundle would red every number the README quotes.
 5. **The 2026-10-24 pass's numbers are not reproduced.** They were taken at
    `5f40d832c`; this head is ~28 commits later. That is the difference reported
    above, not a contradiction.
@@ -273,6 +277,41 @@ metric's own precision.
 | `e1-gate-drops.json` | `e1_gate_drops.py` record (every Object name, its verdict, the controls) |
 | `e2a-value-units.json` | `e2a_value_units.py` record, as written (per-session ids, survived and lost) |
 | `e2a-value-units-falsifier.json` | the same with `--inject-anchor` — both readings in one record. Predates the `strict_all` label fix: its `with_anchor.strict_all` carries the as-written reading |
+| `e1-e2-scores.json` | **the score record** — E1 and E2 as the capstone's table rows read them, in one invocation of `probes/e1_e2_scores.py` (below) |
+
+## The score record — how E1 and E2 become rows (`#9889` item 5)
+
+Until this record existed, `probes/capstone_measure.py` could only score E1/E2 by
+parsing `docs/evidence/7949-capstone/e1-e2.log` — a 25-Object, one-arm artifact
+on a corpus that is not the pre-registration's. Both rows were therefore
+`BLOCKED`/`REFUSED` whatever a fresh run held. This record is the piece that
+makes the rows *these probes'*:
+
+```bash
+uv run python docs/evidence/7949-capstone/probes/e1_e2_scores.py \
+    --out docs/evidence/9889/e1-e2-scores.json
+```
+
+```text
+E1 REFUSED decidable=False (before spread 20.6 pp)
+   before 0.3590 -> bound 0.1795 vs after 0.2131 = FAIL (ratio 0.5937)
+   before 0.5652 -> bound 0.2826 vs after 0.2131 = PASS (ratio 0.3770)
+E2 FAIL — E2a 8/14 (bar >= 13), E2b fused 1/114 = 0.008772
+```
+
+It measures nothing itself: every number is read out of a record above. It
+**refuses** (exit 2, no record) when an input record is missing, when the E2a
+falsifier does not reach the frozen denominator (an inert counter), when the
+value-gate positive controls are dead, or when the ON run's corpus is not the
+pre-registration's frozen `fixtures_hash` — so a row can never cite a corpus the
+record did not freeze.
+
+**E1's refusal is a measurement, not a gap.** Two independent OFF realizations
+(0.3590, 0.5652) and one ON realization (0.2131) can be paired two ways, and the
+two pairings give different verdicts. At n=1 per arm the verdict would depend on
+which before run is chosen, so the aggregate is `REFUSED` with both pairings
+printed. The next requirement is **n >= 2 per arm**.
+
 
 ⚠️ **Provenance of these records is stated once**, in §"Which probe revision
 produced each artifact" above: the probe revision that produced the two OFF
