@@ -3833,6 +3833,12 @@ def _norm_kind(k: str) -> str:
 #: own, unrelated caps (a point's ``_MAX_QUOTE``-char ``quote``, a summary's 2000).
 #: ``vet_gate._MAX_CONTENT`` mirrors this value (that module must not import
 #: this one — see its header), and a parity test pins the two together.
+#: ⛔ The word IDENTITY is load-bearing (#10513 review cycle-18, measured): the
+#: stored text and the key must be ONE string, so a pair the S2.2b arbiter
+#: ruled identical cannot key apart into a duplicate Point. Both storing sites
+#: therefore cut with ``_write_span`` — which returns ``x[:1000]`` UNCHANGED
+#: except when that cut would truncate a NUMERAL (see its docstring), the one
+#: case where value fidelity outranks byte identity.
 _MAX_CONTENT = 1000
 
 #: The point-QUOTE cap — distinct from ``_MAX_CONTENT`` (the identity cap) and
@@ -4544,6 +4550,45 @@ _SCALE_WORDS = frozenset({
 })
 
 
+def _value_slots_scaled(text: object) -> tuple[tuple[str, tuple, str], ...]:
+    """``(anchor, value-core, following-token)`` for each judgeable slot.
+
+    The third field is the token AFTER the value, which is how the SCALE
+    question is asked (#10513 review cycle 18 P2, measured). It is carried per
+    slot rather than used to DROP the slot, because the scale has to be compared
+    ACROSS the two sides rather than discarded:
+
+    * `12 million` against `13 million` is a REAL rewrite — both sides carry the
+      same scale, the scale cancels, and the digits must still be judged
+      (pinned by `test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none`,
+      which is about the SCALE going unread, not the pair going unjudged);
+    * `12 million` against `12000000` is ONE value in two forms — reading the
+      scale is what makes them equal, and `_value_bindings` fuses no magnitude
+      word, so the pair is UNJUDGEABLE and must fail open (it was REFUSED,
+      withholding a truthful point).
+
+    `_value_slots` projects this to the (anchor, core) pairs it always returned,
+    so the mint-guard keys and every existing caller are unchanged.
+    """
+    out: list[tuple[str, tuple, str]] = []
+    _text = str(text or "")
+    if _PAREN_NUMERAL_RE.search(_text):
+        return ()
+    for anchor, value, following in _value_bindings(_text,
+                                                   with_following=True):
+        if _value_form_outside_judged(value):
+            continue
+        core = _value_core(value)
+        if core is not None:
+            # The SCALE is the following token ONLY when it IS a scale word; any
+            # other following token is ordinary prose and must not participate
+            # (#10513 review cycle 18 P2): comparing the raw neighbour would
+            # fail `12 events` against `13 things` open and MISS a real rewrite.
+            _scale = following.lower() if following.lower() in _SCALE_WORDS else ""
+            out.append((str(anchor), core, _scale))
+    return tuple(out)
+
+
 def _value_slots(text: object) -> tuple[tuple[str, tuple], ...]:
     """The judgeable (anchor, value-core) slots of ``text``, IN ORDER.
 
@@ -4555,33 +4600,7 @@ def _value_slots(text: object) -> tuple[tuple[str, tuple], ...]:
     with no numeric core are skipped, so the result is what the guarantee can
     judge mechanically.
     """
-    out: list[tuple[str, tuple]] = []
-    _text = str(text or "")
-    if _PAREN_NUMERAL_RE.search(_text):
-        return ()
-    for anchor, value, following in _value_bindings(_text,
-                                                   with_following=True):
-        if _value_form_outside_judged(value):
-            continue
-        # ⛔ A SCALE WORD MAKES THE SLOT UNJUDGEABLE, so it is dropped (#10513
-        # review cycle 18 P2, measured). `_value_bindings` fuses no magnitude
-        # word, so `12 million` binds the core `12` while the other side's
-        # `12000000` binds `12000000`, and the two DIVERGED — refusing
-        # `"we have 12000000 events"` against `"we have 12 million events"`,
-        # one value written two ways, which is the FALSE-ACCUSATION direction
-        # this rule must never take. Reading a scale is `value_normalizer`'s
-        # territory and #2817's "no magnitude table" ruling is NOT reopened here
-        # (the `OVERRIDES:` recorded on #10360 covers the `k` unit identity
-        # only), so the class is outside the judged set on EITHER side and the
-        # registry row discloses it as residual (m2). Dropping the slot fails
-        # open: a vanished slot changes the layout, and a differing layout is
-        # not a same-slot contradiction.
-        if following and following.lower() in _SCALE_WORDS:
-            continue
-        core = _value_core(value)
-        if core is not None:
-            out.append((str(anchor), core))
-    return tuple(out)
+    return tuple((anchor, core) for anchor, core, _ in _value_slots_scaled(text))
 
 
 def _value_slot_divergence(content: object, quote: object,
@@ -4621,12 +4640,28 @@ def _value_slot_divergence(content: object, quote: object,
         return ()
     if not _carries_value(quote):
         return ()
-    content_slots = _value_slots(content)
-    quote_slots = _value_slots(quote)
+    content_slots = _value_slots_scaled(content)
+    quote_slots = _value_slots_scaled(quote)
     if not content_slots or not quote_slots:
         return ()
-    if tuple(a for a, _ in content_slots) != tuple(a for a, _ in quote_slots):
+    if (tuple(a for a, _, _ in content_slots)
+            != tuple(a for a, _, _ in quote_slots)):
         return ()  # a different slot layout is not a same-slot contradiction
+    # ⛔ THE SCALE MUST MATCH, OR THE PAIR IS UNJUDGEABLE (#10513 review cycle 18
+    # P2, measured). `_value_bindings` fuses no magnitude word, so `12 million`
+    # binds the core `12` while `12000000` binds `12000000`: with the scale
+    # ignored the two DIVERGED and `"we have 12000000 events"` was REFUSED
+    # against `"we have 12 million events"` — one value written two ways, the
+    # false-accusation direction this rule must never take. Reading the scale is
+    # `value_normalizer`'s territory and #2817's "no magnitude table" ruling is
+    # NOT reopened here (the `OVERRIDES:` recorded on #10360 covers the `k` unit
+    # identity only), so a pair whose SCALES differ is outside the judged set
+    # (row residual (m2)). A pair whose scales AGREE is still judged on the
+    # digits — that is the `12 million`/`13 million` rewrite, and it must stay
+    # caught.
+    if (tuple(s for _, _, s in content_slots)
+            != tuple(s for _, _, s in quote_slots)):
+        return ()
     # `strict=True` states the invariant the guard four lines above already
     # enforces (the two slot layouts are equal), so a future edit that weakens
     # the guard raises here instead of silently truncating to the shorter side
@@ -4636,8 +4671,8 @@ def _value_slot_divergence(content: object, quote: object,
     # required `agent-infra-ci / lint` leg (#10513 review P1).
     return tuple(
         (anchor, _value_core_str(cv), _value_core_str(qv))
-        for (anchor, cv), (_, qv) in zip(content_slots, quote_slots,
-                                         strict=True)
+        for (anchor, cv, _), (_, qv, _s) in zip(content_slots, quote_slots,
+                                                strict=True)
         if not _value_identity_matches(cv, qv)
     )
 
@@ -4661,17 +4696,39 @@ def _write_span(text: object, cap: int, *,
     graph. This cuts at a token boundary instead, and the SAME span is what the
     write stores, so the judged pair and the written pair are one string.
 
-    ⛔ A value can only be read SHORT by losing ALPHANUMERIC characters (review
-    cycle-14 P2, measured): a numeral cut to ``12`` out of ``1200`` is the
-    false-accusation shape. So when the cut splits a token, the token is dropped
-    WHOLE only if the discarded remainder carries an alphanumeric character.
+    ⛔ A value can only be read SHORT by losing DIGITS (review cycle-14 P2,
+    measured): a numeral cut to ``12`` out of ``1200`` is the false-accusation
+    shape. So when the cut splits a token, the token is dropped WHOLE only when
+    BOTH hold:
+
+    * the discarded remainder carries an alphanumeric character (a real split,
+      not a full stop), and
+    * the part of the split token that would be KEPT carries a DIGIT.
+
+    ⛔ **That second condition is what keeps this helper on the IDENTITY cap**
+    (#10513 review cycle-18, both P1s, measured). ``_MAX_CONTENT`` is not only a
+    storage bound: ``_norm(x.strip()[:_MAX_CONTENT])`` is the key the write's
+    dedup, ``classify_consolidation``, ``_merge_verdict_keys`` and
+    ``_endpoint_keys`` all compute, and every point already in the graph was
+    stored under it. Dropping a split token whose kept part is pure LETTERS
+    (``weekly`` cut to ``w``, ``bbbb…`` cut to ``bbbb…``) moved the stored text
+    off that key for no value reason at all: measured, a 1639-char content
+    stored 999 chars instead of the key's 1000, so a pair the S2.2b arbiter had
+    ruled identical fell through to ADD and minted a duplicate Point (``merges
+    == 0``), and a minted endpoint stopped being the ref's own key, breaking the
+    #5069 closed loop. The span may only move where the RULE is at stake — a
+    numeral whose digits the cut would truncate.
+
     When the remainder is PUNCTUATION only (``p95.`` cut to ``p95``) the token is
     kept: the value is intact, and dropping it would take a judgeable point out
     of the covered set over a full stop (measured: the committed census loses
     one — ``wp04_aurora_perf/raw``, a 201-char quote ending ``blew up the p95.``).
+    And when the kept digits are the whole value (``12.5 s`` cut after ``5``) the
+    token is kept too — nothing was truncated.
 
-    When the cut lands on a token boundary the span is ``text[:cap]`` unchanged,
-    so ordinary (under-cap) pairs are byte-identical to before this helper.
+    So the span equals ``text[:cap]`` for every text whose cut does not truncate
+    a numeral: on the ``_MAX_CONTENT`` sites the stored text IS the identity key
+    again, and on ``_MAX_QUOTE`` it is the pre-existing cut.
 
     ⛔ **This is the module's ONE truncation helper** — `_mint_endpoint` cuts with
     it too (review cycle 15, measured): leaving the mint on the HARD `[:cap]` cut
@@ -4686,16 +4743,23 @@ def _write_span(text: object, cap: int, *,
         return s
     cut = s[:cap]
     if cut and not cut[-1].isspace() and not s[cap].isspace():
-        # the cap landed INSIDE a token: keep it only if what we would lose is
-        # punctuation, i.e. carries nothing a value could be made of
+        # the cap landed INSIDE a token — the span moves only when a VALUE spans
+        # the cut, so ask the two questions separately (#10513 cycle-18 P1):
+        # what is DISCARDED, and what the kept prefix of the split token HOLDS.
+        kept = cut
+        while kept and not kept[-1].isspace():
+            kept = kept[:-1]
+        split_kept = cut[len(kept):]
+        discarded_alnum = False
         rest = s[cap:]
         while rest and not rest[0].isspace():
             if rest[0].isalnum():
-                # a real truncation: drop the split token whole
-                while cut and not cut[-1].isspace():
-                    cut = cut[:-1]
+                discarded_alnum = True
                 break
             rest = rest[1:]
+        if discarded_alnum and any(ch.isdigit() for ch in split_kept):
+            # a numeral is cut in two: drop the split token whole
+            cut = kept
     if not cut:
         # ⛔ The text is ONE token longer than the cap (a 250-char run with no
         # whitespace). Dropping it whole would leave the point with NO quote at
@@ -8661,14 +8725,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # below DROP the item silently — which reverses that contract and reds
         # the #5060 battery. `_raw_content` exists for the verdict key only.
         _raw_content = str(p.get("content", "")).strip()
-        # ⛔ `_write_span`, not `[:_MAX_CONTENT]` (review cycle-14 P2, measured):
-        # a HARD cut stores the truncated prefix of a split token (`… hit 4.`),
-        # which is a value the model never wrote — and it made the judged pair a
-        # DIFFERENT string from the written one, so a split value was stored
-        # unjudged (`content` ending `4.` against a `5.5` quote carries a real
-        # divergence with no warning). Cutting at the token boundary keeps the
-        # stored text free of module-fabricated values and makes the judged pair
-        # and the written pair the same string.
+        # ⛔ `_write_span`, not a bare `[:_MAX_CONTENT]` (review cycle-14 P2,
+        # measured): a HARD cut stores the truncated prefix of a split token
+        # (`… hit 4.`), which is a value the model never wrote — and it made the
+        # judged pair a DIFFERENT string from the written one, so a split value
+        # was stored unjudged (`content` ending `4.` against a `5.5` quote
+        # carries a real divergence with no warning).
+        # ⛔ AND `_MAX_CONTENT` IS THE IDENTITY CAP, so the span must stay the
+        # hard cut everywhere a value is not at stake (#10513 cycle-18 P1):
+        # `_endpoint_keys`, `_merge_verdict_keys` and the priors this classifier
+        # matches all key on `x[:1000]`, and this line storing a shorter
+        # word-boundary span made the write's probe text differ from the key —
+        # measured, a VET-authorised MERGE was dropped (`merges == 0`) and a
+        # duplicate Point minted. `_write_span` now returns `x[:1000]` verbatim
+        # unless the cut would truncate a NUMERAL, so the stored text IS the key.
         # ⚠️ From `_raw_content` (which is `str(...)`, NOT `str(... or "")`):
         # #5060 made a falsy content WRITABLE as its coerced text (a `None`
         # content is the claim "None"), and collapsing a falsy value to "" here
@@ -9074,32 +9144,34 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     minted_endpoints: list[str] = []
 
     def _mint_endpoint(ref: str, where: str) -> str:
-        # ⛔ `_write_span`, never `[:cap]` (review cycle 15, measured): a HARD cut
-        # stores the truncated prefix of a split token, so `_mint_endpoint`
-        # fabricated the value `… p95 hit 4` out of `… p95 hit 4.0 seconds` and
-        # minted it as a quote-less Point the model never wrote — the same class
-        # of module-fabricated value cycle 14 removed from the WRITE, left on the
-        # mint. It also broke dedup: the stored content is the token-safe span, so
-        # `n in point_ids` below missed a byte-identical ref and minted a
-        # DUPLICATE point beside it (measured: 3 points where the pre-cycle-14
-        # tree produced 1). One truncation helper for both halves, so the two
-        # strings cannot disagree.
-        content = _write_span(str(ref or "").strip(), _MAX_CONTENT,
-                              hard_cut_single_token=False)
+        # ⛔ `_write_span`, never a bare `[:cap]` (review cycle 15, measured): a
+        # HARD cut stores the truncated prefix of a split token, so
+        # `_mint_endpoint` fabricated the value `… p95 hit 4` out of
+        # `… p95 hit 4.0 seconds` and minted it as a quote-less Point the model
+        # never wrote — the same class of module-fabricated value cycle 14
+        # removed from the WRITE, left on the mint. It also broke dedup: the
+        # stored content is what `n in point_ids` below keys on, so a
+        # byte-identical ref missed it and minted a DUPLICATE point beside it
+        # (measured: 3 points where the pre-cycle-14 tree produced 1). One
+        # truncation helper for both halves, so the two strings cannot disagree.
+        # ⛔ AND THE MINT MUST STORE THE REF'S OWN IDENTITY PREFIX (#10513
+        # cycle-18 P1, measured): `_endpoint_keys` keys the entity guard on
+        # `_norm(ref[:1000])` and the closure/removal arms re-read the stored
+        # text back, so a mint that stored a SHORTER word-boundary span lost most
+        # of a long ref (measured: 550 of 1000 chars) and put the two keys out of
+        # step. `_write_span` keeps `ref[:1000]` verbatim except where the cut
+        # would truncate a numeral — the only case where the mint may move.
+        # ⛔ THE ONE SHAPE THE MINT CANNOT MAKE HONEST is the module's own HARD
+        # fallback (#10513 review cycle 18 P1, measured): a ref that is a SINGLE
+        # whitespace-free token longer than the cap has no boundary to cut at, so
+        # `_write_span` can only return the truncated prefix and a value in it
+        # reads SHORT. It is NOT answered by refusing the mint: an over-long ref
+        # must still RESOLVE (#2552, pinned), and a refused endpoint drops the
+        # operator edge with "did not resolve" — trading a disclosed truncation
+        # for a lost edge. The mint therefore keeps the identity prefix and the
+        # shape is stated in the row as residual (n2), not absorbed.
+        content = _write_span(str(ref or "").strip(), _MAX_CONTENT)
         if not content:
-            # ⛔ The single-token over-cap shape, where the hard fallback would
-            # have minted a QUOTE-LESS point carrying a value the operator never
-            # wrote (`… 12` out of `… 12.5…`) with no place to report it: this
-            # site has no `_value_slot_divergence` call to catch it. An ABSENT
-            # endpoint is honest where a misstating one is not (#10513 review
-            # cycle 18 P1), and it is NAMED rather than silently skipped.
-            if str(ref or "").strip():
-                warnings.append(
-                    f"minted endpoint ({where}) is one whitespace-free token "
-                    f"longer than the {_MAX_CONTENT}-char content cap, so no "
-                    "token-safe content exists — NOT minted rather than "
-                    "minting a cut that misstates its own value"
-                )
             return ""
         # The `point_ids` clause is a WARNING fix, not a resolution fix: an
         # operator naming an already-emitted point resolves through `_resolve`

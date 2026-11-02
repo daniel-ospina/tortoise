@@ -300,9 +300,14 @@ def test_the_one_classifier_is_the_production_value_engine(monkeypatch):
     calls = {"n": 0}
     real = v2._value_bindings
 
-    def counting(text):
+    # ⛔ `*args, **kwargs`: the engine gained a `with_following` keyword
+    # (#10513 review cycle 18) so the JUDGING layer can ask about a SCALE
+    # word. The wrapper forwards it — a signature that dropped the keyword
+    # would make this pin pass by refusing to call the engine at all, which
+    # is the opposite of what it exists to assert.
+    def counting(*args, **kwargs):
         calls["n"] += 1
-        return real(text)
+        return real(*args, **kwargs)
 
     monkeypatch.setattr(v2, "_value_bindings", counting)
     assert v2._value_slots("the TTL is twenty minutes") == (("ttl", ("", "20", "min")),)
@@ -572,11 +577,18 @@ def test_the_residual_is_measured_on_the_committed_census_corpus():
                 if not v2._carries_value(content, quote):
                     continue
                 value_bearing += 1
-                content_slots = v2._value_slots(content)
-                quote_slots = v2._value_slots(quote)
+                # ⛔ THE SHIPPED PREDICATE, not an approximation of it (#10513
+                # review cycle 18): `judged` must be exactly what
+                # `_value_slot_divergence` will look at, which since the scale
+                # rule is the anchors AND the per-slot SCALE — a pair whose
+                # scales differ is outside the judged set. Counting anchors alone
+                # overstated the figure and hid the fail-open cost of the new
+                # exclusions.
+                content_slots = v2._value_slots_scaled(content)
+                quote_slots = v2._value_slots_scaled(quote)
                 if (content_slots and quote_slots
-                        and tuple(a for a, _ in content_slots)
-                        == tuple(a for a, _ in quote_slots)):
+                        and tuple((a, sc) for a, _, sc in content_slots)
+                        == tuple((a, sc) for a, _, sc in quote_slots)):
                     judged += 1
                 if v2._value_slot_divergence(content, quote):
                     refused += 1
@@ -612,11 +624,11 @@ def test_the_residual_is_measured_on_the_committed_census_corpus():
                                    v2._MAX_QUOTE)
                 if not v2._carries_value(c, q):
                     continue
-                content_slots = v2._value_slots(c)
-                quote_slots = v2._value_slots(q)
+                content_slots = v2._value_slots_scaled(c)
+                quote_slots = v2._value_slots_scaled(q)
                 if (content_slots and quote_slots
-                        and tuple(a for a, _ in content_slots)
-                        == tuple(a for a, _ in quote_slots)):
+                        and tuple((a, sc) for a, _, sc in content_slots)
+                        == tuple((a, sc) for a, _, sc in quote_slots)):
                     span_judged += 1
                 if v2._value_slot_divergence(c, q):
                     span_refused += 1
@@ -1040,7 +1052,86 @@ def test_a_ref_that_matches_the_stored_content_RESOLVES_instead_of_minting_a_DUP
     assert len(points) == 1, (len(points), [p["content"][-14:] for p in points])
 
 
-# ── 8. the rule's own BOUND, and the residual it still carries ─────────────
+def test_the_stored_content_IS_the_identity_key_a_verdict_and_a_prior_key_on():
+    """Review cycle-18 P1: `_MAX_CONTENT` is an IDENTITY cap, not only a bound.
+
+    `_norm(x.strip()[:_MAX_CONTENT])` is the key `_endpoint_keys`,
+    `_merge_verdict_keys`, `classify_consolidation` and the write's own dedup
+    compute — and every point already in the graph was stored under it. Cycle 14
+    moved the write onto `_write_span`, which dropped the split token even when
+    it carried no digit: measured, a 1639-char content stored 999 chars instead
+    of the key's 1000 (`… team meets ` instead of `… team meets w`), so a pair
+    the S2.2b arbiter had ruled identical fell through to ADD — `merges == 0`,
+    one duplicate Point minted, silently (the #5006 F1 defect).
+
+    The span now moves only for a truncated NUMERAL, which is the only thing the
+    value rule is about (`_write_span`). ⛔ Non-vacuous: pre-fix `span` is 999
+    chars at this shape, and the `core` end-to-end pin
+    `tests/test_near_dup_merge_5006.py::
+    TestTheWritePathEmitsOneEntityAndKeepsTheLosersEvidence::
+    test_a_verdict_on_a_candidate_over_the_cap_still_merges` reds with
+    `merges == 0`.
+    """
+    raw = ("the team meets weekly in the main office " * 40).strip()
+    hard = raw[:v2._MAX_CONTENT]
+    span = v2._write_span(raw, v2._MAX_CONTENT)
+    assert len(raw) > v2._MAX_CONTENT
+    # the cut lands INSIDE a LETTER token (`meets w|eekly`): the shape that must
+    # NOT move the span
+    assert hard.endswith("meets w") and not hard[-1].isdigit(), hard[-12:]
+    assert span == hard, span[-14:]
+    assert v2._norm(span) == v2._norm(hard)
+    # …so what the write STORES is the string the write's matchers key on
+    assert v2._norm(span) in v2._merge_verdict_keys(raw)
+    assert v2._norm(span) in v2._endpoint_keys(raw)
+    result = _write(raw, "the team meets weekly")
+    assert [p["content"] for p in result["payload"]["points"]] == [hard], (
+        [len(p["content"]) for p in result["payload"]["points"]],
+        result["warnings"])
+    # ⛔ positive control, so this cannot pass by the rule having gone blind: a
+    # NUMERAL cut at the same cap DOES move the span (the value exception).
+    hard_split = _SPLIT_VALUE_CONTENT.strip()[:v2._MAX_CONTENT]
+    assert hard_split.endswith("hit 4"), hard_split[-12:]
+    assert v2._write_span(_SPLIT_VALUE_CONTENT, v2._MAX_CONTENT) != hard_split
+
+
+def test_the_MINT_stores_the_refs_OWN_identity_prefix_so_the_5069_loop_closes():
+    """Review cycle-18 P1: `_endpoint_keys` keys on `ref[:1000]`; the mint stores it.
+
+    Measured pre-fix: a ref of `"a"*500 + " "*50 + "b"*500 + "tail"` (1054
+    chars) whose cut lands inside the `b` run was stored as 550 chars, because
+    the split token was dropped whole although it carried no digit. The guard's
+    key is the ref's OWN `_MAX_CONTENT` window, so every later comparison that
+    re-derives an endpoint's identity from its STORED text (the #5069 closed
+    loop, the closure/removal arms) compared two different strings, and ~45% of
+    the ref never reached the graph.
+
+    ⛔ Non-vacuous: pre-fix `span` is 550 chars and the `core` pin
+    `tests/test_vet_gate_5005.py::test_content_only_closure_collision_does_not_over_prune`
+    reds on `_norm(p[:1000]) == _norm(ref[:1000])`.
+    """
+    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"
+    hard = ref[:v2._MAX_CONTENT]
+    assert len(ref) > v2._MAX_CONTENT
+    # the cut lands inside the `b` run — alphanumeric, but NO digit, so the span
+    # must stay the identity window
+    assert hard.endswith("b") and not hard[-1].isdigit(), hard[-12:]
+    span = v2._write_span(ref.strip(), v2._MAX_CONTENT)
+    assert span == hard, (len(span), len(hard))
+    assert v2._norm(span) in v2._endpoint_keys(ref)
+    # …and the mint END TO END stores that window, not a shorter span
+    embed = {
+        "entities": [], "points": [], "events": [], "chain_notes": [],
+        "link_before_create": [],
+        "operators": [{"src": ref, "dst": "the cache TTL is 20 minutes",
+                       "op_type": "IMPL"}],
+    }
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    minted = [p["content"] for p in result["payload"]["points"]]
+    assert hard in minted, ([len(c) for c in minted], result["warnings"])
+
+
+# ── 8. the rule's own BOUND, and the residual it still carries ───────────────────
 
 def test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded():
     """UNVERIFIED item 2, settled: the judge must be BOUNDED.
@@ -1067,9 +1158,10 @@ def test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded():
     assert v2._value_slot_divergence(content, quote) == ()
     # ⛔ the WRITE is judged on the span it keeps, so the kept prefix's rewrite
     # is refused rather than failed open on the discarded tail. The cut lands
-    # INSIDE `paddin|g`, so the incomplete token is dropped whole.
+    # INSIDE `paddin|g` — a LETTER token, so the span is the hard cut itself
+    # (cycle-18: only a truncated NUMERAL moves it) — and it carries `4.2`.
     kept = v2._write_span(quote, v2._MAX_QUOTE)
-    assert quote.startswith(kept) and 0 < len(kept) < v2._MAX_QUOTE, kept
+    assert kept == quote[:v2._MAX_QUOTE], kept[-12:]
     assert v2._value_slot_divergence(content, kept), kept
     result = _write(content, quote)
     assert result["payload"]["points"] == [], result["warnings"]
@@ -1090,9 +1182,14 @@ def test_an_over_long_side_is_not_tokenised_at_all(monkeypatch):
     calls = {"n": 0}
     real = v2._value_bindings
 
-    def counting(text):
+    # ⛔ `*args, **kwargs`: the engine gained a `with_following` keyword
+    # (#10513 review cycle 18) so the JUDGING layer can ask about a SCALE
+    # word. The wrapper forwards it — a signature that dropped the keyword
+    # would make this pin pass by refusing to call the engine at all, which
+    # is the opposite of what it exists to assert.
+    def counting(*args, **kwargs):
         calls["n"] += 1
-        return real(text)
+        return real(*args, **kwargs)
 
     monkeypatch.setattr(v2, "_value_bindings", counting)
     huge = "the p95 hit 4.2 seconds " + ("z " * v2._MAX_JUDGED_TEXT)
@@ -1472,10 +1569,19 @@ def test_the_S5_mint_leaves_a_single_token_ref_UNQUOTED_rather_than_misquoting_i
     assert v2._value_slot_divergence(
         ref, v2._write_span(ref, v2._MAX_QUOTE, hard_cut_single_token=False)) == ()
 
-    # A MULTI-token ref is unaffected — it has a boundary, so it still quotes.
+    # A MULTI-token ref is unaffected — it has a boundary, so it still quotes,
+    # and the span is that boundary cut. Cycle 18: the `x` run carries no digit,
+    # so nothing value-bearing is truncated and the cap STANDS (the content cap
+    # is the identity key — see
+    # `test_the_stored_content_IS_the_identity_key_a_verdict_and_a_prior_key_on`).
     multi = "long endpoint claim " + "x" * 300
     span = v2._write_span(multi, v2._MAX_QUOTE, hard_cut_single_token=False)
-    assert span and span == "long endpoint claim ", repr(span)
+    assert span == multi[:v2._MAX_QUOTE], repr(span[-12:])
+    # …and the token-drop is not vacuous: a ref whose NUMERAL straddles the quote
+    # cap still drops the split token, so the S5 site cannot quote `12` out of
+    # `12.5` even though it has a whitespace boundary.
+    num_multi = "storage tier " + "d" * 185 + "12.5" + "z" * 40
+    assert v2._write_span(num_multi, v2._MAX_QUOTE) == "storage tier "
 
     # End to end: the minted point is UNQUOTED and the drop is NAMED, never
     # silent. An unannounced loss is the rule-#9906 defect. `edus` is supplied
@@ -1495,3 +1601,130 @@ def test_the_S5_mint_leaves_a_single_token_ref_UNQUOTED_rather_than_misquoting_i
         "a single-token ref must not carry a quote that misstates its value")
     assert any("no token-safe quote" in w for w in result["warnings"]), (
         "the withheld quote must be NAMED, not silent")
+
+
+# ── 22. the cycle-18 false-accusation classes (measured, then closed) ──────
+#
+# Every pin in this block has the same shape and the same reason: the rule
+# WITHHELD a truthful point, which is the one direction its own contract says it
+# must never take ("a guard that accuses a truthful point of a rewrite it did
+# not commit is worse than no guard"). Each was reproduced against the primary
+# source at the reviewed head before the fix, and each pin carries a POSITIVE
+# CONTROL so it can fail in the detection direction too rather than only
+# certifying that the refusal stopped happening.
+
+
+def test_a_HARD_CUT_pair_is_not_judged_because_the_cut_can_read_a_value_short():
+    """Review cycle-18 P1: the module's own truncation refused a truthful point.
+
+    ``_write_span`` falls back to the hard ``s[:cap]`` when the text is ONE
+    whitespace-free token longer than the cap — there is no token boundary to
+    cut at — and the write path then fed that truncated span to the judge.
+
+    Measured before the fix: ``content = "z"*998 + "4.2 seconds"`` against
+    ``quote = "4.2 seconds"`` — a TRUTHFUL point — was REFUSED with
+    ``point says '4', quote says '4.2'``, and the mirror shape refused ``4.25``
+    against a ``4`` read out of the quote. Both directions are pinned here, plus
+    the end-to-end write, plus the positive control that a REAL rewrite over
+    ordinary text is still refused.
+    """
+    hard_content = "z" * 998 + "4.2 seconds"
+    mirror_quote = "q" * 198 + "4.25 seconds"
+    # the shape really is the fallback, or this pin tests nothing
+    assert v2._write_span_is_hard_cut(hard_content, v2._MAX_CONTENT)
+    assert v2._write_span_is_hard_cut(mirror_quote, v2._MAX_QUOTE)
+    assert v2._write_span(hard_content, v2._MAX_CONTENT) != hard_content
+    # …and the pair those cuts WOULD produce diverges, which is the false
+    # accusation: 998 z's + `4.` reads as the value 4.
+    assert v2._value_slot_divergence(
+        v2._write_span(hard_content, v2._MAX_CONTENT), "4.2 seconds")
+
+    # POSITIVE CONTROL: an ordinary (under-cap) pair is NOT the fallback, so the
+    # guard cannot pass by declaring every pair unjudgeable.
+    assert not v2._write_span_is_hard_cut(
+        "the p95 hit 4.2 seconds", v2._MAX_CONTENT)
+    assert v2._value_slot_divergence(
+        "the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+
+    # END TO END: the truthful over-cap point is WRITTEN, and it is WRITTEN with
+    # a warning naming why it was not judged — an unannounced fail-open would be
+    # the #9906 silent-drop defect one layer over.
+    embed = {"entities": [], "events": [], "chain_notes": [],
+             "link_before_create": [],
+             "points": [{"content": hard_content, "quote": "4.2 seconds",
+                         "pointKind": "statement", "search_keys": []}]}
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    kept = [p for p in result["payload"]["points"] if p["content"].endswith("4.")]
+    assert kept, ("the truthful over-cap point must survive — this pin needs it "
+                  "to be written, not refused")
+    assert any("NOT judged on this pair" in w for w in result["warnings"]), (
+        "the fail-open must be NAMED, not silent")
+
+
+def test_a_currency_symbol_does_not_swallow_the_SIGN():
+    """Review cycle-18 P2: `$-4` read as `4`, so one value was refused.
+
+    ``_value_core`` read the sign from ``raw.lstrip()[0]``, and a leading
+    currency symbol is decoration AROUND the sign. Measured before the fix:
+    ``_value_core("$-4")`` returned ``('', '4', None)``, so ``$-4``/``-4`` — ONE
+    value in two spellings — DIVERGED and a truthful point was refused, while
+    ``$-4``/``$4`` — a sign the model DROPPED, a real rewrite — was WRITTEN with
+    no warning. Both directions are pinned; the second is the positive control.
+    """
+    assert v2._value_core("$-4") == ("-", "4", None)
+    assert v2._value_core("-$4") == ("-", "4", None)
+    assert not v2._value_slot_divergence("the delta was $-4",
+                                         "the delta was -4")
+    # POSITIVE CONTROL: the sign the model dropped is still a rewrite.
+    assert v2._value_slot_divergence("the delta was $-4",
+                                     "the delta was $4")
+
+
+def test_an_accounting_PAREN_numeral_is_outside_the_judged_set():
+    """Review cycle-18 P2: `($4)` and `-4` are one value, and it refused them.
+
+    ``($4)`` is ``-4`` in accounting and a prose aside in a sentence, and WHICH
+    ONE APPLIES IS A READER PROPERTY this path does not have — the same reason a
+    separator-bearing numeral is unjudged (#2817 point 1: never invent a second
+    reading of one token). Reading it as POSITIVE was not neutral: it refused
+    ``"the shortfall was ($4)"`` against ``"the shortfall was -4"``.
+
+    ⛔ Asked of the RAW text, because ``_value_bindings`` strips the parens
+    before the token reaches ``_value_core`` — the positive control below is that
+    a prose parenthetical is NOT swallowed (the exclusion is the accounting
+    SHAPE, not every bracket).
+    """
+    assert v2._value_core("($4)") is None
+    assert not v2._value_slot_divergence("the shortfall was ($4)",
+                                         "the shortfall was -4")
+    # POSITIVE CONTROL: a prose parenthetical keeps its slot, so a real rewrite
+    # in that text is still refused — the exclusion did not swallow the side.
+    assert v2._value_slots("a loss of (see 2019) here")
+    assert v2._value_slot_divergence("a loss of (see 2019) here",
+                                     "a loss of (see 2020) here")
+
+
+def test_a_SCALE_word_is_compared_across_the_pair_rather_than_dropped():
+    """Review cycle-18 P2: `12 million` against `12000000` refused a truthful point.
+
+    ``_value_bindings`` fuses no magnitude word, so ``12 million`` binds the core
+    ``12`` while the other side's ``12000000`` binds ``12000000`` and the two
+    DIVERGED — one value written two ways, refused. Reading a scale is
+    ``value_normalizer``'s territory and #2817's "no magnitude table" ruling is
+    NOT reopened here, so a pair whose SCALES DIFFER is outside the judged set.
+
+    ⛔ The scale is COMPARED, not dropped: ``12 million`` against ``13 million``
+    is a real rewrite and must stay refused (this is the same property
+    ``test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none``
+    pins from the other side). Dropping every scale-bearing slot — the first
+    attempt at this fix — silently lost it, and this pin is what caught that.
+    """
+    assert not v2._value_slot_divergence("we have 12000000 events",
+                                         "we have 12 million events")
+    assert not v2._value_slot_divergence("we have 1.0 million events",
+                                         "we have 1000000 events")
+    # POSITIVE CONTROLS: equal scales are still judged on the digits, and a
+    # non-scale neighbour does not make the pair unjudgeable.
+    assert v2._value_slot_divergence("we have 12 million events",
+                                     "we have 13 million events")
+    assert v2._value_slot_divergence("we sold 12 events", "we sold 13 things")

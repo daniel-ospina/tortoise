@@ -2156,7 +2156,15 @@ class TestS5:
         exists for — the minted Point is REACHABLE from the operator — is
         unchanged and is what the assertions above it verify.
         """
-        long_ref = "long endpoint claim " + ("x" * 1500)
+        # ⛔ THE SPLIT TOKEN BEARS A NUMERAL, because that is now the ONLY shape
+        # whose cut MOVES (#10513 cycle 18 P2): `_write_span` drops a split
+        # token only when the part it would KEEP carries a digit, so the class of
+        # letter-run refs this fixture used to carry keeps the hard cap and the
+        # precondition below (`span != [:cap]`) became false — the fixture
+        # stopped exercising what it documents. A digit run keeps the assertion
+        # honest: this is the one cut where value fidelity outranks byte
+        # identity, and it is the cut the mint must agree with.
+        long_ref = "long endpoint claim " + ("7" * 1500)
         embed = json.loads(json.dumps(S2_FIXTURE))
         embed["operators"] = [
             {"src": long_ref,
