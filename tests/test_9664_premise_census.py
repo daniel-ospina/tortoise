@@ -79,6 +79,9 @@ Static: imports the probe and the onboarding modules; no DB, no network.
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -687,3 +690,54 @@ def test_the_seeding_stand_in_refuses_a_changed_seed_write(probe) -> None:
             "MERGE (p:PackInstall {namespace: $ns}) SET p.version = $version",
             params={"ns": "dev", "version": "1.0.0"})
     assert not graph.installs, "a refused seed must leave the graph untouched"
+
+
+def test_the_onboarding_section_measures_on_a_box_that_exports_the_hosted_key() -> None:
+    """The re-run recipe must work where lanes actually run, not only on a laptop.
+
+    `tortoise/auth.py:28-38` raises at **import** time when `TORTOISE_API_KEY` is
+    set and `TORTOISE_SECRET_PEPPER` is unset — a STARTUP guard for the hosted
+    server (#67). A fleet cell exports exactly that key for its MCP client, so
+    `census_onboarding`'s `from tortoise.hosted_api import _CHECKPOINT_STEPS`
+    raised, rows 1 and 5a-5e printed as UNMEASURED and the probe exited 3: the
+    documented recipe (`README.md` → "Re-running the measurable half") could not
+    reproduce `25 premises, 0 unmeasured sections` anywhere but a box without the
+    key. These pins are green over it because `tests/conftest.py:18` supplies the
+    pepper the recipe does not — so this one reproduces the recipe, in a fresh
+    process, with the key exported and no pepper.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("TORTOISE_API_KEY", "TORTOISE_SECRET_PEPPER")}
+    env["TORTOISE_API_KEY"] = "tt_hosted_key_a_cell_exports"
+    script = (
+        "import importlib.util\n"
+        f"spec = importlib.util.spec_from_file_location('census', {str(PROBE_PATH)!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "rc = module.main()\n"
+        "for _step, premise, measured in module.rows:\n"
+        "    print(f'ROW\\t{premise}\\t{measured}')\n"
+        "print('RC', rc, 'UNMEASURED', len(module.unmeasured), 'ROWS', len(module.rows))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script], cwd=str(ROOT), env=env,
+        capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, (
+        "the census must measure with the hosted key exported — "
+        f"{proc.returncode} is the recipe failing again: {proc.stderr[-1500:]}"
+    )
+    assert "RC 0 UNMEASURED 0" in proc.stdout, (
+        f"the recipe's own verdict must be reproducible, not just a section run: "
+        f"{proc.stdout[-1600:]} / {proc.stderr[-800:]}")
+    # The VERDICT is the thing that would go unchecked under the harness pepper:
+    # a row prints whether it is CONFIRMED or FALSIFIED, so pin both readings.
+    for needle in ("`team-named` is auto-satisfied",
+                   "`connection-written` is in NO completion gate"):
+        line = next((ln for ln in proc.stdout.splitlines()
+                     if ln.startswith("ROW\t") and needle in ln), None)
+        assert line is not None, f"row never printed: {needle!r} in {proc.stdout[-1600:]}"
+        measured = line.split("\t")[2]
+        assert measured.startswith("CONFIRMED"), (
+            f"the recipe environment measured {needle!r} as {measured!r} — the pins "
+            "only ever read this under the harness pepper")
