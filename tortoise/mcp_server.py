@@ -1479,13 +1479,16 @@ def _take_graph_argument(name: str,
 # disclosure rides the two channels `_warn_retired_result` already established
 # for exactly this shape (see that function): an extra `TextContent` appended
 # LAST, so the tool's own payload stays `content[0]` and `structured_content` is
-# byte-identical — which is what keeps every declared `outputSchema` intact. On
-# the write surface that is ONE tool: `tortoise_delete_entity` advertises
-# `{result: object | boolean}` under `x-fastmcp-wrap-result`, and a dict field
-# merged into `structured_content` would sit beside `result` and violate the
-# `required`/`additionalProperties` contract of that envelope. The envelope is a
-# promise about the success shape and a conforming client enforces it (#8482 is
-# the incident: a failure delivered in the success channel).
+# byte-identical. The reason is NOT that a merged field would break a schema —
+# measured, it would not: the one write tool carrying `x-fastmcp-wrap-result`
+# (`tortoise_delete_entity`, `result: object | boolean`) declares no
+# envelope-level `additionalProperties: false`, so `{"result": …, "graph": …}`
+# validates. The reason is that `structured_content` is the tool's OWN answer: a
+# caller unwraps `result`, and adding a sibling key changes data the tool
+# declared and every consumer would have to learn. Appending leaves both
+# existing channels untouched BY CONSTRUCTION, needing no schema property to be
+# false for that to hold. (#8482 is about a failure delivered in the SUCCESS
+# channel — the `result` VALUE's type — not about extra keys.)
 _GRAPH_DISCLOSURE_KEY = "graph_resolution"
 
 
@@ -1604,6 +1607,15 @@ def _payload_says_preview(result: Any) -> bool:
     `confirmation is None` path, which sets no `dry_run` ARGUMENT at all. Reading
     the receipt is therefore the only way that call is labelled correctly, and it
     is the same marker the design already standardises on.
+
+    ⛔ NEVER call this without the declared-set gate in :func:`_is_preview`: a
+    tool's payload can contain the caller's own `props`, and `dry_run` is not a
+    server-managed prop, so `props={"dry_run": True}` on
+    `tortoise_create_point` comes back in the node it just created. This is the
+    #3926 / #8135 class already fixed once in this file ("a SUCCESSFUL write may
+    carry a user prop literally named `error` … key presence cannot
+    distinguish"), and reading the marker ungated would let a caller forge
+    "Nothing was written" over an executed write.
     """
     payload = getattr(result, "structured_content", None)
     if not isinstance(payload, dict):
@@ -1618,6 +1630,16 @@ def _payload_says_preview(result: Any) -> bool:
 def _is_preview(name: str, arguments: dict[str, Any] | None, result: Any) -> bool:
     """Whether this dispatch wrote nothing — the two shapes that mean it (#10084).
 
+    ⛔ GATED ON `_dry_run_tool_names()` FIRST, for both halves. A tool that does
+    not DECLARE `dry_run` cannot be a preview, and that is a correctness
+    requirement rather than tidiness: its payload may echo the caller's own
+    `props`, so an ungated receipt read lets a caller forge the marker. Measured
+    before the gate existed — `tortoise_create_point` with `props={"dry_run":
+    True}` created the point and the reply said "Nothing was written: this call
+    was a preview". The declared set is exactly the set of write handlers that
+    emit a `dry_run` key (measured: set difference is empty), so gating loses no
+    real preview.
+
     * the `dry_run` ARGUMENT, read with `is True` and NOT `bool(...)`: `arguments`
       is the raw PRE-validation dict (the same trap the metering path at
       `maybe_record_mcp_read` documents, #4057), so `{"dry_run": "false"}` — a
@@ -1629,8 +1651,9 @@ def _is_preview(name: str, arguments: dict[str, Any] | None, result: Any) -> boo
       way an unconfirmed `tortoise_delete` — no `dry_run` argument at all,
       nothing written — is labelled correctly.
     """
-    declared = name in _dry_run_tool_names()
-    return ((declared and isinstance(arguments, dict)
+    if name not in _dry_run_tool_names():
+        return False
+    return ((isinstance(arguments, dict)
              and arguments.get("dry_run") is True)
             or _payload_says_preview(result))
 

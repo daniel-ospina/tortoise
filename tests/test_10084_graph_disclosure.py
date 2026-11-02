@@ -19,10 +19,12 @@ where the data went.
 Why this is not a surface change, and why the test proves it STRUCTURALLY rather
 than by promise: the disclosure rides the two channels `_warn_retired_result`
 already established — an extra `TextContent` appended LAST and a `_meta` entry —
-so `content[0]` and `structured_content` stay byte-identical. That is what keeps
-every declared `outputSchema` intact, including the `x-fastmcp-wrap-result`
-array envelope of a `-> list[dict]` write tool, which a dict field WOULD violate
-(the failure class #8482 exists to repair). No tool, parameter or SDK method is
+so `content[0]` and `structured_content` stay byte-identical — untouched BY
+CONSTRUCTION, which is why no declared `outputSchema` is even consulted (the one
+write tool that declares a wrap envelope is `tortoise_delete_entity`,
+`result: object | boolean`; a merged key would in fact validate, but it would
+change the tool's own answer, and #8482 is about the `result` VALUE's type, not
+about extra keys). No tool, parameter or SDK method is
 added, renamed or removed.
 
 And what the tests refuse to allow: the disclosure must never widen the isolation
@@ -152,10 +154,12 @@ async def test_a_write_naming_no_graph_lands_on_the_default_and_says_so(probe):
 
 @pytest.mark.asyncio
 async def test_the_disclosure_is_the_LAST_content_block_and_the_payload_is_untouched(probe):
-    """Why the extra block is appended rather than merged into the payload: the
-    tool's own `structured_content` is what a conforming client validates against
-    the advertised `outputSchema`, and the array-envelope tools would reject a
-    dict field (#8482). `content[0]` is the payload; the disclosure follows it."""
+    """Why the extra block is appended rather than merged into the payload:
+    `structured_content` is the tool's OWN answer (a caller unwraps `result`), so
+    a sibling key would change data the tool declared and every consumer would
+    have to learn it. Appending leaves `content[0]` and `structured_content`
+    untouched by construction. `content[0]` is the payload; the disclosure
+    follows it."""
     with _workspace():
         result = await ms.mcp.call_tool(PROBE, {"note": "hi"})
 
@@ -369,12 +373,49 @@ def test_the_receipt_marker_is_read_in_both_envelope_shapes(payload, expected):
 
 
 @pytest.mark.asyncio
+async def test_a_caller_prop_named_dry_run_cannot_forge_a_preview(monkeypatch):
+    """MEASURED DEFECT this guards: `dry_run` is NOT a server-managed prop, so
+    `tortoise_create_point(..., props={"dry_run": True})` echoes the key back in
+    the node it created — and reading that payload ungated made the reply say
+    "Nothing was written: this call was a preview" over an EXECUTED write (the
+    #3926/#8135 class: key presence cannot distinguish a caller's prop from a
+    server marker). The declared-set gate is what makes it unforgeable.
+    """
+    monkeypatch.setattr(ms, "WRITE_TOOL_NAMES", frozenset({PROBE}))
+
+    def _echoes_props(props: dict | None = None) -> dict:
+        # Exactly what `tortoise_create_point` returns: the caller's props come
+        # back inside the created node.
+        return {"id": "pt_1", "status": "live", **(props or {})}
+
+    ms.mcp.add_tool(FunctionTool.from_function(_echoes_props, name=PROBE,
+                                               description=PROBE))
+    try:
+        with _workspace():
+            forged = await ms.mcp.call_tool(
+                PROBE, {"props": {"dry_run": True}})
+    finally:
+        with contextlib.suppress(Exception):
+            ms.mcp.local_provider.remove_tool(PROBE)
+
+    # the payload really does carry the caller's prop …
+    assert "dry_run" in _text(forged), _text(forged)
+    # … and it must not be read as a preview marker.
+    assert "preview" not in _disclosure(forged), _disclosure(forged)
+    assert "Nothing was written" not in _text(forged)
+
+
+@pytest.mark.asyncio
 async def test_an_unconfirmed_delete_shape_is_labelled_a_preview(monkeypatch):
     """`tortoise_delete` with no `confirmation` writes nothing and sets NO
     `dry_run` argument — it marks its own receipt instead. That receipt marker is
     the only thing that can label it, and without it the same nothing-happened
     call would read as a completed write."""
     monkeypatch.setattr(ms, "WRITE_TOOL_NAMES", frozenset({PROBE}))
+    # The receipt branch is gated on the DECLARED preview set (a tool that does
+    # not declare `dry_run` can be forged through its own echoed `props`), so the
+    # probe must be declared for the receipt-only path to be exercised at all.
+    monkeypatch.setattr(ms, "_DRY_RUN_TOOLS", frozenset({PROBE}))
 
     def _receipt(dry_run_arg: bool = False) -> dict:
         return {"dry_run": True, "token": "tok_1", "preview": True}
