@@ -4605,7 +4605,7 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # case was widened from the two log-invisible bars to all seven, then 2180 by #10546's
         # ancestry/late-touch tests — the pin landing rather than drifting, because a plausible
         # offset is what it exists to refuse. ⛔ Re-derive this number, never delete the entry: the
-        # whole point is that a citation which names a line that does not say it is a dead pointer)
+        # whole point is that a citation which names a line that does not say it is a dead pointer.
         ("tests/test_capstone_preregistration_9075.py", 2180):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
