@@ -336,3 +336,68 @@ def test_llmreader_answer_with_evidence_passes_the_question_to_the_prompt():
     # same resolved type (None), so a stub that ignored `question` would make
     # these equal.
     assert agg_system != plain_system
+
+
+# ── the frozen interface, pinned as a TEST and not as prose ────────────────
+
+def test_system_prompt_for_signature_stays_frozen():
+    """The A1 plan's CONDITIONAL GATES freeze this signature, and a prose note
+    in the diff is not a gate — this is.
+
+    ``docs/plans/2026-08-20-1546-a1-abstention.md`` §⛔ CONDITIONAL GATES:
+
+        **No new reader interface surface.** ``Reader.answer`` /
+        ``system_prompt_for`` signatures are UNCHANGED — no ``abstention=``
+        kwarg, no ``question_id`` passthrough, no ``_abs``-derived signal of
+        any kind. … must be rejected in review.
+
+    #10539's earlier head carried `system_prompt_for(question_type, *,
+    question=None)`: the counting discipline worked, but the surface it grew
+    contradicted that gate, so it could not land on a lane's authority. The
+    clause is now composed by `_system_prompt_for_question` instead.
+
+    RED mutation (measured at the head this replaced): re-add the keyword-only
+    ``question`` parameter to ``system_prompt_for`` and this assertion fails on
+    the parameter list — i.e. the regression is caught by a test rather than by
+    whoever happens to re-read the plan doc.
+    """
+    import inspect
+
+    params = inspect.signature(system_prompt_for).parameters
+    assert list(params) == ["question_type"], (
+        "system_prompt_for's signature is frozen by the A1 plan's CONDITIONAL "
+        f"GATES; found {list(params)!r}")
+    assert params["question_type"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert params["question_type"].default is inspect.Parameter.empty
+    # and the frozen signature genuinely REJECTS the keyword the gate names
+    with pytest.raises(TypeError):
+        system_prompt_for(None, question="How many items did I buy?")  # type: ignore[call-arg]
+
+
+def test_composition_is_additive_and_leaves_the_type_prompt_untouched():
+    """The clause composes ON TOP of the type prompt — it never rewrites it,
+    and it never reaches a caller that did not supply a question.
+
+    Pinned as an exact identity so the composition point cannot drift: for an
+    aggregative question the composed prompt is ``system_prompt_for(qtype)`` +
+    the fragment, verbatim, in that order; for a non-aggregative one it IS
+    ``system_prompt_for(qtype)``. This is what makes the committed prompts
+    (`system_prompt_for(None)` in #4107's wire capture and #4837's receipt) stay
+    valid without being re-measured.
+
+    RED mutation: append the fragment unconditionally -> the second assertion
+    fails and the #4107/#4837 pins go red with it.
+    """
+    compose = getattr(_reader_mod, "_system_prompt_for_question")
+
+    agg_q = "How many clothing items did I buy last month?"
+    agg_type = detect_question_type(agg_q)
+    assert _AGGREGATION_FRAGMENT, "the fragment must exist for this pin to mean anything"
+    assert compose(agg_type, agg_q) == system_prompt_for(agg_type) + _AGGREGATION_FRAGMENT
+
+    plain_q = "What did I buy at the hardware store?"
+    plain_type = detect_question_type(plain_q)
+    assert compose(plain_type, plain_q) == system_prompt_for(plain_type)
+
+    # no question at all => the pre-#10539 prompt, exactly
+    assert compose(plain_type, None) == system_prompt_for(plain_type)
