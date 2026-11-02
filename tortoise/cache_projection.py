@@ -1708,18 +1708,24 @@ def apply_event_stream_folds(
                 # MATCH, so only the EARLIEST creation record for this id may
                 # speak: #3590 journals another `ObjectRegistered` on EVERY
                 # create, and a re-mention must not rewrite a stored status.
-                # ⚠️ What `birth_seen` actually does (verified by reading this
-                # loop, not assumed): the `status is None` gate already blocks a
-                # re-mention that carries a status when an EARLIER leg set one
-                # (a carrier-derived `superseded`, a connector fold, a
-                # `restatus`). `birth_seen` is what suppresses a status carried
-                # by a LATER creation record when the EARLIEST one spoke with
-                # none — e.g. `[(1, None), (9, 'archived')]` folds NOTHING here,
-                # because the live graph kept `coalesce(NULL,'live')='live'`
-                # from create #1 and ON MATCH never replaced it; writing
-                # `archived` would be a TERMINAL status the graph never had, and
-                # `live._terminal_excluded` would then hide a live name.
-                # (Pinned: `test_the_birth_status_is_on_create_only_like_the_live_fold`.)
+                # ⛔ THE ASSIGNMENT IS UNCONDITIONAL, and that is the round-6
+                # (P2) fix: any fold this replay applied BEFORE the creation
+                # record folded NOTHING in the live graph, because the node did
+                # not exist yet (`entity_identity.resolve_fold_name` never
+                # mints, and an `about_entities` miss is the exempt
+                # `unfolded-mention`, so the event is legal and journaled).
+                # MEASURED before it: `venture:disbursement` naming `T1` at
+                # seq 1 (no node), then `create_object("T1",
+                # objectKind="venture:tranche", status="archived")` at seq 2 →
+                # the live graph holds `archived` (TERMINAL) while the replay
+                # answered `released` (a pack fold from the pre-birth event), and
+                # `status is None` — the old gate — refused the birth value
+                # because the pre-birth fold had already made it non-None. So the
+                # rebuilt Object read as CURRENT and its name resolved: #9974's
+                # own harm, one ordering case over. Discarding the pre-birth fold
+                # also handles `birth_status is None` correctly (a silent birth
+                # CLEARS what preceded it, which is what "the node did not exist"
+                # means).
                 # ⚠️ The live fold's `coalesce($st, 'live')` DEFAULT is NOT
                 # reproduced: a creation record that states no status leaves the
                 # property ABSENT, because absent already reads LIVE and
@@ -1736,8 +1742,7 @@ def apply_event_stream_folds(
                 # here — same class of named residue as the ordering bounds.
                 if not birth_seen:
                     birth_seen = True
-                    if status is None and event.birth_status is not None:
-                        status = event.birth_status
+                    status = event.birth_status
                 continue
             # #9974: a `restatus` is the caller's explicit write, applied the way
             # the live fold applies it — `SET n += $state`, unguarded, so it can
