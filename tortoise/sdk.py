@@ -10185,7 +10185,7 @@ class TortoiseSDK:
         the journal grew — the same reason SQLite's WAL carries a reset SALT in its
         header instead of trusting the file's length, because a WAL is
         legitimately rewound and regrown in place
-        (<https://www.sqlite.org/wal.html> §2.2, §4.1).
+        (<https://www.sqlite.org/fileformat2.html> §4.1, §4.4 "WAL Reset"; <https://www.sqlite.org/wal.html> §11).
 
         RESIDUAL of the seam, stated rather than implied: the check covers the
         bytes ACROSS the seam, so a rewrite that changes content EARLIER in the
@@ -10344,20 +10344,20 @@ class TortoiseSDK:
         # ⛔ THE STAT MUST DESCRIBE THE FILE **AT** `folded_to`, SO IT IS TAKEN
         # AFTER THE FOLD (review round 12, finding 2). The `stat_key` read above
         # is the CACHE KEY — it has to be read before the resume decision — and
-        # storing it next to the offset the fold actually reached described a file
-        # SMALLER than the bytes that were folded. One ordinary append landing
-        # while the fold read then left `folded_to == current size` with a stale
-        # `mtime_ns`, so the NEXT call took the same-size arm, discarded a map
-        # that was a true prefix of the journal, and re-folded from byte 0: an
-        # O(journal) scan per absent write on exactly the append-active lane
-        # #7405 describes, which is the cost round 8 removed. Re-statting here
-        # makes the pair consistent by construction.
+        # storing it next to the offset the fold reached described a SMALLER file
+        # than the bytes folded: a mid-fold append left `folded_to == current
+        # size` with a stale `mtime_ns`, so the NEXT call took the same-size arm,
+        # discarded a true-prefix map and re-folded from byte 0 — an O(journal)
+        # scan per absent write on the append-active lane #7405 describes.
         seam = self._journal_seam(log, resume)
         stat_after = self._journal_stat_key(log)
-        if stat_after is None or stat_after[2] < resume:
-            # The journal vanished, or it no longer holds the bytes that were
-            # folded. Nothing may be memoised: an unmemoised answer costs one
-            # re-fold, a memoised one could answer out of bytes that are gone.
+        if (stat_after is None or stat_after[2] < resume
+                or stat_after[:2] != stat_key[:2]):
+            # The journal vanished, no longer holds the bytes that were folded, or
+            # was REPLACED under the fold (a new `st_dev`/`st_ino`: a rotate, an
+            # `mv`, a restore) — so `resume`/`seam` describe the NEW file while
+            # `known` came from the OLD one. Memoising would serve another file's
+            # records; one re-fold costs less.
             self._journal_presence_memo = None
             return known.get(point_id, False)
         self._journal_presence_memo = {

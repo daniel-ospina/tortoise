@@ -1759,6 +1759,107 @@ def test_a_same_size_rewrite_after_a_quiet_fold_still_drops_the_map(
             sdk.close()
 
 
+def test_a_journal_replaced_during_a_fold_is_not_memoised(tmp_path, monkeypatch):
+    """A REPLACEMENT under the fold must DROP the map, never re-bind it.
+
+    ``resume`` and ``seam`` are observations of whichever file sat at the path
+    when the fold ENDED, while ``known`` was folded from the file the fold READ.
+    A journal rotated, ``mv``'d or restored DURING a fold therefore left a memo
+    whose identity named the NEW inode: the next call matched it, re-read the
+    new file's seam (which is what the memo stored), and answered out of the OLD
+    file's records — a real loss silenced, or a typo alarmed (both #10515
+    indicators reversed), and the map then answered stale for good. The field
+    rule for a retained prefix is to keep the identity it was folded FROM and
+    treat a changed identity as DISCARD, which is the ``stat_after[:2] !=
+    stat_key[:2]`` arm.
+
+    Non-vacuity: on the pre-fix tree the memo survives the replacement and the
+    next call reports an id only the REPLACED file ever held as journal-known.
+    """
+    from tortoise.log import EventLog
+
+    sdk, journal = _sdk_journaled(tmp_path, "midfoldReplace")
+    try:
+        log = sdk._get_event_log()
+        for i in range(120):
+            log.append({"type": "PointAdded", "point": {"id": f"old-{i:04d}"}})
+        old_stat = os.stat(journal)
+
+        # a DIFFERENT journal, longer than the folded prefix, ready to be moved
+        # over the live path: a new inode, new bytes, and a LARGER size so the
+        # growth/seam arm — not the shrink guard — is what a next call takes
+        replacement = journal + ".replacement"
+        other = EventLog(replacement)
+        for i in range(200):
+            other.append({"type": "PointAdded", "point": {"id": f"new-{i:04d}"}})
+
+        scans: list[tuple[int | None, int]] = []
+        real = EventLog.mention_lines
+        armed = {'on': True}
+
+        class _ReplacingScan:
+            """The real ``MentionScan``, with the ROTATE landing when it ends.
+
+            A plain generator wrapper would lose ``resume_offset`` (the fold
+            reads it off the scan object), so this delegates it — the fold must
+            reach the OLD file's real EOF before the path is swapped.
+            """
+
+            def __init__(self, inner, start, needle, on_end):
+                self._inner = inner
+                self._on_end = on_end
+                self._key = (needle, start)
+                self.resume_offset = getattr(inner, 'resume_offset', start)
+
+            def __iter__(self):
+                for line in self._inner:
+                    yield line
+                self.resume_offset = self._inner.resume_offset
+                # every old record HAS been folded and the path has not been
+                # observed since — the exact seam this guard is about
+                self._on_end(self._key)
+
+        def on_end(key):
+            if armed['on'] and key == (None, 0):
+                armed['on'] = False
+                os.replace(replacement, journal)
+
+        def spy(self, needle=None, start=0):
+            scans.append((needle, start))
+            return _ReplacingScan(real(self, needle, start), start, needle, on_end)
+
+        monkeypatch.setattr(EventLog, "mention_lines", spy)
+
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        new_stat = os.stat(journal)
+        assert (new_stat.st_dev, new_stat.st_ino) != (
+            old_stat.st_dev, old_stat.st_ino), (
+            "the fixture must actually REPLACE the journal (a new inode)")
+        assert new_stat.st_size > old_stat.st_size, (
+            "the replacement must be LARGER than the folded prefix, so a next "
+            "call takes the growth/seam arm rather than the shrink guard")
+
+        assert sdk._journal_presence_memo is None, (
+            "a map folded from the REPLACED file must not be memoised under the "
+            "new file's identity — the next call would serve another file's "
+            f"records: {sdk._journal_presence_memo}")
+
+        # and the answer must come from the file that is there NOW, from byte 0
+        before = len(scans)
+        assert sdk._journal_knows_point("old-0007") is False, (
+            "an id only the REPLACED journal held must not read as "
+            "journal-known — that is the silence #10515 indicator 1 removes")
+        assert scans[before:] == [(None, 0)], (
+            "the re-fold must start at byte 0 of the new journal, not resume "
+            f"over a prefix of the old one: {scans[before:]}")
+        assert sdk._journal_knows_point("new-0007") is True, (
+            "the file that is actually there must answer for its own records")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+
 def test_an_empty_id_does_not_scan_the_journal_at_all(tmp_path, monkeypatch):
     """An EMPTY id can never be a journaled point, and its needle is every line.
 
