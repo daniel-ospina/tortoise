@@ -1675,8 +1675,19 @@ def test_a_currency_symbol_does_not_swallow_the_SIGN():
     assert v2._value_core("-$4") == ("-", "4", None)
     assert not v2._value_slot_divergence("the delta was $-4",
                                          "the delta was -4")
+    # ⛔ U+2212 MINUS SIGN IS `Sm`, so a decoration-skip that consumed every
+    # `Sm` ate the sign it existed to find (#10513 review cycle-18 P1, measured):
+    # `€\u221250` was REFUSED against `-50`, and `$\u22124` against `$4` — a
+    # DROPPED sign — was written. U+2212 is what Word and PDF math autocorrect
+    # emit, so this is ordinary extracted text. Both directions pinned.
+    assert v2._value_core("$\u22124") == ("-", "4", None)
+    assert v2._value_core("\u20ac\u221250") == ("-", "50", None)
+    assert not v2._value_slot_divergence("the shortfall was \u20ac\u221250",
+                                         "the shortfall was -50")
     # POSITIVE CONTROL: the sign the model dropped is still a rewrite.
     assert v2._value_slot_divergence("the delta was $-4",
+                                     "the delta was $4")
+    assert v2._value_slot_divergence("the delta was $\u22124",
                                      "the delta was $4")
 
 
@@ -1697,11 +1708,26 @@ def test_an_accounting_PAREN_numeral_is_outside_the_judged_set():
     assert v2._value_core("($4)") is None
     assert not v2._value_slot_divergence("the shortfall was ($4)",
                                          "the shortfall was -4")
-    # POSITIVE CONTROL: a prose parenthetical keeps its slot, so a real rewrite
-    # in that text is still refused — the exclusion did not swallow the side.
-    assert v2._value_slots("a loss of (see 2019) here")
-    assert v2._value_slot_divergence("a loss of (see 2019) here",
-                                     "a loss of (see 2020) here")
+    assert not v2._value_slot_divergence("the shortfall was (-4)",
+                                         "the shortfall was -4")
+    # ⛔ POSITIVE CONTROLS, and they have to be the RIGHT ones (#10513 review
+    # cycle-18 P1, measured): the exclusion is the ACCOUNTING SHAPE — a currency
+    # symbol or a sign inside the parens — NOT every parenthesised number. An
+    # earlier revision made both optional, so a bare `(2019)`/`(2)` matched and
+    # the WHOLE side went unjudged: `"the p95 hit 4.0 seconds (see note 2019)"`
+    # against `"… 4.2 …"` was written with zero warnings. `(2)` and `(2019)` now
+    # keep their slots, and a rewrite in a text carrying one is still refused.
+    assert v2._value_slots("see (2) for details")
+    assert v2._value_slots("a loss of (2019) here")
+    assert v2._value_slot_divergence(
+        "the p95 hit 4.0 seconds (see note 2019)",
+        "the p95 hit 4.2 seconds (see note 2019)")
+    # ⛔ STATED RESIDUAL (row (o)): a BARE `(4)` in an accounting column is
+    # indistinguishable from a prose parenthetical with no locale and no column
+    # context, so it is read as POSITIVE and `(4)`/`-4` is still refused. Pinned
+    # so closing it has to move the row.
+    assert v2._value_slot_divergence("the shortfall was (4)",
+                                     "the shortfall was -4")
 
 
 def test_a_SCALE_word_is_compared_across_the_pair_rather_than_dropped():

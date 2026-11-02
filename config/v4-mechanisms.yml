@@ -896,19 +896,34 @@ mechanisms:
       separator is unjudged and the same doctrine (#2817 point 1: never invent a
       second reading of one token). Reading it as POSITIVE refused
       `"the shortfall was ($4)"` against `"the shortfall was -4"`; the raw text is
-      now asked, and the exclusion is the accounting SHAPE only, so a prose
-      `(see 2019)` keeps its slot and a rewrite in that text is still refused.
-      Pinned both ways by
+      now asked. ⛔ THE DECORATION IS REQUIRED — a currency symbol or a sign
+      INSIDE the parens — because an earlier revision made both OPTIONAL, so a
+      bare `(2019)`/`(2)` matched and, since a match drops the WHOLE SIDE from
+      the judged set, one parenthesised number silenced judgement for the entire
+      text (measured: `"the p95 hit 4.0 seconds (see note 2019)"` against
+      `"… 4.2 …"` was written with zero warnings). `(2019)` and `(2)` now keep
+      their slots and a rewrite in that text is still refused. Two costs are
+      STATED rather than absorbed: a match drops the WHOLE SIDE (not just its
+      slot), and a BARE `(4)` in an accounting column — indistinguishable from a
+      prose parenthetical with no locale and no column context — is read as
+      POSITIVE, so `(4)`/`-4` is still refused. Pinned both ways by
       `test_a_currency_symbol_does_not_swallow_the_SIGN` and
       `test_an_accounting_PAREN_numeral_is_outside_the_judged_set`.
-      (n) A NUMERAL SPLIT AT THE CAP MOVES THE STORED TEXT OFF THE LEGACY KEY
+      (n) A VALUE TOKEN SPLIT AT THE CAP MOVES THE STORED TEXT OFF THE LEGACY KEY
       (#10513 review cycle-18 P1, measured). The `_MAX_CONTENT` sites store
       `x[:1000]` — the identity key `_endpoint_keys`, `_merge_verdict_keys` and
       `classify_consolidation` all compute, and the spelling every point already
-      in the graph carries — EXCEPT when that cut would truncate a NUMERAL, where
-      the split token is dropped whole (`… p95 hit ` instead of `… p95 hit 4`)
-      because a stored `4` where the source wrote `4.0` is a value the graph never
-      stated. The cost, STATED rather than absorbed: a point stored BEFORE this
+      in the graph carries — EXCEPT when that cut would truncate a NUMERAL or a
+      NUMBER WORD, where the split token is dropped whole (`… p95 hit ` instead of
+      `… p95 hit 4`) because a stored `4` where the source wrote `4.0` is a value
+      the graph never stated. ⛔ THE NUMBER WORD HALF IS LOAD-BEARING (#10513
+      review cycle-18 P2, measured): `_value_bindings` binds number words
+      (`four` is 4, `fourteen` is 14), so a digit-only condition kept the
+      identity prefix of a cut inside `fourteen` — `"the "*249 + "fourteen
+      widgets"` stored `… the four` and REFUSED the truthful point with `point
+      says '4', quote says '14'`. The condition is asked of the WHOLE split token
+      (`_num_word_value(split_full)`), so `tender` — whose kept prefix is `ten` —
+      still keeps the identity span. The cost, STATED rather than absorbed: a point stored BEFORE this
       change carries the hard-clipped spelling, so a re-extraction of that same
       over-cap claim whose cut splits a numeral keys apart from the legacy row and
       ADDs a near-duplicate instead of folding (the same trade `_endpoint_keys`
