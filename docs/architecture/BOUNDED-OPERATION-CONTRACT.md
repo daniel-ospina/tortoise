@@ -87,8 +87,11 @@ point with more above-threshold neighbours than `top_k` is precisely the *"a dow
 rows"* case §4 item 3 requires to flip the marker — and it stays `false`. Read `truncated: false` on
 this surface as *"the candidate cut did not fire"*, never as *"nothing was lost"*: the two SILENT
 bounds are named here rather than folded into the marker because folding them in is a code change
-(the return is already a `dict`, so it is additive and needs no surface approval — the sibling search
-path does exactly this at `sdk.py:34571-34579`), and this document is the census, not the fix.
+(the return is already a `dict`, so it is additive and needs no surface approval — `issue_insight`'s
+`_with_truncation` helper performs exactly that additive fold at `sdk.py:34571-34579`, and
+`tortoise_fts_query` folds a *saturated window* into its marker at `:36744` —
+`_trunc["incomplete"] = bool(_leg_peak >= str_limit or _lost_legs)`, which is the precedent for the
+ANN-window case specifically), and this document is the census, not the fix.
 
 ⚠️ **`tortoise_query`'s structural arm (`text=None`) is a different surface, and not ONE surface.**
 With `offset`/`page` given it returns a `hasMore`/`total` dict — the `tag` arm at
