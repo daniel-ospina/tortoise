@@ -72,6 +72,10 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    source is ordered by `seq`, its vocabulary is imported from
    :mod:`tortoise.status_folds` (never restated here), and its bound — the
    terminal statuses the record has no carrier for — is stated at the table.
+   That exception reads THREE writers of the field (`EventRecorded` connector/
+   pack folds, an `EntityMutated` state op, and the CREATION record), so the
+   field is covered on every writer the record can carry — with the residues the
+   table names (birth-on-ON-MATCH, ordering, ambiguous names, a null clear).
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -463,26 +467,38 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   later connector fold is then refused by the terminal guard, so the replay
 #:   latches exactly where the live graph latches. See
 #:   :data:`EVENT_STREAM_FOLDS` and :class:`LifecycleEvent`'s `restatus_status`.
-#:   ⛔ **STATED BOUND — the BIRTH status is a third writer this table does not
-#:   read (#9974 review round 3).** `_upsert_object`/`_upsert_subject` seed
-#:   `status=$st` from the creation record's own payload
-#:   (`projection/entities.py`) — DERIVED-OR-ABSENT since #9974 R1, which removed
-#:   the fold's fabricated `coalesce($st, 'live')` and the door's
-#:   `out["status"] = "live"` so a status-less birth no longer CLAIMS `live`
-#:   (the value this table's §10189 no-fabrication rule already refuses to fill).
-#:   A caller-supplied birth status is unaffected by that: `sdk.create_entity`
-#:   accepts one — ⚠️ the SUBJECT door validates it against §4.2, the OBJECT door
-#:   validates nothing (a comment in `sdk._kind_layer_note` says so of the
-#:   document door — `create_entity`'s object branch has no status validation at
-#:   all, unlike the subject branch above it) — so `create_object(name, status='superseded')`
-#:   writes a terminal status at birth that `never_store` keeps out of the layer
-#:   tables and these two legs do not select (`ObjectRegistered`/`SubjectAdded` are
-#:   not `EventRecorded`). A record-sourced rebuild materializes it with NO status →
-#:   LIVE, while `rebuild_all` (which reads the JSONL payload) writes
-#:   `superseded`. This change therefore reproduces the STATE-OP writer, not every
-#:   writer of the field; the CALLER-SUPPLIED birth leg is a follow-up on #9974.
-#:   Do not read `LifecycleEvent`'s docstring as claiming the field is fully
-#:   covered.
+#:   ✅ **CLOSED (#9974's BIRTH leg) — the CREATION writer is now read.**
+#:   `_upsert_object`/`_upsert_subject` seed `status=$st` from the creation
+#:   record's own payload (`projection/entities.py`) — DERIVED-OR-ABSENT since
+#:   #9974 R1 (#10524), which removed the fold's fabricated `coalesce($st,
+#:   'live')` and the door's `out["status"] = "live"` — and `sdk.create_entity`
+#:   accepts a caller status — ⚠️ the SUBJECT door validates it against §4.2, the
+#:   OBJECT door validates nothing (`sdk.py:4923`, `:23474-23479`:
+#:   `:Object`/`:Event` "do not validate, they STORE the value") — so
+#:   `create_object(name, status='superseded')` writes a terminal status at
+#:   birth that `never_store` keeps out of the layer tables. `ObjectRegistered` /
+#:   `SubjectAdded` are now selected from the SAME stream (their `payload ->
+#:   'status'`) and replayed in `seq` order, ON CREATE, so a record-sourced
+#:   rebuild reproduces the value `rebuild_all` (which reads the JSONL payload)
+#:   writes instead of materializing NO status → LIVE.
+#:   ✅ The ABSENCE rule is now a CORRESPONDENCE rather than a divergence:
+#:   #9974 R1 made the live fold leave a status-less birth ABSENT too, so where
+#:   the creation record states no status this replay writes NONE **and the fold
+#:   writes NONE** — the two routes agree by construction, and neither asserts a
+#:   lifecycle fact the record never stated. (An absent status already reads LIVE,
+#:   `live._terminal_excluded`, so no read surface changes; pinned by
+#:   `test_a_silent_birth_record_derives_no_status_rather_than_live` against a
+#:   fabrication mutation.) Before R1 this replay's silence was the only
+#:   non-fabricating route; it is now the shared one.
+#:   ⚠️ ONE STATED BOUND rides that leg, deliberate: "the EARLIEST creation
+#:   record speaks" is exact only where that record is the write that CREATED the
+#:   node. `_upsert_object`/`_upsert_subject` MERGE on `id` and write `status` ON
+#:   CREATE only, so for an id that already existed (a stub/mention path,
+#:   `create_object(..., id=…)`, a pre-#3590 graph) the live node took the ON
+#:   MATCH arm and kept its own status while this replay still writes the
+#:   record's — possibly a TERMINAL value the graph never held. The record
+#:   carries no create-vs-match signal, so the reader cannot tell; this is the
+#:   same class of named residue as the ordering bounds below.
 #:   ⚠️ Also STATED BOUND — a null-valued `state.status` (`update_entity(obj,
 #:   status=None)`) is NOT modelled: the graph applies `SET n += {status: null}`,
 #:   which REMOVES the property, while this reader skips a non-string value and
@@ -548,12 +564,15 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #:
 #: WHAT IT READS. `public.journal_event`, the record's own history, ordered by
 #: `seq` — the per-graph journal position, which is exactly the order the live
-#: fold applies events in. It reads TWO writers, not one (#9974):
-#: `event_type = 'EventRecorded'` (the connector/pack lifecycle leg), and
+#: fold applies events in. It reads THREE writers, not one (#9974):
+#: `event_type = 'EventRecorded'` (the connector/pack lifecycle leg),
 #: `event_type = 'EntityMutated'` rows whose payload carries a STRING
 #: `state.status` (a caller's explicit lifecycle write — see
 #: :data:`_LIFECYCLE_EVENTS_SQL` for why the predicate is the payload and never
-#: the `op` label). The
+#: the `op` label), and `event_type IN ('ObjectRegistered', 'SubjectAdded')` —
+#: the CREATION record, whose `payload ->> 'status'` is the BIRTH value and the
+#: only carrier it has (a snapshot row cannot hold the name: no column, and
+#: `_split_properties` drops it). The
 #: per-event payload keys (`eventKind`/`object`/`about_entities`) are the
 #: projection's contract (#7969); they are read HERE, in the projection, and
 #: nowhere else. The payload is unwrapped to the event ITSELF first, because the
@@ -639,8 +658,8 @@ EVENT_STREAM_FOLDS: dict[str, tuple[str, ...]] = {
 class LifecycleEvent:
     """One record-sourced lifecycle record, reduced to what the status fold reads.
 
-    TWO record types ride this shape, because the live fold's `status` writes come
-    from two places and a rebuild that read one of them reproduced half the
+    THREE record types ride this shape, because the live fold's `status` writes
+    come from three places and a rebuild that read fewer reproduced part of the
     field:
 
     * `EventRecorded` history — an event whose `eventKind` a
@@ -661,6 +680,13 @@ class LifecycleEvent:
       (`public.journal_event.payload -> 'state' ->> 'status'`) is the whole
       signal. Before this field, a record-sourced rebuild dropped the value and
       `live._terminal_excluded` read the absent status as LIVE — #9974's window.
+    * A CREATION record — ``ObjectRegistered`` / ``SubjectAdded`` (#9974's BIRTH
+      leg). Its `payload ->> 'status'` is the caller's birth status, and it is
+      the value's ONLY carrier for the same reason (no column; the snapshot's
+      props tail refuses the name). Targeted by ID (the snapshot's record key),
+      labelled from the EVENT TYPE (`_BIRTH_EVENT_LABELS`) because a creation
+      payload has no `label` key, and applied ON CREATE only — see the replay in
+      :func:`apply_event_stream_folds`.
 
     Deliberately NOT the event payload: a fold that carried the whole dict would
     be a second `:Event` writer, and the projection already materializes the
@@ -705,6 +731,18 @@ class LifecycleEvent:
     #: id (ids are per-label, not global).
     target_id: str | None = None
     target_label: str | None = None
+    #: #9974 — the FOURTH `status` writer: the CREATION record's own payload.
+    #: `ObjectRegistered` / `SubjectAdded` is a `NodeSnapshot` (`record_projection`)
+    #: whose `status` reaches neither a column (there is none) nor the props tail
+    #: (`_split_properties` refuses the name), so `payload ->> 'status'` on the
+    #: creation record is the value's ONLY carrier — exactly the placement
+    #: `EntityMutated`'s `state.status` has. `is_birth` is a separate flag because
+    #: a creation record with NO status still decides the ON CREATE arm (see
+    #: :func:`apply_event_stream_folds`): the live fold's `_upsert_object` writes
+    #: `status=coalesce($st, 'live')` ONLY on create, so the Earliest creation
+    #: record is the one that speaks and a later re-mention never overwrites.
+    is_birth: bool = False
+    birth_status: str | None = None
 
     def targets(self) -> tuple[tuple[str, bool], ...]:
         """``(name, is_explicit_object)``, deduplicated, declared target first.
@@ -1214,6 +1252,14 @@ def relation_from_row(row: Mapping[str, Any]) -> RecordRelation:
 _PAYLOAD_EVENT = ("COALESCE(CASE WHEN jsonb_typeof(payload -> 'event') = 'object' "
                   "THEN payload -> 'event' ELSE NULL END, payload)")
 
+#: #9974 — the label each CREATION record types, declared once so the reader and
+#: any pin cannot disagree about which family a birth record belongs to.
+#: `record_projection` declares the same mapping structurally (`ObjectRegistered`
+#: is a snapshot of the `object` table, `SubjectAdded` of `subject`); this table
+#: is the reader's half of it, and it is the reason the birth leg cannot write a
+#: `:Object` status onto a `:Subject` with the same id.
+_BIRTH_EVENT_LABELS = {"ObjectRegistered": "Object", "SubjectAdded": "Subject"}
+
 #: The record's own event stream, reduced to the fold's inputs. `seq` orders it.
 #: ⚠️ The payload keys are the projection's own contract (#7969) — this is the
 #: projection reading them, which is where `status_folds` says the fold lives.
@@ -1232,6 +1278,13 @@ _LIFECYCLE_EVENTS_SQL = (
     f"       {_PAYLOAD_EVENT} ->> 'label'     AS label, "
     f"       {_PAYLOAD_EVENT} ->> 'id'        AS node_id, "
     f"       {_PAYLOAD_EVENT} -> 'state' ->> 'status' AS restatus_status "
+    # #9974: the FOURTH writer — the CREATION record's own `status`. It is a
+    # `NodeSnapshot` whose value the layer table cannot hold (no column, and
+    # `_split_properties` refuses the name in `props`), so this is its only
+    # carrier. Without it, `create_object(name, status='superseded')` rebuilt
+    # from the record with NO status — which `live._terminal_excluded` reads as
+    # LIVE, i.e. a terminal Object answered as current after a rebuild.
+    f"       , {_PAYLOAD_EVENT} ->> 'status'  AS birth_status "
     "FROM public.journal_event "
     "WHERE org_id = %s AND graph_id = %s "
     "  AND (event_type = 'EventRecorded' "
@@ -1255,7 +1308,24 @@ _LIFECYCLE_EVENTS_SQL = (
     # fold, so the rebuilt cache HIDES a name the graph resolves: the same
     # hide-a-live-name direction, produced by the "repair". Folding `''` as the
     # value it is reproduces the graph exactly.
-    "           AND jsonb_typeof(payload -> 'state' -> 'status') = 'string'))"
+    # ⚠️ THIS CLOSES THE `EntityMutated` GROUP ONLY — the outer
+    # `AND (…` is closed by the birth clause's tail below. It used to close
+    # BOTH (it ended `'string'))`), and appending a third `OR (…)` leg outside
+    # the tenant group left the whole statement UNPARSEABLE (`syntax error at or
+    # near ")"`) — caught by review on #9974's birth leg, not by the suite,
+    # because `tests/test_cache_projection.py::_FakeConn` matches this SQL by
+    # substring and never parses it. `tests/test_cache_projection.py`
+    # ::test_the_lifecycle_statement_is_parenthesised_as_declared pins the
+    # balance, since a DB-free fake structurally cannot.
+    "           AND jsonb_typeof(payload -> 'state' -> 'status') = 'string')"
+    # #9974: the CREATION records. Selected from the same stream, in the same
+    # `seq` order, for the same reason as the two legs above — the value they
+    # carry is real graph state (`_upsert_object`'s ON CREATE `coalesce($st,
+    # 'live')`) and no layer row can place it. ⛔ The label is decided by the
+    # EVENT TYPE, not by a payload field: these records predate the
+    # `eventKind`/`label` keys, and inventing one here would let a birth record
+    # impersonate a connector fold.
+    "       OR (event_type IN ('ObjectRegistered', 'SubjectAdded')))"
 )
 
 #: The same statement narrowed to the events that could name ONE Object. The
@@ -1274,7 +1344,18 @@ _LIFECYCLE_EVENTS_FOR_ONE_SQL = (
       # name-only predicate would filter out the very record this widening
       # exists to read, and the read door would answer a status the rebuild
       # does not (the two-door disagreement #10198's own leg pins).
-      f" OR (event_type = 'EntityMutated' AND payload ->> 'id' = %s))"
+      # ⚠️ The CREATION records join the same id coordinate (#9974's birth leg).
+      # ⛔ `payload ->> 'id'` — the RAW top level, NOT `_PAYLOAD_EVENT ->> 'id'`,
+      # and that is deliberate rather than an oversight (review, #9974): the two
+      # record types this clause covers are FLAT (`_journal_entity_mutation` and
+      # `_create_entity` journal the record itself), so raw and unwrapped are the
+      # same expression for both. Only a `ConversationMiner` `EventRecorded`
+      # nests its event, and that type is reached here by NAME, never by this
+      # clause. Making the spelling `_PAYLOAD_EVENT` would also silently disarm
+      # `tests/test_cache_projection.py::_ID_CLAUSE_RE`, whose `id_key` read IS
+      # what keeps the read-door legs narrowing instead of passing vacuously.
+      f" OR (event_type IN ('EntityMutated', 'ObjectRegistered', 'SubjectAdded')"
+      f" AND payload ->> 'id' = %s))"
 )
 
 
@@ -1317,7 +1398,33 @@ def _lifecycle_events(cur: Any, *, org_id: str, graph_id: str,
         except (TypeError, ValueError):
             continue
         restatus = row.get("restatus_status")
-        if row.get("event_type") == "EntityMutated":
+        event_type = row.get("event_type")
+        birth_label = _BIRTH_EVENT_LABELS.get(event_type) if isinstance(
+            event_type, str) else None
+        if birth_label is not None:
+            # #9974: the creation record. Keyed by the stable id (the record's
+            # own `NodeSnapshot` key, `id`), and labelled by the EVENT TYPE —
+            # the payload has no `label` to read, and a guessed one would let a
+            # birth record fold onto the other family's node of the same id.
+            # ⚠️ `''` IS carried, exactly as in the state-op arm below: the
+            # graph stores it and `_is_terminal_status('')` is false. Only a
+            # NON-STRING (an absent or null payload `status`) is `None`, and
+            # `None` here still MEANS something — it is the creation record that
+            # decides the ON CREATE arm, so it must be carried either way.
+            birth_id = row.get("node_id")
+            if not isinstance(birth_id, str) or not birth_id:
+                continue
+            birth = row.get("birth_status")
+            out.append(LifecycleEvent(
+                seq=seq,
+                event_kind="",
+                is_birth=True,
+                birth_status=birth if isinstance(birth, str) else None,
+                target_id=birth_id,
+                target_label=birth_label,
+            ))
+            continue
+        if event_type == "EntityMutated":
             # #9974: the caller's explicit lifecycle write. It carries NO
             # `eventKind`, so the connector/pack branch below cannot see it and
             # this arm is the only reader. Any STRING folds — `''` included,
@@ -1491,12 +1598,13 @@ def apply_event_stream_folds(
         name = node.props.get("name")
         events_for = by_target.get(name) if isinstance(name, str) else None
         # #9974: the id-keyed half — an explicit `restatus` names its target by the
-        # stable id (`MATCH (n:$label {id:$rid}) SET n += $state`), not by name —
+        # stable id (`MATCH (n:$label {id:$rid}) SET n += $state`), and so does a
+        # CREATION record (its snapshot key is the `id`) — not by name —
         # so the two coordinates are merged into ONE `seq`-ordered stream. That
         # single stream is what makes this a replay of the live sequence rather
         # than two independent rules whose relative order is a guess; nothing else
         # in the live fold is order-free.
-        restatus_for = (
+        by_id_for = (
             # ⛔ `target_label` must EQUAL the node's label; `None` is NOT a
             # wildcard. The live fold refuses a label-less state op outright
             # (`_fold_entity_mutation`: `state-op-miss`, returns 0 for a label that
@@ -1507,10 +1615,10 @@ def apply_event_stream_folds(
                   if e.target_label == node.label)
             if isinstance(node.key, str) else ()
         )
-        if not events_for and not restatus_for:
+        if not events_for and not by_id_for:
             out.append(node)
             continue
-        evs = sorted(list(events_for or ()) + list(restatus_for),
+        evs = sorted(list(events_for or ()) + list(by_id_for),
                      key=lambda e: e.seq)
         # The record can carry ONE terminal value of its own (`superseded`, from
         # DERIVED_FROM_RECORD's carriers), and a supersession beats any stream
@@ -1565,7 +1673,45 @@ def apply_event_stream_folds(
         # (o.status IN $excluded))`. So a terminal word written by one event
         # latches: the later events are refused instead of resurrecting it.
         status: str | None = current
+        birth_seen = False
         for event in evs:
+            if event.is_birth:
+                # #9974 — the CREATION record. `_upsert_object` /
+                # `_upsert_subject` write `status` **ON CREATE** and never on
+                # MATCH, so only the EARLIEST creation record for this id may
+                # speak: #3590 journals another `ObjectRegistered` on EVERY
+                # create, and a re-mention must not rewrite a stored status.
+                # ⚠️ What `birth_seen` actually does (verified by reading this
+                # loop, not assumed): the `status is None` gate already blocks a
+                # re-mention that carries a status when an EARLIER leg set one
+                # (a carrier-derived `superseded`, a connector fold, a
+                # `restatus`). `birth_seen` is what suppresses a status carried
+                # by a LATER creation record when the EARLIEST one spoke with
+                # none — e.g. `[(1, None), (9, 'archived')]` folds NOTHING here,
+                # because the live graph kept `coalesce(NULL,'live')='live'`
+                # from create #1 and ON MATCH never replaced it; writing
+                # `archived` would be a TERMINAL status the graph never had, and
+                # `live._terminal_excluded` would then hide a live name.
+                # (Pinned: `test_the_birth_status_is_on_create_only_like_the_live_fold`.)
+                # ⚠️ The live fold's `coalesce($st, 'live')` DEFAULT is NOT
+                # reproduced: a creation record that states no status leaves the
+                # property ABSENT, because absent already reads LIVE and
+                # materializing `'live'` would fabricate a lifecycle claim the
+                # record never made (pinned: `test_a_silent_birth_record_
+                # derives_no_status_rather_than_live`).
+                # ⚠️ STATED BOUND: "the earliest creation record" is exact only
+                # where that record is the write that CREATED the node. The MERGE
+                # is on `id` and the fold's `status` write is ON CREATE, so an id
+                # that ALREADY existed (a stub/mention path, an explicit `id=`,
+                # a pre-#3590 graph) took the ON MATCH arm and kept its own
+                # status while this replay writes the record's. The record
+                # carries no create-vs-match signal, so this cannot be closed
+                # here — same class of named residue as the ordering bounds.
+                if not birth_seen:
+                    birth_seen = True
+                    if status is None and event.birth_status is not None:
+                        status = event.birth_status
+                continue
             # #9974: a `restatus` is the caller's explicit write, applied the way
             # the live fold applies it — `SET n += $state`, unguarded, so it can
             # move a terminal node and it beats any earlier in-stream fold. It
