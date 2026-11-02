@@ -4611,11 +4611,14 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # atomic_add_and_its_commits` now names HEAD, which resolves in a depth-1 clone, so the
         # `test` shards stop red-ing on a shallow checkout), then 2528 by its cycle-17 disarm (the
         # restored same-second pin, the opt-in tests for the proposed arm, and the run/CLI seam
-        # tests that keep the ruled verdict the default) — the pin landing
+        # tests that keep the ruled verdict the default), then 2567 by its cycle-18 fix of the
+        # anti-rot loop (it now runs while the arm is DISARMED, so a disclosure for an ordinarily
+        # ordered log is no longer accepted silently on the default path, plus the two tests that
+        # pin both halves) — the pin landing
         # rather than drifting, because a plausible offset is what it exists to refuse. ⛔
         # Re-derive this number, never delete the entry: the whole point is that a citation which
         # names a line that does not say it is a dead pointer.
-        ("tests/test_capstone_preregistration_9075.py", 2528):
+        ("tests/test_capstone_preregistration_9075.py", 2567):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces

@@ -1630,12 +1630,19 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # silent-pass shape this tool refuses. Read from ``atomic_seen``, the STATE, never from the
     # caller's out-param (#10529 review P1).
     #
-    # ⛔ SKIPPED ENTIRELY WHILE THE ARM IS DISARMED (#10546 review cycle 17, IS-1). Under the ruled
-    # semantics an atomic pair never reaches the pass-path, so `atomic_seen` cannot contain it and
-    # this loop would emit the FALSE "discloses X as an atomic add, but it is not one" — the exact
-    # misdescription the cycle-3 fix removed, restored by disarming. The refusal arm above already
-    # said why the log is red; the disclosure is not stale, it is inert, and inert is not rot.
-    for name in (sorted(set(atomic) & present) if allow_atomic_disclosure else ()):
+    # ⛔ THIS LOOP RUNS WHILE THE ARM IS DISARMED TOO (#10546 review cycle 18, IS-1). It used to be
+    # gated on `allow_atomic_disclosure`, on the theory that disarming makes `atomic_seen` empty for
+    # an atomic log and the loop would then emit the FALSE "discloses X as an atomic add, but it is
+    # not one". That concern is answered INSIDE the loop by `atomic_no_matter`, which is populated
+    # for EVERY atomic log before any arm runs (:1394) — so the gate protected against nothing it
+    # was not already guarded against. What it DID do is disable the rule in every invocation CI
+    # performs: a disclosure naming an ORDINARILY ordered log was accepted SILENTLY on the default
+    # path, so the anti-rot rule was only ever enforced on the one path nothing calls, and a tree
+    # green today would red the day the arm is armed. A suppression that suppresses nothing is
+    # reported whether or not the rule it targets is currently armed — the same separation Ruff
+    # makes between a rule and `RUF100` (unused noqa), and the reason `pins.pre_existing_unscored_logs`
+    # refuses a pre-granted exemption on its own sister rule.
+    for name in sorted(set(atomic) & present):
         # A disclosure that is genuinely atomic but malformed was already told so — and telling it
         # "but it is not one" would be FALSE, since it is (#10529 review cycle 3, P2). The same
         # applies to a log whose add-commit could not be read AT ALL: its state is UNKNOWN, and a

@@ -1135,6 +1135,45 @@ def test_a_disclosure_for_a_normally_ordered_log_fails(tmp_path, monkeypatch):
     assert "not one" in failures[0], failures
 
 
+def test_a_disclosure_for_a_normally_ordered_log_fails_with_the_arm_disarmed(tmp_path, monkeypatch):
+    """REGRESSION (#10546 review cycle 18, IS-1): the anti-rot rule must fire on the DEFAULT path.
+
+    The rule used to be gated on `allow_atomic_disclosure`, so a disclosure naming an ORDINARILY
+    ordered log was accepted SILENTLY in every invocation CI performs — the CLI, `run()` and the
+    check step all leave the arm disarmed. The gate's stated reason (a false "but it is not one"
+    for a genuinely atomic log) is already handled by `atomic_no_matter`, so the gate only served
+    to enforce the rule on the one path nothing calls: a tree that is green today would red the day
+    the arm is armed, which is the silent-green shape this rule exists to refuse.
+
+    The disclosure here is COMPLETE and resolvable, so nothing but the anti-rot rule can red it —
+    and the pre-fix default returned `[]`, which is why this test fails on that code.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_100)
+    assert _armed(prereg, [log], None, None, None, _atomic_pins(log.name))  # the rule, armed
+    # …and the DEFAULT, which is what CI runs: identical verdict, not a silent pass.
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert len(failures) == 1, failures
+    assert "not one" in failures[0], failures
+
+
+def test_an_atomic_logs_disclosure_is_not_called_stale_while_the_arm_is_disarmed(tmp_path, monkeypatch):
+    """The anti-rot loop runs while disarmed, and it must not invent rot for a GENUINE atomic add.
+
+    Companion to the test above: dropping the `allow_atomic_disclosure` gate puts an atomic log's
+    own disclosure through the loop on the default path. `atomic_no_matter` is populated for every
+    atomic log before any arm runs, so the disclosure is skipped there — while the log's REFUSAL
+    (the ruled verdict) is still reported, with no false "but it is not one" beside it.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert len(failures) == 1, failures
+    assert "not one" not in failures[0], failures
+    assert "SAME commit" in failures[0], failures
+
+
 def test_a_disclosure_naming_an_absent_log_fails(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
