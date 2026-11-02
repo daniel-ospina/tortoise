@@ -4945,7 +4945,7 @@ def test_a_bundle_with_no_log_does_not_claim_a_measured_ordering(tmp_path, monke
     one step outside every one of them. A withdrawn log is an honest end state for a bundle, so the
     bundle must be able to say "there is nothing here to order" without saying "I measured it".
     """
-    repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    _repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
     assert list(bundle.glob(check.EVIDENCE_LOG_GLOB)) == [], "the fixture must carry NO evidence log"
     _measurement_only(monkeypatch)
 
@@ -4973,7 +4973,7 @@ def test_a_bundle_whose_only_log_is_untracked_does_not_claim_a_measured_ordering
     the zero-log case, reached through the `continue` rather than through an empty list — which is
     why the counter is incremented where an epoch is ESTABLISHED, not derived from `len(logs)`.
     """
-    repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    _repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
     scratch = bundle / "brand-new.log"
     scratch.write_text("x\n")  # written, never `git add`-ed
     assert check._is_tracked(scratch) is False, "the log must be untracked"
