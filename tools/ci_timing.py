@@ -1851,14 +1851,70 @@ _PRIOR_BASIS_RE = re.compile(
     r"\(run [^)]*\)"
     r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?|:[^—]*)?[ \t]*$")
 
+# …and the same span WITHOUT the end-of-note anchor, for the MID-NOTE case, where
+# the suffix has to be BOUNDED (the closing `; was N` / `; kept N`) instead of
+# running to `$`. A re-emitted note is ONE PARAGRAPH (`_joined_note_tail`), so a
+# prior basis can sit in the middle of its text — on the committed map exactly one
+# row does, and it is one refresh away from the stale-provenance shape #9134's P2
+# forbids: the 2026-11-02 refresh appended the basis to `test_source_staleness_
+# sweep_5038.py`'s ROW LINE while the rest of that note continued on five wrap
+# lines, so the joined note reads `… 34 tests — ci-timing … 2026-11-02 …; was 3.2
+# embedded (…) lane …`. The end-anchored pattern above cannot see that basis, so a
+# re-base kept it AND appended this sample's — two bases in one note, one of them
+# from two refreshes ago (#10575 review, P3).
+#
+# The separator ` — ` is REQUIRED here, and that is deliberate: the renderer only
+# ever appends a basis behind one, so requiring it keeps this pattern away from a
+# note that OPENS with a basis and then continues (`  # ci-timing …; was 42.6 — do
+# not drop this row`), where the leading `#` belongs to the note and not to the
+# basis — the end-anchored pattern recognises that shape (it consumes the `#`) and
+# this one must not.
+_PRIOR_BASIS_SPAN_RE = re.compile(
+    rf"[ \t]+—[ \t]+{_SAMPLE_LABEL_RE} \d{{4}}-\d{{2}}-\d{{2}} \(run [^)]*\)"
+    r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?"
+    r"|:[^—]*?;[ \t]*kept [0-9]+(?:\.[0-9]+)?)")
+
 # …and the shape of an ADOPTED basis inside that match (`; was 42.4`). It records
 # the reading that PRODUCED the row's surviving value, so it is not pruned by a
 # later hold (see `_strip_prior_held_basis`, #9134 review, P2).
-_PRIOR_ADOPTED_BASIS_RE = re.compile(r";[ \t]*was [0-9]+(?:\.[0-9]+)?[ \t]*$")
+_PRIOR_ADOPTED_BASIS_RE = re.compile(r";[ \t]*was [0-9]+(?:\.[0-9]+)?")
+
+
+def _prior_basis_spans(tail: str) -> list[tuple[int, int, str]]:
+    """Every prior basis in `tail` as `(start, end, text)`, in ascending order.
+
+    Two patterns, because the shapes differ at the ENDS of the note and neither
+    subsumes the other: `_PRIOR_BASIS_RE` is end-anchored and additionally
+    recognises a note that IS nothing but a basis (`  # ci-timing …; was 42.6`, no
+    ` — ` separator); `_PRIOR_BASIS_SPAN_RE` finds one mid-paragraph. A span found
+    by both is reported once, preferring the end-anchored match.
+    """
+    spans = [(m.start(), m.end(), m.group(0))
+             for m in _PRIOR_BASIS_SPAN_RE.finditer(tail)]
+    anchored = _PRIOR_BASIS_RE.search(tail)
+    if anchored is not None and not any(start == anchored.start()
+                                        for start, _, _ in spans):
+        spans.append((anchored.start(), anchored.end(), anchored.group(0)))
+    spans.sort()
+    return spans
+
+
+def _without_span(tail: str, start: int, end: int) -> str:
+    """`tail` with `[start:end)` removed, without leaving a double space behind.
+
+    An END-OF-NOTE span (the end-anchored pattern's `[ \t]*$`) collapses to
+    `tail[:start].rstrip()`, byte-identical to what this module wrote before the
+    mid-note case existed. A MID-NOTE span keeps the text on both sides, joined by
+    the single space the ` — ` separator it consumed used to occupy.
+    """
+    before, after = tail[:start].rstrip(), tail[end:]
+    if not after.strip():
+        return before
+    return f"{before} {after.lstrip()}".rstrip()
 
 
 def _strip_prior_held_basis(tail: str) -> str:
-    """Drop a PRIOR HELD basis, keep a prior ADOPTED one.
+    """Drop every PRIOR HELD basis, keep every prior ADOPTED one.
 
     A row held week after week must state ONE held basis, so the previous render's
     `… a LOWER bound; kept N` is pruned before this render's is appended.
@@ -1871,13 +1927,40 @@ def _strip_prior_held_basis(tail: str) -> str:
     surviving note only said `kept 61.9`, #9134 review, P2). Keeping it costs one
     clause and it can never grow: the NEXT render finds the held basis at the end
     of the tail, prunes that, and the adopted basis stays put.
+
+    EVERY held span goes, not just the last one — a row can carry more than one
+    (`test_e2e_wrangler_prewarm.py` carries two, the older from the 2026-10-26
+    sweep with `#10214`'s rationale re-emitted between them), and a hold that
+    pruned only the newest would leave the older one standing and append a third
+    in its place. Pruning the older held basis loses nothing: it describes a
+    reading that was already rejected, while the amended rationale between the two
+    spans is NOT part of either and survives.
     """
-    match = _PRIOR_BASIS_RE.search(tail)
-    if match is None:
+    for start, end, text in reversed(_prior_basis_spans(tail)):
+        if _PRIOR_ADOPTED_BASIS_RE.search(text):
+            continue
+        tail = _without_span(tail, start, end)
+    return tail
+
+
+def _strip_prior_basis(tail: str) -> str:
+    """Drop the MOST RECENT prior basis, wherever it sits — the RE-BASE prune.
+
+    A re-base means the value MOVED, so the note that cites the reading it was
+    derived from is falsified by the new basis and is replaced rather than joined
+    (`a row's comment is kept only while the value AND its stated basis are
+    unchanged`). End-of-note and mid-note are the same event to that rule; only the
+    pattern differs.
+
+    EARLIER bases are deliberately kept: a prior ADOPTED basis that sits before a
+    held one is the #9134 record of what produced the value the note describes, and
+    the newest span is always the one this render is about to supersede.
+    """
+    spans = _prior_basis_spans(tail)
+    if not spans:
         return tail
-    if _PRIOR_ADOPTED_BASIS_RE.search(match.group(0)):
-        return tail
-    return tail[: match.start()].rstrip()
+    start, end, _ = spans[-1]
+    return _without_span(tail, start, end)
 
 # `# unmeasured` — the marker the map documents as "carried forward and is not a
 # measurement". Recognised by its LEADING token, and its replacement when the row
@@ -2036,10 +2119,12 @@ def _balance_cut_parens(text: str) -> str:
 
 # ── a row's NOTE is one paragraph, WRAPPED across physical lines ──────────
 #
-# `_DURATION_LINE_RE` reads a row's note as the tail on its own line, but this
-# map's long notes are wrapped: an indented `#` line under a row can continue THAT
-# row's note (72 rows at the 2026-11-02 head), and the guard that judges the
-# written map joins a row's tail with its continuations before it judges a note
+# `_DURATION_LINE_RE` reads a row's note as the tail on its own line, but a
+# note CAN wrap: an indented `#` line under a row can continue THAT row's note
+# (measured at the 2026-11-02 head: 1 row of 1220 does — `test_source_staleness_
+# sweep_5038.py` — and re-derive it, do not trust the figure, because a refresh
+# re-emits notes and moves it). The guard that judges the written map joins a
+# row's tail with its continuations before it judges a note
 # (`tests/test_ci_selection.py::_durations_row_comments`).
 #
 # ⛔ …but “under a row” is NOT “belongs to that row”, and the difference is the
@@ -2120,7 +2205,7 @@ def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
        associated with a particular node", so *nothing* in the file says which row
        an indented block documents. This map's DOMINANT convention is the opposite
        of the one the previous two conditions imply — an indented block PRECEDES
-       the row it documents (measured at this head: 71 of the 72 such blocks open a
+       the row it documents (measured at this head: 73 of the 74 such blocks open a
        new note, and the ones sampled document the row BELOW — `# #4071: …` sits
        above `test_embedded_lane_canonical_store_4071.py`, `# #5612: …` above
        `test_journal_growth.py`, and the `355.0 IS A DELIBERATE CAP … #9172` block
@@ -2597,7 +2682,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # unchanged" — so a row whose value survives untouched by the reading
             # keeps its note exactly as it was, and a row whose value moves gets
             # the basis it was actually re-derived from.
-            tail = _PRIOR_BASIS_RE.sub("", tail)
+            tail = _strip_prior_basis(tail)
             if tail.strip() and _is_stale_provenance(tail):
                 # A note that IS the citation has nothing that survives a re-base
                 # (the cited run is not this sample's, and the basis written below
@@ -2641,7 +2726,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             if survivors == note_body:
                 # The note is UNTOUCHED by this render: write only the value and
                 # keep the writer's own line breaks (re-wrapping here would
-                # reformat 72 rows for a refresh that changed none of their
+                # reformat the block for a refresh that changed none of its
                 # prose).
                 lines[index] = f"{rendered_row}{row_tail}"
             elif note_body and survivors.startswith(note_body):

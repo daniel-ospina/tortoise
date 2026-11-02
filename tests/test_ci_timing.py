@@ -6117,9 +6117,11 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
 
 # ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
 #
-# A row's note is not the tail on its row line: the map wraps long notes across
-# indented `#` continuation lines (72 rows at the 2026-11-02 head), and the guard
-# that judges a written map joins them before judging (`tests/test_ci_selection.py`
+# A row's note is not the tail on its row line: a note CAN wrap across indented `#`
+# continuation lines (measured at the 2026-11-02 head: 1 row of 1220 — the block's
+# dominant shape is the PREAMBLE for the row below, 73 of its 74 indented blocks),
+# and the guard that judges a written map joins them before judging
+# (`tests/test_ci_selection.py`
 # `_durations_row_comments`). The renderer used to reason about the row-line
 # FRAGMENT only, so a cut on the fragment dropped half a sentence and
 # `_balance_cut_parens` — seeing an unclosed `(` whose `)` sat on a continuation —
@@ -6146,7 +6148,7 @@ durations:
   # never ran cannot appear in an artifact), so this is the LOCAL wall: 69 of them
   # — the count is re-derived, not trusted. Keep this sentence.
 # ⛔ COLUMN-0 PROSE inside the block: it is the map's own header, never a row's
-# note (199 such lines at the 2026-11-02 head), and a rewrite must not touch it.
+# note (186 such lines at the 2026-11-02 head), and a rewrite must not touch it.
   test_wrapped_append.py: 6.8  # #9524: what it costs is a parse of three lockfiles
   # plus, on a shallow clone, one `git ls-files` population read.
 """
@@ -6281,7 +6283,7 @@ def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None
 # ── …and the OTHER convention: a block that OPENS a note is not the row above's ──
 #
 # This map's dominant convention is the block that PRECEDES the row it documents
-# (71 of the 72 blocks beside a row at the 2026-11-02 head open a note of their own),
+# (73 of the 74 blocks beside a row at the 2026-11-02 head open a note of their own),
 # and nothing in YAML says which row a comment belongs to — §3.2.3.3 of the spec:
 # comments are “a presentation detail … not associated with a particular node”.
 #
@@ -6347,8 +6349,8 @@ def test_a_note_block_that_opens_of_its_own_is_never_this_rows() -> None:
         _NOTE_BLOCK_FOR_THE_ROW_BELOW_MANIFEST, held, "2026-11-02T00:00:00Z",
         coverage=coverage,
         sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
-    assert _NOTE_BLOCK_FOR_THE_ROW_BELOW == [
-        ln for ln in first.splitlines() if ln in _NOTE_BLOCK_FOR_THE_ROW_BELOW], (
+    assert [ln for ln in first.splitlines()
+            if ln in _NOTE_BLOCK_FOR_THE_ROW_BELOW] == _NOTE_BLOCK_FOR_THE_ROW_BELOW, (
         "a refresh wrote into a block that documents another row: "
         f"{first.splitlines()[11:18]}")
     # The HELD basis still lands on the row it belongs to.
@@ -6360,11 +6362,105 @@ def test_a_note_block_that_opens_of_its_own_is_never_this_rows() -> None:
     second, _ = ci_timing.render_refreshed_manifest(
         first, held, "2026-11-09T00:00:00Z", coverage=coverage,
         sample_label="ci-timing junit-census+top-15 2026-11-16 (run 41379999998)")
-    assert _NOTE_BLOCK_FOR_THE_ROW_BELOW == [
-        ln for ln in second.splitlines() if ln in _NOTE_BLOCK_FOR_THE_ROW_BELOW], (
+    assert [ln for ln in second.splitlines()
+            if ln in _NOTE_BLOCK_FOR_THE_ROW_BELOW] == _NOTE_BLOCK_FOR_THE_ROW_BELOW, (
         "the next week's render folded the neighbour's block into the row above: "
         f"{second.splitlines()[11:18]}")
     assert "355.0 IS A DELIBERATE CAP" not in next(
         ln for ln in second.splitlines() if ln.startswith("  test_above.py:"))
 
 
+
+
+# ── a prior basis is REPLACED on a re-base, even when it sits MID-note ────────
+#
+# The join above turns a wrapped note into one paragraph, which moves a basis that
+# a previous refresh appended to the ROW LINE into the MIDDLE of the text. The
+# end-anchored `_PRIOR_BASIS_RE` cannot see it there, so the re-base kept the
+# superseded basis AND appended this sample's — the row stated two bases, one of
+# them from two refreshes ago, which is the stale-provenance shape #9134's P2
+# exists to prevent. Nothing caught it: no test asserted one basis per row, and the
+# one row it happens to is not synthetic — the refresh itself wrote that layout.
+def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
+    """A mid-note prior basis is replaced, not accumulated (#10575 review, P3).
+
+    Pinned on the COMMITTED map's only wrapped row rather than on a fixture: the
+    layout that produces the defect is the one the refresh wrote.
+    `test_source_staleness_sweep_5038.py`'s note opens on its row line and continues
+    across five indented lines, and the 2026-11-02 refresh appended its basis to the
+    row line — so the joined note carries that basis in the middle
+    (`… deliverable 3: 34 tests — ci-timing … 2026-11-02 …; was 3.2 embedded (…)
+    lane …`), where an end-anchored match finds nothing.
+
+    Non-vacuity, measured against the pre-fix module at this commit's parent: the
+    re-base emitted the stale `2026-11-02 …; was 3.2` clause on the row line and the
+    new `2026-11-09 …; was 2.3` on the last continuation — two bases in one note, so
+    `len(bases) == 1` and `"2026-11-02" not in note` both fail.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    key = "test_source_staleness_sweep_5038.py"
+    rebased, _ = ci_timing.render_refreshed_manifest(
+        text, {key: 5.0}, "2026-11-09T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    lines = rebased.split("\n")
+    index = next(i for i, ln in enumerate(lines) if ln.startswith(f"  {key}: "))
+    match = ci_timing._DURATION_LINE_RE.match(lines[index])
+    assert match is not None, lines[index]
+    continuation = ci_timing._row_continuation_lines(lines, index)
+    note = (ci_timing._joined_note_tail(match.group("tail"),
+                                        [lines[j] for j in continuation])
+            if continuation else match.group("tail"))
+    bases = re.findall(r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2}", note)
+    assert len(bases) == 1, f"the re-based row states {len(bases)} bases: {note}"
+    assert "2026-11-09" in bases[0], note
+    assert "2026-11-02" not in note, f"the superseded basis survived the re-base: {note}"
+    assert "was 2.3" in note, f"the new basis lost the value it replaced: {note}"
+    # The prune replaces the SPAN, not the note: the row's own text is untouched.
+    assert "deliverable 3: 34 tests" in note, note
+    assert "never correct a weight downward" in note, note
+
+
+def test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped() -> None:
+    """The distribution the writer's span rationale rests on, re-derived.
+
+    `_row_continuation_lines` is conservative because the map's indented blocks
+    beside a row are overwhelmingly PREAMBLES for the row BELOW — only a handful
+    actually wrap the row above. The prose used to state that backwards, quoting the
+    count of NON-continuing blocks (72) as the count of wrapped rows, which made one
+    wrapped row look like 72 and hid the regression the opener rule exists to stop
+    (#10575 review, P3).
+
+    Computed, not frozen: a refresh re-emits notes and moves these counts (this
+    branch's own refresh flattened one wrapped row), so a hardcoded figure would
+    re-stale. What must hold is the SHAPE — at least one real wrap, so the wrapped
+    paths are exercised by committed data, and an order-of-magnitude gap between the
+    preambles and the wraps.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    lines = text.split("\n")
+    index, _entries = ci_timing._locate_durations_block(lines)
+    end = next(i for i in range(index + 1, len(lines))
+               if lines[i] and not lines[i][0].isspace()
+               and not lines[i].startswith("#"))
+    wrapped = preamble = column0 = 0
+    for i in range(index + 1, end):
+        if lines[i].startswith("#"):
+            column0 += 1
+        if ci_timing._DURATION_LINE_RE.match(lines[i]) is None:
+            continue
+        if ci_timing._row_continuation_lines(lines, i):
+            wrapped += 1
+        if ci_timing._row_indented_comment_run(lines, i):
+            preamble += 1
+    assert wrapped >= 1, (
+        "no committed row's note wraps any more, so the wrapped-note re-emit paths "
+        "would be pinned on synthetic fixtures alone — which is how the "
+        "half-parenthesis reached the required legs")
+    assert preamble > 10 * wrapped, (
+        f"the block's dominant convention is no longer the preamble for the row "
+        f"below ({preamble} indented blocks beside a row, {wrapped} of them real "
+        f"wraps); the opener rule and `_row_continuation_lines`' rationale rest on "
+        f"that inversion")
+    assert column0 > 100, (
+        f"the block carries only {column0} COLUMN-0 prose lines, so the "
+        f"indentation bound the span relies on is no longer load-bearing")

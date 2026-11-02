@@ -6481,7 +6481,7 @@ def _durations_row_comments(text: str):
     row does this block document" — §3.2.3.3 of the YAML spec says comments are "a
     presentation detail … not associated with a particular node" — and this map's
     dominant convention is the OPPOSITE of "the block continues the row above": the
-    block PRECEDES the row it documents (71 of the 72 such blocks at this head open
+    block PRECEDES the row it documents (73 of the 74 such blocks at this head open
     a new note). Joining anyway attributes a neighbour's prose to the wrong key,
     which matters because these guards read CLAIMS off the joined text — a stale
     case count or a `WATCHDOG_FLOOR_MIN` claim from the block below then lands on a
