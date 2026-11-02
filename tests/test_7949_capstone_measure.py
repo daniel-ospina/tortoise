@@ -486,6 +486,28 @@ def test_the_e1_e2_record_parses_to_the_numbers_the_table_uses():
     assert [pairing["passed"] for pairing in parsed["pairings"]] == [False, True]
 
 
+def test_the_superseded_log_has_no_reader_left_in_the_probe():
+    """P3: the `e1-e2.log` PARSE PATH is deleted, and the README says so.
+
+    `README.md` states *"the old log's parse path is deleted from
+    `probes/capstone_measure.py`"* (`#9889` item 5). The tree disagreed: after the
+    re-point, `parse_e1e2_log`, `corpus_sha_of_log` and `line_value` all survived
+    with no production caller — a reader kept alive beside the record, which reads
+    to the next lane as "this log is still scored". `parse_e1e2_log`'s only caller
+    was its own test, so nothing but a grep could see it (#10610 P3).
+
+    Non-vacuity: re-add any of the three and this reds, which is the state the PR
+    shipped.
+    """
+    for name in ("parse_e1e2_log", "corpus_sha_of_log", "line_value"):
+        assert not hasattr(measure, name), (
+            f"{name} is back in the probe with no production caller — a second, "
+            "quieter reader of an artifact no row may cite")
+    assert hasattr(measure, "normalise_corpus"), (
+        "normalise_corpus is the LIVE reader (measure_e1_e2 uses it); removing it "
+        "would be the opposite mistake")
+
+
 def test_no_row_cites_the_superseded_e1_e2_log():
     """`#9889` item 5: the hard-coded log name is gone from the row builder."""
     assert measure.E1_E2_SCORES == "docs/evidence/9889/e1-e2-scores.json"
@@ -730,24 +752,6 @@ def test_the_e1_e2_record_refuses_a_corpus_off_the_frozen_pin(tmp_path):
     with pytest.raises(SystemExit) as refused:
         scores_probe.score(repo)
     assert refused.value.code == 2, refused.value
-
-
-def test_the_parse_reads_arms_not_a_fixed_line():
-    """A synthetic log: each arm's share is its own, so the parser cannot be
-    passing by echoing a constant."""
-    text = "\n".join([
-        "sha=abc1234",
-        "arm=before metric=objects total=40 numerator=20 denominator=40 share=0.500000",
-        "arm=after-vet-shipped metric=objects total=40 numerator=10 denominator=40 share=0.250000",
-        "arm=after-vet-shipped metric=real_facts count=90",
-        "e1 before_share=0.500000 after_share=0.250000 verdict=GREEN",
-        "result=SCORED",
-    ])
-    arms = measure.parse_e1e2_log(text)
-    assert arms["before"]["objects"]["share"] == "0.500000"
-    assert arms["after-vet-shipped"]["objects"]["share"] == "0.250000"
-    assert arms["summary"]["e1"]["verdict"] == "GREEN"
-    assert measure.parse_e1e2_log(text)["before"] is not None
 
 
 # ── the table shape, and the two rules that keep a row honest ────────────

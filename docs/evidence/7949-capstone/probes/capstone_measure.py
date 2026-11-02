@@ -723,52 +723,13 @@ def e5_outcome(*, raw_loss: float, narrative_loss: float, sentences: int,
     return result
 
 
-def parse_e1e2_log(text: str) -> dict:
-    """The arms of ``e1-e2.log`` as ``{arm: {metric: {key: value}}}``.
-
-    Two line shapes: ``arm=<name> metric=<metric> k=v k=v …`` and the summary
-    lines whose first token is the label (``e1 …``, ``e1-control …``,
-    ``e2-state …``, ``e2-atomic …``), which land under the ``summary`` bucket. A
-    ``k=v`` token is split on the FIRST ``=`` so a value containing ``=`` survives;
-    a value containing SPACES (``matches=[["count", "4668"], …]``) is truncated at
-    the first space — that field is a literal list this probe does not read.
-    """
-    arms: dict[str, dict[str, dict[str, str]]] = {}
-    summary_labels = ("e1", "e1-control", "e2-state", "e2-atomic")
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        tokens = line.split(" ")
-        if tokens[0].startswith("arm="):
-            arm = tokens[0][len("arm="):]
-            rest = tokens[1:]
-            if not rest or not rest[0].startswith("metric="):
-                continue
-            metric = rest[0][len("metric="):]
-            bucket = arms.setdefault(arm, {}).setdefault(metric, {})
-            rest = rest[1:]
-        elif tokens[0] in summary_labels:
-            bucket = arms.setdefault("summary", {}).setdefault(tokens[0], {})
-            rest = tokens[1:]
-        else:
-            continue
-        for token in rest:
-            key, sep, value = token.partition("=")
-            if sep:
-                bucket[key] = value
-    return arms
-
-
-def corpus_sha_of_log(text: str) -> str | None:
-    match = re.search(r"\bcorpus_sha256=([0-9a-f]{64})\b", text)
-    return match.group(1) if match else None
-
-
-def line_value(text: str, key: str) -> str | None:
-    """The first token of a ``key=value`` line (a line may carry more tokens)."""
-    match = re.search(rf"^{re.escape(key)}=(\S+)", text, re.M)
-    return match.group(1) if match else None
+# ⛔ THE `e1-e2.log` PARSE PATH IS GONE, not merely unused (#9889 item 5,
+# #10610 P3). `parse_e1e2_log` / `corpus_sha_of_log` / `line_value` survived the
+# re-point with no production caller — the rows cite `E1_E2_SCORES`, and the
+# README states the parse path `is deleted from probes/capstone_measure.py` — so
+# the file was keeping a READER for an artifact no row may cite, which reads as
+# "this log is still scored" to the next lane that greps for it. The record is
+# the one source; a log reader here would be a second, quieter one.
 
 
 def normalise_corpus(value: str | None) -> str | None:
