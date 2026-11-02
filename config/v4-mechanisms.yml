@@ -478,65 +478,505 @@ mechanisms:
     declared_in:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §7, the narrower-than-it-looks carve-out (#2453)
       - docs/architecture/STORAGE-ARCHITECTURE.md       # §7, the two-class retain table
-    state: not-implemented
+    state: implemented
     tracking_issue: 10360
+    code:
+      - tortoise/extractor_v2.py
+    tests:
+      - tests/test_state_value_verbatim_10360.py
+    symbols:
+      - _value_slot_divergence
+      - _refuse_rewritten_value
+      - _value_slots
     note: >-
-      The MECHANISM is the guarantee: a state value or a decision-relevant
-      operational value (a measurement, deadline, threshold/TTL, version or
-      count) survives extraction VERBATIM, so any mechanical filter must carry
-      the carve-out rather than drop it. ⚠️ The state is `not-implemented` on
-      purpose, and naming the halves is the whole point of the row:
-      WHAT EXISTS — the prompt-side carve-out, on EVERY path that builds a
-      prompt. `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered
-      into S1 (`_granularity_text`), S2/S4 (`_render_master_core_only`,
-      `_render_master_verbose`) and — since `#9775` — S2/S4 compact
-      (`_render_master_compact`), which appends it and the user-personal-state
-      vocabulary it names UNCONDITIONALLY, OUTSIDE its `if story:` gate: the
+      WHAT IS NOW MECHANICAL (neither half is prompt text):
+      (1) A NON-VERBATIM VALUE IS NOT SILENTLY WRITTEN. `_refuse_rewritten_value`
+      runs on `execute_embed`'s S1/S2 model path — where the model authors the
+      quote — and a point whose own verbatim `quote` holds a DIFFERENT value in
+      the SAME slot is not written. That is the shape of a rewrite, which the
+      carve-out forbids outright ("never round, paraphrase, or label them").
+      The refusal is on the POINT, never on the offsets — withholding only the
+      span leaves the rounded value in the graph with the corrected value one
+      `find` away — and it is REPORTED with both values, so the rewrite is
+      recoverable from the run. It also runs BEFORE `classify_consolidation`
+      and before any supersede record is collected (a later refusal left
+      supersessions naming a pid never written), on the pair the WRITE KEEPS —
+      each side cut by `_write_span` to the text the write stores, and that text
+      is the IDENTITY window `x[:_MAX_CONTENT]` itself EXCEPT where the cut would
+      truncate a NUMERAL, in which case the split token is dropped whole so a
+      value straddling the cap is never read short (the one direction in which
+      value fidelity OUTRANKS byte identity — residual (n)), and it carries the
+      refused point's `supersedes` ref
+      into the same drop report the other doors use (#9906: no silent drop door).
+      ⚠️ Judging the UNCLAMPED pair instead — the previous reading — also refused
+      a point over a divergence in text the write DISCARDS: measured, a 1219-char
+      content whose stored `content[:_MAX_CONTENT]` binds no value at all was
+      REFUSED, withholding a durable memory over a tail that never reaches the
+      graph (#10513 review cycle-13 P2). What is judged is now exactly what is
+      written, and the NUMERAL-ONLY cut is what keeps the straddle direction
+      closed — an unconditional word-boundary cut ALSO moved the stored text off
+      the identity key, which cost a VET-authorised MERGE (review cycle-18 P1,
+      measured: `merges == 0` and a duplicate Point).
+      (1b) THE OPERATOR PATH IS GUARDED, AND ITS TWO RESIDUALS ARE STATED RATHER
+      THAN IMPLIED. `_mint_endpoint`
+      (mint-before-wire, #2552) builds a Point from the MODEL's text, so it reads
+      `refused_value_contents` and refuses to mint a refused ref — measured: an
+      operator naming a refused point used to re-materialise the rewritten value
+      as an endpoint Point, undoing the refusal one step later. The key is the
+      VALUE, not the byte string: `_norm` equality is exact, so re-naming the
+      refused ref `the p95 hit 4.0 seconds.` re-minted it (measured), and the
+      guard therefore also matches the refused point's own `_value_slots` — a
+      variant stating the SAME value in the SAME slot is the same resurrection.
+      An endpoint carrying no value has no slots and is unaffected.
+      ⛔ That key is EXACT-tuple, so the guard stops the byte-exact case and the
+      slot-exact variant, and NOT a wider one — residual (1b-ii) below says which
+      and why it is disclosed instead of narrowed.
+      ⚠️ (1b-i) THAT KEY IS COARSE, AND THE COST IS STATED RATHER THAN ABSORBED
+      (#10513 review cycle-11 P3, measured): it keys the VALUE —
+      `(anchor, sign, core, unit)` per slot — and carries NO identity for the
+      CLAIM, so an endpoint that is a DIFFERENT claim sharing an anchor word and
+      a value is suppressed as well. Refusing `the TTL is 20 minutes` (against a
+      `20 hours` quote) also drops the operator endpoint `the cache TTL is 20
+      minutes`; on `main` that endpoint is minted, so in this narrow shape an
+      operator edge is lost — REPORTED, never silent, and under the variant
+      wording rather than a false accusation of a rewrite. ⛔ Not narrowed, and
+      the reason is the classifier rule: telling that endpoint apart from a
+      variant means judging the claim's NON-value words, i.e. a second
+      classifier beside `_value_bindings` — the P2 that killed the previous
+      attempt at this issue — and the shape only arises in a batch that already
+      contains a refusal (0 refusals on the committed census). Pinned by
+      `test_a_DIFFERENT_claim_sharing_an_anchor_and_value_is_suppressed_too`, so
+      a future lane that narrows the key has to move this row.
+      ⚠️ (1b-ii) AND THE KEY IS EXACT-TUPLE, SO A **WIDER** VARIANT STILL MINTS
+      (#10513 review cycle-13 P2, measured): a variant stating the same value in a
+      SUBSET, a SUPERSET or a REORDERED slot layout does not equal the refused
+      point's slot tuple and re-mints the rewritten value as an endpoint Point —
+      `hit 4.0 seconds`, `the p95 hit 4.0 seconds and the p99 is 9 seconds` and
+      `we saw 4.0 seconds on the p95 this time` all reached
+      `payload["points"]` while the point itself was refused. ⛔ Not narrowed by a
+      CONTAINMENT rule, because that buys nothing on the reordered shape (its
+      slots are `(saw, 4)`/`(on, 95)`, which match no refused slot) and pays for
+      the other two by expanding (1b-i)'s over-suppression to EVERY endpoint that
+      merely mentions the same number in the same anchor slot. Closing it means
+      identifying the CLAIM — the second-classifier shape the review P2 already
+      rejected. It needs the model to emit an operator naming a WIDER variant of
+      an already-refused ref, and the committed census produces no refusals at
+      all. Pinned by
+      `test_the_mint_guard_matches_the_SLOT_TUPLE_exactly_so_a_WIDER_variant_mints`,
+      filed as a follow-up (#10542), so a lane that closes it has to move this row.
+      ⚠️ THE MINT'S CUT IS THE SAME `_write_span` CUT (#10513 review cycle-15,
+      measured), so the two strings cannot disagree about WHERE the cut is. A
+      HARD `[:cap]` here stored `… p95 hit 4` out of `… p95 hit 4.0 seconds` — a
+      value the model never wrote, minted as a quote-less endpoint Point, from a
+      text whose kept span carries no complete value — and, because the stored
+      content is what `n in point_ids` keys on, a byte-identical operator ref
+      missed that dedup and minted a DUPLICATE point beside the one it named
+      (measured: 3 points where the pre-cycle-14 tree produced 1).
+      One truncation helper for both halves, so the two strings cannot disagree.
+      ⛔ AND THE MINT STORES THE REF'S OWN IDENTITY WINDOW `ref[:_MAX_CONTENT]`
+      (#10513 review cycle-18 P1, measured): `_endpoint_keys` keys the entity
+      guard on `_norm(ref[:_MAX_CONTENT])`, and the closure/removal arms re-read a
+      minted point's STORED text back, so a mint that stored a shorter
+      word-boundary span lost most of a long ref (measured: 550 of 1000 chars for
+      `"a"*500 + " "*50 + "b"*500 + "tail"`) and put those two keys out of step.
+      `_write_span` now moves the span only for a truncated NUMERAL — residual
+      (n) — so what the mint stores IS the key the guard compares.
+      Pinned by `test_the_MINT_cuts_at_a_TOKEN_boundary_so_it_cannot_FABRICATE_a_value`
+      and `test_a_ref_that_matches_the_stored_content_RESOLVES_instead_of_minting_a_DUPLICATE`.
+      ⛔ ONE SHAPE IS STILL A TRUNCATION, and it is residual (n2): a ref that is
+      a SINGLE whitespace-free token longer than the cap has no boundary to cut
+      at, so `_write_span` can only return its prefix and a value inside it reads
+      short. The mint is NOT refused there — an over-long ref must still RESOLVE
+      (#2552, pinned), and refusing it would trade a disclosed truncation for a
+      LOST operator edge.
+      ⚠️ That is not RETENTION: a refused point loses its value entirely, so what
+      is enforced is "the graph never records a rewritten value as verbatim",
+      not "every value survives".
+      (2) ONE classifier, the production one: `_value_slots` reads
+      `_value_bindings` (the E5/E7 contradiction engine, live) and adds no second
+      value CLASSIFIER — the P2 that killed the previous attempt at this row.
+      THE DISCRIMINATOR — how the rule tells a droppable identifier from a
+      retainable state value: it never judges identifiers at all. It judges
+      VALUES over the engine's own bindings, in three tolerances (#10360 lane
+      record): (i) value identity, not string identity — a numeric core with its
+      SIGN and its UNIT kept, so ``4.20``/``4.2``,
+      ``20%``/``20 percent``, ``.5``/``0.5`` and ``800ms``/``800 milliseconds``
+      are one value while ``20 minutes``/``20 hours`` and ``20 km``/``20 mi`` are
+      rewrites — and the minus may be spelled ASCII `-`, U+2212 `\u2212`, or a
+      LEADING en/em dash (`-5`/`\u20135`/`\u20145` are one value; an INNER dash is
+      a range, not a sign); (ii) clock forms (a CLOCK-VALID colon token — `HH:MM` with hours
+      0-23, ending the token, plus a zone-prefixed one such as `UTC+03:00`, and
+      the engine's own `clocka0300`/`meridiem-pm` placeholders) and ISO
+      dates are OUTSIDE the judged set — a strict containment rule refuses 16 of
+      the 101 truthful census spans and every one of the 16 is a normalised FORM,
+      catching zero rewrites. ⛔ The exclusion is CLOCK-VALID, not "any colon":
+      an any-colon arm put `27:12` — this carve-out's OWN worked example —
+      outside the judged set (measured: `27:00` for `27:12` was written with no
+      warning), and narrowing it changes the census result not at all (62 judged
+      / 0 refused, re-derived). The clockable start is what keeps `27:12`
+      judged (`27` is no hour); a BARE-shape-only arm judged `UTC+03:00`, whose
+      core is the two colon runs joined, and so REFUSED `UTC+3` against
+      `UTC+03:00` — one offset spelled two ways (measured, cycle 10); (ii-bis) a
+      SEPARATOR-BEARING numeral is OUTSIDE the judged set — ``1,200``, ``4,2``,
+      ``1.234``, ``1,234.56`` — because which character is the decimal point is a
+      LOCALE property and this path has no locale (CLDR UTS #35 carries
+      `decimal`/`group` per locale: `format_decimal(1.2345, locale='en_US')` is
+      `'1.234'` while `format_decimal(12345, locale='de_DE')` is `'12.345'`).
+      This one is a RECORDED DECISION complied with, not a tolerance invented
+      here: `tortoise/value_normalizer.py`'s #2817 ruling, point 1 — "**No
+      separator rule, at all** … deciding that ``R$ 1.234,56`` is ``1234.56``
+      **is** the locale question the design excludes". An earlier revision of
+      this row DID ship the "EN reads commas as thousands" rung
+      (`str(token).replace(",", "")`) and withheld truthful points in
+      comma-decimal locales (`4,2` reduced to `42`, so it diverged from `4.2`);
+      it is gone, `_separator_reads_ambiguously` is the gate, and the cost it
+      buys is residual (l); (iii) a
+      value is judged only where both sides bind the SAME anchor sequence, so a
+      quote that fragments, drops, reorders or adds a value fails OPEN.
+      ⚠️ EVERY tolerance above is measured against OVER-REFUSAL on a truthful
+      corpus; the UNDER-detection direction is unmeasured, which is why the
+      residual below is stated rather than implied. `value_gate.identifier_only`
+      (#4899) is untouched: this row moving does not re-admit one identifier that
+      predicate drops, and `tests/test_state_value_verbatim_10360.py` asserts both
+      halves together.
+      ⛔ WHAT IS STILL NOT ENFORCED — read this before improving a number:
+      (a) a value the model never EMITS is unrecoverable by any rule in this
+      module; the capstone E2a class (1 of 14, bar >= 13) is that class, and it
+      is UPSTREAM of selection (#9775); (b) 50 of the 112 value-bearing points in
+      the committed census receipts fail open on slot layout, so the rule judges
+      62 and refuses 0 today — re-derived by
+      `tests/test_state_value_verbatim_10360.py::test_the_residual_is_measured_on_the_committed_census_corpus`
+      from the sealed receipts (produced, not quoted). ⚠️ Unchanged by (ii-bis):
+      the separator exclusion moved neither number on this corpus (re-measured
+      after it landed, 62 judged / 0 refused), which is why the pin did not have
+      to move; (b2) STRICT VERBATIM
+      SURVIVAL stays SHORT of target and is NOT re-measured here: 38/77 = 49.4%
+      on the flags-on arm against the 49/90 = 54.4% committed baseline (`#5064`
+      comment 2026-10-13, `#7949` E2) — the figure that would move is the E2
+      arm's, and this lane ran no LLM arm. `UNMEASURED(<an E2 LLM arm run>)`.
+      (c) a rewritten CLOCK or ISO date is not caught (form excluded by design),
+      and neither is a colon-form value that happens to be a valid clock shape
+      without being a clock (`4:32` read as a marathon time) — the two are the
+      same token shape and nothing in the text separates them;
+      (d) a unit WORD the engine's own `_UNIT_WORDS` vocabulary does not carry
+      (`seconds`, `minute`, `hour`, `day`, `mile`, …) is never fused into the
+      value token — apart or not — so a minutes→seconds rewrite is not judged:
+      an ENGINE VOCABULARY limit, not a tolerance of this rule (the units it
+      does fuse are compared); a unit SPELLING outside `_UNIT_EQUIV` fails open
+      on purpose, because refusing `800millis`/`800ms` is the false-accusation
+      direction this rule must never take; (e) the S5
+      minted-endpoint site is not judged against its own quote — there `quote` is
+      the point's OWN text, cut with the module's one truncation helper
+      (`_write_span`), so a rewrite is impossible by construction and a rule
+      there must compare against the resolved TURN text,
+      a different rule with a weaker precision profile: a follow-up; (e1) the
+      S5 quote spans were HARD-cut (`content[:_MAX_QUOTE]`) until review cycle
+      16, and the clamp — not the text — was the reachable divergence: measured,
+      an operator ref of `"a " * 99 + "12.5 seconds overall"` minted a quote
+      ending `a a a 12` against a `12.5 seconds overall` content with no warning.
+      All three spans now cut with `_write_span`, so this bullet's "impossible by
+      construction" is true of the CLAMP as well as the text it clamps —
+      including `_write_span`'s SINGLE-TOKEN fallback, which is a HARD cut on the
+      content path (pinned, unchanged) but which this site refuses
+      (`hard_cut_single_token=False`): a ref that is one whitespace-free token
+      longer than the cap gets NO quote and a named warning, because an absent
+      quote is honest and a misstating one is not (measured: a 242-char
+      single-token ref stored the quote tail `dddddddddddd12` against a content
+      holding `12.5…`, silently — S5 has no divergence check to refuse it);
+      (e2) a value written in a NON-ASCII decimal script is judged as the value
+      it is — its `Nd` digits AND its own decimal separator
+      (`\uff0e`/`\u066b`, cycle 17) or thousands separator
+      (`\uff0c`/`\u066c`, which folds to `,` and is then outside the judged set
+      as ambiguous) — and the whole `Pd` dash family reads as one minus. Before
+      that, `４.２`/`4.2`, `４．２`/`4.2` and `‑5`/`-5` each refused a truthful
+      point, and the fragmenting separator also made an Arabic decimal compare
+      EQUAL to a genuine ASCII `4/2` ratio; (f) the rule
+      REFUSES, it does not REPAIR — retaining by substituting the verbatim value
+      into the claim is the follow-up; (g) a LEADING CURRENCY SYMBOL is FORM, not
+      value — `_value_core` reads the numeric core and the unit written AFTER the
+      number, so `$12`/`€12` are one value while `$12`/`$60` is a rewrite;
+      named rather than fixed because `$` / `USD` / `US$` are one currency spelled
+      three ways, the `800millis`/`800ms` false-refusal class cycle 3 measured, so
+      a symbol-as-unit-identity rule would re-introduce it (the behaviour is
+      pinned by `test_a_leading_currency_symbol_is_FORM_today_and_that_is_stated`,
+      so tightening it has to move this row); (h) a side LONGER than
+      `_MAX_JUDGED_TEXT` (2 x `_MAX_CONTENT`) is not judged by the PURE function,
+      deliberately: it is LINEAR — measured 0.45 ms at 67 chars, 2.5 ms at 1 KB,
+      23 ms at 10 KB, 227 ms at 100 KB, 2.4 s at 1 MB — so an over-long side is
+      REFUSED the work rather than spending it. ⛔ The WRITE PATH no longer
+      reaches that arm: it judges `_write_span(...)` at `_MAX_CONTENT`/
+      `_MAX_QUOTE` — the same span it STORES — so the cost is bounded by
+      construction AND an over-long side can neither buy a fail-open over the
+      prefix the graph keeps nor make the JUDGE read a value it would not store
+      (#10513 review cycles 13-14 P2) — with one disclosed exception, the
+      single-token hard fallback in residual (n2), where the module's own cut
+      still truncates and the pair is therefore NOT judged rather than refused
+      against its own truncation. The bound remains as the defence for DIRECT
+      callers
+      (pinned by
+      `test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded`).
+      (i) A `k` SUFFIX IS NOT JUDGED AS A UNIT WORD, AND IS NOT SCALED. `k` is
+      SI's x1000 prefix (`5k` IS `5000`) and it is also a unit identity in
+      `_UNIT_EQUIV`, because it is a unit `_value_bindings` fuses; the single
+      symbol serves both jobs, so where the two sides use it for DIFFERENT jobs
+      the unit is unjudgeable and the pair fails OPEN (`_MAGNITUDE_PREFIXES`,
+      `20k`/`20km`, `5k QPS`/`5000 QPS` — both REFUSED before the arm existed,
+      and the false-refusal direction is the one this rule must never take).
+      ⚠️ The case was measured with a GROUPED `5,000`, which (ii-bis) has since
+      put outside the judged set, so this row's live evidence is the UNGROUPED
+      form `5000`; the test file spells it that way on purpose, because a grouped
+      row would stay green with the arm deleted.
+      ⛔ WHAT THE TOLERANCE IS *NOT*: it is not a waiver on the value. The arm
+      fires only where `_magnitude_agrees` proves the two sides name the SAME
+      NUMBER — equal cores, or the prefix reading closing the gap
+      (`_MAGNITUDE_FACTORS`, `5 x 1000 == 5000` — spelled UNGROUPED on purpose:
+      a `5,000` operand is itself outside the judged set, see (l)) — so a moved
+      number and a dropped sign (ASCII `-` or U+2212 `\u2212`: `-20k`/`20km`) are
+      still judged and still refuse: `5k`/`6k`, `20k`/`21km`, `6000`/`5k`.
+      ⛔ A GROUPED operand is NOT one of those cases (review cycle-13 P2,
+      measured): `5k`/`6,000` returns NO divergence, because `6,000` is a
+      separator-bearing numeral and (ii-bis)/(l) put it outside the judged set —
+      so a rewrite spelled with a thousands separator is unjudged on the OTHER
+      side too, and this paragraph used to claim the opposite. An earlier revision
+      of this arm fired on the unit mismatch alone and WROTE
+      `20k`/`21km`, `-20k`/`20km` and `5k`/`6,000`; `5k`/`6k` was refused even
+      then, because both sides carry `k` so the arm never opened. That is why the
+      gate exists and why those rows are pinned.
+      ⛔ AND BOTH BRANCHES ARE GATED ON THE OTHER SIDE'S UNIT (`_K_ABBREVIATES`,
+      review cycle 8 P1): "the cores are equal" is "the same number" only while
+      `k` is standing for that unit word, so `20k`/`20km` and `20k`/`20kg` are
+      tolerated, while `20k`/`20m`, `20k`/`20mi` — 20 km against 20 m, a 1000x
+      unit change, the class `20 km`/`20 m` is refused for — and `20k`/`20 min`
+      (20,000 against 20 minutes), `20k`/`20%` and `5k`/`5 mi` (5 km against 5
+      miles) are REFUSED. Before that gate, `20k`/`20m` and `20k`/`20mi` were
+      WRITTEN (measured), which is this class the wrong way round: a REAL unit
+      rewrite passing on equal cores.
+      ⛔ THE PART THAT IS STILL UNPROVEN, narrowed rather than claimed away: the
+      gate can only compare unit words it knows, so an equal-core pair whose
+      other side carries NO recognised unit still fails OPEN — `20k`/`20 zorks`
+      is tolerated, the same `_UNIT_EQUIV` residual (d) names for every unknown
+      spelling. And the module never asserts `5k == 5,000` as a VALUE anywhere:
+      the prefix branch TOLERATES the pair arithmetically, it does not rewrite
+      the core.
+      Still NOT caught, and named rather than implied: a `k`-suffixed value is
+      never multiplied into its core, so nowhere does the module assert
+      `5k == 5,000` as a VALUE — the arm merely tolerates the pair; and `M`/`m`
+      carries the same prefix-vs-unit collision one letter over while
+      `_value_core` lowercases the suffix, so an uppercase `M`
+      (millions) is read as metres — widening the set to `m` would cost the real
+      `20m`/`20km` rewrite detection, so it is a residual with a stated trade,
+      not a silent gap. Pinned by
+      `tests/test_state_value_verbatim_10360.py::test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit`
+      and by the battery's `magnitude prefix vs unit` / `magnitude prefix vs
+      scaled` / `magnitude rewritten` / `magnitude number moved` / `magnitude
+      number moved 2` / `magnitude sign dropped` rows.
+      ⛔ **OVERRIDES (the recorded decision this row departs from, stated so the
+      next reader does not tidy it away):** `tortoise/value_normalizer.py`'s
+      #2817 ruling that NO magnitude table ships — `k`/`M`/`MM`/`mil`/`milhão`
+      dropped as a class, on the ground that "a second interpretation of the same
+      token is how a third opinion gets invented". This row reads `k` as x1000
+      (`_MAGNITUDE_FACTORS`) IN THIS SEAM ONLY, because #2817 governs the money
+      DERIVATION — a magnitude word must not silently scale an amount — while
+      here `k` is already a unit identity in `_UNIT_EQUIV`, and without the
+      factor the rule refuses `5k QPS` against `5000 QPS`: a truthful point
+      withheld over a spelling, the false-accusation direction this rule must
+      never take. `value_normalizer`'s money path is untouched and keeps its
+      ruling pinned. Recorded as a comment on #10360 so the departure is
+      findable where the decision lives, and reversible by the owner.
+      (j) A VERSION'S TRAILING ZERO IS FORM, not value — `2.10`/`2.1` and
+      `1.10.0`/`1.1.0` fold, because the same unconditional strip is what makes
+      `4.20`/`4.2` one value, and splitting it by "does this look like a
+      version" would re-open that false refusal on every two-group decimal. For
+      a release number this is a real difference that passes, so it is stated
+      rather than implied; a version's NON-zero groups are still judged
+      (`2.10`/`2.11` refuses). Pinned by
+      `test_a_version_trailing_zero_is_FORM_today_and_that_is_stated`.
+      (k) A DASH **ATTACHED** TO THE NUMERAL IS A SIGN IN EVERY SPELLING, WHICH
+      OVER-READS A BULLET GLYPH (#10513 review cycle-11 advisory, measured).
+      ⚠️ This arm is NOT local to this rule: `_keeps_numeric_edge` feeds
+      `_leading_symbol_run` -> `_strip_edges` -> `_guard_token_seq` ->
+      `_value_bindings`, whose OTHER consumers are the against-store fold path
+      (`distinguishing_difference` / `fold_allowed` / `supersede_allowed`,
+      pinned by `tests/test_never_across_fold_5080.py`), so the dash family is
+      now one minus there too. Direction is the safe one — `-5`/`–5`/`-5` agree,
+      so a truthful point is no longer dropped over a typographic minus — with
+      one measured over-read: an em dash written FLUSH against the numeral
+      (`—5 minutes`, punctuation used as a bullet glyph) reads as minus, so a
+      bulleted content line against an unbulleted quote diverges as a dropped
+      sign and is REFUSED. A SPACED dash (`— 5 minutes`) and `• 5 minutes` are
+      still decoration and agree. Named rather than fixed: telling a bullet from
+      a minus means judging the glyph's context, the same form-vs-value guess
+      that re-opened the `800millis`/`800ms` false refusal (cycle 3), and the
+      direction here is safe (an over-read WITHHOLDS a point and reports it; it
+      never writes a rewritten value). Pinned by
+      `test_a_dash_attached_to_the_numeral_is_a_sign_and_the_bullet_glyph_shape_is_stated`,
+      so a future lane that narrows it has to move this row.
+      (l) A SEPARATOR-BEARING NUMERAL IS NEVER JUDGED, AND THAT IS A MEASURED
+      PRECISION LOSS, not an oversight (#10513 review cycle 12 P1). (ii-bis)
+      puts `1,200`/`4,2`/`1.234`/`1,234.56` outside the judged set because the
+      reading needs a LOCALE, so a REAL thousands rewrite is unjudged too:
+      `we saw 5,000 QPS` against `we saw 6,000 QPS` returns no divergence
+      (pinned by `test_a_separator_bearing_number_is_outside_the_judged_set`, so
+      a future lane that adds a separator rung has to move this row). ⛔ THAT CUTS
+      BOTH WAYS AND COSTS THE (i) MAGNITUDE CASE TOO (review cycle-13 P2,
+      measured): `5k` against `6,000` is unjudged as well, because only one side
+      needs the separator to be read — so "a magnitude rewrite is always judged"
+      is true only for an UNGROUPED spelling (`5k`/`6000`). The trade
+      is deliberate and is the one #2817 point 1 already made: a separator rung
+      has to GUESS the locale, and the guess the previous revision made refused
+      truthful points written the other way round — withholding a durable memory
+      over a spelling, the false-accusation direction this carve-out must never
+      take. Precision over recall, in the direction that keeps memories. NAMED,
+      not fixed: closing it means parsing with a declared locale, which is
+      `value_normalizer`'s OWN territory and needs the owner's decision reopened
+      there, never a rung bolted onto this seam.
+      (m) A **SCALE WORD** IS NOT JUDGED (#10513 review cycle-13 P2, measured).
+      `_value_bindings` fuses no magnitude word — `million`/`billion`/`thousand`
+      are ignored — so both sides bind the SAME core and a 10^3..10^9 rewrite is
+      written as verbatim: `we have 12 million events` against
+      `we have 12 billion events` returns NO divergence, likewise `5 million`
+      against `5 thousand` and `12 million` against `12` (pinned by
+      `test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none`).
+      ⛔ A DIFFERENT CLASS from (d): (d) is a unit SPELLING the tables lack, this
+      is a MAGNITUDE the engine never multiplies, so closing it belongs in
+      `_value_bindings` and would be its own change; a second scale reading inside
+      this seam is the parallel-classifier shape the review P2 rejected. Stated
+      rather than absorbed, and pinned so closing it has to move this row.
+      (m2) THE SCALE IS COMPARED ACROSS THE PAIR, SO A FORM-ONLY SCALE DIFFERENCE
+      FAILS OPEN (#10513 review cycle-18 P2, measured). (m) above records that the
+      engine fuses no magnitude word; the consequence runs in BOTH directions and
+      only one was disclosed. `12 million` against `13 million` carries the SAME
+      scale on both sides, so the scale cancels and the digits are still judged —
+      a real rewrite, refused. `12 million` against `12000000` does NOT: the two
+      sides bind different scales (`12` against `12000000`), so the pair is
+      UNJUDGEABLE and fails OPEN. Before this the pair was REFUSED, withholding a
+      truthful point — "we have 12000000 events" against "we have 12 million
+      events" is ONE value in two forms, the same tolerance this seam applies to
+      `20%`/`20 percent`. Reading a scale is `value_normalizer`'s territory and
+      #2817's "no magnitude table" ruling is NOT reopened here (the `OVERRIDES:`
+      on #10360 covers the `k` unit identity only), so the class is outside the
+      judged set rather than scaled. The scale is COMPARED, not dropped: a
+      first attempt at this fix dropped every scale-bearing slot and silently
+      lost the `12 million`/`13 million` rewrite, which
+      `test_a_SCALE_word_is_compared_across_the_pair_rather_than_dropped` (and
+      `test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none` from
+      the other side) pins.
+      (n2) THE SINGLE-TOKEN HARD FALLBACK STILL TRUNCATES, AND THE PAIR IS NOT
+      JUDGED (#10513 review cycle-18 P1, measured). `_write_span` can only cut at
+      a TOKEN boundary; when a side is ONE whitespace-free token longer than its
+      cap (`_MAX_CONTENT`/`_MAX_QUOTE`) there is none, so it falls back to the
+      hard `s[:cap]` prefix. Two consequences, both stated:
+      (a) the WRITE PATH does NOT judge that pair. It did, and the module's own
+      truncation then accused the model: measured, content
+      `"z"*998 + "4.2 seconds"` against quote `"4.2 seconds"` — a TRUTHFUL point —
+      was REFUSED with `point says '4', quote says '4.2'`, and the mirror refused
+      `4.25` against a `4` read out of the quote. The fail-open is NAMED in the
+      run's warnings, never silent (#9906). Pinned by
+      `test_a_HARD_CUT_pair_is_not_judged_because_the_cut_can_read_a_value_short`,
+      whose positive control is that an ordinary pair is still refused on a real
+      rewrite.
+      (b) the MINT and the WRITE keep storing the truncated prefix. That is
+      deliberate and is the residual: `test_quote_capped_at_200` pins the cap for
+      a single-token quote, dropping an over-cap single-token CONTENT would drop
+      the whole point, and refusing the mint would LOSE the operator edge (#2552
+      pins that an over-long ref still resolves). So a value inside such a token
+      may be stored truncated; the alternative costs a durable memory or an edge,
+      and both are worse.
+      (o) A CURRENCY SYMBOL NO LONGER SWALLOWS THE SIGN, AND A PAREN-WRAPPED
+      NUMERAL IS OUTSIDE THE JUDGED SET (#10513 review cycle-18 P2, measured).
+      `_value_core` read the sign from `raw.lstrip()[0]`, so a leading `Sc`/`Sm`
+      decoration ate it in BOTH directions: `_value_core("$-4")` returned
+      `('', '4', None)`, which REFUSED `$-4` against `-4` (one value, two
+      spellings) while WRITING `$-4` against `$4` (a sign the model dropped) with
+      no warning. The sign is now read from the first sign-bearing character after
+      that decoration run, in the ONE predicate `_reads_as_sign` that
+      `_keeps_numeric_edge` already admitted the edge with. Separately, `($4)` is
+      `-4` in accounting and a prose aside in a sentence, and WHICH ONE APPLIES IS
+      A READER PROPERTY this path does not have — the same reason (l)'s
+      separator is unjudged and the same doctrine (#2817 point 1: never invent a
+      second reading of one token). Reading it as POSITIVE refused
+      `"the shortfall was ($4)"` against `"the shortfall was -4"`; the raw text is
+      now asked, and the exclusion is the accounting SHAPE only, so a prose
+      `(see 2019)` keeps its slot and a rewrite in that text is still refused.
+      ⛔ THE FIRST CUT OF THAT PATTERN WAS WIDER THAN THIS SENTENCE CLAIMED
+      (#10513 review cycle-20 P2, measured): every element was optional, so it
+      matched a BARE parenthetical numeral too and `the audit (2019) says 12
+      events` became wholly unjudgeable — the `12` -> `13` rewrite in that text
+      was NOT refused, in the DETECTION direction, while this row and the code's
+      own note said "the accounting SHAPE only". The accounting reading has to be
+      AVAILABLE before a token can be ambiguous, so the class now REQUIRES one of
+      the three things that make it so — a currency symbol, an explicit sign, or
+      an inner separator — and `_value_core`'s wrapped-token arm asks the SAME
+      pattern instead of the wider `startswith("(")` it used, because two rules
+      for one question is how the wider one survives. `(2019)`, `(1)` and
+      `(see 2019)` keep their slots; `($4)`, `(-4)`, `(4.2)` and `(1,200)` do not.
+      The cost, stated: a real rewrite between TWO accounting numerals
+      (`($4)` against `($6)`) is unjudged, because either side alone takes the
+      pair out of the judged set. Pinned both ways by
+      `test_a_currency_symbol_does_not_swallow_the_SIGN`,
+      `test_an_accounting_PAREN_numeral_is_outside_the_judged_set` and
+      `test_a_BARE_parenthetical_numeral_is_still_judged`.
+      (n) A NUMERAL SPLIT AT THE CAP MOVES THE STORED TEXT OFF THE LEGACY KEY
+      (#10513 review cycle-18 P1, measured). The `_MAX_CONTENT` sites store
+      `x[:1000]` — the identity key `_endpoint_keys`, `_merge_verdict_keys` and
+      `classify_consolidation` all compute, and the spelling every point already
+      in the graph carries — EXCEPT when that cut would truncate a NUMERAL, where
+      the split token is dropped whole (`… p95 hit ` instead of `… p95 hit 4`)
+      because a stored `4` where the source wrote `4.0` is a value the graph never
+      stated. The cost, STATED rather than absorbed: a point stored BEFORE this
+      change carries the hard-clipped spelling, so a re-extraction of that same
+      over-cap claim whose cut splits a numeral keys apart from the legacy row and
+      ADDs a near-duplicate instead of folding (the same trade `_endpoint_keys`
+      states for prefix matching, tracked on #5069). Non-vacuous both ways:
+      `test_the_stored_content_IS_the_identity_key_a_verdict_and_a_prior_key_on`
+      pins the identity for every non-numeral cut AND the numeral exception, and
+      the two `core` end-to-end pins that redded on the unconditional
+      word-boundary cut
+      (`test_a_verdict_on_a_candidate_over_the_cap_still_merges`,
+      `test_content_only_closure_collision_does_not_over_prune`) are green.
+      THE RENDER HALF is unchanged and stays pinned where #9775 left it.
+      `STATE_VALUE_CARVE_OUT` (`tortoise/extractor_v2.py`) is rendered into S1
+      (`_granularity_text`), S2/S4 (`_render_master_core_only`,
+      `_render_master_verbose`) and S2/S4 compact (`_render_master_compact`),
+      which appends it UNCONDITIONALLY, OUTSIDE its `if story:` gate: the
       compaction rule may drop HINTS (the matched-domain granularity block, the
-      story-selected pack sections), never the guarantee. That row used to record
-      an ABSENCE here; it now records the rule that keeps the absence from coming
-      back. `VALUE_FIDELITY_RULE` rides the S2/S4 `{anti_routine}` slot via
-      `_s2s4_rules()` — never S1, never a master render. Pinned, in five places
-      because each catches a different insertion: never-S1 by
+      story-selected pack sections), never the guarantee. `VALUE_FIDELITY_RULE`
+      rides the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` — never S1,
+      never a master render. Pinned, in five places because each catches a
+      different insertion: never-S1 by
       `tests/test_extractor_v4_citation_rot.py`; the core-only render
       byte-for-byte by `tests/test_extractor_v2.py`; the `VALUE_FIDELITY_RULE`
       text absent from all three renders by
       `tests/test_v4_declared_mechanisms.py::test_the_value_fidelity_rule_rides_the_s2s4_slot_and_no_master_render`
       (which also asserts the rule still rides `_s2s4_rules()`, so the absence
-      cannot pass by vacancy — measured before that test: appending the rule to
+      cannot pass by vacancy — measured before that pin: appending the rule to
       `_render_master_verbose`, the DEFAULT render, shipped a second copy of one
-      instruction inside one prompt with every gate green); and — since `#9775` —
-      the carve-out PRESENT, whole, on every render path, the vocabulary it names
-      on all three master renders (S1 renders granularity, never the master
-      list), and through both dispatch entry points, by
+      instruction inside one prompt with every gate green); and the carve-out
+      PRESENT, whole, on every render path, the vocabulary it
+      names on all three master renders (S1 renders granularity, never the
+      master list), and through both dispatch entry points, by
       `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires`
       together with
       `tests/test_v4_declared_mechanisms.py::test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly`
       — the render-path pin over three story shapes (matched, `None`, unmatched)
       precisely because a carve-out appended INSIDE the story gate passes the
       matched case, and the dispatcher pin because that one never reaches a
-      dispatcher: it is the half that passes `core_only=False` EXPLICITLY (the
-      default resolves from `TORTOISE_CLASSIFY_LATER`, and with that flag on the
-      dispatcher half contributed NOTHING — measured), that proves the COMPACT
-      branch is the one rendered (`PACK KINDS` plus the compact master header),
-      and that asserts `count(...) == 1` on the real S2/S4 path. The mutation the
-      render-path pin is written to catch is the story-gated variant, not
-      deletion alone.
+      dispatcher: it is the half that passes `core_only=False` EXPLICITLY (with
+      `TORTOISE_CLASSIFY_LATER` on, that half contributed NOTHING — measured),
+      that proves the COMPACT branch is the one rendered (`PACK KINDS` plus the
+      compact master header), and that asserts `count(...) == 1` on the real
+      S2/S4 path.
       ⚠️ Pinned, and NOT read off a comment: the `SEAMS:` comment above
       `SHORT_SESSION_FACT_RULE` belongs to a different constant and names S1 as
       one of ITS seams, so citing it as authority for value-fidelity's never-S1
-      would say the opposite of what the row claims.
-      ⚠️ PRESENT-IN-A-PROMPT IS NOT THE GUARANTEE, and this row is where the
-      distinction is kept. The FILTER side is mechanical
-      (`tortoise/value_gate.py::identifier_only` is the SELECTION predicate that
-      drops identifier-like residues, `#4899`, and the EMBED gate reuses the same
-      rule set — row `embed_gate`), but nothing enforces RETENTION. VERBATIM
-      SURVIVAL is prompt-only (`#2453`'s own closing records this; the enforcement
-      half is `#10360`) and it is measured SHORT: 38/77 = 49.4% strict verbatim
-      survival on the flags-on arm against a 49/90 = 54.4% committed baseline
-      (`#5064` comment 2026-10-13, `#7949` E2). A row marked `implemented` would
-      make the prompt text read as the guarantee — the exact
-      declared-implies-present defect this registry exists to catch.
+      would say the opposite of what this row claims.
+      ⚠️ PRESENT-IN-A-PROMPT IS STILL NOT THE GUARANTEE, which is why this row
+      separates what the write path now REFUSES from what it cannot see. The
+      prompt half makes the guarantee *uniformly declared*;
+      `_refuse_rewritten_value` + the `_mint_endpoint` guard make a rewritten
+      value *unreachable*; and the residual list above is STATED rather than
+      absorbed.
+
 
   - id: atomic_point_write
     name: "an ATOMIC point write — §4.2's FOURTH precondition for the against-store exact dedup"

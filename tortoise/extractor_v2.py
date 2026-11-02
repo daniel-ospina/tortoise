@@ -152,6 +152,7 @@ import unicodedata
 import warnings
 import weakref
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from . import failure_policy as _failure_policy  # #5095: S3's failure policy (§4.4 G3)
@@ -3832,6 +3833,12 @@ def _norm_kind(k: str) -> str:
 #: own, unrelated caps (a point's ``_MAX_QUOTE``-char ``quote``, a summary's 2000).
 #: ``vet_gate._MAX_CONTENT`` mirrors this value (that module must not import
 #: this one — see its header), and a parity test pins the two together.
+#: ⛔ The word IDENTITY is load-bearing (#10513 review cycle-18, measured): the
+#: stored text and the key must be ONE string, so a pair the S2.2b arbiter
+#: ruled identical cannot key apart into a duplicate Point. Both storing sites
+#: therefore cut with ``_write_span`` — which returns ``x[:1000]`` UNCHANGED
+#: except when that cut would truncate a NUMERAL (see its docstring), the one
+#: case where value fidelity outranks byte identity.
 _MAX_CONTENT = 1000
 
 #: The point-QUOTE cap — distinct from ``_MAX_CONTENT`` (the identity cap) and
@@ -4039,6 +4046,832 @@ def _carries_value(*texts: object) -> bool:
     predicate calls, so the numeric-separator forms are detected here.)
     """
     return any(_value_bindings(str(t)) for t in texts if t)
+
+
+# ── #10360: the verbatim state-value guarantee, made mechanical ─────────────
+
+#: The decimal shape a value token's numeric CORE is read with. ⛔ A token
+#: carrying a SEPARATOR is never read with it at all — see
+#: ``_separator_reads_ambiguously``, which puts that class outside the judged
+#: set rather than deciding what its comma or dot means; a trailing fractional
+#: zero is dropped by ``_value_core``, so ``4.20`` and ``4.2`` are one value.
+#: This is the VALUE-identity reading of
+#: "verbatim": the number the source recorded, not the bytes it was written
+#: with. Two competing readings exist and nothing recorded resolves them
+#: (#10360 §1): TEXT identity would make the guarantee unsatisfiable, because
+#: the pipeline *normatively* normalises form (``2026-10-09`` from "yesterday",
+#: ``03:00`` from "3am"), so a form-only difference is reported as a rewrite it
+#: is not. VALUE identity is the reading this check implements, and its
+#: tolerance bound is MEASURED (see ``_value_slot_divergence``).
+_VALUE_DECIMALS = re.compile(r"\d+(?:\.\d+)?")
+
+# The decimal and thousands separators a NON-ASCII decimal script brings with its
+# digits (#10513 review cycle 17 P2). Folding the digits alone left the numeral
+# fragmented — `４．２` read `4/2` and DIVERGED from `4.2`, while also AGREEING
+# with a real ASCII `4/2` ratio. DECIMAL separators fold to `.`; THOUSANDS
+# separators fold to `,`, which `_separator_reads_ambiguously` then excludes from
+# the judged set (this module's doctrine for an ambiguous numeral: no locale-free
+# identity, so no judgement). `\u3002` is deliberately absent — it is a prose full
+# stop, never a decimal point.
+_SCRIPT_SEPARATORS = str.maketrans({
+    "\uff0e": ".",   # FULLWIDTH FULL STOP (CJK decimal point)
+    "\u066b": ".",   # ARABIC DECIMAL SEPARATOR
+    "\uff0c": ",",   # FULLWIDTH COMMA (ambiguous: decimal in some locales)
+    "\u066c": ",",   # ARABIC THOUSANDS SEPARATOR
+})
+
+#: An ISO date. The pipeline derives these from "yesterday" / "November 9"
+#: (normatively), so the FORM is not a value identity the guarantee can judge —
+#: a date slot is outside the judged set, exactly like a clock.
+_ISO_DATE_TOKEN = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+#: A RAW token that is a valid clock time: hours 0-23, minutes and seconds 0-59.
+#: ⛔ Deliberately NOT "any colon-bearing token" (#10513 review P1, measured):
+#: that put `27:12` — the `STATE_VALUE_CARVE_OUT` text's OWN example ('my
+#: personal best 5K time is 27:12') — outside the judged set, so the carve-out's
+#: headline case was the one case the rule could never see, and a race time
+#: rewritten 27:12 -> 27:00 was written with no warning. Hour 27 is not a clock,
+#: so the shape below judges it while `9:30`/`03:00` stay excluded.
+#: ⛔ And it matches a clock that ENDS the token behind a zone/range prefix
+#: (`UTC+03:00`, `UTC-03:00`): a bare-shape-only arm judged those, and because
+#: `_value_core` reads each colon run separately their core came out as `3/0`,
+#: so `UTC+3` against `UTC+03:00` — one offset spelled two ways — was REFUSED
+#: (measured, #10513 review cycle 10 P2). The `(?<=\D)` boundary is what keeps
+#: `27:12` judged: the only clockable start there is index 0, and `27` is no
+#: hour.
+_CLOCK_FORM = re.compile(
+    r"(?:^|(?<=\D))(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$")
+
+
+def _separator_reads_ambiguously(token: str) -> bool:
+    """Does this token's NUMBER depend on a separator CONVENTION to read?
+
+    ⛔ This predicate exists so that NOTHING here decides what a separator means.
+    ``tortoise/value_normalizer.py`` carries the recorded owner decision this
+    module is built to — **#2817**, option selected 2026-10-07, point 1:
+
+        "**No separator rule, at all.** ``1.234``, ``1,234``, ``1.234,56``,
+        ``1,234.56``, ``800.00`` and ``1 234`` are *all* dropped. There is no
+        'PT-BR reads dots as thousands' rung and no 'EN reads commas as
+        thousands' rung to add one — deciding that ``R$ 1.234,56`` is
+        ``1234.56`` **is** the locale question the design excludes."
+
+    A previous revision of this seam shipped the "EN reads commas as thousands"
+    rung anyway (``str(token).replace(",", "")``) and was caught by review
+    (#10513 cycle 12, P1) — the departure had no ``OVERRIDES:`` record, and it
+    was wrong in the WITHHOLDING direction: ``4,2`` and ``4.2`` reduce to
+    ``42`` and ``4.2``, so a truthful point quoted in a comma-decimal locale
+    diverged from its own quote and was REFUSED (measured).
+
+    The locale question is not a detail a rule can default: UTS #35 (CLDR,
+    Part 3) carries ``decimal`` and ``group`` as per-locale number symbols, and
+    the reference implementation shows one string bound to two numbers —
+    ``format_decimal(1.2345, locale='en_US')`` is ``'1.234'`` while
+    ``format_decimal(12345, locale='de_DE')`` is ``'12.345'`` (Babel 2.17,
+    https://babel.pocoo.org/en/latest/numbers.html). With no locale on this
+    path, the honest reading of a separator-bearing token is NONE — which is
+    exactly #2817's posture, and the reason this returns "not a value" rather
+    than a guess.
+
+    What counts as ambiguous: a comma between digit groups (``1,200`` — EN
+    thousands — and ``4,2`` — ES/PT/de decimal — are one shape), and a dot
+    whose trailing group is a whole number of 3-digit groups (``1.234`` is
+    ``1234`` grouped in de/sv and ``1.234`` decimal in en). A single dot with
+    1-2 fractional digits is not groupable and stays judged (``4.2``, ``4.20``,
+    ``1.5-inch``), ``1.2345`` is not a group either, and a leading ``0.``
+    cannot be one (``0.500`` stays a decimal).
+    """
+    t = str(token or "")
+    if re.search(r"\d,\d", t):
+        return True
+    for m in re.finditer(r"(?<![\d.])(\d+)\.(\d+)", t):
+        whole, frac = m.group(1), m.group(2)
+        if whole != "0" and len(frac) % 3 == 0:
+            return True
+    return False
+
+
+def _value_form_outside_judged(token: str) -> bool:
+    """True when a value token's FORM, not its value, is what differs.
+
+    Clocks and ISO dates are excluded from the judged set DELIBERATELY, and the
+    exclusion is measured rather than argued: a strict "is every content value
+    present in the source" rule refuses 16 of the 101 truthful census spans and
+    **every one** of the 16 is a normalised form (``03:00``/``3am``,
+    ``2026-10-09``/"yesterday", ``2026-11-02``/"November 2") while catching
+    zero rewrites (#10360 lane record, §4). The clock exclusion reads the forms
+    ``_canonicalise_clocks`` produces (``clocka0300``, ``meridiem-pm``) as well
+    as a raw clock-VALID ``9:30``, so a value the ONE engine already
+    canonicalised is not re-judged by a second opinion here.
+
+    ⛔ The raw arm is CLOCK-VALID, not "any colon" (#10513 review P1). An
+    any-colon exclusion swallowed every colon-bearing numeric token, so
+    ``27:12`` — a race time, and the carve-out's own worked example — was never
+    judged: ``27:00`` for ``27:12`` was written with no warning. Re-measured
+    under the narrowed arm the committed census is UNCHANGED (62 judged / 0
+    refused), so this buys the carve-out's own example at no precision cost on
+    the corpus the residual cites.
+
+    Named residual: a colon-form value that IS a valid clock shape but is not a
+    clock (``4:32`` read as a marathon time) is still outside the judged set —
+    the two are the same token shape and nothing in the text distinguishes them,
+    so this is a stated trade rather than a silent gap.
+
+    ⛔ A SEPARATOR-BEARING number is outside the judged set for the same reason
+    a clock is — its FORM carries a locale this path does not have
+    (``_separator_reads_ambiguously``, #2817 point 1). This is the FAIL-OPEN
+    direction on purpose: the alternative the previous revision shipped decided
+    the locale (comma = thousands) and withheld truthful points written the
+    other way round, which is the false-accusation direction this rule must
+    never take. The cost is named in the registry row's residual (l): a REAL
+    thousands rewrite (``5,000`` against ``6,000``) is not judged either.
+    """
+    t = str(token or "").lower()
+    return (t.startswith("clock") or t.startswith("meridiem-")
+            or bool(_ISO_DATE_TOKEN.search(t))
+            or bool(_CLOCK_FORM.search(t))
+            or _separator_reads_ambiguously(t))
+
+
+#: Spelling equivalents of one UNIT — the tolerance is SPELLING, never the
+#: unit itself. ``800ms``/``800 milliseconds`` is one value; ``20
+#: minutes``/``20 hours`` is NOT, and the review finding that earned this table
+#: is that erasing the suffix accepted a minutes→hours rewrite — the carve-out's
+#: own named class (a threshold/TTL). ``_value_bindings`` already fuses a
+#: unit into the value token (``20minutes``, ``800ms``), so the suffix is
+#: recoverable without a second pass over the text.
+_UNIT_EQUIV = {
+    "ms": "ms", "msec": "ms", "msecs": "ms", "millisecond": "ms",
+    "milliseconds": "ms",
+    "s": "s", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
+    "min": "min", "mins": "min", "minute": "min", "minutes": "min",
+    "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
+    "%": "%", "percent": "%", "pct": "%",
+    # every unit `_value_bindings` can FUSE (`_UNIT_WORDS`) is spelled here, so
+    # no fused unit falls through to the unmapped branch and is read as "no
+    # unit" — the review-2 finding: `20 km` vs `20 mi` folded because the table
+    # covered 8 of the engine's 14 units and the miss became a WILDCARD.
+    "k": "k", "km": "km", "mi": "mi", "m": "m", "kg": "kg", "lb": "lb",
+}
+
+#: A leading-dot decimal: ``.5`` is a legitimate written form of ``0.5``, and
+#: refusing a truthful point over it is the false-accusation direction this rule
+#: must never take (review P2).
+_LEADING_DOT = re.compile(r"(?<![\d.])\.(\d)")
+
+#: The unit identities this module can compare — the VALUES of the table. A
+#: unit OUTSIDE this set is treated as "unit not stated" by
+#: `_value_identity_matches` (fail open), and `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)`
+#: is asserted by the test file so a unit the ENGINE can fuse can never be
+#: unknown here.
+_KNOWN_UNITS = frozenset(_UNIT_EQUIV.values())
+
+#: Units in the table above that are really a MAGNITUDE PREFIX, not a unit.
+#: `k` is SI's symbol for x1000 (https://en.wikipedia.org/wiki/Kilo-: "Kilo is a
+#: unit prefix ... denoting multiplication by one thousand"), and `_UNIT_EQUIV`
+#: ALSO carries it as a unit identity because it is a unit `_value_bindings`
+#: fuses, so `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` needs the key. One symbol,
+#: two jobs: where the two sides use it for DIFFERENT jobs the pair is
+#: unjudgeable and fails OPEN — the direction every unjudgeable input here takes
+#: (#10513 review P1, measured: `20k`/`20km` and `5k QPS`/`5,000 QPS` both
+#: REFUSED before this arm existed, withholding a durable memory over a spelling
+#: the rule had no business judging).
+#: ⛔ The SECOND of those pairs is now outside the judged set altogether, because
+#: `5,000` carries a separator (#10513 review cycle 12 P1) — so the arm's live
+#: evidence is the UNGROUPED form (`5k QPS`/`5000 QPS`), which it still decides
+#: and `_magnitude_agrees` still refuses when the number moved (`5k`/`6000`).
+#: The test file spells those rows ungrouped for that reason; a grouped row would
+#: pass with this arm deleted.
+#: ⛔ `M`/`m` is the same collision one letter over and is NOT in this set:
+#: `_value_core` lowercases the suffix, so an uppercase `M` is indistinguishable
+#: from metres there. Stated as residual (i) in `config/v4-mechanisms.yml`
+#: rather than widened here on a guess.
+_MAGNITUDE_PREFIXES = frozenset({"k"})
+
+#: The factor each magnitude prefix denotes. Read ONLY by `_magnitude_agrees`,
+#: which is the whole of what the ambiguity arm is allowed to tolerate: the two
+#: sides must name the SAME number once the prefix is read as x1000.
+#: ⛔ EVERY name in `_MAGNITUDE_PREFIXES` needs a factor here, and the test file
+#: asserts the containment: a prefix with no factor makes `_magnitude_agrees`
+#: return False for everything, so the arm becomes a silent no-op and the false
+#: refusals it exists to remove quietly come back (review, measured).
+#:
+#: ⛔ **OVERRIDES:** `tortoise/value_normalizer.py`'s #2817 ruling that NO
+#: magnitude table ships (`k`/`M`/`MM`/`mil`/`milhão` dropped as a class, on the
+#: ground that "a second interpretation of the same token is how a third opinion
+#: gets invented") — scoped to THIS seam, and only for `k`, because the ruling
+#: governs the money DERIVATION (a magnitude word must not silently scale an
+#: amount) while this table governs VALUE IDENTITY in the write-path refusal,
+#: where `k` is ALREADY a unit identity in `_UNIT_EQUIV` because it is a unit
+#: `_value_bindings` fuses. Without it the rule refuses `5k QPS` against
+#: `5000 QPS` — a truthful point withheld over a spelling, which is the
+#: false-accusation direction this carve-out must never take (#10513 review P1).
+#: ⚠️ The motivating case was measured as `5,000`, and a GROUPED numeral is now
+#: outside the judged set (`_separator_reads_ambiguously`), so the record above is
+#: stated in the ungrouped form that still exercises the factor: `5 x 1000` closes
+#: the gap against `5000`, and `6000` is still refused.
+#: It re-admits nothing into `value_normalizer`'s money path, which keeps its
+#: ruling unchanged and pinned. RECORDED on #10360 as comment 6563672665 and
+#: mirrored in the registry row's residual (i), so the departure is findable
+#: where the decision lives and reversible by the owner; raised by #10513
+#: review cycles 8 and 10.
+_MAGNITUDE_FACTORS = {"k": 1000}
+
+#: The longest side the #10360 rule will JUDGE, in characters. The quote a point
+#: STORES is clamped to ``_MAX_QUOTE`` (200) and its content to ``_MAX_CONTENT``
+#: (1000), so a side past ``2 * _MAX_CONTENT`` cannot be the verbatim anchor the
+#: refusal exists to protect — it is a model-authored blob, and judging it is
+#: unbounded work inside the single Point write path, once per point. MEASURED
+#: (fixer, 2026-11-01) on this box: ``_value_slot_divergence`` costs 0.45 ms at
+#: 67 chars, 2.5 ms at 1 KB, 23 ms at 10 KB, 227 ms at 100 KB and 2.4 s at
+#: 1 MB — LINEAR. So an over-long side FAILS OPEN, the direction every
+#: unjudgeable input here takes (a refusal withholds a durable memory). ⛔ It is
+#: NOT clamped: a value straddling a cut reads as a DIFFERENT value, which is
+#: the false accusation the unclamped-judging fix above exists to prevent.
+_MAX_JUDGED_TEXT = 2 * _MAX_CONTENT
+
+
+def _reads_as_sign(ch: str) -> bool:
+    """Whether ``ch`` READS as the minus, in one place.
+
+    The SAME predicate `_value_core` admitted the numeric edge with
+    (``_keeps_numeric_edge``: every ``Pd`` dash) plus U+2212 MINUS SIGN, which is
+    ``Sm``. Two lists that must agree, so read one of them (#10513 review cycle
+    16 P2): a four-literal tuple read only `-`/U+2212/U+2013/U+2014 and every
+    other ``Pd`` reached the identity with NO sign.
+    """
+    return unicodedata.category(ch) == "Pd" or ch == "\u2212"
+
+
+def _value_core(token: str) -> tuple[str, str, str | None] | None:
+    """``(sign, numeric core, unit)`` for a value token, or ``None``.
+
+    What is dropped is FORM — a leading currency symbol, a trailing fractional
+    zero, a unit's SPELLING — and what is kept is the value
+    and the things that change it: the numeric core, its SIGN, and its UNIT.
+    The earlier attempt at this issue compared the raw strings and was rejected
+    for refusing truthful points (``4.20``/``4.2``, ``20%``/``20 percent``);
+    erasing the unit in reaction to that would have
+    missed ``20 minutes`` → ``20 hours``, which is the rewrite the carve-out
+    exists to forbid, so the unit is compared as an identity with a spelling
+    table rather than discarded (#10360 review, P2s 3–4).
+
+    ⛔ A SEPARATOR-BEARING numeral is NOT a tolerance this function applies — it
+    returns ``None`` for it (``_separator_reads_ambiguously``), because the
+    reading depends on a locale this path does not have. That is #2817's own
+    posture, and the previous revision's ``.replace(",", "")`` (which decided
+    the locale and withheld truthful comma-decimal points) is asserted RED in
+    ``tests/test_state_value_verbatim_10360.py``.
+    """
+    raw = str(token or "")
+    # ⛔ DIGITS ARE FOLDED TO ASCII BEFORE ANY COMPARISON (#10513 review cycle 16
+    # P2, measured). `_VALUE_DECIMALS` is `\d+`, which matches EVERY Unicode
+    # decimal digit (Nd), while the normalisation below (`lstrip("0")`,
+    # `rstrip("0")`) and the caller's `a[1] != b[1]` compare CORE STRINGS — so
+    # `\uff14.\uff12` (fullwidth), `\u0664.\u0662` (Arabic-Indic) and
+    # `\u096a.\u0968` (Devanagari) each DIVERGED from `4.2` and a truthful point
+    # was dropped. NFKC does NOT fold Arabic-Indic, so the fold is per codepoint
+    # via `unicodedata.digit`, which is total on Nd by definition.
+    if not raw.isascii():
+        raw = "".join(
+            str(unicodedata.digit(ch)) if unicodedata.category(ch) == "Nd" else ch
+            for ch in raw
+        )
+        # ⛔ THE DIGITS ALONE ARE NOT THE NUMERAL: a decimal script brings its
+        # OWN separator, and `_VALUE_DECIMALS` only knows the ASCII dot, so the
+        # numeral fragmented into two runs that `_value_core` joined with `/`
+        # (#10513 review cycle 17 P2, measured): `\uff14\uff0e\uff12` (fullwidth
+        # full stop) and `\u0664\u066b\u0662` (Arabic decimal separator) read
+        # `('', '4/2', None)` and DIVERGED from `4.2`, refusing a truthful point
+        # — while ALSO agreeing with a genuine ASCII `4/2` ratio, which is the
+        # fail-open half of the same root cause. Fold the script-local DECIMAL
+        # separators to `.` and the THOUSANDS separators to `,` (the latter then
+        # hits `_separator_reads_ambiguously` and is outside the judged set,
+        # this module's own doctrine for an ambiguous numeral). U+3002 `。` is
+        # NOT folded: it is a full stop in prose, never a decimal point.
+        raw = raw.translate(_SCRIPT_SEPARATORS)
+    # ⛔ NO SEPARATOR IS INTERPRETED HERE (#10513 review cycle 12 P1). A
+    # separator-bearing token has no locale-free value identity, so it has no
+    # identity at all and this returns None — the SAME predicate
+    # `_value_form_outside_judged` applies, called here so a direct caller can
+    # never be handed a guess like `'4,2' -> ('', '42', None)` (what the deleted
+    # `str(...).replace(",", "")` returned, and what withheld truthful points
+    # in comma-decimal locales). #2817 point 1; the reasoning is at the
+    # predicate.
+    if _separator_reads_ambiguously(raw):
+        return None
+    # ⛔ ACCOUNTING PARENTHESES ARE OUTSIDE THE JUDGED SET (#10513 review cycle
+    # 18 P2, measured). `($4)` is `-4` in accounting and a prose aside in a
+    # sentence, and WHICH ONE APPLIES IS A READER PROPERTY this path does not
+    # have — the same reason a separator-bearing numeral is unjudged, and the
+    # same doctrine (#2817 point 1): never invent a second interpretation of one
+    # token. Reading it as POSITIVE was not neutral, it was a FALSE ACCUSATION —
+    # `content = "the shortfall was ($4)"` against `quote = "the shortfall was
+    # -4"` is ONE value in two spellings, and it DIVERGED and withheld a
+    # truthful point. Returning None drops the slot on that side, and a
+    # differing slot layout fails open at `_value_slot_divergence`.
+    #
+    # ⚠️ This arm answers a caller that hands over a WRAPPED token; the tokeniser
+    # `_value_bindings` reads strips the parens first (`($4)` arrives as `$4`),
+    # so the reachable shape is caught at `_value_slots`, which asks the raw text
+    # (`_PAREN_NUMERAL_RE`) rather than the token.
+    #
+    # ⛔ THE SAME PREDICATE AS THE TEXT SCAN, not a second one (#10513 review
+    # cycle 20 P2, measured). This arm used to be `startswith("(") and
+    # endswith(")")`, i.e. EVERY wrapped token, which is WIDER than the accounting
+    # shape the text scan is meant to exclude — two rules for one question, and
+    # the wider one is what let a bare `(2019)` swallow a whole side (see
+    # `_PAREN_NUMERAL_RE`).
+    if _PAREN_NUMERAL_RE.fullmatch(raw.strip()):
+        return None
+    raw = _LEADING_DOT.sub(r"0.\1", raw)
+    matches = list(_VALUE_DECIMALS.finditer(raw))
+    if not matches:
+        return None
+    # U+2212 MINUS SIGN and the dash family are signs, not decoration (#10513
+    # review P1/P2, measured): the ASCII-only read made `\u22124` and `4` one
+    # value and let `\u221220k` through where the ASCII `-20k` is refused, and an
+    # en/em dash a quote writes its minus with was stripped upstream, so `-5`
+    # against `\u20135` DIVERGED and a truthful point was refused. Now that
+    # `_keeps_numeric_edge` keeps a LEADING `Pd`, the dash reaches here and has
+    # to be read as the sign it is. `value_normalizer.py` already reads the
+    # typographic minus as a sign, so this is this module JOINING that reading.
+    # ⛔ The sign is read from the SAME PREDICATE that admitted the edge
+    # (`_keeps_numeric_edge`: a LEADING `Pd`) plus U+2212 MINUS SIGN, which is
+    # `Sm`. A four-literal tuple read only `-`/U+2212/U+2013/U+2014 while that
+    # predicate keeps EVERY `Pd` — so U+2010, U+2011 (non-breaking hyphen, what
+    # PDF and Word extraction emits), U+2012, U+2015, U+FE63 and U+FF0D reached
+    # the identity with NO sign, and a truthful `\u20115` against `-5` was
+    # REFUSED (#10513 review cycle 16 P2, measured). That is the same
+    # false-accusation shape cycle 10 fixed for en/em dash, left open for the
+    # rest of the family: two lists that must agree, so read one of them.
+    # ⛔ AND THE SIGN IS READ FROM THE FIRST SIGN-BEARING CHARACTER, not from
+    # `[0]` (#10513 review cycle 18 P2, measured). A leading CURRENCY symbol is
+    # decoration AROUND the sign, and reading `[0]` let it swallow the sign in
+    # BOTH directions: `_value_core("$-4")` returned `('', '4', None)`, so
+    # `$-4`/`-4` — one value — was REFUSED as a false accusation, while
+    # `$-4`/`$4` — a sign the model DROPPED — was WRITTEN with no warning. The
+    # skipped classes are `Sc` (currency) and `Sm` (math), which is the same
+    # edge `_keeps_numeric_edge` already keeps; U+2212 is itself `Sm`, so the
+    # sign is tested FIRST and the skip only runs when `[0]` is not a sign.
+    _stripped = raw.lstrip()
+    if _stripped and not _reads_as_sign(_stripped[0]):
+        _skip = 0
+        while (_skip < len(_stripped)
+               and unicodedata.category(_stripped[_skip]) in ("Sc", "Sm")):
+            _skip += 1
+        _stripped = _stripped[_skip:]
+    sign = "-" if _stripped and _reads_as_sign(_stripped[0]) else ""
+    out: list[str] = []
+    for m in matches:
+        run = m.group(0)
+        if "." in run:
+            whole, frac = run.split(".", 1)
+            whole = whole.lstrip("0") or "0"
+            frac = frac.rstrip("0")
+            run = whole + ("." + frac if frac else "")
+        else:
+            run = run.lstrip("0") or "0"
+        out.append(run)
+    # ⚠️ From the LAST match's own `end()`, not from `raw.find(...)`: a token with
+    # repeated runs (``12.3ms/1``, ``24h/7d/4w``) read its suffix from the FIRST
+    # occurrence of the last run and produced a nonsense unit (review cycle 2, P3
+    # — 1044 such tokens over a docs corpus, 13 of them mapped).
+    suffix = re.sub(r"[^a-z%]+", "", raw[matches[-1].end():].lower())
+    # An UNMAPPED suffix is returned AS ITSELF so the IDENTITY keeps the
+    # spelling — and `_value_identity_matches` then deliberately treats a unit
+    # it does not know as UNSTATED (fail open), because `800millis`/`800ms` and
+    # `32-byte`/`32-bytes` are one unit spelled two ways (#10360 review cycle 3,
+    # P2). Knowledge of a unit is `_UNIT_EQUIV`'s job, and the test file asserts
+    # `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` so a fusable unit is never unknown.
+    return (sign, "/".join(out), _UNIT_EQUIV.get(suffix, suffix or None))
+
+
+#: The units a bare ``k`` can actually BE an abbreviation of. The equal-core
+#: arm may only waive the unit mismatch where the other side names one of these:
+#: `20k`/`20km` is one value written two ways, while `20k`/`20m` is 20 km against
+#: 20 metres — a 1000x unit change, exactly what `20 km`/`20 m` is refused for
+#: (#10513 review P1, measured: `20k`/`20m` and `20k`/`20mi` were WRITTEN).
+_K_ABBREVIATES = frozenset({"km", "kg"})
+
+
+def _magnitude_agrees(with_prefix: tuple[str, str, str | None],
+                      other: tuple[str, str, str | None]) -> bool:
+    """Do these two identities name the SAME number, reading the prefix as x1000?
+
+    The whole of what the ambiguity arm tolerates, and nothing beside it. A bare
+    magnitude prefix is only unjudgeable as a UNIT WORD; the NUMBER it belongs to
+    is never in dispute, so the arm may not waive a sign or a numeric core. That
+    narrowness is load-bearing and was earned by a review finding (#10513 P2,
+    measured): an arm that fired on the unit mismatch ALONE also wrote
+    `5k QPS` against `6000 QPS`, `20k` against `21km` and `-20k` against
+    `20km` — a numeric rewrite and a dropped sign, the carve-out's own defects.
+
+    Two ways the numbers agree:
+      * the cores are EQUAL — `20k`/`20km`, where the suffix only names the unit
+        and no number was ever restated;
+      * the prefix reading closes the gap — `5k`/`5000`, where `5 x 1000` IS
+        the other side's core. (A GROUPED `5,000` is outside the judged set and
+        never reaches here — `_separator_reads_ambiguously`.)
+
+    ⛔ BOTH are gated on the OTHER side's unit (`_K_ABBREVIATES`, #10513 review
+    P1). "The cores are equal" is only "the same number" while `k` is standing
+    for the other side's unit word: against `m`/`mi`/`M` the same equal cores
+    are a 1000x change and the arm must not waive it — `20k`/`20m` (20 km vs
+    20 m) is the pair a reviewer measured passing through the first version. The
+    factor arm takes the same gate for the same reason (`5k`/`5000` is bare,
+    but `5k`/`5000 mi` is not).
+    """
+    factor = _MAGNITUDE_FACTORS.get(with_prefix[2])
+    if factor is None or with_prefix[0] != other[0]:
+        return False
+    if other[2] is not None and other[2] not in _K_ABBREVIATES:
+        return False
+    if with_prefix[1] == other[1]:
+        return True
+    try:
+        return Decimal(with_prefix[1]) * factor == Decimal(other[1])
+    except (InvalidOperation, ValueError):  # pragma: no cover - belt and braces
+        return False
+
+
+def _value_identity_matches(a: tuple[str, str, str | None],
+                            b: tuple[str, str, str | None]) -> bool:
+    """Two value identities agree, allowing one side to omit the unit.
+
+    ``800`` and ``800ms`` agree (the unit is written or not), the way a point may
+    distil "800ms" from a source sentence that says "800". A unit BOTH sides
+    state, and that this module knows how to spell-normalise, must be the SAME
+    unit — so a minutes→hours rewrite does not fold.
+    """
+    # DELIBERATELY BEFORE the numeric-core comparison: `20k`/`20km` bind equal
+    # cores, but `5k`/`5000` bind `5`/`5000`, so an arm placed after the core
+    # comparison would rescue only half the class it exists for.
+    # ⛔ AND IT ONLY EVER *ADDS* TOLERANCE — it cannot return False, so every
+    # pair it does not rescue falls through to the same checks it always faced.
+    # The gating is `_magnitude_agrees`: the unit mismatch alone is NOT enough
+    # (review P2 — that version wrote `5k`/`6000`), so a numeric rewrite or a
+    # dropped sign still reaches the core comparison below and still refuses.
+    if a[2] != b[2] and _MAGNITUDE_PREFIXES & {a[2], b[2]} \
+            and (_magnitude_agrees(a, b) or _magnitude_agrees(b, a)):
+        return True
+    if a[0] != b[0] or a[1] != b[1]:
+        return False
+    # A unit the SPELLING table does not know cannot be compared mechanically:
+    # `800millis`/`800ms`, `20kms`/`20km`, `1.5-inch`/`1.5in`, `32-byte`/`32-
+    # bytes` are one unit spelled two ways, and refusing them is the
+    # false-accusation direction the earlier string-identity attempt died on
+    # (review cycle 3, P2 — the `32-byte` shape already occurs 4 times in the
+    # committed census). So an unknown unit is treated as the "one side omits
+    # the unit" tolerance; knowing it is `_UNIT_EQUIV`'s job, and
+    # `set(_UNIT_WORDS) <= set(_UNIT_EQUIV)` is asserted by the test file so a
+    # fusable unit cannot silently be unknown again.
+    known = _KNOWN_UNITS
+    if a[2] not in known or b[2] not in known:
+        return True
+    return a[2] == b[2]
+
+
+#: The ACCOUNTING shape of a parenthetical numeral — `($4)`, `(-4)`, `(4.2)`,
+#: `(1,200)`. `($4)` is `-4` in accounting and a prose aside in a sentence, and
+#: WHICH ONE APPLIES IS A READER PROPERTY this path does not have (#10513 review
+#: cycle 18 P2, measured), so a text carrying one is OUTSIDE the judged set on
+#: that side: it fails open at the layout guard rather than being read as a
+#: POSITIVE, which REFUSED `($4)` against `-4` (one value, two spellings).
+#:
+#: ⛔ NARROW ON PURPOSE, AND NARROWER THAN THE FIRST CUT (#10513 review cycle 20
+#: P2, measured). The first pattern was `\(\s*[-$\u20ac\u00a3\u00a5]?\s*-?\d`, whose
+#: every element is OPTIONAL — so it matched a BARE parenthetical numeral too,
+#: and `the audit (2019) says 12 events` became wholly unjudgeable: a real
+#: `12` -> `13` rewrite in that text was NOT refused, while both this constant's
+#: note and the registry row claimed "the exclusion is the accounting SHAPE
+#: only". A currency symbol, an explicit sign, or an inner separator is what
+#: makes the accounting reading available at all, so the class is defined by
+#: requiring one of them. `(2019)`, `(1)` and `(see 2019)` keep their slots.
+_PAREN_NUMERAL_RE = re.compile(
+    r"\(\s*(?:"
+    r"[-$\u20ac\u00a3\u00a5]+\s*\d[^\s)]*"      # a sign/currency DECORATION: `($4)`, `(-4)`, `($-4.2m)`
+    r"|\d[\d.,]*[.,]\d[^\s)]*"                  # …or an inner separator: `(4.2)`, `(1,200)`
+    r")\s*\)"
+)
+
+
+#: The scale words that make a numeral's VALUE a reading rather than an
+#: identity: `12 million` and `12000000` are one value only if something
+#: interprets the scale, and `_value_bindings` fuses none (#10513 review cycle
+#: 18 P2). #2817's "no magnitude table" ruling is NOT reopened here — the class
+#: is simply outside the judged set, on EITHER side, and disclosed as residual
+#: (m2). English only, deliberately: a second language's scale vocabulary is the
+#: same reading with a wider table, and a wider table is what #2817 refused.
+_SCALE_WORDS = frozenset({
+    "hundred", "thousand", "million", "billion", "trillion",
+    "quadrillion",
+})
+
+
+def _value_slots_scaled(text: object) -> tuple[tuple[str, tuple, str], ...]:
+    """``(anchor, value-core, following-token)`` for each judgeable slot.
+
+    The third field is the token AFTER the value, which is how the SCALE
+    question is asked (#10513 review cycle 18 P2, measured). It is carried per
+    slot rather than used to DROP the slot, because the scale has to be compared
+    ACROSS the two sides rather than discarded:
+
+    * `12 million` against `13 million` is a REAL rewrite — both sides carry the
+      same scale, the scale cancels, and the digits must still be judged
+      (pinned by `test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none`,
+      which is about the SCALE going unread, not the pair going unjudged);
+    * `12 million` against `12000000` is ONE value in two forms — reading the
+      scale is what makes them equal, and `_value_bindings` fuses no magnitude
+      word, so the pair is UNJUDGEABLE and must fail open (it was REFUSED,
+      withholding a truthful point).
+
+    `_value_slots` projects this to the (anchor, core) pairs it always returned,
+    so the mint-guard keys and every existing caller are unchanged.
+    """
+    out: list[tuple[str, tuple, str]] = []
+    _text = str(text or "")
+    if _PAREN_NUMERAL_RE.search(_text):
+        return ()
+    for anchor, value, following in _value_bindings(_text,
+                                                   with_following=True):
+        if _value_form_outside_judged(value):
+            continue
+        core = _value_core(value)
+        if core is not None:
+            # The SCALE is the following token ONLY when it IS a scale word; any
+            # other following token is ordinary prose and must not participate
+            # (#10513 review cycle 18 P2): comparing the raw neighbour would
+            # fail `12 events` against `13 things` open and MISS a real rewrite.
+            _scale = following.lower() if following.lower() in _SCALE_WORDS else ""
+            out.append((str(anchor), core, _scale))
+    return tuple(out)
+
+
+def _value_slots(text: object) -> tuple[tuple[str, tuple], ...]:
+    """The judgeable (anchor, value-core) slots of ``text``, IN ORDER.
+
+    The anchor is ``_value_bindings``'s own binding anchor — the content token
+    the value sits beside — so this reads the ONE production value engine and
+    adds NO second value CLASSIFIER (the P2 that killed the previous attempt: a
+    new ``_REWRITE_QUANTITY_RE`` beside the engine's vocabulary). Values whose
+    form is outside the judged set (``_value_form_outside_judged``) and tokens
+    with no numeric core are skipped, so the result is what the guarantee can
+    judge mechanically.
+    """
+    return tuple((anchor, core) for anchor, core, _ in _value_slots_scaled(text))
+
+
+def _value_slot_divergence(content: object, quote: object,
+                           ) -> tuple[tuple[str, str, str], ...]:
+    """#10360: the slots where the point's value CONTRADICTS its own quote.
+
+    Returns ``(anchor, content_value, quote_value)`` for each slot whose value
+    differs, and ``()`` — the fail-open answer — everywhere else.
+
+    ⛔ **The discriminator, and why it is not a plain containment test.** A
+    point and its quote do not have to carry the SAME values: the quote may be
+    the context sentence, and the point may distil in a value the quote does
+    not hold at all (measured: ``"forty round-trips blew up the p95"`` quoted
+    as ``"the calls blew up the p95"``). Comparing value BAGS refuses those
+    truthful points. So the two sides are compared SLOT BY SLOT, and a value is
+    judged only when the two sides bind the SAME anchor sequence — the point
+    says a value in the SAME SLOT as the quote, and states a different one.
+    That is the shape of a REWRITE (``"the p95 hit 4.0 seconds"`` against
+    ``"the p95 hit 4.2 seconds"``), and a rewrite is the one thing the
+    carve-out forbids outright ("never round, paraphrase, or label them").
+
+    Measured over the committed census receipts (``#10360`` §5): **0 refusals
+    on 62 judged value-bearing points of 112** — the other 50 fail open because
+    their quote binds a different anchor sequence (a fragment, a dropped value,
+    or a reordered pair). Precision over recall on purpose: every false
+    accusation the previous attempt was rejected for is in the fail-open
+    direction, and a refusal here withholds a durable memory.
+    """
+    # Cheap early-out first: a same-slot contradiction requires the QUOTE to
+    # carry a value at all, and most points carry none (review P3).
+    # ⛔ And BOUNDED before anything is tokenised: an over-long side is not
+    # judged at all (see `_MAX_JUDGED_TEXT`) — the unbounded-cost half of the
+    # review's UNVERIFIED item, measured linear to 2.4 s for one 1 MB quote.
+    # Fail open, never clamp (a cut value reads as a different value).
+    if (len(str(quote or "")) > _MAX_JUDGED_TEXT
+            or len(str(content or "")) > _MAX_JUDGED_TEXT):
+        return ()
+    if not _carries_value(quote):
+        return ()
+    content_slots = _value_slots_scaled(content)
+    quote_slots = _value_slots_scaled(quote)
+    if not content_slots or not quote_slots:
+        return ()
+    if (tuple(a for a, _, _ in content_slots)
+            != tuple(a for a, _, _ in quote_slots)):
+        return ()  # a different slot layout is not a same-slot contradiction
+    # ⛔ THE SCALE MUST MATCH, OR THE PAIR IS UNJUDGEABLE (#10513 review cycle 18
+    # P2, measured). `_value_bindings` fuses no magnitude word, so `12 million`
+    # binds the core `12` while `12000000` binds `12000000`: with the scale
+    # ignored the two DIVERGED and `"we have 12000000 events"` was REFUSED
+    # against `"we have 12 million events"` — one value written two ways, the
+    # false-accusation direction this rule must never take. Reading the scale is
+    # `value_normalizer`'s territory and #2817's "no magnitude table" ruling is
+    # NOT reopened here (the `OVERRIDES:` recorded on #10360 covers the `k` unit
+    # identity only), so a pair whose SCALES differ is outside the judged set
+    # (row residual (m2)). A pair whose scales AGREE is still judged on the
+    # digits — that is the `12 million`/`13 million` rewrite, and it must stay
+    # caught.
+    if (tuple(s for _, _, s in content_slots)
+            != tuple(s for _, _, s in quote_slots)):
+        return ()
+    # `strict=True` states the invariant the guard four lines above already
+    # enforces (the two slot layouts are equal), so a future edit that weakens
+    # the guard raises here instead of silently truncating to the shorter side
+    # — which would judge a PREFIX of the pair and fail open on the rest. Ruff
+    # B905 is part of the pinned `select` (`pyproject.toml` `[tool.ruff.lint]`,
+    # held by `tests/test_lint_config.py`), so leaving it implicit reds the
+    # required `agent-infra-ci / lint` leg (#10513 review P1).
+    return tuple(
+        (anchor, _value_core_str(cv), _value_core_str(qv))
+        for (anchor, cv, _), (_, qv, _s) in zip(content_slots, quote_slots,
+                                                strict=True)
+        if not _value_identity_matches(cv, qv)
+    )
+
+
+def _value_core_str(identity: tuple) -> str:
+    """The readable form of a ``_value_core`` identity, for the warning."""
+    sign, core, unit = identity
+    return f"{sign}{core}{unit or ''}"
+
+
+def _write_span(text: object, cap: int, *,
+                hard_cut_single_token: bool = True) -> str:
+    """The part of ``text`` the WRITE keeps, cut at a TOKEN boundary.
+
+    #10513 review cycle-13 P2, measured: the rule was fed the UNCLAMPED pair, to
+    keep a value that straddles the cap from being read short (a cut ``1200``
+    reads as ``1``). That also judged text the write DISCARDS — measured,
+    ``content = "the " * 300 + "p95 hit 4.0 seconds"`` (1219 chars) was REFUSED
+    while its stored ``content[:_MAX_CONTENT]`` binds no value at all, so a
+    durable memory was withheld over a rewrite in a tail that never reaches the
+    graph. This cuts at a token boundary instead, and the SAME span is what the
+    write stores, so the judged pair and the written pair are one string.
+
+    ⛔ A value can only be read SHORT by losing DIGITS (review cycle-14 P2,
+    measured): a numeral cut to ``12`` out of ``1200`` is the false-accusation
+    shape. So when the cut splits a token, the token is dropped WHOLE only when
+    BOTH hold:
+
+    * the discarded remainder carries an alphanumeric character (a real split,
+      not a full stop), and
+    * the part of the split token that would be KEPT carries a DECIMAL digit
+      (Unicode `Nd`, the class the value engine's digit run matches).
+
+    ⛔ **That second condition is what keeps this helper on the IDENTITY cap**
+    (#10513 review cycle-18, both P1s, measured). ``_MAX_CONTENT`` is not only a
+    storage bound: ``_norm(x.strip()[:_MAX_CONTENT])`` is the key the write's
+    dedup, ``classify_consolidation``, ``_merge_verdict_keys`` and
+    ``_endpoint_keys`` all compute, and every point already in the graph was
+    stored under it. Dropping a split token whose kept part is pure LETTERS
+    (``weekly`` cut to ``w``, ``bbbb…`` cut to ``bbbb…``) moved the stored text
+    off that key for no value reason at all: measured, a 1639-char content
+    stored 999 chars instead of the key's 1000, so a pair the S2.2b arbiter had
+    ruled identical fell through to ADD and minted a duplicate Point (``merges
+    == 0``), and a minted endpoint stopped being the ref's own key, breaking the
+    #5069 closed loop. The span may only move where the RULE is at stake — a
+    numeral whose digits the cut would truncate.
+
+    When the remainder is PUNCTUATION only (``p95.`` cut to ``p95``) the token is
+    kept: the value is intact, and dropping it would take a judgeable point out
+    of the covered set over a full stop (measured: the committed census loses
+    one — ``wp04_aurora_perf/raw``, a 201-char quote ending ``blew up the p95.``).
+    And when the kept digits are the whole value (``12.5 s`` cut after ``5``) the
+    token is kept too — nothing was truncated.
+
+    So the span equals ``text[:cap]`` for every text whose cut does not truncate
+    a numeral: on the ``_MAX_CONTENT`` sites the stored text IS the identity key
+    again, and on ``_MAX_QUOTE`` it is the pre-existing cut.
+
+    ⛔ **This is the module's ONE truncation helper** — `_mint_endpoint` cuts with
+    it too (review cycle 15, measured): leaving the mint on the HARD `[:cap]` cut
+    made it fabricate a value the model never wrote (`… p95 hit 4` out of
+    `… p95 hit 4.0 seconds`, minted quote-less) AND, because the stored content
+    is now the token-safe span, made a byte-identical operator ref miss the
+    `n in point_ids` dedup and mint a DUPLICATE point. Two truncations of one
+    string cannot disagree; one helper, so they cannot.
+    """
+    s = str(text or "")
+    if len(s) <= cap:
+        return s
+    cut = s[:cap]
+    if cut and not cut[-1].isspace() and not s[cap].isspace():
+        # the cap landed INSIDE a token — the span moves only when a VALUE spans
+        # the cut, so ask the two questions separately (#10513 cycle-18 P1):
+        # what is DISCARDED, and what the kept prefix of the split token HOLDS.
+        kept = cut
+        while kept and not kept[-1].isspace():
+            kept = kept[:-1]
+        split_kept = cut[len(kept):]
+        discarded_alnum = False
+        rest = s[cap:]
+        while rest and not rest[0].isspace():
+            if rest[0].isalnum():
+                discarded_alnum = True
+                break
+            rest = rest[1:]
+        if discarded_alnum and any(ch.isdecimal() for ch in split_kept):
+            # `isdecimal` is exactly Unicode `Nd`, the class the value engine's
+            # digit run (`_VALUE_DECIMALS`) matches — so the span moves only for a
+            # character a value could actually be made of. `isdigit` is broader
+            # (`No` superscripts: `unicodedata.decimal('⁹')` is undefined while
+            # `digit('⁹')` is 9), and firing on those would move the identity
+            # span over a character the engine never reads as a number.
+            # a numeral is cut in two: drop the split token whole
+            cut = kept
+    if not cut:
+        # ⛔ The text is ONE token longer than the cap (a 250-char run with no
+        # whitespace). Dropping it whole would leave the point with NO quote at
+        # all — the verbatim anchor is the thing a value-bearing point exists to
+        # carry — so fall back to the cap itself, which is the pre-existing
+        # behaviour for this shape (`test_quote_capped_at_200`).
+        #
+        # ⛔ BUT A HARD CUT HERE FABRICATES A VALUE, and the S5 MINT site has no
+        # `_value_slot_divergence` call to catch it (#10513 review cycle 17 P2,
+        # measured): an operator ref of `"storage/" + "d"*190 + "12.5" + "z"*40`
+        # (242 chars, one token) minted a stored quote ending `dddddddddddd12`
+        # against a content holding `12.5…`, with NO warning — the value the
+        # graph records is not the value the point states. A caller that cannot
+        # report the divergence asks for `hard_cut_single_token=False` and gets
+        # "" instead: an ABSENT quote is honest, a misstating one is not.
+        return s[:cap] if hard_cut_single_token else ""
+    return cut
+
+
+def _write_span_is_hard_cut(text: object, cap: int) -> bool:
+    """True when ``_write_span`` had to fall back to the HARD ``[:cap]`` cut.
+
+    The fallback fires only when the text is ONE whitespace-free token longer
+    than the cap (there is no token boundary to cut at), and the span it returns
+    is then a truncated token — which is exactly the shape a value can be read
+    SHORT out of, and precisely what the token-safe cut exists to prevent.
+
+    It is asked SEPARATELY rather than returned by ``_write_span`` (#10513 review
+    cycle 18 P1, measured) because the two callers want different consequences
+    while needing the SAME cut: the WRITE keeps the pre-existing hard-cut span
+    (pinned by ``test_quote_capped_at_200``, and dropping a >cap single-token
+    content would drop the whole point) but must NOT judge it, while the S5 mint
+    asks ``_write_span`` for `""` instead. This asks the question by reusing the
+    cut, never by re-implementing it: the fallback is reachable exactly when the
+    non-hard cut returns `""` for over-cap text.
+    """
+    s = str(text or "")
+    if len(s) <= cap:
+        return False
+    return _write_span(s, cap, hard_cut_single_token=False) == ""
+
+
+def _refuse_rewritten_value(content: object, quote: object, *,
+                            warnings: list[str]) -> bool:
+    """#10360: True when this point must NOT be written — its value was rewritten.
+
+    The ENFORCEMENT half of the carve-out, in the write path rather than in
+    prompt text. Called on ``execute_embed``'s S1/S2 model path — where the
+    MODEL authors the quote, which is the only place a rewrite can exist — so
+    the guarantee is a fact about the write, not about the instruction.
+
+    ⛔ **Deliberately NOT wired at the S5 minted-endpoint site.** There the
+    point's ``quote`` is the same ``_write_span`` token-safe cut of the point's
+    OWN text (``hard_cut_single_token=False``, so a single-token over-cap text
+    gets NO quote rather than a misstating one), so a rewrite is impossible by
+    construction and the only reachable divergence would be that site's own
+    clamp — i.e. a false accusation, which is why the clamp is answered with an
+    ABSENT quote instead of a refusal. What that site DOES need, and has, is the
+    ``refused_value_contents`` check inside ``_mint_endpoint``: a refused value
+    must not re-enter the graph as a minted endpoint Point.
+
+    ⛔ **What this rule CANNOT do, stated so the row cannot overclaim.** It
+    cannot drop a state value that IS carried verbatim: it fires only when the
+    point's own quote holds a DIFFERENT value in the same slot, i.e. only on a
+    value that is not the verbatim one. And it cannot RECOVER a value the model
+    never emitted — that loss is upstream of every mechanical rule in this
+    module (the capstone E2a class, 1 of 14, is that class), which is why the
+    registry row keeps that residual named.
+
+    The refusal is deliberate and REPORTED: the warning quotes both values and
+    the verbatim one, so the rewrite is recoverable from the run without the
+    original session.
+    """
+    diverged = _value_slot_divergence(content, quote)
+    if not diverged:
+        return False
+    shown = "; ".join(
+        f"{anchor or '<start>'}: point says {cv!r}, quote says {qv!r}"
+        for anchor, cv, qv in diverged[:3]
+    )
+    warnings.append(
+        f"value-bearing point '{str(content)[:60]}' REWRITES its own verbatim "
+        f"quote — {shown} — refused (#10360: the carve-out carries the value "
+        "verbatim, never rounded or paraphrased)"
+    )
+    return True
 
 
 def _turn_text_by_index(edus: list[dict] | None, index: int) -> str:
@@ -5105,6 +5938,16 @@ def _keeps_numeric_edge(ch: str, leading: bool) -> bool:
     """
     if unicodedata.category(ch) in ("Sc", "Sm") or _is_percent_like(ch):
         return True
+    # A LEADING dash in any of its spellings is a MINUS, not decoration (#10513
+    # review cycle 10 P2, measured): `_strip_edges` removed the en/em dash a
+    # quote writes its minus with, so `-5` against `–5` diverged and a TRUTHFUL
+    # point was dropped — the "withholds a durable memory" direction this rule
+    # must never take — with a warning that misreported the quote as `5`. Only
+    # LEADING: an inner dash is a range or a compound (`5–10`, `32-byte`), and a
+    # lone dash token is still stripped as decoration (`_is_numeric_sign_token`
+    # does not accept it), so this cannot turn punctuation into a quantity.
+    if leading and unicodedata.category(ch) == "Pd":
+        return True
     return ch in (_NUMERIC_LEAD if leading else _NUMERIC_TRAIL)
 
 
@@ -5188,7 +6031,9 @@ _UNIT_WORDS = frozenset({
 })
 
 
-def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
+def _value_bindings(content: str, *,
+                    with_following: bool = False,
+                    ) -> tuple[tuple[str, ...], ...]:
     """Each value token paired with the content token BEFORE it, IN ORDER.
 
     Number words map to their value ("six" → "6") and clock forms to one
@@ -5210,9 +6055,15 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
     A compound number spelled in two words is ONE value ("twenty three" →
     "23"), not two: read apart, "twenty three boxes" bound "20" and "3" and
     matched the genuine pair 20 and 3.
+
+    ``with_following`` additionally yields the token AFTER the value, which is
+    how the JUDGING layer asks whether a SCALE WORD follows it (#10513 review
+    cycle 18 P2). It is a keyword, defaulting OFF, so every existing caller gets
+    the two-tuple unchanged: the engine's own reading is not altered by a
+    question only the value-FIDELITY rule asks.
     """
     seq = _guard_token_seq(_canonicalise_clocks(content))
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, ...]] = []
     anchor = ""
     i = 0
     while i < len(seq):
@@ -5242,7 +6093,11 @@ def _value_bindings(content: str) -> tuple[tuple[str, str], ...]:
             value = value + seq[i + 1]
             i += 1
         if value is not None:
-            out.append((anchor, value))
+            if with_following:
+                out.append((anchor, value,
+                            seq[i + 1] if i + 1 < len(seq) else ""))
+            else:
+                out.append((anchor, value))
             i += 1
             continue
         if t not in _CONTENT_STOPWORDS and t not in _CLOCK_UNITS \
@@ -7820,6 +8675,22 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # ── points (dependency order 3) ───────────────────────────────────────
     payload_points: list[dict] = []
     point_ids: dict[str, str] = {}   # norm content → point id
+    #: #10360: the CONTENTS the value-fidelity rule refused. `_mint_endpoint`
+    #: reads it so a refused value cannot re-enter the graph through the
+    #: operator path — measured: without this, an operator naming a refused
+    #: point's text re-materialised it as a minted `statement` Point with no
+    #: verbatim anchor, i.e. the refusal held only for the payload point it was
+    #: refusing and the rewritten value was written anyway (review cycle 2, P2).
+    refused_value_contents: set[str] = set()
+    #: …and the same refusal keyed on the VALUE SLOTS, which is what makes 1(b)
+    #: true rather than approximate (#10513 review P2, measured: `_norm` equality
+    #: is exact, so re-naming the refused ref `the p95 hit 4.0 seconds.` (a
+    #: trailing period) or `… 4.0 second` re-minted the rewritten value). The
+    #: slot key is `_value_slots`' own output, so a variant that states the SAME
+    #: value in the SAME slot is the same resurrection even when its bytes
+    #: differ. Empty slots never match: an endpoint carrying no value cannot be
+    #: the resurrection of a refused one.
+    refused_value_slots: set[tuple] = set()
     tier_a_points = 0                # E2 (#1534): Tier-A state-value count
     noops: list[dict] = []           # E7 (D4): folded duplicates — result-level
     # #5006 (D12/O4): the FUSIONS — near-duplicate pairs merged onto ONE
@@ -7880,7 +8751,26 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # below DROP the item silently — which reverses that contract and reds
         # the #5060 battery. `_raw_content` exists for the verdict key only.
         _raw_content = str(p.get("content", "")).strip()
-        content = _raw_content[:_MAX_CONTENT]
+        # ⛔ `_write_span`, not a bare `[:_MAX_CONTENT]` (review cycle-14 P2,
+        # measured): a HARD cut stores the truncated prefix of a split token
+        # (`… hit 4.`), which is a value the model never wrote — and it made the
+        # judged pair a DIFFERENT string from the written one, so a split value
+        # was stored unjudged (`content` ending `4.` against a `5.5` quote
+        # carries a real divergence with no warning).
+        # ⛔ AND `_MAX_CONTENT` IS THE IDENTITY CAP, so the span must stay the
+        # hard cut everywhere a value is not at stake (#10513 cycle-18 P1):
+        # `_endpoint_keys`, `_merge_verdict_keys` and the priors this classifier
+        # matches all key on `x[:1000]`, and this line storing a shorter
+        # word-boundary span made the write's probe text differ from the key —
+        # measured, a VET-authorised MERGE was dropped (`merges == 0`) and a
+        # duplicate Point minted. `_write_span` now returns `x[:1000]` verbatim
+        # unless the cut would truncate a NUMERAL, so the stored text IS the key.
+        # ⚠️ From `_raw_content` (which is `str(...)`, NOT `str(... or "")`):
+        # #5060 made a falsy content WRITABLE as its coerced text (a `None`
+        # content is the claim "None"), and collapsing a falsy value to "" here
+        # would DROP the item silently — reversing that contract. `_raw_content`
+        # also stays the UNCLAMPED key in `refused_value_contents` below.
+        content = _write_span(_raw_content, _MAX_CONTENT)
         if not content:
             # #9906: an empty-content point is dropped whole (pre-existing, and
             # NOT this fix's subject) — but if it carried a ``supersedes`` ref,
@@ -7942,7 +8832,97 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if len(sents) > 1:
             warnings.append(f"point '{content[:60]}' has {len(sents)} sentences — "
                             "E3 atomicity expects ONE claim per point")
-        quote = str(p.get("quote") or "").strip()[:_MAX_QUOTE]
+        # `_MAX_QUOTE` cut, and STRIPPED before it: the stored quote is
+        # `str(...).strip()[:_MAX_QUOTE]`, so judging an unstripped or
+        # hard-clamped copy shifts the span by the leading whitespace and can drop
+        # a value the STORED quote states (review cycle-14 P2, measured: two
+        # leading spaces moved the cut enough to lose `5.5` from judgment while
+        # the stored pair diverged — always fail-open in that direction).
+        quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)
+        # #10360: the carve-out's ENFORCEMENT half. A value-bearing point whose
+        # own verbatim quote holds a DIFFERENT value in the same slot is a
+        # rewritten value, and writing it puts a non-verbatim value in the
+        # graph — refuse the POINT (never just the offsets: withholding the
+        # address leaves the value wrong and the address one `find` away).
+        #
+        # ⛔ Judged on the pair the WRITE KEEPS, cut at a TOKEN boundary
+        # (`_write_span`). A value that straddles `_MAX_QUOTE`/`_MAX_CONTENT`
+        # would read as a DIFFERENT value once hard-cut, and refusing a truthful
+        # point over this module's own truncation is the false-accusation
+        # direction this rule must never take (review P1) — so the cut is
+        # token-safe, and it judges EXACTLY the two strings the point is built
+        # from (`content` / `quote` above), so a divergence is never read from
+        # text the write discards and never missed in text it keeps.
+        # ⛔ And it runs HERE, before `classify_consolidation` and before any
+        # supersede record is collected: a refusal that fired later left
+        # `supersessions` naming a pid that is never written, which the commit
+        # layer then reported as a failed supersede (review P2).
+        # ⛔ AND A PAIR PRODUCED BY THE HARD FALLBACK IS NOT JUDGED (#10513
+        # review cycle 18 P1, measured). When `content` or `quote` is ONE
+        # whitespace-free token longer than its cap there is no token boundary
+        # to cut at, `_write_span` falls back to the hard `[:cap]` prefix, and
+        # the judge then reads a value SHORT out of this module's own
+        # truncation: `content = "z"*998 + "4.2 seconds"` against
+        # `quote = "4.2 seconds"` — a TRUTHFUL point — was REFUSED with
+        # "point says '4', quote says '4.2'", and the mirror shape refused
+        # `4.25` against a `4` cut out of the quote. That is the
+        # false-accusation direction this rule must never take (and the same
+        # cut cycles 14/15/17 removed elsewhere; the S5 site asks for `""`
+        # instead of judging). Fail OPEN with the reason NAMED, so the unjudged
+        # point is visible in the run rather than silently covered.
+        _hard_cut = (
+            _write_span_is_hard_cut(_raw_content, _MAX_CONTENT)
+            or _write_span_is_hard_cut(
+                str(p.get("quote") or "").strip(), _MAX_QUOTE)
+        )
+        if _hard_cut:
+            warnings.append(
+                f"point '{content[:60]}' is one whitespace-free token longer "
+                f"than its cap ({_MAX_CONTENT} content / {_MAX_QUOTE} quote), "
+                "so the module's own hard cut truncated it — value fidelity "
+                "NOT judged on this pair (fail-open; the cut can read a value "
+                "short, which is not evidence of a rewrite)"
+            )
+        elif _refuse_rewritten_value(content, quote, warnings=warnings):
+            # ⚠️ BOTH keys are needed, and cycle 5's "only the clamped one"
+            # reading was WRONG (cycle 6 measured it): the clamped key matches a
+            # ref `_mint_endpoint` truncates, while the unclamped key is what it
+            # matches when the refused content exceeds `_MAX_CONTENT` only in
+            # WHITESPACE — a transcript/table dump whose `_norm` collapses — so a
+            # short prose ref carries the collapsed full text and the clamped key
+            # cannot produce it. With only the clamped key, a refused `4.0` was
+            # re-minted as an endpoint Point from exactly such a shape.
+            refused_value_contents.add(_norm(content))
+            refused_value_contents.add(_norm(_raw_content))
+            # ⛔ TWO slot keys, because the two sides are clamped differently
+            # (review cycle-14 P2, measured): `_mint_endpoint` computes an
+            # endpoint's slots from its CLAMPED text, so a key built only from
+            # the UNCLAMPED refused text never describes the same string — a
+            # refused over-cap point recorded a 4-slot key while every candidate
+            # endpoint produced 2, and a byte-variant endpoint re-minted the
+            # rewritten value. The clamped key is the one the comparison needs;
+            # the raw key stays for the whitespace-collapse shape cycle 6 pinned.
+            # ⛔ The bound is enforced on BOTH keys (#10513 review cycle 16 P2,
+            # measured): `_value_slot_divergence` refuses to judge past
+            # `_MAX_JUDGED_TEXT`, but this collector fed `_value_slots` the
+            # UNCLAMPED `_raw_content` with no length guard, so the "cost is
+            # bounded by construction" claim was false on the refusal path — a
+            # 2 MB content took 7.53 s to refuse and a 5 MB one 17.67 s. Skipping
+            # an over-cap key loses only a key `_value_slot_divergence` would
+            # never have judged either, so the two bounds now agree.
+            for _key_text in (_raw_content, content):
+                if len(str(_key_text or "")) > _MAX_JUDGED_TEXT:
+                    continue
+                _refused_slots = _value_slots(_key_text)
+                if _refused_slots:
+                    refused_value_slots.add(_refused_slots)
+            # The point's own `supersedes` ref is dropped WITH the point, and
+            # #9906's rule is that none of the drop doors is silent — so the
+            # reversal is reported through the same carry helper the other
+            # doors use, rather than vanishing with the refused point (review
+            # cycle 2, P2).
+            _carry_fold_supersede(p, "", "the #10360 value-fidelity refusal")
+            continue
         search_keys = _clean_search_keys(p.get("search_keys"), warnings,
                                          f"point '{content[:60]}'")
         # E7 (D1): the consolidation decision vs the S3-retrieved priors — pure
@@ -8190,8 +9170,85 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     minted_endpoints: list[str] = []
 
     def _mint_endpoint(ref: str, where: str) -> str:
-        content = str(ref or "").strip()[:_MAX_CONTENT]
+        # ⛔ `_write_span`, never a bare `[:cap]` (review cycle 15, measured): a
+        # HARD cut stores the truncated prefix of a split token, so
+        # `_mint_endpoint` fabricated the value `… p95 hit 4` out of
+        # `… p95 hit 4.0 seconds` and minted it as a quote-less Point the model
+        # never wrote — the same class of module-fabricated value cycle 14
+        # removed from the WRITE, left on the mint. It also broke dedup: the
+        # stored content is what `n in point_ids` below keys on, so a
+        # byte-identical ref missed it and minted a DUPLICATE point beside it
+        # (measured: 3 points where the pre-cycle-14 tree produced 1). One
+        # truncation helper for both halves, so the two strings cannot disagree.
+        # ⛔ AND THE MINT MUST STORE THE REF'S OWN IDENTITY PREFIX (#10513
+        # cycle-18 P1, measured): `_endpoint_keys` keys the entity guard on
+        # `_norm(ref[:1000])` and the closure/removal arms re-read the stored
+        # text back, so a mint that stored a SHORTER word-boundary span lost most
+        # of a long ref (measured: 550 of 1000 chars) and put the two keys out of
+        # step. `_write_span` keeps `ref[:1000]` verbatim except where the cut
+        # would truncate a numeral — the only case where the mint may move.
+        # ⛔ THE ONE SHAPE THE MINT CANNOT MAKE HONEST is the module's own HARD
+        # fallback (#10513 review cycle 18 P1, measured): a ref that is a SINGLE
+        # whitespace-free token longer than the cap has no boundary to cut at, so
+        # `_write_span` can only return the truncated prefix and a value in it
+        # reads SHORT. It is NOT answered by refusing the mint: an over-long ref
+        # must still RESOLVE (#2552, pinned), and a refused endpoint drops the
+        # operator edge with "did not resolve" — trading a disclosed truncation
+        # for a lost edge. The mint therefore keeps the identity prefix and the
+        # shape is stated in the row as residual (n2), not absorbed.
+        content = _write_span(str(ref or "").strip(), _MAX_CONTENT)
         if not content:
+            return ""
+        # The `point_ids` clause is a WARNING fix, not a resolution fix: an
+        # operator naming an already-emitted point resolves through `_resolve`
+        # before minting is ever reached, and this guard runs on the truncated
+        # text. Its only reachable shape is the >cap full-vs-clamped divergence,
+        # where suppressing it keeps a truthful ref from being reported as
+        # "refused" (review cycle 5 measured both branches: the edge drops the
+        # same way, one misleading warning fewer).
+        _refused_here = _norm(content) in refused_value_contents
+        _matched_on_slots = False
+        if not _refused_here and refused_value_slots:
+            # …and the SLOT key (#10513 review P2, measured): `_norm` equality is
+            # EXACT, so re-naming the refused ref `the p95 hit 4.0 seconds.` (one
+            # trailing period) or `… 4.0 second` re-minted the rewritten value —
+            # the resurrection 1(b) exists to stop. A variant that states the
+            # SAME value in the SAME slot is that resurrection even when its
+            # bytes differ. An endpoint carrying NO value has no slots and can
+            # never match, so a plain ref is unaffected.
+            _slots = _value_slots(content)
+            _matched_on_slots = bool(_slots) and _slots in refused_value_slots
+            _refused_here = _matched_on_slots
+        if _refused_here and _norm(content) not in point_ids:
+            # #10360: mint-before-wire must not resurrect what the
+            # value-fidelity rule refused. Minting here would build a
+            # `statement` Point out of the MODEL's text — the rewritten value —
+            # with no verbatim anchor, so the refusal would hold for the payload
+            # point and be undone one step later. The operator edge drops with
+            # this warning instead (its own dangling-edge guard reports that).
+            # ⛔ TWO messages, because the two keys do not know the same thing
+            # (#10513 review cycle-11 P3, measured): the slot key is
+            # `(anchor, sign, core, unit)` per slot, so it carries NO identity
+            # for the CLAIM. `the TTL is 20 minutes` refused against
+            # `the TTL is 20 hours` and an endpoint `the cache TTL is 20 minutes`
+            # share that whole tuple while being a DIFFERENT claim — the endpoint
+            # is suppressed too (this is residual (1b-i), stated in the row), and
+            # telling its author the claim 'was refused for rewriting its own
+            # verbatim quote' would be false of it. The exact-content arm keeps
+            # that wording because for it the claim IS the refused one.
+            if _matched_on_slots:
+                warnings.append(
+                    f"operator endpoint ({where}) named {content[:60]!r}, whose "
+                    "value matches a point refused for rewriting its own "
+                    "verbatim quote (#10360) in the same slot — treated as a "
+                    "variant of that refusal and not minted, so the rewritten "
+                    "value cannot enter the graph through this path")
+            else:
+                warnings.append(
+                    f"operator endpoint ({where}) named {content[:60]!r}, whose "
+                    "point was refused for rewriting its own verbatim quote "
+                    "(#10360) — not minted, so the rewritten value cannot enter "
+                    "the graph through this path")
             return ""
         # `n` is the RESOLUTION key (`point_ids`/`event_ids` are keyed on the
         # minted content). The ENTITY guard is the same key-set transform the
@@ -8312,7 +9369,39 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # point losing its E3 anchor — not what happened) never reaches the
         # payload's warnings.
         if edus:
-            _probe = {"content": content, "quote": content[:_MAX_QUOTE]}
+            # ⛔ `_write_span`, not `content[:_MAX_QUOTE]` (#10513 review cycle 16
+            # P2, measured): `_write_span` is "the module's ONE truncation
+            # helper" and says so, but this site still hard-cut. Measured, an
+            # operator ref of `"a " * 99 + "12.5 seconds overall"` minted a
+            # point whose stored quote ended `a a a 12` against `content`'s
+            # `12.5 seconds overall` — `_value_slot_divergence` then reports
+            # `(('', '12.5', '12'),)` with NO warning, i.e. exactly the
+            # fabricated-value class cycle 14/15 fixed at the mint pre-pass and
+            # in `_mint_endpoint`. The row's residual (e) claimed this site was
+            # safe "by construction" because `quote` is the point's OWN text;
+            # its own CLAMP is the reachable divergence, and it is now cut the
+            # same way every other span in this module is.
+            #
+            # ⛔ AND `hard_cut_single_token=False` (#10513 review cycle 17 P2,
+            # measured): `_write_span` still falls back to the HARD `[:cap]` cut
+            # when the text is ONE whitespace-free token longer than the cap —
+            # there is no token boundary to cut at. On the content path that
+            # fallback is the pinned pre-existing shape, but HERE it stamped a
+            # quote that MISSTATES its own content: an operator ref of
+            # `"storage/" + "d"*190 + "12.5" + "z"*40` (242 chars, one token)
+            # stored the quote tail `dddddddddddd12` against a content holding
+            # `12.5…`, silently — this site has no `_value_slot_divergence` call
+            # to refuse it. An ABSENT quote is honest; a misstating one is not,
+            # so this site asks for "" and names it in the warnings.
+            _quote_span = _write_span(content, _MAX_QUOTE,
+                                      hard_cut_single_token=False)
+            if not _quote_span and content:
+                warnings.append(
+                    f"minted endpoint ({where}) is one token longer than the "
+                    f"{_MAX_QUOTE}-char quote cap, so it has no token-safe "
+                    "quote — left unquoted rather than quoting a cut that "
+                    "misstates its own value")
+            _probe = {"content": content, "quote": _quote_span}
             _scratch: list[str] = []
             _turn = _resolve_source_turn(_probe, edus, warnings=_scratch)
             if _turn is None:
@@ -8321,12 +9410,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                     "left unquoted (no source_turn_id)")
             else:
                 _turn_text = _turn_text_by_index(edus, _turn)
-                _anchor = re.sub(r"\s+", " ", content[:_MAX_QUOTE].strip().lower())
+                _anchor = re.sub(r"\s+", " ", _quote_span.strip().lower())
                 _verbatim = bool(_anchor) and re.sub(
                     r"\s+", " ", _turn_text.lower()).find(_anchor) >= 0
                 pt_entry["source_turn_id"] = _turn
                 if _verbatim:
-                    pt_entry["quote"] = content[:_MAX_QUOTE]
+                    pt_entry["quote"] = _quote_span
                 # #2684 (Slice B): a MINTED ENDPOINT is a statement Point, so a
                 # VALUE-BEARING one takes the same verbatim-span gate the model
                 # path takes ABOVE, in S1/S2 (``_value_verbatim_span``, stamping at
@@ -8367,6 +9456,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                         f"value-bearing minted endpoint ({where}) resolved to "
                         f"turn {_turn} without a verbatim anchor — it carries "
                         "no source span (the value cannot be re-read verbatim)")
+                # ⛔ #10360 is NOT enforced here, deliberately. `quote` at
+                # this site is the token-safe span of the point's OWN text
+                # (`_write_span(content, _MAX_QUOTE, hard_cut_single_token=False)`,
+                # so a single-token over-cap content gets NO quote), so there is
+                # no model-authored excerpt to diverge from — a rewrite is
+                # impossible by construction and the only reachable divergence
+                # would be this site's own clamp, i.e. a false accusation, which
+                # is answered with an ABSENT quote rather than a refusal
+                # (review P2). S5 has no independent quote; a rule here must
+                # compare against the resolved turn text, which is a different
+                # rule with a weaker precision profile — a follow-up, not a
+                # claim in this row.
         payload_points.append(pt_entry)
         point_ids[n] = pid
         # `_resolve` probes the UNTRUNCATED ref, so register that key too when
