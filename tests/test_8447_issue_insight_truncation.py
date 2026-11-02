@@ -211,8 +211,8 @@ class TestIssueInsightTruncation:
         this method raises for; every other failure … is an error dict via _safe
         at the handler". Both halves after the `limit` refusal are false for the
         surfaces that are NOT the MCP tool: this method has ONE `raise` and
-        ZERO `except`/`try` (measured: `grep -nE 'raise |except'` over its
-        body), so a graph-service fault PROPAGATES to a direct SDK caller;
+        ZERO `try` and ZERO `except` (its only `raise` is the guard above), so
+        a graph-service fault PROPAGATES to a direct SDK caller;
         `GET /v1/issue-insight` then answers 500 (`hosted_api.py`, `except
         Exception: raise HTTPException(500)`), and only the MCP tool's `_safe`
         converts anything to a dict (`mcp_server.py`). A caller who trusted the
