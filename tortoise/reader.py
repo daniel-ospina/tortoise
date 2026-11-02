@@ -44,10 +44,13 @@ Key contracts:
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Protocol
 
 from tortoise.retrieval import render_context
+
+_log = logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════
 # ══ READER PROMPT CONSTANTS (OWNED here — the product is the source of
@@ -152,6 +155,85 @@ _MULTI_SESSION_FRAGMENT = (
     "synthesizing from the distinct events — do not dump every entry.\n"
     "- If the asked information is absent from the context, say you do not "
     "know rather than guessing."
+)
+
+# #10539 (C5 #2513 scope unit 4) — aggregation-aware reading. The measured
+# failure this closes: of the epic's misses, 34% had FULL evidence and the
+# reader was still wrong, and the D3 fixture's must-not-abstain failures are
+# dominated by counting questions ("how many clothing items", "total spent on
+# bike expenses"). ``_MULTI_SESSION_FRAGMENT`` already carries counting
+# discipline, but it is selected by ``detect_question_type`` — a single-winner
+# PRECEDENCE classifier — so an aggregative question whose surface also
+# matches a coarser cue loses that discipline entirely. Measured pre-#10539:
+#   "How many clothing items did I buy last month?" -> temporal-reasoning
+#   "What is the sum of my monthly subscriptions?"  -> None
+# both aggregative per ``detect_aggregative_intent``, both answered with NO
+# counting discipline. So the fragment below is appended from the EXISTING,
+# purpose-built detector (which owns its own temporal-ARITHMETIC exclusion,
+# delegated to the #2886 classifier) rather than from a second precedence
+# classifier — extending the mechanism that already decides the reader's
+# instructions, not adding a parallel gate (#1178).
+#
+# The honesty clause is the §8 owner ruling of 2026-09-22 made executable
+# (posture-dependent coverage honesty, option (c)): flag by default, and
+# abstain on a numeric total when the assembled set is visibly incomplete —
+# because a silently missing session turns a count into a confident wrong
+# number, and a wrong number is a worse failure than an admitted gap.
+#
+# Field convergence (researched 2026-11-01, not adopted blind): the mechanism
+# the SOTA multi-document literature names for this class is "enumerate the
+# qualifying items across all sessions, resolve duplicates, then count" —
+# RAPTOR-style hierarchical summarisation is explicitly the WRONG instrument
+# here because lossy summaries discard the fine-grained items an exact count
+# needs. This is prompt-side discipline; no summarisation subsystem is added.
+_AGGREGATION_FRAGMENT = (
+    "\n\nAGGREGATION INSTRUCTIONS: this section applies ONLY IF this "
+    "question asks for a count, a total, or another aggregate over the memory "
+    "context. If it does not — it asks for a single fact, a yes/no answer, a "
+    "value such as a number, address, or time, or a degree of preference — "
+    "IGNORE THIS SECTION ENTIRELY and answer exactly as instructed above. "
+    "When it does apply, work the answer out by enumeration rather than from "
+    "recall:"
+    "\n"
+    "- In your working, enumerate every item in the context that satisfies "
+    "the question. Then answer with the aggregate and, when it is not "
+    "already clear from the answer, the basis you counted from: how many "
+    "distinct items, and how many sessions. This counting basis is the one "
+    "thing you may state about the context; do not otherwise describe the "
+    "context or list the items in your answer."
+    "\n"
+    "- Count an item ONCE. The same item restated WITHIN one session is one "
+    "item, not two — remove the duplicate by what the item IS (same "
+    "subject, same event, same value), never by how many mentions it has. "
+    "The same description appearing under TWO DIFFERENT session dates is "
+    "two separate items unless it is explicitly a restatement of the "
+    "earlier one; do not collapse them, because that under-counts."
+    "\n"
+    "- This refines the cross-session rules above: where those treat a "
+    "repeated entry as the same event, that holds only when the later "
+    "mention refers back to the same occurrence. Two distinct occurrences "
+    "on different dates are two items."
+    "\n"
+    "- Where an instruction above reads the question as asking WHEN something "
+    "happened (elapsed time, ordering), or as asking for the CURRENT value "
+    "of a fact that changed, or as asking WHICH option the user prefers, "
+    "that reading decides a different thing than the count and does not "
+    "replace the enumeration: a date scopes WHICH items count, a "
+    "supersession chain says WHICH items exist now, and a preference decides "
+    "which option — none of them says HOW MANY. Count from the enumerated "
+    "set; do not restate an elapsed-time, current-value, or preference "
+    "answer in place of the count."
+    "\n"
+    "- These rules REFINE the presence-commit rule above; they do not "
+    "override it. When the items the question asks about are present in the "
+    "context, enumerate them and commit to the exact number — do not hedge "
+    "or refuse merely because the total is not written down."
+    "\n"
+    "- Say the set is incomplete ONLY when a session or item the question's "
+    "scope genuinely requires is absent from the context (not merely "
+    "undated or paraphrased). In that case give the enumerated subset, say "
+    "plainly which part is missing, and do not present the subset total as "
+    "the answer."
 )
 
 # A1 (#1546 + #1762 + #1775): the universal partial-knowledge abstention
@@ -286,6 +368,41 @@ _TYPE_FRAGMENTS: dict[str, str] = {
     "multi-session": _MULTI_SESSION_FRAGMENT,
 }
 
+#: Set once so a genuine seam failure is reported, not silenced. A silent
+#: fail-open would let a run record the aggregation-aware configuration while
+#: no prompt carried it — the drift class this whole change is about.
+_AGGREGATION_SEAM_WARNED = False
+
+
+def _is_aggregative_question(question: str | None) -> bool:
+    """Whether the reader must be given counting discipline (#10539).
+
+    Delegates to #2521's ``detect_aggregative_intent`` — the ONE owner of the
+    counting/quantifier vocabulary and of the temporal-ARITHMETIC exclusion
+    ("how many days ago" is date arithmetic, not a count). This function adds
+    no predicate of its own: it is the wiring that was missing.
+
+    The import is local for LOAD COST, not to dodge a cycle — there is no
+    cycle (``tortoise.aggregate`` does not import ``tortoise.reader``; checked
+    in both orders); the local form keeps the extractor chain ``aggregate``
+    pulls in off the reader module's import path.
+
+    Fail-open to ``False``, and LOUD about it — see ``_AGGREGATION_SEAM_WARNED``.
+    """
+    global _AGGREGATION_SEAM_WARNED
+    try:
+        from .aggregate import detect_aggregative_intent
+        return bool(detect_aggregative_intent(question).is_aggregative)
+    except Exception as e:  # never break the reader path
+        if not _AGGREGATION_SEAM_WARNED:
+            _AGGREGATION_SEAM_WARNED = True
+            _log.warning(
+                "#10539 aggregation seam unavailable (%s: %s); reader prompts "
+                "fall back to pre-#10539 text for this process",
+                type(e).__name__, e)
+        return False
+
+
 #: The canonical no-evidence answer text (NEW product code, #1987 Task 1 —
 #: pinned to the A1 abstention phrasing). NOT substituted by the reader —
 #: ``LLMReader.answer`` returns the raw stripped completion and labels
@@ -339,16 +456,26 @@ def reader_prompt_constants() -> tuple[str, dict[str, str]]:
     universal A1 abstention clause + type fragments, recorded verbatim in
     report methodology so prompt drift across run cells is human-visible in
     the report. The automated drift signal (reader_prompt_hash, run.py-owned)
-    now covers the A1 clause too (#1773 closure)."""
+    now covers the A1 clause too (#1773 closure).
+
+    The aggregation fragment (#10539) is recorded here for the same reason: it
+    is appended per-question rather than per-type, so a fragment missing from
+    this dict would change the live reader prompt while the recorded prompt
+    hash stayed identical — the exact silent drift this constant exists to
+    prevent."""
     return _SYSTEM_PROMPT, {
         **dict(_TYPE_FRAGMENTS),
         # the universal clause appended to EVERY question's prompt; keyed
         # 'abstention' (the A1 name, #1546) — not a question_type
         "abstention": _ABSTRACTION_FRAGMENT,
+        # conditional clause appended when the QUESTION (not its type) is an
+        # aggregation — see _AGGREGATION_FRAGMENT / system_prompt_for
+        "aggregation": _AGGREGATION_FRAGMENT,
     }
 
 
-def system_prompt_for(question_type: str | None) -> str:
+def system_prompt_for(question_type: str | None, *,
+                     question: str | None = None) -> str:
     """The reader system prompt for a question, type-tailored.
 
     Unknown/absent types get the hardened generic prompt; temporal-reasoning,
@@ -362,9 +489,21 @@ def system_prompt_for(question_type: str | None) -> str:
     decision (#1775): PHASE 1 commits whenever the asked value is stated in
     the context (partial evidence is still presence); PHASE 2 abstains only
     on genuine absence.
+
+    #10539: when `question` is supplied and the EXISTING aggregative-intent
+    detector (#2521, ``tortoise.aggregate.detect_aggregative_intent``) says
+    the question is a counting aggregation, the aggregation fragment is
+    appended on top of whatever type fragment won. Type selection is a
+    single-winner precedence, so a count phrased over a date cue
+    ("how many items did I buy last month") would otherwise silently lose
+    counting discipline. Passing `question` is optional for backward
+    compatibility; omitting it reproduces the pre-#10539 prompt exactly.
     """
-    return (_SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
-            + _TYPE_FRAGMENTS.get(question_type, ""))
+    prompt = (_SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
+              + _TYPE_FRAGMENTS.get(question_type, ""))
+    if question and _is_aggregative_question(question):
+        prompt += _AGGREGATION_FRAGMENT
+    return prompt
 
 
 # ── Deterministic question-type detection (Task 2) ─────────────────────────
@@ -752,7 +891,8 @@ class LLMReader:
         """
         user = build_reader_user_message(evidence, question)
         raw = self._model.complete(
-            system=system_prompt_for(question_type), user=user)
+            system=system_prompt_for(question_type, question=question),
+            user=user)
         # None-guard: a provider response with empty content (refusal / empty
         # generation) must surface as the empty string, not crash the caller
         # (``ask_lane.run_ask_lane`` guards with ``(raw or "").strip()`` —

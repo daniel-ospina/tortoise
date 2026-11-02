@@ -699,7 +699,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     try:
         raw, reader_out_tokens = _ask_reader_complete(
             model,
-            system=system_prompt_for(qtype),
+            system=system_prompt_for(qtype, question=question),
             user=build_reader_user_message(evidence, question))
     except AskReaderUnavailable:
         raise  # #2280: empty-output failure — never an abstention
@@ -733,7 +733,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     if org_id:
         try:
             from tortoise.metering import record_ask_usage
-            input_tokens = (estimate_tokens_ask(system_prompt_for(qtype))
+            input_tokens = (estimate_tokens_ask(system_prompt_for(qtype, question=question))
                             + estimate_tokens_ask(evidence))
             out_tokens = reader_out_tokens or 500
             record_ask_usage(
@@ -812,7 +812,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         # strong-lane ask metered at the deepseek envelope would
         # under-count ~10×).
         cost_estimate = estimate_ask_cost_usd(
-            estimate_tokens_ask(system_prompt_for(qtype))
+            estimate_tokens_ask(system_prompt_for(qtype, question=question))
             + estimate_tokens_ask(evidence),
             reader_out_tokens or 500,
             rates=select_ask_meter_rates(
@@ -952,7 +952,7 @@ def run_ask_assembled(sdk: TortoiseSDK, question: str, *,
         try:
             raw, _out_tokens = _ask_reader_complete(
                 model,
-                system=system_prompt_for(qtype),
+                system=system_prompt_for(qtype, question=question),
                 user=build_reader_user_message(evidence, question))
         except AskReaderUnavailable:
             raise

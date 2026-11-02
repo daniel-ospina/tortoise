@@ -6263,6 +6263,7 @@ def reader_prompt_source() -> str:
     changes with it.
     """
     from tortoise.reader import _ABSTRACTION_FRAGMENT as _a1
+    from tortoise.reader import _AGGREGATION_FRAGMENT as _agg
     return (
         "Current Date: {question_date} header + per-session date annotation "
         "on every retrieved chunk (question_date + haystack_dates surfaced — "
@@ -6277,7 +6278,12 @@ def reader_prompt_source() -> str:
         "session-date annotations, no parallel mechanism), multi-session "
         "(aggregation: distinct events, no double-count, reconcile by date); "
         "universal A1 abstention clause (#1775 two-phase presence-commit/"
-        "abstention) appended to EVERY question: " + _a1
+        "abstention) appended to EVERY question: " + _a1 +
+        "; conditional aggregation clause (#10539: enumerate, dedupe by "
+        "identity, count, session-date-aware so two purchases in different "
+        "sessions are two items and only a same-session restatement is a "
+        "duplicate) appended when the aggregative-intent detector fires "
+        "for the question: " + _agg
     )
 
 def _print_summary(report: dict[str, Any]) -> None:

@@ -1046,7 +1046,7 @@ def estimate_ask_cost_usd(tokens_in: int, tokens_out: int,
 
     ``rates`` defaults to ``ASK_METER_RATES`` (``{"prompt_per_1m": …,
     "completion_per_1m": …}``); the consumed input quantity is
-    ``input_tokens = estimate_tokens_ask(system_prompt_for(qtype)) +
+    ``input_tokens = estimate_tokens_ask(system_prompt_for(qtype, question=...)) +
     estimate_tokens_ask(rendered_context)`` (Task 5).
     """
     r = rates if rates is not None else ASK_METER_RATES

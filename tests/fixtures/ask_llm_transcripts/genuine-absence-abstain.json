@@ -3,7 +3,7 @@
   "expect_superseded_markers": false,
   "expected_abstained": true,
   "fixture": "genuine-absence-abstain",
-  "prompt_hash": "dc4dc5e705030db076657f725b59c3ab227fe6b5ebdb932a626fecb0fdd5c7e2",
+  "prompt_hash": "d76abb4cdfff30334715fc82987e68dee1ad558fbb9ed6fb5e96a546e8ba4e59",
   "qtype": null,
   "question": "what color is the new bicycle?",
   "question_date": "2026-08-29",
