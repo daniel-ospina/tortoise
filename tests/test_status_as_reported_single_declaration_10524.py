@@ -391,11 +391,16 @@ def test_the_read_surface_sweep_cites_resolve_at_this_head():
 # sweep pin above does — a symbol must resolve to a body that CARRIES the clause, a
 # line cite must LAND on it.
 #
-# Non-vacuity, against the pre-fix block (both legs red on it, independently):
-#   * the symbol leg — pre-fix named no `_upsert_point_props` at all, so the
-#     "the block cites the fold in some resolvable form" assertion reds;
-#   * the line leg — pre-fix's `:2525` normalises to comment prose containing none of
-#     the three clauses, so the "every cite lands on the code it names" assertion reds.
+# Non-vacuity, measured against the pre-fix block (each leg reds on its own):
+#   * the LINE leg — with `:2525`/`:2515`/`:2627` restored the pin reds on the cite
+#     that lands on comment prose;
+#   * the CLAUSE leg — with the operator clause renamed out of the function body
+#     (`n.direction=$dir` → `n.dirn=$dir`) the pin reds on "that function's body
+#     does not carry it". This leg is what stops a symbol cite from being
+#     decorative. The pre-fix block already CONTAINED a bare ``_upsert_point_props``
+#     mention (in the `PointPromoted` sentence), which is why the missing symbol was
+#     never the defect: the defect is that no cite — symbol or line — CARRIED the
+#     clauses the sentence names, and only the symbol is durable enough to hold them.
 
 _LOG = Path(__file__).resolve().parent.parent / "tortoise" / "log.py"
 
