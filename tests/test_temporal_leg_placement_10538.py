@@ -182,20 +182,40 @@ def test_the_receipt_carries_the_arm_that_produced_it():
     ]
     assert stats_blocks, "the temporal_leg_stats literal vanished"
     # The ARM-BEARING row is the one the ON branch rebuilds (the OFF-path
-    # skeleton legitimately keeps its pre-#10538 shape, byte-identical); at
-    # least one literal must therefore carry the arm it ran.
-    key_sets = [{k.value for k in block.keys if isinstance(k, ast.Constant)}
-                for block in stats_blocks]
-    assert any("placement" in keys for keys in key_sets), (
+    # skeleton legitimately keeps its pre-#10538 shape, byte-identical).
+    # VALUE-LEVEL pins: a keyword-presence check passes on a hard-coded
+    # `"placement": "head"` (a receipt advertising an arm that did not run)
+    # and on an unchanged `ceiling`, both measured silent under mutation in
+    # review — so both values are read from the AST, not the source text.
+    def _bound_to_placement(value: ast.AST) -> bool:
+        return isinstance(value, ast.Name) and value.id == "_tl_placement"
+
+    arm_rows = [
+        block for block in stats_blocks
+        if any(isinstance(k, ast.Constant) and k.value == "placement"
+               for k in block.keys)
+    ]
+    assert arm_rows, (
         "the temporal_leg_stats row must carry the placement it ran (#10538): "
         "a head row and a tail row that are indistinguishable in the receipt "
-        f"are not comparable numbers — key sets seen: {sorted(key_sets)}")
-    # and the ceiling must be conditioned on the arm, not the tail constant
-    src_line = [ln for ln in src.splitlines()
-                if '"ceiling":' in ln or "_tl_placement ==" in ln]
-    assert any("_tl_placement" in ln for ln in src_line), (
-        "the reported ceiling must be the one the fused caller used — 0 on "
-        "the head arm, window-limit on tail")
+        "are not comparable numbers")
+    for block in arm_rows:
+        values = {k.value: v for k, v in zip(block.keys, block.values, strict=True)
+                  if isinstance(k, ast.Constant)}
+        assert _bound_to_placement(values["placement"]), (
+            "the echoed placement must be the RESOLVED arm, not a constant — "
+            "a hard-coded value advertises an arm that did not run (#10538)")
+        ceiling = values["ceiling"]
+        assert isinstance(ceiling, ast.IfExp), (
+            "the reported ceiling must be conditioned on the arm: 0 on head "
+            "(the leg gets head_excl=0 there), window-limit on tail")
+        test = ceiling.test
+        assert isinstance(test, ast.Compare) and _bound_to_placement(test.left) \
+            and isinstance(test.comparators[0], ast.Constant) \
+            and test.comparators[0].value == "head", (
+            "the ceiling condition must compare _tl_placement against "
+            "'head' — an inverted or unrelated condition reports the tail "
+            "geometry on a head row (#10538)")
 
 
 # ── the ARM is stamped into the run fingerprint (RED if the stamp is lost) ──

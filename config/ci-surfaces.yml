@@ -6776,6 +6776,7 @@ surfaces:
   # `eval` and would otherwise skip the guard — the #1349/#2938 silent-drop
   # class (surface audit: `... <- tortoise/embeddings.py`, registered: core).
   - test_7809_hosted_prewarm_warmup_flag.py
+  - test_temporal_leg_placement_10538.py
   # #3094: DUAL-REGISTERED with `core` (below) and `onboarding`. The
   # empty-means-unset URI-read census
   # (`test_no_empty_default_tortoise_db_uri_reads`) scans `tests/**` AND
@@ -9302,6 +9303,7 @@ durations:
   # sklearn transitively (`tools.longmem_eval.temporal_leg_replay` builds a
   # `TfidfVectorizer`), which the dev group already pins for
   # `tests/test_gmm_proofs.py`, so no new dependency is introduced.
+  test_temporal_leg_placement_10538.py: 2.0  # new in #10538 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default (the #3400/#4348 trap). ⛔ The CASE COUNT is deliberately NOT quoted: `tools/ci_timing.py --refresh-durations` replaces this row from junit, and a hand-written count re-stales on every case a later round adds. What the weight covers: pure-unit, no DB/server/network/model — it imports `tools.longmem_eval.retrieve` + `tools.longmem_eval.run` and `tortoise.temporal_leg`, builds candidate lists in memory, reads the two source files with `ast`, and writes one checkpoint JSON into `tmp_path`. Local wall time on a loaded box: 3.5 s.
   test_temporal_leg_replay_wiring_10538.py: 2.0
   # #2976: the three new surfaces take the header's flat `DEFAULT_FAST_WEIGHT`
   # (the #2818/#3419/#9121 convention), NOT a local timing. A file ADDED BY A

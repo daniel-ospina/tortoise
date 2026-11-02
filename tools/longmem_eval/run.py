@@ -1688,6 +1688,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     #: #10538: the leg's PLACEMENT arm, resolved from the SAME env the shipped
     #: call resolves (one resolver, one answer) — a fingerprint that read a
     #: different value than the run used would certify the wrong arm.
+    from .retrieve import (
+        DEFAULT_TEMPORAL_LEG_PLACEMENT as _TL_PLACEMENT_DEFAULT,
+    )
     from .retrieve import resolve_temporal_leg_placement as _resolve_tl_place
     _tl_placement_env = _resolve_tl_place(
         None, os.environ.get("TORTOISE_LME_TEMPORAL_LEG_PLACEMENT"))
@@ -1829,7 +1832,8 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             # resumes byte-identically (the ``tr_top_k`` precedent above).
             ("temporal_leg_placement",
              _tl_placement_env
-             if (_temporal_leg_on and _tl_placement_env != "tail") else None),
+             if (_temporal_leg_on
+                 and _tl_placement_env != _TL_PLACEMENT_DEFAULT) else None),
             # #2976: the TR session-admission arm — conditional presence ONLY
             # when it resolves ON (the default fingerprint stays
             # byte-identical), and the FOUR completion budgets are stamped with
