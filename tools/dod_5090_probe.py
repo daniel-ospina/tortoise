@@ -1645,7 +1645,20 @@ def _connect(uri: str):
         raise SystemExit(2)
     from falkordb import FalkorDB
 
-    db = FalkorDB(host=u.hostname, port=u.port or 6379, password=u.password or "")
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    # #8118: the read bound comes from the product's ONE resolver, never from
+    # this call site. ``falkordb.FalkorDB`` defaults ``socket_timeout=None``
+    # and hands it to redis-py explicitly, so an unbounded client parks a
+    # "read, change nothing" census in ``recv()`` forever against a stalled
+    # engine (#2969's defrag loop, #2838's MERGE lock) — alive, 0% CPU, no
+    # error, which is the one outcome this instrument cannot tolerate.
+    db = FalkorDB(
+        host=u.hostname,
+        port=u.port or 6379,
+        password=u.password or "",
+        **_bounded_server_socket_kwargs(),
+    )
     try:
         names = list(db.list_graphs() or [])
     except Exception:

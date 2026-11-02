@@ -1428,3 +1428,173 @@ def test_the_census_note_does_not_break_the_markdown_table(monkeypatch):
         f"the table's row has a different cell count than its header: {widths} — "
         f"a note embedded a `|`: {lines}")
 
+
+
+# ── The two verdicts that had no falsifier (fresh-context review, P2-1) ──────
+#
+# `grep -c score_v1_bullet` in this file was 0 and row 1's mapping was asserted
+# only as "the map SEES the ungated writer", never as "the row HOLDS". The
+# measured mutation — `score_v1_bullet`'s `verdict` forced to `"MET"` — left the
+# suite green at 65 passed / 1 skipped, i.e. an instrument that publishes
+# "V1 is decided and implemented" (fabricating the owner ruling the epic stays
+# open for) could ship green. These two tests are that hole closed.
+
+
+def test_row_four_is_NOT_MET_while_no_decided_marker_exists(tmp_path, monkeypatch):
+    """Bullet 4's verdict, asserted rather than membership-checked.
+
+    Two surfaces, zero V1-decided markers, one marker that still says the
+    decision is OPEN — the epic's own state. `PARTIAL` or `MET` here would
+    publish a ruling nobody made, so this reds on the exact mutation the
+    reviewer showed surviving.
+    """
+    (tmp_path / "docs" / "architecture").mkdir(parents=True)
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "projection").mkdir()
+    for rel in probe.V1_SURFACES:
+        (tmp_path / rel).write_text(
+            "the VECTOR index on `Point.embedding` ONLY — see the owner's "
+            "OPEN decision V1 below\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    row = probe.score_v1_bullet()
+    assert row.verdict == "NOT MET", (
+        f"0 decided markers must not publish a V1 ruling: {row.verdict!r} "
+        f"({row.observed})")
+
+
+def test_row_four_never_reaches_MET_even_with_a_decided_marker(tmp_path, monkeypatch):
+    """A decision RECORD cannot prove what shipped — so PARTIAL is the ceiling.
+
+    Without this, "add one decided marker and it goes MET" reads as progress on
+    the one bullet the epic is open for, when the implementation half is
+    precisely what a record cannot measure.
+    """
+    (tmp_path / "docs" / "architecture").mkdir(parents=True)
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "projection").mkdir()
+    for rel in probe.V1_SURFACES:
+        (tmp_path / rel).write_text(
+            "V1 decided: the vector index carries embeddings (see the ruling)\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    row = probe.score_v1_bullet()
+    assert row.verdict == "PARTIAL", row.verdict
+    assert "decided markers found: 2" in row.observed, row.observed
+
+
+def _fake_rule_tree(tmp_path) -> None:
+    """A tree where the rule is stated AND wired, so only the row's own
+    enforcement clauses decide the verdict."""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "ENV_FLAG = 'TORTOISE_EMBED_GATE'\n"
+        "def embedding_verdict(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "import tortoise.embed_gate as embed_gate\n"
+        "def encode_for_row(content):\n"
+        "    verdict = embed_gate.embedding_verdict(content)\n"
+        "    return verdict\n",
+        encoding="utf-8",
+    )
+
+
+def _fake_shipped(on: bool) -> dict:
+    return {"on": on, "surfaces": ["Dockerfile"], "searched": ["Dockerfile"],
+            "unreadable": [], "mentions": [], "files": ["Dockerfile"] if on else []}
+
+
+def _gated_writer(name: str) -> dict:
+    return {name: {"callee": "embed_text", "at": f"{name.split('::')[0].replace('.', '/')}.py:1",
+                   "kind": "gated", "label": "Point"}}
+
+
+def test_row_one_is_PARTIAL_when_the_gate_is_off_although_every_writer_is_gated(
+        tmp_path, monkeypatch):
+    """The flag is the operator's; a fully-gated population with the gate OFF is
+    still not the write path's operative rule. `MET` here would publish
+    enforcement the shipped config does not set."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(False))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", row.verdict
+    assert "gate enabled by default: False" in row.observed, row.observed
+
+
+def test_row_one_reaches_MET_only_when_every_clause_holds(tmp_path, monkeypatch):
+    """The positive pole: without it, a probe that can only print `PARTIAL` is
+    machinery, not measurement — the same objection, mirrored."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
+
+
+def test_row_one_is_NOT_MET_when_no_writer_reaches_the_gated_seam(
+        tmp_path, monkeypatch):
+    """A stated rule with no gated writer is a comment, not enforcement."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {})
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "NOT MET", f"{row.verdict}: {row.observed}"
+
+
+def _writer(name: str, kind: str) -> dict:
+    return {"callee": "embed_text", "at": f"{name.replace('::', '.py:')}", "kind": kind, "label": "Point"}
+
+
+def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
+        tmp_path, monkeypatch):
+    """The epic body's load-bearing sentence: *"Either fact alone holds this row
+    at `PARTIAL`"*. Re-review (P2) measured that dropping `ungated or` from the
+    verdict left the suite GREEN (70 passed, 1 skipped) — so the clause the epic
+    cites as the reason for row 1's PARTIAL had no falsifier at all. A gate that
+    is ON and a population that is fully gated must still not publish `MET`
+    while one writer embeds outside it: that writer is a path the rule never
+    sees, and turning the flag on does not fix it.
+    """
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
+        "tortoise.session_indexer::main": _writer(
+            "tortoise.session_indexer::main", "ungated"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        f"gate ON + one ungated writer must not publish MET: {row.verdict!r}")
+    assert "embed OUTSIDE the gate: 1" in row.observed, row.observed
+
+
+def test_row_one_is_PARTIAL_because_ONE_writer_has_no_resolved_producer(
+        tmp_path, monkeypatch):
+    """The same argument for the other clause the epic names: an unresolved
+    writer's label cannot be resolved, so the row cannot claim a complete
+    measurement. Dropping `unresolved_writes or` measured GREEN (70 passed)
+    before this test existed."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
+        "tortoise.z::_store": _writer("tortoise.z::_store", "unresolved_write"),
+    })
+    monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        f"an unresolved writer must hold the row at PARTIAL: {row.verdict!r}")
