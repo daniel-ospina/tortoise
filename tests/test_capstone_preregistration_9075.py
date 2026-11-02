@@ -775,6 +775,12 @@ def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_p
     `atomic_add_ordering: {log: "yes"}` reached `run()`'s detail comprehension and escaped as
     `AttributeError` — no failure text, nothing from `--json`, and the module's own exit-2 contract
     bypassed on precisely the input the validator promises to refuse.
+
+    ⛔ ARMED (#10546 review cycle 23, ISSUE 1): this ran the RULED path, where neither `atomic_added`
+    nor `atomic_detail` is ever written, so the out-param half of the assertion could not fail — it
+    asserted a container no reachable code path writes. The arm that owns those out-params is the
+    proposed one; the field diagnosis itself is emitted on both paths (validation precedes the
+    dispatch), which is why the failure-text assertion below was real all along.
     """
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
@@ -782,7 +788,7 @@ def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_p
     for entry in ("yes", {"reason": "r", "branch_commits": 5, "squash_merge": "cfa3de857 x"}):
         added: list[str] = []
         detail: dict = {}
-        failures = check.check_ordering(prereg, [log], None, None, added, {log.name: entry}, detail)
+        failures = _armed(prereg, [log], None, None, added, {log.name: entry}, detail)
         assert failures, entry
         assert any("not a usable disclosure" in f for f in failures), failures
         assert added == [] and detail == {}, (added, detail)
@@ -826,6 +832,11 @@ def test_a_content_decided_pass_is_not_dressed_as_a_declaration(tmp_path, monkey
 
     The waiver stays VISIBLE on the deciding evidence — `ordering_exempt` — so this asserts both
     halves: nothing claimed as a declaration, and the content waiver still reported.
+
+    ⛔ ARMED (#10546 review cycle 23, ISSUE 1). Unarmed, this ran `_check_ordering_ruled`, which has
+    no atomic arm and never writes `atomic_added`/`atomic_detail` — so `added == []` was true of any
+    tree, including the pre-fix one the docstring says measured `['e1-e2.log']`. The property is a
+    property of `_check_ordering_proposed`'s content arm, so that is the arm it now calls.
     """
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
@@ -833,21 +844,27 @@ def test_a_content_decided_pass_is_not_dressed_as_a_declaration(tmp_path, monkey
     added: list[str] = []
     detail: dict = {}
     exempted: list[str] = []
-    assert check.check_ordering(prereg, [log], None, exempted, added, _atomic_pins(log.name),
-                                detail) == []
+    assert _armed(prereg, [log], None, exempted, added, _atomic_pins(log.name),
+                  detail) == []
     assert added == [] and detail == {}, (added, detail)
     assert exempted == [log.name], exempted
 
 
 def test_a_report_never_claims_a_declaration_the_record_does_not_carry(tmp_path, monkeypatch):
-    """An atomic + provably-unscored log with NO disclosure must not be reported as DECLARED."""
+    """An atomic + provably-unscored log with NO disclosure must not be reported as DECLARED.
+
+    ⛔ ARMED (#10546 review cycle 23, ISSUE 1) — same reason as its sibling above: the ruled path
+    never writes `atomic_added`, so the assertion held for every possible tree. This is the
+    content arm's shape: an atomic pair whose pass is decided by the LOG'S CONTENT, with no
+    disclosure in the record to claim as its ground.
+    """
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
     added: list[str] = []
     exempted: list[str] = []
     detail: dict = {}
-    assert check.check_ordering(prereg, [log], None, exempted, added, None, detail) == []
+    assert _armed(prereg, [log], None, exempted, added, None, detail) == []
     assert added == [] and detail == {}      # nothing was declared
     assert exempted == [log.name]            # and the waiver is still visible
 
@@ -956,14 +973,39 @@ def test_a_late_strip_cannot_green_a_predating_log(tmp_path, monkeypatch):
 
 def test_a_pins_exempt_atomic_log_does_not_claim_its_disclosure(tmp_path, monkeypatch):
     """REGRESSION (#10529 cycle-11 P2): the pass is the EXEMPTION's, so the disclosure is not its
-    ground — deleting the disclosure from the identical tree yields the same verdict."""
+    ground — deleting the disclosure from the identical tree yields the same verdict.
+
+    ⛔ ARMED, AND ACTUALLY ATOMIC (#10546 review cycle 23, ISSUE 1): this test was vacuous twice over.
+    It called `check_ordering` with no flag, so it ran the RULED path — where `atomic_added` is not a
+    writable container at all, making `with_disclosure == []` unfalsifiable — over a fixture built by
+    `_write_log` + `_write_and_commit`, which is TWO commits with an equal epoch: the pair was never
+    atomic, so the arm this test names never ran. Its pins also named `e1-e2.log` while the log was
+    `capstone.log`, and the call's return value was never asserted, so a stale-exemption finding went
+    unseen. All four are fixed here.
+
+    The mutation that settles the non-vacuity: add `atomic_added.append(log.name)` beside
+    `atomic_seen.add(log.name)` in `_check_ordering_proposed`'s pins-exempt arm and THIS test reds;
+    before this fix no test in the file did.
+    """
     repo = _repo(tmp_path, monkeypatch)
-    log = _write_log(repo, "capstone.log", epoch=1_700_000_000, body=_capstone_body())
-    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    log = repo / "docs" / "evidence" / "7949-capstone" / "capstone.log"
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+    prereg.write_text("x\n")
+    log.write_text(UNSCORED_LOG)
+    _git(repo, "add", ".")
+    # ONE commit — the ATOMIC shape, which two commits at the same epoch are not.
+    _git(repo, "commit", "-q", "-m", "both at once", epoch=1_700_000_000)
+    pins = _exempt("capstone.log")
     with_disclosure: list[str] = []
-    check.check_ordering(prereg, [log], _exempt(), None, with_disclosure,
-                         _atomic_pins(log.name), {})
+    assert _armed(prereg, [log], pins, None, with_disclosure,
+                  _atomic_pins(log.name), {}) == []
     assert with_disclosure == [], with_disclosure
+    # The IDENTICAL tree minus the disclosure gives the same verdict — the pass is the pins
+    # exemption's, so reporting a declaration here would name a ground that carried nothing.
+    without: list[str] = []
+    assert _armed(prereg, [log], pins, None, without, None, {}) == []
+    assert without == [], without
 
 
 def test_a_merge_landing_the_pair_unchanged_is_not_a_late_edit(tmp_path, monkeypatch):
@@ -1025,6 +1067,48 @@ def test_an_undisclosed_atomic_add_fails(tmp_path, monkeypatch):
     assert len(failures) == 1, failures
     assert "the SAME commit that added" in failures[0], failures
     assert check.ATOMIC_ADD_KEY in failures[0], failures
+
+
+def test_the_ruled_path_never_instructs_a_disclosure_it_would_refuse(tmp_path, monkeypatch):
+    """REGRESSION (#10546 review cycle 23, ISSUE 2): the default gate's ONE instruction must WORK.
+
+    The ruled path appended "Disclose it under <record>.atomic_add_ordering or the ordering is
+    unproven" — and, a few lines later on the SAME path, "it waives nothing unless the caller arms
+    the proposed arm (--allow-atomic-disclosure)". The one concrete repair the default gate named was
+    therefore unsatisfiable, and an author who obeyed it committed an INERT waiver into
+    `preregistration.json`, which is the stale-waiver shape the anti-rot rule exists to refuse.
+
+    Both halves are asserted, so a later lane cannot "restore" the sentence by tidying it back in:
+    the ruled path offers ONLY the satisfiable repair (`SQUASH_COLLAPSE_REMEDY`), and the disclosure
+    route survives on the arm that can honour it. Non-vacuous against the pre-fix tool, which printed
+    the unsatisfiable sentence on this exact tree.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    failures = check.check_ordering(prereg, [log])
+    assert len(failures) == 1, failures
+    assert "Disclose it under" not in failures[0], failures
+    # ... and the instruction it DOES print is the one that clears this refusal.
+    assert "WITHDRAWAL" in failures[0] and "NEW artefact at a NEW path" in failures[0], failures
+    # The disclosure route belongs to the ARMED path, where obeying it changes the verdict.
+    armed = _armed(prereg, [log])
+    assert len(armed) == 1, armed
+    assert "Disclose it under" in armed[0], armed
+    assert _armed(prereg, [log], None, None, None, _atomic_pins(log.name)) == []
+
+
+def test_the_ruled_rule_states_its_claim_in_the_function_docstring():
+    """REGRESSION (#10546 review cycle 23, minor): the claim must be IN `__doc__`, not after it.
+
+    `_check_ordering_ruled` carried TWO adjacent string literals: the second — the module's own
+    statement of the claim, ending "… and it must never report success." — was a dead expression
+    statement, so `__doc__` was only the first text and every `help()`/pydoc reader lost the claim
+    that the strict-epoch rule is measured against. Merged into one docstring; this pins it.
+    """
+    doc = check._check_ordering_ruled.__doc__ or ""
+    assert "THE RULED VERDICT" in doc, doc
+    assert "``[]`` when every log is either after the registration ON THE BASE" in doc, doc
+    assert "must never report success" in doc, doc
 
 
 def test_the_atomic_disclosure_arm_is_opt_in_and_the_ruled_verdict_is_the_default(

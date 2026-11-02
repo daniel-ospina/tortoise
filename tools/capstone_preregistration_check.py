@@ -2344,8 +2344,12 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     exists to prevent.
 
     ``base_ref``/``unmeasured`` are the RULED path's (a base the claim is measured against, and the
-    reasons a bundle compared nothing); ``atomic_added``/``atomic_detail``/``unreadable_atomic``
-    report a disclosed or unreadable atomic add on either path. None of them decide a verdict.
+    reasons a bundle compared nothing), and so are ``atomic_added``/``atomic_detail``: they report a
+    DISCLOSED atomic add, and a disclosure is a ground only on the armed path, so the ruled path
+    accepts them and never writes them (#10546 review cycle 23, ISSUE 1 — this said "on either
+    path", which only a vacuous test could agree with). ``unreadable_atomic`` is the one out-param
+    BOTH paths write: an unreadable record is a fact about the tree, not about which rule is in
+    force. None of them decide a verdict.
 
     Raises ``HistoryUnavailable`` (a ``CheckError``, the NON-FAILING third outcome) when this
     checkout is shallow — the ruled path needs the base's history. ``_check_ordering_proposed``
@@ -2384,8 +2388,8 @@ def _check_ordering_ruled(prereg: Path, logs: list[Path], pins: dict | None = No
     INERT rather than silently ignored, and holds it to the same anti-rot rule
     `pins.pre_existing_unscored_logs` applies to a pre-granted exemption. The pass-path a disclosure
     would buy lives in `_check_ordering_proposed`, reachable only when a caller arms it.
-    """
-    """``[]`` when every log is either after the registration ON THE BASE or provably unscored.
+
+    ``[]`` when every log is either after the registration ON THE BASE or provably unscored.
 
     **The claim, stated so it can be argued with (#10463):** for every evidence log, the
     pre-registration's earliest add-commit *reachable from the base ref* must strictly precede the
@@ -2627,10 +2631,23 @@ def _check_ordering_ruled(prereg: Path, logs: list[Path], pins: dict | None = No
                             if unreadable_atomic is not None:
                                 unreadable_atomic.append(log.name)
                             continue
-                        failure += (
-                            f" Disclose it under {MACHINE_RECORD}.{ATOMIC_ADD_KEY} or the ordering "
-                            "is unproven."
-                        )
+                        # ⛔ AND THE RULED PATH MAY NOT INSTRUCT A REPAIR IT THEN REFUSES (#10546
+                        # review cycle 23, ISSUE 2). It said "Disclose it under
+                        # <record>.atomic_add_ordering or the ordering is unproven" — and an author
+                        # who obeyed got, one paragraph down, "it waives nothing unless the caller
+                        # arms the proposed arm", i.e. an INERT waiver committed into
+                        # `preregistration.json`, which is the stale-waiver shape the anti-rot rule
+                        # below exists to refuse. The disclosure route belongs to the arm that can
+                        # honour it (`_check_ordering_proposed`, where the text is emitted); the
+                        # only satisfiable repair HERE is `SQUASH_COLLAPSE_REMEDY`, appended below
+                        # for every atomic pair. Same defect class the module already fixed twice:
+                        # "the remedy text must match CAUSE" (cycle-3 finding 1c) and "it told the
+                        # author to disclose when the real defect was that there is no readable
+                        # record" (cycle-6 P2).
+                        #
+                        # ⛔ NOTHING IS APPENDED HERE ON PURPOSE — fall through to the refusal and
+                        # its collapse remedy, so the one instruction printed is one that works.
+                        pass
                     else:
                         # A complete, valid disclosure is still NOT a waiver while the arm is
                         # disarmed — and saying so here, rather than silently red-ing, is what
