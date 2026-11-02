@@ -13,10 +13,13 @@ aboutObjects: bounded operation, truncation marker, #8447, AIP-158
 
 **Issue:** #8447 (`P1-severe`) — *"contract: fail explicitly, never return a silently-truncated result"*.
 **Census measured at:** `origin/main = 62e3f2f61` (2026-11-02). **Every citation below re-derived at**
-`origin/main = 63981d152` (2026-11-02): `sdk.py` grew 645 lines and `hosted_api.py` 69 between those
-two heads, so the line numbers moved by *non-uniform* deltas (+181 at the `CROSS_LENS_*` constants,
-+283 in the cross-lens body, +625 below `suggest_entry_points`, +171 at `paginated_query`, +66 in
-`hosted_api`) and were re-read at the anchor rather than shifted by a delta.
+`origin/main = 63981d152` (2026-11-02): `sdk.py` grew 645 lines, `hosted_api.py` 69 and
+`mcp_server.py` 19 between those two heads, so the line numbers moved by *non-uniform* deltas (+181 at
+the `CROSS_LENS_*` constants, +283 in the cross-lens body, +263 at `paginated_query`, +625 below
+`suggest_entry_points`, +66 in `hosted_api`, +19 in `mcp_server`) and were re-read at the anchor rather
+than shifted by a delta. The control that this was a READ and not a typed table: the four further
+cited files that no merge touched between those heads — `selfhost_api.py`, `tool_registry.py`,
+`event_store.py`, `config/surface-manifest.yml` — have unchanged numbers because the code did not move.
 **Status:** C1 of #8447 (this document). C2 (boundary tests per surface) and C3 (the four doors)
 are tracked on the issue.
 
@@ -72,7 +75,7 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 | `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py:34378` — `results = results[:limit]`, returning `results` at `:34426`; declared `-> list[dict]` (`:34326`) |
 | `tortoise_query(text=…)` (MCP, `tool_registry.py:290`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `tortoise/mcp_server.py:2717-2720` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method is declared `-> list[dict]` (`sdk.py:35172`) — so even though `tortoise_fts_query` CAN compute the marker (`_truncation_out`, `:35171`), a bare list has nowhere to carry it. ⚠️ The structural arm (`text=None`) is a different surface, and not ONE surface: only its PAGINATED
 branch (`offset`/`page` given) returns a dict with `hasMore`/`total` (`mcp_server.py:2721-2730` →
-`sdk.py:22163`, `TortoiseSDK.paginated_query`). Its default branch is a bare `list[dict]`
+`sdk.py:22255`, that method's `return {... "hasMore": skip + limit < total}`). Its default branch is a bare `list[dict]`
 (`mcp_server.py:2736-2738` → `sdk.py:22101-22104`, `TortoiseSDK.query`), as is the `tag` arm's
 unpaginated return (`mcp_server.py:2701-2703`). Neither of those two passes a `limit` to the SDK at
 all, so neither is a *bounded* operation and neither belongs in this table — but read the structural
