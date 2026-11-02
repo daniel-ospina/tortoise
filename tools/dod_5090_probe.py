@@ -869,16 +869,34 @@ def score_path_bullet() -> Row:
     # PARTIAL below, because re-classing a writer does not make the vocabulary
     # resolve it. (An earlier draft read this as "a complete measurement" and
     # flipped the row to MET, breaking bullet 2's own falsifier; reverted.)
-    unclassified = sorted(fn for fn in unknown if _census_class(fn) is None)
+    # ⛔ The census population is the `unresolved_write` set — the SAME set
+    # `test_every_unresolved_writer_carries_a_census_class` walks — and NOT
+    # `unknown`, which also carries the `duplicate` identities. A duplicate is
+    # a DIFFERENT defect (two definitions collided, so the later one's label
+    # overwrote the earlier one) and has no key it could EVER have in
+    # `WRITER_CENSUS`, so iterating `unknown` printed a census over a
+    # population of ZERO whenever a duplicate was the only unresolved entry,
+    # and reported a collision as "#10541's own defect". This row is quoted
+    # into #5090's body as evidence, so the misattribution is what a reader
+    # sees (review at `adde2763f`, blocking).
+    unresolved_writers = {fn: d for fn, d in writers.items()
+                          if d["kind"] == "unresolved_write"}
+    unclassified = sorted(fn for fn in unresolved_writers
+                          if _census_class(fn) is None)
     by_class: dict[str, list[str]] = {}
-    for fn in unknown:
+    for fn in unresolved_writers:
         cls = _census_class(fn)
         if cls in CENSUS_CLASSES:
             by_class.setdefault(cls, []).append(fn)
-    if unknown:
+    if unresolved_writers:
         notes.append(
             "#10541 census over the unresolved set: "
-            + " | ".join(
+            # ⛔ NOT `" | "`: `Row.observed` joins these notes and `_table`
+            # emits the result RAW into a 4-column markdown row, so one pipe in
+            # one note adds spurious columns to the one artifact a reader
+            # actually looks at (GFM: an unescaped `|` is a cell separator).
+            # A middle dot separates the counts without escaping anything.
+            + " · ".join(
                 f"{cls}={len(by_class.get(cls, []))}"
                 + (f" ({', '.join(sorted(by_class[cls]))})" if by_class.get(cls) else "")
                 for cls in CENSUS_CLASSES

@@ -1142,8 +1142,35 @@ def test_the_tool_parses_under_the_floor():
     )
 
 
+def _census_violations(unresolved, census, classes, bypass_cls) -> list[str]:
+    """Every way the `#10541` census can fail over ``unresolved``, as data.
+
+    A helper so the property is provable on an INJECTED set as well as on the
+    live tree — a guard whose only input is the head either goes vacuous or
+    pins the head, and this file refuses both.
+    """
+    out: list[str] = []
+    unclassified = [w for w in unresolved if w not in census]
+    if unclassified:
+        out.append(f"unclassified by the #10541 census: {unclassified}")
+    bad = {w: census[w][0] for w in unresolved
+           if w in census and census[w][0] not in classes}
+    if bad:
+        # The class string comes from the tool's OWN constant, never a local
+        # mirror: a hardcoded "bypass" here would stop firing the day the
+        # constant is renamed, and nothing else guards it (measured: this
+        # module refuses the same mirror-duplication elsewhere).
+        out.append(f"census class outside {classes}: {bad}")
+    bypasses = [w for w in unresolved
+                if w in census and census[w][0] == bypass_cls]
+    if bypasses:
+        out.append("a REAL bypass must be fixed or filed, not parked in the "
+                   f"census: {bypasses}")
+    return out
+
+
 def test_every_unresolved_writer_carries_a_census_class() -> None:
-    """#10541 — the unresolved writers are CLASSED, not merely listed.
+    """#10541 — every unresolved writer THIS TREE holds is classed.
 
     The instrument is deliberately over-inclusive: a three-name callee
     vocabulary cannot tell a legitimate exemption from a bypass, so bullet 2
@@ -1154,6 +1181,17 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
 
     Pre-fix this is RED: `WRITER_CENSUS` does not exist, every one of the
     unresolved writers is unclassified, and `unclassified` is the whole set.
+
+    ⛔ `assert unresolved` is deliberately ABSENT. Resolving those writers IS
+    `#5090`'s remainder, so requiring the tree to KEEP having unresolved
+    writers reds on a CORRECT change — and its cheapest-looking repair is to
+    delete the assertion, which disarms the guard exactly when the epic
+    completes (review at `adde2763f`, blocking). The shape this file already
+    refuses at `test_every_embedding_write_path_reaches_the_gate_seam`, and an
+    empty live set here is a GREEN tree, not a proof that nothing is checked:
+    `test_the_census_guard_has_teeth_on_an_INJECTED_map` carries the property
+    on an injected set, so completing `#10541` turns this green without
+    touching it.
     """
     census = getattr(probe, "WRITER_CENSUS", {})
     classes = getattr(probe, "CENSUS_CLASSES", ())
@@ -1161,25 +1199,118 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
         w for w, d in probe.embedding_writers().items()
         if d["kind"] == "unresolved_write"
     )
-    assert unresolved, (
-        "the instrument resolved every writer — this falsifier is no longer "
-        "exercising the case, so it proves nothing")
-    unclassified = [w for w in unresolved if w not in census]
-    assert not unclassified, (
-        f"unclassified by the #10541 census: {unclassified}")
-    bad = {w: census[w][0] for w in unresolved if census[w][0] not in classes}
-    assert not bad, f"census class outside {classes}: {bad}"
-    # The class string comes from the tool's OWN constant, never a local mirror:
-    # a hardcoded "bypass" here would stop firing the day the constant is
-    # renamed, and nothing else guards it (measured: this module refuses the
-    # same mirror-duplication elsewhere). ⛔ NO `getattr` FALLBACK: a tree that
-    # reaches this line is already FULLY CLASSED (the `unclassified` assertion
-    # above fires otherwise), so a census with no bypass constant means the
-    # census and its class vocabulary disagree — that must raise, never resolve
-    # to a mirror literal that matches no entry and so silently disarms the one
-    # guard that must always fire for a REAL bypass.
+    violations = _census_violations(
+        unresolved, census, classes, probe.CENSUS_BYPASS)
+    assert not violations, "\n".join(violations)
+
+
+def test_the_census_guard_has_teeth_on_an_INJECTED_map() -> None:
+    """The `#10541` guard's RED and GREEN directions, both on an injected set.
+
+    Durable on purpose: green for one writer carrying a real class, red for one
+    that carries none, red for a class outside the vocabulary, and red for a
+    REAL bypass — measured without depending on whether this head still has
+    unresolved writers (the `assert unresolved` trap at `adde2763f`).
+    """
+    classes = probe.CENSUS_CLASSES
     bypass_cls = probe.CENSUS_BYPASS
-    bypasses = [w for w in unresolved if census[w][0] == bypass_cls]
-    assert not bypasses, (
-        "a REAL bypass must be fixed or filed, not parked in the census: "
-        f"{bypasses}")
+    classed = "tortoise.q::_classed"
+    unclassed = "tortoise.q::_unclassed"
+    good = {classed: (probe.CENSUS_RECOGNISED, "injected for this test")}
+    assert _census_violations([classed], good, classes, bypass_cls) == []
+    assert "unclassified by the #10541 census" in str(_census_violations(
+        [classed, unclassed], good, classes, bypass_cls))
+    assert "census class outside" in str(_census_violations(
+        [classed], {classed: ("not-a-class", "injected")}, classes,
+        bypass_cls))
+    assert "REAL bypass" in str(_census_violations(
+        [classed], {classed: (bypass_cls, "injected")}, classes, bypass_cls))
+
+
+def test_a_duplicate_identity_paints_no_census_note(monkeypatch):
+    """A `duplicate` is NOT a `#10541` population member, and says nothing here.
+
+    `unknown` (the row's UNKNOWN-label set) also carries the duplicate
+    identities, so a census driven off it printed a census over a population of
+    ZERO — and then reported the collision as "`#10541`'s own defect", which a
+    duplicate can never be: it has no key it could hold in `WRITER_CENSUS`.
+    That line is quoted into `#5090`'s body as evidence (review at `adde2763f`).
+    """
+    writers = {
+        "tortoise.x::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "Point",
+        },
+        "tortoise.y::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/y.py:2",
+            "kind": "duplicate", "label": "UNKNOWN(duplicate writer name)",
+        },
+    }
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()
+    assert not [n for n in row.notes if "#10541 census" in n], row.notes
+    assert not [n for n in row.notes if "UNCLASSIFIED" in n], row.notes
+    # ...and the duplicate itself is still REPORTED, by its own note.
+    assert any("duplicate writer identities" in n for n in row.notes), row.notes
+
+
+def test_the_census_note_names_only_the_unresolved_producers(monkeypatch):
+    """The census counts the `unresolved_write` set — never a duplicate."""
+    writers = {
+        "tortoise.x::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "Point",
+        },
+        "tortoise.y::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/y.py:2",
+            "kind": "duplicate", "label": "UNKNOWN(duplicate writer name)",
+        },
+        "tortoise.z::_store_without_a_producer": {
+            "callee": "unrecognised", "at": "tortoise/z.py:3",
+            "kind": "unresolved_write",
+            "label": "UNKNOWN(unresolved producer)",
+        },
+    }
+    census = dict(probe.WRITER_CENSUS)
+    census["tortoise.z::_store_without_a_producer"] = (
+        probe.CENSUS_EXEMPT, "injected for this test")
+    monkeypatch.setattr(probe, "WRITER_CENSUS", census)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    row = probe.score_path_bullet()
+    notes = [n for n in row.notes if n.startswith("#10541 census")]
+    assert notes, row.notes
+    assert "tortoise.z::_store_without_a_producer" in notes[0], notes[0]
+    assert "tortoise.y::_upsert_point" not in notes[0], (
+        f"a duplicate identity was counted as a #10541 population member: {notes[0]}")
+    assert "exempt=1" in notes[0], notes[0]
+    assert not [n for n in row.notes if "UNCLASSIFIED" in n], row.notes
+
+
+def test_the_census_note_does_not_break_the_markdown_table(monkeypatch):
+    """`_table` emits `Row.observed` RAW, so a note must not carry a pipe.
+
+    GFM: an unescaped `|` inside a table cell is a cell separator. The row that
+    carries the most evidence rendered with three spurious columns on the one
+    artifact this file calls "the one place a reader actually looks" (review at
+    `adde2763f`). This derives the cell count from the header instead of
+    pinning pipes per line, so any future note is covered too.
+    """
+    writers = {
+        "tortoise.z::_store_without_a_producer": {
+            "callee": "unrecognised", "at": "tortoise/z.py:3",
+            "kind": "unresolved_write",
+            "label": "UNKNOWN(unresolved producer)",
+        },
+    }
+    census = dict(probe.WRITER_CENSUS)
+    census["tortoise.z::_store_without_a_producer"] = (
+        probe.CENSUS_EXEMPT, "injected for this test")
+    monkeypatch.setattr(probe, "WRITER_CENSUS", census)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    table = probe._table([probe.score_path_bullet()])
+    lines = [ln for ln in table.splitlines() if ln.startswith("|")]
+    widths = {ln.count("|") for ln in lines}
+    assert len(widths) == 1, (
+        f"the table's row has a different cell count than its header: {widths} — "
+        f"a note embedded a `|`: {lines}")
+
