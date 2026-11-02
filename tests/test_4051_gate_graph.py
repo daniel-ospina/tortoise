@@ -30,8 +30,8 @@ from tortoise import quota as quota_mod
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import tortoise.hosted_api as ha  # noqa: E402  (env above must be set first)
-from tortoise.hosted_api import (  # noqa: E402
+import tortoise.hosted_api as ha  # env above must be set before this import
+from tortoise.hosted_api import (
     _check_org_limit,
     _data_graph_name,
     _gate_sdk_for,
@@ -229,14 +229,12 @@ def test_the_gate_set_is_DERIVED_from_quota_not_hand_copied():
     expected = gateable - quota_mod.REGISTRY_SCOPED_RESOURCES
 
     # 1. the declaration IS the derivation (not a literal that happens to match)
-    assert quota_mod.TENANT_GRAPH_RESOURCES == expected
+    assert expected == quota_mod.TENANT_GRAPH_RESOURCES
 
     # 2. exhaustive and disjoint: every gate-able resource is classified ONCE, so
     #    a new resource cannot land in neither half (silently unscoped) or both.
-    assert (
-        quota_mod.TENANT_GRAPH_RESOURCES | quota_mod.REGISTRY_SCOPED_RESOURCES
-        == gateable
-    )
+    classified = quota_mod.TENANT_GRAPH_RESOURCES | quota_mod.REGISTRY_SCOPED_RESOURCES
+    assert classified == gateable
     assert not (quota_mod.TENANT_GRAPH_RESOURCES & quota_mod.REGISTRY_SCOPED_RESOURCES)
 
     # 3. the gate holds THAT object — identity, not a copy. A copy is the drift.
@@ -258,14 +256,16 @@ def test_every_declared_graph_resource_is_counted_through_a_graph_sdk(
     built = []
 
     class _Result:
-        result_set = [[0]]
+        def __init__(self):
+            self.result_set = [[0]]
 
     class _Graph:
         def query(self, *a, **k):
             return _Result()
 
     class _Proj:
-        g = _Graph()
+        def __init__(self):
+            self.g = _Graph()
 
     class _FakeSDK:
         def __init__(self, **kwargs):
