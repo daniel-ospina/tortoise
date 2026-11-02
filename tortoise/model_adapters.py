@@ -574,12 +574,22 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 
 # ── Provider routing (D2) ──────────────────────────────────────────────────
 
-#: Provider → key env var. **THE ONE PROVIDER-KEY REGISTRY for the routing
-#: lanes** — `resolve_extractor_provider` (below) derives its key presence from
-#: this mapping rather than reading the env vars inline, so the provider set the
-#: v2 resolver honours and the provider set this mapping names cannot diverge.
-#: The empty-intersection guard and `_providers_can_serve` (ask lane) read it
-#: too.
+#: Provider → key env var. **THE ONE PROVIDER-KEY REGISTRY FOR THE V2
+#: EXTRACTOR'S RESOLVER** — `resolve_extractor_provider` (below) derives its key
+#: presence from this mapping rather than reading the env vars inline, so the
+#: provider set the resolver honours and the provider set this mapping names
+#: cannot diverge.
+#:
+#: ⚠️ Coverage, stated exactly (review cycle 1): this map is the single source
+#: for the V2 RESOLVER. Two consumers still hold their own inline key lists and
+#: are NOT derived from it — `resolve_reader_provider` (ask lane) builds a
+#: hand-written `keyed` dict from the same three vars, and
+#: `_SPEC_FAMILY_PROVIDERS`/`_providers_can_serve` never read this map at all.
+#: Those are the #8133 shape surviving on another lane: register a provider here
+#: and the ask lane will not see it, so an `_ASK_PROVIDERS` entry added next
+#: makes `keyed[explicit]` raise `KeyError` (500 on the ask lane) while `auto`
+#: mode silently never keys it. Unifying the ask lane is a separate change —
+#: this comment names the residual rather than claiming it is closed.
 #:
 #: Why it is single-source (#8133): the defect this closes was two
 #: hand-maintained lists in the SAME file — this map, and three inline
@@ -591,11 +601,13 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 #: `test_the_v2_resolver_honours_exactly_the_provider_key_map` pins the
 #: map → behaviour direction.
 #:
-#: ⚠️ Adding an entry here registers the provider's KEY. It does not decide the
-#: ROUTING order (that is the `_chain` calls below), it does not add the
-#: provider to the explicit-selector enum (`_PROVIDER_NAMES` — a product
-#: question open on #8133), and it is not enough on its own for a hosted
-#: deployment: also register the provider in `tortoise.ingest._PROVIDERS`, in
+#: ⚠️ Adding an entry here registers the provider's KEY. It does not decide
+#: whether that provider is an AUTO-PATH PRIMARY (that is a `_chain` call
+#: below, and a key whose provider is fallback-capable but not a primary is a
+#: legitimate future state), it does not add the provider to the
+#: explicit-selector enum (`_PROVIDER_NAMES` — a product question open on
+#: #8133), and it is not enough on its own for a hosted deployment: also
+#: register the provider in `tortoise.ingest._PROVIDERS`, in
 #: `sdk._SESSION_LLM_PROVIDER_PRIORITY` + `_SESSION_LLM_DEFAULT_MODELS`, and in
 #: the deploy mirror. `test_the_lane_gate_registry_covers_the_v2_extractor_
 #: registry` and friends fail loudly if one of those is skipped.
@@ -618,7 +630,9 @@ _PROVIDER_NAMES = ("deepseek-direct", "openrouter")
 
 def _provider_keys_present() -> dict[str, bool]:
     """Which registered providers have their key set — derived from
-    `_PROVIDER_KEY_ENV`, the only place a provider's key var is named."""
+    `_PROVIDER_KEY_ENV`, the only place the V2 RESOLVER reads a provider's key
+    var (`resolve_reader_provider` still names the same vars inline; see the
+    registry's coverage note)."""
     return {p: bool(os.environ.get(env)) for p, env in _PROVIDER_KEY_ENV.items()}
 
 

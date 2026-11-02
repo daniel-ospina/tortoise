@@ -312,9 +312,9 @@ def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
 
 
 def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
-    """#8133 (class fix): ``_PROVIDER_KEY_ENV`` is the SINGLE place a provider's
-    key var is named, and ``resolve_extractor_provider`` must honour exactly it
-    — no provider more, none less.
+    """#8133 (class fix): ``_PROVIDER_KEY_ENV`` is the SINGLE place the v2
+    resolver's provider key vars are named, and ``resolve_extractor_provider``
+    must honour exactly it — no provider more, none less.
 
     This is the direction the merged lane-gate guard could not see. Before the
     unification the resolver read three ``os.environ.get("…_API_KEY")``
@@ -323,23 +323,38 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
     the #8133 defect re-created by the next provider, which is what makes this
     a class fix rather than a one-off.
 
-    Measured both ways, one provider at a time:
-      * set ONLY that provider's key → the resolver returns that provider as
-        the PRIMARY (so the map's entries are all honoured), and
-      * the provider set the resolver honours is EXACTLY the map's keys (so a
-        provider that exists only as an inline read is caught).
+    Measured one provider at a time, both directions:
+      * set ONLY a registered provider's key → whatever the resolver returns is
+        a REGISTERED provider (nothing the map does not name can leak out), and
+      * the set of providers the resolver promotes to a standalone primary is
+        exactly ``_AUTO_PATH_PRIMARIES`` — an EXPLICIT pin, not a policy, so a
+        newly registered provider cannot silently become a primary (see below).
 
-    ⚠️ Deliberately NOT asserted: that the resolver's set equals
-    ``_PROVIDER_NAMES`` (the explicit-selector enum). ``venice`` is in this map
-    and not in that enum on purpose — whether it is a pinnable primary or
-    fallback-only is an OPEN product question recorded on #8133, and a test
-    demanding equality would silently decide it.
+    ⚠️ Registering a key is NOT the same act as making that provider an
+    auto-path primary (the registry's own note says so), so this test does not
+    demand ``primary == provider`` for a new entry: a provider registered as
+    fallback-capable would fail with an accusation of the #8133 defect, leaving
+    "make it a primary" as the only green path — a routing decision made in a
+    registry that is not supposed to make one (review cycle 1, P2). Adding an
+    entry to ``_AUTO_PATH_PRIMARIES`` is the deliberate, visible way to say a
+    provider IS a primary.
+
+    ⚠️ Deliberately NOT asserted: that this set equals ``_PROVIDER_NAMES`` (the
+    explicit-selector enum). ``venice`` is in the map and not in that enum on
+    purpose — whether it is a pinnable primary or fallback-only is an OPEN
+    product question recorded on #8133, and a test demanding equality would
+    silently decide it.
     """
     from tortoise.model_adapters import (
         _PROVIDER_KEY_ENV,
         _PROVIDER_NAMES,
         resolve_extractor_provider,
     )
+
+    #: Providers the AUTO path promotes to a standalone primary TODAY.
+    #: Adding a provider to ``_PROVIDER_KEY_ENV`` does not change this set; a
+    #: provider that should also be a primary is added HERE, on purpose.
+    _AUTO_PATH_PRIMARIES = {"deepseek-direct", "openrouter", "venice"}
 
     honoured = set()
     for provider, key_env in _PROVIDER_KEY_ENV.items():
@@ -348,21 +363,32 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
             primary, avail = resolve_extractor_provider()
         finally:
             del os.environ[key_env]
-        assert primary == provider, (
-            f"{provider!r} is registered in _PROVIDER_KEY_ENV (key {key_env}) "
-            f"but resolve_extractor_provider() returns {primary!r} on a "
-            f"{key_env}-only env — the v2 resolver and the key map have "
-            f"diverged again, the #8133 defect"
-        )
-        assert avail == [provider], (
-            f"{provider!r} alone should yield a one-provider pool, got {avail!r}"
-        )
-        honoured.add(primary)
+        registered = set(_PROVIDER_KEY_ENV)
+        if primary is not None:
+            assert primary in registered, (
+                f"with only {key_env} set, resolve_extractor_provider() returns "
+                f"{primary!r} as the primary — a provider _PROVIDER_KEY_ENV does "
+                f"not register. The resolver answers from a list other than the "
+                f"registry, which is the #8133 divergence"
+            )
+            assert set(avail) <= registered, (
+                f"{key_env}-only pool {avail!r} names provider(s) "
+                f"{sorted(set(avail) - registered)} outside _PROVIDER_KEY_ENV"
+            )
+            honoured.add(primary)
 
-    assert honoured == set(_PROVIDER_KEY_ENV), (
-        f"resolve_extractor_provider() honours {sorted(honoured)}, but "
-        f"_PROVIDER_KEY_ENV registers {sorted(_PROVIDER_KEY_ENV)} — the "
-        f"resolver answers from a list other than the registry (#8133)"
+    assert honoured == _AUTO_PATH_PRIMARIES, (
+        f"resolve_extractor_provider() promotes {sorted(honoured)} to a "
+        f"standalone primary, but _AUTO_PATH_PRIMARIES says "
+        f"{sorted(_AUTO_PATH_PRIMARIES)}. If you deliberately made a provider "
+        f"an auto-path primary, add it to _AUTO_PATH_PRIMARIES; if you did not, "
+        f"the resolver is answering from a list other than the registry (#8133)"
+    )
+    assert _AUTO_PATH_PRIMARIES <= set(_PROVIDER_KEY_ENV), (
+        f"_AUTO_PATH_PRIMARIES names provider(s) "
+        f"{sorted(_AUTO_PATH_PRIMARIES - set(_PROVIDER_KEY_ENV))} that "
+        f"_PROVIDER_KEY_ENV does not register — the resolver cannot possibly "
+        f"honour them"
     )
 
     # The explicit-selector enum is a POLICY set, not the registry; it may only
@@ -377,13 +403,21 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
 
 def test_resolve_extractor_provider_reads_no_inline_provider_keys():
     """#8133 (the structural half): the resolver must not name a provider key
-    env var in its own source — every ``*_API_KEY`` read goes through
+    env var in its own source — every provider key goes through
     ``_PROVIDER_KEY_ENV``.
 
     A behavioural test cannot catch this: a hard-coded inline read that happens
     to agree with the map today passes every assertion, and only diverges when
     the NEXT provider is added to one list and not the other. So this test
     reads the function's AST and fails on the literal itself.
+
+    ⚠️ It collects EVERY string constant ending in ``_API_KEY`` in the
+    function, not just the first argument of an ``os.environ.get`` call
+    (review cycle 1, P2): a scan limited to call arguments let
+    ``os.environ["FOO_API_KEY"]`` (a Subscript) and
+    ``os.environ.get(_FOO_KEY_ENV)`` (a non-constant name) through, and a
+    resolver honouring ``foo`` while the map did not name it is the #8133
+    divergence itself — reproduced, then closed by widening the scan.
 
     ``TORTOISE_EXTRACTOR_PROVIDER`` is deliberately exempt — it is the
     selector, not a provider key.
@@ -399,38 +433,29 @@ def test_resolve_extractor_provider_reads_no_inline_provider_keys():
     )
     tree = ast.parse(src)
 
-    inline: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
-        # os.environ.get("X") / os.getenv("X") / environ.get("X")
-        is_environ_get = (
-            isinstance(fn, ast.Attribute)
-            and fn.attr in ("get", "getenv")
-        )
-        if not is_environ_get or not node.args:
-            continue
-        first = node.args[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            inline.append(first.value)
-
-    api_key_reads = [n for n in inline if n.endswith("_API_KEY")]
-    assert not api_key_reads, (
-        f"resolve_extractor_provider() reads provider key(s) "
-        f"{sorted(api_key_reads)} as literals. Derive them from "
+    # EVERY string constant in the function, any node type — subscript keys,
+    # keyword args, dict literals, concatenations of literals.
+    constants = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+    api_key_literals = [c for c in constants if c.endswith("_API_KEY")]
+    assert not api_key_literals, (
+        f"resolve_extractor_provider() names provider key(s) "
+        f"{sorted(api_key_literals)} as literals. Derive them from "
         f"_PROVIDER_KEY_ENV instead (via _provider_keys_present()): a provider "
         f"added to that registry would otherwise be invisible here and the two "
         f"lists drift again — the exact #8133 root. Add the provider to "
         f"_PROVIDER_KEY_ENV and let the resolver pick it up."
     )
 
-    # Non-vacuity: the selector read is still there, so the scan is finding
-    # real calls rather than an empty AST.
-    assert "TORTOISE_EXTRACTOR_PROVIDER" in inline, (
-        "the AST scan found no os.environ.get call at all in "
+    # Non-vacuity: the selector is still read, so the scan is walking a real
+    # function body rather than an empty AST.
+    assert "TORTOISE_EXTRACTOR_PROVIDER" in constants, (
+        "the AST scan found no TORTOISE_EXTRACTOR_PROVIDER literal in "
         "resolve_extractor_provider, so this guard is vacuous — the function "
-        "reads TORTOISE_EXTRACTOR_PROVIDER and the scan must see it"
+        "reads that selector and the scan must see it"
     )
 
 
