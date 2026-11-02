@@ -199,8 +199,15 @@ SEAM_CALL = "encode_for_row"
 #: `sdk._session_embedding` embed while containing neither gate symbol).
 UNGATED_CALLS: tuple[str, ...] = ("encode_for_store", "compute_session_embedding")
 
-#: `MERGE (n:Label …)` / `CREATE (p:Label …)` — the label the Cypher names.
-_NODE_LABEL = re.compile(r"(?:MERGE|CREATE|MATCH)\s*\(\s*(\w+)\s*:\s*(\w+)")
+#: `MERGE (n:Label …)` / `CREATE (p:Label …)` — the label the WRITE names.
+#: ⛔ A `MATCH` is a read, so it is deliberately NOT in this pattern. Counting it
+#: was the comment/code disagreement review round 17 found (the comment said
+#: MERGE/CREATE while the pattern also took MATCH), and the direction it fails
+#: is the bad one: on the module-stem fallback a `MATCH (n:Point)`-shaped read is
+#: the one path that can RESOLVE a label the writer never writes. Dropping it can
+#: only turn a resolved label into `UNKNOWN(two labels: …)` / `UNKNOWN` (a false
+#: `PARTIAL`, the safe direction), and it moves no label on this tree.
+_NODE_LABEL = re.compile(r"(?:MERGE|CREATE)\s*\(\s*(\w+)\s*:\s*(\w+)")
 
 #: An embedding WRITE — a Cypher property assignment or the clause helper.
 _EMBED_WRITE = re.compile(
@@ -211,8 +218,19 @@ _EMBED_WRITE = re.compile(
 #: A three-name callee vocabulary cannot tell a legitimate exemption from a
 #: bypass, so bullet 2 used to be held at `PARTIAL` over every function the
 #: instrument could not resolve. Each such function is now carried by ONE of
-#: the classes #10541 names, with the `file:line` that decides it. The entries
+#: the classes #10541 names, with the `path::symbol` that decides it. The entries
 #: below were READ at their seam — not inferred from a name.
+#:
+#: ⛔ `path:LINE` IS NOT EVIDENCE, and this table learned that the expensive way:
+#: the first version cited offsets, `sdk.py` then grew ~43 lines on `main`, and
+#: every `tortoise.sdk::*` citation in it pointed at unrelated code — while
+#: `#5090`/`#10541` quote this census as the justification for the classes
+#: (review round 17, P3). Nothing executed the offsets (`_census_class` reads
+#: `entry[0]` only), so they rotted silently. A SYMBOL is stable under an
+#: unrelated edit and still fails when the seam leaves the function the entry
+#: names; `CENSUS_EVIDENCE` carries one `(path, symbol, needle)` citation per
+#: entry and `census_evidence_violations()` re-derives all of them, so the next
+#: drift is a RED test rather than a claim nobody can check.
 #:
 #: ⚠️ `recognised_producer` here means "DIRECTLY reaches a recognised producer"
 #: — the canonical clause builder (`set_embedding_clause`,
@@ -242,90 +260,214 @@ CENSUS_CLASSES = (CENSUS_RECOGNISED, CENSUS_EXEMPT, CENSUS_BYPASS)
 WRITER_CENSUS: dict[str, tuple[str, str]] = {
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
-        "issues no write; the only WRITE-SHAPED text is a COMMENT at "
-        "tortoise/consistency.py:859 quoting what the view cannot produce "
-        "(the function reads `\"embedding\"` at :826/:827 and names it in a "
-        "field list at :862/:873/:877/:881 — reads and appends, never a write)"),
+        "issues no write; the only WRITE-SHAPED text is a COMMENT in "
+        "`tortoise/consistency.py::_compare_views` quoting what `replay(journal)` "
+        "cannot produce (`n.embedding=vecf32($embedding)`). The function reads "
+        "`\"embedding\"` off both sides and APPENDS it to a divergence field "
+        "list — reads and appends, never a write clause"),
     "tortoise.hosted_backup::restore_graph": (
         CENSUS_RECOGNISED,
-        "tortoise/hosted_backup.py:1026 writes through the canonical clause "
-        "builder (`set_embedding_clause(\"n\", \"r.v\")`) from the backed-up row"),
+        "`tortoise/hosted_backup.py::restore_graph` writes through the canonical "
+        "clause builder (`set_embedding_clause(\"n\", \"r.v\")`) from the "
+        "backed-up row"),
     "tortoise.projection.entities::_event_plain_merge": (
         CENSUS_RECOGNISED,
-        "tortoise/projection/entities.py:5631-5632 `set_embedding_clause(\"e\", "
-        "preserve_on_null=False)` / `set_embedding_clause(\"e\")` — canonical clause"),
+        "`tortoise/projection/entities.py::_event_plain_merge` — "
+        "`set_embedding_clause(\"e\", preserve_on_null=False)` / "
+        "`set_embedding_clause(\"e\")`, the canonical clause"),
     "tortoise.projection::_prewipe_synthetic_write_scope": (
         CENSUS_EXEMPT,
-        "tortoise/projection/__init__.py:4650 — the match is inside the scope's "
-        "DOCSTRING and the statement NULLs the vector; a wipe is not a producer"),
+        "`tortoise/projection/__init__.py::_prewipe_synthetic_write_scope` — the "
+        "match is inside the scope's DOCSTRING and the statement NULLs the "
+        "vector (`SET n.embedding = NULL`); a wipe is not a producer"),
     "tortoise.projection::_rebuild_all_replay": (
         CENSUS_RECOGNISED,
-        "tortoise/projection/__init__.py:15809 `set_embedding_clause(\"n\", \"$emb\")` "
-        "(canonical clause). Its labels are LITERAL (`n:Point` at :14318/:15813) — "
-        "the label reads UNKNOWN only because the `unresolved_write` branch "
-        "hardcodes `UNKNOWN(unresolved producer)` and never derives one. ⚠️ It "
-        "also holds two OTHER embedding statements this class does not rest on: "
-        ":14319 `SET n.embedding = NULL` (a wipe) and :15803 a DIRECT "
-        "`n.embedding = $emb` that bypasses the canonical builder"),
+        "`tortoise/projection/__init__.py::_rebuild_all_replay` calls "
+        "`set_embedding_clause(\"n\", \"$emb\")` (canonical clause). Its labels "
+        "are LITERAL (`n:Point` in that function's own Cypher) — the label reads "
+        "UNKNOWN only because the `unresolved_write` branch hardcodes "
+        "`UNKNOWN(unresolved producer)` and never derives one. ⚠️ It also holds "
+        "two OTHER embedding statements this class does not rest on: "
+        "`SET n.embedding = NULL` (a wipe) and a DIRECT `n.embedding = $emb` "
+        "that bypasses the canonical builder"),
     "tortoise.record_read::turn_prior_vectors": (
         CENSUS_EXEMPT,
-        "tortoise/record_read.py:776 `embedding=row[2]` populates a dataclass "
-        "from a returned row — a READ, with no write clause"),
+        "`tortoise/record_read.py::turn_prior_vectors` — `embedding=row[2]` "
+        "populates a dataclass from a returned row: a READ, with no write clause"),
     "tortoise.sdk::_embedding_repair_attempt": (
         CENSUS_RECOGNISED,
-        "the repair helper DOES compute and store: tortoise/sdk.py:43932 "
-        "`embedding = self._session_embedding(...)` + `set_embedding_clause(\"e\")` "
-        "at :43954. It is a producer on the #5008 session chain, and a repair "
-        "by ROLE — both, so `exempt` would contradict the classes above"),
+        "the repair helper DOES compute and store: "
+        "`tortoise/sdk.py::_embedding_repair_attempt` carries "
+        "`embedding = self._session_embedding(...)` and `set_embedding_clause(\"e\")` "
+        "in its own body. It is a producer on the #5008 session chain, and a "
+        "repair by ROLE — both, so `exempt` would contradict the classes above"),
     "tortoise.sdk::_event_raw_write_door": (
         CENSUS_EXEMPT,
-        "tortoise/sdk.py:11019 — a TRANSPORT door: it forwards an already-computed "
-        "`embedding` into `query_params` and executes the statement at "
-        ":11082-11085 inside `_live_write_scope` (the §17.1 sanctioned "
-        "live-write lane); it never computes one"),
+        "`tortoise/sdk.py::_event_raw_write_door` — a TRANSPORT door: it forwards "
+        "an already-computed `embedding` into `query_params` and executes the "
+        "statement inside `_live_write_scope` (the §17.1 sanctioned live-write "
+        "lane); it never computes one"),
     "tortoise.sdk::_index_process_unit": (
         CENSUS_EXEMPT,
-        "tortoise/sdk.py:43533 — the instrument's match is the DIAGNOSTIC STRING "
-        "`\"error\": \"indexed with embedding=None \"`, not a write clause. "
-        "That line sits on the `merge_outcome == \"indexed\"` branch of the "
-        "unit-completion path, whose store is DELEGATED to "
-        "`_session_event_write` at :43412. Its other stores are both "
+        "`tortoise/sdk.py::_index_process_unit` — the instrument's match is the "
+        "DIAGNOSTIC STRING `\"error\": \"indexed with embedding=None \"`, not a "
+        "write clause. That line sits on the `merge_outcome == \"indexed\"` "
+        "branch of the unit-completion path, whose store is DELEGATED to "
+        "`_session_event_write` in the same module. Its other stores are both "
         "DELEGATED to `_embedding_repair_attempt`, at TWO distinct sites: the "
-        "repair-only branch at :43390 (`embedding_only_incomplete`), and the "
-        "post-full-write repair site at :43482 — whose own comment at "
-        ":43472-43475 records that the repair-only branch is NOT re-entered. "
-        "Every callee is a recognised producer, so this function produces no "
-        "vector of its own"),
+        "repair-only branch (`embedding_only_incomplete`), and the "
+        "post-full-write repair site — whose own comment records that the "
+        "repair-only branch is NOT re-entered. Every callee is a recognised "
+        "producer, so this function produces no vector of its own"),
     "tortoise.sdk::_journal_event_raw_write": (
         CENSUS_EXEMPT,
-        "the instrument matches the SIGNATURE DEFAULT at sdk.py:11090 "
-        "(`embedding=None) -> bool | None:`), not a write clause — `_EMBED_WRITE` "
-        "cannot see the dict-key form at :11146 `record[\"embedding\"] = embedding`. "
-        "It stores no LIVE graph vector, but its journal IS the sanctioned replay "
-        "carrier (:11050-11055: `_upsert_event` consumes `embedding` off the "
+        "`tortoise/sdk.py::_journal_event_raw_write` — the instrument matches the "
+        "SIGNATURE DEFAULT (`embedding=None`), not a write clause: `_EMBED_WRITE` "
+        "cannot see the dict-key form `record[\"embedding\"] = embedding` in that "
+        "function. It stores no LIVE graph vector, but its journal IS the "
+        "sanctioned replay carrier (`_upsert_event` consumes `embedding` off the "
         "record instead of recomputing it) — exempt as a sanctioned carrier, NOT "
         "because no store is reachable through it"),
     "tortoise.sdk::_session_event_write": (
         CENSUS_RECOGNISED,
-        "tortoise/sdk.py:43720 `self._session_embedding(...)` → "
-        "`compute_session_embedding` (the documented #5008 exemption) + "
-        "`set_embedding_clause` at :43736-43737"),
+        "`tortoise/sdk.py::_session_event_write` — `self._session_embedding(...)` "
+        "→ `compute_session_embedding` (the documented #5008 exemption) + "
+        "`set_embedding_clause`"),
     "tortoise.sdk::_update_entity": (
         CENSUS_EXEMPT,
-        "tortoise/sdk.py:41146 is a COMMENT, but that is only what the regex "
-        "MATCHED — the function DOES store: :41147 `point_props = dict(props)` "
-        "keeps a caller-supplied `embedding` through the map-merge at "
-        ":41182-41184 (`SET n += $p`). `_EMBED_WRITE` cannot see a map-merge. "
+        "`tortoise/sdk.py::_update_entity` — the instrument's match is a COMMENT, "
+        "but that is only what the regex MATCHED — the function DOES store: "
+        "`point_props = dict(props)` keeps a caller-supplied `embedding` through "
+        "the map-merge (`SET n += $p`). `_EMBED_WRITE` cannot see a map-merge. "
         "Exempt on the NAMED #4094 exemption, not on absence of a write"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
-        "tortoise/sdk.py:33340/33449 `self._session_embedding(...)` + "
-        "`set_embedding_clause(\"e\")` at :33384/33460 — same canonical chain"),
+        "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
+        "`set_embedding_clause(\"e\")`, the same canonical chain"),
     "tortoise.vector_write::set_embedding_clause": (
         CENSUS_EXEMPT,
-        "tortoise/vector_write.py:200 — the clause BUILDER itself; it renders the "
-        "`<alias>.embedding = …` clause and stores no vector"),
+        "`tortoise/vector_write.py::set_embedding_clause` — the clause BUILDER "
+        "itself; it renders the `<alias>.embedding = …` clause and stores no "
+        "vector"),
 }
+
+
+#: `{census key: ((path, symbol, needle), …)}` — every claim above, re-derivable.
+#: Each citation names a SYMBOL and a needle that must appear INSIDE that
+#: symbol's own source, so:
+#:   * an unrelated edit elsewhere in a 47k-line file cannot invalidate it (the
+#:     failure the line-number form had), and
+#:   * a seam that MOVES out of the function the entry names still reds, which a
+#:     bare `path::symbol exists` pin would miss.
+#: `census_evidence_violations()` re-derives the lot; the KEY SET must equal the
+#: union of `WRITER_CENSUS` and `WRITER_LABEL_OVERRIDES`, so a new entry cannot
+#: be added without evidence and evidence cannot outlive its entry.
+CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "tortoise.consistency::_compare_views": (
+        ("tortoise/consistency.py", "_compare_views",
+         "n.embedding=vecf32($embedding)"),),
+    "tortoise.hosted_backup::restore_graph": (
+        ("tortoise/hosted_backup.py", "restore_graph",
+         "set_embedding_clause("),),
+    "tortoise.projection.entities::_event_plain_merge": (
+        ("tortoise/projection/entities.py", "_event_plain_merge",
+         "set_embedding_clause("),),
+    "tortoise.projection::_prewipe_synthetic_write_scope": (
+        ("tortoise/projection/__init__.py", "_prewipe_synthetic_write_scope",
+         "SET n.embedding = NULL"),),
+    "tortoise.projection::_rebuild_all_replay": (
+        ("tortoise/projection/__init__.py", "_rebuild_all_replay",
+         "set_embedding_clause("),),
+    "tortoise.record_read::turn_prior_vectors": (
+        ("tortoise/record_read.py", "turn_prior_vectors",
+         "embedding=row[2]"),),
+    "tortoise.sdk::_embedding_repair_attempt": (
+        ("tortoise/sdk.py", "_embedding_repair_attempt",
+         "self._session_embedding("),
+        ("tortoise/sdk.py", "_embedding_repair_attempt",
+         "set_embedding_clause("),),
+    "tortoise.sdk::_event_raw_write_door": (
+        ("tortoise/sdk.py", "_event_raw_write_door", "_live_write_scope"),),
+    "tortoise.sdk::_index_process_unit": (
+        ("tortoise/sdk.py", "_index_process_unit",
+         "indexed with embedding=None"),),
+    "tortoise.sdk::_journal_event_raw_write": (
+        ("tortoise/sdk.py", "_journal_event_raw_write",
+         'record["embedding"] = embedding'),),
+    "tortoise.sdk::_session_event_write": (
+        ("tortoise/sdk.py", "_session_event_write",
+         "self._session_embedding("),
+        ("tortoise/sdk.py", "_session_event_write",
+         "set_embedding_clause("),),
+    "tortoise.sdk::_update_entity": (
+        ("tortoise/sdk.py", "_update_entity", "point_props = dict(props)"),
+        ("tortoise/sdk.py", "_update_entity", "SET n +="),),
+    "tortoise.sdk::ingest_corpus": (
+        ("tortoise/sdk.py", "ingest_corpus", "self._session_embedding("),
+        ("tortoise/sdk.py", "ingest_corpus", "set_embedding_clause("),),
+    "tortoise.vector_write::set_embedding_clause": (
+        ("tortoise/vector_write.py", "set_embedding_clause",
+         "vecf32({vector_expr})"),),
+    # The label OVERRIDE carries evidence too — it is a claim about where the
+    # `:Point` write happens, and it drifted the same way (it cited
+    # `api.py:318`, which is `vec = encode_for_row(` in a DIFFERENT function).
+    "tortoise.api::_point": (
+        ("tortoise/api.py", "_point", 'p["embedding"] = vec'),),
+}
+
+
+def census_evidence_violations(census: dict | None = None,
+                              evidence: dict | None = None,
+                              root: Path | None = None,
+                              overrides: dict | None = None) -> list[str]:
+    """Re-derive every census citation at THIS head; empty list = falsified.
+
+    Four ways to fail, each reported rather than absorbed: an entry with no
+    evidence, evidence whose entry is gone, a citation whose file/symbol does
+    not exist, and a needle that is no longer inside the symbol it is cited for.
+    """
+    import ast
+
+    census = WRITER_CENSUS if census is None else census
+    evidence = CENSUS_EVIDENCE if evidence is None else evidence
+    overrides = WRITER_LABEL_OVERRIDES if overrides is None else overrides
+    root = REPO_ROOT if root is None else root
+    entries = set(census) | set(overrides)
+    out: list[str] = []
+    for key in sorted(entries - set(evidence)):
+        out.append(f"{key}: classed with no re-derivable evidence")
+    for key in sorted(set(evidence) - entries):
+        out.append(f"{key}: evidence for an entry that does not exist")
+    bodies: dict[str, dict[str, str] | None] = {}
+    for key in sorted(set(evidence) & entries):
+        for citation in evidence[key]:
+            rel, symbol, needle = citation
+            if rel not in bodies:
+                path = root / rel
+                try:
+                    src = path.read_text(encoding="utf-8")
+                except OSError:
+                    bodies[rel] = None
+                else:
+                    lines = src.splitlines()
+                    index: dict[str, list[str]] = {}
+                    for node in ast.walk(ast.parse(src)):
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            index.setdefault(node.name, []).append(
+                                "\n".join(lines[node.lineno - 1:node.end_lineno]))
+                    bodies[rel] = index
+            index = bodies[rel]
+            if index is None:
+                out.append(f"{key}: cites {rel}, which cannot be read")
+                continue
+            if symbol not in index:
+                out.append(f"{key}: cites {rel}::{symbol}, which that file does "
+                           "not define")
+                continue
+            if not any(needle in body for body in index[symbol]):
+                out.append(f"{key}: {rel}::{symbol} does not carry {needle!r} at "
+                           "this head")
+    return out
 
 
 def _census_class(writer: str) -> str | None:
@@ -359,9 +501,12 @@ def _callees(node) -> set[str]:
 #: in the row. Deliberately not a vocabulary: everything else is derived from
 #: the Cypher, so a writer that names `:Document` still trips bullet 2.
 WRITER_LABEL_OVERRIDES: dict[str, str] = {
-    # `tortoise/api.py`'s ingest closure computes the vector and stamps the
-    # journal; its Cypher carries no `MERGE (:Label`. It feeds the `:Point`
-    # write (`api.py:318` -> projection's point clause).
+    # `tortoise/api.py::_point` computes the vector and stamps the journal; its
+    # Cypher carries no `MERGE (:Label`. It feeds the `:Point` write —
+    # `p["embedding"] = vec` is the payload the projection's point clause
+    # stores (re-derived in `CENSUS_EVIDENCE`, not cited by line number: the
+    # previous pointer, `api.py:318`, was `vec = encode_for_row(` in a
+    # DIFFERENT function).
     #
     # ⛔ Keyed by `module::name`, the SAME identity the writer map uses — a bare
     # function name is not an identity: `_point` is a plausible name in any
@@ -575,57 +720,85 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: A YAML block-scalar HEADER: `|` or `>` plus the optional chomping/indent
 #: indicators, introduced as a mapping value (`note: >-`) or a sequence entry
 #: (`- |`) — YAML 1.2.2 §8.1, <https://yaml.org/spec/1.2.2/#81-block-scalar-styles>.
-#: The indicator must introduce the node, so `run: echo hi |` does not match.
+#: The indicator must introduce the node, so `run: echo hi |` does not match. The
+#: mapping KEY is captured because the KEY decides what the body IS (below).
 _BLOCK_SCALAR_HEADER = re.compile(
-    r"(?:^|[:\-]\s)?\s*[|>](?:[+-]?[1-9]?|[1-9][+-]?)?\s*(?:#.*)?$")
+    r"^\s*(?:-\s*)?(?:(?P<key>[A-Za-z_][\w.\-]*)\s*:\s*)?"
+    r"[|>](?:[+-]?[1-9]?|[1-9][+-]?)?\s*(?:#.*)?$")
+
+#: The block-scalar KEYS the CI EXECUTES, on the workflow surface only.
+#: GitHub runs the body of `jobs.<job_id>.steps[*].run` (and `defaults.run`) as
+#: shell commands — *"each line runs in the same shell"* — so an `export
+#: FLAG=1` inside one IS a shipped setting, in shell syntax. Every other key a
+#: block scalar can hang off (`note:`, `description:`, `if:`, …) is text.
+#: Scoped to `.github/workflows` on purpose: a `run:` key in `config/*.yml` is
+#: that tool's own field, not something this CI executes.
+EXECUTED_BLOCK_KEYS = frozenset({"run"})
+
+#: The config surfaces whose block-scalar bodies can be EXECUTED (see above).
+WORKFLOW_SURFACE = ".github/workflows"
 
 
-def _yaml_block_scalar_lines(text: str) -> frozenset[int]:
+def _yaml_block_scalar_bodies(text: str) -> dict[int, str]:
     """The 1-based line numbers that are the BODY of a YAML block scalar.
 
-    ⛔ A line inside a `>-` / `|` body is **documentation prose**, never a
-    mapping entry: YAML 1.2.2 models block scalars as a *scalar node style*
-    (§8.1) structurally separate from *block mappings* (§8.2.2), so inside the
-    body every line is scalar content — the reference page states it plainly,
-    *"Block scalar formats … all express strings"*. `_assigned_value` scans per
-    LINE and has no notion of YAML structure, so a body line shaped like
-    `TORTOISE_EMBED_GATE: 1` read as a shipped ON.
+    Mapped to the KEY that introduced the scalar (lowercased; `""` when the
+    header is a bare sequence entry, `- |`), because the key decides whether the
+    body is documentation or a command — see `EXECUTED_BLOCK_KEYS`.
+
+    ⛔ **A block scalar is a SCALAR NODE, never a YAML mapping**: YAML 1.2.2
+    models block scalars as a scalar node style (§8.1) structurally separate
+    from block mappings (§8.2.2), *"Block scalar formats … all express
+    strings"* — so no line inside a body can be a mapping ENTRY, and
+    `_assigned_value` (which scans per LINE, with no notion of YAML structure)
+    read a body line shaped like `TORTOISE_EMBED_GATE: 1` as a shipped ON.
+
+    ⛔ **But "not a mapping entry" is not "documentation"** (review round 17,
+    P3). On `.github/workflows` a `run: |` body is a SHELL SCRIPT the CI runs
+    (<https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsrun>:
+    *"each line runs in the same shell"*), so `export TORTOISE_EMBED_GATE=1`
+    there is an executed setting that this walk used to count as PROSE — it
+    reported `documented_only: 1` and `set ON in: none` over a workflow that
+    sets it, the measured-looking-nowhere shape this instrument refuses
+    elsewhere. The caller therefore scans a body introduced by an executed key
+    and skips (and REPORTS) the rest.
 
     **Wrong outcome named:** `score_rule_bullet` computes `on_by_default =
     ambient or shipped["on"]`, which is the clause separating bullet 1's
-    `PARTIAL` from `MET` once `#5090`'s remaining writers are resolved. The
-    round-8 fix's own comment promises *"a prose edit must not be able to move
-    it"*, and this repo's documentation of THIS flag already lives in a `>-`
-    block (`config/v4-mechanisms.yml:426-433`) — so the natural edit (a usage
-    line added inside that block) was the one shape that tripped it. That is the
-    only shape in this file whose error direction is toward `MET` (this tool's
-    own review, P3).
+    `PARTIAL` from `MET` once `#5090`'s remaining writers are resolved. This
+    repo's documentation of THIS flag already lives in a `>-` block
+    (`config/v4-mechanisms.yml:426-433`), so the natural edit (a usage line
+    added inside that block) was the one shape that tripped it; and CI is where
+    a flag would actually be TURNED ON, which is the opposite error.
 
     Only called for `.yml`/`.yaml` surfaces: `.env`, Dockerfile and shell files
     have no block scalars, and applying it there could only drop real
     assignments.
     """
-    body: set[int] = set()
+    body: dict[int, str] = {}
     in_block = False
     header_indent = 0
     body_indent: int | None = None
+    key = ""
     for number, line in enumerate(text.splitlines(), 1):
         indent = len(line) - len(line.lstrip())
         if in_block:
             if not line.strip():
                 # A blank line inside the block is still scalar content.
-                body.add(number)
+                body[number] = key
                 continue
             if body_indent is None:
                 body_indent = indent
             if indent > header_indent and indent >= body_indent:
-                body.add(number)
+                body[number] = key
                 continue
             # Dedented: the scalar ends, and THIS line may be a new header.
             in_block = False
-        if _BLOCK_SCALAR_HEADER.search(line):
+        header = _BLOCK_SCALAR_HEADER.match(line)
+        if header:
             in_block, header_indent, body_indent = True, indent, None
-    return frozenset(body)
+            key = (header.group("key") or "").lower()
+    return body
 
 
 def _assigned_value(line: str, flag: str) -> str | None:
@@ -730,23 +903,34 @@ def flag_in_shipped_configs(flag: str) -> dict:
             if flag not in text:
                 continue
             mentions.append(posix)
-            # ⛔ A YAML block scalar's body is PROSE, not a mapping (§8.1 vs
-            # §8.2.2), so an assignment-shaped line there cannot swear the flag
-            # ships ON — the one input that moves bullet 1 toward `MET`.
-            prose = (_yaml_block_scalar_lines(text)
-                     if posix.endswith((".yml", ".yaml")) else frozenset())
+            # ⛔ A block scalar's body is SCALAR CONTENT, so it is never a YAML
+            # mapping entry — but on the workflow surface a body the CI
+            # EXECUTES (`run: |`) is a shell setting, not prose. Documentation
+            # bodies are skipped and COUNTED; executed ones are scanned like any
+            # other line (review round 17, P3).
+            bodies = (_yaml_block_scalar_bodies(text)
+                      if posix.endswith((".yml", ".yaml")) else {})
+            workflow = posix.startswith(WORKFLOW_SURFACE + "/")
             for number, line in enumerate(text.splitlines(), 1):
-                if number in prose:
-                    if _assigned_value(line, flag) is not None:
-                        documented_only += 1
-                    continue
+                if number in bodies:
+                    executed = (workflow
+                                and bodies[number] in EXECUTED_BLOCK_KEYS)
+                    if not executed:
+                        if _assigned_value(line, flag) is not None:
+                            documented_only += 1
+                        continue
+                    # An executed `run:` body: fall through to the real scan,
+                    # so a shipped `export FLAG=1` is a HIT, not a note.
                 value = _assigned_value(line, flag)
                 if value is not None and is_truthy(value):
                     hits.append(f"{posix}: {line.strip()[:90]}")
     return {"on": bool(hits), "files": hits, "searched": searched,
             "mentions": mentions, "unreadable": unreadable,
             # Reported, never silently dropped: how many assignment-shaped lines
-            # were documentation inside a block scalar rather than a setting.
+            # were DOCUMENTATION inside a block scalar (`note:`, `description:`, …)
+            # rather than a setting. An assignment inside an EXECUTED workflow
+            # `run:` body is not counted here — it is a setting, and it is
+            # allowed to move `on`.
             "documented_only": documented_only,
             "surfaces": list(CONFIG_SURFACES)}
 

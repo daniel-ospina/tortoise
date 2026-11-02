@@ -39,6 +39,12 @@ claims:
 | `test_every_real_assignment_shape_still_reads_as_shipped_ON` | the same input, in the other direction | tightening the test makes a REAL shipped ON (compose map/array, `.env`, Dockerfile, `export`) read as a false `False` |
 | `test_searched_is_the_walk_not_the_list_of_mentions` | the documented `searched` contract | `searched` reports the mentions, so "what 'nowhere' covered" is `[]` for the case the function exists for |
 | `test_an_unreadable_surface_is_named_not_silently_excluded` | the `UNMEASURED` rule, applied to the walk | a file the walk could not read is folded into a measured `False` |
+| `test_every_census_citation_re_derives_at_this_head` | `WRITER_CENSUS`'s own promise — *"the entries below were READ at their seam"* — which `#5090`/`#10541` quote as evidence | a citation names a symbol that file does not define, or a needle that is no longer inside the symbol it is cited for (the `file:line` form drifted silently when `sdk.py` grew) |
+| `test_the_citation_check_has_teeth_on_an_INJECTED_drift` | the same guard can FAIL | a drifted symbol, a missing needle, an unclassed entry or orphan evidence passes |
+| `test_an_executed_workflow_run_body_is_a_shipped_setting` | bullet 1 reads what the CI EXECUTES | a `run: |` body carrying `export FLAG=1` is counted as documentation, so row 1 reports `set ON in: none` |
+| `test_a_workflow_prose_block_is_still_documentation` | the same fix must not call every workflow block a command | a `note: >-` body (text) inside a workflow starts voting on `on_by_default` |
+| `test_a_run_key_outside_the_workflow_surface_is_not_executed` | the executed-key rule is SCOPED to the surface that runs it | any `.yml` with a `run:` block is scanned as shell, so a config tool's own field completes a DoD row |
+| `test_a_MATCH_label_is_not_credited_as_the_writers_label` | the writer map credits the label the WRITE names | a read's `MATCH (n:Point)` resolves a writer's stored label — how a label the writer never writes can read as "covered" |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
 measurement-only; the instrument is read-only and its pin must be too.
@@ -1209,6 +1215,83 @@ def test_an_assignment_shaped_line_inside_a_block_scalar_is_not_a_shipped_defaul
     assert shipped["documented_only"] == 1, shipped
 
 
+def test_an_executed_workflow_run_body_is_a_shipped_setting(
+        tmp_path, monkeypatch):
+    """A `run: |` body is a SHELL SCRIPT, not documentation (round 17, P3).
+
+    YAML models a block scalar as a scalar node (§8.1), so no line inside it is
+    a mapping entry — but that says nothing about whether the text is a VALUE.
+    On `.github/workflows` a `run:` body is executed by the shell (*"each line
+    runs in the same shell"*), so `export FLAG=1` there IS a shipped setting.
+    Counting it into `documented_only` printed `set ON in: none` over a workflow
+    that sets it — the measured-looking-nowhere shape this instrument refuses
+    elsewhere, and the one surface where a gate flag is actually TURNED ON.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n"
+        "  t:\n"
+        "    steps:\n"
+        "      - name: run the suite with the embed gate ON\n"
+        "        run: |\n"
+        "          export TORTOISE_EMBED_GATE=1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is True, shipped
+    assert shipped["files"] == [
+        ".github/workflows/ci.yml: export TORTOISE_EMBED_GATE=1"], shipped
+    # It is a SETTING, so it must not be double-reported as documentation.
+    assert shipped["documented_only"] == 0, shipped
+
+
+def test_a_workflow_prose_block_is_still_documentation(
+        tmp_path, monkeypatch):
+    """The over-correction guard: not every workflow block scalar is a command.
+
+    Only the KEY decides. A `note:` / `description:` body is text even inside a
+    workflow, so scanning every block body as shell would let a documentation
+    edit move `on_by_default` — the exact fail-open shape round 8 closed.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n"
+        "  t:\n"
+        "    steps:\n"
+        "      - name: x\n"
+        "        note: >-\n"
+        "          TORTOISE_EMBED_GATE: 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    assert shipped["documented_only"] == 1, shipped
+
+
+def test_a_run_key_outside_the_workflow_surface_is_not_executed(
+        tmp_path, monkeypatch):
+    """`run:` is a shell command only where this repo's CI runs it.
+
+    `config/*.yml` is read by tools, not by GitHub, so a `run:` key there is
+    that tool's own field. Treating it as shell would let an unrelated config
+    schema complete a DoD row.
+    """
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "x.yml").write_text(
+        "run: |\n"
+        "  export TORTOISE_EMBED_GATE=1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    assert shipped["documented_only"] == 1, shipped
+
+
 def test_a_real_mapping_after_a_block_scalar_still_reads_as_shipped_ON(
         tmp_path, monkeypatch):
     """The block predicate must END where the scalar does.
@@ -1570,6 +1653,90 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
     violations = _census_violations(
         unresolved, census, classes, probe.CENSUS_BYPASS)
     assert not violations, "\n".join(violations)
+
+
+def test_every_census_citation_re_derives_at_this_head() -> None:
+    """`WRITER_CENSUS` promises *"READ at their seam"* — so re-derive it.
+
+    The first version cited `file:line`. `sdk.py` then grew ~43 lines on `main`
+    and every `tortoise.sdk::*` citation pointed at unrelated code, silently:
+    `_census_class` reads `entry[0]` only, so nothing ever executed them while
+    `#5090`/`#10541` quote this census as their justification (round 17, P3 —
+    the same defect class the whole PR exists to remove, in the evidence it
+    ships). The citations are `(path, symbol, needle)` now and this falsifier
+    resolves each one, so an ordinary edit cannot rot them and a seam that
+    leaves the named function still reds.
+    """
+    violations = probe.census_evidence_violations()
+    assert not violations, "\n".join(violations)
+
+
+def test_the_citation_check_has_teeth_on_an_INJECTED_drift() -> None:
+    """The citation guard's RED directions, on injected evidence.
+
+    Durable on purpose: it does not depend on today's tree still holding a
+    drifted citation — an entry with no evidence, evidence for no entry, a
+    symbol that file does not define, and a needle that is not inside that
+    symbol must each be reported, or the check greens a census nobody
+    re-derived. Every case is self-contained (`overrides={}`), so it measures
+    the checker and not the live tree.
+    """
+    tree = Path(probe.__file__).resolve().parent.parent
+    clean = probe.WRITER_CENSUS["tortoise.vector_write::set_embedding_clause"]
+    key = "tortoise.q::_classed"
+
+    def violations(census, evidence):
+        return probe.census_evidence_violations(
+            census=census, evidence=evidence, root=tree, overrides={})
+
+    orphan = {f"{key}_orphan": (("tortoise/api.py", "_point", "x"),)}
+    assert violations({key: clean}, orphan) == [
+        f"{key}: classed with no re-derivable evidence",
+        f"{key}_orphan: evidence for an entry that does not exist",
+    ]
+    # A symbol the cited file does not define.
+    assert "which that file does not define" in str(violations(
+        {key: clean}, {key: (("tortoise/api.py", "_pointX", "x"),)}))
+    # A real symbol whose needle has moved out of it.
+    assert "does not carry" in str(violations(
+        {key: clean}, {key: (("tortoise/api.py", "_point", "NOPE"),)}))
+    # A cited file that is gone.
+    assert "cannot be read" in str(violations(
+        {key: clean}, {key: (("tortoise/nope.py", "_point", "x"),)}))
+    # The GREEN direction: the real citation for this entry resolves.
+    assert violations({key: clean}, {
+        key: probe.CENSUS_EVIDENCE["tortoise.vector_write::set_embedding_clause"],
+    }) == []
+
+
+def test_a_MATCH_label_is_not_credited_as_the_writers_label(
+        tmp_path, monkeypatch):
+    """A `MATCH` is a READ; the map must credit the label the WRITE names.
+
+    The comment said `MERGE`/`CREATE` while the pattern also took `MATCH`
+    (round 17, P3). The direction that fails is the bad one: on the module-stem
+    fallback a read's label is the one path that can RESOLVE a label the writer
+    never writes, and bullet 2 then reports it as covered.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "alpha.py").write_text(
+        "from .embeddings import encode_for_row\n"
+        "def _upsert_document(x):\n"
+        "    vec = encode_for_row('x', None)\n"
+        "    return 'MERGE (d:Document {id: $id})'\n"
+        "def _upsert_point(x):\n"
+        "    vec = encode_for_row('x', None)\n"
+        "    return 'MATCH (n:Point {id: $id}) RETURN n'\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    writers = probe.embedding_writers()
+    assert writers["tortoise.alpha::_upsert_document"]["label"] == "Document", writers
+    assert writers["tortoise.alpha::_upsert_point"]["label"] == "UNKNOWN", (
+        "a MATCH's label was credited as the writer's stored label: "
+        f"{writers['tortoise.alpha::_upsert_point']}"
+    )
 
 
 def test_the_census_guard_has_teeth_on_an_INJECTED_map() -> None:
