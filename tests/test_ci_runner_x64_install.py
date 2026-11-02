@@ -3322,6 +3322,11 @@ def test_the_label_assertion_other_files_cite_lands_on_it():
     comments) plus the mirror test — globbing every file under `tests/` for this class would read
     ~48 MB per run and cover nothing further.
 
+    ⚠️ The mirror test cites the assertion by SYMBOL, not by line (it was re-pointed in #10525's
+    "two more unpinned tree cites made symbol-form" commit, because a `:NNNN` cite here re-staled the
+    moment this module's docstring grew). It is therefore still SCANNED — a new `:NNNN` from it reds
+    `unknown` — but it is not in `known`, because there is no number left for this pin to land.
+
     Non-vacuity (measured): the pre-fix refs red on the landing check — the old number is an empty
     line — and re-pointing only SOME of the five reds on the agreement check.
     """
@@ -3333,11 +3338,16 @@ def test_the_label_assertion_other_files_cite_lands_on_it():
         ".github/workflows/availability-watchdog.yml",
         ".github/workflows/ci-check-repair.yml",
         ".github/workflows/ci-queue-health.yml",
-        "tests/test_reporting_workflow_concurrency.py",
     }
     scanned = [
         *(REPO_ROOT / ".github" / "workflows").glob("*.yml"),
         *(REPO_ROOT / ".github" / "workflows").glob("*.yaml"),
+        # ⛔ THE MIRROR IS STILL SCANNED BUT NO LONGER IN `known`: it cites this file by
+        # SYMBOL now (`::test_the_os_label_is_opt_in_and_no_fallback_arm_can_drop_it`), which
+        # cannot re-stale, so there is no number here for this pin to check — and requiring it in
+        # `known` made the pin over a citation that no longer exists (#10525, the `stale` arm
+        # redded). Keeping it in `scanned` is what keeps that true: re-introducing a `:NNNN` cite
+        # from the mirror lands in `unknown` and forces a decision instead of drifting quietly.
         REPO_ROOT / "tests" / "test_reporting_workflow_concurrency.py",
     ]
     ref = re.compile(r"tests/test_ci_runner_x64_install\.py:(\d+)")

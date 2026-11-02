@@ -1004,27 +1004,34 @@ def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
             "copies of a commit pin that can disagree is how a reader is sent to the wrong history"
         )
 
+    # ⛔ SCOPED ON THE RIGHT SUBJECT (#10525 review round 2 P3, corrected round 3 P3 and round 11
+    # P2 — MEASURED, each time). Three shapes, and only these three:
+    #
+    #   * the DOCUMENT registers E3 and the RECORD does not  -> FAIL (the disagreement itself);
+    #   * neither registers it                              -> DECLARED skip (a failure on a subject
+    #                                                          the bundle never raised is the mirror
+    #                                                          of the silent-green shape this tool
+    #                                                          refuses);
+    #   * both do                                           -> the class-set arms below.
+    #
+    # The first version failed UNCONDITIONALLY (a record that adopts the visibility schema but raises
+    # no E3 criterion was refused for a criterion it never registered). The second wrote the
+    # disagreement test INSIDE `if not e3:` as `document_registers_e3 = any(r["id"] == "E3" for r in
+    # rows)` — the same expression as `e3` itself, so it was constantly False there and the failure
+    # was dead code: a record that silently DROPPED its E3 criterion while the document kept one
+    # passed the gate with a declared-skip note, which is exactly the asymmetry the arm exists to
+    # report. Round 11 found it by reading; `test_a_machine_record_that_drops_its_e3_row_is_refused`
+    # now reds on it (measured `[]` at the pre-fix head).
     e3 = [r for r in rows if r["id"] == "E3"]
+    if e3 and "E3" not in by_id:
+        failures.append(
+            "no E3 row — the DOCUMENT registers an E3 criterion but the machine record carries "
+            "none, so the class set it fixes cannot be compared with the model"
+        )
     if not e3:
-        # ⛔ SCOPED ON THE RIGHT SUBJECT (#10525 review round 2 P3, corrected round 3 P3 — MEASURED).
-        # The existence failure was unconditional, then gated on `declares_visibility` — a field of
-        # the RECORD's #9738 schema — while its subject is the DOCUMENT's E3 row. That reproduced the
-        # same false red one level down: a record that adopts the visibility schema but raises no E3
-        # criterion was refused for a criterion it never registered. The subject is a DISAGREEMENT
-        # between the two artifacts, so it fails only when the DOCUMENT registers E3 and the record
-        # does not; a bundle that registers neither is DECLARED skipped (an undeclared skip is the
-        # silent-green shape this tool refuses, and a failure on a subject the bundle never raised is
-        # its mirror).
-        document_registers_e3 = any(r["id"] == "E3" for r in rows)
-        if document_registers_e3:
-            failures.append(
-                "no E3 row — the DOCUMENT registers an E3 criterion but the machine record carries "
-                "none, so the class set it fixes cannot be compared with the model"
-            )
-        else:
-            _note(scopes, "no E3 criterion is registered by this bundle, so its class set cannot "
-                          "be compared with the model — the #9736 arm is not asked of it (the same "
-                          "declared-skip rule as the #9738 arm above)")
+        _note(scopes, "no E3 criterion is registered by this bundle, so its class set cannot "
+                      "be compared with the model — the #9736 arm is not asked of it (the same "
+                      "declared-skip rule as the #9738 arm above)")
     groups: tuple[frozenset[str], ...] | None = None
     for row in e3:
         cells = {name: _classes_named(row[name]) for name in E3_CLASS_CELLS}

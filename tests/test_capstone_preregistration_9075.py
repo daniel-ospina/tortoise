@@ -2942,12 +2942,23 @@ def test_a_caller_that_carries_no_scope_list_still_declares_the_skips(capsys):
 
 
 def test_a_record_that_carries_no_visibility_field_is_not_asked_the_9738_rule(tmp_path):
-    """A record that predates the field makes no claim, so there is nothing to contradict."""
+    """A record that predates the field makes no claim, so there is nothing to contradict.
+
+    The synthetic record carries E5 **and** E3 because the SUBJECT here is the missing visibility
+    FIELD, not a missing criterion: the document paired with it is the real one, which registers
+    both, so a record without E3 is a second, unrelated disagreement (the #10525 round-11 arm —
+    see `test_a_machine_record_that_drops_its_e3_row_is_refused`). Keeping one subject per test is
+    what makes a red here name a cause. `E3` is given no class names, so the class-set arm stays a
+    declared skip as it does for the sibling bundle.
+    """
     directory = tmp_path / "bundle"
     directory.mkdir()
     (directory / check.MACHINE_RECORD).write_text(json.dumps({
         "schema": "capstone-prereg-v1",
-        "criteria": [{"id": "E5", "metric": "m", "denominator": "d"}],
+        "criteria": [
+            {"id": "E5", "metric": "m", "denominator": "d"},
+            {"id": "E3", "metric": "m", "denominator": "d"},
+        ],
     }))
     scopes: list[str] = []
     failures = check.check_registry_contradictions(
@@ -3014,6 +3025,42 @@ def test_e3_counting_an_unanchored_class_is_refused(tmp_path):
         tmp_path, check.parse_criteria_rows(mutated), pins
     )
     assert any("E3" in f and "Object" in f and "#9736" in f for f in failures), failures
+
+
+def test_a_machine_record_that_drops_its_e3_row_is_refused(tmp_path):
+    """THE MUTATION PROOF for the E3-existence arm — which was DEAD CODE until round 11.
+
+    #10525 review round 11 P2: `document_registers_e3 = any(r["id"] == "E3" for r in rows)` was
+    evaluated INSIDE `if not e3:`, where `e3` is that same expression — so the guard was constantly
+    False and the failure it guards was unreachable. Both directions were dead: a record that
+    silently DROPPED its `E3` criterion while the document kept one passed the gate with a
+    `no E3 criterion is registered by this bundle` skip beside a document that registers one, i.e.
+    the artefact a machine consumer reads disagrees with the document and the arm written for exactly
+    that asymmetry reported nothing.
+
+    Non-vacuity (measured at the pre-fix head): `_contradictions(<record without E3>)' == []`.
+    The second half guards the DIRECTION, so a future "fix" cannot make the arm unconditional again:
+    a bundle that registers E3 in neither artefact is a DECLARED skip, not a failure (the same rule
+    the sibling 5087 bundle is held to).
+    """
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    rec["criteria"] = [c for c in rec["criteria"] if c.get("id") != "E3"]
+    assert not any(c.get("id") == "E3" for c in rec["criteria"]), "the record's E3 row moved"
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("no E3 row" in f for f in failures), failures
+
+    # …and the same record against a DOCUMENT that registers no E3 either is a declared skip.
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(
+        directory, rows, check.parse_pins(PREREG.read_text()), scopes
+    )
+    assert not any("no E3 row" in f for f in failures), failures
+    assert any("no E3 criterion is registered" in s for s in scopes), scopes
 
 
 def test_e3_omitting_an_anchored_class_is_refused():
@@ -3140,6 +3187,48 @@ def test_the_records_e3_rule_states_the_rule_the_gate_implements():
     assert "**exactly**" not in paragraph, (
         "§7 item 6 says the cells must name *exactly* one set; the document-derivation class has "
         "two accepted spellings, so `exactly` cannot be what is enforced"
+    )
+
+
+def test_section_10_restates_the_rule_section_7_states():
+    """§10 is the section a lane reads to learn WHAT IS ENFORCED — it may not restore the flat set.
+
+    #10525 review round 11 P2: §10's "What enforces both, mechanically." paragraph said E3's
+    metric/denominator "must name exactly the classes derived from `_DERIVATION_REFERENCES_LABELS`
+    plus `Point`" — the sentence the previous round deleted from §7, and the same falsehood: the gate
+    holds each cell to one ALIAS GROUP per anchored class, so a row spelling the document-derivation
+    class `Source` passes a rule §10 told the reader refuses it. The previous round's assertion was
+    scoped to §7's paragraph ALONE, so two sections of one document could disagree — and did: a lane
+    amending E3 to the `Source` spelling reads §10, concludes the gate will red it, and keeps
+    `Document` to stay green, settling #9736's owner-gated question by prose in the direction the code
+    deliberately refuses to settle.
+
+    The requirement is DERIVED from the code (`e3_required_class_groups`), exactly as §7's is, so §10
+    cannot drift back either.
+
+    Non-vacuity: at the pre-fix head this paragraph carried `exactly the classes derived` and named
+    neither `Document` nor `Source` as alternatives, so every assertion below reds on it.
+    """
+    text = PREREG.read_text()
+    start = text.index("**What enforces both, mechanically.**")
+    paragraph = text[start:].split("\n\n", 1)[0]
+    assert "exactly the classes derived" not in paragraph, (
+        "§10 restates the FLAT `{Point} ∪ _DERIVATION_REFERENCES_LABELS` requirement that §7 had to "
+        "drop: the gate accepts either spelling of the document-derivation class"
+    )
+    assert "**exactly**" not in paragraph, (
+        "§10 says the cells must name *exactly* one set; the document-derivation class has two "
+        "accepted spellings, so `exactly` cannot be what is enforced"
+    )
+    for group in check.e3_required_class_groups():
+        for member in sorted(group):
+            assert f"`{member}`" in paragraph, (
+                f"§10 never names `{member}`, which the gate requires — a reader arriving here "
+                f"would draw the opposite conclusion from §7: {paragraph!r}"
+            )
+    assert "#9736" in paragraph and "owner-gated" in paragraph, (
+        "§10 must state that WHICH spelling is honest is #9736's owner-gated question, or it reads "
+        "as the gate having settled it"
     )
 
 

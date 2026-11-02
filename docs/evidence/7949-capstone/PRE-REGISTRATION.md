@@ -868,8 +868,12 @@ finding about S2.3 idling on the pre-registered corpus; it is not a revision of 
 `measurement_visible_to_author: false` contradicted by a cited `prior_measurements` entry **fails**; a
 `true` with nothing cited **fails**; a `false` that states **no** `measurement_visible_to_author_basis`
 **fails** (§10.4: the ground a `false` rests on cannot be checked, so an unstated one is refused rather
-than trusted); and E3's metric/denominator must name exactly the classes derived
-from `_DERIVATION_REFERENCES_LABELS` plus `Point`. Mutation-checked in
+than trusted); and E3's metric and denominator — **each cell on its own, not their union** — must name
+`Point`, `Event`, and the document-derivation class. That last class may be spelled **either**
+`Document` or `Source`, because **which spelling is honest is #9736's owner-gated question and not
+this rule's**: the rule refuses a cell that names NEITHER and settles nothing (§7 item 6 carries the
+same sentence, deliberately — a reader who arrives here instead of there must not be told a
+`Source`-spelled row is refused when the gate accepts it). Mutation-checked in
 `tests/test_capstone_preregistration_9075.py`, including the node `#9738` names — flip E5's field back
 to `false` and the gate goes red — and the `false`-without-a-ground arm, where deleting E4's basis (or
 blanking it to whitespace) reds the same way.
