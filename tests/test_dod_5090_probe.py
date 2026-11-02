@@ -1213,11 +1213,19 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
     writers reds on a CORRECT change — and its cheapest-looking repair is to
     delete the assertion, which disarms the guard exactly when the epic
     completes (review at `adde2763f`, blocking). The shape this file already
-    refuses at `test_every_embedding_write_path_reaches_the_gate_seam`, and an
-    empty live set here is a GREEN tree, not a proof that nothing is checked:
-    `test_the_census_guard_has_teeth_on_an_INJECTED_map` carries the property
-    on an injected set, so completing `#10541` turns this green without
-    touching it.
+    refuses at `test_every_embedding_write_path_reaches_the_gate_seam`.
+
+    ⛔ NOR is an empty live set a GREEN tree. `_census_violations` reports the
+    STALE direction too (`no unresolved writer behind them`), so the census
+    entry must be trimmed in the same change that resolves its writer, and
+    until it is this test is RED over every un-trimmed entry — the `unused
+    suppression` contract Ruff's RUF100 and ESLint's unused-suppression
+    reporting prescribe, reached by `#5090`'s remainder. Read that failure
+    message before touching anything: it names the three reasons an entry can
+    look stale and only ONE of them is a delete. Nor is the guard vacuous
+    while the set is empty: the injected-map test carries both directions on
+    an injected census and `test_the_completed_state_reds_the_live_falsifier`
+    executes the completed-state contract this paragraph states.
     """
     census = getattr(probe, "WRITER_CENSUS", {})
     classes = getattr(probe, "CENSUS_CLASSES", ())
@@ -1228,6 +1236,41 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
     violations = _census_violations(
         unresolved, census, classes, probe.CENSUS_BYPASS)
     assert not violations, "\n".join(violations)
+
+
+def test_the_completed_state_reds_the_live_falsifier() -> None:
+    """The state `#5090`'s remainder reaches: RED, and never a silent green.
+
+    The docstring above claims this, so it is measured rather than restated:
+    resolving the last unresolved writer does NOT turn the live falsifier
+    green, because the census entry then has `no unresolved writer behind it`
+    and `_census_violations` says so. Pre-fix the paragraph claimed the exact
+    opposite ("an empty live set here is a GREEN tree … completing `#10541`
+    turns this green without touching it") while the helper it calls returned
+    one violation naming all 14 entries — the state in which its own warning
+    about "its cheapest-looking repair is to delete the assertion" would
+    point a lane at the stale check (review on this PR).
+    """
+    violations = _census_violations(
+        [], probe.WRITER_CENSUS, probe.CENSUS_CLASSES, probe.CENSUS_BYPASS)
+    stale = [v for v in violations
+             if "no unresolved writer behind them" in v]
+    assert stale, (
+        "the completed state must NOT read as green: the census outlives its "
+        f"holes, and that is where the trim is demanded — {violations}")
+    unnamed = [w for w in probe.WRITER_CENSUS if w not in stale[0]]
+    assert not unnamed, (
+        "the stale violation names a subset only, so the repair it demands "
+        f"is not derivable from it: {unnamed}")
+    # The docstring above must POINT AT that message instead of asserting a
+    # verdict of its own: prose that restates behaviour goes stale silently,
+    # which is how the pre-fix paragraph came to describe the one state where
+    # it misdirects a lane into disarming the guard.
+    doc = test_every_unresolved_writer_carries_a_census_class.__doc__ or ""
+    assert "no unresolved writer behind them" in doc, (
+        "the live falsifier's docstring does not name the stale message, so "
+        "the lane that reaches the completed state gets no pointer to the "
+        f"repair: {doc}")
 
 
 def test_the_census_guard_has_teeth_on_an_INJECTED_map() -> None:
