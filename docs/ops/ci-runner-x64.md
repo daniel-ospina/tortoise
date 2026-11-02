@@ -975,7 +975,8 @@ Two further facts measured on the canary, so the next author copies the right pr
   `reason=absent-not-provisionable` on any box that lacks it. It is therefore an ASSERTION, and
   the premise it was first justified with — "the hosted image ships both; the pool does not" —
   is false for jq and was corrected in `ci.yml`.
-- **It is gated the way its consumer is.** The only real jq invocation in that job is
-  `registry-cron.test.sh:280` (`jq -Rsc`), gated on the `driver_scripts` surface, so the assert
-  carries the same gate. Ungated it would red every PR — including the large majority that cannot
-  touch the driver — naming a tool nothing would have used.
+- **It is gated the way its consumer is.** The real jq surface in that job is
+  `registry-cron.test.sh:280` **plus every call in the driver it executes** (`:572` runs the real
+  `registry-cron.sh`; the harness stubs no `jq`), and that whole script is gated on the
+  `driver_scripts` surface, so the assert carries the same gate. Ungated it would red every PR —
+  including the large majority that cannot touch the driver — naming a tool nothing would have used.

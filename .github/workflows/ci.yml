@@ -1570,10 +1570,10 @@ jobs:
       # inherit the machine); do not read "ensure" as "provisioned" when
       # copying this onto another leg.
       #
-      # ⚠️ AND IT IS GATED THE WAY ITS CONSUMER IS. The only REAL `jq`
-      # invocation in this job is `registry-cron.test.sh:280` (`jq -Rsc`), whose
-      # step is gated on `driver_scripts`; `ai-review-gate.test.sh` merely greps
-      # `--jq .body` inside a STUBBED `gh` argv and never runs jq itself.
+      # ⚠️ AND IT IS GATED THE WAY ITS CONSUMER IS. The real jq surface is
+      # `registry-cron.test.sh:280` PLUS every call in the driver it EXECUTES (`:572`
+      # runs the real `registry-cron.sh`; `grep -c bin/jq` on the harness is 0), all
+      # under `driver_scripts`; `ai-review-gate.test.sh` only greps STUBBED `gh` argv.
       # Ungated, an absent jq redded EVERY PR — including the large majority
       # whose diff cannot touch the driver — naming a tool nothing would have
       # used, which is the #9018 misdiagnosis one layer up.
