@@ -673,7 +673,7 @@ test (it must FAIL) before changing this line.
 uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log
 # → capstone-verdict-check: … GREEN=0, RED=3, BLOCKED=2, UNPREREGISTERED=0
 # → ✅ verdict table is structurally sound … blocker states: every cited blocker
-#   verified 2026-11-02T12:09:48Z (11 on record)   (exit 0)
+#   verified 2026-11-02T14:22:24Z (11 on record)   (exit 0)
 
 uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log --require-green
 # → [V9] epic #7949: --require-green: 5/5 rows are not green  (exit 1)
