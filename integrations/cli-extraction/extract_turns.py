@@ -23,7 +23,7 @@ Configuration (env vars; all optional):
 
 Example:
   python3 extract_turns.py dump
-  python3 extract_turns.py run --transcript 01a1102f --out ex.json   # defaults: claude-haiku-5-5 @ high
+  python3 extract_turns.py run --transcript <session-id> --out ex.json  # defaults: claude-haiku-5-5 @ high
   python3 extract_turns.py write --extraction ex.json \
       --source session://extraction-2026-10-24-haiku-high-thread-01a1102f --domain my-project
 
@@ -115,14 +115,112 @@ def state_dir() -> Path:
 
 # ── dump ─────────────────────────────────────────────────────────────
 
+#: The predicate `dump` reads: the CAPTURE lane's real shape (#9932).
+#:
+#: `sdk._TURN_WRITE_CYPHER` — the ONE turn store, called by both capture lanes
+#: (SDK `capture_session` and the hosted commit path) — MERGEs each turn as a
+#: `:Point` carrying `content`, `pointKind`, `is_episodic`, `speaker` and
+#: wires it `(s:Session)-[:CONTAINS]->(t)`. It sets **no** `extractedFrom`
+#: property, so an `extractedFrom STARTS WITH …` predicate matched ZERO rows
+#: against every session this repo captures, and `authoredBy` (the human-author
+#: property) is absent too — the role lives on `speaker`. Reading those two
+#: names is what broke the documented dump→run→write workflow.
+#:
+#: The `session://` prefix makes a transcript key the CAPTURE session id — the
+#: id the operator passed to `capture_session`. `build_transcripts` keys a
+#: `session://` source by the WHOLE remainder (never a tail split, which would
+#: merge `teamA/run-7` and `teamB/run-7`).
+_DUMP_QUERY = (
+    "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
+    "WHERE t.is_episodic = true AND t.pointKind = 'event' "
+    # No ORDER BY: the graph's order is discarded — `dump` re-sorts by the
+    # integer turn index (`_turn_order`), because the server's lexicographic
+    # order puts `t10` before `t2`.
+    "RETURN 'session://' + s.id, t.pointKind, t.speaker, t.content, t.createdAt, t.id"
+)
+
+
+def _is_turn_of(row) -> bool:
+    """`{session}_t{i}` — the id shape the one turn store derives.
+
+    The suffix must be DECIMAL, mirroring `sdk._capture_turn_ids`' own
+    `isdecimal()` guard, so this filter admits exactly what that sweep admits.
+
+    It is NOT an exact equivalence with `_turn_order`, and must not be
+    described as one: `isdecimal()` is True for a suffix longer than `int()`'s
+    4300-digit limit, which `_turn_order` then refuses with a `ValueError`
+    (`dump` does not catch it, so it surfaces as a traceback). No writer mints
+    such an id — `_capture_turn_id` emits a plain running index — so this is a
+    documented edge rather than a reachable state.
+    """
+    sid = str(row[0]).split("://", 1)[-1]
+    tail = str(row[5])[len(sid) + 2:]
+    return (str(row[5]).startswith(f"{sid}_t") and tail.isdecimal())
+
+#: The capture store's own frame (`_capture_turn_frame`, ``"[role] body"``).
+#: The turn's `content` property holds the FRAMED text and `speaker` holds the
+#: un-bracketed role, so a transcript line built verbatim from `content` says
+#: the speaker twice. This mirrors `_capture_turn_role_text` EXACTLY (including
+#: `*` rather than `+` for the role, so an EMPTY role still unframes) — a local
+#: copy because `dump` maps rows on the HOST, where `tortoise` is not
+#: necessarily importable (the whole lane talks to the container).
+_FRAME_RE = re.compile(r"^\[([^\]]*)\]\s*")
+
+
+def _turn_order(row) -> tuple:
+    """Sort key: (session, turn index).
+
+    `createdAt` CANNOT order a session's turns: the writer stamps the whole
+    batch with one `$now` (`coalesce(t.createdAt,$now)`), so every turn in a
+    capture carries the SAME timestamp and the graph returns them in arbitrary
+    order — a scrambled transcript that reds nothing. The turn index in the
+    deterministic id (`_capture_turn_id` -> `{session}_t{i}`) is the order, and
+    it is parsed as an INTEGER because a lexicographic sort puts `t10` before
+    `t2`.
+    """
+    sid = str(row[0])
+    m = re.search(r"_t(\d+)$", str(row[5]))
+    if m is None:
+        # An id that carries no turn index is not a turn: it cannot be
+        # ordered, and defaulting to 0 would splice it in front of turn 0.
+        raise ValueError(f"turn id carries no index: {row[5]!r}")
+    try:
+        index = int(m.group(1))
+    except (TypeError, ValueError) as exc:      # >4300 digits: not an index
+        raise ValueError(f"turn id index is not an integer: {row[5]!r}") from exc
+    return (sid, index)
+
+
+#: One graph row -> one turns-file record. `by` carries the turn ROLE
+#: (`speaker`), which is what `build_transcripts` renders as the prompt's
+#: per-line speaker and what lets the engine separate user text from assistant
+#: text. `kind` mirrors the point's `pointKind`; it is informational only (no
+#: reader consumes it, and the query pins `pointKind = 'event'`).
+def _turn_record(row) -> dict:
+    role, text = row[2], row[3] or ""
+    framed = _FRAME_RE.match(text)
+    if framed:
+        role = role or framed.group(1)
+        text = text[framed.end():]
+    return {"src": row[0], "kind": row[1], "by": role,
+            "content": text, "at": str(row[4])}
+
 
 def dump(out: Path, allow_empty: bool = False):
-    """Pull captured turn Points (codex:// thread sources) from the container.
+    """Pull the captured session turns out of the container.
 
-    This is the integration's ONE private graph read (a prefix query —
-    `STARTS WITH` — has no public equivalent); everything else goes through
-    public SDK doors. Fails loudly on zero rows unless --allow-empty: an
-    empty capture usually means capture is off or the schema moved.
+    This is the integration's ONE private graph read. A public session-id route
+    does exist (`sdk.get_events(eventKind="sessionCaptured")` -> `get_session`),
+    but the Event index is best-effort (its write is non-fatal and minted only
+    on a fresh capture, so it silently misses sessions) and `get_session`'s
+    graph arm serves turns `ORDER BY t.id`, i.e. lexicographically (`t10`
+    before `t2`). The `CONTAINS` read is chosen for completeness and one round
+    trip, not because no public route exists. Everything else goes through
+    public SDK doors. Fails loudly on zero rows unless --allow-empty: an empty
+    capture usually means capture is off, the schema moved, or — on a
+    deployment with the Postgres record armed (`TORTOISE_RECORD_DSN`) — the
+    turns live in the RECORD and this lane's graph-only read finds none
+    (#10000; `sdk.get_session()` serves those).
     """
     ns = _cfg("TORTOISE_NAMESPACE", "selfhost")
     log = _cfg("TORTOISE_EVENT_LOG", f"/data/events/{ns}.jsonl")
@@ -131,11 +229,9 @@ def dump(out: Path, allow_empty: bool = False):
         "from tortoise.sdk import TortoiseSDK\n"
         f"sdk = TortoiseSDK(namespace={ns!r}, event_log_path={log!r})\n"
         "g = sdk._get_proj().g\n"
-        "rows = g.query(\"MATCH (p:Point) WHERE p.extractedFrom STARTS WITH 'codex://' \"\n"
-        "               \"RETURN p.extractedFrom, p.pointKind, p.authoredBy, p.content, p.createdAt \"\n"
-        "               \"ORDER BY p.createdAt\").result_set\n"
+        f"rows = g.query({_DUMP_QUERY!r}).result_set\n"
         "for r in rows:\n"
-        "    print(json.dumps({'src': r[0], 'kind': r[1], 'by': r[2], 'content': r[3], 'at': str(r[4])}))\n"
+        "    print(json.dumps([r[0], r[1], r[2], r[3], str(r[4]), str(r[5])]))\n"
         "sdk.close()\n"
     )
     try:
@@ -145,27 +241,83 @@ def dump(out: Path, allow_empty: bool = False):
     except subprocess.TimeoutExpired as exc:
         raise SystemExit(f"dump: docker exec timed out after {DOCKER_TIMEOUT}s "
                          "— is the container healthy?") from exc
-    out.write_text(r.stdout)
+    rows = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip()]
+    turns = [row for row in rows if _is_turn_of(row)]
+    rejected = len(rows) - len(turns)
+    out.write_text("".join(json.dumps(_turn_record(row)) + "\n"
+                           for row in sorted(turns, key=_turn_order)))
     with out.open() as fh:
         n = sum(1 for _ in fh)
     if n == 0 and not allow_empty:
+        # The two empty cases have DIFFERENT causes and the old one-line
+        # message named neither of them: it sent every operator to their
+        # capture setting (#9932), which is the wrong cause in both. NEITHER
+        # branch below may name a SINGLE cause — every branch names what it can
+        # measure and then every cause that measurement admits.
+        # `rows` is what the query actually returned, so the split below is
+        # measured rather than guessed: rows>0 means the predicate MATCHED and
+        # something below it rejected every row; rows==0 means the predicate
+        # matched nothing at all — which has THREE causes, not two (a message
+        # that offers two and omits the third repeats #9932's own defect: it
+        # sent every operator to a setting that was not the cause).
+        if rows:
+            # TWO causes, for the same reason the branch below names three:
+            # a message that offers one where another applies sends the
+            # operator to the wrong place, which is #9932 itself. The count
+            # and the rejected id are measured; the CAUSE is not —
+            # `_is_turn_of` rejecting a row proves only that the row is not a
+            # turn of this session, never WHY. `pointKind` cannot settle it:
+            # its vocabulary is OPEN (`create_point` accepts any registered
+            # kind), so a caller-minted `is_episodic` `event` Point wired
+            # under a Session matches `_DUMP_QUERY` and is rightly rejected
+            # here for not being a turn — the same reason the repo's own
+            # `session_reinjection._TURN_SHAPE_FILTER` refuses to trust
+            # `pointKind` alone (#2517 review).
+            raise SystemExit(
+                f"dump: 0 turns captured — the query MATCHED {len(rows)} "
+                f"point(s) under a :Session and all {rejected} were rejected: none "
+                "carried the `{session}_t<i>` id this lane reads (`_is_turn_of`). "
+                "Capture is therefore ON, and this has two causes: the ID "
+                "DERIVATION has moved (`sdk._capture_turn_id`), or the matched "
+                "Points are NOT turns at all — `pointKind` is an open vocabulary, "
+                "so a caller-minted `is_episodic` `event` Point under the Session "
+                "matches the predicate and is not a turn "
+                "(`session_reinjection._TURN_SHAPE_FILTER`). "
+                "(pass --allow-empty to accept an empty dump)")
         raise SystemExit(
-            "dump: 0 turns captured — is TORTOISE_CAPTURE on and are there captured "
-            "sessions? (pass --allow-empty to accept an empty dump)")
+            "dump: 0 turns captured — the query matched NO point at all, so this is "
+            "not the id filter. Any of three causes applies: TORTOISE_CAPTURE was "
+            "off for the sessions you expect; the turns live in the Postgres RECORD "
+            "(with TORTOISE_RECORD_DSN armed, #10000, capture is ON and this lane's "
+            "graph-only read legitimately finds nothing — `sdk.get_session()` "
+            "serves those); or the turn nodes do not carry the names/values "
+            "`_DUMP_QUERY` reads — pre-#947 captures wrote turn Points with NO "
+            "`is_episodic` flag (`graph-scripts/backfill_is_episodic.py` backfills "
+            "it, and its scope covers exactly `(s:Session)-[:CONTAINS]->(:Point)`), "
+            "and a writer that has moved past these property names matches nothing "
+            "either. (pass --allow-empty to accept an empty dump)")
     keys = ", ".join(build_transcripts(out)) or "(none)"
     print(f"dumped {n} turns -> {out}")
     print(f"transcripts: {keys}")
 
 
 def build_transcripts(turns_path: Path):
-    """Group turns by codex thread -> {full_thread_id: transcript}.
+    """Group turns into transcripts: `{key: transcript}`.
 
-    Keys are the FULL thread id (a truncated key would merge distinct
-    threads: the fixtures are UUIDv7, whose first hex characters encode a
-    ~65-second timestamp window, so parallel runs collide — measured risk,
-    not theoretical). `resolve_transcript` accepts unambiguous prefixes.
-    A src that starts with codex:// but does not name a thread is a schema
-    surprise: raise rather than silently mis-group.
+    Two keyings, one per source shape. A `session://<id>` source (what `dump`
+    emits from the capture lanes) keys by the **capture session id**, so
+    `--transcript <session-id>` works — in EITHER spelling, `session://<id>` or
+    the canonical single-colon `session:<id>`. A `codex://threads/<id>` source
+    keys by the FULL thread id and raises on any other `codex://` shape. Any
+    other src (a hand-built turns file) keeps its full tail id with the
+    fragment stripped.
+
+    For the `codex://` and hand-built shapes the key is the FULL thread id (a
+    truncated key would merge distinct threads: the fixtures are UUIDv7, whose
+    first hex characters encode a ~65-second timestamp window, so parallel runs
+    collide — measured risk, not theoretical). `resolve_transcript` accepts
+    unambiguous prefixes. A src that starts with `codex://` but does not name a
+    thread is a schema surprise: raise rather than silently mis-group.
     """
     groups = {}
     with turns_path.open() as fh:
@@ -178,6 +330,26 @@ def build_transcripts(turns_path: Path):
                 key = m.group(1)
             elif t["src"].startswith("codex://"):
                 raise ValueError(f"unexpected codex source shape: {t['src']!r}")
+            elif t["src"].startswith("session:"):
+                # A CAPTURE-turn source (what `dump` emits): the key is the
+                # session id itself, so `--transcript <session-id>` works.
+                # Never a tail split — truncating would collapse
+                # `teamA/run-7` and `teamB/run-7` into one transcript. The
+                # `#message=` fragment is the HAND-BUILT file form and is
+                # stripped (one session, many message fragments) — the capture
+                # writer never appends one.
+                #
+                # BOTH spellings must key to the same session id: `dump`
+                # emits `session://<id>`, while the repo's canonical identity
+                # is the SINGLE-colon `session:<session_id>`
+                # (`derive_session_source_url`, ONTOLOGY §4.6) — a hand-built
+                # turns file uses that one. Splitting on `://` alone left
+                # `session:abc123` keyed as `session:abc123`, so
+                # `--transcript abc123` reported `have: ['session:abc123']`.
+                raw = t["src"].split(":", 1)[-1]
+                if raw.startswith("//"):
+                    raw = raw[2:]
+                key = raw.split("#message=", 1)[0]
             else:
                 # hand-built turns files: full tail id, fragment stripped —
                 # no truncation (a length cut would silently re-introduce the
@@ -714,7 +886,8 @@ def main():
     r.add_argument("--effort", default="high")
     r.add_argument("--turns-file", default=str(state_dir() / "turns_raw.jsonl"))
     r.add_argument("--transcript", required=True,
-                   help="full thread id or an unambiguous prefix")
+                   help="capture session id (or a codex thread id from a "
+                        "hand-built turns file) — exact or unambiguous prefix")
     r.add_argument("--out", required=True)
     w = sub.add_parser("write", help="write an extraction into the graph")
     w.add_argument("--extraction", required=True)
