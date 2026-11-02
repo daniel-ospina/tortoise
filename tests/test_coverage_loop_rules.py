@@ -532,9 +532,20 @@ def test_floor_term_keeps_the_deferred_tail_in_original_rank_order():
 
 
 def test_guard_and_recap_pool_forwards_the_floor_term():
-    """The seam the eval harness arms must actually be wired: dropping the
-    ``floor_term=floor_term`` forward leaves every other test green, so this
-    one asserts the forward itself."""
+    """The seam the eval harness arms must actually be wired — and this test
+    pins the forward AT ITS OWN CALL SITE, where the ``floor_term=False`` leg
+    proves the seam is not hard-wired ON.
+
+    It is NOT the sole killer of that mutant, and an earlier version of this
+    docstring said it was ("dropping the forward leaves every other test
+    green") — measurably false. With the forward removed from
+    ``retrieval.guard_and_recap_pool`` and THIS test deselected, two others
+    still red: ``test_floor_term_keeps_the_deferred_tail_in_original_rank_order``
+    (it reaches the guard through the same composition) and
+    ``test_reinjection_merge_order_forwards_the_floor_term`` — measured
+    ``2 failed, 75 passed, 1 deselected``. So this test is defence in depth at
+    the call site, not the only guard on the forward.
+    """
     items = _non_monopolised_pool()
     on = guard_and_recap_pool(items, guard=True, window=5, per_session_cap=2,
                               floor_term=True, max_chunks_per_session=99)
