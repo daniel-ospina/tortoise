@@ -3432,11 +3432,9 @@ class TestStallWatchdog:
                 time.sleep(0.05)
         finally:
             # Cleanup runs even if an assert above fires, so the gauge cannot
-            # leak into a sibling test (#2850 review P2).
-            monitoring._reset_workload()
-            stop.set()
-            if thread is not None:
-                thread.join(timeout=2)
+            # leak into a sibling test (#2850 review P2) — and it runs AFTER
+            # the thread is stopped, so the reset cannot authorise a late kill.
+            self._disarm(thread, stop)
         assert fired == [1], (
             "the in-flight gauge vetoed the hard ceiling — this is the "
             "permanent-silent-outage bug (#2850)")
@@ -3464,11 +3462,25 @@ class TestStallWatchdog:
             assert thread is not None
             time.sleep(0.5)
         finally:
-            monitoring._reset_workload()
-            stop.set()
-            if thread is not None:
-                thread.join(timeout=2)
+            self._disarm(thread, stop)
         assert fired == [], "a busy loop must not be killed without a ceiling"
+
+    @staticmethod
+    def _disarm(thread, stop):
+        """STOP the watcher, and only THEN reset any global it reads.
+
+        The reverse order is a real flake, not a style nit (measured in this
+        lane: `test_the_hard_ceiling_does_not_fire_without_one` failed once in
+        ~15 runs on a loaded box). Resetting the workload gauge or the recorded
+        ticker while the thread is still polling lets it observe a *clean*
+        state beside a stale heartbeat — and it fires its ``exit_fn``, which is
+        exactly what these tests assert did NOT happen.
+        """
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=2)
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
 
     @staticmethod
     def _fake_ticker(*, done=False, cancelled=False, exc=None,
@@ -3622,11 +3634,7 @@ class TestStallWatchdog:
             assert thread is not None
             time.sleep(0.6)
         finally:
-            monitoring._reset_workload()
-            monitoring._reset_heartbeat_task()
-            stop.set()
-            if thread is not None:
-                thread.join(timeout=2)
+            self._disarm(thread, stop)
         assert fired == [], (
             "a dead heartbeat ticker must NOT be treated as a wedge — this "
             "would restart-loop a healthy process")
@@ -3668,10 +3676,7 @@ class TestStallWatchdog:
             while not fired and time.monotonic() < deadline:
                 time.sleep(0.05)
         finally:
-            monitoring._reset_workload()
-            stop.set()
-            if thread is not None:
-                thread.join(timeout=2)
+            self._disarm(thread, stop)
         assert fired == [1], (
             "a loop that wedges before its SECOND tick never grows ``ticks`` "
             "— the min_ticks gate must not be able to hold the ceiling off")
@@ -3707,9 +3712,7 @@ class TestStallWatchdog:
             while not fired and time.monotonic() < deadline:
                 time.sleep(0.05)
         finally:
-            stop.set()
-            if thread is not None:
-                thread.join(timeout=2)
+            self._disarm(thread, stop)
         assert fired == [1], (
             "the ceiling was degraded to max(threshold, ceiling): an operator "
             "who arms soft 5s beside a 0.15s ceiling must still exit at 0.15s")
@@ -3741,10 +3744,7 @@ class TestStallWatchdog:
                 assert thread is not None
                 time.sleep(0.3)
         finally:
-            monitoring._reset_heartbeat_task()
-            stop.set()
-            if thread is not None:
-                thread.join(timeout=2)
+            self._disarm(thread, stop)
         assert fired == []
         refusals = [r for r in caplog.records
                     if "not provably a wedge" in r.getMessage()]
