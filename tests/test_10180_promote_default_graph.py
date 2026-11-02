@@ -1077,10 +1077,22 @@ _ORG_WIDE_OPENER_ALLOWLIST = {
     #   pre-#3543 `team_{id}`, and "neither listed") on the server's LISTING
     #   (#10510, round 7 — the name-only open minted the absent `org_{prior}`
     #   and lost the creator's fork). What the earlier round removed is not the
-    #   gate: it is the COST. The listing probe and the control-plane name read
-    #   now run in the caller's `_cp_offload` worker and reach the open as
-    #   `prior_listed` / `prior_moved` (review P2 at `50f0a9c53`); the closure
-    #   still CONSTRUCTS on the loop (tortoise#7500).
+    #   gate: it is the COST. Every fact that prior-org read needs is sampled
+    #   OFF the loop, each on the lane its own dependency uses: the
+    #   `organizations.graph_name` read (`prior_moved`) in `_cp_offload`'s `org`
+    #   pool (#7678); and the LISTING probe with the open and the `MATCH` it
+    #   gates as ONE `_graph_offload` submission (`_prior_org_onboarding_fork`),
+    #   because `db.list_graphs()` is a REGISTRY read that reaches the graph
+    #   pool and never `_cp_offload` (#3718/#3773: the `org` pool charges it the
+    #   10 s PostgREST bound and maps a bound miss to the SIGN-IN 503 body),
+    #   and the open and the `MATCH` ride that same worker because a graph read
+    #   on the loop is the #4625 class the `test_health_ready_nonblocking`
+    #   guard fails on. That is why "the caller's `_cp_offload` worker", the
+    #   door this reason named after review P2 at `50f0a9c53`, is no longer
+    #   where the listing runs (review P2 at `6e49c4fa9` folded it back out).
+    #   Nothing for that prior-org answer is left on the loop but the
+    #   CONSTRUCTION the closure still performs there — the org-being-created
+    #   mint already recorded above (tortoise#7500).
     "provision_tenant": 1,
     "register_user": 3,
     "_eager_provision_org_graph": 1,
