@@ -245,15 +245,48 @@ async def test_a_write_naming_a_reachable_graph_lands_there_and_says_so(probe):
 
 @pytest.mark.asyncio
 async def test_the_redundant_default_ref_reports_the_default_it_names(probe):
-    """`graph="default"` is the documented no-op. It must disclose the same
-    landing the omitted form does — while staying distinguishable as NAMED,
-    because the caller did name it."""
+    """`graph="default"` is the documented no-op: the resolver short-circuits it
+    BEFORE any lane check, so it resolves to exactly what omission resolves to.
+    It must therefore disclose the SAME landing the omitted form does (only
+    `requested`/`omitted` differ) — giving the two equivalent forms opposite
+    disclosures is the one thing this feature exists to prevent."""
     with _workspace():
         result = await ms.mcp.call_tool(
             PROBE, {"graph": "default", "note": "hi"})
     assert probe == [{"graph_id": None, "namespace": None}], probe
     assert _disclosure(result) == {"graph": "default", "requested": "default",
-                                   "omitted": False, "source": "argument"}
+                                   "omitted": False,
+                                   "source": "workspace-default"}
+    assert "the same target as omitting it" in _text(result), _text(result)
+    assert "named no `graph`" not in _text(result), (
+        "the reply denied an argument the caller actually sent")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("org", [None, mcp_auth.SELFHOST_ORG_ID])
+async def test_the_default_ref_on_a_no_workspace_lane_still_names_no_graph(probe, org):
+    """The named-no-op and the omitted form are the SAME target, so on a lane with
+    no hosted workspace they must disclose the same thing: `server-configured`
+    with NO id. Echoing the caller's spelling here would name a graph id that does
+    not exist on that surface — and would contradict the omitted form of the same
+    call one line away."""
+    tokens = [mcp_auth._current_org_id.set(org),
+              mcp_auth._current_graph_id.set(None)]
+    try:
+        result = await ms.mcp.call_tool(
+            PROBE, {"graph": "default", "note": "hi"})
+    finally:
+        mcp_auth._current_graph_id.reset(tokens[1])
+        mcp_auth._current_org_id.reset(tokens[0])
+
+    disclosure = _disclosure(result)
+    assert disclosure["source"] == "server-configured", (org, disclosure)
+    assert disclosure["graph"] is None, disclosure
+    assert disclosure["requested"] == "default"
+    assert disclosure["omitted"] is False
+    assert "default graph" not in _text(result), (
+        "a default-graph id was presented as the target on a surface that has none")
+    assert "the same target as omitting it" in _text(result)
 
 
 # ── 4. the honest arm: a graph-bound credential's omission is NOT the default ──

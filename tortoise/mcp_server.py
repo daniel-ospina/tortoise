@@ -1535,10 +1535,23 @@ def _graph_disclosure(graph_ref: str | None,
 
     `preview` never changes WHAT is disclosed, only whether the reply may say the
     write happened (see `_graph_disclosure_message`).
+
+    ⛔ `graph="default"` takes the OMITTED arm, not the named one. It is the
+    resolver's own no-op — `plan_graph_target` short-circuits it BEFORE any lane
+    check (`mcp_auth.py:515-540`) — so it resolves to exactly what omission
+    resolves to, and the sibling sentence in
+    `GRAPH_ARGUMENT_DESCRIPTION` says so ("An explicit `graph=\"default\"`
+    targets the same graph as omitting it"). Echoing the caller's spelling as the
+    TARGET would name a graph id that does not exist on the no-workspace lanes
+    (where `_get_org_sdk` opens `namespace='selfhost'` / the URI's graph) and
+    would give the two equivalent forms opposite disclosures — which is the one
+    thing this feature exists to prevent. Only `requested`/`omitted` differ, so a
+    caller still sees what it sent.
     """
-    if graph_ref is not None:
-        if not isinstance(graph_ref, str):
-            return None
+    named = graph_ref is not None
+    if named and not isinstance(graph_ref, str):
+        return None
+    if named and not _mcp_auth._is_default_graph_ref(graph_ref):
         info = {"graph": graph_ref, "requested": graph_ref,
                 "omitted": False, "source": "argument"}
     else:
@@ -1551,6 +1564,10 @@ def _graph_disclosure(graph_ref: str | None,
             info = {"graph": bound or _mcp_auth._DEFAULT_GRAPH_ID,
                     "requested": None, "omitted": True,
                     "source": "credential-graph" if bound else "workspace-default"}
+        if named:
+            # Same resolution, stated as NAMED: the caller did send the argument,
+            # so `omitted` stays False and `requested` echoes it.
+            info["requested"], info["omitted"] = graph_ref, False
     if preview:
         # A preview's write has not happened. Recorded as its own fact so a
         # consumer (and the prose below) cannot read a preview as a completed
@@ -1578,19 +1595,39 @@ def _graph_disclosure_message(info: dict[str, Any]) -> str:
     """
     graph = info["graph"]
     source = info["source"]
+    requested = info.get("requested")
     preview = " Nothing was written: this call was a preview (dry run)." \
         if info.get("preview") else ""
+    # `graph="default"` is the resolver's no-op, so it is DISCLOSED as the arm it
+    # actually resolves to — but the prose must not claim the caller named no
+    # graph when it did.
+    named_default = (f"`graph={requested!r}` (the same target as omitting it)"
+                     if requested is not None else None)
     if source == "server-configured":
+        if named_default:
+            return (
+                f"Graph disclosure: this write named {named_default}, and this "
+                "transport has no workspace — so its target is the graph this "
+                "server is configured with." + preview)
         return (
             "Graph disclosure: this write named no `graph`, and this transport "
             "has no workspace — so its target is the graph this server is "
             "configured with." + preview)
     if source == "workspace-default":
+        if named_default:
+            return (
+                f"Graph disclosure: this write named {named_default}, so its "
+                f"target is this workspace's default graph ({graph!r})." + preview)
         return (
             f"Graph disclosure: this write named no `graph`, so its target is "
             f"this workspace's default graph ({graph!r}). If another graph was "
             f"meant, pass `graph` with that graph's id or name." + preview)
     if source == "credential-graph":
+        if named_default:
+            return (
+                f"Graph disclosure: this write named {named_default}, so its "
+                f"target is this credential's own graph ({graph!r}) — not the "
+                f"workspace default." + preview)
         return (
             f"Graph disclosure: this write named no `graph`, so its target is "
             f"this credential's own graph ({graph!r}) — not the workspace "
