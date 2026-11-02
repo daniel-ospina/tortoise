@@ -336,8 +336,9 @@ UNOBSERVED and the count drops to 6/8),
 `test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` (the per-surface cite table, with
 mutual exclusion — a swapped pair fails),
 `test_the_unobserved_cause_counts_the_keys_it_actually_inspected` and
-`test_every_step_is_witnessed_or_given_a_cause`. (The shipped-log test still asserts THIS
-artifact's 6/8 — that pins the record, not the probe's capability.)
+`test_every_step_is_witnessed_or_given_a_cause`. (The 6/8 counts above are the PROBE's capability
+fixtures — synthetic receipts — not this bundle's record: the shipped-log test asserts THIS
+artifact's **eight of eight**, with `steps_unobserved` empty.)
 
 ## E3 — the census, and the contradiction it measures
 
@@ -929,7 +930,7 @@ gap, never as "the pipeline skipped VET/classify/search/commit". A receipt that 
 still does not witness a step is the run's own answer, quoted from the witness's values — a flag
 gated the pass off, or the stage produced nothing.
 
-## Dependency state (fresh read `2026-11-02T14:22:24Z` — the committed `blocker-states.json`'s own `checked_at`; the `#9116` row re-read at this PR's head)
+## Dependency state (the `#9116` row re-read at this PR's head; the other rows carry the tracker states recorded in `blocker-states.json` at its `checked_at` `2026-11-02T14:22:24Z` — that record covers 9 of these 12 issues, so `#9076` and `#7947` carry their own closure evidence in the cell, not a stamp)
 
 | issue | state |
 |---|---|
