@@ -2875,11 +2875,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
 def test_every_readme_line_cite_carries_the_sentence_it_quotes():
     """A `README.md:<line>` cite is invisible to every sweep — resolve it here.
 
-    ⛔ WHY (#10601 review round 2). `E1-E5-PROOFS.md` cited `README.md:430-435`
-    for the sentence *"printed, and NOT used to green the row, because the
-    artifact counts atomic Points, not surviving planted units"* — but at this
-    head 430-435 is the E5 re-score SHELL TRANSCRIPT and the quoted sentence had
-    moved to 534-535. It was already stale at the base and every added line
+    ⛔ WHY (#10601 review round 2). `E1-E5-PROOFS.md` cited a line RANGE for the
+    sentence *"printed, and NOT used to green the row, because the artifact
+    counts atomic Points, not surviving planted units"* — but by this head that
+    range was the E5 re-score SHELL TRANSCRIPT and the quoted sentence had moved
+    down again (the numbers are not repeated here: a quoted line number is the
+    very drift this pin exists to catch, and the cite now lives in the document
+    that carries it, re-derived from the file). It was already stale at the base and every added line
     pushed it further, and nothing could see it: `_BUNDLE_CITE` resolves only
     `sdk|edges|extractor_v2`, `_BUNDLE_CITE_PREFIX` requires the file to be one
     of those three, and the bundle's own docs are not sources. A document whose
