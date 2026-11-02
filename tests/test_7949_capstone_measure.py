@@ -1268,6 +1268,91 @@ def test_an_idle_claim_is_run_wide_so_one_session_can_refute_it():
                                        "basis": "the pass assigned 3 kinds"}], accounts
 
 
+def _render_text() -> str:
+    """The probe's real `render_log`, over a minimal but REAL-shaped run."""
+    run = _idle_run(surfaces={
+        "classify_later": {"enabled": True, "s2": {}, "union": {}},
+        "vet": {"enabled": True, "s2": {"kept": 3}}})
+    census = {**_FULL_CENSUS, "object_names": ["Acme"], "anchored_total": 12,
+              "label_counts": {"Point": 10},
+              "relationship_counts": {"aboutObject": 0},
+              "relationship_anchored": {"aboutObject": 0},
+              "point_composition": None}
+    observed, unobserved = measure.observe_steps([run], census)
+    required, accounts, gap = measure.step_accounting(
+        measure.read_conditional(_prereg()), [run], observed)
+    assert gap == "", gap
+    refused = {"outcome": "REFUSED", "value": "0/1", "bar": "1/1"}
+    return measure.render_log(
+        head="a" * 40, prereg_sha=_with_head(),
+        bars={"E5": {"ratio": 0.9, "raw_absolute": 0.8},
+              "floors": {"e1_objects": 30, "e5_rate_min_sentences": 10}},
+        corpus_sha="sha256:" + "d" * 64, graph="capstone_measure_test",
+        runs=[run], observed=observed, unobserved=unobserved,
+        census_data=census,
+        e1={"before_share": 0.5, "after_share": 0.6,
+            "objects_numerator": 25, "objects_total": 25, "sha": "b" * 40,
+            "corpus": "c.json", "corpus_sha256": "sha256:" + "e" * 64,
+            "declared_prereg": "abcd", "declared_result": "REFUSED",
+            "real_facts": 90, "state_values": 14, "fused": 2,
+            "atomic_points": 40},
+        e1_aux={"bare_definite": 1, "share": 0.5},
+        e1_out=refused, e1b_out=refused, e2a_out=refused, e2b_out=refused,
+        e3_out=refused, e4_out=refused,
+        e3={"numerator": 12, "denominator": 12, "below_floor": False,
+            "outcome": "PASS", "bar": "1.0"},
+        e4={"run_id": "w2b", "date": "2026-10-19", "commit": "c" * 40,
+            "corpus_hash": "d" * 64, "judge_pin": "p", "verdict": "RED",
+            "failure_origin": "f", "planted": 15, "edge_correct": 5,
+            "content_ok": 1, "operators_total": 15,
+            "operators_provenanced": 15},
+        e5={"arms_dir": "arms", "artifact": "e5.json", "raw_loss_count": 13,
+            "raw_n": 25, "raw_loss": 0.52, "narrative_loss_count": 1,
+            "narrative_n": 25, "narrative_loss": 0.04,
+            "recall": {"raw": {"recalled": 12, "planted": 25},
+                       "narrative": {"recalled": 24, "planted": 25}},
+            "warning": [], "partial_receipts": []},
+        e5_out={"raw_recovery": 0.48, "ratio": 0.923, "ratio_ok": True,
+                "raw_absolute": 0.48, "raw_ok": False, "outcome": "RED",
+                "bar": "0.9 / 0.8", "narrative_recovery": 0.96},
+        rows=[{"criterion": "E3", "verdict": "GREEN",
+               "evidence_kind": "measurement", "numerator": 12,
+               "denominator": 12, "evidence": "capstone.log",
+               "blocked_by": None, "note": "n"}],
+        out_path="capstone-measured-test.log",
+        required=required, accounts=accounts, steps_gap=gap)
+
+
+def test_the_EMITTED_log_carries_the_split_the_gate_reads():
+    """The wiring: `render_log` must SPLICE the split into the run block.
+
+    Every arm above tests `step_accounting` in isolation, and a helper that is
+    computed and never emitted is exactly the defect this fixes one layer down:
+    `capstone_measure` HAD the observation and emitted no split, so V5 read all
+    eight as required. This drives the real `render_log`, parses the machine block
+    back out of the log text, and asks the shipped gate.
+
+    Non-vacuity is the second half: pop the two keys back off the emitted record —
+    the pre-#10215 run-block shape — and the gate refuses the same GREEN row for
+    S2.3. So this reds if `render_log` stops writing them, which none of the other
+    arms can see.
+    """
+    record = cvc.extract_block(_render_text())
+    run = record["run"]
+    assert run["steps_required"] == [s for s in cvc.STEPS if s != "S2.3"], run
+    assert [entry["step"] for entry in run["steps_conditional"]] == ["S2.3"], run
+    assert run["steps_conditional"][0]["state"] == "idle", run
+    codes = [code for code, _where, _msg in
+             cvc.check(record, repo=_REPO, require_green=False).items]
+    assert "V5" not in codes, codes
+    # ...and without the splice the same record is refused for the REAL fact
+    record["run"].pop("steps_required")
+    record["run"].pop("steps_conditional")
+    v5 = [msg for code, _w, msg in
+          cvc.check(record, repo=_REPO, require_green=False).items if code == "V5"]
+    assert v5 and all("steps not observed in the run: S2.3" in msg for msg in v5), v5
+
+
 # ── E3's Point denominator is disclosed, not silently mixed (F4) ──────────
 
 def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():

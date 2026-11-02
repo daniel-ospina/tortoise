@@ -763,8 +763,8 @@ def completed_rows(*, head: str, corpus_sha: str,
             "denominator": receipt["denominator"] if cid == "E4" else None,
             "corpus_sha256": corpus_sha,
             "sibling": None, "blocked_by": owner,
-            "note": "the run completed all eight steps; this criterion's "
-                    "evidence artifact is still owned by " + owner,
+            "note": "the run completed with all eight steps accounted for; "
+                    "this criterion's evidence artifact is still owned by " + owner,
         })
         if cid in ALSO_BLOCKED_BY:
             rows[-1]["note"] += (f" / the pre-registration half is "
