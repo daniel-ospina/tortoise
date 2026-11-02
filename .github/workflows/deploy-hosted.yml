@@ -846,6 +846,16 @@ jobs:
         # describes the image that actually runs. `false` is a positive claim and
         # is only written when the tree is provably clean — an absent file leaves
         # the field `null` ("NOT STATED"), which is NOT "clean".
+        #
+        # ⚠️ `false` MEANS "no tracked modification and no untracked non-ignored
+        # file", which is narrower than "the image equals the commit". The build
+        # context is filtered by `.dockerignore`, not `.gitignore`, so a GITIGNORED
+        # artefact under a COPY'd path (`tortoise/__pycache__/*.pyc` after any
+        # in-tree python step) would be baked in while this reads clean. No step in
+        # this job creates one today (they write only to /tmp and $runner.temp),
+        # so it is a declared residual rather than a live gap — widening this to
+        # `git ls-files --others --ignored` would flag a normal `.venv`/`dist`
+        # checkout and make every deploy permanently "dirty".
         run: |
           # ⛔ A FAILED READING IS 'unknown', NEVER 'false'. `-e` does not save this:
           # the exit status that decides the branch is `[`'s, not the

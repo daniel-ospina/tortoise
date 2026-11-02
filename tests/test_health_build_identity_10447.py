@@ -167,16 +167,21 @@ def _workflow_step_run(step_name_prefix: str) -> str:
     raise AssertionError(f"no step named {step_name_prefix!r} in deploy-hosted.yml")
 
 
-def _run_record_step(cwd: Path, *, git_available: bool) -> str:
+def _run_record_step(cwd: Path, *, git_available: bool, stamp: Path | None = None) -> str:
     """Execute the workflow's OWN `record the built tree` step and return the stamp
     file's contents.
 
     `PATH` carries `bash` plus the real git binaries when `git_available`, and
     nothing but the system dirs otherwise — so the `git status` FAILURE branch is
     exercised by the same code the deploy runs, not by a mock of it.
+
+    ⛔ THE STAMP FILE LIVES OUTSIDE `cwd` (review P2). It is the OUTPUT of measuring
+    the tree, so a stamp written inside `cwd` makes the tree dirty and a SECOND call
+    on an unchanged tree reads `true` — a trap in the very pin that claims "clean →
+    false".
     """
     body = _workflow_step_run("Record whether the built tree matches the deploy commit")
-    stamp = cwd / "git-dirty"
+    stamp = stamp or (cwd.parent / f"{cwd.name}-git-dirty")
     # The workflow writes a fixed path; substitute a scratch one so a test never
     # touches a real /tmp marker an earlier run left behind.
     body = body.replace("/tmp/tortoise-deploy-git-dirty", str(stamp))
@@ -187,7 +192,7 @@ def _run_record_step(cwd: Path, *, git_available: bool) -> str:
     return stamp.read_text().strip()
 
 
-def _run_payload_read(cwd: Path) -> str:
+def _run_payload_read(cwd: Path, *, stamp: Path | None = None) -> str:
     """Execute the workflow's OWN staging lines for the dirty stamp and return the
     value that would reach Fly.
 
@@ -213,7 +218,8 @@ def _run_payload_read(cwd: Path) -> str:
     start = _index("TORTOISE_GIT_DIRTY_STAMP=", "the dirty reading")
     end = _index("ARGS+=(TORTOISE_GIT_DIRTY=", "TORTOISE_GIT_DIRTY")
     body = "\n".join(lines[start:end + 1])
-    body = body.replace("/tmp/tortoise-deploy-git-dirty", str(cwd / "git-dirty"))
+    stamp = stamp or (cwd / "git-dirty")
+    body = body.replace("/tmp/tortoise-deploy-git-dirty", str(stamp))
     # Emit the staged value: a bare `printf` keeps the assertion about the VALUE.
     body += '\nprintf %s "${ARGS[0]#TORTOISE_GIT_DIRTY=}"'
     proc = subprocess.run([_BASH, "-e", "-c", body], cwd=str(cwd),
@@ -240,6 +246,8 @@ def test_the_deploy_stamps_whether_the_built_tree_was_dirty(tmp_path):
     """
     repo = tmp_path / "build"
     repo.mkdir()
+    # ONE stamp path for both steps, OUTSIDE the measured tree (review P2).
+    stamp = tmp_path / "stamp"
     env = {**_git_env(), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
     subprocess.run(["git", "init", "-q"], cwd=str(repo), env=env, check=True,
@@ -250,23 +258,30 @@ def test_the_deploy_stamps_whether_the_built_tree_was_dirty(tmp_path):
     subprocess.run(["git", "commit", "-qm", "one"], cwd=str(repo), env=env,
                    check=True, capture_output=True)
 
-    assert _run_record_step(repo, git_available=True) == "false", (
+    assert _run_record_step(repo, git_available=True, stamp=stamp) == "false", (
         "a clean tree must stamp `false` — the positive claim"
     )
-    assert _run_payload_read(repo) == "false", (
+    # Twice: the helper's own output must not be able to make the tree dirty
+    # (review P2 — a stamp written INSIDE the measured tree returns `true` on the
+    # second call and would teach the next maintainer that `false` is unreachable).
+    assert _run_record_step(repo, git_available=True, stamp=stamp) == "false", (
+        "a second reading of the same clean tree changed its answer — the stamp "
+        "artifact is inside the tree being measured"
+    )
+    assert _run_payload_read(repo, stamp=stamp) == "false", (
         "the staged argv did not carry the clean reading — this is the `$(< file)` "
         "empty-value bug: the file is present, so an empty/unknown value here "
         "means the reading never reached Fly"
     )
 
     (repo / "f.txt").write_text("2\n")
-    assert _run_record_step(repo, git_available=True) == "true", (
+    assert _run_record_step(repo, git_available=True, stamp=stamp) == "true", (
         "a MODIFIED tree must stamp `true` — otherwise a modified build claims the "
         "commit it names"
     )
-    assert _run_payload_read(repo) == "true", "the dirty reading must reach the argv"
+    assert _run_payload_read(repo, stamp=stamp) == "true", "the dirty reading must reach the argv"
 
-    assert _run_record_step(repo, git_available=False) == "unknown", (
+    assert _run_record_step(repo, git_available=False, stamp=stamp) == "unknown", (
         "an UNREADABLE tree must stamp `unknown` (→ null, NOT STATED). Stamping "
         "`false` here is the false PASS: a positive 'provably clean' claim from a "
         "reading that never happened"
@@ -292,6 +307,41 @@ def test_the_staged_dirty_value_is_never_a_bare_empty_string(tmp_path):
     )
 
 
+def test_the_dirty_stamp_is_recorded_before_the_payload_stages_it():
+    """THE ORDERING IS THE LOAD-BEARING INVARIANT (review P1).
+
+    The producer writes a file and the payload reads it. Swapping the two steps
+    leaves every other pin green — the drift gate executes the payload standalone,
+    never the step sequence — while production stages `unknown` on every run, i.e.
+    `commit_dirty: null` / `build_identified: false` forever: the exact "published
+    with no producer" defect this issue was reopened for, now reading as "cannot
+    check" instead. Measured: moving the record step after the payload step
+    survived 128 tests before this pin existed.
+    """
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / "deploy-hosted.yml")
+                         .read_text(encoding="utf-8"))
+    record = "Record whether the built tree matches the deploy commit"
+    stage = "Set all app secrets on Fly.io"
+    for job_name, job in (doc.get("jobs") or {}).items():
+        names = [str(step.get("name") or "") for step in (job or {}).get("steps") or []]
+        if not any(n.startswith(record) for n in names):
+            continue
+        assert any(n.startswith(stage) for n in names), (
+            f"the record step is in job {job_name!r} but the staging step is not — "
+            "the two must be in the SAME job or the file can never be read"
+        )
+        record_at = next(i for i, n in enumerate(names) if n.startswith(record))
+        stage_at = next(i for i, n in enumerate(names) if n.startswith(stage))
+        assert record_at < stage_at, (
+            f"the record step runs AFTER the staging step in job {job_name!r}: the "
+            "stamp file does not exist yet when the payload reads it, so every "
+            "deploy stages `unknown` and `commit_dirty` is null forever"
+        )
+        return
+    raise AssertionError("deploy-hosted.yml has no step that records the built tree")
+
+
 def test_the_dirty_stamp_is_declared_to_the_fly_drift_gate():
     """The other half of the contract: a name the workflow ASSIGNS must be declared
     in `.github/scripts/fly-managed-secrets.txt`, or `check-fly-secret-drift.py`
@@ -300,6 +350,13 @@ def test_the_dirty_stamp_is_declared_to_the_fly_drift_gate():
     That is why the previous approach (publish the field, file the stamp
     separately) left the field dead; the declaration and the stamp have to land
     together.
+
+    The DERIVING owner of this contract is
+    `tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`
+    (it derives declaration↔payload from the real workflow). This pin is the local
+    readability half and deliberately duplicates ONE line of it; if that owner is
+    ever removed, the invariant loses its deriving reader and this grep alone is
+    not enough.
     """
     declared = (REPO / ".github" / "scripts" / "fly-managed-secrets.txt").read_text(
         encoding="utf-8")

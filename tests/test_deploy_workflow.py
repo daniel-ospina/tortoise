@@ -3951,12 +3951,14 @@ def test_the_health_build_block_is_documented_for_operators():
     Four subtleties ride on this block and every one of them is a misread an
     operator will make under pressure: it deliberately does not fold into
     `status` (so `status: ok` is not "current"), `build_identified: false` is the
-    "cannot check" refusal (not "no build"), `commit_dirty` is **`null` on
-    production today** because nothing stamps `TORTOISE_GIT_DIRTY` (`null` is NOT
-    "clean"), and `migrations_head` is the population the IMAGE carries — not the
-    set applied to the database. A stale deploy with `build_identified: true` and
-    a null `commit_dirty` is exactly the case that reads as clean if the runbook
-    is silent.
+    "cannot check" refusal (not "no build"), `commit_dirty: null` means **NOT
+    STATED** — the deploy now stamps `TORTOISE_GIT_DIRTY` from its own tree
+    (#10447 reopen), so `null` means the reading is missing (selfhost / local dev /
+    an unreadable tree), never "clean" — and `migrations_head` is the population
+    the IMAGE carries — not the set applied to the database. A deployment whose
+    `commit_dirty` is null reports `build_identified: false` with
+    `build_identified_reason: tree_dirt_unstated`, which is the case that reads as
+    clean if the runbook is silent.
 
     Pre-fix this reds at the marker: the runbook's §4 has 4.1 (client effect) and
     4.2 (billing mirror) and nothing about `build`.
