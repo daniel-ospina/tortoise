@@ -18,6 +18,7 @@ fixture repo is the only way to assert the failure direction without mutating th
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import subprocess
@@ -363,6 +364,36 @@ def test_ordering_fails_when_the_log_predates_the_registration(tmp_path, monkeyp
     assert "is an ANCESTOR of the pre-registration's add-commit" in failures[0], failures
 
 
+def test_ordering_is_not_satisfied_by_the_same_second(tmp_path, monkeypatch):
+    """'Same second' is not 'before' — the two files landing in one commit is not an ordering.
+
+    ⛔ THIS IS THE PIN OF THE RECORDED RULING, RESTORED (#10546 review cycle 17, IS-2). `#10463`
+    comment `6564634454` item 1 keeps this verdict: *"Do not relax the guard. Keep 'same second is
+    not before — an ordering that cannot be shown is not an ordering.'"* The earlier revision of
+    this PR deleted it and shipped a pass-path for exactly this tree, which is the decision
+    reversed by DIFF rather than by ruling. It is restored **without any option passed**, so it
+    pins the DEFAULT verdict — the one every caller in CI gets. The proposal's own semantics are
+    pinned separately, behind `--allow-atomic-disclosure`
+    (`test_the_atomic_disclosure_arm_is_opt_in_and_the_ruled_verdict_is_the_default`), so a reader
+    can see both and can see that only one of them is reachable by default.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
+    log = repo / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
+    prereg.parent.mkdir(parents=True, exist_ok=True)
+    prereg.write_text("x\n")
+    log.write_text("x\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "both at once", epoch=1_700_000_000)
+    failures = check.check_ordering(prereg, [log])
+    assert len(failures) == 1
+    assert "not strictly after" in failures[0], failures
+    # And the disclosure arm may not reach it by default: the same tree WITH a complete disclosure
+    # still fails, because the arm is disarmed.
+    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    assert any("not strictly after" in f for f in failures), failures
+
+
 def _atomic_pins(name: str, **overrides) -> dict:
     """A complete atomic-add disclosure for ``name``, as the MACHINE RECORD carries it.
 
@@ -398,6 +429,20 @@ def _atomic_pins(name: str, **overrides) -> dict:
     }
     entry.update(overrides)
     return {name: entry}
+
+
+def _armed(*args, **kwargs) -> list[str]:
+    """``check_ordering`` with the PROPOSED atomic-disclosure arm ARMED (#10546 review cycle 17).
+
+    ⛔ Everything that does not go through this helper runs the DEFAULT — the verdict the recorded
+    ruling on `#10463` comment `6564634454` keeps: *"an ordering that cannot be shown is not an
+    ordering"*. The disclosure machinery below is this PR's **proposal**, and the reopen that would
+    arm it (`6566767704`) is ungranted, so a test that exercises it must say so at the call site.
+    Nothing in CI passes `--allow-atomic-disclosure`; the default path is pinned separately, and
+    most emphatically by `test_ordering_is_not_satisfied_by_the_same_second`.
+    """
+    kwargs["allow_atomic_disclosure"] = True
+    return check.check_ordering(*args, **kwargs)
 
 
 def _two_commits_same_second(repo: Path, log_first: bool,
@@ -676,7 +721,7 @@ def test_a_merge_landing_the_pair_unchanged_is_not_a_late_edit(tmp_path, monkeyp
     prereg, log = _both_in_one_commit(repo, epoch=1_700_000_000)
     _git(repo, "checkout", "-q", "-")
     _git(repo, "merge", "-q", "--no-ff", "-m", "land the pair", "feat", epoch=1_700_000_500)
-    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    failures = _armed(prereg, [log], None, None, None, _atomic_pins(log.name))
     assert failures == [], failures
 
 
@@ -698,26 +743,52 @@ def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, P
 
 
 def test_an_undisclosed_atomic_add_fails(tmp_path, monkeypatch):
-    """Same commit + no disclosure is still a FAILURE, and it names the ORDINARY cause (#10529).
+    """Same commit + no disclosure is a FAILURE on BOTH paths, and each names its own cause.
 
-    The pre-fix message read "not strictly after", which is what made #10468 permanently red: a
-    squash merge can never satisfy it. The verdict must stay a failure — a laundering commit has
-    this exact shape — but the diagnosis must name it.
+    ⛔ THE DEFAULT IS THE RULED REFUSAL (#10546 review cycle 17, IS-1/IS-2). The earlier revision of
+    this PR replaced the pre-fix message ("not strictly after") with "the SAME commit that added …",
+    which quietly retired the sentence the recorded ruling keeps verbatim. Here the unarmed call
+    keeps that refusal, and only the ARMED call — the proposal — offers the disclosure as a route.
     """
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
+    # DEFAULT: the ruling's verdict, with the ruled sentence still in it.
     failures = check.check_ordering(prereg, [log])
+    assert len(failures) == 1, failures
+    assert "not strictly after" in failures[0], failures
+    assert "6564634454" in failures[0], failures
+    # ARMED (the proposal): a failure that names the atomic cause and the disclosure route.
+    failures = _armed(prereg, [log])
     assert len(failures) == 1, failures
     assert "the SAME commit that added" in failures[0], failures
     assert check.ATOMIC_ADD_KEY in failures[0], failures
 
 
+def test_the_atomic_disclosure_arm_is_opt_in_and_the_ruled_verdict_is_the_default(
+        tmp_path, monkeypatch):
+    """NON-VACUITY of the disarm (#10546 review cycle 17, IS-1): one tree, two verdicts, one flag.
+
+    This is the finding's whole substance made executable. The SAME tree carrying a COMPLETE, valid,
+    resolvable disclosure — the best case the proposal can ever have — is RED without the flag and
+    GREEN with it. If a later lane arms the arm by default, the first assertion goes green-with-a-
+    notice and this test fails, which is exactly the review the ruling asks for.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    pins = _atomic_pins(log.name)
+    disarmed = check.check_ordering(prereg, [log], None, None, None, pins)
+    assert disarmed, "the ruled verdict must be a refusal even with a complete disclosure"
+    assert "not strictly after" in disarmed[0], disarmed
+    assert "waives nothing unless the caller arms" in disarmed[0], disarmed
+    assert _armed(prereg, [log], None, None, None, pins) == []
+
+
 def test_a_disclosed_atomic_add_passes_and_is_reported(tmp_path, monkeypatch):
-    """The disclosure is what turns an unprovable pair into a DECLARED one — never a silent pass."""
+    """ARMED: the disclosure turns an unprovable pair into a DECLARED one — never a silent pass."""
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     added: list[str] = []
-    failures = check.check_ordering(prereg, [log], None, None, added, _atomic_pins(log.name))
+    failures = _armed(prereg, [log], None, None, added, _atomic_pins(log.name))
     assert failures == [], failures
     assert added == [log.name]
 
@@ -732,8 +803,8 @@ def test_the_three_argument_form_agrees_with_the_reported_one(tmp_path, monkeypa
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     pins = _atomic_pins(log.name)
-    assert check.check_ordering(prereg, [log], None, None, None, pins) == []
-    assert check.check_ordering(prereg, [log], None, None, [], pins) == []
+    assert _armed(prereg, [log], None, None, None, pins) == []
+    assert _armed(prereg, [log], None, None, [], pins) == []
 
 
 def test_an_atomic_and_unscored_log_may_be_disclosed(tmp_path, monkeypatch):
@@ -741,7 +812,7 @@ def test_an_atomic_and_unscored_log_may_be_disclosed(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
-    assert check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name)) == []
+    assert _armed(prereg, [log], None, None, None, _atomic_pins(log.name)) == []
 
 
 def test_a_typed_shrug_is_not_a_disclosure(tmp_path, monkeypatch):
@@ -804,7 +875,7 @@ def test_branch_commits_need_not_resolve_because_a_squash_hides_them(tmp_path, m
     pins = _atomic_pins(
         log.name, branch_commits=["deadbeef1 the branch commit a squash made unreachable"]
     )
-    assert check.check_ordering(prereg, [log], None, None, None, pins) == []
+    assert _armed(prereg, [log], None, None, None, pins) == []
 
 
 def _rev(repo: Path, ref: str) -> str:
@@ -864,7 +935,7 @@ def test_a_real_squash_disclosure_is_verified_and_a_forged_squash_is_refused(tmp
         branch_commits=[f"{sha[:9]} a branch commit the squash collapsed" for sha in branch],
         squash_merge=f"{squash[:9]} the merged commit",
     )
-    assert check.check_ordering(prereg, [log], None, None, None, honest) == []
+    assert _armed(prereg, [log], None, None, None, honest) == []
     # The commits it names are really here, so the CLI has nothing to disclaim.
     assert check._unverified_history_note(honest[log.name]) == ""
 
@@ -1059,7 +1130,7 @@ def test_a_disclosure_for_a_normally_ordered_log_fails(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_000)
     log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_100)
-    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    failures = _armed(prereg, [log], None, None, None, _atomic_pins(log.name))
     assert len(failures) == 1, failures
     assert "not one" in failures[0], failures
 
@@ -1080,7 +1151,7 @@ def test_the_attack_is_still_undeclarable(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_000)
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
-    failures = check.check_ordering(prereg, [log], None, None, None, _atomic_pins(log.name))
+    failures = _armed(prereg, [log], None, None, None, _atomic_pins(log.name))
     assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
     assert any("not one" in f for f in failures), failures
 
@@ -1879,6 +1950,23 @@ def test_the_touch_history_sees_a_merge_commit(tmp_path, monkeypatch):
 
     Without `--full-history` a `--no-ff` merge that touched the exempt log was absent from the
     epochs, so the content bound could miss an edit landed on a side branch.
+
+    ⛔ THE BEHAVIOURAL ASSERTION ALONE DID NOT PIN IT (#10546 review cycle 17, IS-4). Measured on
+    this repo: the side edit is `late` on its own, so `failures[0]` is the SAME with or without the
+    flag — the test would stay green for a lane that deleted `--full-history`, which is a guard that
+    stopped guarding. The two assertions below are the pin, and they are non-vacuous by measurement:
+    on this exact history the merge sha appears in `_touch_commits` and NOT in a plain
+    `git log --format=%H -- <path>`, so removing the flag fails the second one.
+
+    ⛔ AND WHY THERE IS NO "THE MERGE IS THE ONLY LATE COMMIT" CASE. The reviewer asked for one and
+    it cannot be built, measured rather than assumed: `_late_touches` counts a commit only when it
+    CHANGED the blob, so a merge that carries content through unchanged is skipped — and a merge
+    whose blob differs must have got that content somewhere. If it came from a side commit, that
+    side commit is not an ancestor of the registration (else the registration's snapshot would
+    already hold it, making the merge blob-equal) and is therefore late too; if the merge itself
+    introduced it (an "evil merge"), plain `git log` lists it as well (measured), so `--full-history`
+    buys nothing. A merge is therefore never the SOLE late commit — which is exactly why the flag
+    had to be pinned directly rather than through a verdict.
     """
     repo = _repo(tmp_path, monkeypatch)
     log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000)
@@ -1892,8 +1980,57 @@ def test_the_touch_history_sees_a_merge_commit(tmp_path, monkeypatch):
     _git(repo, "commit", "-q", "-m", "side edit", epoch=1_700_000_050)
     _git(repo, "checkout", "-q", "-")
     _git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side", epoch=1_700_000_200)
+    # THE PIN: the merge is TREESAME to the side parent for this path, so history simplification
+    # drops it — and `_touch_commits` must still see it, or the content bound can be walked past.
+    merge_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert merge_sha in check._touch_commits(log), "the merge landing the edit is invisible"
+    simplified = subprocess.run(
+        ["git", "log", "--format=%H", "--", str(log.relative_to(repo))],
+        cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.split()
+    assert merge_sha not in simplified, (
+        "this history no longer demonstrates the hazard: plain `git log` now shows the merge, so "
+        "the `--full-history` pin above proves nothing"
+    )
     failures = check.check_ordering(prereg, [log], _exempt())
     assert failures and "not an ancestor of" in failures[0], failures
+
+
+def test_neither_the_cli_nor_run_arms_the_disclosure_by_default(monkeypatch, capsys):
+    """The DISARM must survive the seam, not only `check_ordering` (#10546 review cycle 17, IS-1).
+
+    `check_ordering` is where the verdict is decided, but `run()` and `main()` are what CI actually
+    invokes — an arm defaulted on at either of those would make the ruling's refusal unreachable no
+    matter what the inner function says. Captured at the call boundary, so this costs no bundle.
+    """
+    seen: list[bool] = []
+
+    def fake_run(*_args, **kwargs):
+        seen.append(kwargs.get("allow_atomic_disclosure"))
+        return {"document": "d", "rows": [], "evidence_logs": [], "ok": True,
+                "failures": [], "ordering": "verified", "run_order_claim": "verified"}
+
+    monkeypatch.setattr(check, "run", fake_run)
+    assert check.main(["--dir", "docs/evidence/7949-capstone"]) == 0
+    assert check.main(["--dir", "docs/evidence/7949-capstone", "--allow-atomic-disclosure"]) == 0
+    capsys.readouterr()
+    assert seen == [False, True], seen
+
+
+def test_run_defaults_to_the_ruled_verdict_not_the_proposal():
+    """`run()`'s default is the RULED verdict, and a future lane must change it on purpose.
+
+    `run()` is the seam CI calls. Its default is asserted by signature here rather than by building
+    a full bundle (the bundle schema is a separate fixture); `main()`'s wiring of the same flag is
+    pinned in `test_neither_the_cli_nor_run_arms_the_disclosure_by_default`. Together they mean the
+    arm cannot be switched on by an edit that only touches one of the three layers.
+    """
+    assert (inspect.signature(check.run)
+            .parameters["allow_atomic_disclosure"].default is False)
+    assert (inspect.signature(check.check_ordering)
+            .parameters["allow_atomic_disclosure"].default is False)
 
 
 # ── round-5: shallow CI, glued markers, unreadable status, wrong-typed inputs ──

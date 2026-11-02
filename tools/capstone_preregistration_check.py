@@ -44,16 +44,25 @@ It verifies five things, and it fails on each of them for a specific reason:
    whose author could already see it**. An exempt log stays unscored forever; the moment E1/E2 are
    re-run, the new log must postdate this file or the check fails.
 
-   **The FOURTH outcome — ATOMIC ADD, and why the rule is split (#10529).** The comparison above is
+   **The FOURTH outcome — ATOMIC ADD, and why the rule is split (#10529) — GATED OFF BY DEFAULT.**
+   The comparison above is
    ``log_add_epoch <= prereg_add_epoch`` → fail. That ``<=`` conflated two different states, and one
    of them is unsatisfiable: a repo that SQUASH-merges collapses an ordered branch's two commits
    into one, so ``git log --diff-filter=A`` reports ONE add-commit for the registration and its log.
    ``#10468`` was merged that way and red-ed main permanently, blocking every PR in the queue.
 
-   The verdict is now decided by COMMIT IDENTITY and ANCESTRY, not by the epoch — ``%ct`` is
-   attacker-controlled (``GIT_COMMITTER_DATE``), so an epoch comparison both admits the attack and
-   accuses an honest pair. `Atomicity is identical-SHA`: `epoch` survives only to name a commit in
-   a message.
+   ⛔ **THE ARM BELOW IS A PROPOSAL, NOT A VERDICT — it runs only under
+   ``--allow-atomic-disclosure``, which nothing in CI passes (#10546 review cycle 17, IS-1).** The
+   ruling on ``#10463`` (comment ``6564634454``) refuses the shape: item 1 *"Do not relax the guard.
+   Keep 'same second is not before — an ordering that cannot be shown is not an ordering.'"*, item 4
+   *"Change WHAT the guard compares"* (base ancestry, implemented on ``#10548``), and its marker
+   states **OVERRIDES:** *deriving the ordering from commits inside the pull request, rather than
+   from the base branch*. The reopen that would be needed (requested at ``6566767704``) has not been
+   granted, so the DEFAULT path keeps an atomic pair a refusal and treats any disclosure in the
+   record as inert rather than as a waiver. Arming it is a one-line default change, and doing that
+   without the ruling would be adopting over a decision — this module may not.
+
+   With the arm ARMED, the verdict is decided by COMMIT IDENTITY and ANCESTRY, not by the epoch —
 
    * the log's add-commit is an **ancestor** of the registration's — the log was added BEFORE the
      thresholds. **The attack this check exists for. A HARD FAIL that no disclosure can waive.**
@@ -1050,6 +1059,11 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
 #: The MACHINE RECORD key that discloses an ATOMIC ADD: a pre-registration and an evidence log that
 #: entered the repository in the SAME commit. Per-log: ``{log name: {reason, branch_commits}}``.
 #:
+#: ⛔ IT IS NOT A WAIVER UNLESS THE ARM IS ARMED (#10546 review cycle 17, IS-1). The block is read
+#: only when ``--allow-atomic-disclosure`` is passed; without it an atomic pair is REFUSED and a
+#: present block is reported as inert. The ruling on ``#10463`` (comment ``6564634454``) keeps the
+#: refusal and its reopen (``6566767704``) is ungranted; see ``check_ordering`` for the full ground.
+#:
 #: ⛔ WHY THIS EXISTS AND WHY IT IS NOT ROUTE B (#10529) — the full argument is in the module
 #: docstring's "FOURTH outcome" section; one copy on purpose, so the two cannot rot apart. In short:
 #: ``<=`` conflated two states, and only one of them is an attack. The verdict is decided by COMMIT
@@ -1235,11 +1249,29 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                    atomic_disclosures: dict | None = None,
                    atomic_detail: dict | None = None,
                    record_unreadable: bool = False,
-                   unreadable_atomic: list[str] | None = None) -> list[str]:
+                   unreadable_atomic: list[str] | None = None,
+                   allow_atomic_disclosure: bool = False) -> list[str]:
     """``[]`` when every log is either after the registration or provably unscored.
 
     ``atomic_disclosures`` is the machine record's ``atomic_add_ordering`` block — the record, NOT
     the pins block (see ``ATOMIC_ADD_KEY`` for why the distinction is load-bearing).
+
+    ⛔ ``allow_atomic_disclosure`` IS OFF BY DEFAULT, AND THAT IS THE WHOLE POINT (#10546 review
+    cycle 17, IS-1/IS-2). The disclosure arm answers "the pre-registration and its log entered in
+    ONE commit" with a PASS gated by a record the CHECKED PARTY authors. That is the opposite of
+    what `#10463` comment `6564634454` rules, verbatim item 1: *"Do not relax the guard. Keep 'same
+    second is not before — an ordering that cannot be shown is not an ordering.'"*, and item 4
+    fixes WHAT must be compared (base ancestry, not commits inside the pull request) — carrying the
+    marker *"OVERRIDES: deriving the ordering from commits inside the pull request, rather than
+    from the base branch"*. The reopen that ruling requires (requested at `6566767704`) has NOT
+    been granted, so the mechanism is this PR's PROPOSAL, not its result.
+
+    The flag is how the tree keeps obeying the decision it currently obeys while the proposal stays
+    deliverable and tested: with the flag absent — every caller in CI, every default invocation —
+    an atomic pair is the ruled REFUSAL, and a disclosure in the record is not a waiver at all (it
+    is reported as inert rather than silently ignored, so no author can believe they disclosed
+    something). Nothing in CI passes it. If the owner grants the reopen, arming it is a one-line
+    default change plus a comment pointing at the ruling that granted it.
 
     ``exempted``, when given, is APPENDED with the name of every log the content arm exempted
     (#9089), and ``atomic_added`` with every log whose ordering was disclosed as an ATOMIC ADD
@@ -1272,7 +1304,12 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # that, and this half must not also demand a disclosure into a file that cannot be read. It is a
     # separate flag rather than "disclosures is None", so the plain three-argument form every test
     # and any future caller uses keeps its meaning (#10529 review cycle 6, P2).
-    atomic = dict(atomic_disclosures or {})
+    declared_atomic = dict(atomic_disclosures or {})
+    #: The disclosures this run treats as a GROUND for an ordering verdict. The block is still
+    #: VALIDATED when the arm is disarmed — a stale or malformed disclosure is a finding either way,
+    #: and its diagnosis is the only thing that tells an author what to fix — but it can never turn
+    #: an atomic pair into a pass (#10546 review cycle 17, IS-1).
+    atomic = declared_atomic
     #: Set by the arms below: the logs this tree PROVES entered with the registration. Distinct from
     #: the ``atomic_added`` out-param on purpose — the out-param reports, this decides.
     atomic_seen: set[str] = set()
@@ -1490,7 +1527,22 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         if atomic_pair:
             # ATOMIC ADD (#10529): the pair entered the repository in ONE commit — a squash merge of
             # an ordered branch, or a single commit written after the numbers were read. The git
-            # object is identical, so the comparison answers nothing; the disclosure is required.
+            # object is identical, so the comparison answers nothing.
+            #
+            # ⛔ AND THAT IS WHERE IT STOPS UNLESS THE ARM IS ARMED (#10546 review cycle 17,
+            # IS-1/IS-2). Disarmed — the default, and every caller in CI — the pair is the REFUSAL
+            # the recorded ruling keeps: "same second is not before — an ordering that cannot be
+            # shown is not an ordering". The disclosure below is then inert by construction; the
+            # record is still VALIDATED (its diagnosis is what tells an author what is wrong) but it
+            # is never a ground for a pass.
+            refusal = (
+                f"{log.name}: added at {log_epoch} which is not strictly after the "
+                f"pre-registration's add-commit {prereg_epoch} — the registration and this log "
+                f"entered in the SAME commit ({log_sha[:9]}), so git cannot show which came first, "
+                f"and an ordering that cannot be shown is not an ordering (#10463 comment "
+                f"6564634454 rules this stays a refusal). It does not prove it measured nothing "
+                f"({why})"
+            )
             if log.name in disclosure_failed:
                 continue  # the specific field failure is already reported above
             if log.name not in atomic:
@@ -1508,12 +1560,25 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     if unreadable_atomic is not None:
                         unreadable_atomic.append(log.name)
                     continue
+                if not allow_atomic_disclosure:
+                    failures.append(refusal)
+                    continue
                 failures.append(
                     f"{log.name}: added at {log_epoch} by the SAME commit that added "
                     f"{PREREG_NAME} ({log_sha[:9]}) — the ordering is atomic, so git cannot show "
                     f"which came first (a squash merge of an ordered branch and one commit "
                     f"written after the numbers look identical). Disclose it under "
                     f"{MACHINE_RECORD}.{ATOMIC_ADD_KEY} or the ordering is unproven."
+                )
+                continue
+            if not allow_atomic_disclosure:
+                # A complete, valid disclosure is still not a waiver while the arm is disarmed — and
+                # saying so HERE, rather than silently red-ing, is what stops an author from adding
+                # a record entry that cannot possibly change the verdict.
+                failures.append(
+                    refusal + f". The disclosure under {MACHINE_RECORD}.{ATOMIC_ADD_KEY} is "
+                    "well-formed, but it waives nothing unless the caller arms the proposed arm "
+                    "(--allow-atomic-disclosure)"
                 )
                 continue
             # `log.name` is provably in `atomic` from here on.
@@ -1564,7 +1629,13 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # ordered log is a waiver granted where none is needed — and a waiver that is routine is the
     # silent-pass shape this tool refuses. Read from ``atomic_seen``, the STATE, never from the
     # caller's out-param (#10529 review P1).
-    for name in sorted(set(atomic) & present):
+    #
+    # ⛔ SKIPPED ENTIRELY WHILE THE ARM IS DISARMED (#10546 review cycle 17, IS-1). Under the ruled
+    # semantics an atomic pair never reaches the pass-path, so `atomic_seen` cannot contain it and
+    # this loop would emit the FALSE "discloses X as an atomic add, but it is not one" — the exact
+    # misdescription the cycle-3 fix removed, restored by disarming. The refusal arm above already
+    # said why the log is red; the disclosure is not stale, it is inert, and inert is not rot.
+    for name in (sorted(set(atomic) & present) if allow_atomic_disclosure else ()):
         # A disclosure that is genuinely atomic but malformed was already told so — and telling it
         # "but it is not one" would be FALSE, since it is (#10529 review cycle 3, P2). The same
         # applies to a log whose add-commit could not be read AT ALL: its state is UNKNOWN, and a
@@ -1949,7 +2020,14 @@ def check_pins(pins: dict, derived: dict) -> list[str]:
 # ── entry point ─────────────────────────────────────────────────────────────
 
 
-def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
+def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
+        allow_atomic_disclosure: bool = False) -> dict:
+    """The report for one bundle.
+
+    ``allow_atomic_disclosure`` arms the ATOMIC-ADD disclosure pass-path, and it is OFF by default
+    on purpose (#10546 review cycle 17, IS-1): the recorded ruling on `#10463` keeps an atomic pair
+    a refusal, and the arm is this PR's proposal rather than its result. See ``check_ordering``.
+    """
     prereg = directory / PREREG_NAME
     if not prereg.is_file():
         raise CheckError(f"no {PREREG_NAME} in {directory}")
@@ -1994,6 +2072,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
             ordering_findings = check_ordering(
                 prereg, logs, pins, content_exempt, atomic_added, disclosures, atomic_detail,
                 record_unreadable=disclosures is None, unreadable_atomic=unreadable_atomic,
+                allow_atomic_disclosure=allow_atomic_disclosure,
             )
             failures += ordering_findings
             report["ordering_exempt"] = sorted(content_exempt)
@@ -2094,6 +2173,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-corpus", action="store_true",
                     help="skip the corpus pin re-derivation")
     ap.add_argument("--json", action="store_true", help="emit the report as JSON")
+    ap.add_argument("--allow-atomic-disclosure", action="store_true",
+                    help="exercise the PROPOSED atomic-add disclosure arm: a pre-registration and "
+                         "its log that entered in ONE commit PASS when ``%s`` in the machine "
+                         "record discloses it. OFF by default because the ruling on #10463 keeps an "
+                         "atomic pair a REFUSAL (\"same second is not before — an ordering that "
+                         "cannot be shown is not an ordering\"); the reopen that would arm this is "
+                         "requested on #10463 and not granted, so nothing in CI passes it."
+                         % ATOMIC_ADD_KEY)
     args = ap.parse_args(argv)
 
     directories = []
@@ -2106,7 +2193,8 @@ def main(argv: list[str] | None = None) -> int:
     for directory in directories:
         try:
             reports.append(run(directory, use_git=not args.no_git,
-                               use_corpus=not args.no_corpus))
+                               use_corpus=not args.no_corpus,
+                               allow_atomic_disclosure=args.allow_atomic_disclosure))
         except CheckError as exc:
             errors.append((directory, str(exc)))
     # 2 outranks 1 on purpose: "I could not check this subject" is a different answer from "I
