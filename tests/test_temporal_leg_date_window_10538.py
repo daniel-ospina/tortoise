@@ -198,8 +198,18 @@ def test_a_pick_never_re_adds_a_session_the_visible_head_already_holds():
     half of the budget re-adding ``sA`` — the session owning 8 of the 10
     visible slots, i.e. the one the reader already has — and EVICTED ``b3``
     (``sB``, a DIFFERENT session) from the 12-window: the inverse of the
-    unit's objective. Pre-fix this probe yields ``picks == ['c1', 'a8']`` with
-    ``b3`` at index 12."""
+    unit's objective.
+
+    Review cycle 7 found the SAME shape one slot further along: the exclusion
+    stopped at the promotion ceiling (``candidates[:head + 1]`` = ``[:11]``)
+    while the reader sees ``candidates[:12]``, so the pick this geometry
+    produced was ``c1`` — ``pool[11]``, an id already inside the visible
+    window. Every bucket within reach here (``b3``/``sB`` at 10, ``c1``/``sC``
+    at 11, ``a8``/``sA`` at 12) is one the reader already holds, so the honest
+    verdict is that this pool has nothing new to promote: the arm must go
+    INERT rather than report ``applied`` for a reorder that widens nothing.
+    Pre-fix this probe yields ``picks == ['c1']`` and a reordered window.
+    """
     pool = (
         [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
           "content": "alpha"} for i in range(8)]
@@ -219,19 +229,64 @@ def test_a_pick_never_re_adds_a_session_the_visible_head_already_holds():
     order, picks = temporal_leg_fusion_order(
         pool, anchors=(), window=12, limit=2,
         date_window=("2023-04-10", "2023-04-20"))
-    assert picks == ["c1"], picks
-    head_sessions = {c["session_id"] for c in pool[:10]}
-    assert not head_sessions & {session_of[p] for p in picks}, (
-        f"a pick re-added a session the visible head already holds: "
-        f"head={sorted(head_sessions)} picks="
+    # Every bucket the reader's 12-window holds is out of reach, so there is
+    # nothing to promote. Pre-fix the exclusion stopped at index 11 and this
+    # spent the budget on ``c1`` (``pool[11]``, already visible).
+    assert picks == [], (
+        f"a pick was spent on an id the reader's window already holds: "
         f"{[(p, session_of[p]) for p in picks]}")
-    # ...and the slot it spent must not evict a DIFFERENT session from the
-    # window (pre-fix ``b3`` fell out at index 12).
+    assert order == base, (
+        f"an inert window leg reordered the pool: {order}")
+    # ...and the slot the ceiling-only slice would have spent must not evict a
+    # DIFFERENT session from the window either.
     assert order.index("b3") < 12, (
-        f"the pick evicted b3/sB from the reader's window: {order}")
-    assert order != base, "a windowed pick must move something (non-vacuity)"
-    assert ({session_of[i] for i in order[:12]}
-            >= {session_of[i] for i in base[:12]}), "session coverage must not drop"
+        f"a pick evicted b3/sB from the reader's window: {order}")
+
+
+def test_the_budget_is_spent_below_the_reader_window_not_on_visible_ids():
+    """Review cycle 7 (#10549), the case where a genuinely NEW session exists:
+    ``window=12, limit=2`` ⇒ ``ceiling=10``, head = ``sA``×10, ``b1``/``sB`` at
+    10, ``c1``/``sC`` at 11, ``d1``/``sD`` at 12, ``e1``/``sE`` at 13.
+
+    ``b1`` and ``c1`` are both inside the reader's window (indices 10 and 11),
+    so neither buys a session the reader does not already have; ``d1`` and
+    ``e1`` are the only net-new buckets. A ceiling-only exclusion
+    (``candidates[:head + 1]`` = ``[:11]``) reaches neither ``c1``'s bucket nor
+    the visible-window bound, so it halves the budget: measured
+    ``picks == ['c1', 'd1']`` — one wasted pick, one of two net-new sessions
+    delivered. Excluding the reader WINDOW (``candidates[:window]``) gives
+    ``['d1', 'e1']``: the full budget, spent on two new sessions."""
+    pool = (
+        [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
+          "content": "alpha"} for i in range(10)]
+        + [{"id": "b1", "session_id": "sB", "session_date": "2023-04-12",
+            "content": "alpha"},
+           {"id": "c1", "session_id": "sC", "session_date": "2023-04-13",
+            "content": "alpha"},
+           {"id": "d1", "session_id": "sD", "session_date": "2023-04-14",
+            "content": "alpha"},
+           {"id": "e1", "session_id": "sE", "session_date": "2023-04-15",
+            "content": "alpha"}]
+    )
+    bucket_of = {c["id"]: (c["session_date"], c["session_id"]) for c in pool}
+    window = 12
+    seen_buckets = {bucket_of[c["id"]] for c in pool[:window]}
+    seen_ids = {c["id"] for c in pool[:window]}
+
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=window, limit=2,
+        date_window=("2023-04-10", "2023-04-20"))
+
+    assert picks == ["d1", "e1"], (
+        f"the budget was spent on a bucket the reader already holds: {picks}")
+    # The invariant the code comment states, stated at the window bound.
+    assert not (set(picks) & seen_ids), (
+        f"a pick re-emitted an id inside the reader's window: {picks}")
+    assert not ({bucket_of[p] for p in picks} & seen_buckets), (
+        f"a pick re-emitted a bucket the reader already holds: "
+        f"{[(p, bucket_of[p]) for p in picks]}")
+    assert order != [c["id"] for c in pool], (
+        "the windowed arm reported picks but moved nothing")
 
 
 def test_the_head_placement_arm_declines_on_an_unclustered_window():

@@ -357,6 +357,13 @@ no candidate is dated, which the caller treats as "leg inert".
     # contract), not the index within the date-filtered list: an undated
     # candidate sitting in the head must not shift the boundary downward
     # and silently make a deep anchor match unpromotable.
+    #
+    # ⚠️ ``head`` is the caller's PROMOTION boundary, not its reader window:
+    # the fused caller passes ``ceiling = window - limit`` (where its picks
+    # START), so this slice reaches ``limit - 1`` slots INTO the window. That
+    # is deliberate for phase 1 (the anchor path is measured as-is, #2976) and
+    # the window branch's own exclusion — :data:`held_buckets` — is what keeps
+    # the window path from re-emitting an id the reader already sees.
     promotable = [c for i, c in enumerate(candidates)
                   if i >= max(head, 0) and c.get("session_date")]
     if not promotable:
@@ -458,8 +465,24 @@ no candidate is dated, which the caller treats as "leg inert".
             # EVICTED ``b3``/``sB`` (a different session) from the window: the
             # inverse of the unit's objective. Every bucket the head holds is
             # therefore excluded, not just the one at the boundary.
+            #
+            # ⚠️ And the slice must be the READER WINDOW, not the promotion
+            # ceiling (review cycle 7). ``head`` is ``ceiling = window -
+            # limit`` — where the caller's picks start — while the reader sees
+            # ``candidates[:window]`` (``retrieve.py`` truncates the pool to
+            # ``effective_top_k``). Excluding only ``[:head + 1]`` left the
+            # window's own tail slots (``head + 1 .. window - 1``, ``limit - 1``
+            # of them) promotable, so at the shipped geometry a pick was spent
+            # re-emitting ``candidates[window - 1]`` — an id the reader already
+            # has — while a genuinely new bucket below the window went
+            # unpromoted: measured ``window=12, limit=2`` on a ``sA``×10 head
+            # with ``b1``/``sB`` at 10, ``c1``/``sC`` at 11, ``d1``/``sD`` at
+            # 12, ``e1``/``sE`` at 13 gave ``['c1','d1']`` (one wasted pick)
+            # where this slice gives ``['d1','e1']``. ``window`` only participates
+            # when the caller supplies it; a direct caller passing a bare
+            # ``head`` keeps the ``head + 1`` slice it has always had.
             held_buckets = {_bucket_key(c)
-                            for c in candidates[:max(head, 0) + 1]}
+                            for c in candidates[:max(head + 1, window)]}
         if not relevant:
             return []
 
