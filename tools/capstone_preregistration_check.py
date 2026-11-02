@@ -2175,12 +2175,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit the report as JSON")
     ap.add_argument("--allow-atomic-disclosure", action="store_true",
                     help="exercise the PROPOSED atomic-add disclosure arm: a pre-registration and "
-                         "its log that entered in ONE commit PASS when ``%s`` in the machine "
-                         "record discloses it. OFF by default because the ruling on #10463 keeps an "
-                         "atomic pair a REFUSAL (\"same second is not before — an ordering that "
-                         "cannot be shown is not an ordering\"); the reopen that would arm this is "
-                         "requested on #10463 and not granted, so nothing in CI passes it."
-                         % ATOMIC_ADD_KEY)
+                         f"its log that entered in ONE commit PASS when ``{ATOMIC_ADD_KEY}`` in the "
+                         "machine record discloses it. OFF by default because the ruling on #10463 "
+                         "keeps an atomic pair a REFUSAL (\"same second is not before — an ordering "
+                         "that cannot be shown is not an ordering\"); the reopen that would arm "
+                         "this is requested on #10463 and not granted, so nothing in CI passes it.")
     args = ap.parse_args(argv)
 
     directories = []
