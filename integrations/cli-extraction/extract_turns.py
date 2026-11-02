@@ -186,10 +186,11 @@ def _turn_order(row) -> tuple:
     return (sid, index)
 
 
-#: One graph row -> one turns-file record. The `by` key carries the turn ROLE
+#: One graph row -> one turns-file record. `by` carries the turn ROLE
 #: (`speaker`), which is what `build_transcripts` renders as the prompt's
 #: per-line speaker and what lets the engine separate user text from assistant
-#: text. `kind` rides along for the writer's tiering.
+#: text. `kind` mirrors the point's `pointKind`; it is informational only (no
+#: reader consumes it, and the query pins `pointKind = 'event'`).
 def _turn_record(row) -> dict:
     role, text = row[2], row[3] or ""
     framed = _FRAME_RE.match(text)
@@ -203,16 +204,18 @@ def _turn_record(row) -> dict:
 def dump(out: Path, allow_empty: bool = False):
     """Pull the captured session turns out of the container.
 
-    This is the integration's ONE private graph read. The per-session walk is
-    public (`sdk.get_session`, which also serves record-held turns); what no
-    public API offers is an ENUMERATION of captured `:Session` nodes
-    (`search_sessions` searches indexed `AgentSession` Events, not the durable
-    `:Session`), and an all-sessions dump needs exactly that. Everything else
-    goes through public SDK doors. Fails loudly on zero rows unless
-    --allow-empty: an empty capture usually means capture is off, the schema
-    moved, or — on a deployment with the Postgres record armed
-    (`TORTOISE_RECORD_DSN`) — the turns live in the RECORD and this lane's
-    graph-only read finds none (#10000).
+    This is the integration's ONE private graph read. A public session-id route
+    does exist (`sdk.get_events(eventKind="sessionCaptured")` -> `get_session`),
+    but the Event index is best-effort (its write is non-fatal and minted only
+    on a fresh capture, so it silently misses sessions) and `get_session`'s
+    graph arm serves turns `ORDER BY t.id`, i.e. lexicographically (`t10`
+    before `t2`). The `CONTAINS` read is chosen for completeness and one round
+    trip, not because no public route exists. Everything else goes through
+    public SDK doors. Fails loudly on zero rows unless --allow-empty: an empty
+    capture usually means capture is off, the schema moved, or — on a
+    deployment with the Postgres record armed (`TORTOISE_RECORD_DSN`) — the
+    turns live in the RECORD and this lane's graph-only read finds none
+    (#10000; `sdk.get_session()` serves those).
     """
     ns = _cfg("TORTOISE_NAMESPACE", "selfhost")
     log = _cfg("TORTOISE_EVENT_LOG", f"/data/events/{ns}.jsonl")

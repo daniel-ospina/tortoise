@@ -10,11 +10,12 @@ turns into tiered graph Points using subscriptions you already have.
 No SDK or MCP surface changes: this is a client-side integration. Its writes
 go through public SDK doors (`create_point`, `set_source_tier`,
 `get_source_reliability`, `compute_confidence`, `query`); `dump` uses one
-private read (`sdk._get_proj().g`) — not because the per-session walk is
-private (it is public: `sdk.get_session()`, which also serves record-held
-turns), but because **no public API enumerates captured `:Session` nodes**
-(`search_sessions` searches indexed `AgentSession` Events, not the durable
-`:Session`) and an all-sessions dump needs exactly that. It is the only
+private read (`sdk._get_proj().g`) — not because no public route to a session's
+turns exists (there is one: `sdk.get_events(eventKind="sessionCaptured")` →
+`sdk.get_session()`), but because the Event index is best-effort (its write is
+non-fatal, minted only on a fresh capture, so it silently misses sessions) and
+`get_session`'s graph arm orders turns lexicographically (`t10` before `t2`).
+The `CONTAINS` read buys completeness and one round trip. It is the only
 private surface, it is read-only, and it is documented here rather than
 glossed.
 
