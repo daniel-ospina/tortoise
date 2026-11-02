@@ -1462,6 +1462,72 @@ def test_a_restatus_is_applied_unguarded_within_the_replay():
     )
 
 
+def test_a_birth_record_cannot_resurrect_a_terminal_the_graph_holds():
+    """Review P1: the birth arm must not overwrite a TERMINAL it finds held.
+
+    MEASURED on the reviewed head (`92ed5d1b5`, and still live at `952e30fa7` —
+    the head this pin lands on): the `restatus` leg is UNGUARDED by design (it is
+    the caller's own `SET n += $state`), and the birth arm then assigned
+    `status = event.birth_status` UNCONDITIONALLY — so
+    `[restatus(seq 5,'archived'), birth(seq 9,'live')]` rebuilt **`live`** while
+    the live graph holds **`archived`**: seq 9 is a RE-MENTION, so
+    `_upsert_object` took the ON MATCH arm, which writes no `status`
+    (`projection/entities.py`).
+
+    ⛔ That is #9974's own harm, re-opened by the leg added to close it: a
+    rebuilt status of `live` is admitted by `live._terminal_excluded` as CURRENT
+    and its name resolves through `entity_identity.resolve_entity_id`. It is NOT
+    the benign "absent reads LIVE" flavour — the arm actively asserts CURRENT,
+    and `sdk._entity_door_props` seeds `status='live'` on every create, so the
+    seeded value is exactly what lands here. Reachability is ordinary: the first
+    journaled creation record is a re-mention whenever the node pre-existed the
+    journal (name stub, explicit `id=`, pre-#3590 graph, partial replay from
+    `start_seq`).
+
+    MEASURED without the latch (`if not _is_terminal_status(status)`): the first
+    assertion below reads `'live'`.
+    """
+    obj = cp.node_from_row("Object", {"id": "o-1", "name": "Acme",
+                                      "object_kind": "other"})
+    rebuilt = cp.apply_event_stream_folds([obj], [
+        cp.LifecycleEvent(seq=5, event_kind="", restatus_status="archived",
+                          target_id="o-1", target_label="Object"),
+        cp.LifecycleEvent(seq=9, event_kind="ObjectRegistered", is_birth=True,
+                          birth_status="live", target_id="o-1",
+                          target_label="Object"),
+    ])[0]
+    assert rebuilt.props.get("status") == "archived", (
+        f"the birth arm resurrected a terminal node ({rebuilt.props!r}) — the "
+        "graph holds 'archived' because a re-mention takes ON MATCH and writes "
+        "no status, so a rebuilt superseded Object answers as CURRENT and its "
+        "name resolves"
+    )
+
+    # ⛔ The latch must NOT degrade into "ignore the birth arm". A NON-terminal
+    # pre-birth fold is still displaced by the creation record (review round 6's
+    # case): an id that did not pre-exist folded nothing live, so the creation
+    # record is the write that made the node. This half is the POSITIVE sibling
+    # the absence-only pins lacked: a mutant that stops ASSIGNING the birth value
+    # (`if not birth_seen: birth_seen = True`, no write) leaves this assertion
+    # reading `live` and reds it — MEASURED. ⚠️ It does NOT pin
+    # `_BIRTH_EVENT_LABELS`: this test synthesises `LifecycleEvent(is_birth=True)`
+    # directly and `apply_event_stream_folds` never consults that table, so
+    # emptying it leaves this test green too. The table's own pin is
+    # `test_the_birth_event_labels_are_the_one_home_creation_map` (review P2).
+    still = cp.apply_event_stream_folds([obj], [
+        cp.LifecycleEvent(seq=1, event_kind="", restatus_status="live",
+                          target_id="o-1", target_label="Object"),
+        cp.LifecycleEvent(seq=2, event_kind="ObjectRegistered", is_birth=True,
+                          birth_status="archived", target_id="o-1",
+                          target_label="Object"),
+    ])[0]
+    assert still.props.get("status") == "archived", (
+        f"the terminal latch became 'ignore the birth arm' ({still.props!r}) — a "
+        "NON-terminal pre-birth fold must still be displaced by the creation "
+        "record, or the round-6 fix is undone"
+    )
+
+
 def test_the_restatus_fold_cannot_cross_the_label_on_a_shared_id():
     """An id-keyed state op folds only onto its OWN label's node.
 
@@ -2488,9 +2554,9 @@ def test_the_birth_event_labels_are_the_one_home_creation_map():
         f"labels this pin was written for ({status_bearing!r}) — re-read the "
         "EventRecorded exclusion above before widening it"
     )
-    assert cp._BIRTH_EVENT_LABELS == {
+    assert {
         k: v for k, v in fold_home.items() if v in status_bearing
-    }, (
+    } == cp._BIRTH_EVENT_LABELS, (
         "the birth label table drifted from the journal fold's home "
         f"(projection._ENTITY_CREATION_EVENT_LABEL={fold_home!r}, "
         f"cache_projection._BIRTH_EVENT_LABELS={cp._BIRTH_EVENT_LABELS!r}) — a "
