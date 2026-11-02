@@ -2899,8 +2899,13 @@ def _commit_together(repo: Path, epoch: int, names: tuple[str, ...] = ("capstone
 def _squashed_base(repo: Path, epoch: int, names: tuple[str, ...] = ("capstone.log",)) -> str:
     """A ref adding the registration AND its log in ONE commit, NOT an ancestor of the contribution.
 
-    That is what a squash-merged `main` looks like to a branch that has not been rebased, and it is
-    the only shape in which the base reading and the PR-internal reading disagree on a REFUSAL.
+    That is what a squash-merged `main` looks like to a branch that has not been rebased: equal
+    epochs on the base, so the base reading refuses while the contribution's own ordering may be
+    strict. ⛔ NOT the only such shape (review cycle 8, finding 1, measured): a base whose log
+    predates its registration — two separate commits — discriminates the two readings just as well,
+    and is witnessed separately by
+    `test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contribution`. A future
+    lane tempted to delete this helper because "the other test covers it" should know both exist.
     """
     branch = _git_out(repo, "symbolic-ref", "--short", "HEAD")
     _git(repo, "checkout", "-q", "--orphan", "squashed-base")
@@ -3112,9 +3117,12 @@ def test_a_squash_collapsed_base_refuses_even_when_the_contribution_is_ordered(t
 
     The shape that discriminates: the base carries the registration and the log in ONE squash commit
     (equal epochs), while THIS contribution carries them in order. Reading the log from the
-    contribution alone therefore ACCEPTS it; reading it from the base REFUSES it. Only a test built
-    on `_squashed_base` can tell those two implementations apart, which is what its docstring claims
-    it is for.
+    contribution alone therefore ACCEPTS it; reading it from the base REFUSES it.
+
+    ⛔ "Only a `_squashed_base` shape can discriminate" was FALSE (review cycle 8, finding 1): a base
+    where the log predates the registration — two separate commits — discriminates just as well, and
+    is witnessed by `test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contribution`
+    below. Both are kept because they are different paths through the same base read.
     """
     repo = _repo(tmp_path, monkeypatch)
     _git(repo, "remote", "add", "origin", "https://example.invalid/x.git")
@@ -3138,3 +3146,56 @@ def test_a_squash_collapsed_base_refuses_even_when_the_contribution_is_ordered(t
     assert "not strictly after" in failures[0], failures[0]
     # …and the squash-collapse diagnostic names the withdrawal, because that is the only remedy.
     assert "SAME commit" in failures[0] and "WITHDRAWAL" in failures[0], failures[0]
+
+
+def test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contribution(
+        tmp_path, monkeypatch):
+    """The SECOND shape that discriminates the base reading from the PR-internal one.
+
+    The squash-collapse shape (equal epochs on the base) is one; this is the other, and it needs no
+    squash at all: on the base the log was added BEFORE the registration (two separate commits),
+    while THIS contribution adds them in the correct order. A contribution-only reading accepts the
+    tree (the ordering here is strict); the base reading refuses it, correctly — the log was already
+    published when the registration was not.
+
+    Measured by the reviewer as the counterexample to a `_squashed_base`-only claim (review cycle 8,
+    finding 1). Kept because it exercises the log-side base read through a path the squash test does
+    not: no orphan branch, no equal epochs, no shared add-commit — so a future change that special-
+    cases the squash shape cannot pass both.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/x.git")
+    # The contribution: registration FIRST, log second — strictly ordered HERE.
+    prereg = _commit_prereg(
+        repo, epoch=1_700_001_000, text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    log = _write_and_commit(repo, "capstone.log", epoch=1_700_002_000)
+    assert min(check._added_epochs(log)) > min(check._added_epochs(prereg)), (
+        "the contribution must be ordered, or this test cannot discriminate")
+
+    # The base: the LOG first (1_700_000_100), the registration later (1_700_000_300) — separate
+    # commits, on a ref that is not an ancestor of this branch.
+    branch = _git_out(repo, "symbolic-ref", "--short", "HEAD")
+    _git(repo, "checkout", "-q", "--orphan", "base-order")
+    _git(repo, "rm", "-rq", "--cached", "docs")
+    # ⛔ The registration is still on DISK from the branch checkout, so `git add docs` would put it
+    # in the log's commit — collapsing the two into one and measuring nothing (the first version of
+    # this test did exactly that, and its own "no SAME commit" assertion caught it). Remove it first.
+    (repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME).unlink()
+    _stage_log(repo, "capstone.log")
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "the log lands first", epoch=1_700_000_100)
+    _write_prereg_uncommitted(repo)
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "the registration lands later", epoch=1_700_000_300)
+    base_sha = _git_out(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-qf", branch)
+    _git(repo, "update-ref", "refs/remotes/origin/main", base_sha)
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, (
+        "the log was accepted from the contribution's own ordering — the log-side base read is not "
+        "load-bearing on the non-squash path either")
+    assert "not strictly after" in failures[0], failures[0]
+    # No squash collapse here, so the withdrawal diagnostic must NOT fire: the remedy is a proper
+    # ordering, not a withdrawal.
+    assert "SAME commit" not in failures[0], failures[0]
