@@ -1118,8 +1118,8 @@ _OTHER_FILE_ALLOWLIST = {
     # helper is what #10510 requires here: resolving the prior org's default
     # name alone still opened the absent `org_{prior}` for a pre-#3543
     # `team_{prior}` org, and opened — so MINTED — any prior graph the registry
-    # listing never held (`test_the_post_provision_hook_opens_the_legacy_team_
-    # graph` / `..._skips_an_unlisted_prior_org`).
+    # listing never held (pinned by the two
+    # `test_the_post_provision_hook_*` cases beside the promoted-prior pin).
     "tortoise/supabase_control.py": {"provision_org": 1,
                                      "_ensure_onboarding_node_after_provision": 1},
 }
