@@ -6215,3 +6215,64 @@ def test_an_appended_basis_lands_at_the_end_of_a_wrapped_note() -> None:
         text, {"test_wrapped_append.py": 4.4}, "2026-11-02T00:00:00Z",
         sample_label="ci-timing junit-census+top-15 2026-11-02 (run 41375596528)")
     assert again == text, "a second render at the same reading rewrote the note"
+
+
+# ── …and a REGISTRATION must not be spliced INTO a wrapped note either ────────
+#
+# The span rule binds the writer twice: the cutters were the visible half (the
+# 2026-11-02 half-parenthesis), and this is the other one. A key with no row is
+# APPENDED to the block; the append point was `max(entries.values()) + 1`, i.e. the
+# line right after the last row's ROW LINE — which on a wrapped note is its first
+# continuation. The new row therefore landed mid-sentence, the continuations left
+# below it read as the NEW row's note, and the old row kept only its first half.
+#
+# The committed map's last row (`test_worktree_report.py`) carries no continuation,
+# which is the only reason this never materialised: it is one wrapped last row away,
+# and the damage it produces is what `_joined_note_tail` exists to prevent.
+_REGISTRATION_AFTER_WRAP_MANIFEST = """\
+surfaces:
+  core:
+    - test_last_row_wraps.py
+    - test_newly_registered.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations_held_equal: {}
+surfaces_x: []
+durations:
+  test_last_row_wraps.py: 12.0  # #4348: do not drop this row. Its note opens here
+  # and continues on this indented wrap line, which belongs to THE ROW ABOVE.
+"""
+
+
+def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None:
+    """A new row is appended after the SPAN, never between a row and its wrap.
+
+    Non-vacuity (measured against the pre-fix renderer, whose append point was
+    `max(entries.values()) + 1`): the emitted block was
+
+      test_last_row_wraps.py: 12.0  # #4348: do not drop this row. Its note opens here
+      test_newly_registered.py: 5.0
+      # and continues on this indented wrap line, which belongs to THE ROW ABOVE.
+
+    — the new row mid-sentence, and the wrap line silently re-owned by it, so the
+    row it documented lost half its note. Both assertions below fail on that text.
+    """
+    text, stats = ci_timing.render_refreshed_manifest(
+        _REGISTRATION_AFTER_WRAP_MANIFEST,
+        {"test_last_row_wraps.py": 12.0, "test_newly_registered.py": 5.0},
+        "2026-11-02T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-02 (run 41375596528)")
+    assert stats["added_keys"] == 1, stats
+    lines = text.splitlines()
+    row = lines.index(
+        "  test_last_row_wraps.py: 12.0  # #4348: do not drop this row. "
+        "Its note opens here")
+    wrap = lines.index(
+        "  # and continues on this indented wrap line, which belongs to THE ROW ABOVE.")
+    assert wrap == row + 1, (
+        f"the wrap line is no longer the row's own continuation: {lines[row:row + 3]}")
+    assert lines.index("  test_newly_registered.py: 5.0") == wrap + 1, (
+        "the appended row was spliced into the last row's note: "
+        f"{lines[row:row + 4]}")
