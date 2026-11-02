@@ -121,14 +121,22 @@ def _submit_index_off_loop(fn, /, *args, **kwargs):
     is copied in the CALLING thread and the worker runs under that copy. The
     walk and the onboarding writes both read caller-context state.
 
-    RECORDED, not fixed: this pair mirrors ``hosted_api._submit_off_loop`` /
-    ``_run_off_loop`` body-for-body, differing only in the bound executor. The
-    obvious dedup goes the wrong way on the dependency graph — ``hosted_api``
-    imports THIS module (lazily, inside its handlers), and the indexer is also
-    reached from the standalone GitHub-index CLI, so importing the hosted app
-    module here would invert the layering and drag the whole app into the CLI.
-    The clean home is a shared leaf module for the generic pair; deferred to
-    avoid growing this change, and to avoid cloning it a second time.
+    RECORDED, not fixed: this pair USED to mirror
+    ``hosted_api._submit_off_loop`` / ``_run_off_loop`` body-for-body. It no
+    longer does — ``_submit_off_loop`` now goes through
+    ``monitoring.confine_context`` (#10612), which re-copies the submitting
+    context per INVOCATION. This one builds its ``Context`` per call and runs it
+    once, so it cannot re-enter either — but a caller that starts RETRYING it
+    must move to ``confine_context``, or the second submission raises
+    ``RuntimeError: cannot enter context ... already entered``. Do not copy this
+    body into anything that may run its callable twice.
+
+    The layering note stands: the generic pair wants a shared leaf module —
+    ``monitoring`` is one and is already off this module's dependency path, so
+    it is the natural home; migrating was left out of this change to keep the
+    diff to the hosted seam. ``hosted_api`` imports THIS module (lazily, inside
+    its handlers), so importing the hosted app module here would invert the
+    layering and drag the whole app into the standalone GitHub-index CLI.
     """
     ctx = contextvars.copy_context()
     return _INDEX_EXECUTOR.submit(ctx.run, functools.partial(fn, *args, **kwargs))

@@ -667,9 +667,10 @@ surfaces:
   - test_control_plane_offload_3498.py
   # #10612: the offload seam must not re-enter a stored contextvars.Context.
   # Same dual registration as the offload guard above and for the same reason:
-  # the files it guards are tortoise/hosted_api.py and tortoise/monitoring.py,
-  # which select the `api` surface, and an exact surface match REPLACES the
-  # `core` fallback.
+  # tortoise/hosted_api.py is an exact `api` SOURCE_PATTERN that REPLACES the
+  # `core` fallback, so this file also has an `api` row above; the other file it
+  # guards, tortoise/monitoring.py, selects `core`, so the `core` row is what
+  # delivers the guard for a monitoring.py-only diff.
   - test_context_confinement.py
   # #7678: the org-create lane's dedicated control-plane pool + the single
   # membership read. Same dual registration as the offload guard above and for
