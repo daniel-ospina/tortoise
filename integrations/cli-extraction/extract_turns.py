@@ -467,23 +467,42 @@ sdk = TortoiseSDK(namespace=ns, event_log_path=log)
 # stripped keys, provenance drops) are exactly the silent-drift class this
 # writer must not absorb. WARNING+ records NEW SINCE A BASELINE (a warm-up
 # read through the same SDK) from the write doors' loggers fail the write.
-# The one sanctioned exception is the dedup-hit fold report (classified in
-# the handler below). Other tortoise warnings — e.g. this deployment's
+# There is NO sanctioned exception — the dedup-hit fold is classified from the
+# write's RESULT (the survivor it returns), never from a log line, so a
+# WARNING+ record from any write door still fails the write. Other tortoise
+# warnings — e.g. this deployment's
 # pack-registry declaration complaints, which fire on every create_point —
 # are environmental noise: recorded in the receipt, never fatal, so a
 # noisy-but-healthy deployment still writes.
 warnings_seen = []
-folded = []   # pids of existing points a dedup hit folded onto: the SDK's
-              # dedup-hit warning is a REPORT of correct behavior (content
-              # already known under another source), not drift. Classified
-              # by the unformatted template (record.msg): an upstream reword
-              # degrades LOUD — unrecognized warnings go back to fatal —
-              # never silent.
+# pids of existing points this run FOLDED onto — read off the WRITE'S RESULT,
+# never off a log line (#7704). The SDK reports a fold at INFO now (it is
+# correct behaviour, not drift), and an earlier revision of this writer parsed
+# the WARNING that preceded it: when #7704 moved that report to INFO the
+# classifier saw nothing, `folded_onto_other_sources` vanished from the receipt
+# and CI reddened on the missing key. The durable signal is the survivor the
+# write RETURNS. A dedup hit returns the existing point's id, and the fold
+# carries WHAT it folded in `extractedFromAll` (a list) while `extractedFrom`
+# stays the survivor's OWN creating source — a scalar, so the equality-filtered
+# read door keeps answering for it (#7704 review P1). Two shapes on that result
+# mean "this write FOLDED, it did not mint":
+#   * CROSS-SOURCE fold — the returned `extractedFrom` is a SCALAR naming a
+#     source that is not ours: the survivor was created under another source and
+#     this fold wired ours beside it. This is what
+#     `folded_onto_other_sources` is named for.
+#   * ARRAY prop — `extractedFrom` came back a LIST: the survivor was born from a
+#     ref SEQUENCE (a caller passing a list — ingest bundles do) or holds a
+#     prop-only ref no edge addresses. The point EXISTS already, no
+#     equality-matched read can see it, and the all-fold branch below would
+#     otherwise refuse the batch as "SDK drift" (the #10010 review P2 false
+#     failure: sticky, and it names the wrong component). Counted here, so
+#     `written` and `new`/`folded` still describe the same batch.
+# A point this run MINTED carries the SCALAR this writer passed (line above) and
+# `query()` matches it, so a mint can never be mistaken for a fold here.
+# No message template involved.
+folded = []
 class _Collect(logging.Handler):
     def emit(self, record):
-        if isinstance(record.msg, str) and record.msg.startswith('create_point dedup hit on '):
-            folded.append(str(record.args[0]) if record.args else '?')
-            return
         warnings_seen.append((record.name, record.getMessage()))
 _handler = _Collect()
 _handler.setLevel(logging.WARNING)   # collect WARNING+ only: an INFO-tuned
@@ -511,6 +530,17 @@ try:
             non_live.append(r['id'])   # reported, never force-promoted: a retracted
                                        # or draft point is someone else's decision
         made.append(r['id'])
+        # A dedup FOLD, read off the RESULT (#7704): the write returns the
+        # survivor, whose `extractedFrom` is its OWN creating source — a SCALAR
+        # — or an ARRAY when the survivor was born from a ref sequence. A point
+        # this run minted carries the SCALAR passed above. So: names another
+        # source ⇒ cross-source fold; array ⇒ survivor this read cannot match
+        # (both are folds, never mints — #10010 review P2).
+        _refs = r.get('extractedFrom')
+        if isinstance(_refs, (list, tuple)):
+            folded.append(r['id'])
+        elif isinstance(_refs, str) and _refs != source:
+            folded.append(r['id'])
     _new_warnings = warnings_seen[_baseline:]
     _fatal = [f'{name}: {msg}' for name, msg in _new_warnings
               if name.startswith(_WRITE_PATH_LOGGERS)]
@@ -525,7 +555,19 @@ try:
         raise RuntimeError(f'inconsistent write: before={before} after={after}')
     _noise = [f'{name}: {msg}' for name, msg in _new_warnings
               if not name.startswith(_WRITE_PATH_LOGGERS)]
-    receipt = {'written': len(made), 'new': after - before, 'total_for_source': after,
+    # `new` counts points that are under this source and were not before. A
+    # survivor FOLDED from another source is NOT among them: the fold keeps the
+    # `extractedFrom` property the survivor's OWN creating source — a scalar, so
+    # `query(extractedFrom=…)`'s EQUALITY match still answers for it — and
+    # carries the folded set on `extractedFromAll` (#7704 review P1). This
+    # source's ref therefore lives on the EDGES, never in the equality-matched
+    # property. ⚠️ DEPENDS ON #10063: once a read can ask for the folded set (the
+    # edges, or `extractedFromAll`), a folded survivor WILL count as `new` here
+    # and `after - before` stops excluding folds. Until then the `:Source` EDGES
+    # are the authoritative provenance (#3263), this read sees the creating
+    # source only, and `folded_onto_other_sources` is what reports the folds.
+    receipt = {'written': len(made), 'new': after - before,
+               'total_for_source': after,
                'non_live_hits': non_live, 'ids': made[:5]}
     if folded:
         receipt['folded_onto_other_sources'] = len(folded)
@@ -533,19 +575,33 @@ try:
         receipt['env_warnings'] = {'count': len(_noise),
                                    'sample': [n[:150] for n in _noise[:2]]}
     if after == 0:
-        # Every claim folded onto existing points under OTHER sources (dedup
-        # drops extractedFrom): a legitimate all-fold run, not a failure —
-        # nothing new under this source, so nothing to tier or propagate.
-        # The guard is a drift tripwire: create_point calls succeeded yet
-        # query() finds nothing under the source AND the SDK reported no
-        # folds — the write path has drifted (e.g. extractedFrom stopped
-        # being a queryable property), which must fail, never exit 0.
+        # Nothing is queryable under this source after the loop. Two shapes reach
+        # here and they must not be confused:
+        #   * ALL-FOLD — every call folded onto a point that already existed under
+        #     OTHER sources, or onto a survivor whose `extractedFrom` is an ARRAY
+        #     this equality-matched read cannot see at all. The fold KEEPS the
+        #     evidence now (it wires this source onto the survivor, #7704), but a
+        #     survivor CREATED under another source keeps that source as its
+        #     scalar `extractedFrom` (deliberately equality-matchable — #7704
+        #     review P1) and carries the folded set on `extractedFromAll`, so
+        #     `query(extractedFrom=<this source>)` does not return it.
+        #     ⚠️ DEPENDS ON #10063: this branch is CORRECT only while the
+        #     population read is the equality property; a read over the folded set
+        #     would make an all-fold run report points, and this `after == 0` arm
+        #     would stop firing for it. A legitimate all-fold run today: nothing
+        #     NEW under this source, so nothing to tier or propagate. Every fold
+        #     that can reach this arm is counted above — including the array-prop
+        #     survivor — which is what keeps a healthy batch from being refused as
+        #     drift.
+        #   * DRIFT — create_point calls succeeded, the SDK reported no folds, and
+        #     the read-back still finds nothing (e.g. `extractedFrom` stopped
+        #     being a queryable property). That must fail, never exit 0.
         if len(folded) != len(made):
             raise RuntimeError(
                 f'inconsistent write: {len(made)} create_point calls succeeded but '
                 f'query() finds 0 points under the source with only {len(folded)} '
                 'dedup folds reported — SDK drift, not an all-fold run')
-        receipt['folded_onto_existing'] = len(made)
+        receipt['folded_onto_existing'] = len(folded)
         print(json.dumps(receipt))
         sdk.close()
         sys.exit(0)   # SystemExit is a BaseException: not caught below
@@ -554,8 +610,7 @@ try:
     # catches silent drift (a renamed kwarg becomes a stale property, not an
     # error). Every Point currently under this source must carry this domain —
     # new ones because this loop just wrote them, old ones because a rerun uses
-    # the same arguments. Points that dedup-folded onto OTHER sources are not
-    # under this source and do not participate (their domain is theirs).
+    # the same arguments.
     _bad = [p.get('id') for p in pts if p.get('domain') != domain]
     if _bad:
         raise RuntimeError('read-back failed: points under source missing domain '
