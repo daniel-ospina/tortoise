@@ -6397,8 +6397,15 @@ def _durations_row_comments(text: str):
     A row's comment is the tail after its value PLUS its indented `#` continuation
     lines. The map's long notes are wrapped across lines, so reading only the row
     line both misses damage that sits on a continuation line and reads a pair that
-    wraps as unbalanced. Continuations are unambiguous here: the block carries no
-    standalone comment line (`durations:` is followed by rows and wrap lines only).
+    wraps as unbalanced.
+
+    Continuations are INDENTED lines. That bound is not cosmetic: this block also
+    carries COLUMN-0 prose between rows — 199 lines at the 2026-11-02 head, e.g.
+    the `# #3395: per-file CI wall time …` method note — and attaching it to the
+    row above made one row's note 122 lines of the map's own header, so the guard
+    below judged that prose together with the note (and a note joined with
+    unrelated prose can hide, or invent, an imbalance). The writer bounds its span
+    the same way (`tools/ci_timing._row_continuation_lines`).
     """
     out = []
     lines = text.splitlines()
@@ -6416,7 +6423,7 @@ def _durations_row_comments(text: str):
             out.append(current)
             continue
         stripped = lines[i].strip()
-        if current is not None and stripped.startswith("#"):
+        if current is not None and stripped.startswith("#") and lines[i][:1].isspace():
             current[1].append(stripped.lstrip("#"))
         elif stripped:
             current = None
@@ -6468,6 +6475,35 @@ def test_the_paren_guard_is_not_vacuous():
     assert [k for k, _ in _durations_rows_with_unbalanced_parens(stale)] == [
         "test_a.py", "test_b.py"]
     assert _durations_rows_with_unbalanced_parens(legitimate) == []
+
+
+def test_the_paren_guard_reads_only_a_rows_OWN_note():
+    """A row's note is its indented wrap lines — not the block's column-0 prose.
+
+    The `durations:` block carries COLUMN-0 prose between rows (199 lines at the
+    2026-11-02 head — the `# #3395: per-file CI wall time …` method note). Attaching
+    that prose to the row above it made `test_spa_dependency_overrides.py`'s "note"
+    122 lines of the map's own header. A guard that judges a note together with
+    unrelated prose can both HIDE an imbalance (prose closing a pair the note
+    opened) and INVENT one (prose opening a pair the note never closes), which is
+    why the span is bounded the same way the writer bounds it
+    (`tools/ci_timing._row_continuation_lines`).
+    """
+    text = (
+        "durations:\n"
+        "  test_a.py: 4.3  # a note that OPENS a pair (and never closes it\n"
+        "# column-0 prose, NOT this row's note: it closes a pair) nobody opened\n"
+        "  test_b.py: 7.4  # a balanced row (fine).\n"
+        "      # its continuation line carries the closer (so it stays balanced).\n"
+        "surfaces: []\n")
+    joined = dict(_durations_row_comments(text))
+    assert "column-0 prose" not in joined["test_a.py"], joined["test_a.py"]
+    assert "carries the closer" in joined["test_b.py"]
+    # …so the opener on test_a.py is judged on its own, and is caught.
+    assert [k for k, _ in _durations_rows_with_unbalanced_parens(text)] == [
+        "test_a.py"]
+    # The prose alone is balanced, so the pre-fix join would have cleared it.
+    assert joined["test_a.py"].count("(") != joined["test_a.py"].count(")")
 
 
 # ── the re-derivable CASE COUNT a row states (#10356 review P3-1) ─────────────

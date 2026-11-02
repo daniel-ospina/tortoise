@@ -2034,6 +2034,80 @@ def _balance_cut_parens(text: str) -> str:
     return re.sub(r"\s+([,.;:])", r"\1", out)
 
 
+# ── a row's NOTE is one paragraph, WRAPPED across physical lines ──────────
+#
+# `_DURATION_LINE_RE` reads a row's note as the tail on its own line, but this
+# map's long notes are wrapped: an indented `#` line under a row continues THAT
+# row's note (76 rows in the committed map), which is exactly how the guard that
+# judges the written map reads it (`tests/test_ci_selection.py`
+# `_durations_row_comments` joins a row's tail with its continuations before it
+# judges a note).
+#
+# Every clause cutter in this module decides what to drop by MATCHING and CUTTING
+# text, so handing it the fragment on the row line made it judge half a sentence —
+# and that is how the 2026-11-02 refresh left `test_ci_catch_history.py` with half a
+# parenthesis and a dangling clause: the `(` stood on the row line and its `)` on a
+# continuation, the cut dropped the clause the fragment held, and
+# `_balance_cut_parens` — seeing an unclosed `(` and no `)` — deleted the OPENER,
+# leaving `never ran cannot appear in an artifact), so this is the LOCAL wall …`.
+# That reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
+# legs (run 41395489623), which is a P3 note-damage defect and not a wrong weight.
+#
+# So the renderer joins the span before it touches it (`_joined_note_tail`) and
+# re-emits it per the shape of the change (see `render_refreshed_manifest`):
+#   * an APPEND-only result keeps the existing wrapping, with the added clause at
+#     the END of the note — the end of the paragraph is where it reads, and the
+#     row-line fragment is mid-sentence by construction;
+#   * a CUT or a wholesale replacement re-emits the survivors on the row line and
+#     drops the continuations, because a survivor set cannot be mapped back onto
+#     line breaks chosen for the clauses it dropped.
+
+
+def _comment_body(line: str) -> str:
+    """A `# …` row tail / continuation line's text, comment marker removed.
+
+    Deliberately NOT `_note_body`: that strips EVERY leading `#`, and a note that
+    opens with an issue anchor (`# #10131: …`) must keep it through the join below
+    — `_repair_adopted_note` recognises the anchor by it, and re-emits it.
+    """
+    stripped = line.strip()
+    return stripped[1:].strip() if stripped.startswith("#") else stripped
+
+
+def _row_continuation_lines(lines: list[str], index: int) -> list[int]:
+    """Indices of the indented `#` lines that CONTINUE `lines[index]`'s note.
+
+    TWO conditions, and the second is not decoration. A continuation must be
+    INDENTED: this block also carries COLUMN-0 prose (199 lines at the 2026-11-02
+    head — the `# #3395: per-file CI wall time …` method note sits between rows),
+    and attaching that to the row above it made one row's "note" 122 lines of the
+    map's own header. A rewrite that cut such a "note" would delete the header
+    with it.
+
+    What remains mirrors the READER that judges a written map
+    (`tests/test_ci_selection.py::_durations_row_comments`): a blank line does not
+    end a note and any other non-comment line does. Keeping the renderer's notion
+    of a note's span IDENTICAL to the reader's is the point — a writer reasoning
+    about a different span than the guard is how a cut came to orphan a
+    parenthesis the guard was counting.
+    """
+    out: list[int] = []
+    for j in range(index + 1, len(lines)):
+        stripped = lines[j].strip()
+        if stripped.startswith("#") and lines[j][:1].isspace():
+            out.append(j)
+        elif stripped:
+            break
+    return out
+
+
+def _joined_note_tail(fragment: str, continuation_lines: list[str]) -> str:
+    """The whole WRAPPED note as one `  # …` tail, for the clause cutters."""
+    parts = [_comment_body(fragment)]
+    parts.extend(_comment_body(ln) for ln in continuation_lines)
+    return f"  # {' '.join(part for part in parts if part)}"
+
+
 # ── the UNMEASURED-STATE note, and the adoption that falsifies it ───────────
 #
 # Two guards in the suite read ONE rule off this map, and the writer did not
@@ -2321,6 +2395,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         _resolve_to_manifest_keys({path: 0.0 for path in coverage}, classified_keys)
         coverage_by_key = dict(coverage)
     kept_as_lower_bound = 0
+    drop: set[int] = set()
     for key in sorted(resolved):
         if key not in entries:
             continue
@@ -2328,7 +2403,16 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         index = entries[key]
         match = _DURATION_LINE_RE.match(lines[index])
         assert match is not None  # located by the same regex
-        tail = match.group("tail")
+        row_tail = match.group("tail")
+        # A WRAPPED note is ONE note (see `_joined_note_tail`): the cutters below
+        # match and cut TEXT, so they are handed the whole paragraph. Given only
+        # the row-line fragment they once deleted the `(` of a pair whose `)` sat
+        # on a continuation line — the half-parenthesis this span exists to stop.
+        continuation = _row_continuation_lines(lines, index)
+        note_tail = (_joined_note_tail(row_tail, [lines[j] for j in continuation])
+                     if continuation else row_tail)
+        note_body = _comment_body(note_tail) if note_tail.strip() else ""
+        tail = note_tail
         previous = float(match.group("value"))
         # COMPARE AT THE PRECISION THE MAP STORES (one decimal). The rows are
         # written `{value:.1f}`, so a raw-float comparison both mis-reports
@@ -2468,10 +2552,45 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # rewritten, or a key character that needs quoting would become an
         # unparseable bare scalar. `entries` is keyed by the PARSED key, so
         # this lookup finds the quoted row instead of missing it.
-        lines[index] = (
+        rendered_row = (
             f"{match.group('indent')}{match.group('key')}: "
-            f"{new_value:.1f}{tail}"
+            f"{new_value:.1f}"
         )
+        if not continuation:
+            lines[index] = f"{rendered_row}{tail}"
+        else:
+            survivors = _comment_body(tail) if tail.strip() else ""
+            if survivors == note_body:
+                # The note is UNTOUCHED by this render: write only the value and
+                # keep the writer's own line breaks (re-wrapping here would
+                # reformat 76 rows for a refresh that changed none of their
+                # prose).
+                lines[index] = f"{rendered_row}{row_tail}"
+            elif note_body and survivors.startswith(note_body):
+                # APPEND-ONLY (`— <basis>`): keep the wrapping and put the added
+                # clause at the END of the note. Writing it mid-sentence on the
+                # row line is what produced `… (a file that — ci-timing …`, the
+                # fragment-plus-orphan shape. The continuation keeps its own
+                # separator (` — `/`; `), so nothing is doubled here.
+                lines[index] = f"{rendered_row}{row_tail}"
+                lines[continuation[-1]] = (
+                    lines[continuation[-1]].rstrip() + survivors[len(note_body):]
+                )
+            else:
+                # A CUT (a falsified clause, a restated marker) or a wholesale
+                # replacement: what survives cannot be mapped back onto line
+                # breaks chosen for the clauses that went, so the note is
+                # re-emitted whole and the stale continuations go WITH those
+                # clauses. Leaving them is the fragment damage.
+                lines[index] = f"{rendered_row}{tail}"
+                drop.update(continuation)
+    if drop:
+        # Only COMMENT lines are ever dropped (a row line is never in `drop`), so
+        # `entries` keeps one index per row — each shifted by the dropped lines
+        # above it. Done here, before the registration append and the stamp, so
+        # both act on the array this render actually emits.
+        lines = [ln for i, ln in enumerate(lines) if i not in drop]
+        entries = {k: v - sum(1 for d in drop if d < v) for k, v in entries.items()}
     # A resolved key with no `durations:` line is a REGISTRATION, not a rewrite —
     # append it to the block in the same `  key: value` shape the existing rows
     # use (indent 2, one decimal, no trailing comment). APPENDED, not inserted
