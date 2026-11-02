@@ -1313,6 +1313,43 @@ def fallback_probe(degraded: dict | None = None) -> dict[str, str]:
                 # not fatal to a measurement.
                 with contextlib.suppress(Exception):
                     setattr(b, slot, value)
+        # Every breaker this probe CREATED is absent from `snapshot`, so the loop
+        # above cannot reach it — and in a FRESH process the snapshot is `{}`,
+        # which is the CLI's state, `measure()`'s state, and the state this
+        # tool's first test starts from. `_probe_mechanisms` lazily registers the
+        # vector breaker (`_breaker_record` → `search_engine._breaker`), so that
+        # entry stayed behind in the CALLER's process: measured at `37fa883bd`,
+        # `before {}` → `after {'vector': (0, 0.0, False)}` (review P3). The
+        # previous restore could not see it because its falsifier PRE-CREATED the
+        # breaker — the one state in which the snapshot is not empty. Reset first,
+        # so a thread already holding the object keeps a CLOSED, clean breaker,
+        # then un-register it: a read-only instrument must leave the module's map
+        # the way it found it. `_BREAKERS_LOCK` is the map's own lock and is never
+        # held across a query (that is `_CircuitBreaker._lock`), so this cannot
+        # stall the caller; a lock we cannot take still gets the reset above.
+        created = [name for name in list(breakers) if name not in snapshot]
+        if not created:
+            return
+        for name in created:
+            b = breakers.get(name)
+            if b is not None:
+                with contextlib.suppress(Exception):
+                    b.reset()
+        lock = getattr(_se, "_BREAKERS_LOCK", None)
+        acquired = False
+        if lock is not None:
+            # A lock we cannot take (or does not exist) still gets the reset
+            # above; the un-registering below is then done unlocked, which is no
+            # worse than the module's own unlocked `reset_circuit_breakers()`.
+            with contextlib.suppress(Exception):
+                acquired = lock.acquire(timeout=5.0)
+        try:
+            for name in created:
+                breakers.pop(name, None)
+        finally:
+            if acquired:
+                with contextlib.suppress(Exception):
+                    lock.release()
 
     out: dict[str, str] = {}
 

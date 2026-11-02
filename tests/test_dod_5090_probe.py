@@ -937,6 +937,36 @@ def test_the_fallback_probe_restores_the_circuit_breakers():
     assert after == before, (before, after)
 
 
+def test_the_fallback_probe_leaves_no_breaker_it_CREATED_behind():
+    """A FRESH process starts with an EMPTY `_BREAKERS` — leave it empty.
+
+    The other direction is `…_restores_the_circuit_breakers` above, and it is the
+    only state that direction can see: it PRE-CREATES the breaker, so the probe's
+    snapshot is non-empty. A fresh process has no such entry — that is the CLI's
+    state, `measure()`'s state, and this file's first test's — so the restore
+    iterated an empty snapshot and the breaker `_probe_mechanisms` registers
+    lazily (`_breaker_record("vector", …)` → `search_engine._breaker`) was never
+    restored by anything.
+
+    Measured at `37fa883bd` before the fix (review P3, reproduced verbatim):
+    `before: {}` → `after: {'vector': (0, 0.0, False)}` — an entry this read-only
+    instrument created and left in the caller's module. The slot values alone
+    would not have caught it, which is why the assertion is over the MAP.
+    """
+    import tortoise.search_engine as se
+
+    saved = dict(se._BREAKERS)
+    se._BREAKERS.clear()
+    try:
+        probe.fallback_probe()
+        after = {name: (b._fails, b._open_until, b._probing)
+                 for name, b in se._BREAKERS.items()}
+        assert after == {}, after
+    finally:
+        se._BREAKERS.clear()
+        se._BREAKERS.update(saved)
+
+
 def test_a_failed_population_read_is_unmeasured_not_a_narrowed_population():
     """`CALL db.labels()` failing must not fall back to `indexed | served`."""
 
