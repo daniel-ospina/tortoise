@@ -3745,9 +3745,19 @@ class TestStallWatchdog:
 
         # The REAL env parser, not a monkeypatched constant (same reason as
         # ``test_hard_ceiling_fires_even_with_a_request_in_flight``).
-        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.15")
+        #
+        # 0.5s, not 0.15s (#10585 review, UNVERIFIED note): this is the ONE
+        # armed-ceiling test that needs the heartbeat to stay fresh across
+        # EVERY poll, so a scheduling gap longer than the ceiling fails it
+        # where every other armed test would only be helped by a delay. At
+        # 0.15s a 150 ms stall on a loaded runner is enough; at 0.5s with the
+        # ticker refreshing every 20 ms the tolerance is ~25x the tick period.
+        # The mutant discrimination is unchanged — an INVERTED comparison
+        # (``age < hard_exit_s``) fires at age ~= 0.02s, which is below BOTH
+        # ceilings, so ``fired == []`` still kills it.
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.5")
         monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
-        assert monitoring._loop_stall_hard_exit_s() == 0.15
+        assert monitoring._loop_stall_hard_exit_s() == 0.5
         fired: list = []
         stop = threading.Event()
         monitoring._reset_heartbeat()
@@ -3768,7 +3778,7 @@ class TestStallWatchdog:
                 None, exit_fn=fired.append, stop_event=stop,
                 poll_interval=0.05)
             assert thread is not None, "the armed ceiling must start the thread"
-            time.sleep(1.0)   # ~7x the ceiling, heartbeat kept fresh throughout
+            time.sleep(1.6)   # ~3x the ceiling, heartbeat kept fresh throughout
         finally:
             self._disarm(thread, stop)
             ticker.join(timeout=2)
@@ -4001,7 +4011,6 @@ class TestStallWatchdog:
         root = Path(__file__).resolve().parent.parent
         mon = (root / "tortoise" / "monitoring.py").read_text(encoding="utf-8")
         api = (root / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
-        mon_flat = " ".join(mon.split())
         api_flat = " ".join(api.split())
 
         # ── the preamble the old text shipped, in the block that introduces
@@ -4077,7 +4086,7 @@ class TestStallWatchdog:
         monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "5")
         monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
         floor = monitoring._loop_stall_floor_s()
-        assert 5.0 < floor, "this test needs a ceiling below the floor"
+        assert floor > 5.0, "this test needs a ceiling below the floor"
 
         stop = threading.Event()
         stop.set()   # the body never runs => no os._exit in the test process
@@ -4218,6 +4227,58 @@ class TestStallWatchdog:
             "TORTOISE_LOOP_STALL_HARD_EXIT_S" in stale_block), (
             "LOOP_STALE_AFTER's rationale must scope its idle-gate claim to "
             "the SOFT path and name the hard ceiling that bypasses it")
+
+    def test_the_projection_socket_block_names_the_knob_that_sizes_the_ceiling(self):
+        """#10585 review P2 (SIXTH copy): the socket-timeout rationale still
+        sent the operator to the SOFT knob.
+
+        ``projection._socket_timeouts``' rationale — the block an operator
+        arrives at from ``.env.example``'s pointer — invited a tighter
+        "loop-stall ceiling" by pairing a lower read timeout with a lower
+        ``TORTOISE_LOOP_STALL_EXIT_S``, and closed with an UNQUALIFIED "self-kill
+        is OPT-IN and disabled by default". Both are wrong for the shipped
+        deployment: the knob that SIZES a loop-stall ceiling, and the ONLY one
+        ``fly.toml`` ``[env]`` arms, is ``TORTOISE_LOOP_STALL_HARD_EXIT_S``,
+        while its soft sibling is deliberately unset there — so the block handed
+        an operator tuning this timeout the mechanism production does not run,
+        and read as "nothing is armed" for the deployment that ships the file.
+
+        Same defect class, same fix shape as the five copies already corrected
+        (``.env.example``, the gate contract, ``start_stall_watchdog``'s
+        docstring, ``hosted_api._start_liveness``, ``LOOP_STALE_AFTER``). This
+        one was missed because it lives outside ``monitoring.py``.
+        """
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent
+               / "tortoise" / "projection" / "__init__.py").read_text(
+                   encoding="utf-8")
+        lines = src.splitlines()
+
+        end = next(i for i, line in enumerate(lines)
+                   if line.startswith("_DB_CONNECT_TIMEOUT_DEFAULT = "))
+        start = next(i for i, line in enumerate(lines)
+                     if i < end
+                     and "liveness budget; it is now configurable" in line)
+        assert end > start, (start, end)
+        block = "\n".join(lines[start:end])
+        assert len(block) > 200, block
+
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" in block, (
+            "the socket-timeout rationale must name the knob that SIZES the "
+            "loop-stall ceiling and that the hosted deployment ARMS: pointing "
+            "an operator at its sibling hands them the knob production does "
+            "not run")
+        assert "SOFT" in block, (
+            "the idle-gated conditions describe the SOFT path only; "
+            "unqualified they describe a mechanism this deployment does not run")
+        assert "DISABLED BY DEFAULT" in block and "PRODUCT" in block, (
+            "\"self-kill is OPT-IN and disabled by default\" must be scoped to "
+            "the PRODUCT default — unqualified it reads as \"nothing is armed\" "
+            "for the deployment that ships this file, which arms 600s")
+        assert "bypass" in block.lower(), (
+            "and must say what makes the ceiling different: it BYPASSES the "
+            "in-flight gauge, which is the whole point of arming it")
 
     def test_the_test_session_pin_BEATS_an_ambient_hard_ceiling(self, monkeypatch):
         """#10585 review P3: the pin must OVERRIDE an ambient value, not defer.
