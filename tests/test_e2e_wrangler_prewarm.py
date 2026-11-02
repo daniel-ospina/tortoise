@@ -35,7 +35,11 @@ What is left for THIS file is the shape that keeps those properties true:
   4. every e2e job has an unconditional install-and-VERIFY step that runs BEFORE
      its boot and keeps its three-attempt registry retry (a single npm
      `ECONNRESET` reded the required `legal-e2e` check on 2026-10-15, and the
-     last attempt is the hard one now);
+     last attempt is the hard one now); each attempt first HEALS the runner's
+     global prefix (#10523: npm retires the old directory to a name derived FROM
+     THE PATH, so one interrupted install makes every later attempt fail the
+     SAME `rename(2)` with ENOTEMPTY — a retry that cannot heal it is a retry
+     that can only red the check three times for one cause);
   5. boot steps carry no spec and keep their two-attempt retry;
   6. every deploy step asserts before it uploads;
   7. every job that installs wrangler pins node 22 — `npm install` only WARNS
@@ -77,6 +81,9 @@ rather than grepping its path.
 
 from __future__ import annotations
 
+import base64
+import errno
+import hashlib
 import os
 import re
 import shutil
@@ -93,6 +100,15 @@ VERSION_SOURCE = "config/wrangler-version"
 
 PREWARM_JOBS = frozenset({"welcome-e2e", "legal-e2e", "dashboard-e2e"})
 VERIFY_STEP = "Install and verify the wrangler toolchain (#8816)"
+WEDGE_SCRIPT = REPO_ROOT / ".github" / "scripts" / "npm-global-wedge.sh"
+
+#: The install PREFIX `legal-e2e` resolved on the runner that redded it
+#: (2026-11-02T03:58Z, `gh-runner-x64-7`). npm retired `<prefix>/wrangler` to a
+#: destination it RE-DERIVES on every later install, which is why one interrupted
+#: install reds all of them — reconstructed below from npm's own formula rather
+#: than trusted from a log.
+MEASURED_PREFIX = "/opt/gh-runner-x64-7/_work/_tool/node/22.23.4/x64/lib/node_modules"
+MEASURED_RESIDUE = f"{MEASURED_PREFIX}/.wrangler-UdmJz4wm"
 BOOT_STEP_PREFIX = "Start wrangler pages dev preview"
 DEPLOY_STEP_PREFIX = "Deploy to Cloudflare Pages"
 
@@ -711,6 +727,158 @@ def test_the_three_website_e2e_jobs_install_and_verify() -> None:
                 f"{job}: the retry carries no backoff — all three attempts would burn "
                 "inside the same second and fail together"
             )
+
+
+def _npm_retired_name(absolute_path: str) -> str:
+    """npm's retire name for `absolute_path`, per `arborist/lib/retire-path.js`:
+    `.<basename>-<first 8 alnum chars of base64(sha1(<the absolute path>))>`.
+
+    Reproduced so the mechanism the healer exists for is a MEASUREMENT, not prose:
+    the name depends only on the path, which is why a residue survives the job that
+    dropped it and wedges every later install of the same package in that prefix.
+    """
+    digest = hashlib.sha1(absolute_path.encode()).digest()
+    safe = re.sub(r"[^a-zA-Z0-9]+", "", base64.b64encode(digest).decode())[:8]
+    return os.path.join(
+        os.path.dirname(absolute_path), f".{os.path.basename(absolute_path)}-{safe}"
+    )
+
+
+def _run_wedge(*args: str) -> subprocess.CompletedProcess:
+    assert WEDGE_SCRIPT.is_file(), f"the healer the install steps call is missing: {WEDGE_SCRIPT}"
+    return subprocess.run(
+        ["bash", str(WEDGE_SCRIPT), *args], capture_output=True, text=True, timeout=120
+    )
+
+
+def _rename_onto(prefix: Path, residue: Path) -> None:
+    """`rename(2)` — the syscall npm's install actually fails on.
+
+    ⛔ NOT `subprocess.run(["mv", "-T", …])`. `-T` is a **GNU Coreutils** option
+    (`--no-target-directory`); BSD/macOS `mv` documents no such flag and exits 64
+    with `illegal option -- T`, so that form red the file on every dev host
+    outside Linux while CI — Ubuntu-only — stayed green (#10523 review, P2).
+
+    The leg's subject is the SYSTEM CALL, and `os.rename` IS `rename(2)` on POSIX,
+    so the reproduction needs no subprocess and no option at all, and the failure
+    can be keyed on `errno` rather than on a program's stderr prose. Plain `mv` is
+    not a substitute: with an existing directory as the final operand it moves the
+    source INTO it and succeeds, which hides the very defect this pins.
+    """
+    os.rename(prefix / "wrangler", residue)
+
+
+def _prefix(tmp_path: Path) -> Path:
+    """A throwaway global prefix with a package directory in it."""
+    prefix = tmp_path / "node_modules"
+    (prefix / "wrangler" / "lib").mkdir(parents=True)
+    (prefix / "wrangler" / "lib" / "index.js").write_text("// old\n", encoding="utf-8")
+    return prefix
+
+
+def test_the_measured_runner_residue_reproduces_from_npms_own_formula() -> None:
+    """The mechanism, pinned to the OBSERVED value from the red build.
+
+    If npm's retired name were random, that runner's three identical failures would
+    be inexplicable and a cleanup could never be aimed at the right directory.
+    """
+    assert _npm_retired_name(f"{MEASURED_PREFIX}/wrangler") == MEASURED_RESIDUE
+
+
+def test_the_healer_clears_the_residue_that_blocks_npms_rename(tmp_path: Path) -> None:
+    """The failure is a `rename(2)`, so this reproduces THAT — before and after.
+
+    Pre-heal the rename fails with the exact syscall error npm reported; post-heal
+    the same rename succeeds. Both halves are `os.rename`, i.e. `rename(2)` itself
+    — no `mv`, so the arm is platform-neutral (see `_rename_onto`).
+    """
+    prefix = _prefix(tmp_path)
+    residue = Path(_npm_retired_name(str(prefix / "wrangler")))
+    (residue / "lib").mkdir(parents=True)
+    (residue / "lib" / "stale.js").write_text("// residue\n", encoding="utf-8")
+
+    with pytest.raises(OSError) as wedge:
+        _rename_onto(prefix, residue)
+    # POSIX leaves the code to the implementation: rename() onto a NON-EMPTY
+    # directory "shall" fail, and the spec's own ERRORS list offers ENOTEMPTY or
+    # EEXIST. Keying on the code is what makes this an assertion about the syscall
+    # instead of about one `mv`'s wording.
+    assert wedge.value.errno in (errno.ENOTEMPTY, errno.EEXIST), (
+        f"the fixture is not a wedge: rename(2) failed with {wedge.value!r}"
+    )
+
+    healed = _run_wedge("clear", str(prefix / "wrangler"))
+    assert healed.returncode == 0, healed.stderr
+    assert f"CLEARED {residue}" in healed.stdout, healed.stdout
+    assert not residue.exists()
+
+    _rename_onto(prefix, residue)
+    assert residue.is_dir() and (residue / "lib" / "index.js").is_file()
+
+
+def test_the_healer_leaves_a_clean_prefix_alone(tmp_path: Path) -> None:
+    """No residue is not a failure, and the installed package is never touched."""
+    prefix = _prefix(tmp_path)
+    healed = _run_wedge("clear", str(prefix / "wrangler"))
+    assert healed.returncode == 0, healed.stderr
+    assert "NO-STALE-STATE" in healed.stdout, healed.stdout
+    assert (prefix / "wrangler" / "lib" / "index.js").is_file()
+
+
+def test_the_healer_refuses_a_relative_path() -> None:
+    """The name it removes is a hash of the ABSOLUTE path — a relative argument
+    would heal whatever prefix the cwd happens to sit in."""
+    out = _run_wedge("clear", "node_modules/wrangler")
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "absolute path" in out.stderr, out.stderr
+
+
+def test_the_healer_does_not_read_on_when_a_residue_survives(tmp_path: Path) -> None:
+    """A residue it cannot remove is a red with a NAMED cause, never a quiet pass:
+    the next `npm install -g` would fail ENOTEMPTY and blame npm."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the directory mode this arm needs to make rm fail")
+    prefix = _prefix(tmp_path)
+    residue = Path(_npm_retired_name(str(prefix / "wrangler")))
+    (residue / "lib").mkdir(parents=True)
+    prefix.chmod(0o500)  # a directory entry cannot be unlinked from a readonly parent
+    try:
+        out = _run_wedge("clear", str(prefix / "wrangler"))
+    finally:
+        prefix.chmod(0o700)
+    assert out.returncode == 2, out.stdout + out.stderr
+    assert "ENOTEMPTY" in out.stderr and str(residue) in out.stderr, out.stderr
+    assert residue.exists(), "the fixture did not actually survive the removal"
+
+
+def test_every_wrangler_install_step_heals_the_prefix_before_it_fetches() -> None:
+    """The heal must be INSIDE the retry loop and BEFORE the install.
+
+    Before 2026-11-02 the loop retried a failure that is deterministic in the
+    runner's prefix, so all three attempts died on the same rename; each attempt
+    now heals first, which is what makes the retry able to recover at all.
+    """
+    healed = 0
+    for job, step in _steps_named(VERIFY_STEP):
+        run = _run(step)
+        for body in _retry_loop_bodies(run, "for attempt in 1 2 3;"):
+            if "npm install -g" not in body:
+                continue
+            assert "npm-global-wedge.sh" in body, (
+                f"{job}: the install loop does not heal the runner's npm prefix — a "
+                "residue from an interrupted install makes every attempt fail on the "
+                "SAME rename(2) (measured 2026-11-02T03:58Z, legal-e2e)"
+            )
+            assert body.index("npm-global-wedge.sh") < body.index("npm install -g"), (
+                f"{job}: the heal runs AFTER the install, so a wedged prefix reds the "
+                "attempt before it is ever healed"
+            )
+            assert "npm root -g" in body, (
+                f"{job}: the heal does not resolve npm's OWN global root; a guessed "
+                "prefix heals a directory the install never uses"
+            )
+            healed += 1
+    assert healed, f"no install loop in any {VERIFY_STEP!r} step — the probe is wrong"
 
 
 def test_the_retry_check_ignores_a_commented_out_loop() -> None:
