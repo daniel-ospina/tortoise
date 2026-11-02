@@ -1,3 +1,14 @@
+---
+title: "The bounded-operation contract (#8447, C1)"
+type: engineering
+domain: platform
+doc_status: live
+created: 2026-11-02
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: bounded operation, truncation marker, #8447, AIP-158
+---
+
 # The bounded-operation contract
 
 **Issue:** #8447 (`P1-severe`) — *"contract: fail explicitly, never return a silently-truncated result"*.
@@ -71,19 +82,27 @@ non-breaking place to put an incompleteness marker:
 
 For the two SDK-implemented ones, that second option is an MCP/SDK **surface** change, and the
 repo's hard rule requires Daniel's approval before any surface change (`AGENTS.md` → *MCP/SDK
-Surface Approval*). So they are recorded here as:
+Surface Approval*). `tortoise_search` is the third of the same class — an MCP tool
+(`tortoise/tool_registry.py:474`), not a route — and the manifest's own note calls its list→object
+change *"an MCP Surface Approval decision"* (`config/surface-manifest.yml:140-141`). So the three
+are recorded here as:
 
-> **NEEDS-APPROVAL(`tortoise_list_batches`, `tortoise_suggest_entry_points`)** — the fix for each is
-> a return-shape change from a bare list to a marked result; the contract cannot be honoured on a
-> bare `list[dict]` without one.
+> **NEEDS-APPROVAL(`tortoise_list_batches`, `tortoise_suggest_entry_points`, `tortoise_search`)** —
+> the fix for each is a return-shape change from a bare list to a marked result; the contract
+> cannot be honoured on a bare `list[dict]` without one.
 
-`tortoise_search`, selfhost `GET /search` and selfhost `GET /points` are the same shape and need the
-same decision, but they are published **HTTP response models** rather than SDK methods, so they are
-recorded as **SILENT** with the same return-shape dependency. That deferral is the **deliberate
-limit** recorded on **#8447's 2026-11-01 comment** (§6: *"`tortoise_search` (MCP) and
-`selfhost_api`'s `/search` are list-shaped, so they still cannot say it"*; §1 rows #13/#14:
-*"list-shaped surfaces — a field cannot ride a list … an MCP/SDK surface decision (owner-only)"*)
-and restated in `config/surface-manifest.yml:139-141`. It is **not** a scope note on any PR body.
+`selfhost GET /search` and selfhost `GET /points` are published **HTTP response models**
+(`response_model=list[PointResponse]`) rather than SDK methods or MCP tools, so they are recorded as
+**SILENT** with the same return-shape dependency. The deferral record names **exactly two**
+surfaces: `tortoise_search` and selfhost `GET /search` — **#8447's 2026-11-01 comment** §6, verbatim:
+*"Deliberate limit: `tortoise_search` (MCP) and `selfhost_api`'s `/search` are list-shaped, so they
+still cannot say it"*, with §1 rows #13/#14 as the same pair and `config/surface-manifest.yml:139-141`
+restating the MCP half. It is **not** a scope note on any PR body.
+
+⚠️ **`selfhost GET /points` is NOT in that record.** It is the same shape and needs the same
+decision, but no artifact has decided it yet — so it is recorded here as **SILENT and undecided**,
+not as deferred. An undecided surface is not a deferred one; conflating them is how a surface stops
+being tracked.
 
 ⚠️ **hosted `GET /v1/points` is NOT one of these, and is not parked on an approval.** Its body is a
 **dict**, not a list — `return {"points": results, "count": len(results)}` (`hosted_api.py:10201`) —
@@ -151,7 +170,9 @@ A marker is only an instrument if a caller can act on it. Therefore:
 - #5388 — the closed instance: `_iter_registered_orgs` could not distinguish a *complete* 1000-org
   fleet from a PostgREST-truncated page. We fixed the instance, not the class; this is the class.
 - PR #10500 — merged: `GET /v1/search` marks its result incomplete (`truncated` + `total_available`
-  via `truncation.py`); the list-shaped surfaces are a recorded deferral on #8447's 2026-11-01
-  comment (§1 census rows #13/#14), not a scope note on that PR.
+  via `truncation.py`); the list-shaped surfaces named there are a recorded deferral on #8447's
+  2026-11-01 comment (§1 census rows #13/#14 — `tortoise_search` and selfhost `GET /search` only),
+  not a scope note on that PR. ⚠️ selfhost `GET /points` is the same shape and is **undecided**, not
+  deferred.
 - PR #10518 — `read_after` refuses an out-of-domain `limit` instead of rewriting it.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` — the storage seams these bounds sit on.
