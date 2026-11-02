@@ -2738,8 +2738,10 @@ def main(argv: list[str] | None = None) -> int:
                  f"corpus_hash={receipt['corpus_hash']} differ from the frozen "
                  f"corpus ({corpus_sha}), and its verdict={receipt['verdict']} "
                  f"failure_origin={receipt['failure_origin']}: the planted edges "
-                 f"are not formed at all (#8503), and the receipt's "
-                 f"retrievability rate is UNMEASURED (#9596)"),
+                 f"are not formed at all (#8503 \u2014 CLOSED 2026-10-24: that closure "
+                 f"records the DISPROOF, so it is this row's measurement record and "
+                 f"not a live blocker; the residual is owned by #9596), and the "
+                 f"receipt's retrievability rate is UNMEASURED (#9596)"),
     }
 
     # ── E5 ────────────────────────────────────────────────────────────────
