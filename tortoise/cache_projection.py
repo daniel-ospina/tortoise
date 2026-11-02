@@ -1264,12 +1264,25 @@ def relation_from_row(row: Mapping[str, Any]) -> RecordRelation:
 _PAYLOAD_EVENT = ("COALESCE(CASE WHEN jsonb_typeof(payload -> 'event') = 'object' "
                   "THEN payload -> 'event' ELSE NULL END, payload)")
 
-#: #9974 — the label each CREATION record types, declared once so the reader and
-#: any pin cannot disagree about which family a birth record belongs to.
-#: `record_projection` declares the same mapping structurally (`ObjectRegistered`
-#: is a snapshot of the `object` table, `SubjectAdded` of `subject`); this table
-#: is the reader's half of it, and it is the reason the birth leg cannot write a
-#: `:Object` status onto a `:Subject` with the same id.
+#: #9974 — the label each CREATION record types: the reader's half of the
+#: creation shape, and the reason the birth leg cannot write a `:Object` status
+#: onto a `:Subject` with the same id (ids are per-label).
+#: ⛔ IT IS A COPY, NOT THE ONE HOME, and it must not be described as one. The
+#: one home is `projection._ENTITY_CREATION_EVENT_LABEL` — the map
+#: `record_projection` materialises a snapshot from (`ObjectRegistered` is a
+#: snapshot of the `object` table, `SubjectAdded` of `subject`) — and this table
+#: is that map RESTRICTED to the labels that carry a §2.6 projection-owned status
+#: (:data:`EVENT_STREAM_FOLDS`: `Object`, `Subject`). `EventRecorded` is
+#: deliberately absent: `public.event`'s CHECK refuses only `confidence`, so
+#: `:Event` has no projection-owned `status` a birth record could carry.
+#: The copy is therefore only as good as the pin that binds it to the one home —
+#: `tests/test_cache_projection.py::
+#: test_the_birth_event_labels_are_the_one_home_creation_map`. Without that pin, a
+#: creation type added or renamed in `_ENTITY_CREATION_EVENT_LABEL` would leave
+#: this table naming the old types, the birth leg would select NOTHING for the
+#: new one, and a born-terminal node would rebuild with NO status — which
+#: `live._terminal_excluded` reads as LIVE. That is #9974's harm, silently, with
+#: every other pin green.
 _BIRTH_EVENT_LABELS = {"ObjectRegistered": "Object", "SubjectAdded": "Subject"}
 
 #: The record's own event stream, reduced to the fold's inputs. `seq` orders it.
