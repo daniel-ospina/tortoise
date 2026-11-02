@@ -216,6 +216,18 @@ def test_the_receipt_carries_the_arm_that_produced_it():
             "the ceiling condition must compare _tl_placement against "
             "'head' — an inverted or unrelated condition reports the tail "
             "geometry on a head row (#10538)")
+        # The OPERATOR and the BRANCHES, not only the operands: review
+        # measured `_tl_placement != "head"` and a branch swap each passing a
+        # condition-and-operands-only pin, i.e. certifying the very defect
+        # (tail ceiling on a head row) that this pin exists to catch.
+        assert isinstance(test.ops[0], ast.Eq), (
+            "the ceiling condition must be `== 'head'`, not its negation")
+        assert isinstance(ceiling.body, ast.Constant) and ceiling.body.value == 0, (
+            "the HEAD arm must report ceiling 0 — that is the value the fused "
+            "caller actually uses there (the leg is handed head_excl=0)")
+        assert isinstance(ceiling.orelse, ast.Call), (
+            "the TAIL arm must report the computed ceiling (window - limit), "
+            "not a constant")
 
 
 # ── the ARM is stamped into the run fingerprint (RED if the stamp is lost) ──
@@ -268,3 +280,54 @@ def test_a_garbage_env_placement_stamps_the_shipped_arm(monkeypatch, tmp_path):
     shipped call resolves, so a typo cannot certify an arm the run did not use."""
     fp = _fp(monkeypatch, tmp_path, leg="1", placement="heads")
     assert fp.get("temporal_leg_placement") is None
+
+
+# ── the PARAMETER reaches the resolver (RED if the explicit arg is dropped) ──
+
+def test_the_call_resolves_the_explicit_parameter_not_the_env_alone():
+    """The knob's contract is `explicit > env > default`. Pinning the resolver
+    in isolation and pinning that the call forwards the *name* ``_tl_placement``
+    leaves the middle link unguarded: review measured that replacing the
+    resolver's first argument with ``None`` — ``temporal_leg_placement``
+    accepted and silently IGNORED, env-only — kept all 12 tests green. That is
+    the "knob exists but the counterfactual is unreachable" defect #10538
+    exists to end, restored at the parameter surface with no red test."""
+    src = Path(r.__file__).read_text()
+    calls = [
+        node for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "resolve_temporal_leg_placement"
+    ]
+    assert len(calls) == 1, (
+        f"expected exactly one resolver call site, found {len(calls)}")
+    call = calls[0]
+    first = call.args[0] if call.args else None
+    assert isinstance(first, ast.Name) and first.id == "temporal_leg_placement", (
+        "the resolver must be handed the `temporal_leg_placement` PARAMETER as "
+        "its explicit arm — passing None makes the documented precedence "
+        "env-only and silently ignores the caller (#10538)")
+
+
+def test_the_fingerprint_stamp_is_gated_on_the_leg_being_on():
+    """A leg-OFF run with the placement env exported must not stamp an arm
+    that never ran: the key's presence is gated on ``_temporal_leg_on``."""
+    from tools.longmem_eval import run as runner
+
+    src = Path(runner.__file__).read_text()
+    stamps = [
+        node for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Tuple) and len(node.elts) == 2
+        and isinstance(node.elts[0], ast.Constant)
+        and node.elts[0].value == "temporal_leg_placement"
+    ]
+    assert stamps, "the fingerprint stamp vanished (#10538)"
+    value = stamps[0].elts[1]
+    assert isinstance(value, ast.IfExp), (
+        "the stamp must be CONDITIONAL (absent at the shipped default), so an "
+        "existing arm-ON checkpoint still resumes byte-identically")
+    test = value.test
+    names = {n.id for n in ast.walk(test) if isinstance(n, ast.Name)}
+    assert "_temporal_leg_on" in names, (
+        "the stamp must be gated on the leg being ON — otherwise a leg-OFF "
+        "run stamps an arm it never used (#10538)")
