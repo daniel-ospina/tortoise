@@ -1215,17 +1215,21 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
     completes (review at `adde2763f`, blocking). The shape this file already
     refuses at `test_every_embedding_write_path_reaches_the_gate_seam`.
 
-    ⛔ NOR is an empty live set a GREEN tree. `_census_violations` reports the
-    STALE direction too (`no unresolved writer behind them`), so the census
-    entry must be trimmed in the same change that resolves its writer, and
-    until it is this test is RED over every un-trimmed entry — the `unused
-    suppression` contract Ruff's RUF100 and ESLint's unused-suppression
+    ⛔ NOR does an empty live set ALONE make the tree green. `_census_violations`
+    reports the STALE direction too (`no unresolved writer behind them`), so
+    the census entry must be trimmed in the same change that resolves its
+    writer; until it is, this test is RED over every un-trimmed entry — the
+    `unused suppression` contract Ruff's RUF100 and ESLint's unused-suppression
     reporting prescribe, reached by `#5090`'s remainder. Read that failure
     message before touching anything: it names the three reasons an entry can
-    look stale and only ONE of them is a delete. Nor is the guard vacuous
-    while the set is empty: the injected-map test carries both directions on
-    an injected census and `test_the_completed_state_reds_the_live_falsifier`
-    executes the completed-state contract this paragraph states.
+    look stale and only ONE of them is a delete.
+
+    Once the entries ARE trimmed the live set and the census are both empty and
+    this test is GREEN — that is the FINISHED state, not a disarmed guard, and
+    it is the state `#5090`'s remainder is aiming at. Nor is the guard vacuous
+    while the set is empty: the injected-map test carries both directions on an
+    injected census, and `test_an_untrimmed_census_over_a_resolved_set_is_red`
+    executes the trim contract this paragraph states.
     """
     census = getattr(probe, "WRITER_CENSUS", {})
     classes = getattr(probe, "CENSUS_CLASSES", ())
@@ -1238,39 +1242,64 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
     assert not violations, "\n".join(violations)
 
 
-def test_the_completed_state_reds_the_live_falsifier() -> None:
-    """The state `#5090`'s remainder reaches: RED, and never a silent green.
+def test_an_untrimmed_census_over_a_resolved_set_is_red() -> None:
+    """Resolving every writer does NOT license a stale census entry.
 
-    The docstring above claims this, so it is measured rather than restated:
-    resolving the last unresolved writer does NOT turn the live falsifier
-    green, because the census entry then has `no unresolved writer behind it`
-    and `_census_violations` says so. Pre-fix the paragraph claimed the exact
-    opposite ("an empty live set here is a GREEN tree … completing `#10541`
-    turns this green without touching it") while the helper it calls returned
-    one violation naming all 14 entries — the state in which its own warning
-    about "its cheapest-looking repair is to delete the assertion" would
-    point a lane at the stale check (review on this PR).
+    `#5090`'s remainder reaches a tree with NO unresolved writers, and the trim
+    contract the sibling docstring states is measured here rather than
+    restated: an entry whose writer is no longer a hole makes
+    `_census_violations` report `no unresolved writer behind them`.
+
+    ⛔ The census is INJECTED and the unresolved set is empty ON PURPOSE. An
+    earlier version of this test fed the LIVE `WRITER_CENSUS` into the same
+    assertion with an empty live set, which made the pair UNSATISFIABLE at the
+    very state it named: with the entries trimmed as the sibling docstring
+    demands, `_census_violations([], {}, …)` is `[]` and `assert stale` failed
+    on a CORRECT tree — while leaving the entries in place reddened the live
+    falsifier instead. No tree satisfied both tests (review on this PR, P2).
+    The contract is about an UNTRIMMED census, not about today's literal, so an
+    injected map keeps it executable after the real census is emptied — the
+    same shape `test_the_census_guard_has_teeth_on_an_INJECTED_map` uses.
     """
+    resolved = "tortoise.q::_resolved_since"
+    also_resolved = "tortoise.q::_also_resolved"
+    census = {
+        resolved: (probe.CENSUS_RECOGNISED, "injected for this test"),
+        also_resolved: (probe.CENSUS_EXEMPT, "injected for this test"),
+    }
     violations = _census_violations(
-        [], probe.WRITER_CENSUS, probe.CENSUS_CLASSES, probe.CENSUS_BYPASS)
+        [], census, probe.CENSUS_CLASSES, probe.CENSUS_BYPASS)
     stale = [v for v in violations
              if "no unresolved writer behind them" in v]
     assert stale, (
-        "the completed state must NOT read as green: the census outlives its "
-        f"holes, and that is where the trim is demanded — {violations}")
-    unnamed = [w for w in probe.WRITER_CENSUS if w not in stale[0]]
+        "an untrimmed census over a resolved set must NOT read as green: the "
+        f"census outlives its holes, and that is where the trim is demanded — "
+        f"{violations}")
+    unnamed = [w for w in census if w not in stale[0]]
     assert not unnamed, (
         "the stale violation names a subset only, so the repair it demands "
         f"is not derivable from it: {unnamed}")
-    # The docstring above must POINT AT that message instead of asserting a
-    # verdict of its own: prose that restates behaviour goes stale silently,
-    # which is how the pre-fix paragraph came to describe the one state where
-    # it misdirects a lane into disarming the guard.
+    # The TRIMMED census over the same resolved set is the finished state and it
+    # is GREEN. Without this the assertion above would be satisfied by a helper
+    # that redded unconditionally — the "pin the head" failure this file
+    # refuses, and the one that made the previous version unsatisfiable.
+    assert _census_violations(
+        [], {}, probe.CENSUS_CLASSES, probe.CENSUS_BYPASS) == [], (
+        "a trimmed census over a resolved set is the FINISHED state and must "
+        "be green, or the trim contract can never be satisfied")
+    # ⛔ INVERTED pin on the paragraph that used to misdescribe this state:
+    # assert the KNOWN-FALSE claims are ABSENT rather than requiring one
+    # specific true sentence to be PRESENT. The positive pin made any unrelated
+    # prose correction a RED (review on this PR, P2); this one reds only if the
+    # inversion comes BACK, which is the regression `4b0e8caed` actually fixed.
     doc = test_every_unresolved_writer_carries_a_census_class.__doc__ or ""
-    assert "no unresolved writer behind them" in doc, (
-        "the live falsifier's docstring does not name the stale message, so "
-        "the lane that reaches the completed state gets no pointer to the "
-        f"repair: {doc}")
+    for false_claim in ("turns this green without touching it",
+                        "an empty live set here is a",
+                        "is a GREEN tree"):
+        assert false_claim not in doc, (
+            "the live falsifier's docstring re-asserts the pre-fix claim that "
+            f"an empty live set is green without a trim — {false_claim!r}: "
+            f"{doc}")
 
 
 def test_the_census_guard_has_teeth_on_an_INJECTED_map() -> None:
