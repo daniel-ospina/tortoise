@@ -21,8 +21,10 @@ These tests lock:
   3. the behavior — a prompt-faithful reader answers the superseding value
      (current-value), the value valid at the asked date via chain-walk
      (point-in-time, current value as context only), abstains when no
-     version covers the asked date, counts a restated fact once, and
-     synthesizes distinct decisions across sessions,
+     version covers the asked date, counts a restated fact once where the MSR
+     rule is the only instruction, counts a second date as a second item where
+     #10539's aggregation clause refines it (and still counts an explicit
+     back-reference once), and synthesizes distinct decisions across sessions,
   4. the E2E-6/E2E-9 chain end-to-end — a REAL graph on embedded
      FalkorDBLite: production ``supersede_point`` → CORRECTS edge, the
      superseded point co-retrieves (``include_terminal=True``, E5), the
@@ -46,9 +48,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tortoise.sdk import TortoiseSDK  # noqa: E402, F401, I001, RUF100
 
 from tools.longmem_eval.reader import (  # noqa: E402, RUF100
-    LLMReader, _ABSTRACTION_FRAGMENT, _KNOWLEDGE_UPDATE_FRAGMENT,
-    _MULTI_SESSION_FRAGMENT, _SYSTEM_PROMPT, _TYPE_FRAGMENTS,
-    system_prompt_for,
+    LLMReader, _ABSTRACTION_FRAGMENT, _AGGREGATION_FRAGMENT,
+    _KNOWLEDGE_UPDATE_FRAGMENT, _MULTI_SESSION_FRAGMENT, _SYSTEM_PROMPT,
+    _TYPE_FRAGMENTS, system_prompt_for,
 )
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     render_context, retrieve_for_question,
@@ -163,7 +165,12 @@ class _AggregationFaithfulModel:
       with the current value appended ONLY as trailing context; no version
       covers the asked date → abstain.
     - MSR fragment present: dedupe entry values across the dated sessions
-      (same fact restated is the SAME event) and join the distinct ones.
+      (same fact restated is the SAME event) and join the distinct ones —
+      EXCEPT when the aggregation clause (#10539) is in the same prompt: it is
+      appended after the MSR fragment and refines it, so an identical
+      description under two different session dates is two items unless the
+      later one refers back to the earlier occurrence. ``_multi_session``
+      implements both modes; see its docstring.
     - Anything else → the abstention marker.
 
     Proves the prompt, not retrieval, unlocks the answer-from-newer /
@@ -173,11 +180,24 @@ class _AggregationFaithfulModel:
     _PREFIX = re.compile(
         r"^\s*(?:\[[^\]]*\]|\(session date [^)]*\))(?:\s|$)")
 
+    #: The aggregation clause's ONE exception to "a second date means a second
+    #: item": a mention that explicitly points BACK at the earlier one is a
+    #: restatement, so it is the same item. Matched on the entry text, which is
+    #: all a reader has (``tortoise/reader.py`` — ``_AGGREGATION_FRAGMENT``:
+    #: "unless it is explicitly a restatement of the earlier one").
+    _BACK_REFERENCE = re.compile(
+        r"\b(?:as i (?:said|mentioned)|as mentioned|same as before|"
+        r"restating|to repeat)\b",
+        re.IGNORECASE)
+
     def complete(self, *, system: str, user: str) -> str:
         if "KNOWLEDGE-UPDATE INSTRUCTIONS" in system:
             return self._knowledge_update(user)
         if "MULTI-SESSION REASONING INSTRUCTIONS" in system:
-            return self._multi_session(user)
+            # the clause is appended AFTER the type fragment and refines it, so
+            # reading its presence here mirrors the composition order exactly
+            return self._multi_session(
+                user, counting="AGGREGATION INSTRUCTIONS" in system)
         return "I do not know; the history does not mention it."
 
     def _entries(self, user: str) -> list[tuple[str, str]]:
@@ -222,14 +242,39 @@ class _AggregationFaithfulModel:
         # current-value → answer from the newest, superseding point
         return max(entries)[1]
 
-    def _multi_session(self, user: str) -> str:
-        distinct: list[str] = []
-        for _, content in self._entries(user):
-            if content not in distinct:
-                distinct.append(content)
-        if not distinct:
+    def _multi_session(self, user: str, *, counting: bool) -> str:
+        """The MSR branch, as the composed prompt actually instructs it.
+
+        ``counting`` = the aggregation clause is in the same prompt. The two
+        modes differ on exactly one class, and it is the class #10539 is about:
+
+        - MSR only (``counting=False``): a description already seen is the SAME
+          event wherever it appears — the MSR rule verbatim.
+        - MSR + aggregation (``counting=True``): the same description under the
+          SAME session date is still one item, but under a DIFFERENT date it is
+          a second item (do not collapse — that under-counts), *unless* the
+          later entry explicitly refers back to the earlier one.
+
+        Keeping both modes is the point: it is what makes the restatement pin
+        below able to SEE the refinement instead of passing on a prompt its
+        model never read.
+        """
+        items: list[str] = []
+        seen_per_date: dict[str, set[str]] = {}
+        for session_date, content in self._entries(user):
+            if counting:
+                if self._BACK_REFERENCE.search(content):
+                    continue        # explicit restatement → the same item
+                same_date = seen_per_date.setdefault(session_date, set())
+                if content in same_date:
+                    continue        # restated WITHIN one session → one item
+                same_date.add(content)
+                items.append(content)
+            elif content not in items:
+                items.append(content)
+        if not items:
             return "I do not know; the history does not mention it."
-        return " ; ".join(distinct)
+        return " ; ".join(items)
 
 
 def test_ku_current_value_answers_superseding_point():
@@ -272,22 +317,95 @@ def test_ku_point_in_time_ambiguous_restore_abstains():
     assert "do not know" in hyp.lower()
 
 
-def test_msr_same_fact_restated_is_one_event():
-    """MSR discipline: the same fact restated in a later session is the SAME
-    event — the answer counts it once (no double-count)."""
-    hits = [
+def _restated_in_two_sessions() -> list[dict]:
+    """The same decision, described identically, under two session dates.
+
+    This is the fixture the aggregation clause's reversal is about: nothing in
+    the text says whether the second session re-affirmed the first decision or
+    recorded a fresh one, so the ONLY signal is the date — plus, when present,
+    an explicit back-reference.
+    """
+    return [
         {"id": "a", "content": "We decided to go to Tokyo.",
          "lme_session_index": 0, "session_date": "2025-06-01"},
         {"id": "b", "content": "We decided to go to Tokyo.",
          "lme_session_index": 1, "session_date": "2025-06-12"},
     ]
+
+
+def test_msr_same_fact_restated_is_one_event():
+    """MSR discipline, on the class where the MSR rule IS the instruction: the
+    same fact restated in a later session is the SAME event — counted once.
+
+    Scoped to a NON-aggregative question on purpose. #10539 appends the
+    aggregation clause to aggregative prompts, and that clause REFINES this
+    rule ("that holds only when the later mention refers back to the same
+    occurrence"), so the same fixture on an aggregative question is TWO items —
+    pinned immediately below. Before the split, this test asked an aggregative
+    question while asserting the un-refined rule, and its fake model never read
+    the appended clause, so the repo's only behavioural pin for the dominant
+    class was blind to the reversal it was sitting on.
+    """
+    hits = _restated_in_two_sessions()
+    question = "Where did Ava decide to go?"
+    # the premise of the split, asserted rather than assumed
+    assert _AGGREGATION_FRAGMENT not in system_prompt_for(
+        "multi-session", question=question)
     reader = LLMReader(_AggregationFaithfulModel(), model_id="a2-faithful")
     hyp = reader.answer(context_hits=hits,
-                        question="How many times did Ava decide on Tokyo?",
+                        question=question,
                         question_date="2025-06-15",
                         question_type="multi-session")
     assert "Tokyo" in hyp
     assert hyp.count("Tokyo") == 1  # restated fact counted exactly once
+
+
+def test_aggregative_restatement_on_two_dates_counts_two_items():
+    """#10539's deliberate reversal, pinned where it can be SEEN.
+
+    Same fixture, aggregative question: the composed prompt now carries the
+    aggregation clause after the MSR fragment, and that clause narrows the
+    dedupe rule — the same description under two DIFFERENT session dates is two
+    separate items unless the later one refers back to the earlier occurrence,
+    "because that under-counts". A description-only key could not tell a
+    re-affirmed decision from a second one, and under-counting is the direction
+    #10539 exists to fix.
+
+    Non-vacuous by construction: delete `question=question` at
+    `tortoise/reader.py`'s `LLMReader.answer_with_evidence` and the clause never
+    reaches the prompt, the model falls back to MSR-only dedupe, and this
+    assertion (2) fails while the pin above still passes.
+    """
+    hits = _restated_in_two_sessions()
+    question = "How many times did Ava decide on Tokyo?"
+    prompt = system_prompt_for("multi-session", question=question)
+    assert _MULTI_SESSION_FRAGMENT in prompt
+    assert _AGGREGATION_FRAGMENT in prompt    # both rules compose for this class
+    reader = LLMReader(_AggregationFaithfulModel(), model_id="a2-faithful")
+    hyp = reader.answer(context_hits=hits,
+                        question=question,
+                        question_date="2025-06-15",
+                        question_type="multi-session")
+    assert hyp.count("Tokyo") == 2
+
+
+def test_aggregation_clause_counts_an_explicit_restatement_once():
+    """The reversal's own exception, so the clause is not a blanket
+    double-count: a later entry that refers BACK to the earlier one is a
+    restatement, not a second item, even across two session dates.
+
+    This is the guard against turning #10539's under-count fix into the
+    over-count that `_MULTI_SESSION_FRAGMENT` exists to prevent.
+    """
+    hits = _restated_in_two_sessions()
+    hits[1]["content"] = "As I said before, we decided to go to Tokyo."
+    question = "How many times did Ava decide on Tokyo?"
+    reader = LLMReader(_AggregationFaithfulModel(), model_id="a2-faithful")
+    hyp = reader.answer(context_hits=hits,
+                        question=question,
+                        question_date="2025-06-15",
+                        question_type="multi-session")
+    assert hyp.count("Tokyo") == 1
 
 
 def test_msr_aggregates_distinct_decisions_across_sessions():
