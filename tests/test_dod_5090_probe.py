@@ -1286,11 +1286,18 @@ def test_the_census_carries_no_entry_for_a_writer_that_is_no_longer_unresolved()
     re-check at all, and a dead entry would silently inflate the `exempt` count
     a reader takes as "these are the instrument's false positives".
 
-    Bidirectional on purpose: equality, not containment. It goes RED on a stale
-    entry (delete it) and on a newly unresolved writer that no entry names —
-    which the other falsifier catches too, so the two cannot drift apart.
+    Bidirectional on purpose: **equality**, not containment. The stale
+    direction is this test's own; the containment direction (a newly unresolved
+    writer that no entry names) is redundantly asserted here as well, so a
+    reader cannot delete either half of the pair and still read a green suite.
+    ⛔ No `getattr` default on the census: a `getattr(probe, "WRITER_CENSUS",
+    {})` makes this test VACUOUS the day the constant is renamed — `stale`
+    becomes `[]` and it passes having read nothing. A missing census must
+    raise, exactly as the sibling falsifier's own comment demands (review
+    finding on this test, which claimed the bidirectional property its
+    assertion did not have).
     """
-    census = getattr(probe, "WRITER_CENSUS", {})
+    census = probe.WRITER_CENSUS
     unresolved = {
         w for w, d in probe.embedding_writers().items()
         if d["kind"] == "unresolved_write"
@@ -1302,3 +1309,7 @@ def test_the_census_carries_no_entry_for_a_writer_that_is_no_longer_unresolved()
     assert not stale, (
         "census entries with no unresolved writer behind them (a stale "
         f"suppression — delete the entry, or explain the hole it names): {stale}")
+    missing = sorted(unresolved - set(census))
+    assert not missing, (
+        "unresolved writers carrying no census entry (this direction is the "
+        f"sibling's, asserted here so neither half can be deleted): {missing}")
