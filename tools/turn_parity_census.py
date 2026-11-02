@@ -242,8 +242,12 @@ USAGE
 
     --uri            the FalkorDB URI of the TARGET graph (or --db-path for
                      an embedded graph). Read-only queries only.
-    --local-record-dir   the per-session capture log directory (env fallback
-                     TORTOISE_FALLBACK_DIR; default ~/.tortoise/session-events).
+    --local-record-dir   the per-session capture log directory, e.g.
+                     `~/.tortoise/session-events` (REQUIRED when this is the
+                     leg you want — there is NO ambient default and no
+                     `TORTOISE_FALLBACK_DIR` fallback: the leg is chosen by an
+                     explicit flag, so an inherited environment can never
+                     silently move the census onto a different authority).
                      THE AUTHORITY for #10017. Reads BOTH SHAPES in BOTH
                      directories — plain `<day>.jsonl` and sealed
                      `<day>.jsonl.gz`, under the root and under `archive/` —
@@ -260,6 +264,16 @@ USAGE
                      definition above; `compared_fields` and
                      `declared_absent` are in the artifact, and the
                      `NOT COMPARED` line says it on stdout.
+                     ⛔ A local-leg CLEAN does NOT arm the purge yet. The only
+                     irreversible consumer, `tools/purge_legacy_turns.py
+                     --execute`, has no local leg and keys its approval
+                     fingerprint on the HOSTED record DSN, so it cannot
+                     consume this verdict. That is a known scope boundary, not
+                     a bug in this tool: the operator runs this census and
+                     posts the artifact (which is how #10017's precondition (2)
+                     is met), and wiring the authority leg into `--execute` is
+                     the purge tool's own change. Stated here so a `CLEAN` on
+                     this leg is never read as an armed delete.
     --record-dsn     defaults to TORTOISE_RECORD_DSN. Must connect as a role
                      the tenant scope accepts (the app role) — a superuser/
                      owner DSN is refused with exit 3, because RLS would be
@@ -856,9 +870,12 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     would silently drop a session's transcript from the record and then certify
     the graph's copy as redundant.
 
-    ⚠️ The real record on the reference box has THREE such interior lines
-    (`2026-10-31.jsonl:34`, `:67`, `2026-11-02.jsonl:76`), each two session
-    records merged by a lost newline between concurrent appends. Part of such a
+    ⚠️ A reference measurement: this box's record DID hold interior lines of
+    this kind — two session records merged by a lost newline between concurrent
+    appends — so the state is real and not hypothetical. ⛔ The list is NOT a
+    closed inventory and must not be read as one: the refusing file/line moves
+    as the record grows, so re-measure with `--json` rather than clearing the
+    sites named in an older artifact. Part of such a
     line IS attributable (the trailing record parses; the truncated one does
     not), so this leg refuses rather than recovering a partial: a recovery that
     silently kept the parseable half would certify a session whose sibling was

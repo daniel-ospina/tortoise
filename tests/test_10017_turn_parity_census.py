@@ -1616,23 +1616,35 @@ def test_expect_empty_does_NOT_skip_the_hosted_leg(tmp_path, monkeypatch):
                      "--local-record-dir", str(tmp_path / "absent")]) == 3
 
 
-def test_the_docstring_documents_every_flag_the_parser_accepts():
+def test_the_USAGE_block_documents_every_flag_the_parser_accepts():
     """Review P2: the module docstring IS this gate's definition, and it had
     drifted — it documented only the hosted flags, so the flag the owner ruling
     makes the AUTHORITY (`--local-record-dir`) was absent from the contract a
     reader decides on.
 
-    Mutation that goes RED here: deleting the `--local-record-dir` line from
-    the USAGE block (the pre-fix state).
+    Scoped to the USAGE block on purpose: checking `flag in __doc__` passed
+    while a flag was cited in prose and missing from the contract (measured —
+    deleting the USAGE entry left a mention in the PARITY DEFINITION, so the
+    weaker assertion stayed green).
+
+    Mutation that goes RED here: removing EVERY mention of
+    `--local-record-dir` from the USAGE block (both the flag entry and the
+    authority example). Removing only the entry stays green because the
+    example above it still documents the flag — which is the true statement,
+    and why the mutation is spelled out this way rather than as "delete the
+    line".
     """
     import re
     source = Path(tpc.__file__).read_text(encoding="utf-8")
+    doc = tpc.__doc__ or ""
+    assert "USAGE" in doc, "the contract has no USAGE block — the scan is broken"
+    usage = doc.split("USAGE", 1)[1]
     flags = sorted(set(re.findall(r'add_argument\(\s*"(--[a-z][a-z0-9-]*)"',
                                   source)))
     assert flags, "no parser flags found — the scan is broken, not the doc"
-    undocumented = [f for f in flags if f not in (tpc.__doc__ or "")]
+    undocumented = [f for f in flags if f not in usage]
     assert not undocumented, (
-        f"flags accepted but absent from the module docstring: {undocumented}")
+        f"flags accepted but absent from the USAGE block: {undocumented}")
 
 
 def test_the_docstring_states_the_local_legs_DECLARED_ABSENT_fields():
