@@ -22,7 +22,8 @@
 #    verdict was edited, and re-deriving them still needs a re-run. The committed
 #    probe now EMITS both cells and that sentence, so a re-run reproduces this
 #    file's content instead of contradicting it; `tests/test_7949_capstone_measure.py`
-#    pins this log's cells and note to the emitter so the next divergence REDS.
+#    pins this log's five `blocked_by` cells, its E4 note sentence and its E5 note
+#    sentence to the emitter, so the next divergence REDS.
 #    Why it is disclosure and not a defect left open: the alternative reading — a
 #    reader (or this gate) taking the old cells as the run's output — is exactly
 #    the stale-pointer failure V12 exists to refuse. See README

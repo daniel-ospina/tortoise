@@ -672,6 +672,17 @@ def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
         "the E5 blocker-move sentence is NOT in the committed probe, so the log "
         "carries words no run wrote — move it into the probe's E5 note template")
     assert sentence in record["rows"][4]["note"], record["rows"][4]["note"]
+    # AND THE E4 NOTE (#10601 review round 4): the disclosure pin's stand-down
+    # rests on this pin refusing an undisclosed note edit, so the note the
+    # correction block NAMES has to be pinned too — otherwise a hand-edit of E4's
+    # note, with the block left in place, passes both pins, which is exactly the
+    # "edit that reads as emitter output" class #10537 exists to refuse.
+    e4_sentence = ("that closure records the DISPROOF, so it is this row's "
+                   "measurement record")
+    assert e4_sentence in source_joined, (
+        "the E4 note's closed-blocker sentence is NOT in the committed probe, so "
+        "a hand-typed E4 note would still pass")
+    assert e4_sentence in record["rows"][3]["note"], record["rows"][3]["note"]
 
 
 def test_the_shipped_log_discloses_what_the_run_did_not_emit():
@@ -691,8 +702,11 @@ def test_the_shipped_log_discloses_what_the_run_did_not_emit():
     file. The neighbouring artifact pin stands down for exactly this reason. The
     protection is unchanged, because the two pins together still refuse an
     undisclosed edit: `test_the_shipped_logs_blocker_cells_are_the_emitters_own`
-    reds WHENEVER the cells or the note diverge from the emitter, and this pin
-    reds whenever a block claims the edit but does not describe it. What is no
+    reds WHENEVER the five `blocked_by` cells, the E4 note's closed-blocker
+    sentence OR the E5 blocker-move sentence diverge from the emitter (those
+    three are the surfaces the correction block names, so the block cannot
+    confess an edit the artifact does not carry), and this pin reds whenever a
+    block claims the edit but does not describe it. What is no
     longer required is a confession for an edit that never happened.
     """
     log = _newest_log(_scored_logs())
@@ -702,7 +716,7 @@ def test_the_shipped_log_discloses_what_the_run_did_not_emit():
         # sibling pin is what makes this branch safe rather than a hole: it
         # reds the moment the artifact stops being what its emitter writes.
         return
-    for named in ("#8503 -> #9596", "#9738 -> #5087", "E5 note"):
+    for named in ("#8503 -> #9596", "#9738 -> #5087", "E5 note", "E4 note"):
         assert named in text, f"the correction block does not name {named!r}"
     assert "THE NUMBERS ARE THE RUN'S AND WERE NOT TOUCHED" in text, (
         "the disclosure must state the scope of the edit: numbers untouched")
