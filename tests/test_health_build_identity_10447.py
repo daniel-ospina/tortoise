@@ -175,13 +175,16 @@ def _git_head(cwd: Path) -> str:
 
 
 def _run_record_step(cwd: Path, *, git_available: bool, stamp: Path | None = None,
-                     github_sha: str | None = None) -> str:
+                     github_sha: str | None = None,
+                     path_prefix: Path | None = None) -> str:
     """Execute the workflow's OWN `record the built tree` step and return the stamp
     file's contents.
 
     `PATH` carries `bash` plus the real git binaries when `git_available`, and
-    nothing but the system dirs otherwise — so the `git status` FAILURE branch is
-    exercised by the same code the deploy runs, not by a mock of it.
+    nothing but the system dirs otherwise. ⚠️ `git_available=False` reaches the
+    HEAD-GUARD arm (`git rev-parse HEAD` fails → `unknown`), NOT the `git status`
+    failure arm — the guard runs first. The `git status` arm needs a git that can
+    `rev-parse` but not `status`, which is what `path_prefix` is for (a shim dir).
 
     ⛔ THE STAMP FILE LIVES OUTSIDE `cwd` (review P2). It is the OUTPUT of measuring
     the tree, so a stamp written inside `cwd` makes the tree dirty and a SECOND call
@@ -199,6 +202,8 @@ def _run_record_step(cwd: Path, *, git_available: bool, stamp: Path | None = Non
            # The step compares the checkout HEAD with the deploy commit, so the
            # scratch repo's HEAD must be what GITHUB_SHA names (review P2).
            "GITHUB_SHA": _git_head(cwd) if git_available else "0" * 40}
+    if path_prefix is not None:
+        env["PATH"] = f"{path_prefix}:{git_bin}:/usr/bin:/bin"
     if github_sha is not None:
         env["GITHUB_SHA"] = github_sha
     proc = subprocess.run([_BASH, "-e", "-c", body], cwd=str(cwd), env=env,
@@ -296,6 +301,12 @@ def test_the_deploy_stamps_whether_the_built_tree_was_dirty(tmp_path):
     )
     assert _run_payload_read(repo, stamp=stamp) == "true", "the dirty reading must reach the argv"
 
+    # …and COMMIT it, so the wrong-HEAD arm below really measures a CLEAN tree at
+    # the wrong commit — the only scenario that could publish
+    # `build_identified: true` for a commit the image was not built from
+    # (review P2: the tree was dirty here, so the arm proved less than it claimed).
+    subprocess.run(["git", "commit", "-qam", "two"], cwd=str(repo), env=env,
+                   check=True, capture_output=True)
     assert _run_record_step(repo, git_available=True, stamp=stamp,
                             github_sha="0" * 40) == "unknown", (
         "a clean tree at a HEAD the deploy did not name must stamp `unknown` — "
@@ -306,6 +317,47 @@ def test_the_deploy_stamps_whether_the_built_tree_was_dirty(tmp_path):
         "an UNREADABLE tree must stamp `unknown` (→ null, NOT STATED). Stamping "
         "`false` here is the false PASS: a positive 'provably clean' claim from a "
         "reading that never happened"
+    )
+
+
+def test_a_git_that_cannot_read_the_tree_stamps_unknown(tmp_path):
+    """THE `git status` FAILURE ARM (review P2) — distinct from the HEAD guard.
+
+    Round 2 fixed a failure falling through to `false`, and round 3 added a HEAD
+    guard that runs FIRST — which meant the `git status` arm stopped being reached
+    by any test: flipping it back to `printf 'false'` was 210-passed, undetected.
+    A shim that answers `rev-parse` (so the HEAD guard passes) and fails `status`
+    is the only shape that reaches it.
+    """
+    repo = tmp_path / "build"
+    repo.mkdir()
+    stamp = tmp_path / "stamp"
+    env = {**_git_env(), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), env=env, check=True,
+                   capture_output=True)
+    (repo / "f.txt").write_text("1\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=str(repo), env=env, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=str(repo), env=env,
+                   check=True, capture_output=True)
+
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    real_git = shutil.which("git") or "/usr/bin/git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "rev-parse" ]; then exec {real_git} "$@"; fi\n'
+        "echo 'fatal: cannot read the index' >&2\n"
+        "exit 128\n"
+    )
+    shim.chmod(0o755)
+
+    assert _run_record_step(repo, git_available=True, stamp=stamp,
+                            path_prefix=shim_dir) == "unknown", (
+        "a git that cannot read the tree stamped a POSITIVE claim — an unreadable "
+        "tree is UNSTATED, never `false` (the round-2 P1, back again)"
     )
 
 
@@ -325,6 +377,14 @@ def test_the_staged_dirty_value_is_never_a_bare_empty_string(tmp_path):
     assert _run_payload_read(tmp_path) == "unknown", (
         "an absent stamp file must stage `unknown` (null), never an empty string "
         "and never `false`"
+    )
+    # AN EMPTY file: `-r` would pass and `IFS= read -r` would leave the value
+    # empty, staging `TORTOISE_GIT_DIRTY=` — the `K=` clobber this pin's name
+    # promises cannot happen (review P2, measured).
+    (tmp_path / "git-dirty").write_text("")
+    assert _run_payload_read(tmp_path) == "unknown", (
+        "an EMPTY stamp file staged an empty value — `[ -r ]` proves readable, not "
+        "non-empty, and `K=` clobbers the Fly value"
     )
 
 

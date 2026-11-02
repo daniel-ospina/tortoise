@@ -377,13 +377,13 @@ def test_optional_fly_appends_are_n_guarded(workflow_text):
     """#4334 — every single-key `ARGS+=(K="$K")` append stays `[ -n "$K" ]`-guarded.
 
     The guard is what keeps an unset optional secret OUT of the argv; dropping
-    it would push `K=` to Fly and clobber any out-of-band value. Two append
-    shapes are deliberately exempt: the two multi-pair appends (the base
-    three-key array and the Stripe pair), and
-    `TORTOISE_GIT_SHA="${GITHUB_SHA}"` — GITHUB_SHA is a GitHub built-in that is
-    always set, not an env-bound secret, so it needs no guard (`_NON_SECRET_PAIRS`).
-    A third is `TORTOISE_GIT_DIRTY="${TORTOISE_GIT_DIRTY_STAMP}"` (#10447) — also
-    workflow-computed and never empty. A fourth is the #4126 versioned default
+    it would push `K=` to Fly and clobber any out-of-band value. The exemptions,
+    named rather than numbered so a stale count cannot hide a deliberate one:
+    the multi-pair appends (the base three-key array and the Stripe pair);
+    `TORTOISE_GIT_SHA="${GITHUB_SHA}"` — a GitHub built-in that is always set, not
+    an env-bound secret (`_NON_SECRET_PAIRS`); `TORTOISE_GIT_DIRTY=` (#10447) — also
+    workflow-computed and never empty, because the payload defaults an absent or
+    EMPTY stamp file to `unknown`; and the #4126 versioned default
     (`_UNCONDITIONAL_BY_DECISION`), which pushes a recorded non-secret constant,
     never an empty value."""
     run = _steps()[_SET_STEP]["run"]

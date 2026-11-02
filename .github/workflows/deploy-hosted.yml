@@ -982,9 +982,18 @@ jobs:
           # Absent file → `unknown` → `null` (NOT STATED), never a fabricated
           # `false` ("provably clean"), which would be the false PASS this field
           # exists to refuse.
+          # `-s`, not `-r`: readable is not NON-EMPTY. `IFS= read -r V < empty`
+          # returns 1 and leaves V empty, so `-r` + `|| true` would stage
+          # `TORTOISE_GIT_DIRTY=` — the same empty-value shape as the `$(< file)`
+          # bug this payload exists to avoid, and the `K=` clobber the `-n` guard
+          # would otherwise catch (review P2, measured). An empty or unreadable
+          # file stages `unknown` → null (NOT STATED), never `false`.
           TORTOISE_GIT_DIRTY_STAMP=unknown
-          if [ -r /tmp/tortoise-deploy-git-dirty ]; then
+          if [ -s /tmp/tortoise-deploy-git-dirty ]; then
             IFS= read -r TORTOISE_GIT_DIRTY_STAMP < /tmp/tortoise-deploy-git-dirty || true
+          fi
+          if [ -z "$TORTOISE_GIT_DIRTY_STAMP" ]; then
+            TORTOISE_GIT_DIRTY_STAMP=unknown
           fi
           ARGS+=(TORTOISE_GIT_DIRTY="${TORTOISE_GIT_DIRTY_STAMP}")
           # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
