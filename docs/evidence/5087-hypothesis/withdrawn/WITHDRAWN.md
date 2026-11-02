@@ -18,5 +18,8 @@ The rule is `tools/capstone_preregistration_check.py` check 2. Its defect was th
 sibling commits **inside one contribution**, which a squash merge collapses — so the same tree
 passed its PR checks and failed on `main` minutes later. That defect is **not fixed by this
 withdrawal**: the guard repair ruled on #10463 (part 4 — the ordering claim becomes base ancestry,
-not PR-internal order) is a SEPARATE change, and it must not be read as landed. Withdrawing this
+not PR-internal order) is a SEPARATE change; whether it is in force therefore depends on the tree
+you are reading, so check the gate's own `ordering measured against:` line rather than trusting this
+note. On a tree that carries it, the refusal described here cannot fire for this bundle at all,
+because the directory no longer holds a log to order. Withdrawing this
 log is the deliberate act that restores `main` without touching a gate under pressure.

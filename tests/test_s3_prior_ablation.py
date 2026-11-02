@@ -391,11 +391,24 @@ def test_the_withdrawn_log_is_not_back_in_the_checked_directory(probe):
     Ruling item 2 on #10463: *"Do not re-add the log in a fresh commit to obtain a later
     add-commit. That satisfies the letter of the check while the real ordering is unchanged — it is
     precisely the fabrication the guard exists to prevent."* That ruling is unenforced by
-    construction: the guard requires only `log_add_epoch > prereg_add_epoch` over every `*.log` it
-    globs NON-recursively (`EVIDENCE_LOG_GLOB`, `directory.glob(...)`), and the single-measured-log
-    rule counts only `capstone-measured-*.log`. A copy put back here in a FRESH commit therefore
-    has a LATER add-commit than the registration and is blessed — `evidence logs: 1`, ordering
-    "verified" — i.e. the exact fabrication, now wearing a green gate.
+    construction, but NOT for the reason an earlier version of this docstring gave. Two cases, and
+    they are not the same case:
+
+    * **A copy under a NEW name** — the hole this test closes. The guard globs `*.log`
+      NON-recursively (`EVIDENCE_LOG_GLOB`, `directory.glob(...)`) and the single-measured-log rule
+      counts only `capstone-measured-*.log`, so a renamed copy has NO add-commit on the base, its
+      epoch is therefore read from THIS contribution, it lands later than the registration's and is
+      blessed — `evidence logs: 1`, ordering "verified". That is the exact fabrication, now wearing
+      a green gate.
+    * **The original path** — already refused, and not by this test: the base still records the
+      collapsed add (`cfa3de857`, the registration's own add-commit), and a deletion does not remove
+      an earlier add from a ref's history, so a re-add here is measured against that same epoch and
+      the strict comparison refuses it. Pinned by
+      `test_a_withdrawn_log_cannot_be_reordered_by_re_adding_it`, not by this one.
+
+    So the open route is the rename, and the guard's rule is **base ancestry** (the registration's
+    add on the base must strictly precede the log's), not the PR-internal sibling comparison the
+    earlier version of this paragraph described.
 
     The temptation is real and this PR's own note invites it: `withdrawn/WITHDRAWN.md` says the
     claim stays PROVISIONAL until re-measured with the registration already on the base branch,
