@@ -770,7 +770,11 @@ RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
 #   (permissions, I/O, a path removed mid-flight). "Unjudged" is not "a typo":
 #   nothing can tell what was lost, so it is reported rather than folded into
 #   silence. A journal-less lane is NOT this — with no replay source nothing can
-#   be judged lost, and that path stays silent.
+#   be judged lost, and that path stays silent. Nor is a journal FILE that is
+#   merely not there yet (the ordinary early-life lane): a path is only called
+#   removed mid-flight when the journal's own sidecar proves it CARRIED records,
+#   so this label counts a gone replay source rather than every typo on a lane
+#   whose journal has not been written yet (#10543 review round 7, finding 2).
 #
 # The typo path is NOT counted and NOT logged: absent from the graph AND from the
 # journal is the one shape #10119 handled, and turning it into an alarm is

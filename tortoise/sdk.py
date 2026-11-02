@@ -9820,8 +9820,29 @@ class TortoiseSDK:
         try:
             seen = _journal_presence_mentions(log, point_id)
         except FileNotFoundError:
-            # No journal FILE yet is the ordinary early-life typo path (a lane with
-            # a configured path and nothing written). Silent, by indicator 2.
+            # ⛔ A MISSING FILE IS TWO FACTS, and the vocabulary above already
+            # names one of them (review round 7, finding 2):
+            #
+            # * nothing has EVER been written at this configured path — the
+            #   ordinary early-life lane, and it stays SILENT (indicator 2);
+            # * the journal CARRIED records and its path no longer names them
+            #   (deleted, rotated, moved off a running lane). Nothing can be
+            #   judged about the id, so it is reported as `journal_unreadable`.
+            #
+            # Reading the second as the first is the silence #10515 indicator 1
+            # removes — and it was the state `journal_unreadable`'s own
+            # documented trigger ("a path removed mid-flight") was silently
+            # answered by a different reason for. The evidence is the journal's
+            # own sidecar, read through the LOG HANDLE (see
+            # `EventLog.carried_records`); its absence is not proof of early
+            # life, so this only ever ADDS a report, never invents one.
+            if self._journal_carried_records(log):
+                _logger.warning(
+                    "the journal at %r carried records but its FILE is gone — "
+                    "an absent live read is reported as UNJUDGED rather than "
+                    "asserted to be a typo (#10515)",
+                    getattr(log, 'path', None))
+                return None
             seen = {}
         except Exception:  # noqa: BLE001, RUF100 — reported by the caller
             _logger.warning(
@@ -9834,6 +9855,30 @@ class TortoiseSDK:
         if stat_key is not None:
             self._journal_presence_memo = (stat_key, known, log)
         return known[point_id]
+
+    @staticmethod
+    def _journal_carried_records(log) -> bool:
+        """Did *log* demonstrably carry records before its read failed (#10543 r7)?
+
+        A thin, defensive seam over :meth:`EventLog.carried_records` — the
+        journal's own read-side evidence (the position sidecar's proved
+        ``records`` count), which is the ONE durable statement that this path
+        carried records. Anything that cannot answer — an older/synthetic log
+        object without the method, an unreadable sidecar — answers ``False``:
+        this only chooses between "silent" and "unjudged", so a failure must
+        fall to the silence that was correct before this seam existed.
+        """
+        carried = getattr(log, 'carried_records', None)
+        if not callable(carried):
+            return False
+        try:
+            return bool(carried())
+        except Exception:  # noqa: BLE001, RUF100 — evidence, not a verdict
+            _logger.debug(
+                "could not tell whether the journal carried records; an "
+                "absent live read is reported only if it did (#10515)",
+                exc_info=True)
+            return False
 
     @staticmethod
     def _journal_stat_key(log):
@@ -9880,8 +9925,11 @@ class TortoiseSDK:
         * ``journal_unreadable`` — a journal IS configured and the read failed
           (permissions, I/O, a path removed mid-flight). Unjudged is not "a typo":
           nothing can tell what was lost, so it is reported as its own reason
-          rather than folded into silence (review round 2, finding 3). A missing
-          journal FILE is the ordinary early-life typo path and stays silent;
+          rather than folded into silence (review round 2, finding 3). A journal
+          FILE that is simply not there yet is the ordinary early-life typo path
+          and stays silent — unless the journal's own sidecar says it CARRIED
+          records, in which case the file went away mid-flight and this reason
+          is what that loss reports (review round 7, finding 2);
         * neither — absent from BOTH, the typo shape, and it stays silent.
 
         Rides the existing ``monitoring`` seam (``metrics()``

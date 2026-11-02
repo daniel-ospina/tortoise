@@ -1417,6 +1417,74 @@ def test_an_unconfirmable_graph_reports_the_loss_with_its_own_reason(tmp_path):
             sdk.close()
 
 
+def test_a_journal_removed_mid_flight_is_unreadable_not_a_typo(tmp_path, caplog):
+    """#10543 review round 7, finding 2: a GONE journal is not "early life".
+
+    ``_journal_knows_point`` folded ``FileNotFoundError`` to *not a typo* before
+    anything asked whether the journal had ever carried anything. So the two facts
+    the reason vocabulary separates — a configured path nothing has written
+    (ordinary early life, silent) and a journal that CARRIED records whose file
+    was deleted, rotated or moved off a running lane (nothing can be judged) —
+    produced the same silence, and ``journal_unreadable`` could never move for the
+    shape its own docstring names ("a path removed mid-flight"). That is the
+    loss-stays-silent failure #10515 indicator 1 exists to remove.
+
+    Both facts are reached here, in that order, because the discriminator has to
+    keep the FIRST silent: the control at the top is what stops the fix from
+    turning every typo on a freshly-configured lane into an alarm (indicator 2).
+    """
+    from tortoise import monitoring
+
+    sdk, journal = _sdk_journaled(tmp_path, "journalgone")
+    try:
+        # ── the shape that must STAY silent: the path has never been written ──
+        assert not os.path.exists(journal), (
+            "the early-life control needs a configured path nothing wrote")
+        early_before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts() == early_before, (
+            "a configured journal path nothing has written yet is the ordinary "
+            "early-life typo path — it must add to NO reason")
+        assert not any("will not be replayed" in r.getMessage()
+                       for r in caplog.records), (
+            "early life must not warn about a lost revision")
+
+        # ── the journal carried records, then the FILE went away ──
+        pid = _pid(sdk)
+        assert _journal_carries(journal, pid), (
+            "the fixture must leave the journal carrying a record")
+        assert os.path.exists(journal + ".position"), (
+            "the discriminator reads the writer's own sidecar, so the fixture "
+            "must actually have one (it is written through on append)")
+        os.unlink(journal)
+
+        known_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        before = monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        after = monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0)
+        assert after == before + 1, (
+            "a journal whose file is GONE after carrying records cannot be "
+            "read, so the absent read is UNJUDGED — folded into the typo "
+            "silence it is the loss #10515 indicator 1 forbids")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == known_before, (
+            "the gone journal is UNREADABLE, not known — counting it as "
+            "journal_known would claim a revision was found and dropped")
+        assert any("FILE is gone" in r.getMessage()
+                   for r in caplog.records), (
+            "the loss must also be LOUD in the log, not only in a counter")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 class TestJournalMentionScan:
     """The journal byte-scan's MECHANICS, pinned where they now live (#10543).
 
@@ -1496,6 +1564,40 @@ class TestJournalMentionScan:
         with pytest.raises(FileNotFoundError):
             list(EventLog(str(tmp_path / "never-written.jsonl"))
                  .mention_lines(b"anything"))
+
+    def test_carried_records_reads_the_sidecar_and_creates_nothing(self, tmp_path):
+        """The gone-file discriminator (#10543 review round 7, finding 2).
+
+        ``carried_records`` is what separates "a configured path nothing has
+        written" from "a journal that carried records and lost its file". The
+        evidence is the position sidecar ``append`` writes through, and the read
+        must be PURE: answering for a path with no sidecar must not create one
+        (the whole point is a diagnostic on a lane that is already refusing a
+        write), and the journal file must stay absent too.
+        """
+        from tortoise.log import EventLog
+
+        fresh = tmp_path / "fresh.jsonl"
+        assert EventLog(str(fresh)).carried_records() is False, (
+            "a path nothing has written has no evidence and must answer False")
+        assert not fresh.exists() and not (tmp_path / "fresh.jsonl.position").exists(), (
+            "the probe must be read-only — it may not create the journal or its "
+            "sidecar")
+
+        written = EventLog(str(tmp_path / "written.jsonl"))
+        written.append({"type": "PointAdded", "point": {"id": "a"}})
+        assert written.carried_records() is True, (
+            "one appended record must be visible as evidence even after the "
+            "journal file itself is gone")
+        written.path.unlink()
+        assert written.carried_records() is True, (
+            "the evidence has to SURVIVE the journal file — that is the whole "
+            "shape it exists for")
+
+        (tmp_path / "written.jsonl.position").write_text("{\"v\":1,\"records\":0}")
+        assert written.carried_records() is False, (
+            "a sidecar that proved ZERO records is not evidence the journal "
+            "carried any — an empty early-life journal stays silent")
 
 
 def test_an_absent_id_is_not_embedded_at_all(tmp_path, monkeypatch):

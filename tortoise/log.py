@@ -2051,6 +2051,57 @@ class EventLog:
             if needle in sub:
                 yield sub
 
+    def carried_records(self) -> bool:
+        """Did this journal demonstrably carry at least one RECORD? (#10543 r7)
+
+        The discriminator a caller needs when the journal's own FILE is gone,
+        because ``FileNotFoundError`` from :meth:`mention_lines` is produced by
+        two facts that are answers apart: a configured path nothing has written
+        yet (ordinary early life — silence is correct) and a journal that DID
+        carry records whose file was deleted, rotated or moved off a running
+        lane (nothing can be judged — the caller must say so). Reading the first
+        as the second is the silence #10515 exists to remove.
+
+        The evidence is the POSITION SIDECAR beside the journal
+        (``POSITION_SUFFIX``), which ``append`` maintains WRITE-THROUGH once a
+        record has landed: its payload names the count it last proved, so
+        ``records >= 1`` is a durable statement that this path carried records.
+        It describes a journal STATE that may no longer exist (the file is gone),
+        which is exactly the point — only the count is read, never the state.
+
+        Read-only and O(1): ``_read_regular_file`` is ``O_RDONLY|O_NOFOLLOW``
+        plus ``S_ISREG``, so it CREATES nothing, follows no attacker-chosen link,
+        and cannot block on a FIFO someone left at the sidecar path. It never
+        affects a reply; it only tells a diagnostic which of two silences it is
+        looking at.
+
+        RESIDUAL, stated rather than claimed closed: a lane that could never
+        maintain its sidecar (a read-only data dir, the ``_POSITION_CACHE_DEAD``
+        window, a journal written before the sidecar existed) leaves no such
+        evidence, so a journal removed off THAT lane still reads as early life.
+        The evidence is therefore ONE-DIRECTIONAL — its absence is not proof the
+        journal carried nothing — and that is deliberately the direction a
+        diagnostic may be wrong in: a missed report, never a fabricated alarm.
+        """
+        try:
+            raw = _read_regular_file(
+                _position_cache_path(Path(self._lock_key())))
+        except OSError:
+            return False
+        if raw is None:
+            return False
+        try:
+            payload = json.loads(raw)
+        except (ValueError, RecursionError, MemoryError):
+            # RecursionError/MemoryError: a sidecar is a file anything may have
+            # written, and this only decides a diagnostic — never fail on it.
+            return False
+        if not isinstance(payload, dict) or payload.get("v") != _POSITION_VERSION:
+            return False
+        count = payload.get("records")
+        return (isinstance(count, int) and not isinstance(count, bool)
+                and count > 0)
+
     def read_all(self, *, salvage: bool = False) -> list[dict]:
         """Read all events in the log.
 
