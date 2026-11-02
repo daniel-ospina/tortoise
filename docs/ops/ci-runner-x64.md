@@ -922,12 +922,12 @@ holds for a label named there. Re-measure `actions/runners` before pinning anyth
 ### Residual: the #10237 canary is a POOL-ONLY pin — and it is non-required on purpose
 
 **OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `repo-harnesses`
-(`ci.yml:1473`) now reads `runs-on: [self-hosted, self-hosted-x64]`. The rule's cost is a WAIT with
-no hosted half, so it is a cost of BLOCKING A MERGE; this job is in neither `.mergify.yml`
-`queue_conditions` (`pricing-artifact`, `docs`, `test-isolation`, `license-surface`, `legal-e2e`,
-`ai-review-gate`) nor `merge_conditions` (`python-ci-gate`), and `needs: repo-harnesses` appears
-nowhere. When the pool is unreachable the loss is one slow non-required check — a SCHEDULING plus
-minimal-`PATH`-shell measurement, which is not #10237 ask 1's proof list (see the scope note below).
+(`ci.yml:1473`) now reads `runs-on: [self-hosted, self-hosted-x64]`. Its accepted cost is a WAIT with
+no hosted half — and ⛔ that IS a landing cost: the rail (`admin-merge.sh`) merges with `--admin`, so
+required-ness decides nothing, every code-measuring red on the PR's tree BLOCKS, and this job is on
+that tree. `.mergify.yml` names it in neither `queue_conditions` nor `merge_conditions` and
+`needs: repo-harnesses` appears nowhere — none of which helps: a pool-connectivity red blocks the
+head until someone re-runs. What the green buys is scheduling + the shell contract, not ask 1's proof list.
 
 Why it was taken: `ubuntu-latest` is answered by **0 of the pool's 12 runners** (measured
 2026-11-01T16:41Z, `actions/runners`), so every `ubuntu-latest` job is served only by GitHub-hosted,
@@ -948,12 +948,12 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. It costs no merge only because this job is absent from the required aggregate's
-  `needs:` (`python-ci.yml:4411`).
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:4411`) buys no landing:
+  the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
-⛔ **Do not copy this pin onto a required leg.** The override is scoped to a job whose failure costs a
-wait, and a required leg's failure costs the merge. It also bypasses the label attachment
-`scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
+⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a
+re-run before that head can land; a required leg's red also reddens the aggregate. It bypasses the
+label attachment `scripts/ci_runner_gate.sh` performs, so it has no hosted fallback at all.
 
 ### Scope of the #10237 canary's proof — scheduling only; the ask's proof list is NOT discharged
 

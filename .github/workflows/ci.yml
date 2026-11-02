@@ -1508,14 +1508,14 @@ jobs:
     # because such a pin removes the GitHub-hosted half of the race and a
     # hosted outage then leaves the required aggregate pending forever.
     #
-    # That refusal does NOT reach a job with no branch-protection context. This
+    # That refusal does NOT reach a job with no branch-protection context: this
     # job is not in `.mergify.yml`'s `queue_conditions` (pricing-artifact, docs,
     # test-isolation, license-surface, legal-e2e, ai-review-gate) nor in
-    # `merge_conditions` (python-ci-gate), so a wait here can never hold a merge
-    # — which is exactly the cost the pin exists to avoid. It is the canary the
-    # issue asks for first (`#10237` ask 1: "canary on one non-required job
-    # first"): if the pool cannot carry it, the loss is one slow non-required
-    # check, not a blocked PR.
+    # `merge_conditions` (python-ci-gate). ⛔ BUT NON-REQUIRED IS NOT NO MERGE
+    # COST: the land rail (`agent-infra scripts/admin-merge.sh`) merges with
+    # `--admin`, so required-ness gates nothing there — its surface is EVERY
+    # code-measuring check on the PR tree, and a RED here BLOCKS the landing.
+    # The cost this canary accepts is a RE-RUN before the head can land.
     #
     # THE LABEL SET IS THE RUNNERS' OWN, VERBATIM. Every x64 runner carries
     # `self-hosted,Linux,X64,self-hosted-x64`; `runs-on` is AND semantics, so
@@ -1541,10 +1541,10 @@ jobs:
     # `41343233944` — started 00:29:10Z, ended 00:40:10Z, reported ZERO steps, and
     # annotated "The self-hosted runner lost communication with the server". Zero
     # steps is the discriminator: no step of this job ran, so no step of it caused
-    # that. Re-run before investigating a harness. It costs no merge (this job is
-    # in no `needs:` of the required aggregate — `python-ci.yml:4411`), but a red
-    # carrying no steps READS as a job defect, which is the #9018 misdiagnosis one
-    # layer up — the same class this job's tool contract exists to prevent.
+    # that. Re-run before investigating a harness. ⛔ IT CAN COST A MERGE: a red
+    # here BLOCKS the land rail — every red on the PR's tree blocks, and `--admin`
+    # makes required-ness irrelevant — and a red carrying no steps READS as a job
+    # defect: the #9018 misdiagnosis one layer up, this contract's own class.
     # ⚠️ WHAT THIS CANARY PROVES — READ IT NARROWLY (#10237 ask 1).
     # The ask is two-part: a non-required canary, AND a proof list on it ("docker
     # available, the FalkorDB image pullable, `uv sync --extra embeddings --extra
