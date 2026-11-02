@@ -928,13 +928,13 @@ gated the pass off, or the stage produced nothing.
 | `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its receipt is cited by E4 (`2/15`) |
 | `#5199` the version anchor stops at Points | **CLOSED COMPLETED** — the anchor is on the derivation link by design; #9736 owns the metric contradiction that leaves behind |
 | `#7947` the raw-vs-narrative measurement | **CLOSED COMPLETED** — E5 re-scores its arms |
-| `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, `S2.3` is IDLE on this corpus and is accounted as a **witnessed idle** since `#10215` restated V5/G5 as all-eight-accounted (the conditional set is read from the frozen record, so the log cannot self-declare it) |
+| `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, and `S2.3` is WITNESSED by this one — the shipped log's `step S2.3 WITNESSED` line carries `assigned_llm: 7`, so the classify pass is NOT idle on this corpus (`#10215` restated V5/G5 as all-eight-accounted, and this run is 8/8 witnessed) |
 | `#9736` E3's denominator vs the owner-approved model | **OPEN — owner-gated**; `PRE-REGISTRATION.md` §10.1 carries the amended class set (`Point`+`Event`+`Document`, re-derived `148/383 = 0.38642`, still RED) as the reopen awaiting the ruling |
-| `#9738` E5's disclosure and population reconciliation | **OPEN — owner-gated**; `PRE-REGISTRATION.md` §10.2 carries the amendment (`measurement_visible_to_author: true` for E5, the 2026-10-19 measurement named) as the reopen awaiting the ruling |
+| `#9738` E5's disclosure and population reconciliation | **CLOSED** `2026-11-02T08:53:06Z` — it closed on its own §10 *record* correction (PR `#10525`), which is not a measurement of E5's number. The residual is S3 selection recovery, owned by **`#5087`** (OPEN): raw absolute `0.4800` against the `0.80` floor |
 | `#5333` may any pass remove/relocate an Object (owner ruling) | **OPEN** — E1's blocker (the mechanism that must move the share) |
 | `#10360` nothing enforces the state-value guarantee on the write path | **OPEN** — E2's blocker (the render half is closed: PR `#10382` on `#9775`) |
-| `#8503` the planted operator edges are not formed | **OPEN** — E4's blocker |
-| `#9596` the operator receipt's retrievability is unmeasured | **OPEN** — the E4 artifact's own caveat |
+| `#8503` the planted operator edges are not formed | **CLOSED** `2026-10-24T20:50:13Z` — it was E4's `blocked_by` and closed nine days before this bundle noticed. The residual is the receipt's retrievability, owned by **`#9596`** (OPEN) |
+| `#9596` the operator receipt's retrievability is unmeasured | **OPEN — E4's blocker** (re-attributed from the closed `#8503`, `2026-11-02`): the receipt's retrievability rate is UNMEASURED, which E4's own note already named |
 
 A **scored** row moves to a different verdict only by RE-RUNNING the probe, never by reading an
 issue's state — which is why E1 stays `BLOCKED` (its two before realizations disagree, so it is not
