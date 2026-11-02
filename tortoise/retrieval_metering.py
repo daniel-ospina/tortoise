@@ -446,7 +446,8 @@ class RetrievalMeteringMiddleware:
                 with contextlib.suppress(Exception):
                     # Awaited on a worker thread (never fire-and-forget): the
                     # ledger write is blocking, so it must not run on the loop,
-                    # and the row is committed before the wrap-up completes.
+                    # and the row is committed before the wrap-up completes
+                    # (on the completed path — see the refused arm below).
                     #
                     # #10602: the worker is the BEST-EFFORT lane (``telemetry``),
                     # not the loop's shared default executor. The flush sits on
@@ -477,4 +478,14 @@ class RetrievalMeteringMiddleware:
                             op="retrieval.flush", pool="telemetry",
                             cancel_on_timeout=False)
                     except ControlPlaneOffloadError as exc:
-                        _report(org_id=org, error=exc)
+                        # ⚠️ ONLY a REFUSED submission is a drop. The
+                        # delivery-preserving arm above leaves a bound miss
+                        # that is still RUNNING (or still QUEUED on this lane)
+                        # to complete, so its row IS written — reporting it
+                        # would manufacture a durable `unmetered_increments`
+                        # row plus an operator alert for a flush that landed,
+                        # poisoning the one record of real ledger shortfalls
+                        # (the seam exposes `refused` for exactly this, and the
+                        # billing-notify caller escalates on it the same way).
+                        if exc.refused:
+                            _report(org_id=org, error=exc)

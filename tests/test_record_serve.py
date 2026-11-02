@@ -520,7 +520,7 @@ def _call_endpoint(monkeypatch, point_id="p-1", *, cache="unusable"):
                     return _R()
             return type("P", (), {"g": _G()})()
 
-    async def _sdk(_org):
+    async def _sdk(_org, **_kwargs):  # #10602: the seam grew
         built.append(_org)
         return _SpySDK()
 
@@ -688,7 +688,9 @@ def test_the_endpoint_prefers_the_cache_with_a_named_reason(monkeypatch):
                     return _R()
             return type("P", (), {"g": _G()})()
 
-    async def _sdk(_org):
+    async def _sdk(_org, **_kwargs):  # #10602: the seam grew
+        # `attach_projection` — these stubs mirror its signature so a keyword the
+        # route now passes cannot turn every record-mode case into a TypeError.
         return _CacheSDK()
 
     # #7970: `prefer` constructs its handle eagerly through the bounded
@@ -859,7 +861,7 @@ def test_a_credential_without_a_record_tenant_is_a_fault_not_an_outage(monkeypat
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: None)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
 
-    async def _no_cache(_org):  # pragma: no cover - must not be reached
+    async def _no_cache(_org, **_kwargs):  # pragma: no cover - must not be reached
         raise AssertionError("the cache was consulted without a record tenant")
 
     monkeypatch.setattr(api, "_data_sdk_offloaded", _no_cache)
@@ -905,7 +907,7 @@ def test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened(monkeypa
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
 
-    async def _graph_down(_org):
+    async def _graph_down(_org, **_kwargs):  # #10602: the seam grew
         raise HTTPException(status_code=403,
                             detail={"error_code": "GRAPH_NOT_FOUND"})
 
@@ -941,7 +943,7 @@ def test_prefer_counts_an_unresolved_tenant_under_its_own_reason(monkeypatch):
                     return _R()
             return type("P", (), {"g": _G()})()
 
-    async def _sdk(_org):
+    async def _sdk(_org, **_kwargs):  # #10602: the seam grew
         return _EmptySDK()
 
     monkeypatch.setattr(api, "_data_sdk_offloaded", _sdk)
@@ -975,7 +977,7 @@ def test_the_unresolved_tenant_arm_counts_only_when_the_cache_answers(monkeypatc
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: None)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
 
-    async def _graph_down(_org):
+    async def _graph_down(_org, **_kwargs):  # #10602: the seam grew
         raise HTTPException(status_code=403,
                             detail={"error_code": "GRAPH_NOT_FOUND"})
 
@@ -1037,7 +1039,7 @@ def test_prefer_surfaces_the_cache_failure_when_the_record_also_misses(monkeypat
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
 
-    async def _graph_down(_org):
+    async def _graph_down(_org, **_kwargs):  # #10602: the seam grew
         raise HTTPException(status_code=403,
                             detail={"error_code": "GRAPH_NOT_FOUND"})
 

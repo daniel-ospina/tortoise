@@ -2169,9 +2169,18 @@ CONTROL_PLANE_READ_BACKLOG = 128
 #: which for a submission that never ran is a false statement, and which is what
 #: the ticket measured as a 504 ``-32009`` after 10–15 s.
 #:
-#: 8.0 s, not the graph lane's derived bound: a read is a HOT round trip (the
-#: measured store answer is 41–80 ms), so its bound is a saturation gate, not a
-#: cold-start allowance. It sits BELOW ``mcp_auth._TRANSPORT_WAIT_BOUND_S``
+#: 8.0 s, not the graph lane's derived bound. What this bound MEASURES is the
+#: hot QUERY against an already-attached projection: the routes that use this
+#: lane attach their projection on the CONSTRUCTION submission
+#: (``_data_sdk_offloaded(..., attach_projection=True)``, whose ``graph``-lane
+#: bound is ``probe_setup_timeout()`` + a margin), so the cold open — and the
+#: index BUILD a restored/DR graph can trigger — never lands inside this clock
+#: (cycle-2 review: an 8 s bound over a callable that contains a 20 s cold-start
+#: allowance would refuse a HEALTHY store's first read). The measured store
+#: answer is 41–80 ms, so 8 s is a saturation gate with ~100x headroom, not a
+#: per-query timeout.
+#:
+#: It sits BELOW ``mcp_auth._TRANSPORT_WAIT_BOUND_S``
 #: (10 s) deliberately, so the lane's legible refusal is what the caller sees
 #: when the pool is the reason — not a transport timeout that mis-describes
 #: queued work as in-flight. The ordering is pinned by

@@ -7503,7 +7503,41 @@ def _data_sdk(org: dict) -> TortoiseSDK:
     return sdk
 
 
-async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:
+def _data_sdk_with_projection(org: dict) -> TortoiseSDK:
+    """#10602: ``_data_sdk`` PLUS the projection attach, in ONE worker call.
+
+    The attach is the COLD half of a read: ``Projection.__init__`` connects,
+    probes the version and runs ``_ensure_indexes()`` — and when an index is
+    MISSING it BUILDS it over the whole graph (the O(1) fast path exists only
+    once the index is there; a restored/DR graph reaches the fresh branch with
+    arrays and no index — see ``projection``'s own note). That is the phase this
+    repo budgets with ``probe_setup_timeout()`` (20 s, up to 300 s) and why the
+    graph lane's bound is ``probe_setup_timeout() + margin``: *"a cold projection
+    open is a legitimate ~28-round-trip phase"* that must never be
+    false-degraded into a retryable 503.
+
+    So the attach rides the CONSTRUCTION lane (whose bound already covers it),
+    and the read submission on the ``read`` lane contains only the QUERY. That
+    is what makes the read lane's shorter bound honest — without it, the bound
+    would be measuring an index build, and a DR graph's first read would be
+    refused as a capacity failure while the store is healthy (cycle-2 review,
+    P1).
+
+    Failure closes the SDK first: the handle was opened by ``_data_sdk``, so a
+    raise from ``_get_proj()`` would otherwise leak it.
+    """
+    sdk = _data_sdk(org)
+    try:
+        sdk._get_proj()
+    except BaseException:
+        with contextlib.suppress(Exception):
+            sdk.close()
+        raise
+    return sdk
+
+
+async def _data_sdk_offloaded(org: dict, *,
+                              attach_projection: bool = False) -> TortoiseSDK:
     """#3773: ``_data_sdk`` off the event loop (context-isolated).
 
     The write handlers built their per-request SDK inline, so in embedded mode
@@ -7516,8 +7550,19 @@ async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:
     The #2600 actor bind runs LOOP-side first: the off-loaded call executes
     under a context COPY, so its own bind does not reach the loop — and the
     later off-loaded write's ``asyncio.to_thread`` copies the LOOP's context.
+
+    ``attach_projection`` (#10602) bundles ``sdk._get_proj()`` into the SAME
+    submission — still ONE ``graph``-lane submission per request (the pinned
+    occupancy), but now carrying the cold open, so the read that follows on the
+    read lane is a hot query against an attached projection. Only the read
+    routes that are about to query the data plane pass it; a route that never
+    touches the projection (a registry or control-plane read) must not pay a
+    connect it does not use.
     """
     _bind_actor_context(org)
+    if attach_projection:
+        return await _graph_offload(
+            lambda: _data_sdk_with_projection(org), op="data_sdk.attach")
     return await _graph_offload(lambda: _data_sdk(org), op="data_sdk")
 
 
@@ -10284,7 +10329,7 @@ async def list_points(
     # first statement even though the query below was already off-loaded. Same
     # `_data_sdk_offloaded` twin the write lane uses (#3773) — it returns the
     # identical SDK (`_data_sdk`), so only WHERE the call runs changes.
-    sdk = await _data_sdk_offloaded(org)
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
@@ -10411,11 +10456,11 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     cache_open_error: Exception | None = None
     if mode == record_serve.MODE_PREFER:
         try:
-            sdk = await _data_sdk_offloaded(org)
+            sdk = await _data_sdk_offloaded(org, attach_projection=True)
         except Exception as e:  # the seam's 403/503, or the driver's own
             cache_open_error = e
     elif mode == record_serve.MODE_OFF:
-        sdk = await _data_sdk_offloaded(org)
+        sdk = await _data_sdk_offloaded(org, attach_projection=True)
 
     def _cache_props() -> dict | None:
         if sdk is None:
@@ -10792,7 +10837,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     # re-raises and this route's own 500 arm answers, exactly as before. A
     # domain error from `_data_sdk` itself propagates unchanged either way.
     # Relayed to #3718 (issuecomment-6330213773).
-    sdk = await _data_sdk_offloaded(org)
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
         # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
@@ -10884,7 +10929,7 @@ async def topic_summary(
     _require_scope(org, "graphs:read", "topic_summary")
     # #3718 (construction half of #4660, second batch): built off the loop — see
     # the `search` handler for the full rationale and the `OVERRIDES:` line.
-    sdk = await _data_sdk_offloaded(org)
+    sdk = await _data_sdk_offloaded(org, attach_projection=True)
     try:
         # #1676 (launch capacity): topic_summarize is CPU-blocking (EP
         # classification + neighborhood traversal) — offload to a worker

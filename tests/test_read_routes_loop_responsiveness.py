@@ -2750,6 +2750,64 @@ def test_a_read_lane_refusal_keeps_its_503_on_the_read_routes(client):
         assert response.json()["detail"]["error_code"] == "graph_unavailable"
 
 
+def test_the_anchored_point_read_serves_on_the_read_lane_in_prefer_mode(client):
+    """#10602 review cycle 2, finding 3: the ``prefer``/``record`` arm is pinned.
+
+    ``get_point`` has TWO graph round trips: the cache-props read and — when a
+    record tenant resolves — ``record_serve.serve_point(..., cache_answer=
+    _cache_props)``, which invokes that SAME cache read inside the worker. Only
+    the first was covered by the route-level cases (they run in the default
+    ``off`` mode), so a refactor reverting the second back to
+    ``asyncio.to_thread`` would re-park the anchored read on the shared executor
+    with the whole suite green. This drives the ``prefer`` arm and asserts the
+    submission went to the read lane.
+
+    ``serve_point`` is stubbed to raise ``RecordUnavailable`` — the route's own
+    503 arm — because this test is about WHERE the submission runs, not about
+    the record's behaviour (which ``tests/test_record_serve.py`` owns).
+    """
+    from tortoise import record_serve
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+
+    ops: list[str] = []
+    real = ha_mod._read_offload
+
+    async def _recorder(fn, *, op):
+        ops.append(op)
+        return await real(fn, op=op)
+
+    def _serve_point(**_kwargs):
+        raise record_serve.RecordUnavailable("probe: record arm reached")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(ha_mod, "_read_offload", _recorder)
+    monkeypatch.setattr(record_serve, "serve_mode",
+                        lambda: record_serve.MODE_PREFER)
+    monkeypatch.setattr(ha_mod, "_resolve_record_tenant",
+                        lambda _org: ("tenant-probe", "graph-probe"))
+    monkeypatch.setattr(record_serve, "serve_point", _serve_point)
+    try:
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.get(f"/v1/points/{_SEEDED_POINT}")
+
+        response = asyncio.run(_run())
+    finally:
+        monkeypatch.undo()
+
+    assert response.status_code == 503, response.text[:300]
+    assert "get_point.serve" in ops, (
+        f"the prefer-mode record arm never reached the read lane (ops seen: "
+        f"{ops!r}) — it is back on the shared default executor, which is the "
+        f"measured #10602 shape for the anchored point read")
+
+
 def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     """#10602: a read answers inside its bound while the shared pool is full.
 
