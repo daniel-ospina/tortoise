@@ -370,6 +370,16 @@ def _checker():
     in the guard (`tools/capstone_preregistration_check.py::EVIDENCE_LOG_GLOB`, whose comment says
     *"Widening it is a deliberate act"*), and a second copy here would be exactly the
     two-copies-that-can-disagree shape this file refuses for the bars.
+
+    ⛔ Cited by SYMBOL, not by `file:line`, and the history is the reason. The citation once spelled
+    a line number, which was true on `origin/main` and was silently falsified by this branch's own
+    module header — the interpreter-guard block moved the constant. Two lanes re-derived that number
+    independently (review cycles 8 and 11), and the SECOND re-derivation was already wrong again by
+    the head that shipped it: the third re-derivation is the argument. A bare line number into a
+    file this branch edits is asserted by nothing, so it goes stale silently; the symbol does not.
+    So there is no number here to re-derive — this paragraph carries none, and
+    `test_the_symbol_citation_paragraph_carries_no_line_number` holds it that way. Grep for
+    `EVIDENCE_LOG_GLOB = ` against the guard instead.
     """
     spec = importlib.util.spec_from_file_location(
         "_capstone_preregistration_check",
@@ -381,17 +391,58 @@ def _checker():
     return module
 
 
+def test_the_symbol_citation_paragraph_carries_no_line_number():
+    """The paragraph that argues for symbol citation must not carry a number itself.
+
+    Measured twice, and the second measurement is the finding: the paragraph spelled the constant's
+    line, review cycle 8 re-derived it, cycle 11 re-derived it AGAIN — and by the head that shipped
+    that second number it was wrong a third time, because this branch's own header edits moved the
+    constant under it. That is exactly the argument the paragraph makes, applied to itself: a bare
+    line number into a file this branch edits is asserted by nothing, so re-deriving it is not a fix,
+    it is a scheduled re-staleness. The number is therefore GONE from the paragraph, and this leg
+    holds it gone — a re-introduced number reds here instead of reading as a repair.
+
+    Non-vacuity: at the pre-fix head the docstring carried both the old number and the re-derived one,
+    so this assertion fails there.
+    """
+    import re
+
+    doc = _checker.__doc__ or ""
+    found = re.findall(r":\d+", doc)
+    assert not found, (
+        f"the symbol-citation paragraph carries a line number again ({found}): delete it rather "
+        "than re-deriving it — this branch's own header edits moved `EVIDENCE_LOG_GLOB` twice, so "
+        "the next number is stale by the next commit. Cite the SYMBOL, or the grep that finds it.")
+
+
 def test_the_withdrawn_log_is_not_back_in_the_checked_directory(probe):
     """The withdrawal moves the log out of the glob — and NOTHING pinned it staying out.
 
     Ruling item 2 on #10463: *"Do not re-add the log in a fresh commit to obtain a later
     add-commit. That satisfies the letter of the check while the real ordering is unchanged — it is
     precisely the fabrication the guard exists to prevent."* That ruling is unenforced by
-    construction: the guard requires only `log_add_epoch > prereg_add_epoch` over every `*.log` it
-    globs NON-recursively (`EVIDENCE_LOG_GLOB`, `directory.glob(...)`), and the single-measured-log
-    rule counts only `capstone-measured-*.log`. A copy put back here in a FRESH commit therefore
-    has a LATER add-commit than the registration and is blessed — `evidence logs: 1`, ordering
-    "verified" — i.e. the exact fabrication, now wearing a green gate.
+    construction, but NOT for the reason an earlier version of this docstring gave. Two cases, and
+    they are not the same case:
+
+    * **A copy under a NEW name** — the hole this test closes. The guard globs `*.log`
+      NON-recursively (`EVIDENCE_LOG_GLOB`, `directory.glob(...)`) and the single-measured-log rule
+      counts only `capstone-measured-*.log`, so a renamed copy has NO add-commit on the base, its
+      epoch is therefore read from THIS contribution, it lands later than the registration's and is
+      blessed — `evidence logs: 1`, ordering "verified". That is the exact fabrication, now wearing
+      a green gate.
+    * **The original path** — already refused, and not by this test: the base still records the
+      collapsed add (`cfa3de857`, the registration's own add-commit), and a deletion does not remove
+      an earlier add from a ref's history, so a re-add here is measured against that same epoch and
+      the strict comparison refuses it. Pinned by
+      `test_a_withdrawn_log_cannot_be_reordered_by_re_adding_it` — with one caveat a reviewer
+      measured: that test's fixture publishes the base at the branch's own HEAD, so the
+      contribution-side fallback yields the same epoch and the refusal survives even with the
+      base-side log read removed. It pins the OUTCOME, not the base read; the base read's witnesses
+      are the three squash/predates tests in `test_capstone_preregistration_9075.py`.
+
+    So the open route is the rename, and the guard's rule is **base ancestry** (the registration's
+    add on the base must strictly precede the log's), not the PR-internal sibling comparison the
+    earlier version of this paragraph described.
 
     The temptation is real and this PR's own note invites it: `withdrawn/WITHDRAWN.md` says the
     claim stays PROVISIONAL until re-measured with the registration already on the base branch,

@@ -2000,11 +2000,6 @@ def _run_all():
                 raise
 
 
-if __name__ == "__main__":
-    _run_all()
-    print("\nall projection tests passed")
-
-
 
 # ------------------------------------------------------------------ #125 capture fields (live DB)
 
@@ -5881,3 +5876,13 @@ def test_server_projection_receives_the_bounded_timeouts(monkeypatch):
     assert fake.call_args.kwargs["socket_connect_timeout"] == 1.5
     assert fake.call_args.kwargs["socket_timeout"] == 4.0
     assert proj_mod._socket_timeouts() == (1.5, 4.0)
+
+
+# ----------------------------------------------------------------- _run_all guard
+# LAST statement, on purpose (#10010 F3): `_run_all()` discovers tests from
+# `globals()` at call time, so a guard above a later `def test_` runs none of
+# it and still prints "all passed". Enforced by
+# tests/test_main_guards.py::test_a_globals_discovery_main_guard_is_last.
+if __name__ == "__main__":
+    _run_all()
+    print("\nall projection tests passed")
