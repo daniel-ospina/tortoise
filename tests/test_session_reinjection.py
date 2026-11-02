@@ -443,8 +443,9 @@ def test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm(
     and ``None`` values), never the zeroed one: a zero there would be
     indistinguishable from "no crowding" and from a merge-stage failure at
     the same time. (On the outer-handler branch the census is simply never
-    written and keeps its initialised zeroed shape, which is why that branch
-    is caught by the counters, not by this key.)
+    written and keeps its initialised zeroed shape, so this key's assertion
+    fails with it; the COUNTERS are what identify the branch (they clear to 0
+    while ``hits`` still carry the injected ids).)
     """
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
