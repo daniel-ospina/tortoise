@@ -37,7 +37,9 @@ WHAT THIS PINS
 6. The recorded log is LOADED from either side of the withdrawal the #10463 ruling orders, so
    neither merge order (this PR first, or #10544 first) collects zero pins.
 7. The bundle README scopes that withdrawal to the RECORDED run's log — the ordering half reads
-   no log of that run, and it does read this run's log, measured from the guard's own glob.
+   no log of that run, and it does read this run's log, measured from the guard's own glob — and
+   so does the note beside the withdrawn log itself, which carried the same unscoped "no log"
+   claim one file over from the guard that refuses it (#10548 r15 F1).
 
 Every number is re-derived from `s3-ablation-a1075dfc.log` and `s3-ablation-a83c23a8.log`; none
 is hardcoded, so a future edit to either log reds these pins instead of silently re-basing them.
@@ -446,3 +448,80 @@ def test_the_ordering_half_reads_this_log_and_not_the_withdrawn_one(
         f"{THIS_LOG.name} (measured from the guard's own glob above) — say which run's log is "
         "withdrawn instead of overstating the withdrawal to the whole bundle"
     )
+
+
+#: Shapes that assert the ordering half has nothing to order in this bundle. ⛔ The withdrawn
+#: note's own pre-fix sentence is the first one — the SAME overstatement the README guard above
+#: refuses, reintroduced one file over, where nothing read it (#10548 r15 F1).
+_UNSCOPED_NO_LOG_CLAIMS = (
+    re.compile(r"no longer holds (?:a|any|some) log\b", re.I),
+    # ⛔ …but "holds no log OF the recorded run" IS scoped, so the bare form is the one refused.
+    # Without the lookahead this would red a note that named its subject properly, which is the
+    # opposite of what it is for.
+    re.compile(r"holds no log\b(?!\s+of\b)", re.I),
+    re.compile(r"\bno log to order\b", re.I),
+)
+
+
+#: The sentence the note carried before this cycle, verbatim. Held here so the guard below is
+#: proven to REJECT it rather than merely asserted to (non-vacuity, in-test).
+_PRE_FIX_NO_LOG_SENTENCE = (
+    "On a tree that carries it, the refusal described here cannot fire for this bundle at all, "
+    "because the directory no longer holds a log to order."
+)
+
+
+def _unscoped_no_log_claims(text: str) -> list[str]:
+    """Every place ``text`` claims the ordering half has no log of this bundle to order.
+
+    Emphasis and code markers are stripped first: ``*this* log`` is a SCOPED claim and must not
+    read as ``a log``, which is exactly the one-word difference between the pre-fix sentence and
+    the scoped one.
+    """
+    plain = re.sub(r"[*`]", "", " ".join(text.split()))
+    return [m.group(0) for rx in _UNSCOPED_NO_LOG_CLAIMS for m in rx.finditer(plain)]
+
+
+def test_the_withdrawn_note_scopes_its_no_log_claim_to_the_withdrawn_log():
+    """The note beside the withdrawn log may not say THIS BUNDLE holds no log to order.
+
+    ``withdrawn/WITHDRAWN.md`` gained, in this PR, the sentence *"the refusal described here
+    cannot fire for this bundle at all, because the directory no longer holds a log to order"* —
+    and the directory DOES hold one: ``s3-ablation-a83c23a8.log`` sits at the top level, is inside
+    the guard's non-recursive glob, and is ordered from its own add-commit. So the note told a
+    reader to check the gate's ``ordering measured against:`` line and then made a claim that line
+    refutes two lines later in the same transcript.
+
+    The bundle README guard above (``test_the_ordering_half_reads_this_log_and_not_the_withdrawn_one``)
+    exists for exactly this overstatement and refuses it by name — but it reads ``README.md``, so
+    the sibling note could carry the refused claim unpinned. The predicate is shared in spirit and
+    its non-vacuity is asserted on the pre-fix sentence itself, so this cannot pass by matching
+    nothing.
+    """
+    glob = _ordering_glob()
+    scanned = {path.name for path in EVIDENCE.glob(glob)}
+    assert THIS_LOG.name in scanned, (
+        f"the ordering half's glob {glob!r} does not reach {THIS_LOG.name}, so the note's "
+        "\"no log to order\" claim would be TRUE and this guard would be pinning a non-issue; "
+        f"it globs {sorted(scanned)}"
+    )
+
+    note = (EVIDENCE / "withdrawn" / "WITHDRAWN.md").read_text()
+    assert not _unscoped_no_log_claims(note), (
+        "withdrawn/WITHDRAWN.md claims the ordering half has no log of THIS BUNDLE to order "
+        f"({_unscoped_no_log_claims(note)}), and it orders {THIS_LOG.name} (measured from the "
+        "guard's own glob above). Scope the claim to the WITHDRAWN log — \"no longer holds "
+        "*this* log to order\" — and say that the re-measurement's log IS ordered."
+    )
+    assert THIS_LOG.name in note, (
+        f"the note must NAME the log the ordering half does read ({THIS_LOG.name}); otherwise a "
+        "reader scoping the withdrawal by this note finds no statement of what remains ordered"
+    )
+
+    # NON-VACUITY: the predicate really rejects the sentence this cycle removed. If a later edit
+    # restores it, the guard above fires — asserted here rather than assumed.
+    assert _unscoped_no_log_claims(_PRE_FIX_NO_LOG_SENTENCE), (
+        "the guard's predicate does not reject the pre-fix sentence, so it is vacuous: "
+        f"{_PRE_FIX_NO_LOG_SENTENCE!r}"
+    )
+
