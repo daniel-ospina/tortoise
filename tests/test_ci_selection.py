@@ -6528,13 +6528,27 @@ def _durations_row_comments(text: str):
     wraps as unbalanced.
 
     Continuations are INDENTED lines. That bound is not cosmetic: this block also
-    carries COLUMN-0 prose between rows — 199 lines at the 2026-11-02 head, e.g.
+    carries COLUMN-0 prose between rows — 186 lines at the 2026-11-02 head, e.g.
     the `# #3395: per-file CI wall time …` method note — and attaching it to the
     row above made one row's note 122 lines of the map's own header, so the guard
     below judged that prose together with the note (and a note joined with
-    unrelated prose can hide, or invent, an imbalance). The writer bounds its span
-    the same way (`tools/ci_timing._row_continuation_lines`).
+    unrelated prose can hide, or invent, an imbalance).
+
+    The join STOPS at a block whose first line OPENS a note of its own
+    (`tools.ci_timing._starts_a_new_note`). Indentation alone cannot answer "which
+    row does this block document" — §3.2.3.3 of the YAML spec says comments are "a
+    presentation detail … not associated with a particular node" — and this map's
+    dominant convention is the OPPOSITE of "the block continues the row above": the
+    block PRECEDES the row it documents (71 of the 72 such blocks at this head open
+    a new note). Joining anyway attributes a neighbour's prose to the wrong key,
+    which matters because these guards read CLAIMS off the joined text — a stale
+    case count or a `WATCHDOG_FLOOR_MIN` claim from the block below then lands on a
+    row whose value it does not describe. The writer bounds its span identically
+    (`tools/ci_timing._row_continuation_lines`), which is the property that keeps a
+    cut from orphaning a parenthesis this guard is counting.
     """
+    from tools.ci_timing import _starts_a_new_note
+
     out = []
     lines = text.splitlines()
     try:
@@ -6552,6 +6566,9 @@ def _durations_row_comments(text: str):
             continue
         stripped = lines[i].strip()
         if current is not None and stripped.startswith("#") and lines[i][:1].isspace():
+            if len(current[1]) == 1 and _starts_a_new_note(lines[i]):
+                current = None
+                continue
             current[1].append(stripped.lstrip("#"))
         elif stripped:
             current = None
@@ -6608,7 +6625,7 @@ def test_the_paren_guard_is_not_vacuous():
 def test_the_paren_guard_reads_only_a_rows_OWN_note():
     """A row's note is its indented wrap lines — not the block's column-0 prose.
 
-    The `durations:` block carries COLUMN-0 prose between rows (199 lines at the
+    The `durations:` block carries COLUMN-0 prose between rows (186 lines at the
     2026-11-02 head — the `# #3395: per-file CI wall time …` method note). Attaching
     that prose to the row above it made `test_spa_dependency_overrides.py`'s "note"
     122 lines of the map's own header. A guard that judges a note together with
@@ -6721,6 +6738,85 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
+
+
+def test_a_note_block_that_opens_of_its_own_is_never_read_as_the_row_aboves(
+        tmp_path):
+    """A block that OPENS a note documents another row — the reader must not join it.
+
+    This map's dominant convention is the block that PRECEDES the row it documents
+    (in `config/ci-surfaces.yml` the `355.0 IS A DELIBERATE CAP … #9172` block lies
+    directly under `test_work_claim.py` and documents `test_lane_stash.py`). YAML
+    supplies no association — §3.2.3.3: comments are "a presentation detail … not
+    associated with a particular node" — so the reader has to decide, and joining by
+    indentation alone attributes a neighbour's CLAIM to the wrong key.
+
+    Non-vacuity (measured pre-fix): the join runs to the end of the indented block,
+    so `test_above.py`'s note inherits the `grep -c '^def test_'` claim written for
+    the row BELOW and `_durations_rows_with_a_stale_case_count` reports
+    `('test_above.py', 2, 3)` — a FALSE RED against a row whose own note says
+    nothing about a count, in a required leg.
+    """
+    (tmp_path / "test_above.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n\n\n"
+        "def test_c():\n    pass\n", encoding="utf-8")
+    text = (
+        "durations:\n"
+        "  test_above.py: 3.8  # ci-timing junit-census+top-15 2026-11-02 "
+        "(run 41375596528); was 4.0\n"
+        "  # #8051: LOCAL readings on this fleet-loaded host — 366.4s, 422.9s,\n"
+        "  # 216.6s, and #10356: 2 cases (`grep -c '^def test_'` -> 2; pytest\n"
+        "  # collects 2).\n"
+        "  test_below.py: 25.4  # ci-timing junit-census+top-15 2026-11-02 "
+        "(run 41375596528); was 355.0\n"
+        "  # #5612: 12.2 is the HIGHER of two local readings of this file.\n"
+        "surfaces: []\n")
+    joined = dict(_durations_row_comments(text))
+    assert "LOCAL readings" not in joined["test_above.py"], joined["test_above.py"]
+    assert "grep -c" not in joined["test_above.py"], joined["test_above.py"]
+    assert _durations_rows_with_a_stale_case_count(text, tmp_path) == []
+    # …and the mid-sentence wrap — the one shape that IS a continuation — still
+    # joins, so the paren guard keeps seeing a pair that wraps across two lines.
+    wrapped = (
+        "durations:\n"
+        "  test_wrapped.py: 9.5  # it opens here (and the closer sits on the\n"
+        "  # continuation line, so the pair is balanced together).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_unbalanced_parens(wrapped) == []
+    assert "continuation line" in dict(_durations_row_comments(wrapped))[
+        "test_wrapped.py"]
+
+
+def test_the_cap_block_is_not_read_as_the_row_aboves_note():
+    """The REAL `355.0 IS A DELIBERATE CAP` block belongs to the row BELOW it.
+
+    The writer's span rule and the reader's are one rule (see
+    `_durations_row_comments`); this pins the committed map against the shape that
+    rule exists for, so a re-flow of the block cannot quietly re-attach it to
+    `test_work_claim.py` (weight 3.8) and leave `test_lane_stash.py` — the row the
+    cap governs — with no note at all (#10575 review, P2).
+    """
+    from tools.ci_timing import _row_continuation_lines
+
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    above = next(i for i, ln in enumerate(lines)
+                 if ln.startswith("  test_work_claim.py:"))
+    below = next(i for i, ln in enumerate(lines)
+                 if ln.startswith("  test_lane_stash.py:"))
+    assert above < below, (above, below)
+    block = lines[above + 1:below]
+    assert any("355.0 IS A DELIBERATE CAP" in ln for ln in block), block[:2]
+    assert all(ln[:1].isspace() and ln.strip().startswith("#") for ln in block), (
+        "the cap block must stay an INDENTED comment run beside its row: "
+        f"{[ln[:60] for ln in block][:2]}")
+    # The WRITER does not claim it…
+    assert _row_continuation_lines(lines, above) == [], (
+        "the cap block is being claimed as test_work_claim.py's note")
+    # …and the READER does not attribute it upward either, so no claim it carries is
+    # judged against `test_work_claim.py`'s 3.8.
+    assert "355.0 IS A DELIBERATE CAP" not in dict(_durations_row_comments(
+        text))["test_work_claim.py"]
 
 
 def _durations_rows_stating_a_stale_watchdog_floor(text: str, floor: int):
