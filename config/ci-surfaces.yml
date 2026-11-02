@@ -636,9 +636,10 @@ surfaces:
   # `Query(100, ge=1, le=MAX_PAGE)` must BE `event_store.MAX_PAGE`, not a
   # second literal — and that route lives in `tortoise/hosted_api.py`, an
   # EXACT `api` SOURCE_PATTERN match. Without this arm a hosted_api.py-only
-  # change could lower the seam's maximum and leave the route accepting a
-  # value the seam refuses. The `core` arm (below) is the primary one — it
-  # pins `tortoise/event_store.py` and `tortoise/sdk.py`'s `poll_events`.
+  # change could move the route's declared maximum off the seam's — accepting a
+  # value the seam refuses, or refusing one the seam accepts. The `core` arm
+  # (below) is the primary one — it pins `tortoise/event_store.py` and
+  # `tortoise/sdk.py`'s `poll_events`.
   - test_8447_read_after_page_bound.py
   - test_hosted_aboutobject_journal_4240.py
   # #3718 (read half): the REST graph-READ handlers must not run synchronous

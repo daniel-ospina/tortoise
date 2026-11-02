@@ -1208,12 +1208,15 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
             # is the completeness test below. Comparing the page against the
             # UNCLAMPED `batch` (the pre-#8447 form) meant a batch above the
             # bound could never set `more_pending` — a short page read as
-            # drained, the identical DEFECT one layer out. Note the counter
-            # itself has no reader today (nothing reads `more_pending`: the
-            # dream path discards the summary outright and the retry sweep
-            # aggregates only `delivered`/`failed`), so this is the measurement
-            # being right, not a live behaviour change: nothing was delivered
-            # wrongly, a backlog count lied.
+            # drained, the identical DEFECT one layer out. No code BRANCHES on
+            # `more_pending` today (the retry sweep aggregates only
+            # `delivered`/`failed`, and the dream path's wrapper LOGS the whole
+            # summary rather than reading the field — `hosted_api.py:3005` is
+            # exactly where the wrong backlog count was visible), and the only
+            # production caller passes no `batch`, so `page == DEFAULT_BATCH ==
+            # 50` there and both comparison forms agree. That is why this is the
+            # measurement being right rather than a live behaviour change:
+            # nothing was delivered wrongly, a backlog count lied.
             page = max(1, min(int(batch), MAX_PAGE))
             events = read_after(proj, int(sub.get("cursor") or 0), types=types,
                                 limit=page)
