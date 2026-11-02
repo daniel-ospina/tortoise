@@ -1051,10 +1051,21 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
             # renamed and the symbol removed with this gate green, while the row
             # still claimed the test pins the built half. Judged by the SAME
             # rules the `implemented` branch applies (path kind, containment,
-            # existence, module-level definition), because one validator is the
-            # only way the two branches cannot drift — presence is what makes a
+            # existence, module-level definition) — presence is what makes a
             # field a claim, and a claim this gate cannot verify is the
             # fail-open this registry exists to close.
+            #
+            # ⚠️ Those rules are a DELIBERATE LINE-FOR-LINE MIRROR of the
+            # `implemented` branch above (`_path_violations` / `_resolve_in_repo`
+            # / `_defined_names`, same order, same keying), NOT a single shared
+            # helper — an earlier draft of this comment claimed "one validator
+            # is the only way the two branches cannot drift", which is the goal
+            # and not yet the fact. The two copies are decision-equivalent
+            # today and `test_the_artifact_fields_of_a_not_implemented_row_are_`
+            # `still_verified` pins both, but a rule added to ONE copy later
+            # would not reach the other: that is the same drift-shaped defect
+            # this PR closes, so the extraction to one helper is tracked rather
+            # than assumed (#10650).
             declared_code = row.get("code")
             declared_tests = row.get("tests")
             declared_symbols = row.get("symbols")

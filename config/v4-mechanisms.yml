@@ -442,14 +442,19 @@ mechanisms:
       points stop at the FIRST of those four gates — the shape *a point whose
       content and quote carry no value* — which is the only absence
       `test_the_span_link_row_records_the_widening_as_unbuilt`
-      (`tests/test_v4_declared_mechanisms.py`) actually pins. The other two
-      refusal routes are pinned ELSEWHERE, not by it: the band-resolved route by
-      `tests/test_extractor_v2.py::TestValueVerbSpan2684::`
-      `test_a_band_resolved_value_is_REPORTED_not_silently_unspanned`, and the
-      verbatim-but-value-free route by the same class's
-      `test_a_value_free_quote_gets_no_span_and_is_REPORTED`. Neither of those
-      two appears in the row test above, so do not read its 2 unspanned points
-      as coverage of them. A `validate_span`
+      (`tests/test_v4_declared_mechanisms.py`) actually pins. The other THREE
+      gates are pinned ELSEWHERE, not by it, and all in
+      `tests/test_extractor_v2.py::TestValueVerbSpan2684`: no resolvable turn by
+      `test_no_resolution_reuses_the_existing_anchor_warning`, the band-resolved
+      route by `test_a_band_resolved_value_is_REPORTED_not_silently_unspanned`,
+      and the verbatim-but-value-free route by
+      `test_a_value_free_quote_gets_no_span_and_is_REPORTED`. One more absence
+      class sits OUTSIDE `_value_verbatim_span` altogether — an empty quote with
+      a resolved index — reported by the resolver's own "unverified (empty
+      quote)" step and pinned by
+      `test_empty_quote_model_index_path_carries_no_span`. NONE of these four
+      appears in the row test above, so do not read its 2 unspanned points as
+      coverage of them. A `validate_span`
       that validates a SUPPLIED pair is not a producer: a row marked
       `implemented` here would recreate exactly the declared-implies-present
       defect this registry exists to catch, so the absence is recorded against
