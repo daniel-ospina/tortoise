@@ -3356,3 +3356,92 @@ def test_one_comparable_pair_is_enough_to_report_the_bundle_as_measured(tmp_path
     assert report["ok"] is True, report["failures"]
     assert report["ordering"] == "verified", report["ordering"]
     assert report["ordering_base"] == "origin/main", report["ordering_base"]
+
+
+# ── cycle 13: the readers must see an add hidden behind a merge ───────────────
+
+
+def test_the_ordering_readers_see_an_add_hidden_behind_a_merge(tmp_path, monkeypatch):
+    """FAIL-OPEN, measured (review cycle 13, finding 1): simplification can hide the EARLIER add.
+
+    `git log --diff-filter=A` follows only the TREESAME parent at a merge. So when one branch adds
+    the log at T1 (before the registration) and a sibling adds the same path at T2 (after it), and
+    the merge is resolved to the sibling's copy, the default read returns **[T2] only** — `min()`
+    is then later than the truth and a log that predates the registration is ACCEPTED. That is
+    precisely the fabricated ordering the gate exists to refuse, passing silently.
+
+    The file already knew this hazard: `_touch_epochs` carries `--full-history` for it, with a
+    comment saying git's simplification can drop a merge commit that touched the log, and a test
+    (`test_the_touch_history_sees_a_merge_commit`). The lesson had been applied to a DIAGNOSTIC
+    and not to the two readers that decide the VERDICT — which is exactly why it went unnoticed.
+
+    The fixture is the criss-cross shape, and the assertion is on the ACCEPT it used to produce.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_003_000)
+    _publish_base(repo)
+    log = prereg.parent / "capstone.log"
+
+    # Branch `early`: the log lands BEFORE the registration was published.
+    _git(repo, "checkout", "-q", "-b", "early")
+    log.write_text("measured before the thresholds\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "log first", epoch=1_700_000_100)
+
+    # Branch `late`: the same path, after the registration, and the merge keeps THIS copy. It
+    # branches from the PUBLISHED registration commit, not from `early`.
+    _git(repo, "checkout", "-q", "-b", "late", "origin/main")
+    log.write_text("measured after the thresholds\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "log again", epoch=1_700_004_000)
+    _git(repo, "merge", "-q", "-s", "ours", "-m", "merge early, keep late's copy", "early",
+         epoch=1_700_005_000)
+
+    # The premise: the DEFAULT read is blind to the earlier add, `--full-history` is not.
+    default_epochs = [int(x) for x in _git_out(
+        repo, "log", "--diff-filter=A", "--format=%ct", "--", "docs/evidence/7949-capstone/"
+        "capstone.log").split()]
+    full_epochs = [int(x) for x in _git_out(
+        repo, "log", "--full-history", "--diff-filter=A", "--format=%ct", "--",
+        "docs/evidence/7949-capstone/capstone.log").split()]
+    assert min(default_epochs) == 1_700_004_000, default_epochs
+    assert min(full_epochs) == 1_700_000_100, full_epochs
+
+    failures = check.check_ordering(prereg, [log], {})
+    assert failures, (
+        "a log whose EARLIER add is hidden behind a merge was accepted — the ordering readers are "
+        "history-simplified again, and `min()` is then later than the truth")
+    assert "not strictly after" in failures[0], failures[0]
+
+
+def test_an_ordering_violation_is_not_reported_as_a_verified_claim(tmp_path, monkeypatch, capsys):
+    """A VIOLATED ordering must not print `run-order claim: verified` (review cycle 13, finding 2).
+
+    `run()` took `ordering = "verified"` whenever `unmeasured` was empty, without looking at what
+    `check_ordering` returned. So on a tree with two "not strictly after" failures — a real
+    violation — the two fields a consumer keys on reported the opposite of the measurement, while
+    `ok`/exit were correctly 1. The exit code saved it, and that is exactly why it survived: every
+    test of the report ran on a PASSING tree.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_003_000,
+                            text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    _publish_base(repo)
+    log = prereg.parent / "capstone.log"
+    log.write_text("x\n")
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "log BEFORE the registration", epoch=1_700_000_100)
+    monkeypatch.setattr(check, "check_machine_record", lambda directory, pins: [])
+
+    report = check.run(prereg.parent, use_git=True, use_corpus=False)
+    assert report["ok"] is False, report
+    assert any("not strictly after" in f for f in report["failures"]), report["failures"]
+    assert report["ordering"] != "verified", report["ordering"]
+    assert report["run_order_claim"] != "verified", report["run_order_claim"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+
+    assert check.main(["--dir", str(prereg.parent), "--no-corpus"]) == 1
+    out = capsys.readouterr().out
+    assert "machine record run-order claim: verified" not in out, out
+    assert check.ORDERING_UNMEASURED not in out, ("a VIOLATION is not an UNMEASURED outcome — it "
+                                                  "was measured, and it failed")

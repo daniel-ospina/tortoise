@@ -37,6 +37,16 @@ It verifies five things, and it fails on each of them for a specific reason:
    `_touch_epochs` content bound; the ordinary arm never had one), closing it is a NEW RULE that
    needs an owner decision, and it is tracked as **#10555** rather than invented here.
 
+   ⚠️ **And it does not prove the log's history either — the same hole on the LOG side.** Because
+   the log's own add-commit is what the ordering compares, a log that existed before the
+   registration can be **moved or copied to a new path**, and the measured add is then the rename
+   commit, which is later than the registration: it passes. `SQUASH_COLLAPSE_REMEDY` recommends
+   exactly that shape ("a NEW artefact at a NEW path"), which is correct for a genuinely re-run
+   measurement and unguarded for a copy of a pre-registration score. This is the same class as
+   #10555 (an add-only read cannot see a content move), it is **pre-existing**, and it is left
+   open rather than papered over: closing it is a NEW RULE — a rename-following read, or a content
+   bound on every measured log — which needs an owner decision, not a lane invention.
+
    **The refusal this buys, at PR time rather than after the merge.** A change that adds a
    registration *and* a log has nothing on the base to appeal to, so it is **REFUSED**: the
    registration must land first, in its own PR. That is the arm that stops a contribution instead
@@ -566,7 +576,14 @@ def _added_epochs(path: Path) -> list[int]:
         return []
     try:
         out = subprocess.run(
-            ["git", "log", "--diff-filter=A", "--format=%ct", "--", str(rel)],
+            # ⛔ `--full-history`: without it git's history simplification follows a TREESAME
+            # parent at a merge and can return only the SECOND add of a path, so `min()` is later
+            # than the truth and a log that predates the registration is ACCEPTED (review cycle 13,
+            # finding 1 — reproduced: adds at 1577880000 and 1578009600 on two branches, merge
+            # resolved to the later side, default log returns only 1578009600). This is the same
+            # hazard `_touch_epochs` already guards with the same flag; there it was applied to a
+            # DIAGNOSTIC and here it decides the VERDICT, which is why it went unnoticed.
+            ["git", "log", "--full-history", "--diff-filter=A", "--format=%ct", "--", str(rel)],
             cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
         )
     except OSError:  # pragma: no cover - git absent
@@ -843,12 +860,18 @@ def _added_epochs_on(ref: str, path: Path) -> list[int]:
     Reachability is bounded by ``ref`` (``git log <ref> -- <path>``), so this reads only commits
     that are ALREADY on that ref — the set a squash merge cannot rewrite. Empty when the path was
     never added there, which is the whole signal for "is the registration published on the base".
+
+    ⛔ ``--full-history`` is load-bearing, for the reason spelled out in ``_added_epochs``: the
+    default simplification can hide the EARLIER of two adds across a merge, which turns `min()`
+    into a later epoch and makes this reader accept exactly the ordering it is here to refuse.
     """
     try:
         rel = path.resolve().relative_to(REPO_ROOT)
     except ValueError:
         return []
-    code, out = _git_stdout(["log", "--diff-filter=A", "--format=%ct", ref, "--", str(rel)])
+    code, out = _git_stdout(
+        ["log", "--full-history", "--diff-filter=A", "--format=%ct", ref, "--", str(rel)]
+    )
     if code != 0:
         return []
     return sorted(int(x) for x in out.split() if x.strip().isdigit())
@@ -1713,8 +1736,9 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             candidate = resolve_base_ref(base_ref) or UNRESOLVED_BASE
             report["ordering_base_candidate"] = candidate
             unmeasured: list[str] = []
-            failures += check_ordering(prereg, logs, pins, content_exempt, base_ref=base_ref,
-                                       unmeasured=unmeasured)
+            ordering_failures = check_ordering(prereg, logs, pins, content_exempt,
+                                               base_ref=base_ref, unmeasured=unmeasured)
+            failures += ordering_failures
             report["ordering_exempt"] = sorted(content_exempt)
             if unmeasured:
                 # ⛔ The arm marks the outcome only when NOTHING was compared (review cycle 12):
@@ -1723,6 +1747,14 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
                 # no registration on the base returns from the branch above; a bundle that DID
                 # compare a pair is measured, whatever else failed.
                 ordering = f"{ORDERING_UNMEASURED} ({unmeasured[0]})"
+            elif ordering_failures:
+                # ⛔ "verified" is a claim about the ORDERING, so it may not be taken from the
+                # absence of an `unmeasured` note alone (review cycle 13, finding 2). On a
+                # VIOLATING tree the arm compared its pairs and REFUSED, `unmeasured` stayed empty,
+                # and this field still read `verified` beside two "not strictly after" failures —
+                # the field a consumer keys on reporting the opposite of the measurement. The base
+                # is still not reported as measured: nothing about this ordering held.
+                ordering = "failed"
             else:
                 ordering = "verified"
                 # Only NOW is the base a fact about this verdict rather than an intention.
