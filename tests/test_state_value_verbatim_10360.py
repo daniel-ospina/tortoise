@@ -1,0 +1,1782 @@
+"""#10360 — the verbatim state-value guarantee, enforced in the WRITE PATH.
+
+What this file pins, and why each pin is here rather than in a comment:
+
+1. **The rule.** ``_value_slot_divergence`` fires exactly on a same-slot
+   contradiction (the point states a DIFFERENT value than its own verbatim
+   quote in the slot the quote binds) and fails open everywhere else. The
+   tolerance battery below is the one the previous attempt at this issue was
+   rejected for failing: string identity refused truthful points for
+   ``4.0``/``4``, ``1200``/``1,200``, ``20%``/``20 percent``,
+   ``800ms``/``800 milliseconds`` and ``03:00``/``3am`` (review P1s 1–2, #10360
+   lane record §6). A guard that accuses a truthful point of a rewrite it did
+   not commit is worse than no guard: it withholds a durable memory.
+   ⛔ ``1200``/``1,200`` is no longer a TOLERANCE the rule applies: a
+   separator-bearing number is outside the judged set entirely
+   (``_separator_reads_ambiguously``, review cycle 12 P1) — the pair agrees
+   because neither side is judged, not because the comma was decided.
+2. **The enforcement, at the emit site.** ``execute_embed`` does not write a
+   point whose value contradicts its own quote. This is the pin that fails if
+   the rule is DELETED from the write path (mutation-checked in the lane
+   record): asserting the pure function alone would be machinery, not proof.
+3. **The invariant the guarantee cannot break.** A point whose value IS
+   verbatim survives — untouched, with its span — so this rule can never be
+   read as a filter that drops state values.
+4. **The other invariant, which this rule must not disturb.** The selection
+   predicate ``value_gate.identifier_only`` (#4899) still drops
+   identifier-like residues. Retention must not re-admit the identifiers that
+   filter was built to remove, so both halves are asserted together.
+"""
+
+from __future__ import annotations
+
+import inspect
+import json
+import pathlib
+
+import pytest
+
+from tortoise import extractor_v2 as v2
+from tortoise import value_gate
+
+
+def _embed(content: str, quote: str) -> dict:
+    """The minimal S2 payload the write path accepts, one point."""
+    return {
+        "entities": [], "points": [{
+            "content": content, "pointKind": "statement",
+            "about_entities": [], "quote": quote,
+        }],
+        "events": [], "operators": [], "chain_notes": [],
+        "link_before_create": [],
+    }
+
+
+def _write(content: str, quote: str) -> dict:
+    return v2.execute_embed(_embed(content, quote), {}, session_id="s_10360")
+
+
+# ── 1. the rule + its tolerance bound ───────────────────────────────────────
+
+#: ``(content, quote, must_flag, label)``. The ``False`` rows carry one of three
+#: measured false-positive classes — a model-independent FORM difference, a
+#: separator/locale-ambiguous numeral, or a quote that drops/reorders a value —
+#: and the ``True`` rows are the class the carve-out exists for ("never round,
+#: paraphrase, or label them"). ⛔ The rows are NOT counted here: a hand-written
+#: total re-staled twice on #10513 (`four` FORM rows and `three` dropped/reordered
+#: ones against a 33-row battery, review cycle 13 P2). The battery is the count;
+#: a reader who needs one reads it from `len(BATTERY)`.
+BATTERY = (
+    ("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds", True, "rounding"),
+    ("the invoice was $12", "the invoice was $60", True, "leading symbol"),
+    ("the p95 hit 4 seconds", "the p95 hit 4.2 seconds", True, "precision dropped"),
+    ("the TTL is ten minutes", "the TTL is twenty minutes", True, "ttl rewritten"),
+    ("p95 went from 4.2 to 6.1", "p95 went from 4.2 to 6.0", True, "one of two"),
+    ("we have 2 cats and 3 dogs", "we have 3 cats and 2 dogs", True, "quantities swapped"),
+    ("the p95 hit 4.0 seconds", "the p95 hit 4.0 seconds", False, "identical"),
+    ("latency was 1200 ms", "latency was 1,200 ms", False, "separator, unjudged"),
+    # ⛔ A SEPARATOR-BEARING NUMBER IS UNJUDGED (#10513 review cycle 12, P1).
+    # Which of ``,``/``.`` is the decimal point is a LOCALE property (CLDR UTS #35
+    # carries `decimal` and `group` per locale; Babel's `format_decimal(1.2345,
+    # locale='en_US')` is '1.234' while `format_decimal(12345, locale='de_DE')`
+    # is '12.345'), and this path has no locale — so BOTH readings fail OPEN.
+    # The comma pair is the one the previous revision REFUSED, because it had
+    # decided the locale: it deleted the comma, so `4,2` read as `42` against
+    # `4.2` and a truthful point in a comma-decimal locale was withheld.
+    ("the p95 hit 4,2 seconds", "the p95 hit 4.2 seconds", False,
+     "comma decimal, unjudged"),
+    ("the drive was 1.234 km", "the drive was 1234 km", False,
+     "dot thousands, unjudged"),
+    ("the p95 hit 4.20 seconds", "the p95 hit 4.2 seconds", False, "trailing zero"),
+    ("the share was 20 percent", "the share was 20%", False, "percent form"),
+    ("budget 800 milliseconds", "budget 800ms", False, "unit spacing"),
+    ("the freeze starts 03:00", "the freeze starts 3am", False, "clock form"),
+    ("the freeze starts 2026-10-09", "the freeze starts yesterday", False, "date form"),
+    ("12 million events", "twelve million events", False, "number word"),
+    ("the session cache TTL is twenty minutes", "the TTL is twenty minutes",
+     False, "quote is a fragment"),
+    ("forty round-trips blew up the p95", "the calls blew up the p95",
+     False, "quote omits a value"),
+    # units are VALUE, not form: a minutes->hours rewrite is refused, while a
+    # unit SPELLED differently is not (review P2 on the first round).
+    ("the TTL is 20 minutes", "the TTL is 20 hours", True, "unit rewritten"),
+    # `_value_bindings` fuses only the units in its own `_UNIT_WORDS`, so the
+    # judged form is the fused one (`800ms`); a unit written APART is not
+    # fused by the engine and therefore not a unit identity here either.
+    ("the timeout is 800ms", "the timeout is 800s", True, "unit rewritten 2"),
+    ("the TTL is 20 minutes", "the TTL is 20 mins", False, "unit spelling"),
+    ("the p95 is 0.5 seconds", "the p95 is .5 seconds", False, "leading dot"),
+    ("the delta is -4 percent", "the delta is -4 percent", False, "identical sign"),
+    ("the delta is 4 percent", "the delta is -4 percent", True, "sign dropped"),
+    # units the ENGINE can fuse but the first table did not spell (review 2, P2)
+    ("the drive is 20 km", "the drive is 20 mi", True, "unit rewritten 3"),
+    ("the weight is 20 kg", "the weight is 20 lb", True, "unit rewritten 4"),
+    ("the TTL is 20 min", "the TTL is 20 m", True, "unit rewritten 5"),
+    # A BARE MAGNITUDE PREFIX is not a unit (#10513 review P1, MEASURED: both of
+    # the first two rows REFUSED before `_MAGNITUDE_PREFIXES` existed). `k` is
+    # SI's x1000 symbol and the table ALSO carries it as a unit identity, so a
+    # pair that DISAGREES about which job it did is unjudgeable and fails OPEN.
+    ("I ran 20k", "I ran 20km", False, "magnitude prefix vs unit"),
+    ("we saw 5k QPS", "we saw 5000 QPS", False, "magnitude prefix vs scaled"),
+    # ...and the tolerance is NARROW, which is what keeps it from being a waiver:
+    # a bare-magnitude rewrite is still refused, because both sides agree the
+    # suffix is `k` and only the number moved. ⛔ The mutation this row
+    # discriminates is NOT "widen the arm's condition" — the `_magnitude_agrees`
+    # gate still refuses this pair under any condition that keeps its gating
+    # (measured: `a[2] in _MAGNITUDE_PREFIXES or b[2] in ...` leaves this row
+    # green, because 5 x 1000 != 6). It reds when the SIGN/CORE comparison is
+    # deleted, or when `_magnitude_agrees` is replaced by the unit-mismatch test
+    # the previous revision shipped — which is exactly the regression it guards.
+    ("the load was 5k QPS", "the load was 6k QPS", True, "magnitude rewritten"),
+    # ⛔ THE TOLERANCE IS ABOUT THE UNIT WORD, NEVER ABOUT THE NUMBER OR THE SIGN
+    # (#10513 review P2, MEASURED: an arm that fired on the unit mismatch ALONE
+    # WROTE all three of these — `_value_slot_divergence` returned `()`).
+    # `_magnitude_agrees` is the gate that keeps them refused, and these rows are
+    # the only thing standing between that arm and a numeric waiver.
+    ("we saw 5k QPS", "we saw 6000 QPS", True, "magnitude number moved"),
+    ("we ran 20k", "we ran 21km", True, "magnitude number moved 2"),
+    ("the delta is -20k", "the delta is 20km", True, "magnitude sign dropped"),
+    # ⛔ A MAGNITUDE **WORD** IS NEITHER FUSED NOR JUDGED (#10513 review cycle-13
+    # P2, measured). `_value_bindings` fuses no scale word, so `million` /
+    # `billion` / `thousand` are ignored and both sides bind the SAME core — a
+    # 10^3..10^9 scale rewrite is written as verbatim. It is residual (m) in the
+    # registry row, NOT a tolerance this rule applies on purpose: closing it means
+    # fusing scale words into the core in `_value_bindings`, which is a change to
+    # the production engine, not to this seam. Pinned so closing it must move the
+    # row.
+    ("we have 12 million events", "we have 12 billion events", False,
+     "scale word, unjudged"),
+)
+
+
+@pytest.mark.parametrize("content,quote,must_flag,label", BATTERY)
+def test_the_rule_fires_on_a_same_slot_rewrite_and_fails_open_on_form(
+        content, quote, must_flag, label):
+    diverged = v2._value_slot_divergence(content, quote)
+    assert bool(diverged) is must_flag, (
+        f"{label}: expected flag={must_flag}, got {diverged}")
+    if must_flag:
+        # The report names BOTH values, so a rewrite is recoverable from the
+        # run without the original session.
+        _anchor, point_value, quote_value = diverged[0]
+        assert point_value and quote_value and point_value != quote_value
+
+
+def test_a_bare_magnitude_prefix_is_tolerated_only_against_a_DIFFERENT_unit():
+    """The `k` arm is a tolerance on AMBIGUITY, not a waiver on `k` (#10513 P1/P2).
+
+    `k` is SI's x1000 prefix AND a unit identity in `_UNIT_EQUIV` (it is a unit the
+    engine fuses, so the table must carry the key). The two jobs are only
+    confusable when the two sides DISAGREE about which one it was, and even then
+    the arm may only tolerate the UNIT WORD — the number and the sign are never
+    in dispute.
+
+    ⛔ That second half is a review finding, not a nicety (#10513 P2, MEASURED):
+    an earlier revision of this arm fired on the unit mismatch ALONE and returned
+    before the sign/core check, so `5k QPS`/`6000 QPS`, `20k`/`21km` and
+    `-20k`/`20km` were all WRITTEN. The assertions below are what reds that
+    revision; the unit-only arm cannot satisfy them.
+
+    ⛔ THE OTHER SIDE IS SPELLED UNGROUPED (``5000``) ON PURPOSE. The case was
+    measured with ``5,000``, and a grouped numeral is now OUTSIDE the judged set
+    (``_separator_reads_ambiguously``, review cycle 12 P1), so a grouped row
+    would test the fail-open rather than this arm: it would stay green with
+    ``_magnitude_agrees`` deleted. The arm's live evidence is the ungrouped form.
+    """
+    # Ambiguous unit word: unjudgeable, so it fails OPEN (the refusal direction
+    # this rule must never take is the one that withholds a truthful memory).
+    assert v2._value_slot_divergence("I ran 20k", "I ran 20km") == ()
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5000 QPS") == ()
+    # Same unit on both sides: still judged, and a moved number is a rewrite.
+    assert v2._value_slot_divergence("the load was 5k QPS", "the load was 6k QPS")
+    # ⛔ EVERY magnitude prefix needs a FACTOR, or `_magnitude_agrees` returns
+    # False for everything and the arm becomes a silent no-op — the two false
+    # refusals below would quietly come back with every test still green. One
+    # line, because the containment is the whole mechanism.
+    assert set(v2._MAGNITUDE_PREFIXES) <= set(v2._MAGNITUDE_FACTORS)
+    # ⛔ The number and the sign are NOT the ambiguity, so they are still judged
+    # even where the unit words disagree (this is the P2 the arm first shipped).
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 6000 QPS")
+    assert v2._value_slot_divergence("we ran 20k", "we ran 21km")
+    assert v2._value_slot_divergence("the delta is -20k", "the delta is 20km")
+    # ⛔ The equal-core half is gated on the OTHER unit (#10513 review P1):
+    # "the cores are equal" is "the same number" only while `k` stands for that
+    # unit word. Against `m`/`mi` the same cores are a 1000x change — the class
+    # `20 km`/`20 m` is refused for — and the first version of this arm WROTE
+    # them: measured `20k`/`20m` and `20k`/`20mi` both passed with no warning.
+    assert v2._value_slot_divergence("the drive is 20k", "the drive is 20m")
+    assert v2._value_slot_divergence("the drive is 20k", "the drive is 20mi")
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5000 mi QPS")
+    # …and the two tolerance cases the arm exists for still hold, so the gate did
+    # not buy the detection by re-introducing the false refusals.
+    assert v2._value_slot_divergence("the drive is 20k", "the drive is 20kg") == ()
+    assert v2._value_slot_divergence("we saw 5k QPS", "we saw 5000 QPS") == ()
+
+
+def test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none():
+    """Residual (m), PINNED so closing it has to move the registry row.
+
+    #10513 review cycle-13 P2, measured: `_value_bindings` fuses no scale word,
+    so `million`/`billion`/`thousand` are IGNORED and both sides bind the same
+    core — a 10^3..10^9 rewrite is written as verbatim. This is a different class
+    from residual (d) (a unit word outside `_UNIT_WORDS`): it is not a spelling
+    the table lacks, it is a MAGNITUDE the engine never multiplies, so the fix
+    belongs in `_value_bindings` and would be its own change — a second scale
+    reading here is the parallel-classifier shape that killed the previous
+    attempt at this issue.
+    """
+    for a, b in (("we have 12 million events", "we have 12 billion events"),
+                 ("5 million requests", "5 thousand requests"),
+                 ("we have 12 million events", "we have 12 events")):
+        assert v2._value_slot_divergence(a, b) == (), (a, b)
+    # positive control: the NUMBER in the same slot is still judged, so this is a
+    # scale-word gap and not a broken pair
+    assert v2._value_slot_divergence("we have 12 million events",
+                                     "we have 13 million events")
+
+
+def test_a_separator_bearing_number_is_outside_the_judged_set():
+    """NO SEPARATOR RULE SHIPS — the recorded decision, and the over-refusal.
+
+    ``tortoise/value_normalizer.py`` carries the owner's #2817 ruling, point 1:
+    "**No separator rule, at all.** … There is no 'PT-BR reads dots as
+    thousands' rung and no 'EN reads commas as thousands' rung to add one —
+    deciding that ``R$ 1.234,56`` is ``1234.56`` **is** the locale question the
+    design excludes."
+
+    ⛔ THE PREVIOUS REVISION SHIPPED THE RUNG ANYWAY (#10513 review cycle 12, P1)
+    — ``str(token).replace(",", "")`` — so this test reds on it: pre-fix
+    ``_value_form_outside_judged('1,200')`` was False and ``_value_core('1,200')``
+    was ``('', '1200', None)``, i.e. the locale was decided, and the consequence
+    was in the WITHHOLDING direction: ``4,2`` reduced to ``42`` so it diverged
+    from ``4.2`` and the whole point was refused, losing a durable memory over a
+    spelling. Both directions are asserted below, so neither half can be
+    reverted silently.
+    """
+    # Every reading that needs a separator CONVENTION is outside the judged set,
+    # in both conventions and in the mixed shapes.
+    for token in ("1,200", "4,2", "1.234", "1.234,56", "1,234.56",
+                  "$1,200,000", "1,200km"):
+        assert v2._value_form_outside_judged(token), token
+        assert v2._value_core(token) is None, token
+    # …and a number that reads the same in EVERY locale is still judged, so the
+    # exclusion did not swallow the class it sits beside: a 1-2 digit fraction
+    # cannot be a thousands group, a leading `0.` cannot be one, and an ungrouped
+    # integer carries no separator at all.
+    for token in ("4.2", "4.20", "1200", "5000", "1.2345", "0.500", "800ms",
+                  "1.5-inch", "-4percent", ".5"):
+        assert not v2._value_form_outside_judged(token), token
+        assert v2._value_core(token) is not None, token
+    # The over-refusals the finding MEASURED, end to end: a truthful comma-decimal
+    # quote and a truthful dot-thousands quote are no longer accusations.
+    assert v2._value_slot_divergence("the p95 hit 4,2 seconds",
+                                     "the p95 hit 4.2 seconds") == ()
+    assert v2._value_slot_divergence("the drive was 1.234 km",
+                                     "the drive was 1234 km") == ()
+    # ⛔ THE MEASURED COST, stated rather than hidden (registry residual (l)): a
+    # REAL thousands rewrite is unjudged too, because both sides carry the
+    # ambiguity. Precision over recall, in the direction that keeps memories.
+    assert v2._value_slot_divergence("we saw 5,000 QPS",
+                                     "we saw 6,000 QPS") == ()
+
+
+def test_the_one_classifier_is_the_production_value_engine(monkeypatch):
+    """No second value classifier: the rule reads ``_value_bindings``.
+
+    The previous attempt at this issue introduced a private
+    ``_REWRITE_QUANTITY_RE`` beside the engine's own vocabulary and was rejected
+    for it (review P2, owner rule: "never create a parallel layer doing the same
+    thing with redundant machinery"). Asserted structurally, because a comment
+    cannot fail: a value the engine binds is a value the rule judges, and a
+    token the engine does not bind is invisible to the rule.
+
+    ⛔ AND ASSERTED AS A CALL (#10513 review P2, measured). The three
+    assertions below are all about ``_value_slots``' OUTPUT, so a lane that added
+    a parallel regex classifier INSIDE ``_value_slots`` would satisfy every one of
+    them — the exact P2 that killed the previous attempt, passing green. The
+    counter is what makes this pin fail on that shape; it is the same device
+    ``test_an_over_long_side_is_not_tokenised_at_all`` uses for the bound.
+    """
+    calls = {"n": 0}
+    real = v2._value_bindings
+
+    # ⛔ `*args, **kwargs`: the engine gained a `with_following` keyword
+    # (#10513 review cycle 18) so the JUDGING layer can ask about a SCALE
+    # word. The wrapper forwards it — a signature that dropped the keyword
+    # would make this pin pass by refusing to call the engine at all, which
+    # is the opposite of what it exists to assert.
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(v2, "_value_bindings", counting)
+    assert v2._value_slots("the TTL is twenty minutes") == (("ttl", ("", "20", "min")),)
+    assert calls["n"] == 1, (
+        f"_value_slots answered without calling the ONE engine: {calls['n']} "
+        "calls — a second value classifier is the P2 this row forbids")
+    assert v2._value_slots("the team prefers intervals") == ()
+    assert calls["n"] == 2
+    # the rule's judged set IS the engine's, minus the excluded FORMS
+    engine = [v for _a, v in v2._value_bindings("the freeze starts 03:00")]
+    assert engine and v2._value_slots("the freeze starts 03:00") == ()
+    assert calls["n"] == 4, calls["n"]
+    # ⛔ THE COUNTER ALONE IS NOT ENOUGH (#10513 review cycle 10 P2, measured):
+    # it observes a REPLACEMENT or a second call, so a SUPPLEMENTARY classifier
+    # added BESIDE the engine — the `_REWRITE_QUANTITY_RE` shape that killed the
+    # previous attempt — left the whole file green (62 passed, mutated, measured).
+    # The guard that catches it is DERIVABILITY: every slot the rule returns must
+    # be re-derivable from a binding the engine produced. A parallel classifier's
+    # slot has no binding behind it and this equality reds.
+    for text in ("the TTL is twenty minutes",
+                 "we waited 3 turns for the 5k rollout",
+                 "the freeze starts 03:00",
+                 "my personal best 5K time is 27:12",
+                 "the team prefers intervals 7"):
+        assert v2._value_slots(text) == tuple(
+            (str(a), c)
+            for a, v in v2._value_bindings(text)
+            if not v2._value_form_outside_judged(v)
+            and (c := v2._value_core(v)) is not None
+        ), text
+
+
+def test_a_clock_valid_colon_form_is_excluded_but_a_duration_is_judged():
+    """The colon exclusion is CLOCK-VALID, not "any colon" (#10513 review P1).
+
+    An any-colon exclusion swallowed every colon-bearing numeric token, so a
+    race time — the ``STATE_VALUE_CARVE_OUT`` text's OWN example, "my personal
+    best 5K time is 27:12" — was outside the judged set and ``27:00`` for it was
+    written with no warning. The carve-out's headline case was the one case the
+    rule could never see.
+
+    Measured on the committed census, narrowing it changes NOTHING (62 judged /
+    0 refused), so this pin buys the carve-out's own example at no precision
+    cost on the corpus the residual cites.
+    """
+    # a valid clock stays outside the judged set — the measured false-positive
+    # class (`03:00`/`3am`), which is why the arm exists at all.
+    assert v2._value_form_outside_judged("9:30")
+    assert v2._value_form_outside_judged("03:00")
+    assert v2._value_form_outside_judged("23:59:59")
+    assert not v2._value_slot_divergence("the freeze starts 03:00",
+                                         "the freeze starts 3am")
+    # a colon form that is NOT a clock is a value, and a moved one is a rewrite
+    assert not v2._value_form_outside_judged("27:12")
+    assert v2._value_slot_divergence("my personal best 5K time is 27:00",
+                                     "my personal best 5K time is 27:12")
+    # …and the write path refuses it, so the carve-out's own example is enforced
+    result = _write("my personal best 5K time is 27:00",
+                    "my personal best 5K time is 27:12")
+    assert result["payload"]["points"] == [], result["warnings"]
+    # ⛔ A ZONE-QUALIFIED clock is still a clock (#10513 review cycle 10 P2,
+    # measured): a bare-shape-only arm judged `UTC+03:00`, whose core is the two
+    # colon runs joined (`3/0`), so `UTC+3` against `UTC+03:00` — one offset
+    # spelled two ways — was REFUSED. That is the over-refusal direction.
+    assert v2._value_form_outside_judged("UTC+03:00")
+    assert v2._value_form_outside_judged("UTC-03:00")
+    assert not v2._value_slot_divergence("the offset is UTC+3",
+                                         "the offset is UTC+03:00")
+    # …and the boundary that keeps a duration judged is still there: `27` is no
+    # hour, so `27:12` has NO clockable start.
+    assert not v2._value_form_outside_judged("27:12")
+
+
+def test_a_typographic_minus_is_a_sign_not_decoration():
+    """U+2212 is a sign (#10513 review P1, measured).
+
+    The ASCII-only read made ``−4`` and ``4`` one value, and let ``−20k`` through
+    where the ASCII ``-20k`` is refused — so the registry's "a dropped sign …
+    still refuse" was true of one spelling of the minus and false of the other.
+    ``value_normalizer.py`` already reads U+2212 as a sign; this pins that the
+    value rule joins it.
+
+    ⛔ AND THE DASH FAMILY (#10513 review cycle 10 P2), which is the OVER-refusal
+    direction and so the worse one: ``_strip_edges`` removed an en/em dash as
+    decoration, so a quote writing its minus that way read as NO sign and a
+    truthful ``-5`` point was DROPPED, with a warning that misreported the quote
+    as ``5``. A LEADING dash is now part of the numeral in every spelling.
+    """
+    assert v2._value_slot_divergence("the delta is \u22124 percent",
+                                     "the delta is 4 percent")
+    assert v2._value_slot_divergence("the delta is \u221220k",
+                                     "the delta is 20km")
+    # positive control: both spellings of the SAME signed value agree
+    assert not v2._value_slot_divergence("the delta is \u22124 percent",
+                                         "the delta is -4 percent")
+    # the dash family: one minus, three spellings, all equal to each other
+    assert not v2._value_slot_divergence("the temperature was -5 degrees",
+                                         "the temperature was \u20135 degrees")
+    assert not v2._value_slot_divergence("the temperature was -5 degrees",
+                                         "the temperature was \u20145 degrees")
+    # …and a dash does not hide a real sign change
+    assert v2._value_slot_divergence("the temperature was -5 degrees",
+                                     "the temperature was 5 degrees")
+    # the positive control for the OTHER direction: an INNER dash is a range or a
+    # compound, never a sign, so `5–10` is still two numbers and not `5` minus
+    # `10`. Keeping only the LEADING case is what makes this safe.
+    assert v2._value_slots("we ran 5\u201310 km") == (("ran", ("", "5/10", "km")),)
+
+# ── 2. the enforcement, in the write path ───────────────────────────────────
+
+def test_the_write_path_refuses_a_point_that_rewrites_its_own_quote():
+    """MUTATION CHECK TARGET: delete the emit-site rule and this goes red.
+
+    The refusal is on the POINT, not on the offsets: withholding only the span
+    would leave the rounded value in the graph with the correct value one
+    ``find`` away — the P1 that rejected the previous attempt.
+    """
+    result = _write("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    assert result["payload"]["points"] == [], (
+        "a point whose value contradicts its own verbatim quote reached the "
+        "write path — the guarantee is prompt-only again")
+    assert any("REWRITES its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
+
+
+def test_the_refusal_names_the_verbatim_value_it_would_have_lost():
+    result = _write("the TTL is ten minutes", "the TTL is twenty minutes")
+    joined = " ".join(result["warnings"])
+    assert "'10min'" in joined and "'20min'" in joined, joined
+
+
+def test_the_refusal_judges_the_SAME_text_the_write_uses_on_a_falsy_content():
+    """#5060's trap, in the new gate (review P3 — it was a live bypass).
+
+    The call site passed ``str(p.get("content") or "")``, which turns a writable
+    falsy content (the integer ``0``) into ``""``. The judge then read an EMPTY
+    side, ``_value_slots`` bound nothing, no divergence was found, and the
+    rewritten value was WRITTEN with no warning — while ``content`` in the same
+    iteration was ``"0"``. The file warns about exactly this 80 lines above the
+    call (``#5060 made a falsy content WRITABLE as its coerced text``), so the
+    fix passes ``_raw_content``: the coerced string the write clamps from.
+
+    Measured at the pre-fix call site: ``str(0 or "")`` = ``""`` against the
+    quote ``"20 minutes"`` is ``()``, while ``"0"`` yields
+    ``(('', '0', '20min'),)``. The integration call below would have written the
+    point; the predicate assertions pin the half that actually changed.
+    """
+    assert v2._value_slot_divergence(str(0 or ""), "20 minutes") == (), (
+        "the pre-fix coercion is supposed to MISS this — if it no longer does, "
+        "this pin has stopped discriminating and the bypass is untestable")
+    assert v2._value_slot_divergence(str(0), "20 minutes"), (
+        "the judged text must be the text the write uses; a falsy writable "
+        "content must not be collapsed to an empty side")
+    # And the shape the write path receives: content=0 is a dict value here, so
+    # `or ""` is reached. It must be REFUSED, not written silently.
+    result = _write(0, "20 minutes")
+    assert result["payload"]["points"] == [], (
+        "a falsy content collapsed the judged side to '' and the rewrite was "
+        f"written anyway: {result['payload']['points']!r}")
+    assert any("REWRITES its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
+
+
+# ── 3. the invariant: a verbatim value is never dropped ─────────────────────
+
+def test_a_point_that_carries_its_value_verbatim_is_written_untouched():
+    """The rule cannot be read as a filter over state values.
+
+    It fires only on a value that is NOT the verbatim one. A point whose value
+    the quote also holds passes through byte-identical, still value-bearing —
+    which is what makes this enforcement of the carve-out rather than a second
+    way to lose state values.
+    """
+    result = _write("the p95 hit 4.2 seconds", "the p95 hit 4.2 seconds")
+    points = result["payload"]["points"]
+    assert len(points) == 1, result["warnings"]
+    assert points[0]["content"] == "the p95 hit 4.2 seconds"
+
+
+def test_a_quote_that_only_fragments_the_point_is_not_a_contradiction():
+    """Fail-open on a different slot layout: the quote may legitimately omit a
+    value the point distils in (measured class, census receipts)."""
+    result = _write("the session cache TTL is twenty minutes",
+                    "the TTL is twenty minutes")
+    assert len(result["payload"]["points"]) == 1, result["warnings"]
+
+
+# ── 4. the invariant retention must NOT break: identifiers stay dropped ─────
+
+@pytest.mark.parametrize("text,rule", [
+    ("see #4118", value_gate.RULE_REFERENCE),
+    ("merged deadbeef1", value_gate.RULE_HASH),
+    ("see a/b/c.py", value_gate.RULE_PATH),
+    ("commit 550e8400-e29b-41d4-a716-446655440000", value_gate.RULE_UUID),
+])
+def test_identifier_only_still_drops_identifier_residues(text, rule):
+    """#4899's predicate is untouched by this change.
+
+    Retention must never be bought by widening ``identifier_only`` — the exact
+    failure #10360 names in reverse: a survival number improved by re-admitting
+    the identifiers the filter exists to remove.
+    """
+    assert value_gate.identifier_only(text) == rule
+
+
+@pytest.mark.parametrize("text", [
+    "the TTL is twenty minutes",
+    "the p95 hit 4.2 seconds",
+    "back under 800 milliseconds",
+    "a ten minute TTL",
+])
+def test_identifier_only_never_drops_a_state_value(text):
+    """…and the two rules agree on the class they are both about."""
+    assert value_gate.identifier_only(text) is None
+
+
+# ── 5. the residual, PRODUCED rather than quoted ───────────────────────────
+
+RECEIPTS = (pathlib.Path(__file__).parent / "eval" / "write_path" / "receipts"
+            / "7947-arms-2026-10-18")
+SESSIONS = ("wp01_quarry_debug", "wp02_lumen_refactor", "wp03_ember_design",
+            "wp04_aurora_perf", "wp05_retro_writeup", "wp06_quarry_rollout",
+            "wp07_bluepeak_followup")
+ARMS = ("raw", "narrative")
+
+
+def test_the_residual_is_measured_on_the_committed_census_corpus():
+    """The registry row's residual, re-derived here instead of quoted.
+
+    `#10360`'s second indicator: the survival/residual figure must be PRODUCED
+    by a lane, not copied from a comment. Re-running this test reproduces the
+    row's numbers from the same sealed receipts the span census reads — so a
+    change to the rule's reach moves this test, and the row cannot cite a
+    measurement nothing can reproduce.
+
+    ⚠️ The first pair here is the HARD-clamped one (the caps production used to
+    truncate the STORED point with) and the second the UNCLAMPED pair; the third
+    reading — `_write_span`, the token-boundary cut the write now stores AND
+    judges — is pinned below, because it is the shipped one. All three give the
+    same `(62, 0)` on this corpus, which is what makes the numbers in the
+    registry row safe to state once.
+    """
+    unclamped_judged = unclamped_refused = 0
+    for session in SESSIONS:
+        blob = json.loads((RECEIPTS / f"{session}.arms.json").read_text())
+        for arm in ARMS:
+            for point in blob["embed_list"][arm]["points"]:
+                raw_content = str(point.get("content") or "").strip()
+                raw_quote = str(point.get("quote") or "").strip()
+                if not v2._carries_value(raw_content, raw_quote):
+                    continue
+                c = v2._value_slots(raw_content)
+                q = v2._value_slots(raw_quote)
+                if c and q and tuple(a for a, _ in c) == tuple(a for a, _ in q):
+                    unclamped_judged += 1
+                if v2._value_slot_divergence(raw_content, raw_quote):
+                    unclamped_refused += 1
+
+    points = value_bearing = judged = refused = 0
+    for session in SESSIONS:
+        blob = json.loads((RECEIPTS / f"{session}.arms.json").read_text())
+        for arm in ARMS:
+            for point in blob["embed_list"][arm]["points"]:
+                content = str(point.get("content") or "").strip()[:v2._MAX_CONTENT]
+                quote = str(point.get("quote") or "").strip()[:v2._MAX_QUOTE]
+                points += 1
+                if not v2._carries_value(content, quote):
+                    continue
+                value_bearing += 1
+                # ⛔ THE SHIPPED PREDICATE, not an approximation of it (#10513
+                # review cycle 18): `judged` must be exactly what
+                # `_value_slot_divergence` will look at, which since the scale
+                # rule is the anchors AND the per-slot SCALE — a pair whose
+                # scales differ is outside the judged set. Counting anchors alone
+                # overstated the figure and hid the fail-open cost of the new
+                # exclusions.
+                content_slots = v2._value_slots_scaled(content)
+                quote_slots = v2._value_slots_scaled(quote)
+                if (content_slots and quote_slots
+                        and tuple((a, sc) for a, _, sc in content_slots)
+                        == tuple((a, sc) for a, _, sc in quote_slots)):
+                    judged += 1
+                if v2._value_slot_divergence(content, quote):
+                    refused += 1
+    # A positive control, so the pin has a direction that can FAIL: `refused`
+    # alone is self-derived (a weakened rule keeps it at 0), so the rule's
+    # STRENGTH is pinned separately here.
+    assert v2._value_slot_divergence("the TTL is 20 minutes",
+                                     "the TTL is 20 hours")
+    assert not v2._value_slot_divergence("the TTL is 20 minutes",
+                                         "the TTL is 20 minutes")
+    assert points == 217, points
+    assert value_bearing == 112, value_bearing
+    # The measured residual the registry row states. A refusal on this corpus
+    # would be a false accusation against a sealed truthful extraction — the
+    # exact failure the previous attempt at this issue was rejected for.
+    assert (judged, refused) == (62, 0), (judged, refused)
+    assert (unclamped_judged, unclamped_refused) == (62, 0), (
+        unclamped_judged, unclamped_refused)
+    # ⛔ AND THE READING THE WRITE PATH ACTUALLY USES (review cycle-14 P2): the
+    # three arms above compared a HARD-clamped and an UNCLAMPED pair, and the
+    # shipped judge is neither — it is `_write_span(...)`, the token-boundary cut
+    # the write also STORES. Pinning only the two older readings let the shipped
+    # one drift out of the covered set with every gate green (measured on the
+    # cycle-13 cut: 61 judged / 51 fail open, while this file still asserted 62).
+    span_judged = span_refused = 0
+    for session in SESSIONS:
+        blob = json.loads((RECEIPTS / f"{session}.arms.json").read_text())
+        for arm in ARMS:
+            for point in blob["embed_list"][arm]["points"]:
+                c = v2._write_span(str(point.get("content") or "").strip(),
+                                   v2._MAX_CONTENT)
+                q = v2._write_span(str(point.get("quote") or "").strip(),
+                                   v2._MAX_QUOTE)
+                if not v2._carries_value(c, q):
+                    continue
+                content_slots = v2._value_slots_scaled(c)
+                quote_slots = v2._value_slots_scaled(q)
+                if (content_slots and quote_slots
+                        and tuple((a, sc) for a, _, sc in content_slots)
+                        == tuple((a, sc) for a, _, sc in quote_slots)):
+                    span_judged += 1
+                if v2._value_slot_divergence(c, q):
+                    span_refused += 1
+    assert (span_judged, span_refused) == (62, 0), (span_judged, span_refused)
+
+
+# ── 6. the two review findings this rule must never repeat ─────────────────
+
+def test_a_value_that_straddles_the_quote_clamp_is_not_a_rewrite():
+    """Review P1: the module's own truncation must not accuse the model.
+
+    The quote is cut to `_MAX_QUOTE` before the point is built, so a HARD cut of
+    a value sitting across it reads as a SHORTER value ("1200" -> "1"). The cut
+    is therefore made at a TOKEN boundary (`_write_span`), which drops the split
+    token whole; a truthful point over a long quote is written.
+    """
+    # The cut must land INSIDE the digits: "1200" -> "12" with the anchor
+    # ("ttl") surviving, so a clamped read is a DIVERGENT read. Putting the
+    # whole value past the cut binds no value at all and fails open for an
+    # unrelated reason — a test that cannot fail (review cycle 2, P2).
+    content = "the ttl is 1200"
+    quote = ("x" * (v2._MAX_QUOTE - 7)) + " ttl 1200 seconds"
+    assert len(quote) > v2._MAX_QUOTE
+    assert v2._value_slot_divergence(content, quote[:v2._MAX_QUOTE]), (
+        "the clamped pair no longer diverges — this test would not pin the fix")
+    assert not v2._value_slot_divergence(content, quote)
+    result = _write(content, quote)
+    assert len(result["payload"]["points"]) == 1, result["warnings"]
+
+
+def test_the_judged_pair_IS_the_stored_pair():
+    """Review cycle-14 P2: a judged pair that differs from the stored one is a hole.
+
+    Two measured holes, both closed here and both pinned by the STORED text:
+
+    * the write HARD-cut content/quote while the judge saw a token-cut span, so a
+      value split at the cap was stored as its truncated prefix (`… hit 4.`) and
+      was never judged — the graph then held a value the model never wrote, with
+      no warning;
+    * the judge saw the UNSTRIPPED quote while the write stores the stripped one,
+      so two leading spaces shifted the cut far enough to drop a value the stored
+      quote states (fail-open, always in that direction).
+
+    ⛔ Pinned on `payload`, not on the helper: the defect was which STRING the two
+    halves used, so a helper-only assertion cannot see it.
+    """
+    # (1) the value's token straddles `_MAX_CONTENT`, and the quote states a
+    # DIFFERENT value in the same slot. Whatever is stored must therefore be
+    # judged: either the point is refused, or the stored pair does not diverge.
+    content = "the " * 247 + "a " + "p95 hit 4.0 seconds"
+    quote = "the p95 hit 5.5 seconds"
+    assert len(content) > v2._MAX_CONTENT
+    span = v2._write_span(content, v2._MAX_CONTENT)
+    assert content.startswith(span) and span.endswith(" "), span[-12:]
+    assert not span.rstrip().endswith("4."), span[-12:]
+    result = _write(content, quote)
+    stored = result["payload"]["points"]
+    if stored:  # written ⇒ the STORED pair must not diverge and must not be cut
+        c = stored[0]["content"]
+        q = stored[0].get("quote") or ""
+        assert not v2._value_slot_divergence(c, q), (c, q)
+        assert not c.endswith("4."), c
+    # (2) leading whitespace on the quote must not move the judged span: the
+    # stored quote states 5.5 against a point saying 4.0, so it is refused.
+    quote_padded = "  " + ("the " * 47) + "p95 hit 5.5 seconds"
+    span_stripped = v2._write_span(quote_padded.strip(), v2._MAX_QUOTE)
+    # the padding must actually MOVE the cut, or this pin proves nothing: the
+    # unstripped span loses `5.5` (whose token the shifted cut splits), while the
+    # stripped span — the one the write stores — keeps it
+    assert span_stripped != v2._write_span(quote_padded, v2._MAX_QUOTE)[2:]
+    assert "5.5" in span_stripped, span_stripped[-20:]
+    result = _write("the p95 hit 4.0 seconds", quote_padded)
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim" in w for w in result["warnings"])
+
+
+def test_a_divergence_in_the_text_the_write_DISCARDS_is_not_a_rewrite():
+    """Review cycle-13 P2: judge what is WRITTEN, not what is thrown away.
+
+    Judging the UNCLAMPED pair (the straddle fix above) also judged text the
+    write DISCARDS. Measured before this pin: a 1219-char content whose value
+    sits past `_MAX_CONTENT` was REFUSED, while the stored
+    `content[:_MAX_CONTENT]` binds no value at all — so a durable memory was
+    withheld over a rewrite in a tail that never reaches the graph, which is the
+    over-refusal direction this rule must never take.
+
+    The cut is at a TOKEN boundary, so the straddle protection is kept: an
+    incomplete trailing token is dropped whole and can never be read short.
+    """
+    content = "the " * 300 + "p95 hit 4.0 seconds"          # value past the cap
+    quote = "the p95 hit 4.2 seconds"
+    assert len(content) > v2._MAX_CONTENT
+    assert v2._value_slots(content[:v2._MAX_CONTENT]) == (), (
+        "the kept span must bind no value, or this pin proves nothing")
+    # …while the unclamped pair DOES diverge, which is what used to refuse it
+    assert v2._value_slot_divergence(content, quote)
+    result = _write(content, quote)
+    assert len(result["payload"]["points"]) == 1, result["warnings"]
+    # ⛔ positive control: the SAME divergence inside the kept span still refuses,
+    # so this cannot pass by the rule having gone blind to long content
+    kept_content = "the p95 hit 4.0 seconds" + " the" * 300
+    assert v2._value_slot_divergence(
+        v2._write_span(kept_content, v2._MAX_CONTENT), quote)
+    result = _write(kept_content, quote)
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim" in w for w in result["warnings"])
+
+
+def test_a_refused_point_leaves_no_supersession_naming_it():
+    """Review P2: the refusal must run BEFORE any supersede record is collected.
+
+    Firing late left `payload.supersessions` naming a pid that is never written,
+    and the commit layer reported the dangling target as a failed supersede — a
+    write bug reported for an extraction refusal.
+    """
+    prior = {"id": "pt_prior", "content": "the p95 hit 4.2 seconds",
+             "about_entities": []}
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    result = v2.execute_embed(
+        embed, {"points": [prior], "entities": []}, session_id="s_10360")
+    assert result["payload"]["points"] == []
+    assert result["payload"].get("supersessions") in (None, []), (
+        result["payload"].get("supersessions"))
+    # …and the reversal the refused point carried is not dropped SILENTLY
+    # (#9906: none of the drop doors is silent).
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["points"][0]["supersedes"] = "pt_prior_claim"
+    result = v2.execute_embed(embed, {"points": [], "entities": []},
+                              session_id="s_10360")
+    assert result["payload"]["points"] == []
+    assert any("pt_prior_claim" in w for w in result["warnings"]), (
+        result["warnings"])
+
+
+def test_a_refused_value_cannot_re_enter_the_graph_through_an_operator():
+    """Review cycle 2, P2: mint-before-wire must not resurrect a refused value.
+
+    `_mint_endpoint` builds a `statement` Point out of the MODEL's text, so an
+    operator naming the refused point's content used to write the rewritten value
+    anyway — the refusal held for the payload point and was undone one step
+    later. Measured before the fix: the payload held two points, one of them
+    exactly `'the p95 hit 4.0 seconds'`.
+    """
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["operators"] = [{
+        "src": "the p95 hit 4.0 seconds",
+        "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the p95 hit 4.0 seconds" not in contents, contents
+    assert any("refused for rewriting its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
+
+
+@pytest.mark.parametrize("variant", [
+    "the p95 hit 4.0 seconds.",   # a trailing period
+    "the p95 hit 4.0 second",     # a singular unit
+])
+def test_a_refused_value_cannot_re_enter_the_graph_under_a_VARIANT_name(variant):
+    """#10513 review P2: the guard is the VALUE, not the byte string.
+
+    The first version keyed only on ``_norm`` equality, which is EXACT — so an
+    operator naming the refused ref with one character added re-minted the
+    rewritten value as an endpoint Point, which is the resurrection 1(b) exists
+    to stop. Measured before the fix: the payload held
+    ``'the p95 hit 4.0 seconds.'`` and ``'the p95 hit 4.0 second'``.
+
+    The second key is ``_value_slots``: a variant that states the SAME value in
+    the SAME slot is the same resurrection even when its bytes differ. An
+    endpoint carrying no value has no slots and is unaffected (positive control
+    below), so this cannot be read as "any operator endpoint is refused".
+    """
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["operators"] = [{
+        "src": variant,
+        "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert variant not in contents, contents
+    # positive control: an endpoint with no value in it is still minted, so the
+    # slot key is a value guard and not a blanket refusal of the operator path.
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["operators"] = [{
+        "src": "the nightly rebuild window",
+        "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the nightly rebuild window" in contents, contents
+
+
+def test_the_mint_guard_matches_the_SLOT_TUPLE_exactly_so_a_WIDER_variant_mints():
+    """Residual (1b-ii), PINNED so closing it has to move the registry row.
+
+    #10513 review cycle-13 P2, measured: the mint guard's second key is
+    ``_value_slots(content)`` compared for EQUALITY against the refused point's
+    own slot tuple, so a variant that states the same value in a SUBSET, a
+    SUPERSET, or a REORDERED slot layout is NOT matched and re-mints the
+    rewritten value as an endpoint Point — the resurrection 1(b) exists to stop,
+    one notch wider than the byte-exact and slot-exact variants above.
+
+    ⛔ Why this is disclosed rather than "narrowed": a containment rule (match
+    when any refused slot appears in the endpoint) does NOT close it either —
+    measured, the reordered endpoint ``we saw 4.0 seconds on the p95 this time``
+    binds ``(saw, 4)``/``(on, 95)``, so it matches NO refused slot — while it
+    WOULD suppress every unrelated endpoint that merely mentions the same number
+    in the same anchor slot, i.e. it buys the subset/superset shapes with a large
+    expansion of residual (1b-i)'s over-suppression. Closing it properly means
+    identifying the CLAIM, which is the parallel-classifier shape the review P2
+    already rejected. The shape needs the model to emit an operator naming a
+    WIDER variant of an already-refused ref, and the committed census produces 0
+    refusals at all.
+    """
+    WIDER_VARIANTS = {
+        "subset": "hit 4.0 seconds",
+        "superset": "the p95 hit 4.0 seconds and the p99 is 9 seconds",
+        "reordered": "we saw 4.0 seconds on the p95 this time",
+    }
+    for name, variant in WIDER_VARIANTS.items():
+        embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+        embed["operators"] = [{
+            "src": variant,
+            "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+        result = v2.execute_embed(embed, {}, session_id="s_10360")
+        contents = [p["content"] for p in result["payload"]["points"]]
+        assert variant in contents, (name, contents)
+
+
+def test_a_DIFFERENT_claim_sharing_an_anchor_and_value_is_suppressed_too():
+    """Residual (1b-i), PINNED so narrowing the key has to move the row.
+
+    #10513 review cycle-11 P3, measured: the mint guard's slot key is
+    ``(anchor, sign, core, unit)`` per slot, so it carries NO identity for the
+    CLAIM. Refusing ``the TTL is 20 minutes`` (its quote says ``20 hours``)
+    therefore also suppresses the operator endpoint ``the cache TTL is 20
+    minutes`` — a DIFFERENT claim that merely shares the anchor word and the
+    value. On ``main`` that endpoint is minted, so in this narrow shape one
+    operator edge is lost; the loss is reported (``operator_endpoints_minted``
+    and the edge's own dangling-edge warning), never silent, and it is reported
+    as a VARIANT of the refusal rather than as an accusation that this claim
+    rewrote its quote — which is false of it.
+
+    The behaviour STAYS: separating that endpoint from a genuine variant means
+    judging the claim's non-value words, i.e. a second value classifier beside
+    the production engine — the P2 that killed the previous attempt at this
+    issue. It is stated as residual (1b-i) in ``config/v4-mechanisms.yml``
+    instead. The positive control below is the load-bearing half: with NO
+    refusal in the batch the same endpoint IS minted, so the drop is caused by
+    the refusal and not by the mint path.
+    """
+    refusal = _embed("the TTL is 20 minutes", "the TTL is 20 hours")
+    refusal["operators"] = [{
+        "src": "the cache TTL is 20 minutes",
+        "dst": "the nightly rebuild window", "op_type": "IMPL"}]
+    result = v2.execute_embed(refusal, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the cache TTL is 20 minutes" not in contents, contents
+    assert any("value matches a point refused" in w for w in result["warnings"]), (
+        result["warnings"])
+    # …and it does NOT inherit the exact-content arm's wording, which would be a
+    # false accusation against a claim that never rewrote anything.
+    assert not any("whose point was refused" in w for w in result["warnings"]), (
+        result["warnings"])
+
+    # positive control: the SAME endpoint, in a batch with no refusal, mints.
+    control = _embed("the TTL is 20 minutes", "the TTL is 20 minutes")
+    control["operators"] = [{
+        "src": "the cache TTL is 20 minutes",
+        "dst": "the nightly rebuild window", "op_type": "IMPL"}]
+    result = v2.execute_embed(control, {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the cache TTL is 20 minutes" in contents, contents
+
+
+# ── 7. pins for the cycle-3 findings ──────────────────────────────────────
+
+def test_the_unit_table_covers_every_unit_the_engine_can_fuse():
+    """A fused unit must never be UNKNOWN here.
+
+    Review cycle 2 closed the wildcard by returning an unmapped suffix as
+    itself; review cycle 3 measured that this created a false-refusal class
+    (`800millis`/`800ms`, `20kms`/`20km`, `32-byte`/`32-bytes` — the last shape
+    occurs 4 times in the committed census), so an unknown unit now fails OPEN
+    and this structural pin keeps a fusable unit from being unknown at all.
+    Mutating any of the six `k/km/mi/m/kg/lb` rows reds this.
+    """
+    assert set(v2._UNIT_WORDS) <= set(v2._UNIT_EQUIV)
+
+
+def test_the_suffix_comes_from_the_last_digit_run():
+    """Review cycle 3, finding 3: `raw.find(...)` read the FIRST occurrence of
+    the last run (`24h/7d/4w` → `hdw`). Reverting to it reds these two."""
+    assert v2._value_core("24h/7d/4w") == ("", "24/7/4", "w")
+    assert v2._value_core("12.3ms/1") == ("", "12.3/1", None)
+
+
+def test_an_unknown_unit_is_a_spelling_not_a_rewrite():
+    """The fail-open half of the same finding: same unit, different spelling."""
+    for content, quote in (("800millis", "800ms"), ("20kms", "20km"),
+                           ("1.5-inch", "1.5in"), ("32-byte", "32-bytes")):
+        assert v2._value_slot_divergence(f"the value is {content}",
+                                         f"the value is {quote}") == (), content
+
+
+def test_a_refused_value_over_the_content_cap_cannot_be_minted_either():
+    """Review cycle 3, P2: the set was keyed UNCLAMPED while `_mint_endpoint`
+    compares the CLAMPED text, so a >`_MAX_CONTENT` refused content was minted
+    anyway. The CLAMPED key reds THIS pin; the refusal records the UNCLAMPED key
+    as well, because a whitespace-heavy >cap content collapses to a short norm
+    that a short prose operator ref carries — see
+    `test_a_whitespace_collapsed_over_cap_refusal_still_blocks_the_mint`."""
+    content = "the p95 hit 4.0 seconds " + ("z" * (v2._MAX_CONTENT + 200))
+    quote = "the p95 hit 4.2 seconds " + ("z" * (v2._MAX_CONTENT + 200))
+    embed = _embed(content, quote)
+    embed["operators"] = [{"src": content, "dst": "the cache TTL is 20 minutes",
+                           "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    # ⚠️ Compare against the CLAMPED text: the resurrection artifact is what
+    # `_mint_endpoint` builds, i.e. `str(ref).strip()[:_MAX_CONTENT]`. Asserting
+    # against the UNCLAMPED string is vacuous — it is true even when the
+    # rewritten value did re-enter, which is exactly cycle 4's finding.
+    clamped = content[:v2._MAX_CONTENT]
+    assert all(p["content"] != clamped and "4.0 seconds" not in p["content"]
+               for p in result["payload"]["points"]), (
+        [p["content"][:40] for p in result["payload"]["points"]])
+
+
+def test_a_whitespace_collapsed_over_cap_refusal_still_blocks_the_mint():
+    """Review cycle 6, P2: the UNCLAMPED key is load-bearing, not redundant.
+
+    A refused content that exceeds `_MAX_CONTENT` only in WHITESPACE collapses
+    under `_norm`, so a SHORT prose operator ref carries the collapsed full text
+    — and `_mint_endpoint`'s clamped key cannot produce it. With only the clamped
+    key the refused value is re-minted (measured before this pin:
+    `'the p95 hit 4.0 seconds b'` reappeared in `payload["points"]`).
+    """
+    content = "the p95 hit 4.0 seconds" + ("\n" * (v2._MAX_CONTENT + 200)) + "b"
+    embed = {
+        "entities": [],
+        "points": [{"content": content, "pointKind": "statement",
+                    "about_entities": [],
+                    "quote": "the p95 hit 4.2 seconds"}],
+        "events": [], "operators": [{
+            "src": "the p95 hit 4.0 seconds b",
+            "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}],
+        "chain_notes": [], "link_before_create": [],
+    }
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    assert result["payload"]["points"] == [], (
+        [p["content"][:44] for p in result["payload"]["points"]])
+
+
+# ── 7b. the MINT's own cut, which cycle 14 left on the old hard clamp ──────
+
+#: A content whose `[:_MAX_CONTENT]` cut lands INSIDE the value and whose
+#: discarded remainder starts with an ALPHANUMERIC (`0`). That is the branch
+#: `_write_span` resolves by dropping the split token WHOLE, so the token-safe
+#: span carries no value while the HARD clamp carries `… p95 hit 4`.
+_SPLIT_VALUE_PAD = v2._MAX_CONTENT - 10
+_SPLIT_VALUE_CONTENT = "z" * _SPLIT_VALUE_PAD + " p95 hit 4.0 seconds"
+
+
+def _split_value_embed() -> dict:
+    """One point plus an operator whose `src` is that point's OWN content."""
+    return {
+        "entities": [],
+        "points": [{"content": _SPLIT_VALUE_CONTENT, "pointKind": "statement",
+                    "about_entities": [], "quote": "p95 hit 4.2 seconds"}],
+        "events": [], "operators": [{
+            "src": _SPLIT_VALUE_CONTENT,
+            "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}],
+        "chain_notes": [], "link_before_create": [],
+    }
+
+
+def test_the_MINT_cuts_at_a_TOKEN_boundary_so_it_cannot_FABRICATE_a_value():
+    """Review cycle 15, P2: the write was moved to `_write_span` and the MINT
+    was left on the hard clamp, so the module still fabricated a value.
+
+    Measured pre-fix on this shape: `_mint_endpoint` built a quote-less Point
+    whose content ended `… p95 hit 4` — a value the model never wrote, out of a
+    text whose own token-safe span carries no value at all (`… p95 hit `) — and
+    the point was written to the graph. The helper is now the module's ONE
+    truncation, so the mint cannot invent a value the write would have dropped.
+
+    Non-vacuous: the assertion names the exact fabricated string, and the mint
+    does produce it pre-fix.
+    """
+    hard = _SPLIT_VALUE_CONTENT.strip()[:v2._MAX_CONTENT]
+    # the shape is only interesting because the two cuts DIFFER:
+    assert hard.endswith("hit 4"), hard[-12:]
+    assert v2._write_span(_SPLIT_VALUE_CONTENT, v2._MAX_CONTENT) != hard
+    result = v2.execute_embed(_split_value_embed(), {}, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert hard not in contents, (
+        "the mint stored the HARD-clamped text — a value the model never wrote "
+        f"({hard[-12:]!r})")
+    assert all(not c.endswith("hit 4") for c in contents), [c[-14:] for c in contents]
+
+
+def test_a_ref_that_matches_the_stored_content_RESOLVES_instead_of_minting_a_DUPLICATE():
+    """Review cycle 15, P2: ONE truncation helper, or the dedup breaks.
+
+    `_mint_endpoint` keys the already-emitted check on `_norm(content)` of its
+    OWN cut (`:8907`). While the write stored the hard clamp and the mint
+    computed the same hard clamp, a byte-identical operator ref hit that dedup
+    and minted nothing. Moving the WRITE to the token-safe span without moving
+    the mint made the two strings differ, so the same ref missed the dedup and
+    minted a second, quote-less Point beside the one it was naming — measured
+    pre-fix: 3 points and an `operator endpoint minted` warning for a ref that
+    is the point's own content, verbatim.
+
+    Non-vacuous: pre-fix this reds on both the count and the mint warning.
+    """
+    result = v2.execute_embed(_split_value_embed(), {}, session_id="s_10360")
+    points = result["payload"]["points"]
+    # scoped to the SRC (the ref that IS the point's own content): the `dst`
+    # endpoint is genuinely new, so its mint is correct and unrelated here.
+    minted = [w for w in (result.get("warnings") or [])
+              if "operator endpoint minted" in w and "src named" in w]
+    assert not minted, (minted, [p["content"][-14:] for p in points])
+    assert len(points) == 1, (len(points), [p["content"][-14:] for p in points])
+
+
+def test_the_stored_content_IS_the_identity_key_a_verdict_and_a_prior_key_on():
+    """Review cycle-18 P1: `_MAX_CONTENT` is an IDENTITY cap, not only a bound.
+
+    `_norm(x.strip()[:_MAX_CONTENT])` is the key `_endpoint_keys`,
+    `_merge_verdict_keys`, `classify_consolidation` and the write's own dedup
+    compute — and every point already in the graph was stored under it. Cycle 14
+    moved the write onto `_write_span`, which dropped the split token even when
+    it carried no digit: measured, a 1639-char content stored 999 chars instead
+    of the key's 1000 (`… team meets ` instead of `… team meets w`), so a pair
+    the S2.2b arbiter had ruled identical fell through to ADD — `merges == 0`,
+    one duplicate Point minted, silently (the #5006 F1 defect).
+
+    The span now moves only for a truncated NUMERAL, which is the only thing the
+    value rule is about (`_write_span`). ⛔ Non-vacuous: pre-fix `span` is 999
+    chars at this shape, and the `core` end-to-end pin
+    `tests/test_near_dup_merge_5006.py::
+    TestTheWritePathEmitsOneEntityAndKeepsTheLosersEvidence::
+    test_a_verdict_on_a_candidate_over_the_cap_still_merges` reds with
+    `merges == 0`.
+    """
+    raw = ("the team meets weekly in the main office " * 40).strip()
+    hard = raw[:v2._MAX_CONTENT]
+    span = v2._write_span(raw, v2._MAX_CONTENT)
+    assert len(raw) > v2._MAX_CONTENT
+    # the cut lands INSIDE a LETTER token (`meets w|eekly`): the shape that must
+    # NOT move the span
+    assert hard.endswith("meets w") and not hard[-1].isdigit(), hard[-12:]
+    assert span == hard, span[-14:]
+    assert v2._norm(span) == v2._norm(hard)
+    # …so what the write STORES is the string the write's matchers key on
+    assert v2._norm(span) in v2._merge_verdict_keys(raw)
+    assert v2._norm(span) in v2._endpoint_keys(raw)
+    result = _write(raw, "the team meets weekly")
+    assert [p["content"] for p in result["payload"]["points"]] == [hard], (
+        [len(p["content"]) for p in result["payload"]["points"]],
+        result["warnings"])
+    # ⛔ positive control, so this cannot pass by the rule having gone blind: a
+    # NUMERAL cut at the same cap DOES move the span (the value exception).
+    hard_split = _SPLIT_VALUE_CONTENT.strip()[:v2._MAX_CONTENT]
+    assert hard_split.endswith("hit 4"), hard_split[-12:]
+    assert v2._write_span(_SPLIT_VALUE_CONTENT, v2._MAX_CONTENT) != hard_split
+
+
+def test_the_MINT_stores_the_refs_OWN_identity_prefix_so_the_5069_loop_closes():
+    """Review cycle-18 P1: `_endpoint_keys` keys on `ref[:1000]`; the mint stores it.
+
+    Measured pre-fix: a ref of `"a"*500 + " "*50 + "b"*500 + "tail"` (1054
+    chars) whose cut lands inside the `b` run was stored as 550 chars, because
+    the split token was dropped whole although it carried no digit. The guard's
+    key is the ref's OWN `_MAX_CONTENT` window, so every later comparison that
+    re-derives an endpoint's identity from its STORED text (the #5069 closed
+    loop, the closure/removal arms) compared two different strings, and ~45% of
+    the ref never reached the graph.
+
+    ⛔ Non-vacuous: pre-fix `span` is 550 chars and the `core` pin
+    `tests/test_vet_gate_5005.py::test_content_only_closure_collision_does_not_over_prune`
+    reds on `_norm(p[:1000]) == _norm(ref[:1000])`.
+    """
+    ref = "a" * 500 + " " * 50 + "b" * 500 + "tail"
+    hard = ref[:v2._MAX_CONTENT]
+    assert len(ref) > v2._MAX_CONTENT
+    # the cut lands inside the `b` run — alphanumeric, but NO digit, so the span
+    # must stay the identity window
+    assert hard.endswith("b") and not hard[-1].isdigit(), hard[-12:]
+    span = v2._write_span(ref.strip(), v2._MAX_CONTENT)
+    assert span == hard, (len(span), len(hard))
+    assert v2._norm(span) in v2._endpoint_keys(ref)
+    # …and the mint END TO END stores that window, not a shorter span
+    embed = {
+        "entities": [], "points": [], "events": [], "chain_notes": [],
+        "link_before_create": [],
+        "operators": [{"src": ref, "dst": "the cache TTL is 20 minutes",
+                       "op_type": "IMPL"}],
+    }
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    minted = [p["content"] for p in result["payload"]["points"]]
+    assert hard in minted, ([len(c) for c in minted], result["warnings"])
+
+
+# ── 8. the rule's own BOUND, and the residual it still carries ───────────────────
+
+def test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded():
+    """UNVERIFIED item 2, settled: the judge must be BOUNDED.
+
+    The pure function answers `()` for a side longer than `_MAX_JUDGED_TEXT`
+    (2 x `_MAX_CONTENT`), because it is LINEAR in the text it is given —
+    measured on this box: 0.45 ms at 67 chars, 2.5 ms at 1 KB, 23 ms at 10 KB,
+    227 ms at 100 KB, 2.4 s at 1 MB. That bound is now a DEFENSIVE one for
+    direct callers: the write path never reaches it, because it hands the rule
+    the span the write KEEPS (`_write_span`, <= `_MAX_CONTENT`/`_MAX_QUOTE`).
+    ⛔ That is also why an over-long quote no longer FAILS OPEN at the write
+    (review cycle-13 P2): the stored quote keeps its first `_MAX_QUOTE` chars,
+    and for this pair those chars DO carry `4.2` against a point saying `4.0` —
+    failing open there recorded a rewritten value as verbatim to save work the
+    write path no longer spends. Bounded AND judging the written pair, instead
+    of bounded at the price of the guarantee.
+    """
+    content = "the p95 hit 4.0 seconds"
+    quote = "the p95 hit 4.2 seconds " + ("padding z " * (v2._MAX_JUDGED_TEXT))
+    assert len(quote) > v2._MAX_JUDGED_TEXT
+    # within the bound the same pair IS a rewrite, so this fails open only on
+    # length — the bound cannot pass by the rule being broken (positive control)
+    assert v2._value_slot_divergence(content, "the p95 hit 4.2 seconds")
+    assert v2._value_slot_divergence(content, quote) == ()
+    # ⛔ the WRITE is judged on the span it keeps, so the kept prefix's rewrite
+    # is refused rather than failed open on the discarded tail. The cut lands
+    # INSIDE `paddin|g` — a LETTER token, so the span is the hard cut itself
+    # (cycle-18: only a truncated NUMERAL moves it) — and it carries `4.2`.
+    kept = v2._write_span(quote, v2._MAX_QUOTE)
+    assert kept == quote[:v2._MAX_QUOTE], kept[-12:]
+    assert v2._value_slot_divergence(content, kept), kept
+    result = _write(content, quote)
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim" in w for w in result["warnings"])
+    # …and the bound still holds at the write for a side that is over-long AND
+    # whose kept prefix carries no value: nothing to judge, so nothing is spent
+    result = _write("the p95 hit 4.0 seconds", "padding z " * (v2._MAX_JUDGED_TEXT))
+    assert len(result["payload"]["points"]) == 1, result["warnings"]
+
+
+def test_an_over_long_side_is_not_tokenised_at_all(monkeypatch):
+    """The same bound, stated as COST: the engine is never called for it.
+
+    This is the half a return-value pin cannot see. It fails on the pre-fix code
+    (which tokenised the whole side first and answered `()` afterwards), so the
+    bound cannot be deleted without this going red.
+    """
+    calls = {"n": 0}
+    real = v2._value_bindings
+
+    # ⛔ `*args, **kwargs`: the engine gained a `with_following` keyword
+    # (#10513 review cycle 18) so the JUDGING layer can ask about a SCALE
+    # word. The wrapper forwards it — a signature that dropped the keyword
+    # would make this pin pass by refusing to call the engine at all, which
+    # is the opposite of what it exists to assert.
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(v2, "_value_bindings", counting)
+    huge = "the p95 hit 4.2 seconds " + ("z " * v2._MAX_JUDGED_TEXT)
+    assert v2._value_slot_divergence("the p95 hit 4.0 seconds", huge) == ()
+    assert calls["n"] == 0, f"tokenised an over-long side: {calls['n']} calls"
+    # …and a side AT the bound is still judged (the bound is a bound, not an off
+    # switch): the engine is called again for a judgeable pair.
+    assert v2._value_slot_divergence("the p95 hit 4.0 seconds",
+                                     "the p95 hit 4.2 seconds")
+    assert calls["n"] > 0
+
+
+def test_a_leading_currency_symbol_is_FORM_today_and_that_is_stated():
+    """The residual the review called out, PINNED so it cannot move silently.
+
+    `_value_core` reads the numeric core and the unit AFTER it, so a LEADING
+    symbol is discarded: `$12` and `€12` are one value. That is fail-open (the
+    direction this rule always takes), and making a symbol a unit identity would
+    add a false-refusal class — `$` / `USD` / `US$` are one currency spelled
+    three ways, exactly the `800millis`/`800ms` trap cycle 3 measured. So the
+    behaviour STAYS and the registry row names it in "WHAT IS STILL NOT
+    ENFORCED" instead. If a future lane tightens it, this test reds and the row
+    has to move with it.
+    """
+    assert not v2._value_slot_divergence("the invoice was $12",
+                                         "the invoice was €12")
+    # the positive control: a symbol does not hide a numeric rewrite
+    assert v2._value_slot_divergence("the invoice was $12",
+                                     "the invoice was $60")
+
+
+def test_a_version_trailing_zero_is_FORM_today_and_that_is_stated():
+    """The residual the cycle-10 review called out, PINNED so it cannot drift.
+
+    `_value_core` drops a trailing fractional zero UNCONDITIONALLY, because that
+    is what makes `4.20`/`4.2` one value — the false refusal that rejected the
+    first attempt at this issue. The same strip also folds `2.10` into `2.1`,
+    and for a VERSION that is a semantic change, not a form: `2.10` and `2.1`
+    are different releases, and `versions` is a class `STATE_VALUE_CARVE_OUT`
+    names explicitly.
+
+    It stays, and the registry row names it as residual (j) instead: splitting
+    the strip by "does this token look like a version" would re-open the
+    `4.20`/`4.2` false refusal on any two-group decimal, which is the direction
+    this rule must never take. If a future lane tightens it, this test reds and
+    the row has to move with it.
+    """
+    assert v2._value_core("2.10") == ("", "2.1", None)
+    assert not v2._value_slot_divergence("the release is 2.10",
+                                         "the release is 2.1")
+    # the positive control: a version's NON-zero groups are still judged, so this
+    # residual is a trailing-zero tolerance and not a hole in version comparison.
+    assert v2._value_slot_divergence("the release is 2.10",
+                                     "the release is 2.11")
+    assert v2._value_slot_divergence("the SDK version is 2026.10",
+                                     "the SDK version is 2025.10")
+
+
+def test_a_dash_attached_to_the_numeral_is_a_sign_and_the_bullet_glyph_shape_is_stated():
+    """Residual (k), PINNED: the dash arm is shared and over-reads one glyph.
+
+    An en/em dash is a MINUS in every spelling (`_keeps_numeric_edge` keeps a
+    leading `Pd`), which is what stops a truthful `-5` point being dropped over
+    a typographic minus — the over-refusal direction that is worse than no guard.
+
+    ⚠️ The arm is NOT local to this rule: it feeds `_value_bindings`, which the
+    against-store fold path also consumes (`test_never_across_fold_5080.py`).
+    And it over-reads exactly one shape, measured here: an em dash written FLUSH
+    against the numeral (`—5 minutes`, punctuation used as a bullet glyph) reads
+    as minus, so a bulleted content line against an unbulleted quote diverges as
+    a dropped sign and is refused. A SPACED dash and `•` stay decoration. The
+    row states the cost as residual (k) instead of narrowing it, because telling
+    a bullet from a minus means judging the glyph's context — the same
+    form-vs-value guess that re-opened the `800millis`/`800ms` false refusal.
+    If a future lane narrows it, this test reds and the row has to move with it.
+    """
+    # ATTACHED em dash: read as a sign, so the unmarked side diverges.
+    assert v2._value_core("\u20145 minutes") == ("-", "5", "min")
+    assert v2._value_slot_divergence("\u20145 minutes of downtime",
+                                     "5 minutes of downtime")
+    # SPACED dash and a bullet marker: decoration, so the two sides agree. Both
+    # are the positive controls — the arm must not turn punctuation into a
+    # quantity in the shapes where the glyph is unambiguously markup.
+    assert not v2._value_slot_divergence("\u2014 5 minutes of downtime",
+                                         "5 minutes of downtime")
+    assert not v2._value_slot_divergence("\u2022 5 minutes of downtime",
+                                         "5 minutes of downtime")
+    # …and the sign the arm exists for is still kept: a dash does not hide a
+    # real sign change, in every spelling.
+    assert v2._value_slot_divergence("\u20145 minutes of downtime",
+                                     "-5 minutes of downtime") == (), (
+        "one minus, two spellings, must be ONE value — otherwise a truthful "
+        "point is dropped over typography")
+    assert v2._value_slot_divergence("-5 minutes of downtime",
+                                     "5 minutes of downtime")
+
+
+def test_the_changelog_records_the_flip_and_marks_the_old_claim_superseded():
+    """The durable record a later lane reads INSTEAD of the row (#10513 P3).
+
+    The 2026-10-30 `#9775` entry ends by asserting the row "keeps
+    `not-implemented` because … nothing in the write path *enforces* retention".
+    `#10360` put the enforcement in the write path, so that present-tense claim
+    went false and NOTHING in the tree marked it superseded — the defect this
+    test exists to keep closed. Two directions, both required:
+
+    * the old claim is still WORDS in the history (deleting it is how a later
+      lane loses the reason the residual list is read first), and it carries a
+      supersession marker naming `#10360`;
+    * a dated entry AFTER it records the flip with the row state the registry
+      actually carries, so the page and `config/v4-mechanisms.yml` cannot drift
+      apart in either direction.
+
+    Non-vacuous: on the pre-fix tree there is no marker and no such entry, so
+    both halves red.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    page = (root / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md"
+            ).read_text(encoding="utf-8")
+    claim = ("keeps `not-implemented` because")
+    assert claim in page, (
+        "the #9775 history paragraph was DELETED — it is the record of why the "
+        "residual list outranks the state word; mark it superseded instead")
+    claim_at = page.index(claim)
+    # the marker has to be bound to the claim it supersedes, not floating
+    # somewhere else in a 1,500-line page.
+    marker = "SUPERSEDED 2026-11-01 by `#10360`"
+    assert marker in page, (
+        f"the pre-#10360 claim is not marked superseded ({marker!r} absent) — a "
+        "reader arriving at state_value_carve_out still gets the old story")
+    assert claim_at < page.index(marker) < claim_at + 700, (
+        "the supersession marker is not adjacent to the claim it supersedes")
+    # …and the dated entry records the flip AFTER it, with the state the row
+    # actually carries. Asserting only "implemented appears somewhere" would
+    # pass against the row prose alone, so the entry's own heading is required.
+    entry = "## 2026-11-01 — the carve-out's enforcement half exists in the write path"
+    assert entry in page, (
+        "no dated entry records that #10360 landed and the row moved to "
+        "`implemented`")
+    assert page.index(entry) > claim_at, (
+        "the entry must come AFTER the history it supersedes (newest last)")
+    tail = page[page.index(entry):]
+    assert "`implemented`" in tail, tail[:400]
+    assert "execute_embed" in tail, tail[:400]
+    # the departure is pointed at where the decision lives, not asserted here
+    assert "6563672665" in tail, (
+        "the entry names the OVERRIDES departure but not the comment id on "
+        "#10360 that records it")
+    # and the residuals that are NOT enforced stay readable in the same entry
+    assert "REFUSE" in tail and "REPAIR" in tail, tail[:400]
+
+
+# ---------------------------------------------------------------------------
+# Review cycle 16 — four false-accusation / cost defects found at `dede0d903`,
+# each fixed in `tortoise/extractor_v2.py` and pinned here.
+#
+# The common shape: the rule's own docstring says a guard that accuses a
+# truthful point of a rewrite "is worse than no guard: it withholds a durable
+# memory". Three of these four were exactly that, reachable from ordinary
+# extracted text. Every test below carries the positive control that keeps the
+# fix from becoming an unjudged hole.
+# ---------------------------------------------------------------------------
+
+
+def test_a_unicode_decimal_digit_is_the_same_value_in_every_script():
+    """Cycle 16 P2: `\\d` matches every Nd script, the COMPARISON did not.
+
+    `_VALUE_DECIMALS` is `\\d+`, so a fullwidth, Arabic-Indic or Devanagari
+    numeral was BOUND and then normalised as a core STRING — the same value
+    spelled in another decimal script diverged and the point was REFUSED.
+    Measured at `dede0d903`: `_value_slot_divergence("…\\uff14.\\uff12 …",
+    "…4.2 …") == (('hit', '\\uff14.\\uff12', '4.2'),)` — a dropped durable
+    memory over typography, and it was in no residual.
+
+    NFKC does NOT fold Arabic-Indic (checked, not assumed), so the fold is per
+    codepoint through `unicodedata.digit`, which is total on category Nd.
+    """
+    # Every script spells the ONE value `4.2`, so the pair AGREES.
+    for token in ("\uff14.\uff12", "\u0664.\u0662", "\u096a.\u0968"):
+        assert v2._value_core(token) == ("", "4.2", None), token
+        assert not v2._value_slot_divergence(
+            f"the p95 hit {token} seconds", "the p95 hit 4.2 seconds"), token
+
+    # POSITIVE CONTROL — the fold must not flatten a DIFFERENT value into
+    # agreement. `4.3` in fullwidth is still a different value from `4.2`.
+    assert v2._value_slot_divergence(
+        "the p95 hit \uff14.\uff13 seconds", "the p95 hit 4.2 seconds"), (
+        "folding must make SCRIPT invisible, never VALUE")
+    # …and a sign in another script is still a sign, not a digit.
+    assert v2._value_core("-5") == ("-", "5", None)
+
+
+def test_the_whole_Pd_dash_family_reads_as_one_minus_not_just_four_literals():
+    """Cycle 16 P2: the edge predicate keeps every `Pd`; the sign read four.
+
+    `_keeps_numeric_edge` admits a LEADING `Pd` (so the dash reaches
+    `_value_core` at all) while the sign tuple named only `-`, U+2212, U+2013
+    and U+2014 — so the comment's own invariant ("now that the edge is kept, the
+    dash reaches here and has to be read as the sign it is") was false for
+    U+2010, U+2011, U+2012, U+2015, U+FE63 and U+FF0D. Measured at `dede0d903`:
+    a truthful `\\u20115` (non-breaking hyphen — what PDF and Word extraction
+    emits) against `-5` was REFUSED, the same shape cycle 10 fixed for en/em
+    dash and left open for the rest of the family. The fix reads the sign from
+    the SAME predicate, so the two lists cannot drift again.
+    """
+    family = ("\u2010", "\u2011", "\u2012", "\u2013", "\u2014",
+              "\u2015", "\ufe63", "\uff0d", "\u2212")
+    for ch in family:
+        assert v2._value_core(f"{ch}5") == ("-", "5", None), hex(ord(ch))
+        assert not v2._value_slot_divergence(
+            f"the temperature was {ch}5 degrees",
+            "the temperature was -5 degrees"), hex(ord(ch))
+
+    # POSITIVE CONTROL — one minus in nine spellings must not make a REAL sign
+    # change invisible. Every member still diverges from the unsigned value…
+    for ch in family:
+        assert v2._value_slot_divergence(
+            f"the temperature was {ch}5 degrees",
+            "the temperature was 5 degrees"), hex(ord(ch))
+    # …and a leading SPACED dash stays decoration, so the widened sign read did
+    # not turn markup into a quantity (residual (k)'s boundary).
+    assert not v2._value_slot_divergence("\u2014 5 minutes of downtime",
+                                         "5 minutes of downtime")
+
+
+def test_the_S5_mint_span_is_token_safe_so_it_cannot_fabricate_a_value():
+    """Cycle 16 P2: the last holdout on the HARD `[:cap]` cut.
+
+    `_write_span`'s own docstring calls itself "the module's ONE truncation
+    helper", and `_mint_endpoint` was moved onto it in cycle 15 — but the S5
+    quote spans (`_probe`, `_anchor`, `pt_entry["quote"]`) still hard-cut with
+    `content[:_MAX_QUOTE]`. Measured, an operator ref of
+    `"a " * 99 + "12.5 seconds overall"` minted a point whose stored quote ended
+    `a a a 12` against a content of `12.5 seconds overall`, and
+    `_value_slot_divergence` reports `(('', '12.5', '12'),)` with NO warning:
+    the fabricated-value class the row's residual (e) claimed this site could
+    not reach "by construction", because the point's own CLAMP is the reachable
+    divergence.
+
+    Non-vacuous both ways: the hard cut MUST diverge (that is the defect) and
+    the token-safe span MUST not (that is the fix).
+    """
+    content = "a " * 99 + "12.5 seconds overall"
+    assert len(content) > v2._MAX_QUOTE
+
+    hard = content[:v2._MAX_QUOTE]
+    assert v2._value_slot_divergence(content, hard), (
+        "the hard cut is supposed to be the defect this test pins — if it no "
+        "longer diverges, the fixture stopped straddling the cap")
+
+    safe = v2._write_span(content, v2._MAX_QUOTE)
+    assert not v2._value_slot_divergence(content, safe), (
+        "the token-safe span must never read a value SHORT out of the cap")
+
+    # And the S5 sites use it. This is a SOURCE property by nature ("one
+    # truncation helper"), so it is asserted as one rather than inferred.
+    # Comments are stripped first: the fix's own note QUOTES the old cut to
+    # explain it, and a pin that reds on its own explanation is not a pin.
+    src = inspect.getsource(v2.execute_embed)
+    mint = src[src.index("def _mint_endpoint"):]
+    mint = "\n".join(
+        line for line in mint.splitlines() if not line.lstrip().startswith("#"))
+    assert "content[:_MAX_QUOTE]" not in mint, (
+        "the S5 mint quotes are still hard-cut — the value can be fabricated")
+    assert "_quote_span = _write_span(content, _MAX_QUOTE," in mint, (
+        "the S5 quote spans must cut with the module's one truncation helper")
+    assert "hard_cut_single_token=False" in mint, (
+        "the S5 site must refuse the single-token HARD fallback — on a ref that "
+        "is one whitespace-free token it would stamp a quote that misstates "
+        "its own value, and this site has no divergence check to catch it")
+    assert mint.count('pt_entry["quote"] = _quote_span') == 1, (
+        "the stored quote must be the SAME span that was probed and anchored")
+
+
+def test_a_refusal_over_the_judged_cap_never_tokenises_the_unclamped_text():
+    """Cycle 16 P2: the cost bound was claimed by construction and not enforced.
+
+    `_value_slot_divergence` refuses to judge past `_MAX_JUDGED_TEXT`, and the
+    docstring said "the write path never reaches it, because it hands the rule
+    the span the write keeps". That was FALSE on the refusal path: the
+    `refused_value_slots` collector fed `_value_slots` the UNCLAMPED
+    `_raw_content` with no guard, so cost was linear and unbounded in the
+    model-authored content length — measured 7.53 s to refuse a 2 MB content and
+    17.67 s for 5 MB.
+
+    The pin asserts the CONTRACT on the shipped refusal path — an over-cap text
+    contributes no slot key — plus the MEASUREMENT that the pure function's own
+    bound still refuses to judge it. Wall-clock is deliberately not asserted, so
+    the pin cannot flake on a loaded box; the bound is the property, the seconds
+    were the symptom.
+    """
+    cap = v2._MAX_JUDGED_TEXT
+    over = "the p95 hit 4.0 seconds " + ("z " * cap)
+    assert len(over) > cap
+    # The pure function's own bound still holds — unchanged by this fix.
+    assert v2._value_slot_divergence(over, "the p95 hit 4.2 seconds") == ()
+
+    # The COLLECTOR, which is where the bound was missing, now enforces the same
+    # cap on both keys. Asserted against the shipped source (there is no
+    # side-effect-free seam to count calls through `execute_embed`), together
+    # with the behavioural half above that the skipped key loses nothing a
+    # judge would have used.
+    src = inspect.getsource(v2.execute_embed)
+    guard = "for _key_text in (_raw_content, content):\n"
+    assert guard in src, "the two-key refusal collector moved — re-read this pin"
+    after = src[src.index(guard):]
+    after = after[:after.index("refused_value_slots.add")]
+    assert "_MAX_JUDGED_TEXT" in after, (
+        "the refusal collector tokenises the UNCLAMPED text with no length "
+        "bound again — cost is linear in the model-authored content length")
+    assert "continue" in after, (
+        "the bound must SKIP the over-cap key, not truncate it (a truncated key "
+        "describes a string the mint never produces)")
+
+
+def test_a_numeral_in_another_script_keeps_its_OWN_decimal_separator():
+    """Cycle 17 P2: folding the digits left the numeral fragmented.
+
+    Folding the `Nd` digits (cycle 16) made `４.２` agree with `4.2` — but only
+    when the separator was ASCII. A decimal script brings its OWN separator, and
+    `_VALUE_DECIMALS` only knows the ASCII dot, so the numeral split into two
+    runs that `_value_core` joined with `/`: measured, `４．２` (U+FF0E) and
+    `٤٫٢` (U+066B) both read `('', '4/2', None)` and DIVERGED from `4.2`,
+    refusing a truthful point — the same false-accusation class the cycle-16
+    fold claimed to close, and stated as closed in the row.
+
+    ⛔ The fail-open half is asserted too: that same `/` join made an
+    Arabic-locale decimal compare EQUAL to a genuine ASCII `4/2` ratio. One root
+    cause, both directions.
+    """
+    for token in ("\uff14\uff0e\uff12", "\u0664\u066b\u0662"):
+        assert v2._value_core(token) == ("", "4.2", None), token
+        assert not v2._value_slot_divergence(
+            f"the p95 hit {token} seconds", "the p95 hit 4.2 seconds"), token
+
+    # POSITIVE CONTROL — the fold must not make a DIFFERENT value agree, and it
+    # must not make a genuine ratio look like a decimal.
+    assert v2._value_slot_divergence(
+        "the p95 hit \uff14\uff0e\uff13 seconds", "the p95 hit 4.2 seconds")
+    assert v2._value_slot_divergence(
+        "the ratio is 4/2", "the ratio is \u0664\u066b\u0662"), (
+        "an Arabic decimal separator is not a solidus — the join artifact must "
+        "not survive as agreement")
+
+    # A THOUSANDS separator folds to `,`, which `_separator_reads_ambiguously`
+    # then excludes from the judged set (no locale-free identity, so no
+    # judgement) — this module's own doctrine for an ambiguous numeral.
+    assert v2._value_core("4\u066c200") is None
+
+
+def test_the_S5_mint_leaves_a_single_token_ref_UNQUOTED_rather_than_misquoting_it():
+    """Cycle 17 P2: `_write_span`'s single-token fallback is still a HARD cut.
+
+    When the text is ONE whitespace-free token longer than the cap there is no
+    token boundary to cut at, so `_write_span` falls back to `s[:cap]`. On the
+    CONTENT path that is the pinned pre-existing shape
+    (`test_quote_capped_at_200`). At the S5 MINT site it stamped a quote that
+    misstates its own content — and S5 has NO `_value_slot_divergence` call to
+    refuse it. Measured: an operator ref of
+    `"storage/" + "d"*190 + "12.5" + "z"*40` (242 chars, one token) stored the
+    quote tail `dddddddddddd12` against a content holding `12.5…`, silently.
+
+    The site now asks for `hard_cut_single_token=False` and names the drop in
+    its warnings, so an absent quote replaces a misstating one.
+    """
+    ref = "storage/" + "d" * 190 + "12.5" + "z" * 40
+    assert len(ref) > v2._MAX_QUOTE and " " not in ref
+
+    # The default is UNCHANGED — the content path keeps its pinned hard cut.
+    assert v2._write_span(ref, v2._MAX_QUOTE) == ref[:v2._MAX_QUOTE]
+    # The S5 mode refuses to fabricate.
+    assert v2._write_span(ref, v2._MAX_QUOTE,
+                          hard_cut_single_token=False) == ""
+    # …and the divergence it dodged is real, not hypothetical: the hard cut
+    # misstates the value, the empty span cannot.
+    assert v2._value_slot_divergence(ref, ref[:v2._MAX_QUOTE])
+    assert v2._value_slot_divergence(
+        ref, v2._write_span(ref, v2._MAX_QUOTE, hard_cut_single_token=False)) == ()
+
+    # A MULTI-token ref is unaffected — it has a boundary, so it still quotes,
+    # and the span is that boundary cut. Cycle 18: the `x` run carries no digit,
+    # so nothing value-bearing is truncated and the cap STANDS (the content cap
+    # is the identity key — see
+    # `test_the_stored_content_IS_the_identity_key_a_verdict_and_a_prior_key_on`).
+    multi = "long endpoint claim " + "x" * 300
+    span = v2._write_span(multi, v2._MAX_QUOTE, hard_cut_single_token=False)
+    assert span == multi[:v2._MAX_QUOTE], repr(span[-12:])
+    # …and the token-drop is not vacuous: a ref whose NUMERAL straddles the quote
+    # cap still drops the split token, so the S5 site cannot quote `12` out of
+    # `12.5` even though it has a whitespace boundary.
+    num_multi = "storage tier " + "d" * 185 + "12.5" + "z" * 40
+    assert v2._write_span(num_multi, v2._MAX_QUOTE) == "storage tier "
+
+    # End to end: the minted point is UNQUOTED and the drop is NAMED, never
+    # silent. An unannounced loss is the rule-#9906 defect. `edus` is supplied
+    # because the S5 quote spans are only reached when a transcript exists.
+    embed = {
+        "entities": [], "points": [], "events": [], "chain_notes": [],
+        "link_before_create": [],
+        "operators": [{"src": ref, "dst": "the quota is 20 requests",
+                       "op_type": "IMPL"}],
+    }
+    result = v2.execute_embed(embed, {}, session_id="s_10360", edus=[
+        {"index": 0, "role": "user", "text": "maybe try intervals for speed"}])
+    minted = [p for p in result["payload"]["points"] if p["id"].startswith("pt")]
+    single = [p for p in minted if "storage/" in p.get("content", "")]
+    assert single, "the endpoint was not minted at all — this pin needs it to be"
+    assert single[0]["quote"] == "", (
+        "a single-token ref must not carry a quote that misstates its value")
+    assert any("no token-safe quote" in w for w in result["warnings"]), (
+        "the withheld quote must be NAMED, not silent")
+
+
+# ── 22. the cycle-18 false-accusation classes (measured, then closed) ──────
+#
+# Every pin in this block has the same shape and the same reason: the rule
+# WITHHELD a truthful point, which is the one direction its own contract says it
+# must never take ("a guard that accuses a truthful point of a rewrite it did
+# not commit is worse than no guard"). Each was reproduced against the primary
+# source at the reviewed head before the fix, and each pin carries a POSITIVE
+# CONTROL so it can fail in the detection direction too rather than only
+# certifying that the refusal stopped happening.
+
+
+def test_a_HARD_CUT_pair_is_not_judged_because_the_cut_can_read_a_value_short():
+    """Review cycle-18 P1: the module's own truncation refused a truthful point.
+
+    ``_write_span`` falls back to the hard ``s[:cap]`` when the text is ONE
+    whitespace-free token longer than the cap — there is no token boundary to
+    cut at — and the write path then fed that truncated span to the judge.
+
+    Measured before the fix: ``content = "z"*998 + "4.2 seconds"`` against
+    ``quote = "4.2 seconds"`` — a TRUTHFUL point — was REFUSED with
+    ``point says '4', quote says '4.2'``, and the mirror shape refused ``4.25``
+    against a ``4`` read out of the quote. Both directions are pinned here, plus
+    the end-to-end write, plus the positive control that a REAL rewrite over
+    ordinary text is still refused.
+    """
+    hard_content = "z" * 998 + "4.2 seconds"
+    mirror_quote = "q" * 198 + "4.25 seconds"
+    # the shape really is the fallback, or this pin tests nothing
+    assert v2._write_span_is_hard_cut(hard_content, v2._MAX_CONTENT)
+    assert v2._write_span_is_hard_cut(mirror_quote, v2._MAX_QUOTE)
+    assert v2._write_span(hard_content, v2._MAX_CONTENT) != hard_content
+    # …and the pair those cuts WOULD produce diverges, which is the false
+    # accusation: 998 z's + `4.` reads as the value 4.
+    assert v2._value_slot_divergence(
+        v2._write_span(hard_content, v2._MAX_CONTENT), "4.2 seconds")
+
+    # POSITIVE CONTROL: an ordinary (under-cap) pair is NOT the fallback, so the
+    # guard cannot pass by declaring every pair unjudgeable.
+    assert not v2._write_span_is_hard_cut(
+        "the p95 hit 4.2 seconds", v2._MAX_CONTENT)
+    assert v2._value_slot_divergence(
+        "the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+
+    # END TO END: the truthful over-cap point is WRITTEN, and it is WRITTEN with
+    # a warning naming why it was not judged — an unannounced fail-open would be
+    # the #9906 silent-drop defect one layer over.
+    embed = {"entities": [], "events": [], "chain_notes": [],
+             "link_before_create": [],
+             "points": [{"content": hard_content, "quote": "4.2 seconds",
+                         "pointKind": "statement", "search_keys": []}]}
+    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    kept = [p for p in result["payload"]["points"] if p["content"].endswith("4.")]
+    assert kept, ("the truthful over-cap point must survive — this pin needs it "
+                  "to be written, not refused")
+    assert any("NOT judged on this pair" in w for w in result["warnings"]), (
+        "the fail-open must be NAMED, not silent")
+
+
+def test_a_currency_symbol_does_not_swallow_the_SIGN():
+    """Review cycle-18 P2: `$-4` read as `4`, so one value was refused.
+
+    ``_value_core`` read the sign from ``raw.lstrip()[0]``, and a leading
+    currency symbol is decoration AROUND the sign. Measured before the fix:
+    ``_value_core("$-4")`` returned ``('', '4', None)``, so ``$-4``/``-4`` — ONE
+    value in two spellings — DIVERGED and a truthful point was refused, while
+    ``$-4``/``$4`` — a sign the model DROPPED, a real rewrite — was WRITTEN with
+    no warning. Both directions are pinned; the second is the positive control.
+    """
+    assert v2._value_core("$-4") == ("-", "4", None)
+    assert v2._value_core("-$4") == ("-", "4", None)
+    assert not v2._value_slot_divergence("the delta was $-4",
+                                         "the delta was -4")
+    # POSITIVE CONTROL: the sign the model dropped is still a rewrite.
+    assert v2._value_slot_divergence("the delta was $-4",
+                                     "the delta was $4")
+
+
+def test_an_accounting_PAREN_numeral_is_outside_the_judged_set():
+    """Review cycle-18 P2: `($4)` and `-4` are one value, and it refused them.
+
+    ``($4)`` is ``-4`` in accounting and a prose aside in a sentence, and WHICH
+    ONE APPLIES IS A READER PROPERTY this path does not have — the same reason a
+    separator-bearing numeral is unjudged (#2817 point 1: never invent a second
+    reading of one token). Reading it as POSITIVE was not neutral: it refused
+    ``"the shortfall was ($4)"`` against ``"the shortfall was -4"``.
+
+    ⛔ Asked of the RAW text, because ``_value_bindings`` strips the parens
+    before the token reaches ``_value_core`` — the positive control below is that
+    a prose parenthetical is NOT swallowed (the exclusion is the accounting
+    SHAPE, not every bracket).
+    """
+    assert v2._value_core("($4)") is None
+    assert not v2._value_slot_divergence("the shortfall was ($4)",
+                                         "the shortfall was -4")
+    # POSITIVE CONTROL: a prose parenthetical keeps its slot, so a real rewrite
+    # in that text is still refused — the exclusion did not swallow the side.
+    assert v2._value_slots("a loss of (see 2019) here")
+    assert v2._value_slot_divergence("a loss of (see 2019) here",
+                                     "a loss of (see 2020) here")
+
+
+def test_a_SCALE_word_is_compared_across_the_pair_rather_than_dropped():
+    """Review cycle-18 P2: `12 million` against `12000000` refused a truthful point.
+
+    ``_value_bindings`` fuses no magnitude word, so ``12 million`` binds the core
+    ``12`` while the other side's ``12000000`` binds ``12000000`` and the two
+    DIVERGED — one value written two ways, refused. Reading a scale is
+    ``value_normalizer``'s territory and #2817's "no magnitude table" ruling is
+    NOT reopened here, so a pair whose SCALES DIFFER is outside the judged set.
+
+    ⛔ The scale is COMPARED, not dropped: ``12 million`` against ``13 million``
+    is a real rewrite and must stay refused (this is the same property
+    ``test_a_scale_WORD_rewrite_is_unjudged_because_the_engine_fuses_none``
+    pins from the other side). Dropping every scale-bearing slot — the first
+    attempt at this fix — silently lost it, and this pin is what caught that.
+    """
+    assert not v2._value_slot_divergence("we have 12000000 events",
+                                         "we have 12 million events")
+    assert not v2._value_slot_divergence("we have 1.0 million events",
+                                         "we have 1000000 events")
+    # POSITIVE CONTROLS: equal scales are still judged on the digits, and a
+    # non-scale neighbour does not make the pair unjudgeable.
+    assert v2._value_slot_divergence("we have 12 million events",
+                                     "we have 13 million events")
+    assert v2._value_slot_divergence("we sold 12 events", "we sold 13 things")
+
+
+def test_a_BARE_parenthetical_numeral_is_still_judged():
+    """Review cycle-20 P2: the paren exclusion was WIDER than it claimed.
+
+    The first cut of `_PAREN_NUMERAL_RE` made every element optional
+    (``\\(\\s*[-$€£¥]?\\s*-?\\d``), so it matched a BARE parenthetical numeral as
+    well as the accounting shape — and `_value_slots_scaled` returns ``()`` for
+    a text carrying a match, so ``the audit (2019) says 12 events`` became
+    WHOLLY unjudgeable: a real ``12`` -> ``13`` rewrite in that text was NOT
+    refused, while the constant's own note, `_refuse_rewritten_value`'s
+    docstring and the registry row all claimed "the exclusion is the accounting
+    SHAPE only". A prose parenthetical year is a common shape, and the loss was
+    in the DETECTION direction — the guarantee quietly not applying rather than
+    a truthful point being withheld.
+
+    ⛔ The accounting reading has to be AVAILABLE before the token can be
+    ambiguous: a currency symbol, an explicit sign, or an inner separator is
+    what makes it so. `(2019)`, `(1)` and `(see 2019)` carry none of the three,
+    so they keep their slots.
+    """
+    # the accounting SHAPE is still excluded, every spelling of it
+    for excluded in ("($4)", "(-4)", "($-4.2m)", "(4.2)", "(1,200)",
+                     "(\u20ac4)", "(-\u00a350)"):
+        assert v2._PAREN_NUMERAL_RE.search(excluded), excluded
+    # …and a BARE parenthetical numeral is NOT the accounting shape
+    for judged in ("(2019)", "(1)", "(see 2019)", "( 4 )", "(2019-2020)"):
+        assert not v2._PAREN_NUMERAL_RE.search(judged), judged
+    # the side keeps its slots, so the rewrite below can be caught at all
+    assert v2._value_slots("the audit (2019) says 12 events")
+    # DETECTION: a real rewrite in a text carrying a prose paren numeral
+    assert v2._value_slot_divergence("the audit (2019) says 12 events",
+                                     "the audit (2019) says 13 events")
+    # …and the truthful pair still agrees (the exclusion did not simply move)
+    assert not v2._value_slot_divergence("the audit (2019) says 12 events",
+                                         "the audit (2019) says 12 events")
+    # POSITIVE CONTROL, the class the exclusion EXISTS for: one value in two
+    # spellings stays unjudged, so the narrowing did not re-open the false
+    # accusation cycle 18 fixed.
+    assert not v2._value_slot_divergence("the shortfall was ($4)",
+                                         "the shortfall was -4")
+    assert v2._value_core("($4)") is None
+    # …and the SECOND arm agrees with the text scan (#10513's own "two lists
+    # that must agree" pattern): a wrapped BARE numeral is not the accounting
+    # shape, so `_value_core` must not swallow it either.
+    assert v2._value_core("(2019)") == ("", "2019", None)
+    # END TO END: the write path refuses the rewrite, not just the predicate.
+    result = _write("the audit (2019) says 12 events",
+                    "the audit (2019) says 13 events")
+    assert result["payload"]["points"] == [], result["warnings"]
+    assert any("REWRITES its own verbatim quote" in w
+               for w in result["warnings"]), result["warnings"]
