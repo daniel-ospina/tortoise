@@ -2917,6 +2917,48 @@ def test_the_reason_distinguishes_git_that_could_not_answer(monkeypatch):
     assert check.no_base_ref_reason() == check.NO_BASE_REF
 
 
+def test_an_explicit_base_ref_that_does_not_resolve_is_refused_not_replaced(tmp_path, monkeypatch):
+    """#10547 review 5 P2: `--base-ref` names the SUBJECT, so it may not fall through to another ref.
+
+    The explicit ref was PREPENDED to the candidate list, so an unresolvable one was a hint rather
+    than an answer: measured on the pre-fix tree, `resolve_base_ref('origin/does-not-exist')`
+    answered `origin/main` and the run reported ``ordering measured against: origin/main`` — a
+    verdict about a different subject than the one named, on a green line. Reached for real by a
+    stacked PR whose base was never fetched: name `origin/feature-x`, be measured against
+    `main` — and this is the path :data:`check.NO_BASE_REF` sends the reader to.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)   # `origin/main` DOES resolve here
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)
+    _publish_base(repo)
+    log = _write_and_commit(repo, "capstone.log", epoch=1_700_000_200)
+    # The premise: the fallback ref resolves, so a fallback WOULD answer something plausible.
+    assert check.resolve_base_ref() == "origin/main"
+    assert check.resolve_base_ref("origin/stacked-base") is None
+    with pytest.raises(check.HistoryUnavailable) as exc:
+        check.check_ordering(prereg, [log], base_ref="origin/stacked-base")
+    assert "origin/stacked-base" in str(exc.value), str(exc.value)
+    assert "does not resolve" in str(exc.value), str(exc.value)
+    assert "origin/main" not in str(exc.value), (
+        f"the refusal must not send the reader back to the ref it refused to substitute: {exc.value}"
+    )
+
+
+def test_the_cli_refuses_a_named_base_ref_it_cannot_resolve(capsys):
+    """...and the CLI answers exit 2 for it, on a bundle whose ordering would otherwise pass.
+
+    `7949-capstone` is green against `origin/main` in this checkout, so an exit of 0 here is
+    exactly the wrong-subject green the arm above is about: the run measured `main` while the
+    caller asked about `origin/not-fetched`.
+    """
+    code = check.main(["--dir", str(PREREG_DIR), "--no-corpus",
+                       "--base-ref", "origin/not-fetched"])
+    printed = capsys.readouterr()
+    output = printed.out + printed.err
+    assert code == 2, f"a named ref that cannot be resolved is 'could not check', not green: {output}"
+    assert "origin/not-fetched" in output, output
+    assert "does not resolve" in output, output
+
+
 def test_a_corpus_refusal_still_names_the_base_ref_refusal(tmp_path, monkeypatch, capsys):
     """#10547 review 4 P2: a raise from a history-free half bypassed the deferral.
 

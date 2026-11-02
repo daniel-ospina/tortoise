@@ -733,6 +733,18 @@ NO_GIT_BINARY = (
     "pre-registration ordering cannot be measured at all. Install git, or pass --no-git when the "
     "ordering is deliberately out of scope"
 )
+#: The FIFTH state: an explicit ref was NAMED and does not resolve here. It is its own message
+#: because its remedy is its own — fetch (or correct) the ref that was named — and the generic
+#: NO_BASE_REF text would send the reader to `git fetch origin main`, which is not the ref they asked
+#: for. It is also the state in which the tool used to answer a DIFFERENT question and report OK
+#: (#10547 review 5 P2).
+BASE_REF_UNRESOLVED = (
+    "UNPROVABLE — the base ref named for this run ({ref!r}) does not resolve in this checkout "
+    "(git rev-parse --verify --quiet found no such ref), so the ordering cannot be measured "
+    "against the subject that was named. It is NOT measured against a different ref instead: a "
+    "run that answers about another base reports OK for a question nobody asked. Fetch that ref "
+    "(git fetch origin …) or correct --base-ref/${env}"
+)
 
 SAME_PR_REFUSAL = (
     "{prereg} is not on the merge base ({base}): this change adds {n} evidence log(s) against a "
@@ -782,8 +794,22 @@ def resolve_base_ref(explicit: str | None = None) -> str | None:
     fails closed — with whichever of :data:`NO_BASE_REF` / :data:`NO_GIT_CHECKOUT` /
     :data:`NO_GIT_ANSWER` / :data:`NO_GIT_BINARY` :func:`no_base_ref_reason` establishes, because
     one message for all four names a cause and a remedy that do not hold in three of them.
+
+    ⛔ AN EXPLICIT REF IS THE ANSWER OR A REFUSAL, NEVER A HINT TO TRY ANOTHER REF (#10547 review 5
+    P2, measured: ``resolve_base_ref('origin/does-not-exist')`` answered ``origin/main``). The
+    explicit ref was PREPENDED to the candidate list, so a stale, typo'd or not-yet-fetched
+    ``--base-ref`` measured the ordering against a *different subject* than the one named and
+    reported ``OK`` — the wrong-subject class this whole change removes, reachable through the
+    one path :data:`NO_BASE_REF` tells the reader to use. It is reached in practice by a stacked
+    PR whose base was never fetched: naming ``origin/feature-x`` and being measured against
+    ``origin/main`` is the silent degradation, not a convenience. So the explicit ref is tried
+    ALONE and an unresolved one returns ``None``, which raises the fail-closed refusal naming it
+    (:func:`no_base_ref_reason`).
     """
-    for candidate in ((explicit,) if explicit else ()) + BASE_REF_CANDIDATES:
+    if explicit:
+        code, out = _git_stdout(["rev-parse", "--verify", "--quiet", explicit])
+        return explicit if code == 0 and out.strip() else None
+    for candidate in BASE_REF_CANDIDATES:
         code, out = _git_stdout(["rev-parse", "--verify", "--quiet", candidate])
         if code == 0 and out.strip():
             return candidate
@@ -812,8 +838,8 @@ def _with_refusal(head: str, fatal: "HistoryUnavailable | None",
     return text
 
 
-def no_base_ref_reason() -> str:
-    """WHY :func:`resolve_base_ref` answered ``None`` — four states, four remedies.
+def no_base_ref_reason(explicit: str | None = None) -> str:
+    """WHY :func:`resolve_base_ref` answered ``None`` — five states, five remedies.
 
     ``resolve_base_ref`` collapses them to one ``None``, which was fine while the reason was never
     printed. Now that the refusal is user-visible, one message for all of them is a false statement
@@ -841,6 +867,16 @@ def no_base_ref_reason() -> str:
     code, _out, err = probe
     if code != 0:
         return NO_GIT_ANSWER.format(code=code, detail=err.strip() or "no stderr")
+    if explicit:
+        # The fifth state, and the only one whose remedy is the ref the caller named. Reached only
+        # when the checkout IS a repository with remotes (the probes above), so "fetch it" is advice
+        # that holds. `--quiet` suppresses git's own stderr, so the message is generated here.
+        probe = _git_answer(["rev-parse", "--verify", "--quiet", explicit])
+        if probe is None:
+            return NO_GIT_BINARY
+        code, out, _err = probe
+        if code != 0 or not out.strip():
+            return BASE_REF_UNRESOLVED.format(ref=explicit, env=BASE_REF_ENV)
     return NO_BASE_REF
 
 
@@ -1157,7 +1193,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
 
     base = resolve_base_ref(base_ref)
     if base is None:
-        raise HistoryUnavailable(no_base_ref_reason(), failures, fatal=True)
+        raise HistoryUnavailable(no_base_ref_reason(base_ref), failures, fatal=True)
 
     # The registration's appearance ON THE BASE — the only side a squash merge cannot rewrite.
     prereg_epochs = _added_epochs_on(base, prereg)
