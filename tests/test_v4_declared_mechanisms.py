@@ -1107,33 +1107,71 @@ def test_every_declared_mechanism_has_a_declaration_marker_and_vice_versa() -> N
         "\n  ".join(errors)
 
 
-def test_the_state_value_carve_out_is_registered_and_marked_absent() -> None:
+def test_the_state_value_carve_out_row_records_what_is_enforced_and_what_is_not() -> None:
     """The enumeration's first deliverable, pinned by name (#5064, #2453, #9775).
 
     `STATE_VALUE_CARVE_OUT` is declared by name in §7 of BOTH design documents and
     the table carried only seven rows — so the mechanism the checklist names
     ("verbatim operational values hold on a live write") had **neither code entry
-    nor marker** in the registry while the gate passed. Its state must stay
-    `not-implemented` because the guarantee is still prompt-only (no mechanical
-    enforcement; #2453's own closing records that): a row marked `implemented`
-    here would make prompt text read as the guarantee, which is the defect this
-    registry exists to catch.
+    nor marker** in the registry while the gate passed. The row carried
+    `not-implemented` while the guarantee was prompt-only (#2453's own closing
+    records that).
 
-    What the row no longer records is an OMISSION: until #9775 the compact render
-    appended nothing, so the row's `note` had to name the render path that
-    dropped the guarantee. Every render path now carries it, and the row says so
-    and names the compaction rule that keeps it there — the code half of that
-    claim is `test_every_render_path_carries_the_carve_out_the_guarantee_requires`.
+    ⛔ Why the state may now read `implemented`, and what keeps that from being
+    the defect this registry exists to catch. The row moved only when the
+    ENFORCEMENT half landed in the write path (`#10360`: `execute_embed` refuses
+    a point whose own verbatim quote holds a different value in the same slot),
+    with a test that goes red when the rule is removed. The state word alone
+    would be overclaiming, so this test pins the residual IN the row: the note
+    must keep naming what is still not enforced. A future lane that deletes that
+    section while keeping `implemented` reds this test instead of shipping a
+    blanket claim.
     """
     rows = {r["id"]: r for r in load_registry()["mechanisms"]}
     assert "state_value_carve_out" in rows, sorted(rows)
     row = rows["state_value_carve_out"]
-    assert row["state"] == NOT_IMPLEMENTED, row
-    assert isinstance(row.get("tracking_issue"), int), row
+    assert row["state"] == IMPLEMENTED, row
+    # An `implemented` row names its code, its test and its symbols — that is
+    # the `declared ⇒ present` contract the gate reads.
+    for field in ("code", "tests", "symbols"):
+        assert row.get(field), (field, row)
+    assert "tortoise/extractor_v2.py" in row["code"], row
+    assert "tests/test_state_value_verbatim_10360.py" in row["tests"], row
+    assert "_refuse_rewritten_value" in row["symbols"], row
+    # The residual stays STATED, as a literal: the claim it guards is "nothing
+    # is silently absorbed". The class the write path cannot reach (a value the
+    # model never emitted) must stay readable in the row.
+    assert "STILL NOT ENFORCED" in row["note"], row["note"]
+    assert "never EMITS" in row["note"], row["note"]
     # The compact render is NAMED in the row: it is the path the row's claim was
     # once false on (#9775), so a reader is sent to the render the compaction
     # rule lives in rather than to a prose assurance.
     assert "_render_master_compact" in row["note"], row["note"]
+    # And the mint guard's COARSE KEY is stated as a residual (#10513 review
+    # cycle-11 P3): the slot key carries the value and no identity for the
+    # claim, so a distinct endpoint sharing an anchor+value is dropped too. The
+    # claim this row makes is "nothing is silently absorbed", so the cost has to
+    # stay readable in the artifact a lane acts on.
+    assert "THAT KEY IS COARSE" in row["note"], row["note"]
+    assert "sharing an anchor word and" in row["note"], row["note"]
+    # And the SHARED tokenizer arm's over-read is stated too (#10513 review
+    # cycle-11 advisory): the dash-as-sign fix is not local to this rule — it
+    # feeds `_value_bindings`, which the against-store fold path also consumes —
+    # and it reads an em dash written flush against the numeral as a minus. A
+    # lane that narrows the arm, or widens it, has to move this row.
+    assert "ATTACHED" in row["note"], row["note"]
+    assert "OVER-READS A BULLET GLYPH" in row["note"], row["note"]
+    assert "test_never_across_fold_5080" in row["note"], row["note"]
+    # And the SEPARATOR exclusion's COST is stated as a residual (#10513 review
+    # cycle-12 P1): NO separator rung ships — `tortoise/value_normalizer.py`'s
+    # #2817 point 1, which this seam now COMPLIES with after shipping the
+    # unrecorded "commas are thousands" rung and WITHHOLDING truthful
+    # comma-decimal points — so the price is that a real thousands rewrite is
+    # unjudged too. The row is where that compliance and that cost are recorded
+    # together, so a future lane either moves the row or re-ships the guess.
+    assert "A SEPARATOR-BEARING NUMERAL IS NEVER JUDGED" in row["note"], row["note"]
+    assert ("test_a_separator_bearing_number_is_outside_the_judged_set"
+            in row["note"]), row["note"]
 
 
 #: Number words the registry prose may spell, keyed by the count they name. A
