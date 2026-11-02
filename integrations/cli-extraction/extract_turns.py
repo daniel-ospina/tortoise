@@ -251,20 +251,39 @@ def dump(out: Path, allow_empty: bool = False):
     if n == 0 and not allow_empty:
         # The two empty cases have DIFFERENT causes and the old one-line
         # message named neither of them: it sent every operator to their
-        # capture setting (#9932), which is the wrong cause in both.
+        # capture setting (#9932), which is the wrong cause in both. NEITHER
+        # branch below may name a SINGLE cause — every branch names what it can
+        # measure and then every cause that measurement admits.
         # `rows` is what the query actually returned, so the split below is
-        # measured rather than guessed: rows>0 means the predicate matched and
-        # the ID shape moved; rows==0 means the predicate matched nothing at
-        # all — which has THREE causes, not two (a message that offers two and
-        # omits the third repeats #9932's own defect: it sent every operator to
-        # a setting that was not the cause).
+        # measured rather than guessed: rows>0 means the predicate MATCHED and
+        # something below it rejected every row; rows==0 means the predicate
+        # matched nothing at all — which has THREE causes, not two (a message
+        # that offers two and omits the third repeats #9932's own defect: it
+        # sent every operator to a setting that was not the cause).
         if rows:
+            # TWO causes, for the same reason the branch below names three:
+            # a message that offers one where another applies sends the
+            # operator to the wrong place, which is #9932 itself. The count
+            # and the rejected id are measured; the CAUSE is not —
+            # `_is_turn_of` rejecting a row proves only that the row is not a
+            # turn of this session, never WHY. `pointKind` cannot settle it:
+            # its vocabulary is OPEN (`create_point` accepts any registered
+            # kind), so a caller-minted `is_episodic` `event` Point wired
+            # under a Session matches `_DUMP_QUERY` and is rightly rejected
+            # here for not being a turn — the same reason the repo's own
+            # `session_reinjection._TURN_SHAPE_FILTER` refuses to trust
+            # `pointKind` alone (#2517 review).
             raise SystemExit(
-                f"dump: 0 turns captured — the query MATCHED {len(rows)} turn-shaped "
+                f"dump: 0 turns captured — the query MATCHED {len(rows)} "
                 f"point(s) under a :Session and all {rejected} were rejected: none "
                 "carried the `{session}_t<i>` id this lane reads (`_is_turn_of`). "
-                "Capture is therefore ON — the ID DERIVATION has moved "
-                "(`sdk._capture_turn_id`). (pass --allow-empty to accept an empty dump)")
+                "Capture is therefore ON, and this has two causes: the ID "
+                "DERIVATION has moved (`sdk._capture_turn_id`), or the matched "
+                "Points are NOT turns at all — `pointKind` is an open vocabulary, "
+                "so a caller-minted `is_episodic` `event` Point under the Session "
+                "matches the predicate and is not a turn "
+                "(`session_reinjection._TURN_SHAPE_FILTER`). "
+                "(pass --allow-empty to accept an empty dump)")
         raise SystemExit(
             "dump: 0 turns captured — the query matched NO point at all, so this is "
             "not the id filter. Any of three causes applies: TORTOISE_CAPTURE was "

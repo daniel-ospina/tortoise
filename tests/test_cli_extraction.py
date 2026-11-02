@@ -468,6 +468,19 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
                       "the count of rejected rows must reach the operator")
         self.assertIn("_capture_turn_id", matched,
                       "the id derivation is the cause this case rules out")
+        # ...but it is ONE of two, not the cause. `_is_turn_of` rejecting a row
+        # proves the row is not a turn of this session, never WHY: `pointKind`'s
+        # vocabulary is OPEN (`create_point` takes any registered kind), so a
+        # caller-minted `is_episodic` `event` Point under the Session matches
+        # `_DUMP_QUERY` and is not a turn — `session_reinjection`'s own
+        # `_TURN_SHAPE_FILTER` exists because of exactly that (#2517 review).
+        # Naming only the id derivation sends that operator to
+        # `sdk._capture_turn_id`, a place that is not at fault: #9932's defect
+        # one layer down.
+        for fragment in ("NOT turns", "open vocabulary", "_TURN_SHAPE_FILTER"):
+            self.assertIn(fragment, matched,
+                          "a matched-but-rejected row need not be a turn at all "
+                          "— that cause needs naming too")
         self.assertNotIn("is TORTOISE_CAPTURE on", matched,
                          "capture is ON here — that is what MATCHED rows prove")
 
