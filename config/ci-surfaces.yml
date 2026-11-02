@@ -1535,6 +1535,12 @@ surfaces:
   # every surface except the one that drains. The `core` row is the other half
   # (`session_events_drain.py` matches no named surface); BOTH are required.
   - test_6388_session_events_drain.py
+  # #6388 part 2: the startup assert is reached from BOTH halves it spans — the
+  # predicate in `capture_install.py` (no named surface → `core`) and its three
+  # callsites in `tortoise/__main__.py` (an EXACT `api` SOURCE_PATTERN, which
+  # REPLACES the `core` fallback in `select()`). Same dual registration, for the
+  # same reason, as `test_capture_install.py` and `test_6388_session_events_drain.py`.
+  - test_6388_startup_seam_assert.py
   # #4197: the saved-backlog CLI surface lives in `tortoise/__main__.py` — an
   # exact `api` SOURCE_PATTERN (it is NOT a SHARED_MODULE, so a `__main__.py`
   # change selects `api`, not the full matrix). The file's largest subject is
@@ -3805,6 +3811,10 @@ surfaces:
   # `api` for the `__main__.py` callsite (see the `api` entry) — the same shape
   # `test_capture_spool.py` carries one block up.
   - test_6388_session_events_drain.py
+  # #6388 part 2: `capture_install.startup_seam_report` matches no named
+  # SOURCE_PATTERNS entry, so the mechanism half falls through to `core`; the
+  # `api` row above covers a `__main__.py`-only diff. BOTH are required.
+  - test_6388_startup_seam_assert.py
   # #3516 §B: the capture-lane marker. `tortoise/capture_spool.py` (the spool
   # carry-forward), `tortoise/pi-hooks/` (the producer stamp) and
   # `tortoise/projection/entities.py` (the journal fold) match no named surface
