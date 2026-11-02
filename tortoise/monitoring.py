@@ -3522,8 +3522,8 @@ LOOP_HEARTBEAT_INTERVAL = 0.25   # tick period of the loop-side heartbeat task
 #: set ABOVE the largest identified single bounded on-loop operation (a 10s
 #: socket read; 60s at the operator maximum) so it distinguishes "wedged" from
 #: "busy" for the single-operation case. It is still not a load signal: a
-#: request path can legitimately exceed it,
-#: which is exactly why the destructive self-kill below is opt-in and, on its
+#: request path can legitimately exceed it, which is exactly why the
+#: destructive self-kill below is opt-in and, on its
 #: SOFT path, gated on an idle workload (the HARD ceiling
 #: ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` is the exception and deliberately
 #: bypasses that gate — a request in flight does not stop the loop ticking, so
@@ -4174,9 +4174,8 @@ def stop_health_listener(server: ThreadingHTTPServer | None = None) -> None:
 # window is capped at ``quota.MAX_SESSION_TURNS = 500`` (refused above it at
 # the top of ``_capture_session_impl``), not by ``SessionRequest.conversation``'s
 # ``max_length`` — and the per-turn queries the old text named are off the loop
-# too. What remains on
-# the loop is graph I/O, bounded by its own socket timeouts (see the HARD
-# ceiling's derivation below).
+# too. What remains on the loop is graph I/O, bounded by its own socket
+# timeouts (see the HARD ceiling's derivation below).
 # The default stays OFF for the reason that SURVIVES: the idle gate is TRUE by
 # construction for the wedge it was built for (CONTRACT OF THE IDLE GATE,
 # below), and the hard ceiling below is the answer to that — as an opt-in
