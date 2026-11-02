@@ -67,7 +67,23 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:
 #: Re-cut with: `sha256sum .github/scripts/new-failure-gate.py` after reading the diff.
 #:   #9984 — first cut, from #10202 (the module as landed, 658 lines).
-_GATE_MODULE_SHA256 = "4b3ce65979ac45c0e57a33829524b5ab3b7be0a77cb5ff213f40c5fc28570f1c"
+#:   #10289 — re-cut: the LEG dimension of measuredness (`main_leg_coverage`) — a leg main
+#:            never EXECUTED is UNMEASURED, never clean. Nothing in the decision changed.
+#:   #10564 (c561c2edc) — re-cut: the leg-coverage claim is scoped to the runs the probe
+#:            actually READ (`no EXAMINED run executed this leg`), and the counter
+#:            shortcut is documented as sufficient-not-necessary for a green run.
+#:   #10564 (cfbd25685) — re-cut: the refusal NAMES the executed set, generated from
+#:            `_EXECUTED_CONCLUSIONS` (`", ".join(sorted(...))`) so the words cannot drift
+#:            from the constant.
+#:   #10564 (91188fcfa) — re-cut: the non-executing states are marked `e.g.` ILLUSTRATIVE
+#:            (not exhaustive) and include `startup_failure` — the module's own
+#:            `_UNCERTIFIABLE_CONCLUSIONS` member and the shape the probe most often reads;
+#:            enumerating all six as final would re-seal the claim this line of review
+#:            removed. The test pins the executed-set clause AND the markers. (The commit
+#:            after this one changes this file only, so the digest stays at 91188fcfa's.)
+#:            No logic change in any re-cut: no new branch, no exit-code change, no
+#:            polarity change.
+_GATE_MODULE_SHA256 = "f4108e2e3d4db724a2b046f4ccd18e060a8652f21676d838b4c6f1889cb1886b"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box
@@ -175,12 +191,13 @@ _STUB = """#!/usr/bin/env bash
 # REAL producer calls the GitHub API; the gate's comparison logic is what is under
 # test here, and its wire formats are pinned by the shared module's own parsers.
 set -u
-mode=""; report=""
+mode=""; report=""; prov=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --main-union-rates) mode=rates; shift 2 ;;
     --main-union-signatures) mode=sigs; shift 2 ;;
     --runs-report) report="${2:-}"; shift 2 ;;
+    --provenance) prov="${2:-}"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -188,6 +205,8 @@ if [ -n "$report" ] && [ "${STUB_NO_REPORT:-0}" != "1" ]; then
   printf 'examined=12\\nextracted=3\\ncompleted=12\\ntested=%s\\npending=0\\n' \\
     "${STUB_TESTED:-10}" > "$report"
 fi
+# The examined FAILING runs of the same window (#10289) — the leg dimension's run set.
+[ -n "$prov" ] && printf '%s' "${STUB_PROV:-}" > "$prov"
 [ "${STUB_RC:-0}" = "0" ] || { echo "ci-failure-set: stub failure" >&2; exit "${STUB_RC}"; }
 if [ "$mode" = "rates" ]; then printf '%s' "${STUB_RATES:-}"; else printf '%s' "${STUB_SIGS:-}"; fi
 """
@@ -218,11 +237,19 @@ class Sandbox:
         return env
 
     def run(self, *, jobs: str, logs: dict[int, str], red_legs: str = "test",
-            event: str = "pull_request", **extra: str) -> subprocess.CompletedProcess:
+            event: str = "pull_request", main_jobs: dict[str, str] | None = None,
+            **extra: str) -> subprocess.CompletedProcess:
         jobs_path = self.root / "jobs.jsonl"
         jobs_path.write_text(jobs, encoding="utf-8")
         for job_id, text in logs.items():
             (self.logs / f"{job_id}.log").write_text(text, encoding="utf-8")
+        # The main window's per-run job listings (the leg dimension). Always passed, so
+        # a case that reaches the probe with no fixture records fails CLOSED instead of
+        # calling the live API from a test.
+        main_dir = self.root / "main-jobs"
+        main_dir.mkdir(exist_ok=True)
+        for run_id, listing in (main_jobs or {}).items():
+            (main_dir / f"{run_id}.jsonl").write_text(listing, encoding="utf-8")
         argv = [
             sys.executable, str(GATE), "evaluate",
             "--repo", "daniel-ospina/tortoise",
@@ -233,6 +260,7 @@ class Sandbox:
             "--agent-infra", str(self.agent_infra),
             "--jobs-json", str(jobs_path),
             "--logs-dir", str(self.logs),
+            "--main-jobs-dir", str(main_dir),
         ]
         return subprocess.run(argv, capture_output=True, text=True, timeout=120,
                               env=self.env(**extra))
@@ -923,3 +951,176 @@ def test_the_verdict_job_is_pinned_and_bounded():
         "python-ci-gate pending on every PR")
     assert set(job.get("permissions") or {}) == {"actions", "contents", "pull-requests"}, (
         "the job's token must be the three reads it needs, stated explicitly")
+
+
+# ── the LEG dimension: did main ever EXECUTE the leg this run failed in? (#10289) ──
+#
+# `tested` is a RUN-level counter (`ci-failure-set.sh`: "FINISHED IS NOT TESTED"). A
+# window whose runs each had `test-slow` SKIPPED — the shape a failing `changes` job
+# produces, every dependent job skipped behind it — therefore reads `tested=3,
+# measured`, and a PR failure from that leg was reported as NEW: "introduced by this
+# PR" about a failure nothing on main ever measured. These cases assert the GATE'S
+# VERDICT (its exit code and its words), never an internal helper.
+
+#: main's window: three examined FAILING runs, each with `changes` red and every test
+#: leg SKIPPED behind it. The suite never ran in this window at all.
+_MAIN_WINDOW_LEG_SKIPPED = {
+    run_id: _jobs((1, "changes", "failure"), (2, "test-slow (d)", "skipped"))
+    for run_id in ("1001", "1002", "1003")
+}
+
+#: The same window with the leg `neutral` on main — one of the non-executing
+#: conclusions. It exists so the refusal's own wording is pinned to the code: the EXECUTED
+#: set it names is generated from `_EXECUTED_CONCLUSIONS`, and the non-executing states it
+#: lists are ILLUSTRATIVE. A message that enumerates a few states as if that were the
+#: complement states a fact narrower than what the code did (#10564 review).
+_MAIN_WINDOW_LEG_NEUTRAL = {
+    run_id: _jobs((1, "changes", "success"), (2, "test-slow (d)", "neutral"))
+    for run_id in ("1001", "1002", "1003")
+}
+
+#: The same window with the leg EXECUTED (and clean) — the control: a leg that main
+#: measured must still let a genuinely new PR failure block.
+_MAIN_WINDOW_LEG_EXECUTED = {
+    run_id: _jobs((1, "changes", "success"), (2, "test-slow (d)", "success"))
+    for run_id in ("1001", "1002", "1003")
+}
+
+#: The window's counters and its examined failing runs. `tested=3` EQUALS the examined
+#: count on purpose: `tested > len(examined)` is the proof that a GREEN run exists, and a
+#: green run covers every leg — so an all-red window is the only shape that probes.
+_STUB_PROV = {"STUB_PROV": "aaa:1001\nbbb:1002\nccc:1003\n",
+              "STUB_TESTED": "3", "STUB_EXAMINED": "3"}
+
+
+def _leg_case(tmp_path: Path, *, main_jobs: dict[str, str]):
+    box = Sandbox(tmp_path, copy_exemption=False)
+    (box.agent_infra / "scripts" / "ci_exemption.py").write_text(
+        _decision_stub(rc=1, verdict="VERDICT\tBLOCK\ttest_brand_new introduced it\n"),
+        encoding="utf-8")
+    return box.run(jobs=_jobs((900, "test-slow (d)", "failure")), logs={900: NEW_LOG},
+                   red_legs="test-slow", main_jobs=main_jobs, **_STUB_PROV)
+
+
+def test_a_leg_main_never_executed_is_Unmeasured_not_introduced(tmp_path):
+    """The verdict that was WRONG before this change: it read `introduced` (exit 1).
+
+    ⚠️ Read the pre-change delta exactly: the old module has no `--main-jobs-dir` flag, so
+    re-running THIS test against it exits 2 from argparse, not from the leg dimension. The
+    behavioural delta was reproduced by running the pre-change blob WITHOUT the seam flag
+    on the same fixture — `rc=1, VERDICT: NEW FAILURE … this PR introduced it` — where
+    this fixture now yields exit 2 naming the leg. The assertion below therefore pins the
+    POST-change verdict; the pre-change one is reproduced out of band and in
+    `/tmp/repro-unmeasured.py`'s transcript, not claimed by this test.
+
+    The window is measured (`tested=3`) and its rate table is non-empty, so every
+    pre-existing refusal passed — and the shared decision, correctly, found no main row
+    for the PR's id. What was missing is the question this asserts: did the leg the
+    failure came from ever EXECUTE on main? It did not. The honest verdict is
+    UNMEASURED, which blocks too, but says "nothing compared against this leg" instead
+    of emitting a confident, wrong attribution.
+    """
+    proc = _leg_case(tmp_path, main_jobs=_MAIN_WINDOW_LEG_SKIPPED)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "VERDICT: UNMEASURED" in proc.stdout
+    assert "leg coverage: test-slow=NOT EXECUTED" in proc.stdout
+    assert "NEW FAILURE" not in proc.stdout
+    assert "'test-slow'" in proc.stdout, "the refusal must NAME the unmeasured leg"
+    # ⛔ THE REFUSAL STATES ONLY WHAT IT READ (#10564 review, ISSUE 2). The probe scans
+    # the EXAMINED (failing) runs; `tested <= len(examined)` is sufficient-but-not-
+    # necessary for a green run, so a `success` run may exist in this window unprobed.
+    # The words must therefore scope to the run set that was actually read — the
+    # unscoped form ("the window holds no run in which the leg EXECUTED") is a claim
+    # about runs nothing measured, the same class as the absent-provenance defect.
+    assert "no EXAMINED run of main's" in proc.stdout, proc.stdout
+    assert "window holds no" not in proc.stdout, (
+        "the refusal must not claim the whole window; only the examined runs were read")
+
+
+def test_the_refusal_names_the_conclusions_it_actually_treats_as_not_executed(tmp_path):
+    """The refusal names the EXECUTED set (generated), and marks its examples as examples.
+
+    A `neutral` (or `stale`, `startup_failure`) leg on main is `NOT EXECUTED` — the set
+    the code uses is `{success, failure, timed_out}` — so a refusal that enumerates only
+    some of the others describes a narrower thing than it did. The generated clause is
+    the fix for drift; the `e.g.`-marked list is illustrative on purpose, because
+    GitHub can add a conclusion and that must not make the message wrong.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("new_failure_gate", GATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    proc = _leg_case(tmp_path, main_jobs=_MAIN_WINDOW_LEG_NEUTRAL)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "leg coverage: test-slow=NOT EXECUTED" in proc.stdout
+    # The EXECUTED set is GENERATED from the constant, so the words cannot drift from
+    # the code: a message naming a stale subset fails here the moment the constant moves.
+    executed = ", ".join(sorted(module._EXECUTED_CONCLUSIONS))
+    assert f"something other than {executed}" in proc.stdout, (
+        "the refusal must name the conclusions that DO count as executed, generated "
+        f"from `_EXECUTED_CONCLUSIONS` ({executed}); got: {proc.stdout!r}")
+    # The named states are EXAMPLES of that complement, not a completeness claim — so
+    # asserting them cannot certify a list as exhaustive the way the previous wording
+    # did (#10564 review, F1). `action_required` is a real conclusion in this repo
+    # (`tools/ci_verdict.py:NEGATIVE_CONCLUSIONS`).
+    for state in ("skipped", "cancelled", "neutral", "stale", "startup_failure",
+                  "action_required"):
+        assert state in proc.stdout, f"{state!r} missing from the refusal: {proc.stdout!r}"
+    # ...and the list must be MARKED as illustrative, or it reads as the exhaustive
+    # enumeration F1 was raised about (a mutation that drops the marker passed this test
+    # until this assertion existed — the docstring claimed the marker was checked).
+    assert "ILLUSTRATIVE, not exhaustive" in proc.stdout, (
+        f"the example list must be marked illustrative, not exhaustive: {proc.stdout!r}")
+    assert "e.g. " in proc.stdout, (
+        f"the state list must be introduced as examples: {proc.stdout!r}")
+    assert "the complement of" not in proc.stdout, (
+        "the message must not CERTIFY its example list as complete: the gate reads only "
+        "the conclusions it observes, and `absent` is not a conclusion at all")
+
+
+def test_a_leg_main_did_execute_still_blocks_a_genuinely_new_failure(tmp_path):
+    """The control that keeps the change from becoming a blanket refusal.
+
+    Same fixture, same BLOCK from the shared decision — only main's window differs: the
+    leg ran. A gate that answered UNMEASURED here would be the over-block the module's
+    own docstring refuses ("a gate that refuses everything is not a gate").
+    """
+    proc = _leg_case(tmp_path, main_jobs=_MAIN_WINDOW_LEG_EXECUTED)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "VERDICT: NEW FAILURE" in proc.stdout
+    assert "leg coverage: test-slow=executed (probed)" in proc.stdout
+
+
+def test_a_green_run_in_the_window_covers_the_leg_without_a_jobs_call(tmp_path):
+    """A `success` python-ci run IS leg evidence — no extra API call, and no probe.
+
+    A `skipped` leg the selector SELECTED fails closed in `python-ci-gate`'s own leg
+    table (#5219), so a green python-ci run means every selected leg executed. `tested >
+    len(examined)` proves one exists in the window (`tested` = success|failure|timed_out,
+    `examined` = failure|timed_out|startup_failure), so the no-fixture `main-jobs` dir
+    must never be consulted — asserted by the run NOT failing closed on a missing
+    listing while `tested` exceeds the examined count.
+    """
+    box = Sandbox(tmp_path, copy_exemption=False)
+    (box.agent_infra / "scripts" / "ci_exemption.py").write_text(
+        _decision_stub(rc=1, verdict="VERDICT\tBLOCK\ttest_brand_new introduced it\n"),
+        encoding="utf-8")
+    proc = box.run(jobs=_jobs((900, "test-slow (d)", "failure")), logs={900: NEW_LOG},
+                   red_legs="test-slow", main_jobs={},
+                   STUB_TESTED="4", STUB_EXAMINED="3",
+                   STUB_PROV=_STUB_PROV["STUB_PROV"])
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "leg coverage: test-slow=executed (green-run)" in proc.stdout
+
+
+def test_a_missing_main_job_listing_is_unmeasured_never_unexecuted(tmp_path):
+    """A missing listing is not "the run had no jobs" — it refuses (exit 2).
+
+    Without this, the leg dimension could read a fixture gap as "the leg never ran" and
+    manufacture a refusal from a recording bug rather than from a measurement.
+    """
+    proc = _leg_case(tmp_path, main_jobs={})          # provenance names runs, no listings
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "no recorded job listing for run" in proc.stdout
