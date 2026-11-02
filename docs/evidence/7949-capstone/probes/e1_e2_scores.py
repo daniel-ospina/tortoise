@@ -24,8 +24,8 @@ to find it:
   from `criteria[E1].threshold`, the two floors from `denominator_floors` — so
   this record cannot score against a bar the record did not freeze. The before
   arm exists in TWO independent realizations (two OFF runs, because a single one
-  cannot show whether a
-  difference is the arm or the model) and the after arm in one (the ON run).
+  cannot show whether a difference is the arm or the model) and the after arm in
+  one (the ON run).
   Pairing the single after arm against each before arm gives **two different
   verdicts**, so the honest aggregate is `decidable: false` — the metric is
   REFUSED at n=1 per arm, and the record prints both pairings rather than

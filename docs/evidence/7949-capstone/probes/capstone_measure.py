@@ -719,6 +719,32 @@ def verdict_word(result: dict) -> str:
     return {"PASS": "GREEN", "FAIL": "RED"}.get(result["outcome"], "BLOCKED")
 
 
+def e1_pass_objects(e1: dict) -> int | None:
+    """E1's row numerator: the Objects that are NOT bare-definite.
+
+    ⛔ The table's numerator is the count that PASSED, on every other row (E1b's
+    real facts, E2a's surviving units, E3's anchored nodes, E5's recovered facts).
+    E1's criterion is written over the OPPOSITE quantity — the bare-definite
+    `:Object` share it MINIMISES — so carrying that count in the slot would put a
+    row whose best possible outcome is `0 of 61` in front of V5, which refuses a
+    GREEN row with a zero numerator as the silent-drop shape ("a green row must
+    measure at least ONE success"). Refusing the PERFECT outcome is the same
+    green-row-cannot-be-written defect this row was repaired for, one boundary
+    earlier. The complement keeps the table's polarity and the population (all
+    `:Object` nodes written by the after arm, floored at 30), and leaves the
+    measured bare-definite count where it belongs: in the note and in the artifact
+    the row cites.
+
+    ``None`` when the arm is unmeasured — an empty slot, which V5 refuses on a
+    GREEN row and V6 covers with the blocker on every other.
+    """
+    numerator = e1.get("after_numerator")
+    denominator = e1.get("after_objects")
+    if not isinstance(numerator, int) or not isinstance(denominator, int):
+        return None
+    return denominator - numerator
+
+
 def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
                e3: dict, e4: dict, e5: dict, e1: dict, e2: dict) -> list[dict]:
     """The five table rows — one per criterion, each with the artifact behind it.
@@ -763,10 +789,10 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         return built
 
     return [
-        # E1 and E2 carry the counts their OWN criteria are written over — E1 the
-        # after arm's bare-definite Objects over all Objects (13/61 on the #9889
-        # record), E2 the E2a count over the FROZEN 14 value-bearing units
-        # (8/14, bar >= 13 of 14).
+        # E1 and E2 carry the counts their OWN criteria are written over — E2 the
+        # E2a count over the FROZEN 14 value-bearing units (8/14, bar >= 13 of 14),
+        # E1 the after arm's Objects that are NOT bare-definite over all its
+        # Objects (48/61 on the #9889 record, whose bare-definite count is 13).
         #
         # ⛔ They are NOT a sibling pair and name no `sibling`. V8 requires a pair
         # to carry the SAME numerator/denominator, which is right for two readings
@@ -2522,10 +2548,11 @@ def main(argv: list[str] | None = None) -> int:
         "sha": e1["sha"],
         "corpus_sha256": e1["corpus_sha256"],
         # The population E1's own criterion is written over: a share over ALL
-        # `:Object` nodes written by the AFTER arm, so the count slots carry the
-        # after arm's bare-definite Objects / its Objects (13/61 on the #9889
-        # record) — read off the record, never re-derived from share x objects.
-        "numerator": e1["after_numerator"],
+        # `:Object` nodes written by the AFTER arm. The count slot carries the
+        # PASS-direction half of it (Objects that are NOT bare-definite) because
+        # that is the table's convention on every other row and the bare-definite
+        # count it minimises can legitimately be 0 — see `e1_pass_objects`.
+        "numerator": e1_pass_objects(e1),
         "denominator": e1["after_objects"],
         "note": (f"E1 is scored from {E1_E2_SCORES} (one invocation over the "
                  f"#9889 probes), whose corpus IS the frozen one "
@@ -2540,11 +2567,13 @@ def main(argv: list[str] | None = None) -> int:
                  f"{e1['gate_drops_objects']} Objects with its positive controls "
                  f"alive, so the selection pass is not the mover — the "
                  f"removal/relocation ruling is (#5333). n >= 2 per arm is the "
-                 f"next requirement. The row's count is the AFTER arm's own "
-                 f"population — bare-definite Objects / all Objects = "
-                 f"{e1['after_numerator']}/{e1['after_objects']} — because E1 is a "
-                 f"share over Objects, not a planted-unit count (E2 carries "
-                 f"those, over the frozen 14)"),
+                 f"next requirement. The row's count is that population — "
+                 f"Objects that are NOT bare-definite over all Objects = "
+                 f"{e1_pass_objects(e1)}/{e1['after_objects']} — i.e. the "
+                 f"PASS-direction half of a share the criterion MINIMISES (the "
+                 f"measured bare-definite count is {e1['after_numerator']} of "
+                 f"{e1['after_objects']}); E2 carries the planted-unit counts, "
+                 f"over the frozen 14"),
     }
     e2_row = {
         "verdict": verdict_word(e2_result),

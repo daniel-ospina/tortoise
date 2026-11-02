@@ -321,7 +321,11 @@ printed. The next requirement is **n >= 2 per arm**.
 
 **The counts reach the rows.** The capstone's E2 row now carries E2a's count over
 the FROZEN 14 (`8 of 14` today; the bar is `>= 13 of 14`), and E1's carries the
-after arm's bare-definite `:Object` count over its Objects (`13 of 61`). They are
+after arm's `Object` count in the PASS direction — the Objects that are NOT
+bare-definite, over all of them (`48 of 61`; the measured bare-definite count the
+criterion minimises is `13 of 61` and stays in the row's note, because a run whose
+bare-definite count is 0 is the BEST outcome and a `0` numerator is refused as a
+silent drop). They are
 NOT a sibling pair any more: `tools/capstone_verdict_check.py`'s V8 compares two
 copies of ONE population, and these two rows score two (all Objects vs the 14
 value-bearing units) — naming them siblings is what forced both counts empty, and

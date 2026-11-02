@@ -595,11 +595,14 @@ def test_the_parse_reads_arms_not_a_fixed_line():
 
 def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
           *, e2_verdict: str = "RED") -> list[dict]:
+    parsed = measure.measure_e1_e2(_REPO)
     return measure.build_rows(
         head="a" * 40, out_path=out_path, log_corpus_sha="sha256:" + "d" * 64,
         e1={"verdict": measure.verdict_word(measure.e1_outcome(**_e1_kwargs())),
             "sha": "c" * 40, "corpus_sha256": "e" * 64,
-            "numerator": 13, "denominator": 61, "objects_numerator": 28,
+            "numerator": measure.e1_pass_objects(parsed),
+            "denominator": parsed["after_objects"],
+            "objects_numerator": 28,
             "objects_total": 78, "note": "E1 note"},
         e2={"verdict": e2_verdict, "sha": "c" * 40, "corpus_sha256": "e" * 64,
             "numerator": 8, "denominator": 14, "note": "E2 note"},
@@ -700,8 +703,17 @@ def test_the_e1_and_e2_rows_carry_the_counts_their_criteria_are_written_over():
     rows = {row["criterion"]: row for row in _rows()}
     assert (rows["E2"]["numerator"], rows["E2"]["denominator"]) == (
         parsed["e2a_survived"], parsed["e2a_units"])
+    # E1's slot is the PASS-direction half of its (minimised) share: the table's
+    # numerator is a count that passed on every other row, and a bare-definite
+    # count of 0 — the BEST outcome — would be refused by V5 as a silent drop.
     assert (rows["E1"]["numerator"], rows["E1"]["denominator"]) == (
-        parsed["after_numerator"], parsed["after_objects"])
+        parsed["after_objects"] - parsed["after_numerator"],
+        parsed["after_objects"])
+    assert measure.e1_pass_objects({"after_numerator": 0,
+                                    "after_objects": 61}) == 61, (
+        "a run with NO bare-definite Objects must still be writable green")
+    assert measure.e1_pass_objects({"after_numerator": None,
+                                    "after_objects": 61}) is None
     # The two rows score two DIFFERENT populations (all Objects vs the frozen 14
     # value-bearing units), so neither may name the other as a `sibling`: V8
     # compares one population's two copies, and naming this pair siblings is what
