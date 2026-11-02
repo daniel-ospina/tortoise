@@ -64,18 +64,44 @@ def _isolate_atexit_budget():
     embedded_lifecycle._atexit_deadline = None
 
 
+#: Does this host expose ``/proc``? Decided ONCE, at import: a /proc-less
+#: host (macOS — this file otherwise runs there) must fall back to ``ps``,
+#: because a /proc-only read returns ``None`` for EVERY pid there. That is
+#: not a slow answer, it is the false-PASS shape: ``_server_still_alive``
+#: would say "no leak" about a server that is still running, and the
+#: assertion it guards would pass vacuously.
+_HAVE_PROC = os.path.exists("/proc/self/cmdline")
+
+
 def _server_cmdline(pid: int) -> str | None:
     """The ``pid``'s command line, or ``None`` when that pid is gone.
 
-    Linux ``/proc`` read, deliberately: the only questions this module asks
-    about a server are "is THIS pid still there?" and "is it still the
-    redislite server we started?" (the second guards pid recycling).
+    ``/proc`` is preferred — one read, no fork, asked up to ~120 times by the
+    poll below — and ``ps`` is the fallback for a host that has no ``/proc``
+    at all. The only questions this module asks about a server are "is THIS
+    pid still there?" and "is it still the redislite server we started?"
+    (the second guards pid recycling).
+
+    The two arms are deliberately NOT interchangeable: on a host WITH
+    ``/proc``, an ``OSError`` means the pid is gone and ``None`` is the right
+    answer (falling through to ``ps`` would fork per poll to re-learn it);
+    on a host WITHOUT ``/proc``, ``None`` from the ``/proc`` arm would be a
+    claim about the host, not about the pid. ``tests/test_fork_slot_wedge_3845.py``'s
+    ``_ps_command`` keeps the same fallback for the same reason.
     """
+    if _HAVE_PROC:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                return fh.read().replace(b"\0", b" ").decode(
+                    "utf-8", "replace").strip()
+        except OSError:
+            return None  # a real /proc answered: this pid is gone
     try:
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            return fh.read().replace(b"\0", b" ").decode(
-                "utf-8", "replace").strip()
-    except OSError:
+        return _subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.strip() or None
+    except (OSError, _subprocess.TimeoutExpired):
         return None
 
 
