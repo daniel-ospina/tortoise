@@ -2243,6 +2243,12 @@ def retrieve_for_question(
     _sr_seed_window = (eff_item_cap if eff_item_cap is not None
                        else DEFAULT_REINJECTION_SEED_WINDOW)
     _sr_seed_limit = DEFAULT_REINJECTION_SEED_SESSIONS
+    # The reader's item cap IS its window: ``reader_window_displacement``
+    # measures crowding against the prefix the reader actually consumes, so
+    # the fallback is assemble_context's own documented default rather than
+    # an invented constant.
+    _sr_reader_window = (eff_item_cap if eff_item_cap is not None
+                         else DEFAULT_REINJECTION_SEED_WINDOW)
     # per-outcome census (§2): the OFF arm records the same zeroed shape so
     # the arm delta stays reconstructable per question.
     sr_seeds: list[str] = []
@@ -2254,6 +2260,10 @@ def retrieve_for_question(
     sr_dropped_by_cap = 0
     sr_fetch_ok = False
     sr_total_cap_hit = False
+    sr_window_displacement: dict[str, object] = {
+        "window": _sr_reader_window, "injected_in_window": 0,
+        "base_displaced": 0, "sessions_lost": [],
+        "sessions_before": 0, "sessions_after": 0, "measured": True}
     sr_latency_ms = 0.0
     if reinjection_on and not is_tr and pool:
         from tortoise import session_reinjection as _sr
@@ -2370,6 +2380,7 @@ def retrieve_for_question(
                         if _group:
                             _added_by_session[_sid] = _group
                     if _added_by_session:
+                        _pre_merge_pool = pool
                         _merged = _sr.reinjection_merge_order(
                             pool, _added_by_session,
                             seed_order=[s.session_id for s in _seeds],
@@ -2382,7 +2393,46 @@ def retrieve_for_question(
                             for sid, v in _added_by_session.items()}
                         sr_injected_merged = sum(
                             sr_injected_per_session_merged.values())
+                        # READER-WINDOW census (#10540): ``injected_merged``
+                        # counts items that reached the POOL. The reader
+                        # consumes a PREFIX of it, so the crowding this arm's
+                        # outcome forbids — base hits, and whole sessions,
+                        # pushed past the cut by the injection — was invisible
+                        # in every prior census key. Measured on 63981d152 at
+                        # the shipped budgets: 10 base hits displaced and two
+                        # sessions lost entirely, while ``injected_merged``
+                        # read a healthy 10.
+                        # The ARM DECISION comes first: a pure measurement
+                        # must never decide whether the treatment is applied.
+                        # ``pool = _merged`` therefore precedes the census
+                        # below, which has its OWN except — a measurement
+                        # failure leaves the merged pool intact and records
+                        # an explicit unmeasured marker instead of the zeroed
+                        # shape (a zero there would read as "no crowding"
+                        # and as a merge-stage failure at once).
                         pool = _merged
+                        try:
+                            sr_window_displacement = (
+                                _sr.reader_window_displacement(
+                                    _pre_merge_pool, _merged,
+                                    window=_sr_reader_window))
+                        except Exception:  # noqa: BLE001, RUF100
+                            import logging as _logging
+                            sr_window_displacement = {
+                                "window": _sr_reader_window,
+                                # None, not the POOL-scope count: every
+                                # other key here is window-scope, and a pool
+                                # count read as a window count over-reports.
+                                "injected_in_window": None,
+                                "base_displaced": None,
+                                "sessions_lost": None,
+                                "sessions_before": None,
+                                "sessions_after": None, "measured": False}
+                            _logging.getLogger(__name__).warning(
+                                "C4 reader-window census failed for %s — "
+                                "the merged pool stands; the crowding is "
+                                "UNMEASURED for this question", qid,
+                                exc_info=True)
         except Exception:  # noqa: BLE001, RUF100
             # fail-open: any failure (fetch OR annotate/merge stage) keeps
             # the ORIGINAL pool — byte-identical to the one-shot result. The
@@ -2409,6 +2459,7 @@ def retrieve_for_question(
         "injected_per_session_merged": sr_injected_per_session_merged,
         "injected_merged": sr_injected_merged,
         "dropped_by_cap": sr_dropped_by_cap,
+        "reader_window_displacement": sr_window_displacement,
         "fetch_ok": sr_fetch_ok,
         "total_cap_hit": sr_total_cap_hit,
         "guard": reinjection_guard,

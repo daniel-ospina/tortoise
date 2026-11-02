@@ -673,7 +673,10 @@ _CENSUS_KEYS = {
     "on", "seed_window", "seed_limit", "seed_sessions", "seeded",
     "injected_per_session", "injected_total",
     "injected_per_session_merged", "injected_merged", "dropped_by_cap",
-    "fetch_ok", "total_cap_hit", "guard", "latency_ms", "tr_excluded"}
+    "fetch_ok", "total_cap_hit", "guard", "latency_ms", "tr_excluded",
+    # #10540: the reader-window crowding census (pool-scope keys above
+    # could not see it)
+    "reader_window_displacement"}
 
 
 def test_reader_item_and_token_caps_hold_on_the_reinjected_pool(seeded_sdk):
