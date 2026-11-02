@@ -438,10 +438,13 @@ def test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm(
         contract is "the SEED and FETCH censuses are NOT wiped", so
         ``fetch_ok`` is deliberately still True on that path.
 
-    Either way the census itself must read the UNMEASURED shape
-    (``measured: False`` and ``None`` values), never the zeroed one: a zero
-    there would be indistinguishable from "no crowding" and from a
-    merge-stage failure at the same time.
+    Where its own ``except`` handles the failure — the path this test
+    measures — the census must read the UNMEASURED shape (``measured: False``
+    and ``None`` values), never the zeroed one: a zero there would be
+    indistinguishable from "no crowding" and from a merge-stage failure at
+    the same time. (On the outer-handler branch the census is simply never
+    written and keeps its initialised zeroed shape, which is why that branch
+    is caught by the counters, not by this key.)
     """
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
@@ -467,9 +470,12 @@ def test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm(
     # not revert the pool, clear the merged counters, or let its exception
     # reach the outer fail-open handler (which would clear ``injected_merged``
     # to 0 and leave the zeroed ``measured: True`` census shape).
-    # ``fetch_ok`` stays True on every fail-open path BY DESIGN — the outer
-    # handler's contract is "only the MERGED counters are cleared", so this
-    # assertion documents that contract rather than discriminating a branch.
+    # ``fetch_ok`` is never CLEARED by either handler — the outer handler's
+    # contract is "only the MERGED counters are cleared" — so on this path it
+    # stays True. It is not True on EVERY fail-open path: a fetch that itself
+    # reports not-ok leaves it False (``test_fetch_failure_keeps_the_base_pool``).
+    # So this assertion documents that contract rather than discriminating a
+    # branch.
     assert st["fetch_ok"] is True
     assert [h["id"] for h in ret["hits"]] == [h["id"] for h in ok["hits"]]
     assert st["injected_merged"] == st_ok["injected_merged"] > 0
