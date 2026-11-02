@@ -43,6 +43,7 @@ from .live import (  # #2490: terminal rows are never contested; #2598: the draf
     epistemic_sweep,  # #7927: id-anchored present-label sweep
     is_draft_status,
     is_terminal_status,
+    status_as_reported,  # #9974 R1: absent renders live on the subgraph surface
 )
 
 
@@ -1709,7 +1710,10 @@ class SubgraphExpander:
             "  coalesce(n.pointKind, n.objectKind, n.subjectKind, "
             "           n.eventKind, n.documentKind, n.sourceKind, '') AS kind, "
             "  coalesce(n.is_operator, false) AS is_operator, "
-            "  coalesce(n.status, '') AS status, "
+            # Raw, NOT coalesced: `status_as_reported` below needs the
+            # ABSENT/stored distinction (#9974 R1 — `coalesce(n.status, '')`
+            # collapses an absent status into a STORED empty one).
+            "  n.status AS status, "
             "  CASE WHEN labels(n)[0] = 'Point' THEN coalesce(n.confidence, 0.5) "
             "       ELSE null END AS confidence",
             params={"ids": list(nodes)},
@@ -1724,8 +1728,16 @@ class SubgraphExpander:
                 node["kind"] = kind
             if is_op:
                 node["is_operator"] = True
-            if status:
-                node["status"] = status
+            # #9974 R1: this is the FIFTH read surface — `SUBNODE_LABELS`
+            # includes Object/Subject, whose birth status is now derived-or-
+            # absent, so an absent status must render LIVE (the shared
+            # declaration, with the `:Event`/`:Source` carve-out keeping `""`)
+            # rather than dropping the key. `if status:` used to drop it, so a
+            # status-less Object appeared with no `status` where it carried
+            # `"live"` before.
+            reported = status_as_reported(status, label=label)
+            if reported:
+                node["status"] = reported
             if confidence is not None:
                 node["confidence"] = round(float(confidence), 6)
 

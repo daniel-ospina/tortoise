@@ -267,7 +267,7 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: EXCLUDED, each with its reason — the fold's OTHER `ON CREATE` defaults are
 #: not applied here, and the reasons are not all "it is not a constant":
 #:
-#: * `status` (`'live'` on Subject/Object) — PROJECTION-OWNED CACHE (§2.6/
+#: * `status` — PROJECTION-OWNED CACHE (§2.6/
 #:   `record_projection.OpDispatch.never_store`); the schema has no column for it.
 #:   It is NOT a constant this table may fill, because it is not a DEFAULT here:
 #:   it is DERIVED from another column the record does hold, and that derivation
@@ -465,18 +465,24 @@ FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
 #:   :data:`EVENT_STREAM_FOLDS` and :class:`LifecycleEvent`'s `restatus_status`.
 #:   ⛔ **STATED BOUND — the BIRTH status is a third writer this table does not
 #:   read (#9974 review round 3).** `_upsert_object`/`_upsert_subject` seed
-#:   `status=coalesce($st, 'live')` from the creation record's own payload
-#:   (`projection/entities.py`), and `sdk.create_entity` accepts a caller status —
-#:   ⚠️ the SUBJECT door validates it against §4.2, the OBJECT door validates
-#:   nothing (`sdk.py:4923`, `:23474-23479`: `:Object`/`:Event` "do not validate,
-#:   they STORE the value") — so `create_object(name, status='superseded')` writes a
-#:   terminal status at birth that `never_store` keeps out of the layer tables and
-#:   these two legs do not select (`ObjectRegistered`/`SubjectAdded` are not
-#:   `EventRecorded`). A record-sourced rebuild materializes it with NO status →
+#:   `status=$st` from the creation record's own payload
+#:   (`projection/entities.py`) — DERIVED-OR-ABSENT since #9974 R1, which removed
+#:   the fold's fabricated `coalesce($st, 'live')` and the door's
+#:   `out["status"] = "live"` so a status-less birth no longer CLAIMS `live`
+#:   (the value this table's §10189 no-fabrication rule already refuses to fill).
+#:   A caller-supplied birth status is unaffected by that: `sdk.create_entity`
+#:   accepts one — ⚠️ the SUBJECT door validates it against §4.2, the OBJECT door
+#:   validates nothing (a comment in `sdk._kind_layer_note` says so of the
+#:   document door — `create_entity`'s object branch has no status validation at
+#:   all, unlike the subject branch above it) — so `create_object(name, status='superseded')`
+#:   writes a terminal status at birth that `never_store` keeps out of the layer
+#:   tables and these two legs do not select (`ObjectRegistered`/`SubjectAdded` are
+#:   not `EventRecorded`). A record-sourced rebuild materializes it with NO status →
 #:   LIVE, while `rebuild_all` (which reads the JSONL payload) writes
 #:   `superseded`. This change therefore reproduces the STATE-OP writer, not every
-#:   writer of the field; the birth leg is a follow-up on #9974. Do not read
-#:   `LifecycleEvent`'s docstring as claiming the field is fully covered.
+#:   writer of the field; the CALLER-SUPPLIED birth leg is a follow-up on #9974.
+#:   Do not read `LifecycleEvent`'s docstring as claiming the field is fully
+#:   covered.
 #:   ⚠️ Also STATED BOUND — a null-valued `state.status` (`update_entity(obj,
 #:   status=None)`) is NOT modelled: the graph applies `SET n += {status: null}`,
 #:   which REMOVES the property, while this reader skips a non-string value and

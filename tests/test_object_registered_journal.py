@@ -139,7 +139,9 @@ class TestCaptureFoldRoundTrip:
             assert line["id"] == node_id(proj, "Object", name), line
             assert line["name"] == name
             assert line["object_kind"] == "core:org"
-            assert line["status"] == "live"
+            # #9974 R1: the record carries NO status for a status-less birth —
+            # the door no longer fabricates `'live'` into it (absent READS live).
+            assert "status" not in line, line
             assert line.get("createdAt"), line
             assert line["is_episodic"] == False  # noqa: E712
             proj.rebuild_all(str(events), confirm_destructive=True)
@@ -268,13 +270,13 @@ class TestReMentionJournalsEveryRegistration:
                 "a re-mention of a terminal name must mint ONE new incarnation "
                 f"(D2/R5), leaving the folded one in place; got {rows}")
             by_status = {r[1]: r for r in rows}
-            assert set(by_status) == {"superseded", "live"}, (
+            assert set(by_status) == {"superseded", None}, (
                 "the re-mention reset the fold — #1350 clobber guard: "
                 f"{rows}")
             assert by_status["superseded"][0] == folded_id, (
                 f"the folded incarnation changed id: {rows} vs {folded_id}")
             assert by_status["superseded"][2] == "strategy-B", rows
-            twin_id = by_status["live"][0]
+            twin_id = by_status[None][0]
             assert twin_id != folded_id, (
                 f"R5 forbids id reuse; the re-mention adopted {folded_id}: {rows}")
             journal = _journaled(sdk, events)
@@ -291,7 +293,7 @@ class TestReMentionJournalsEveryRegistration:
             assert rebuilt_by_status.get("superseded") == by_status["superseded"], (
                 "no resurrect on rebuild — the folded incarnation must replay "
                 f"byte-identically; live={rows} rebuilt={rebuilt}")
-            assert rebuilt_by_status.get("live") == by_status["live"], (
+            assert rebuilt_by_status.get(None) == by_status[None], (
                 "the live incarnation must replay with the same id: "
                 f"live={rows} rebuilt={rebuilt}")
         finally:
@@ -341,9 +343,11 @@ class TestStubAdoption:
                 "stub must be canonicalized to the obj-<sha26> id")
             assert rows[0][1] == line["createdAt"], (
                 "live adopted createdAt must equal the journaled value")
-            # Accepted stub status/title asymmetry (see docstring): the LIVE
-            # adopted node keeps the stub's absent status/title; rebuild's ON
-            # CREATE writes them from the journaled line.
+            # Accepted stub asymmetry: rebuild's ON CREATE writes the
+            # journaled line's own properties, the live stub keeps its own. For
+            # `status` there is nothing to write either way since #9974 R1 (the
+            # line carries none for a status-less birth), so both sides are
+            # ABSENT and the asymmetry is gone for this field.
             live_props = _object_row(proj, "connector-name")[0][0]
             assert "status" not in live_props, live_props
             proj.rebuild_all(str(events), confirm_destructive=True)
@@ -352,7 +356,7 @@ class TestStubAdoption:
                 "rebuild must restore the canonical id, not the stub ulid")
             assert rows[0][1] == line["createdAt"], rows[0]
             rebuilt_props = _object_row(proj, "connector-name")[0][0]
-            assert rebuilt_props.get("status") == "live", rebuilt_props
+            assert "status" not in rebuilt_props, rebuilt_props
         finally:
             sdk.close()
 
@@ -701,9 +705,10 @@ class TestFailureInjection:
                         if e.get("type") == "ObjectSuperseded"], journal
             proj.rebuild_all(str(events), confirm_destructive=True)
             rows = _object_row(proj, "strategy-A", "status")
-            assert rows and rows[0][0] == "live", (
+            assert rows and rows[0][0] is None, (
                 "journal-consistent outcome: without the fold line, rebuild "
-                f"restores live, not superseded: {rows}")
+                "restores the derived-or-absent birth status (absent READS "
+                f"live), not superseded: {rows}")
             assert not any("fold" in r.getMessage() and
                            "match" in r.getMessage().lower()
                            for r in caplog.records), (

@@ -1097,7 +1097,18 @@ _PROJECTION_STATE_SUFFIX = ".projection-state.json"
 # (`tags`) and v2 → v3 (the `(label, id)` re-key): append the format, so a v3
 # sidecar is a KNOWN predecessor that migrates on the next healthy recording
 # run.
-_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2, 3, 4)
+# v4 → v5 (#9974 R1): the `:Object`/`:Subject` BIRTH status is DERIVED-OR-ABSENT.
+# `_entity_node_view` folds `status` into the baseline, and the released fold
+# seeded `coalesce($st, 'live')` for a record that stated no status — that
+# property is now ABSENT (and reads LIVE, `live._terminal_excluded`). Every
+# entity registered by a producer that never stated a status therefore loses the
+# property on the first post-upgrade replay, so `db_hash` moves while the journal
+# does not — `unrecorded-mutation` on a healthy graph, sticky because
+# `record_projection_state` is gated on `ok`. Same consequence and same answer as
+# v1 → v2 (`tags`), v2 → v3 (the `(label, id)` re-key) and v3 → v4 (identifier
+# aliases): append the format, so a v4 sidecar is a KNOWN predecessor that
+# migrates on the next healthy recording run.
+_PROJECTION_STATE_FORMAT_HISTORY: tuple[int, ...] = (1, 2, 3, 4, 5)
 _PROJECTION_STATE_FORMAT: int = _PROJECTION_STATE_FORMAT_HISTORY[-1]
 _PROJECTION_STATE_SUPERSEDED_FORMATS: frozenset[int] = frozenset(
     _PROJECTION_STATE_FORMAT_HISTORY[:-1])
@@ -1824,6 +1835,17 @@ _ENTITY_PARITY: tuple[tuple[str, str], ...] = tuple(
 # `_creation_entity_id` reads the writer's own `_CANONICAL_ENTITY_ID_PROPS`,
 # so a change there cannot silently desync this leg (the hand-copied second
 # list is what this file's doctrine forbids).
+#
+# ⛔ The default stays `'live'` (#9974 R1) — and it is the COMPARISON, not the
+# writer, that reconciles it with the graph. A status-less birth now stores NO
+# `status` (the fold seeds `status=$st`; the door no longer fabricates one), and
+# `live._terminal_excluded` reads an ABSENT status as LIVE — so "the record says
+# the birth default, the graph holds nothing" is AGREEMENT, not divergence.
+# Defaulting this row to `None` instead (the first draft of #9974 R1) made `jv
+# is None` mean "no expectation", which switched the status leg OFF for every
+# status-less birth — an out-of-band `SET o.status='retracted'` then read
+# `ok=True, divergence=None`: a FALSE PASS in a durability verifier, and
+# `tests/test_rebuild_parity_fail_loud_3585.py`'s burial leg reds on it.
 _ENTITY_CREATION: dict[str, tuple[str, str | None]] = {
     "ObjectRegistered": ("Object", "live"),
     "SubjectAdded": ("Subject", "live"),
@@ -2714,8 +2736,14 @@ def _compare_entities(journal_entities, graph_entities,
         if label in _STATUS_COMPARED_LABELS and not ambiguous_status:
             jv = rec.get("status")
             if jv is not None:
+                # #9974 R1: `status` is no longer fabricated at birth, so an
+                # absent GRAPH status is the ordinary shape AND it READS live
+                # (`live._terminal_excluded`). Compare the EFFECTIVE value, or
+                # every status-less birth is reported as `expected 'live', found
+                # None` — `divergence="content"` on a faithful journal — while a
+                # real out-of-band terminal write is still caught.
                 gv = g.get("status")
-                if gv != jv:
+                if (gv if gv is not None else "live") != jv:
                     count += 1
                     if len(mismatches) < _MAX_DIVERGENT_POINTS:
                         mismatches.append({

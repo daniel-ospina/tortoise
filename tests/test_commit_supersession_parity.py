@@ -104,7 +104,12 @@ _EXPECTED_END_STATE = {
     "corrects_count": 1,
     "old_object_status": "superseded",
     "old_object_superseded_by": SUCCESSOR_OBJECT_NAME,
-    "successor_object_status": "live",
+    # #9974 R1: the successor Object is minted with NO status, so the birth
+    # status is DERIVED-OR-ABSENT — `None` here means "the property is absent",
+    # which the read side treats as live (`live._terminal_excluded`). Pinning
+    # `"live"` would assert the fabricated default this PR removes, so this arm
+    # is the smoke contract's own proof that no writer invents one.
+    "successor_object_status": None,
 }
 
 

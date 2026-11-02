@@ -66,6 +66,7 @@ from .live import (
     epistemic_disjunction,  # #6976: the traversal-position widening
     epistemic_label_queries,  # #6976: the id-anchored per-label sweep
     is_terminal_status,
+    status_as_reported,  # #9974 R1: an absent status RENDERS as live
 )
 
 
@@ -4720,20 +4721,37 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # WITHOUT the point's provenance disappearing — the ONTOLOGY
             # §4.2/§12 doctrine is `superseded, never deleted`, and a point
             # about a reorganized team remains a true record of that turn.
-            # Additive: the key is present on every row ("" when unset), so
-            # existing consumers reading id/name/kind are unaffected.
+            # Additive: the key is present on every row, so existing consumers
+            # reading id/name/kind are unaffected.
+            #
+            # The VALUE is `status_as_reported`, not `or ""` (#9974 R1 review
+            # P2, third site): a status-less Subject is the ORDINARY shape since
+            # R1 (the fold seeds `status=$st`), and absent has always READ live
+            # — so rendering `""` here would report a live team as having no
+            # lifecycle state, and a consumer comparing `== "live"` would start
+            # seeing a None-shaped deformation. Both arms are `:Subject`-anchored
+            # by construction, so the `:Event` carve-out cannot apply.
+            #
+            # The POINT's own `status` in the payload above keeps `or ""`: the
+            # Point fold still writes `coalesce($st, n.status, 'live')`, so
+            # that row was never absent and this change does not reach it.
             s_id, s_name, s_kind = row[12], row[13], row[14]
             es_id, es_name, es_kind = row[15], row[16], row[17]
-            s_status = row[19] if len(row) > 19 else ""
-            es_status = row[20] if len(row) > 20 else ""
+            # #9974 R1 review: the short-row fallback is ABSENT (None), not
+            # `""` — `status_as_reported("")` reports `""` (a stored empty
+            # value) while `status_as_reported(None)` reports `live`, and these
+            # arms are `:Subject`-anchored, so a short row must not read as
+            # "this team has no lifecycle state".
+            s_status = row[19] if len(row) > 19 else None
+            es_status = row[20] if len(row) > 20 else None
             if st["subject"] is None and s_id:
                 st["subject"] = {"id": s_id, "name": s_name or "",
                                  "kind": s_kind or "",
-                                 "status": s_status or ""}
+                                 "status": status_as_reported(s_status)}
             elif st["subject"] is None and es_id:
                 st["subject"] = {"id": es_id, "name": es_name or "",
                                  "kind": es_kind or "",
-                                 "status": es_status or ""}
+                                 "status": status_as_reported(es_status)}
     except Exception:
         logger.warning("Epistemic-state fetch failed", exc_info=True)
 

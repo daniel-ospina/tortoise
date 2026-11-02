@@ -392,16 +392,16 @@ class TestSubjectStatusWriteIsValidated:
         sid = node_id(sdk, "Subject", "Team Alpha")
         with pytest.raises(ValueError, match="Invalid status"):
             sdk.update_entity(sid, status=bad)
-        # refused BEFORE any write: the stored value is untouched.
+        # refused BEFORE any write: the stored value is untouched — a status-less
+        # birth leaves it ABSENT since #9974 R1 (absent reads LIVE).
         (status,), = _subject_row(proj, "Team Alpha", "status")
-        assert status == "live", status
+        assert status is None, status
 
     @pytest.mark.parametrize("bad", ["retracted", "dead"])
     def test_create_entity_refuses_an_undeclared_subject_status(
             self, env, bad):
         """The SECOND door: `status` reaches `_upsert_subject` through
-        `**props`, overriding the `'live'` default — so a guard on
-        `_update_entity` alone leaves this writable."""
+        `**props`, so a guard on `_update_entity` alone leaves this writable."""
         sdk, _proj, _events, _journal_path = env
         with pytest.raises(ValueError, match="Invalid status"):
             sdk.create_entity("subject", "Team New", subjectKind="core:team",
@@ -434,33 +434,51 @@ class TestStatusIsProjectionOwnedOnSubject:
         proj.rebuild_all(str(events), confirm_destructive=True)
         rebuilt = _subject_row(proj, "Team Alpha")
         assert live == rebuilt, (live, rebuilt)
-        from tortoise.commit_ops import SUBJECT_TERMINAL_STATUSES
+        from tortoise.live import is_terminal_status
         # #3590: identity is the ID, so a superseded name and the incarnation a
         # later EXPLICIT registration mints are TWO carriers of that name (the
         # same shape `test_delete_then_recreate_…` pins). The single-carrier
         # unpack below assumed name identity, which is what this PR retires.
         # The guard's own claim is unchanged and is now asserted per carrier:
         # the burial KEEPS its terminal status and is never resurrected.
-        terminal = [r for r in live if (r[0] or "") in SUBJECT_TERMINAL_STATUSES]
+        # The shared predicate, not a hand-rolled `or ""`/`or "live"` copy: an
+        # ABSENT status is LIVE (#9974 R1), so the terminal test is the one
+        # declaration — `is_terminal_status` reads an absent value as live and
+        # its complement IS "live" (no second copy of the rule, #1178).
+        terminal = [r for r in live if is_terminal_status(r[0])]
         assert len(terminal) == 1, (
             f"a re-mention must not resurrect a superseded Subject: {live!r}")
         assert terminal[0][1] == "Team Beta", terminal
-        live_rows = [r for r in live if r[0] == "live"]
+        live_rows = [r for r in live if not is_terminal_status(r[0])]
         assert len(live_rows) == 1, (
             "the explicit re-registration must be a NEW incarnation born live "
             f"(D1: the entity set grows only from an explicit registration "
             f"that mints the id), not a mutation of the buried one: {live!r}")
         assert live_rows[0][1] is None, live_rows
 
-    def test_re_created_subject_is_born_live_not_status_less(self, env):
-        """The ON CREATE half of the guard: a NEW incarnation (hard-deleted,
-        then created again) must carry `status='live'` rather than the
-        `status`-less node the extras-only design would leave."""
+    def test_re_created_subject_is_born_live_and_carries_no_fabricated_status(
+            self, env):
+        """The ON CREATE half of the guard, as #9974 R1 narrowed it.
+
+        A NEW incarnation (hard-deleted, then created again) must READ live — and
+        since R1 it carries that by ABSENCE of the fabricated `'live'` seed the
+        fold used to write (the seed is `status=$st`, derived-or-absent; absent
+        reads LIVE under ``live._terminal_excluded``). What the ON CREATE arm must
+        still guarantee is the other direction: a status the caller DID supply
+        lands, so the arm cannot pass by dropping the property entirely.
+        """
         sdk, proj, _events, _journal_path = env
         sdk.delete_entity(node_id(sdk, "Subject", "Team Alpha"))
         sdk.create_entity("subject", "Team Alpha", subjectKind="core:team")
         (status,), = _subject_row(proj, "Team Alpha", "status")
-        assert status == "live", status
+        assert status is None, status
+
+        # anti-vacuity: the ON CREATE arm still writes a caller-supplied status.
+        sdk.delete_entity(node_id(sdk, "Subject", "Team Alpha"))
+        sdk.create_entity("subject", "Team Alpha", subjectKind="core:team",
+                          status="draft")
+        (status,), = _subject_row(proj, "Team Alpha", "status")
+        assert status == "draft", status
 
 
 # ── 5. the consistency projection-owned-status leg ──────────────────────
@@ -543,6 +561,12 @@ def test_provenance_chain_surfaces_the_subject_status(env):
                           authoredBy=sid)
     chain = sdk.provenance(pt["id"])
     assert chain["subject"]["name"] == "Team Alpha", chain
+    # #9974 R1: a status-less birth leaves the property ABSENT — and this read
+    # RENDERS an absent status as `'live'` (`live.status_as_reported`), the value
+    # absence has always READ as (`_terminal_excluded`'s NULL arm). Pinned
+    # EXACTLY: an allow-list of `("", None, "live")` would stop discriminating
+    # the value this leg asserts about, and `""` is reserved for a layer with no
+    # `status` family at all (#9974 R1 review P2).
     assert chain["subject"]["status"] == "live", chain
     _apply(proj, sdk, [RECORD])
     assert sdk.provenance(pt["id"])["subject"]["status"] == "superseded"

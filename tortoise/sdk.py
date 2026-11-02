@@ -98,6 +98,7 @@ from .live import is_terminal_status  # #2498 shared terminal predicate (Python 
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
+from .live import status_as_reported  # #9974 R1 absent-status rendering (shared with live.py)
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -4457,8 +4458,19 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
     a supplied value.
 
     ``props`` is returned as a NEW dict in the door's established key order
-    (name, kind?, status, *caller props*) so a caller-supplied ``status`` still
-    overrides the ``"live"`` seed, exactly as before.
+    (name, kind?, *caller props*).
+
+    #9974 R1: the door fabricates NO ``status`` either. It used to write
+    ``out["status"] = "live"`` on every create, so every creation record
+    CLAIMED a birth status nothing derived — and the two rebuild routes then
+    disagreed about the same record: the JSONL replay wrote the fabricated
+    ``'live'`` through ``entities._upsert_object``'s ``coalesce($st, 'live')``
+    while the record-sourced route (``cache_projection``) derives ``status``
+    from the carriers and leaves it absent — the §2.0 two-graphs defect
+    (#9974 R1). ``status`` is a DERIVED cache (§2.6,
+    ``02-identity-and-placement.md``): the caller's value is carried through
+    untouched, and "the caller named none" now reaches the fold as ABSENT —
+    exactly the #9572 rule this function already applies to the kind.
     #9572 review P2: BLANK is not a kind either. ``""`` / ``"   "`` is not
     ``None``, so it survived the ``is not None`` line and reached the fold as a
     real value — ``coalesce("", stored)`` returns ``""``, so a blank re-create
@@ -4472,7 +4484,6 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
     out: dict = {"name": name}
     if kind is not None:
         out[kind_key] = kind
-    out["status"] = "live"
     out.update(props)
     return out
 
@@ -4598,8 +4609,9 @@ def _refuse_bare_lifecycle_carrier(props: dict, *, label: str, surface: str,
     #10192. The predicate is the RESULT of the write, not the presence of a
     ``status`` key: ``props['status']`` when the caller supplies one, otherwise
     the node's STORED status (``stored_status`` — probed by the caller; ``None``
-    on the create door, where the fold's ``'live'`` seed is what the write will
-    leave). A carrier is a key the write CARRIES — a present ``None`` is the
+    on the create door, where a status-less birth now leaves the property ABSENT
+    (#9974 R1 — absent reads LIVE under ``live._terminal_excluded``, so a carrier
+    on such a node is still the incoherent write this guard refuses). A carrier is a key the write CARRIES — a present ``None`` is the
     documented CLEAR (``supersededBy=None``), not a carrier, so clearing stays
     writable.
 
@@ -6567,11 +6579,13 @@ def _item_declared_status(item: dict, depth: int = 1) -> tuple[bool, object]:
 
     ``_item_effective_status`` above returns the same VALUE the writer sees,
     but collapses "absent" and "explicitly ``None``" onto ``None``. Those are
-    different to the entity writers: an absent ``status`` takes the mint
-    default (``"live"``), while an explicit ``None`` is VALIDATED and
-    refused (``create_entity(type='subject', status=None)`` raises
-    ``Invalid status None``). Phase 1 cannot claim writer agreement without
-    the distinction, so it is kept here (#7925 review P3).
+    different to the entity writers: an absent ``status`` stores NOTHING — the
+    fold seeds ``status=$st`` so the property stays absent, which reads live
+    (``live._terminal_excluded``; #9974 R1) — while an explicit ``None`` is
+    VALIDATED and refused on the Subject door
+    (``create_entity(type='subject', status=None)`` raises ``Invalid status
+    None``). Phase 1 cannot claim writer agreement without the distinction, so
+    it is kept here (#7925 review P3).
     """
     return _item_prop_at_depth(item, "status", depth)
 
@@ -27702,10 +27716,16 @@ class TortoiseSDK:
                              # #1423: the deciding subject's own lifecycle status
                              # rides the chain, so "who decided this?" can also
                              # report that the role/team has since been
-                             # superseded. Empty string when unset (a
-                             # pre-#1423 / raw-producer node), never absent —
-                             # additive for existing consumers.
-                             "status": sub.get("status", "") or ""}
+                             # superseded. Never absent — additive for existing
+                             # consumers — and DERIVED-OR-ABSENT since #9974 R1: a
+                             # status-less birth stores no `status`, which READS
+                             # live (`live._terminal_excluded`), so it renders as
+                             # `'live'` here rather than as `''`. This lookup is
+                             # `:Subject`-anchored, so the label is fixed by
+                             # construction and the `:Event`-shaped `""` of
+                             # `expand_relationships` does not apply (#9974 R1
+                             # review P2).
+                             "status": status_as_reported(sub.get("status"))}
         # ponytail: follow outgoing rels for Role → Org delegation
         rels = proj.g.query(
             "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], properties(n)",
@@ -36147,8 +36167,13 @@ class TortoiseSDK:
                         "content": row[1] or "",
                         "kind": row[2] or "",
                         # #1350: projection-owned status + successor (Object
-                        # status fold; absent = honestly absent)
-                        "status": row[3] or "",
+                        # status fold). #9974 R1: the field is a LIVENESS
+                        # decoration, so an absent stored status renders live
+                        # (the same `live.status_as_reported` the three other
+                        # read surfaces use) rather than `""`/omitted — a
+                        # consumer comparing `== "live"` must keep matching a
+                        # live Object whose birth stored nothing.
+                        "status": status_as_reported(row[3]),
                         "superseded_by": row[4] or "",
                     }
             elif entity_type == "operator":
@@ -36733,6 +36758,15 @@ class TortoiseSDK:
         because its label's status leg died, which is exactly the conflation the
         widening above was added to end — stated rather than left to be
         rediscovered.
+
+        An ABSENT `status` on a status-carrying label (`:Point`, `:Subject`,
+        `:Object`) reports `"live"`, not `""` (#9974 R1,
+        `live.status_as_reported`): absent has always READ live
+        (`live._terminal_excluded`'s NULL arm), and since R1 that is also the
+        ordinary birth state of a status-less Object/Subject — the entity fold
+        seeds `status=$st`, derived-or-absent, never a fabricated `'live'`.
+        `""` therefore stays reserved for the two meanings above, which is the
+        distinction this field exists to carry.
         """
         from .search_engine import get_relationships
         proj = self._get_proj()
@@ -36743,15 +36777,20 @@ class TortoiseSDK:
         statuses: dict[str, str] = {}
         if related_ids:
             rows: list = []
-            for _q in epistemic_label_queries(
-                    "MATCH (n:{label}) WHERE n.id IN $ids "
-                    "RETURN n.id, n.status"):
+            for _label, _q in zip(
+                    EPISTEMIC_LABELS,
+                    epistemic_label_queries(
+                        "MATCH (n:{label}) WHERE n.id IN $ids "
+                        "RETURN n.id, n.status"),
+                    strict=True):
                 try:
-                    rows.extend(proj.g.query(
-                        _q,
-                        params={"ids": related_ids},
-                        timeout=200,
-                    ).result_set)
+                    rows.extend(
+                        (_label, _row)
+                        for _row in proj.g.query(
+                            _q,
+                            params={"ids": related_ids},
+                            timeout=200,
+                        ).result_set)
                 except Exception:
                     # ONE label failing must not blank every peer's status: the
                     # sweep widens, so a leg that fails can only fail to add.
@@ -36760,9 +36799,14 @@ class TortoiseSDK:
                         "label — the other labels' statuses are kept",
                         exc_info=True)
                     continue
-            for row in rows:
+            for _label, row in rows:
                 try:
-                    statuses[row[0]] = row[1] or ""
+                    # `or "live"` would be wrong HERE: it would report `live`
+                    # for an `:Event` peer, the one label with no `status`
+                    # family. `status_as_reported` carries that carve-out (#9974
+                    # R1 review P2) — an ABSENT status on the other three labels
+                    # reads live, exactly as `_terminal_excluded` reads it.
+                    statuses[row[0]] = status_as_reported(row[1], label=_label)
                 except Exception:
                     # A malformed status row must not turn an ADVISORY
                     # annotation into a whole-read failure on this public method
@@ -39831,8 +39875,9 @@ class TortoiseSDK:
         # without its status, and it is not merely a shape of its own: the fold
         # behind it (`_upsert_object` / `_upsert_subject`) MERGEs, so an
         # ON-MATCH re-create reaches an EXISTING node too — a guard on
-        # `update_entity` alone is bypassable in one call. `_entity_door_props`
-        # has already seeded `status='live'`, so a caller-supplied carrier is
+        # `update_entity` alone is bypassable in one call. The create door
+        # carries NO stored status for a status-less birth (#9974 R1: `props`
+        # holds only what the caller named), so a caller-supplied carrier is
         # refused here unless the same call supplies `status='superseded'`;
         # there is no stored status to consult (a born-superseded create that
         # names the status stays writable). Nothing is written yet, so the
@@ -41314,8 +41359,10 @@ class TortoiseSDK:
         """Create an entity — consolidated surface (epic #888 W2, PR #912).
 
         ``type`` routes to the right entity kind:
-          - subject  → Subject node (subjectKind, status='live')
-          - object   → Object node (objectKind, status='live')
+          - subject  → Subject node (subjectKind; no stored status — an ABSENT
+            status READS live, `live._terminal_excluded`; #9974 R1)
+          - object   → Object node (objectKind; the same derived-or-absent
+            lifecycle status)
           - event    → Event node (eventKind required) — preserves the legacy
             about* edge wiring: aboutSubject/aboutObject/aboutPoint/
             aboutDocument props are extracted and wired as typed edges
@@ -41381,11 +41428,14 @@ class TortoiseSDK:
                 type(_layer_exc).__name__, _layer_exc)
             _layer_note = None
         if t == "subject":
-            # #1423 (review P1): `status` arrives through `**props` below and
-            # OVERRIDES the `"status": "live"` default, so this surface is a
-            # SECOND door onto an undeclared Subject status. Validate against
-            # ONTOLOGY §4.2's declared lifecycle and fail closed, exactly as
-            # `_update_entity` does.
+            # #1423 (review P1): `status` arrives through `**props` below, so this
+            # surface is a SECOND door onto an undeclared Subject status.
+            # Validate against ONTOLOGY §4.2's declared lifecycle and fail closed,
+            # exactly as `_update_entity` does. #9974 R1: there is no defaulted
+            # `status` to override any more, so the door validates only a value
+            # the caller actually NAMED — an unnamed one is ABSENT on the node
+            # and reads LIVE, which is not a status to validate (hence the
+            # read-only sentinel below: it decides nothing the fold writes).
             _subj_status = props.get("status", "live")
             if (not isinstance(_subj_status, str)
                     or _subj_status not in _SUBJECT_STATUS_VALUES):

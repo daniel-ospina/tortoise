@@ -276,7 +276,12 @@ class TestShapeBDeleteThenRegister:
         s2, _oid = self._build(tmp_path, events)
         proj = s2._get_proj()
         live = _objects(proj)
-        assert live and live[0][2] == "live", live
+        # #9974 R1: the re-created Object's birth status is DERIVED-OR-ABSENT, so
+        # it is ABSENT here — pinned strictly (`is None`, not `or "live"`) so
+        # this leg still reds if the fabricated `'live'` seed is reinstated. An
+        # absent status READS live (`live._terminal_excluded`), which is the
+        # half the "buried" claim below relies on.
+        assert live and live[0][2] is None, live
         for engine in ENGINES:
             replay = _drive(engine, tmp_path, events, _fresh(tmp_path, engine))
             assert _objects(replay) == live, f"{engine} buried shape B: {_objects(replay)}"
@@ -302,7 +307,11 @@ class TestShapeBDeleteThenRegister:
         _sdk, events = env
         s2, oid = self._build(tmp_path, events)
         proj = s2._get_proj()
-        live_ids = [r[0] for r in _objects(proj) if r[2] == "live"]
+        # The shared predicate, not a hand-rolled `or "live"` copy of the rule
+        # (#1178): an ABSENT status is LIVE since #9974 R1, and
+        # `is_terminal_status` is the ONE declaration of that.
+        from tortoise.live import is_terminal_status
+        live_ids = [r[0] for r in _objects(proj) if not is_terminal_status(r[2])]
         assert live_ids and oid not in live_ids, (
             "premise: the re-creation mints a NEW id (the MERGE key is the id), "
             f"so the deleted {oid!r} is not the live carrier: {_objects(proj)}")
