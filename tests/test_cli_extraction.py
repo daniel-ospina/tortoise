@@ -672,7 +672,7 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         # APPEND at `turn_offset=2` leaves 4 rows `_t0.._t3` against a
         # `turn_count` of 2 (a WINDOW length, not a running total), so an
         # EQUALITY rule (`served != expected` — the rule that docstring rejects
-        # at `record_read.py:669-673`) refuses this HEALTHY, COMPLETE session.
+        # at `record_read.py:657-660`) refuses this HEALTHY, COMPLETE session.
         # The witness is therefore the id-space COVERAGE, not a count
         # comparison. (The `len(...) < count` arm IS present and is correct: it
         # fires only when the graph holds fewer turns than the window length,

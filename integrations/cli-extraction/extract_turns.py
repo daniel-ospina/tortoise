@@ -326,15 +326,19 @@ def _dump_shortfall(turns) -> str | None:
     facts are each decidable from the rows already in hand:
 
     * FEWER turns than the `turn_count` the session itself declares — the shape
-      a mid-capture refusal leaves, where the refused turns stayed in the
-      record;
+      a mid-capture refusal leaves, where the turns the RECORD accepted are
+      absent from the graph. (`sdk._write_capture_turns` writes a turn the
+      record did NOT take to the GRAPH, so a refused turn is the one the graph
+      HOLDS; its mirror `record_read._shortfall` says "the refused turns went to
+      the graph" because it reads the record.);
     * the ids do not cover ``0 .. max(index)`` — the `turn_offset` append shape
       (`_t2`/`_t3` here, `_t0`/`_t1` still in the record), where `turn_count`
       is a WINDOW length and cannot see the gap, and an interior hole left by
-      one refused write between two that landed;
-    * the ids stop BELOW `turn_max_index` — a refused HIGHEST turn, which is
-      invisible to the other two (a missing tail sits above `max(held)`, and
-      the run stays contiguous with `len(rows) >= turn_count`).
+      one accepted turn between two the record refused;
+    * the ids stop BELOW `turn_max_index` — an ACCEPTED highest turn (or a graph
+      write that never landed for it), which is invisible to the other two (a
+      missing tail sits above `max(held)`, and the run stays contiguous with
+      `len(rows) >= turn_count`).
 
     ⛔ THE GAP ARM IS ANCHORED AT INDEX 0 ON PURPOSE, AND THAT IS AN ASSUMPTION.
     The writer can start a window anywhere (`_capture_turn_id(session, i,
@@ -527,24 +531,6 @@ def dump(out: Path, allow_empty: bool = False, allow_partial: bool = False):
                 "so a caller-minted `is_episodic` `event` Point under the Session "
                 "matches the predicate and is not a turn "
                 "(`session_reinjection._TURN_SHAPE_FILTER`). "
-                "(pass --allow-empty to accept an empty dump)")
-        if rows:
-            # A MIXED dump: some rows carry no turn id AND the rest sat above
-            # the live end, so neither single-cause sentence below is true of
-            # this one. Naming one of them would repeat #9932's own defect one
-            # layer down ("a message that offers one cause where another
-            # applies"), and a peer review caught exactly that here.
-            raise SystemExit(
-                f"dump: 0 turns captured — the query MATCHED {len(rows)} "
-                f"point(s) under a :Session and none is this session's "
-                f"transcript: {rejected} carry no `{{session}}_t<i>` id "
-                f"(`_is_turn_of`), and {len(residue)} sit ABOVE their session's "
-                "`turn_max_index` (residue from a shorter re-capture whose "
-                "surplus sweep did not land, #10000). Both counts are measured; "
-                "the CAUSES are not — a rejected row may be a caller-minted "
-                "`is_episodic` `event` Point (an OPEN `pointKind` vocabulary, "
-                "`session_reinjection._TURN_SHAPE_FILTER`), or the id derivation "
-                "may have moved (`sdk._capture_turn_id`). "
                 "(pass --allow-empty to accept an empty dump)")
         raise SystemExit(
             "dump: 0 turns captured — the query matched NO point at all, so this is "
