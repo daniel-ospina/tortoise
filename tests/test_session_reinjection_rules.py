@@ -870,7 +870,15 @@ def test_a_rank_below_five_count_is_invariant_to_injection():
 
 
 def test_reader_window_displacement_window_zero_is_a_clean_zero():
+    """The ``window < 1`` branch is load-bearing, not cosmetic: the SAME
+    list sliced with ``merged[:window]`` reads the tail at a negative
+    window and reports ``injected_in_window=10``. Deleting the guard must
+    fail this test, so the whole shape is asserted at 0 AND at -1."""
     pool = _corpus()
     _added, _order, merged = _merge(pool, [3, 3, 3, 1])
-    out = reader_window_displacement(pool, merged, window=0)
-    assert out["base_displaced"] == 0 and out["sessions_lost"] == []
+    zero = {"window": 0, "injected_in_window": 0, "base_displaced": 0,
+            "sessions_lost": [], "sessions_before": 0,
+            "sessions_after": 0, "measured": True}
+    assert reader_window_displacement(pool, merged, window=0) == zero
+    # NEGATIVE is the case the guard exists for.
+    assert reader_window_displacement(pool, merged, window=-1) == zero
