@@ -2409,8 +2409,125 @@ def test_an_armed_capture_puts_the_turn_text_in_no_node_at_all(sdk, monkeypatch)
         "the armed capture handed no turn to the record — the graph is not "
         "carrying it either, so this assertion would prove nothing")
     proj = sdk._get_proj()
-    assert _graph_text_hits(proj, needle) == [], (
-        "a turn's text is in the graph while the record was armed")
+    _assert_the_text_is_in_exactly_one_store(proj, needle, in_graph=False)
+
+
+def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: bool):
+    """The invariant EVERY arm shares: never two stores, and never none.
+
+    `test_an_armed_capture_puts_the_turn_text_in_no_node_at_all` states one
+    half — armed ⇒ the graph holds no node carrying the text. Stated alone that
+    is satisfiable by a capture that stored the transcript NOWHERE, which is
+    why it carries a non-vacuity leg for the record half.
+
+    ⛔ THE POPULATION SCAN IS THE SAME ON EVERY ARM, and that is the point. The
+    sibling arms are pinned by id space (`_capture_turn_ids`), which asks one id
+    derivation on one edge: a writer that invents its own shape would pass them
+    while putting prose in the graph. The scan is a `CONTAINS` over every
+    text-bearing property of every node, so it does not care which arm ran or
+    who wrote the node.
+
+    ⛔ IT TAKES NO SEAM, AND THAT IS NOT AN OMISSION. A seam's
+    `point_contents()` reports what the record was **offered**, not what it
+    **committed** — `_RecordSeam(None)` appends the record and then refuses it.
+    So the record half is asserted by the CALLER, against the seam's own
+    `outcome`; this function owns only the graph population, which is the half
+    no mock can speak for.
+
+    ⚠️ **The population is FIVE PROPERTY NAMES, not "every property"**: `c`,
+    `content`, `text`, `payload`, `props` — the ones the writers in this tree
+    use (`props` is in the list although no writer currently stores it; it is a
+    Cypher parameter spelled `SET n += $props`). A writer that carried turn text
+    under a SIXTH name (`body`, `summary`, `raw`…) would be outside this
+    population. The scan therefore guards against a changed label, id space or
+    wiring — the shapes the sibling id-space assertions cannot see — and not
+    against a renamed property. Read the claim no wider than that.
+
+    ⚠️ `tests/test_10017_record_carrier.py::_text_hits` is a SECOND copy of this
+    same query (both predate this diff). A change to the property list has to
+    reach both, or this helper and that one will disagree about the population.
+
+    `in_graph=False` asserts the text is absent from the graph, `in_graph=True`
+    that it is present — a capture that lost the transcript reddens on both
+    arms, from opposite sides, which is the property acceptance bullet 5 asks
+    for. Both branches are LIVE: the armed pin uses the `False` arm.
+    """
+    graph_hits = _graph_text_hits(proj, needle)
+    if in_graph:
+        assert graph_hits, (
+            "the graph is the store on this arm and no node carries the turn's "
+            "text: the capture LOST the transcript while reporting success")
+    else:
+        assert graph_hits == [], (
+            f"a turn's text is in the graph while the record held it: "
+            f"{graph_hits!r}")
+
+
+def test_an_unarmed_capture_puts_the_turn_text_in_the_graph(sdk, monkeypatch):
+    """The capability fallback, stated as a PRESENCE, not as an absence.
+
+    ⛔ THIS IS THE TRIPWIRE FOR THE `#9548` DELETION, and that claim is measured,
+    not asserted: forcing `_record_first` true (the simulated deletion) reddens
+    this test — `assert graph_hits` fails with `[]` — because the graph write it
+    relies on is the one that gets deleted. Deleting the fallback therefore
+    redirects this test, on purpose, instead of passing silently.
+
+    ⛔ THE NAME SAYS ONLY WHAT IS ASSERTED. It deliberately does NOT claim
+    "…and not the record": with no DSN there are no record rows to inspect, and
+    a stub can only LIE about this arm — measured, a blind-`APPLIED` seam on an
+    unarmed capture produces a genuine DOUBLE store (contents in both the seam
+    and the graph), so a stubbed exclusivity assertion here would pass while the
+    defect it named was happening. The record half of this arm is therefore
+    **unasserted here and unassertable here**; `test_unarmed_record_keeps_turns_
+    in_the_graph` pins the id space and has no record-side assertion either. It
+    is not claimed anywhere else.
+
+    The sibling `test_unarmed_record_keeps_turns_in_the_graph` pins the same arm
+    by id space; this one pins it by the TEXT, so it is the arm that can tell a
+    transcript that moved from a transcript that vanished.
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    needle = "the unarmed transcript line that the graph must still hold"
+    _capture(sdk, "unarmed-property", [{"role": "user", "content": needle},
+                                       {"role": "assistant", "content": "ok"}])
+    _assert_the_text_is_in_exactly_one_store(
+        sdk._get_proj(), needle, in_graph=True)
+
+
+def test_a_refused_record_write_puts_the_turn_text_in_the_graph_not_in_neither(
+        sdk, monkeypatch):
+    """The arm where a turn is most likely to be lost, pinned by its text.
+
+    The record was available to the preflight and REFUSED this write, so the
+    graph write — already skipped on the strength of that preflight — is the
+    only thing standing between the turn and no store at all. The sibling
+    `test_a_refused_record_write_falls_back_to_the_graph` pins the ids; this
+    pins the bytes, because the failure this guards is a fallback that runs,
+    writes a node, and carries no text.
+
+    ⛔ THE ARM IS ISOLATED BY THE CARRIER, NOT BY `seam.records`. "The seam saw
+    something" is true on the UNARMED branch too (it is handed the session and
+    per-turn `PointAdded`s when the preflight says the record cannot hold the
+    turns), so a `records`-only guard would let this test silently degenerate
+    into a second copy of the unarmed arm if `_bind_tenant` ever went missing —
+    leaving the refusal fallback with no text pin and nothing reddening. The
+    record-first lane emits ONE `TurnsRecorded` carrier; only this arm has it.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    seam = _RecordSeam(None)
+    monkeypatch.setattr("tortoise.record_writer.write_live_record", seam)
+    _bind_tenant(sdk)
+    needle = "the refused transcript line the graph must not drop"
+    _capture(sdk, "refused-property", [{"role": "user", "content": needle},
+                                       {"role": "assistant", "content": "ok"}])
+    assert any(r.get("type") == "TurnsRecorded" for r in seam.records), (
+        "the record-first carrier was never emitted, so this capture took the "
+        "UNARMED branch and this is not the refusal arm at all")
+    assert seam.point_contents() == [f"[user] {needle}", "[assistant] ok"], (
+        "the refusal arm exists to put these turns IN THE GRAPH, so the seam "
+        "handing them over is what establishes the fallback was needed")
+    _assert_the_text_is_in_exactly_one_store(
+        sdk._get_proj(), needle, in_graph=True)
 
 
 def test_an_armed_record_that_cannot_name_a_tenant_keeps_the_turns_in_the_graph(
