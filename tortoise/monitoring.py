@@ -4222,6 +4222,40 @@ LOOP_STALL_EXIT_FLOOR_S = 120.0    # lower bound on an ENABLED threshold
 LOOP_STALL_EXIT_WINDOWS = 3        # consecutive stale polls required to exit
 LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before judging
 
+#: HARD CEILING — the in-flight gauge CANNOT veto this one. 0 == disabled.
+#:
+#: WHY THIS EXISTS (measured 2026-11-02, tortoise-y4mjjq). The idle gate above
+#: is correct for "don't kill a merely BUSY loop", but `workload_in_flight`
+#: stays > 0 for the whole ASGI lifetime of an SSE stream on ``GET /mcp``, and
+#: the fleet's MCP clients hold those open continuously. So the gate is TRUE
+#: BY CONSTRUCTION for the very wedge it guards: measured on the live machine,
+#: ``loop_age_ms: 275117`` / ``loop_lag_max_ms: 696164`` (11.6 min) with
+#: ``workload_idle: false`` — the loop-stall self-kill could never fire, and
+#: Fly does not replace a hung process (its docs: a failing check "does NOT
+#: automatically restart or stop a Machine"; restart policies apply only when
+#: the main process EXITS). Result: a silent, permanent outage — 97 minutes
+#: with the machine reporting ``2/2 checks passing``.
+#:
+#: The gate conflates two different questions. A request in flight does NOT
+#: stop the loop ticking (it awaits, releasing the loop); only a BLOCKED loop
+#: stops it. So 'in flight' is not evidence of progress — a TICK is. Past this
+#: ceiling the loop has produced no tick for longer than any legitimate
+#: synchronous on-loop request can run, so the in-flight request is not
+#: progressing either: it is the wedge. Killing there is bounded and
+#: recoverable (the platform replaces the process); NOT killing is unbounded
+#: and silent.
+#:
+#: The hosted 600s is ~5x the enabled-threshold floor (120s), ~68x the observed
+#: p99 loop lag (8.8s), and far above the
+#: slowest legitimate synchronous handler, so it cannot fire on load; the
+#: measured wedge exceeded it (696s max lag) within minutes.
+#:
+#: DISABLED BY DEFAULT (``0``), preserving the shipped "no destructive action in
+#: process unless an operator asks for one" contract. The HOSTED deployment
+#: arms it at 600s in ``fly.toml`` ``[env]`` — a deployment-configuration
+#: decision, so the product default is unchanged and a self-hoster opts in.
+LOOP_STALL_HARD_EXIT_S = 0.0       # 0 == hard ceiling DISABLED (the default)
+
 
 # ── #2850 P0 review: workload-in-flight gauge for the idle gate ───────────
 #
@@ -4285,6 +4319,36 @@ def _loop_stall_floor_s() -> float:
     (round-4 review P2) so the two cannot drift.
     """
     return max(LOOP_STALL_EXIT_FLOOR_S, LOOP_STALE_AFTER * 2.0)
+
+
+def _loop_stall_hard_exit_s() -> float:
+    """Resolve the hard ceiling (env ``TORTOISE_LOOP_STALL_HARD_EXIT_S``).
+
+    Fail-CLOSED to ``0`` (disabled) on anything unusable — blank, non-numeric,
+    NON-FINITE (``nan``/``inf``) or negative. Unlike the soft threshold this
+    does NOT get clamped to a floor: a value ABOVE the floor is the whole point
+    (it must sit above legitimate work), and a small value is the operator's
+    own bounded trade rather than an accident of parsing. ``nan``/``inf`` are
+    rejected for the same reason as the soft path: ``nan`` would make every
+    comparison False while looking armed, ``inf`` wedges the path in reverse.
+    """
+    raw = os.environ.get("TORTOISE_LOOP_STALL_HARD_EXIT_S")
+    if raw is None or not raw.strip():
+        return LOOP_STALL_HARD_EXIT_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "TORTOISE_LOOP_STALL_HARD_EXIT_S=%r is not a number — the hard "
+            "loop-stall ceiling stays DISABLED", raw)
+        return 0.0
+    if not math.isfinite(value):
+        logger.error(
+            "TORTOISE_LOOP_STALL_HARD_EXIT_S=%r is not finite — DISABLED", raw)
+        return 0.0
+    if value <= 0:
+        return 0.0
+    return value
 
 
 def _loop_stall_threshold() -> float:
@@ -4355,6 +4419,11 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
     /healthz 503 is the only signal, and destructive action stays out of
     process. Read the constant block above for why that is the safe default.
 
+    EXCEPTION — the hard ceiling (``TORTOISE_LOOP_STALL_HARD_EXIT_S``) bypasses
+    condition 3 deliberately: past that age the in-flight request is not
+    evidence of progress but the measure of the wedge (see
+    ``LOOP_STALL_HARD_EXIT_S``). Everything below describes the SOFT path.
+
     When explicitly enabled, an exit requires ALL of:
 
     1. the heartbeat older than ``threshold_s`` for
@@ -4383,12 +4452,23 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
     # a killer whose ``age <= nan`` comparison is False forever — the same
     # restart-loop the env parser rejects. This matches the docstring's
     # promise ("a non-finite value DISABLES").
+    # The HARD ceiling is honoured even when the soft (idle-gated) path is
+    # disabled: it is the only mechanism that can end a wedge the in-flight
+    # gauge vetoes forever. When only the hard ceiling is armed, the soft
+    # threshold is raised to it so the age comparison below can reach it.
+    hard_exit_s = _loop_stall_hard_exit_s()
     if not math.isfinite(threshold_s) or threshold_s <= 0:
-        logger.warning(
-            "#2850: in-process loop-stall self-kill DISABLED (threshold=%s). "
-            "The /healthz listener still reports staleness; destructive "
-            "action belongs to the out-of-band watchdog.", threshold_s)
-        return None
+        if hard_exit_s <= 0:
+            logger.warning(
+                "#2850: in-process loop-stall self-kill DISABLED (threshold=%s). "
+                "The /healthz listener still reports staleness; destructive "
+                "action belongs to the out-of-band watchdog.", threshold_s)
+            return None
+        logger.info(
+            "#2850: idle-gated self-kill disabled (threshold=%s); the HARD "
+            "loop-stall ceiling %.0fs is armed and cannot be vetoed by an "
+            "in-flight request", threshold_s, hard_exit_s)
+        threshold_s = hard_exit_s
     if exit_fn is None:
         # Round-4 review P2: the env path floors an enabled threshold, but a
         # PROGRAMMATIC finite-but-absurd value (``1e-9``) passed the
@@ -4424,10 +4504,29 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
                 stale_windows = 0
                 continue
             age = loop_heartbeat_age()
+            # (3a) HARD CEILING — evaluated BEFORE the soft threshold so it is
+            # a real CEILING and not `max(threshold_s, hard_exit_s)`: an
+            # operator who arms both (e.g. soft 900 beside a 600 ceiling) must
+            # still exit at 600. No tick for longer than any legitimate
+            # synchronous on-loop request can run. The in-flight gauge is
+            # deliberately NOT consulted: it is TRUE by construction during
+            # this failure (an open SSE stream, then the wedge itself), so
+            # consulting it here is what made the outage permanent and silent.
+            if hard_exit_s > 0 and age is not None and age >= hard_exit_s:
+                logger.critical(
+                    "#2850 loop-stall HARD ceiling: the event loop has not "
+                    "ticked for %s (>= %.0fs, %d request(s) in flight) — no "
+                    "legitimate handler blocks the loop this long, so this "
+                    "is a wedge. Exiting so the platform replaces the "
+                    "process instead of hanging indefinitely.",
+                    f"{age:.1f}s", hard_exit_s, workload_in_flight())
+                with contextlib.suppress(BaseException):
+                    exit_fn(1)
+                return
             if age is not None and age <= threshold_s:
                 stale_windows = 0
                 continue
-            # (3) never kill a loop that is busy doing work.
+            # (3b) never kill a loop that is busy doing work.
             try:
                 idle = bool(workload_idle_fn())
             except Exception:  # a broken predicate must not authorise a kill

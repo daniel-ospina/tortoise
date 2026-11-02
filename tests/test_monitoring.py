@@ -3322,6 +3322,7 @@ class TestStallWatchdog:
         """
         import logging
 
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
         for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
             caplog.clear()
             monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", raw)
@@ -3335,6 +3336,7 @@ class TestStallWatchdog:
 
     def test_unset_or_zero_threshold_starts_no_killer_thread(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
         assert monitoring.start_stall_watchdog(exit_fn=lambda *_: None) is None
         assert monitoring.start_stall_watchdog(
             threshold_s=0, exit_fn=lambda *_: None) is None
@@ -3376,6 +3378,90 @@ class TestStallWatchdog:
             stop.set()
             thread.join(timeout=2)
         assert fired == [1], "watchdog did not fire on a stale idle loop"
+
+    def test_hard_ceiling_fires_even_with_a_request_in_flight(self,
+                                                             monkeypatch):
+        """The 2026-11-02 outage, as a regression test.
+
+        The idle gate is TRUE by construction during the wedge it guards: an
+        open SSE stream on ``GET /mcp`` holds ``workload_in_flight`` above zero
+        for the connection's whole life, so the soft path vetoed the kill
+        forever and the machine hung for 97 minutes reporting 2/2 checks
+        passing. The hard ceiling must fire WITHOUT the idle gate.
+        """
+        import threading
+        import time
+
+        # Exercise the REAL env parser, not a monkeypatched constant: a broken
+        # parser is otherwise invisible (#2850 review P2).
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.15")
+        assert monitoring._loop_stall_hard_exit_s() == 0.15
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring.workload_enter()  # a stream is open — NOT idle, forever
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            assert monitoring.workload_is_idle() is False
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop, poll_interval=0.05)
+            assert thread is not None, (
+                "a hard ceiling must arm the watchdog even when the soft "
+                "idle-gated threshold is disabled")
+            deadline = time.monotonic() + 5.0
+            while not fired and time.monotonic() < deadline:
+                time.sleep(0.05)
+        finally:
+            # Cleanup runs even if an assert above fires, so the gauge cannot
+            # leak into a sibling test (#2850 review P2).
+            monitoring._reset_workload()
+            stop.set()
+            if thread is not None:
+                thread.join(timeout=2)
+        assert fired == [1], (
+            "the in-flight gauge vetoed the hard ceiling — this is the "
+            "permanent-silent-outage bug (#2850)")
+
+    def test_the_hard_ceiling_does_not_fire_without_one(self, monkeypatch):
+        """The safety property survives: a busy loop is still never killed
+        unless an operator arms a ceiling."""
+        import threading
+        import time
+
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
+        assert monitoring._loop_stall_hard_exit_s() == 0.0
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()
+            monitoring.workload_enter()
+            thread = monitoring.start_stall_watchdog(
+                0.1, exit_fn=fired.append, stop_event=stop,
+                poll_interval=0.05, consecutive_windows=1)
+            assert thread is not None
+            time.sleep(0.5)
+        finally:
+            monitoring._reset_workload()
+            stop.set()
+            if thread is not None:
+                thread.join(timeout=2)
+        assert fired == [], "a busy loop must not be killed without a ceiling"
+
+    def test_hard_ceiling_parser_is_fail_closed(self, monkeypatch):
+        """Every unusable value must DISABLE the ceiling (fail closed) — a
+        parsed-but-unusable ceiling is the restart-loop this file guards."""
+        for raw in ("", "   ", "banana", "nan", "NaN", "inf", "-inf", "-1", "0"):
+            monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raw)
+            assert monitoring._loop_stall_hard_exit_s() == 0.0, raw
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
+        assert monitoring._loop_stall_hard_exit_s() == 0.0
 
     def test_requires_consecutive_stale_windows(self):
         """#2850 review P2: a single stale sample must not exit the process."""
@@ -3432,6 +3518,8 @@ class TestStallWatchdog:
         so one free-tier request can freeze the loop far past any plausible
         threshold. Under the DEFAULT configuration the process must not die.
         """
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
+
         import asyncio
         import threading
         import time

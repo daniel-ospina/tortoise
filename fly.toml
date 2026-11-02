@@ -187,6 +187,25 @@ kill_timeout = 30
   destination = "/data"
 
 [env]
+  # The loop-stall HARD ceiling (#2850, measured outage 2026-11-02). Arms the
+  # in-process watchdog so a WEDGED event loop exits non-zero and the machine's
+  # `on-failure` restart policy replaces the process. This is the ONLY self-heal
+  # available: Fly's own docs are explicit that a failing health check "does NOT
+  # automatically restart or stop a Machine" and that restart policies act only
+  # on process EXIT — and `[checks.loop_liveness]` cannot even go red here,
+  # because its predicate requires `stale AND idle` while a wedged app keeps an
+  # MCP stream counted as in flight (`workload_idle: false`). Measured: 97 min
+  # wedged, `loop_lag_max_ms` 696164, machine reporting 2/2 checks passing.
+  # DEPENDENCY, measured not assumed: the exit only becomes a RESTART because
+  # this machine's restart policy is `on-failure` / `max_retries 10`, verified
+  # 2026-11-02 via `fly machine status 8654509b634758 --display-config`. That is
+  # a MACHINE attribute, not a fly.toml key (this file has no `[[restart]]`
+  # block), so a machine recreated without it turns this exit into a STOPPED
+  # machine. Re-check it after any recreate before trusting the self-heal.
+  # 600s is ~5x the enabled-threshold floor (120s), ~68x the observed p99 loop
+  # lag (8.8s), and far above any legitimate
+  # synchronous handler, so it cannot fire on load. `0` disables it.
+  TORTOISE_LOOP_STALL_HARD_EXIT_S = "600"
   # ⛔ TORTOISE_RECORD_DSN is a Fly SECRET, not an [env] key (#9548, epic #7879
   # R1) — and must never be added here. Its value is a Postgres DSN carrying a
   # password, so an [env] entry would commit a credential; and a Fly secret
