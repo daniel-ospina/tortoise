@@ -4124,13 +4124,6 @@ def _rec_point_id(rec: dict):
     return pid
 
 
-#: The chunk a journal presence scan reads at a time (#10515). Bounded so the
-#: scan's peak memory is the chunk, not the journal: a full-parsed
-#: ``EventLog.read_all()`` was measured at 631.7 ms and a 136 MB spike on 100k
-#: records, which is not a price a TYPO may pay.
-_JOURNAL_SCAN_CHUNK = 1 << 20
-
-
 _NON_POINT_ENTITY_LABELS_CACHE: frozenset[str] | None = None
 
 
@@ -4216,19 +4209,33 @@ def _apply_journal_presence(line: bytes, point_id: str,
         state[point_id] = True
 
 
-def _journal_presence_mentions(path, point_id: str) -> dict[str, bool]:
-    """Presence state for *point_id* from the journal at *path* (#10515).
+def _journal_presence_mentions(log, point_id: str) -> dict[str, bool]:
+    """Presence state for *point_id* from the journal *log* (#10515).
 
-    One bounded-memory pass over the file, JSON-parsing ONLY the lines that
-    contain the id at all — a journal with 100k records about other points costs
-    a byte scan, not 100k object constructions. The id is the needle rather than
-    the ``"id": "…"`` form so a writer's separator choice cannot defeat it; a
-    false positive is filtered by the parse (:func:`_apply_journal_presence`
-    requires the record's OWN id to match).
+    One bounded-memory pass over the journal, folding ONLY the records that name
+    the id at all — a journal with 100k records about other points costs a byte
+    scan, not 100k object constructions. The id is the needle rather than the
+    ``"id": "…"`` form so a writer's separator choice cannot defeat it; a false
+    positive is filtered by the parse (:func:`_apply_journal_presence` requires
+    the record's OWN id to match).
 
     Returns a ``{point_id: present}`` dict — ``{}`` when the journal never names
     it (the typo shape). A record naming the id that no rule can classify leaves
     it absent, which is the same answer as today.
+
+    SPLIT OF DUTIES (why this takes a LOG and not a path): the byte mechanics —
+    the window, the ``\\n``/``\\r`` separators :meth:`EventLog.read_all`
+    documents, the carried partial line — are the journal's own contract and live
+    in :meth:`EventLog.mention_lines`. The RECORD VOCABULARY is this module's, and
+    stays here in :func:`_apply_journal_presence`. ⛔ The SDK must not open the
+    journal file itself: ``_NON_FS_RECEIVERS`` in the capability model
+    (``tests/tool_surface_capabilities.py``) already declares that a read through
+    the LOG HANDLE is not "reaching a filesystem path" for the HTTP-exclusion
+    guard, while a bare ``open()`` in an SDK method body is — and this scan sits
+    under the ABSENT arm of ``update_point``, so a direct ``open()`` here
+    re-classified ``update_point``, ``create_point``, ``ingest`` and eight other
+    HTTP-EXPOSED writes as operator-only filesystem operations and redded
+    ``test_tool_registry.py`` (measured: 33 fs methods against ``main``'s 12).
 
     RESIDUALS, named rather than claimed away (review round 2):
 
@@ -4237,32 +4244,16 @@ def _journal_presence_mentions(path, point_id: str) -> dict[str, bool]:
       line — that id reads as a typo. SDK-minted ids are hex-and-dash tokens, so
       this needs a caller-supplied id; it is bounded and stated, not silent
       reasoning;
-    * the splitter handles ``\\n``, ``\\r\\n`` and bare ``\\r`` (``EventLog``
-      documents all three), but a line SPLIT ACROSS TWO CHUNKS is carried by
-      ``tail`` and parsed only once complete. ⚠️ The memory bound follows the
-      separator: for a ``\\n``/``\\r\\n`` journal the peak is one chunk, but a
-      journal with NO ``\\n`` at all makes ``tail`` the whole file, so memory is
-      linear in journal size there (the ANSWER stays correct — the run of
-      ``\\r``-separated records is still folded).
+    * the memory bound follows the separator: for a ``\\n``/``\\r\\n`` journal the
+      peak is one window, but a journal with NO ``\\n`` at all makes the carried
+      partial line the whole file, so memory is linear in journal size there (the
+      ANSWER stays correct — the run of ``\\r``-separated records is still
+      folded).
     """
     needle = str(point_id).encode('utf-8')
     state: dict[str, bool] = {}
-    tail = b''
-    with open(path, 'rb') as fh:
-        while True:
-            chunk = fh.read(_JOURNAL_SCAN_CHUNK)
-            if not chunk:
-                break
-            buf = tail + chunk
-            lines = buf.split(b'\n')
-            tail = lines.pop()          # a partial line — carried, never parsed
-            for line in lines:
-                for sub in line.split(b'\r'):
-                    if needle in sub:
-                        _apply_journal_presence(sub, point_id, state)
-    for sub in tail.split(b'\r'):
-        if needle in sub:
-            _apply_journal_presence(sub, point_id, state)
+    for line in log.mention_lines(needle):
+        _apply_journal_presence(line, point_id, state)
     return state
 
 
@@ -9827,7 +9818,7 @@ class TortoiseSDK:
             if point_id in known:
                 return known[point_id]
         try:
-            seen = _journal_presence_mentions(log.path, point_id)
+            seen = _journal_presence_mentions(log, point_id)
         except FileNotFoundError:
             # No journal FILE yet is the ordinary early-life typo path (a lane with
             # a configured path and nothing written). Silent, by indicator 2.

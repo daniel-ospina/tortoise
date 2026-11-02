@@ -1417,6 +1417,87 @@ def test_an_unconfirmable_graph_reports_the_loss_with_its_own_reason(tmp_path):
             sdk.close()
 
 
+class TestJournalMentionScan:
+    """The journal byte-scan's MECHANICS, pinned where they now live (#10543).
+
+    ``EventLog.mention_lines`` is the bounded-memory half of the ABSENT arm's
+    presence check (#10515). Its window/tail/separator handling used to sit in
+    ``sdk.py`` behind a bare ``open()`` — which the capability model correctly
+    reads as "this SDK operation reaches a filesystem path", so it re-classified
+    ``update_point`` (and every method that shares its write path: 33 fs methods
+    against ``main``'s 12) as an operator-only filesystem operation and redded
+    ``tests/test_tool_registry.py``. A journal read through the LOG HANDLE is the
+    shape that model already declares non-filesystem, and keeping the mechanics
+    on ``EventLog`` is what makes that true rather than an exemption.
+
+    These tests fail on the pre-fix tree by construction (the method did not
+    exist), and each one pins a behaviour the fold depends on and cannot see
+    from the outside: the carried partial line, the CR separator, the needle
+    filter, and the missing-file contract the silent early-life path relies on.
+    """
+
+    @staticmethod
+    def _journal(tmp_path, name: str, records, sep=b"\n") -> str:
+        path = tmp_path / name
+        path.write_bytes(sep.join(
+            json.dumps(r, ensure_ascii=False).encode("utf-8") for r in records))
+        return str(path)
+
+    def test_only_lines_naming_the_needle_are_yielded(self, tmp_path):
+        from tortoise.log import EventLog
+
+        journal = self._journal(tmp_path, "needle.jsonl", [
+            {"type": "PointAdded", "point": {"id": "wanted"}},
+            {"type": "PointAdded", "point": {"id": "other"}},
+            {"type": "PointRevised", "id": "wanted"},
+        ])
+        seen = list(EventLog(journal).mention_lines(b"wanted"))
+        assert len(seen) == 2, f"one line per mention, saw {seen!r}"
+        ids = [json.loads(line.decode("utf-8")) for line in seen]
+        assert [r.get("type") for r in ids] == ["PointAdded", "PointRevised"]
+        assert all(b"other" not in line for line in seen), (
+            "a line that does not name the needle must never be yielded")
+
+    def test_a_line_straddling_two_windows_is_carried_not_split(self, tmp_path):
+        """The tail carry: the needle sits in the SECOND window of ONE line."""
+        from tortoise.log import EventLog
+
+        record = {"type": "PointAdded", "point": {"id": "straddler",
+                                                    "text": "x" * 200}}
+        journal = self._journal(tmp_path, "straddle.jsonl", [record])
+        log = EventLog(journal)
+        log.MENTION_SCAN_CHUNK = 64          # force the line across windows
+        seen = list(log.mention_lines(b"straddler"))
+        assert len(seen) == 1, f"one record, one line — saw {len(seen)}"
+        assert len(seen[0]) > 64, (
+            "the fixture must actually straddle two windows, or this test "
+            "proves nothing about the carry")
+        assert json.loads(seen[0].decode("utf-8")) == record, (
+            "a carried partial line must be yielded ONCE, whole — a split "
+            "yield would fold a truncated record and lose the presence "
+            "answer for a point the journal does hold")
+
+    def test_a_bare_cr_separated_journal_still_reads(self, tmp_path):
+        """``append`` writes ``\\n``; a foreign journal may use bare ``\\r``."""
+        from tortoise.log import EventLog
+
+        journal = self._journal(tmp_path, "cr.jsonl", [
+            {"type": "PointAdded", "point": {"id": "crsplit"}},
+            {"type": "PointAdded", "point": {"id": "unrelated"}},
+        ], sep=b"\r")
+        seen = list(EventLog(journal).mention_lines(b"crsplit"))
+        assert len(seen) == 1, f"saw {seen!r}"
+        assert b"unrelated" not in seen[0]
+
+    def test_a_missing_journal_raises_rather_than_answering(self, tmp_path):
+        """The silent early-life path belongs to the CALLER, not to this reader."""
+        from tortoise.log import EventLog
+
+        with pytest.raises(FileNotFoundError):
+            list(EventLog(str(tmp_path / "never-written.jsonl"))
+                 .mention_lines(b"anything"))
+
+
 def test_an_absent_id_is_not_embedded_at_all(tmp_path, monkeypatch):
     """#10495 review P3: the derived-embedding seam runs AFTER the guard read.
 
