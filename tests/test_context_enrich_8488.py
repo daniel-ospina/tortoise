@@ -662,13 +662,24 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
             "a journalled vector whose embeddingText no longer matches its "
             "attested hash was restored SILENTLY — the #4194 identity is not "
             "checkable, which is the one property schema A′ exists to keep")
-        unreported = [tid for tid in mismatched_ids
-                      if not any(tid in m for m in messages)]
-        assert not unreported, (
-            "a divergence was reported for only SOME of the tampered Points "
-            f"(missing {unreported} of {mismatched_ids}) — "
-            "`_record_embedding_identity` must report every DISTINCT "
-            f"divergence, not just the first: {messages}")
+        # ⛔ The de-dup key is the (journalled hash, current hash) PAIR, NOT the
+        # Point id — `_record_embedding_identity` de-dups per pair and says so
+        # ("keyed by the identity pair, so every DISTINCT divergence still
+        # reports"; review cycle 2, P3). Asserting one warning per POINT would
+        # demand a stronger contract than the code makes and would red on a
+        # fixture whose turns share a text — a legitimate, intended de-dup.
+        pairs = {
+            (p.get("embedding_text_hash"), content_hash(p["embeddingText"]))
+            for ev in events for p in [ev.get("point") or {}]
+            if p.get("embeddingText") and p.get("embedding") is not None
+            and p.get("embedding_text_hash") != content_hash(p["embeddingText"])}
+        assert len(messages) == len(pairs), (
+            "one warning per DISTINCT (journal hash, text hash) pair is the "
+            f"contract — got {len(messages)} warning(s) for {len(pairs)} "
+            f"distinct pair(s): {messages}")
+        assert all(any(tid in m for tid in mismatched_ids) for m in messages), (
+            "a text-hash warning named no Point that is actually mismatched "
+            f"({mismatched_ids}): {messages}")
     finally:
         s.close()
 
