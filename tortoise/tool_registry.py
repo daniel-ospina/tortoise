@@ -1600,7 +1600,7 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 #:
 #: ⛔ The description states that `graph` is OPTIONAL — the FACT #9340 decided —
 #: and states what omission means. It does not INSTRUCT omission as the form to
-#: send (#10084 pack comment 6576482269 / `NOT-A-DECISION(10504, re-brief to the
+#: send (#10084 decision card, comment 6576482268 / `NOT-A-DECISION(10504, re-brief to the
 #: optional-graph form)`): `tortoise_list_graphs()` returns flat names with no
 #: `is_default`, so in a workspace with two or more graphs an "omit it" rule makes
 #: the model GUESS, and the guess that rule rewards lands the write on the

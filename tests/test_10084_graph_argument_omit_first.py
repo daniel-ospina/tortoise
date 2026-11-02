@@ -1,4 +1,4 @@
-"""#10084 — the `graph` DESCRIPTION sends the omitted form first.
+"""#10084 — the `graph` description states the argument is OPTIONAL, with no omit imperative.
 
 The measurement behind this file: on the ChatGPT venue a `tortoise_create_point`
 carrying a `graph` argument is refused client-side —
@@ -34,6 +34,7 @@ the same tool definitions served from two different domains. See #10084.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -57,10 +58,19 @@ def test_the_description_states_the_parameter_is_optional_not_a_drop_tactic():
     optional, omission lands on the default) and never instructs omission as the
     form to send. The imperative it replaces made a model in a ≥2-graph workspace
     GUESS — `tortoise_list_graphs()` carries no `is_default` — and the guess it
-    rewarded landed the write on the default graph."""
+    rewarded landed the write on the default graph.
+
+    ⛔ The HEAD is pinned as an EXACT SENTENCE SET, not by a phrase blocklist: a
+    blocklist only catches the wordings we thought of, and a re-worded imperative
+    ("when in doubt, leave it out") appended alongside an intact anchor would pass
+    it — the same defect back in new words. An added, removed or replaced sentence
+    reds here whatever its wording."""
     head = GRAPH_ARGUMENT_DESCRIPTION.split("Accepts")[0]
-    assert "this parameter MAY be omitted" in head, head
-    assert "that is what omission MEANS, not a form to prefer" in head, head
+    sentences = [s for s in re.split(r"(?<=\.)\s+", head.strip()) if s]
+    assert len(sentences) == 7, sentences
+    assert sentences[0] == "Optional graph to act on: this parameter MAY be omitted.", sentences[0]
+    assert "that is what omission MEANS, not a form to prefer" in sentences[2], sentences[2]
+    assert "never permission to drop the argument" in sentences[3], sentences[3]
     assert "OMIT IT" not in head, head
     assert "that is the form to send" not in head, head
 
@@ -138,8 +148,8 @@ def test_the_no_op_equivalence_is_qualified_for_a_graph_bound_credential():
 
 
 def test_the_description_still_carries_the_forms_that_are_accepted():
-    """Omit-first is not the same as omit-only: the accepted forms and the
-    transport limits #9340 pins must survive the re-wording."""
+    """Optional is not omit-first: the accepted forms and the transport limits
+    #9340 pins must survive the re-wording."""
     assert "org_<workspace>_<graph_id>" in GRAPH_ARGUMENT_DESCRIPTION
     assert "HOSTED" in GRAPH_ARGUMENT_DESCRIPTION
     assert "namespace" in GRAPH_ARGUMENT_DESCRIPTION
