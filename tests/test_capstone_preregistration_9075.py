@@ -4319,8 +4319,12 @@ def test_the_measured_base_is_printed_for_a_human_not_only_for_json(capsys, monk
 
     The expectation is read from the REPORT, not from a second `resolve_base_ref()` call (review
     cycle 6, finding 1): re-resolving renders the literal `None` in a checkout with no resolvable
-    base — the depth-1 shape the sibling test below commits as LEGITIMATE — and the tool prints
-    `(unresolved)` there, so a second resolve reds a correctly-ordered tree.
+    base — the depth-1 shape the sibling test below commits as LEGITIMATE — so a second resolve reds
+    a correctly-ordered tree. Careful with the two strings, which are NOT interchangeable:
+    `ordering_base_candidate` carries `(unresolved)` when the candidates are checked and rejected,
+    while `ordering_base` — the base the ordering was actually MEASURED against — says
+    `(not measured)`, and the candidate line is suppressed rather than printed when it is
+    UNRESOLVED. Asserting `(unresolved)` against `ordering_base` reds an ordered tree.
     """
     # ⛔ One resolution, not two (review cycle 7, finding 3): `main()` honours
     # `$PREREG_ORDERING_BASE_REF` and `check.run()` does not, so an ambient value would make the
@@ -4418,7 +4422,8 @@ def test_a_depth_one_checkout_without_a_base_reports_the_unresolved_base(tmp_pat
 
     The acceptance test asserts `report["ordering_base"]` is one of the resolved candidates. In a
     depth-1 checkout of a single branch there is no `origin/main` and no local `main`, so the honest
-    report is `(unresolved)` — and an assertion that insists on a resolved ref reds a correctly
+    report is `(not measured)` — with `(unresolved)` recorded separately as the candidate — and an
+    assertion that insists on a resolved ref reds a correctly
     ordered tree from inside the test written to prevent exactly that. The value must stay a
     reported fact; what it must NOT do is turn the unprovable third outcome into a failure.
     """
@@ -4698,3 +4703,104 @@ def test_a_depth_one_clone_of_main_reports_no_measured_base_even_though_one_reso
     assert "would be measured against: origin/main" in out, out
     # ⛔ The pre-fix line, verbatim: a base named as measured when none was.
     assert "ordering measured against: origin/main" not in out, out
+
+
+
+
+
+def test_a_squash_collapsed_base_refuses_even_when_the_contribution_is_ordered(tmp_path, monkeypatch):
+    """THE LOG-SIDE HALF of the squash-invariance rule (#10463 review cycle 7, finding 1).
+
+    WHY THIS IS THE SHAPE. The rule reads each log's add-commit **on the base** when the log is
+    already merged there, and in the contribution when it is not. That log-side read had NO witness:
+    at the head that finding was made, forcing `base_log_epochs = []` (so every log is read from
+    the contribution) left all 212 tests green, and on the real #10468 shape it flipped a REFUSAL
+    into a silent PASS. The registration side was covered; the log side — half the predicate — was
+    not. (That count is historical: the same mutation now reds three tests, this one among them.)
+
+    The shape that discriminates: the base carries the registration and the log in ONE squash commit
+    (equal epochs), while THIS contribution carries them in order. Reading the log from the
+    contribution alone therefore ACCEPTS it; reading it from the base REFUSES it.
+
+    ⛔ "Only a `_squashed_base` shape can discriminate" was FALSE (review cycle 8, finding 1): a base
+    where the log predates the registration — two separate commits — discriminates just as well, and
+    is witnessed by `test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contribution`
+    below. Both are kept because they are different paths through the same base read.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/x.git")
+    # The contribution: registration first, log second — ORDERED, and provably so.
+    prereg = _commit_prereg(
+        repo, epoch=1_700_001_000, text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    log = _write_and_commit(repo, "capstone.log", epoch=1_700_002_000)
+    # The base: the same two artefacts in ONE commit, on a ref that is NOT an ancestor of this branch.
+    base_sha = _squashed_base(repo, epoch=1_700_001_500)
+    _git(repo, "update-ref", "refs/remotes/origin/main", base_sha)
+
+    # The discrimination, asserted FIRST so the test states what it is about: the contribution's own
+    # ordering is strict (log 1_700_002_000 > prereg 1_700_001_000), so a contribution-only reading
+    # would pass this tree. It must not.
+    assert min(check._added_epochs(log)) > min(check._added_epochs(prereg))
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, (
+        "the log was accepted from the contribution's own ordering — the log-side base read is not "
+        "load-bearing, which is the exact regression #10463 exists to prevent")
+    assert "not strictly after" in failures[0], failures[0]
+    # …and the squash-collapse diagnostic names the withdrawal, because that is the only remedy.
+    assert "SAME commit" in failures[0] and "WITHDRAWAL" in failures[0], failures[0]
+
+
+def test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contribution(
+        tmp_path, monkeypatch):
+    """The SECOND shape that discriminates the base reading from the PR-internal one.
+
+    The squash-collapse shape (equal epochs on the base) is one; this is the other, and it needs no
+    squash at all: on the base the log was added BEFORE the registration (two separate commits),
+    while THIS contribution adds them in the correct order. A contribution-only reading accepts the
+    tree (the ordering here is strict); the base reading refuses it, correctly — the log was already
+    published when the registration was not.
+
+    Measured by the reviewer as the counterexample to a `_squashed_base`-only claim (review cycle 8,
+    finding 1). Kept because it exercises the log-side base read through axes the squash test does
+    not: the epochs on the base are NOT equal, and there is NO shared add-commit (the log lands
+    first, in its own commit, before the registration). ⛔ It does NOT differ by "no orphan branch" —
+    an earlier version of this line said so and was false; both witnesses build their base on an
+    orphan branch. A future change that special-cases the squash shape cannot pass both.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "remote", "add", "origin", "https://example.invalid/x.git")
+    # The contribution: registration FIRST, log second — strictly ordered HERE.
+    prereg = _commit_prereg(
+        repo, epoch=1_700_001_000, text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    log = _write_and_commit(repo, "capstone.log", epoch=1_700_002_000)
+    assert min(check._added_epochs(log)) > min(check._added_epochs(prereg)), (
+        "the contribution must be ordered, or this test cannot discriminate")
+
+    # The base: the LOG first (1_700_000_100), the registration later (1_700_000_300) — separate
+    # commits, on a ref that is not an ancestor of this branch.
+    branch = _git_out(repo, "symbolic-ref", "--short", "HEAD")
+    _git(repo, "checkout", "-q", "--orphan", "base-order")
+    _git(repo, "rm", "-rq", "--cached", "docs")
+    # ⛔ The registration is still on DISK from the branch checkout, so `git add docs` would put it
+    # in the log's commit — collapsing the two into one and measuring nothing (the first version of
+    # this test did exactly that, and its own "no SAME commit" assertion caught it). Remove it first.
+    (repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME).unlink()
+    _stage_log(repo, "capstone.log")
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "the log lands first", epoch=1_700_000_100)
+    _write_prereg_uncommitted(repo)
+    _git(repo, "add", "docs")
+    _git(repo, "commit", "-q", "-m", "the registration lands later", epoch=1_700_000_300)
+    base_sha = _git_out(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-qf", branch)
+    _git(repo, "update-ref", "refs/remotes/origin/main", base_sha)
+
+    failures = check.check_ordering(prereg, [log])
+    assert failures, (
+        "the log was accepted from the contribution's own ordering — the log-side base read is not "
+        "load-bearing on the non-squash path either")
+    assert "not strictly after" in failures[0], failures[0]
+    # No squash collapse here, so the withdrawal diagnostic must NOT fire: the remedy is a proper
+    # ordering, not a withdrawal.
+    assert "SAME commit" not in failures[0], failures[0]
