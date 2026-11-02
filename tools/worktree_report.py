@@ -635,16 +635,47 @@ def _check_digest(text: str) -> list[str]:
     return []
 
 
+def _superseded_by_later_run(suites: list[dict[str, Any]], idx: int) -> bool:
+    """A killed record (`exit: None`) is superseded when the SAME command was
+    re-run to completion LATER in this report.
+
+    This is the resumed-lane case the artifact exists FOR. A lane killed at its
+    cap leaves `exit: None` records; the lane that picks the worktree up
+    re-runs those exact commands (the ON RESUME discipline), and without this
+    rule that lane can NEVER produce a valid report: the stale killed record
+    alone holds `check` at exit 1 however green every re-run is, so the merge
+    path (`agent-infra#2977`) refuses a report whose every command has real
+    captured evidence. Measured on tortoise#10452: three killed records from a
+    predecessor lane, five completed re-runs, verdict still INVALID.
+
+    Only a LATER completed record of the byte-identical command counts — a
+    different command supersedes nothing, and neither does an earlier run (the
+    killed one is the newer statement of that command). The superseding record
+    still passes every other rule on its own iteration, so a fabricated or
+    unhashable one is refused there.
+    """
+    cmd = str(suites[idx].get("command") or "").strip()
+    if not cmd:
+        return False
+    return any(
+        str(later.get("command") or "").strip() == cmd
+        and later.get("exit") is not None
+        and later.get("log")
+        for later in suites[idx + 1:])
+
+
 def _check_suites(wt: Path, state: dict[str, Any]) -> tuple[list[str], int]:
     rules: list[str] = []
     red = 0
     if not state["suites"]:
         rules.append("no-suites")
-    for suite in state["suites"]:
+    for idx, suite in enumerate(state["suites"]):
         tag = f"suite-{suite.get('n', '?')}"
         if not str(suite.get("command") or "").strip():
             rules.append(f"suite-command-missing:{tag}")
         if suite.get("exit") is None:
+            if _superseded_by_later_run(state["suites"], idx):
+                continue
             rules.append(f"suite-incomplete:{tag}")
             continue
         if suite["exit"] != 0:
