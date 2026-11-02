@@ -692,6 +692,26 @@ def test_the_seeding_stand_in_refuses_a_changed_seed_write(probe) -> None:
     assert not graph.installs, "a refused seed must leave the graph untouched"
 
 
+def _run_recipe(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the README's recipe as a SCRIPT, so `returncode` IS the census verdict."""
+    script = (
+        "import importlib.util\n"
+        "import sys\n"
+        f"spec = importlib.util.spec_from_file_location('census', {str(PROBE_PATH)!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "rc = module.main()\n"
+        "for _step, premise, measured in module.rows:\n"
+        "    print(f'ROW\\t{premise}\\t{measured}')\n"
+        "print('RC', rc, 'UNMEASURED', len(module.unmeasured))\n"
+        "sys.exit(rc)\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", script], cwd=str(ROOT), env=env,
+        capture_output=True, text=True, timeout=120,
+    )
+
+
 def test_the_onboarding_section_measures_on_a_box_that_exports_the_hosted_key() -> None:
     """The re-run recipe must work where lanes actually run, not only on a laptop.
 
@@ -699,45 +719,46 @@ def test_the_onboarding_section_measures_on_a_box_that_exports_the_hosted_key() 
     set and `TORTOISE_SECRET_PEPPER` is unset — a STARTUP guard for the hosted
     server (#67). A fleet cell exports exactly that key for its MCP client, so
     `census_onboarding`'s `from tortoise.hosted_api import _CHECKPOINT_STEPS`
-    raised, rows 1 and 5a-5e printed as UNMEASURED and the probe exited 3: the
-    documented recipe (`README.md` → "Re-running the measurable half") could not
-    reproduce `25 premises, 0 unmeasured sections` anywhere but a box without the
-    key. These pins are green over it because `tests/conftest.py:18` supplies the
-    pepper the recipe does not — so this one reproduces the recipe, in a fresh
-    process, with the key exported and no pepper.
+    raised, the `onboarding` section was UNMEASURED (rows 1 and 5a-5e never
+    printed) and the probe exited 3: the documented recipe (`README.md` →
+    "Re-running the measurable half") could not reproduce `25 premises, 0
+    unmeasured sections` anywhere but a box without the key. These pins are green
+    over it because `tests/conftest.py:18` supplies the pepper the recipe does
+    not — so this one reproduces the recipe, in a fresh process.
+
+    Two arms, because either alone is a gate that lies: the exported arm proves
+    the section measures at all, and the unexported arm proves the fix does not
+    CHANGE a measured row (identical row blocks). The probe's other refusal knobs
+    are stripped too, so a red pin can only mean the hosted-key regression — not
+    a stray `TORTOISE_STARTER_PACKS` in the ambient env.
     """
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("TORTOISE_API_KEY", "TORTOISE_SECRET_PEPPER")}
-    env["TORTOISE_API_KEY"] = "tt_hosted_key_a_cell_exports"
-    script = (
-        "import importlib.util\n"
-        f"spec = importlib.util.spec_from_file_location('census', {str(PROBE_PATH)!r})\n"
-        "module = importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(module)\n"
-        "rc = module.main()\n"
-        "for _step, premise, measured in module.rows:\n"
-        "    print(f'ROW\\t{premise}\\t{measured}')\n"
-        "print('RC', rc, 'UNMEASURED', len(module.unmeasured), 'ROWS', len(module.rows))\n"
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("TORTOISE_API_KEY", "TORTOISE_SECRET_PEPPER",
+                         "TORTOISE_STARTER_PACKS", "PACK_STATE_DISABLE_SELF_HEAL")}
+    # Both arms share a hash seed: a set-ordered measured string would otherwise
+    # differ between two processes and read as a distortion that is not there.
+    base["PYTHONHASHSEED"] = "0"
+
+    exported = _run_recipe(dict(base, TORTOISE_API_KEY="tt_hosted_key_a_cell_exports"))
+    assert exported.returncode == 0, (
+        "the recipe must exit 0 with the hosted key exported; a non-zero exit IS "
+        "the census verdict (fail-closed 3 = a section unmeasured): "
+        f"{exported.stdout[-1600:]} / {exported.stderr[-800:]}"
     )
-    proc = subprocess.run(
-        [sys.executable, "-c", script], cwd=str(ROOT), env=env,
-        capture_output=True, text=True, timeout=300,
-    )
-    assert proc.returncode == 0, (
-        "the census must measure with the hosted key exported — "
-        f"{proc.returncode} is the recipe failing again: {proc.stderr[-1500:]}"
-    )
-    assert "RC 0 UNMEASURED 0" in proc.stdout, (
-        f"the recipe's own verdict must be reproducible, not just a section run: "
-        f"{proc.stdout[-1600:]} / {proc.stderr[-800:]}")
-    # The VERDICT is the thing that would go unchecked under the harness pepper:
-    # a row prints whether it is CONFIRMED or FALSIFIED, so pin both readings.
+    assert "RC 0 UNMEASURED 0" in exported.stdout, (
+        f"the recipe's own verdict must be reproducible: {exported.stdout[-1600:]}")
+    rows_with_key = [
+        ln for ln in exported.stdout.splitlines() if ln.startswith("ROW\t")]
     for needle in ("`team-named` is auto-satisfied",
                    "`connection-written` is in NO completion gate"):
-        line = next((ln for ln in proc.stdout.splitlines()
-                     if ln.startswith("ROW\t") and needle in ln), None)
-        assert line is not None, f"row never printed: {needle!r} in {proc.stdout[-1600:]}"
-        measured = line.split("\t")[2]
-        assert measured.startswith("CONFIRMED"), (
-            f"the recipe environment measured {needle!r} as {measured!r} — the pins "
-            "only ever read this under the harness pepper")
+        assert any(needle in ln for ln in rows_with_key), (
+            f"row never printed: {needle!r} in {exported.stdout[-1600:]}")
+
+    unexported = _run_recipe(dict(base))
+    assert unexported.returncode == 0, (
+        f"the recipe must exit 0 with no key either: {unexported.stdout[-1600:]}")
+    rows_without_key = [
+        ln for ln in unexported.stdout.splitlines() if ln.startswith("ROW\t")]
+    assert rows_without_key == rows_with_key, (
+        "clearing the key for the import must not change ONE measured row — "
+        "otherwise the fix is distorting the census rather than unblocking it")

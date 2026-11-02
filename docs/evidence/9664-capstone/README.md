@@ -236,8 +236,8 @@ The recipe above needs no environment surgery: the onboarding section imports
 `hosted_api` with a hosted `TORTOISE_API_KEY` cleared for that one import and restored
 immediately (`_hosted_startup_guard_cleared`), because `tortoise/auth.py:28-38` treats that
 key as a server-STARTUP precondition — exporting it for an MCP client (every fleet cell
-does) used to make rows 1 and 5a-5e unmeasurable on any box that exports it, leaving the
-recipe reproducible only where the key is unset (exit `3`).
+does) used to make rows 1 and 5a-5e unmeasurable on any box that exported it (exit `3`),
+so the recipe was reproducible only where the key was unset.
 Each row measures exactly the clause it prints: a two-clause premise is read clause by clause
 (the org-create init fragment for "auto-satisfied", `_NON_AGENT_STEPS` for "never an agent
 act"), and "every completion gate" is the three named gates `_GATE_SELF` / `_GATE_BUILD` /

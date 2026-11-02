@@ -69,12 +69,12 @@ def _hosted_startup_guard_cleared():
     is set and `TORTOISE_SECRET_PEPPER` is unset. That is a STARTUP guard for
     the hosted server (#67) — and a fleet cell exports exactly that key for its
     MCP client, so the onboarding section's `from tortoise.hosted_api import
-    _CHECKPOINT_STEPS` raised there, rows 1 and 5a-5e printed as UNMEASURED and
-    this probe exited 3. The documented recipe (README.md → "Re-running the
-    measurable half") therefore could not reproduce `25 premises, 0 unmeasured
-    sections` on any box that exports the key; the pins in
-    `tests/test_9664_premise_census.py` were green over it only because
-    `tests/conftest.py:18` supplies a pepper the recipe does not.
+    _CHECKPOINT_STEPS` raised there, the `onboarding` section was UNMEASURED
+    (rows 1 and 5a-5e never printed) and this probe exited 3. The documented
+    recipe (README.md → "Re-running the measurable half") therefore could not
+    reproduce `25 premises, 0 unmeasured sections` on any box that exports the
+    key; the pins in `tests/test_9664_premise_census.py` were green over it only
+    because `tests/conftest.py:18` supplies a pepper the recipe does not.
 
     The remedy is the one `auth.py`'s own message prescribes for a non-server
     process ("For local stdio, UNSET TORTOISE_API_KEY"), applied for the import
