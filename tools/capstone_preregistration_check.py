@@ -2849,7 +2849,13 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
             (sha for sha in sorted(add_shas) if sha != prereg_sha and _is_ancestor(sha, prereg_sha)),
             "",
         )
-        # For MESSAGES only. The verdict never keys on this choice.
+        # ⛔ For MESSAGES only — EVERY arm must decide over all of `add_shas` (below). The epoch
+        # chose a representative once and it was a P1 (#10529 review cycle 10); hex sort order is a
+        # representative too, and just as unrelated to the ordering being tested (`sorted(add_shas)`
+        # is the order of the SHA TEXT). git defines no ordering among several candidate commits
+        # (`git-merge-base`: "When the --all option is not given, it is unspecified which best one is
+        # output"), so determinism cannot be inherited from it — the rule has to hold over every
+        # candidate, which is what the proven-order arm below now does (#10546 review cycle 25).
         log_sha = predating_sha or (prereg_sha if atomic_pair else sorted(add_shas)[0])
         sha_known.add(log.name)
         if atomic_pair:
@@ -2946,7 +2952,14 @@ def _check_ordering_proposed(prereg: Path, logs: list[Path], pins: dict | None =
         # "(exempt by CONTENT, measured nothing: X)" — a waiver reported where none was granted, the
         # mirror of the misdescription cycle 3 fixed in the verdict line, and it teaches readers that
         # waivers are routine. A proven order returns here, before any arm that records a waiver.
-        if not atomic_pair and _is_ancestor(prereg_sha, log_sha):
+        # ⛔ OVER EVERY ADD-COMMIT, not `log_sha` (#10546 review cycle 25). `log_sha` falls back to
+        # `sorted(add_shas)[0]`, i.e. the representative was chosen by hex text: on a log with more
+        # than one add-commit (a delete and re-add) whose re-add is a descendant of the registration,
+        # whether the pair was PROVEN ORDERED or REFUSED depended on which sha sorted first — two
+        # topologically identical trees, two verdicts, and the refused one was a false red on a pair
+        # git does prove. The predating arm above has already taken every add-commit that is an
+        # ANCESTOR of the registration, so by here a descendant add-commit is the whole proof.
+        if not atomic_pair and any(_is_ancestor(prereg_sha, sha) for sha in add_shas):
             continue
         # A log that provably produced NO number cannot have been scored against thresholds
         # chosen after it was read. Re-asked of the content on every run, so the moment it gains a
@@ -3820,6 +3833,15 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
                     "UNPROVEN (the machine record is unreadable, so the atomic add of "
                     + ", ".join(sorted(unreadable_atomic)) + " could not be judged)"
                 )
+                # ⛔ …and a VIOLATION beside it was still MEASURED (#10546 review cycle 25, the
+                # mirror of #10548 r15 F3). This arm is consulted before `ordering_failures`, so an
+                # unreadable record that ALSO carries a refusal left `ordering_base` at its
+                # `(not measured)` default while the output printed the very ref the pair was
+                # refused against. `unmeasured` is empty here (its arm precedes this one), so a pair
+                # really was compared: the BASE answers "what was this measured against", which on a
+                # refusal is the ref that did the refusing.
+                if ordering_failures:
+                    report["ordering_base"] = candidate
             elif ordering_failures:
                 # ⛔ "verified" is a claim about the ORDERING, so it may not be taken from the
                 # absence of an `unmeasured` note alone (review cycle 13, finding 2). On a

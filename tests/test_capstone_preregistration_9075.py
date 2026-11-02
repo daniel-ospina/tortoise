@@ -938,6 +938,72 @@ def test_a_backdated_readd_cannot_choose_the_pair(tmp_path, monkeypatch):
     assert any("is an ANCESTOR of the pre-registration's add-commit" in f for f in failures), failures
 
 
+def _head_sha(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def test_a_readd_beside_an_unrelated_add_is_still_a_proven_order(tmp_path, monkeypatch):
+    """REGRESSION (#10546 review cycle 25): the proven-order pass may not key on a REPRESENTATIVE.
+
+    `log_sha` falls back to `sorted(add_shas)[0]` — the order of the SHA TEXT — and the proven-order
+    arm tested `_is_ancestor(prereg_sha, log_sha)`. On a delete-and-re-add log whose re-add is a
+    descendant of the registration, whether a pair git PROVES ordered passed or was refused
+    therefore depended on which add-commit sorted first: two topologically identical trees, two
+    verdicts, and the refused one was a false red. git defines no ordering among several candidates
+    (`git-merge-base`: *"When the `--all` option is not given, it is unspecified which best one is
+    output"*), so determinism cannot be inherited from it — the rule has to hold over EVERY
+    add-commit, which is what the predating arm beside it already did.
+
+    The fixture FORCES the pre-fix failure mode: the unrelated side-branch add is made to sort before
+    the re-add, so `sorted(add_shas)[0]` is the one commit git cannot order against the registration.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    seed = repo / "README.md"
+    seed.write_text("x\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "seed", epoch=1_700_000_000)
+    trunk = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(repo),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    # An UNRELATED add on a side branch: merged in later, so it is NOT an ancestor of the
+    # registration — the add-commit git can say nothing about.
+    _git(repo, "checkout", "-q", "-b", "side")
+    log = _write_and_commit(repo, "e1-e2.log", epoch=1_700_000_100)
+    side_sha = _head_sha(repo)
+    _git(repo, "checkout", "-q", trunk)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_200)
+    prereg_sha = _head_sha(repo)
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge the side branch", "side",
+         epoch=1_700_000_300)
+    # Delete, then RE-ADD after the registration: a descendant add-commit git does prove.
+    _git(repo, "rm", "-q", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "delete the log", epoch=1_700_000_400)
+    readd_sha = ""
+    for attempt in range(40):
+        log.write_text("x\n")
+        _git(repo, "add", str(log.relative_to(repo)))
+        _git(repo, "commit", "-q", "-m", f"re-add {attempt}", epoch=1_700_000_500 + attempt)
+        candidate = _head_sha(repo)
+        if candidate > side_sha:
+            readd_sha = candidate
+            break
+        # Undo the attempt so it is not reachable history and NOT an add-commit of the log.
+        _git(repo, "reset", "-q", "--hard", "HEAD~1")
+    assert readd_sha, "could not build the shape: the re-add must sort AFTER the unrelated add"
+
+    shas = {sha for _, sha in check._added_commits(log)}
+    assert shas == {side_sha, readd_sha}, check._added_commits(log)
+    # …the pre-fix representative is the UNRELATED add, and nothing predates the registration.
+    assert sorted(shas)[0] == side_sha
+    assert not any(check._is_ancestor(sha, prereg_sha) for sha in shas)
+    # …while git does prove the order the log actually entered with.
+    assert check._is_ancestor(prereg_sha, readd_sha)
+    assert _armed(prereg, [log]) == []
+
+
 def test_a_late_edit_cannot_erase_the_disclosure_requirement(tmp_path, monkeypatch):
     """REGRESSION (#10529 cycle-10 P2): the content arm must not certify "measured nothing" over a
     LATER edit — a post-green edit flipping the verdict is the silent-green class one arm earlier."""
@@ -2679,6 +2745,32 @@ def test_ruled_run_says_unproven_when_the_record_it_could_not_read_mattered(tmp_
     report = check.run(directory, use_corpus=False)
     assert report["ordering"].startswith("UNPROVEN"), report["ordering"]
     assert "e1-e2.log" in report["ordering"], report["ordering"]
+
+
+def test_an_unreadable_record_does_not_erase_the_base_a_refusal_was_measured_against(
+    tmp_path, monkeypatch
+):
+    """REGRESSION (#10546 review cycle 25): `ordering_base` may not read `(not measured)` beside a
+    refusal that WAS measured.
+
+    `run()` consults `unreadable_atomic` before `ordering_failures`, so a tree that both carries an
+    ordering violation and an unreadable machine record reported the violation while leaving the
+    BASE at its default — the field is named for the MEASUREMENT, and the failure lines beside it
+    name the ref that did the refusing. The `ordering_failures` arm keeps this true (#10548 r15 F3);
+    this is the same fact one arm earlier.
+    """
+    directory = PREREG_DIR.parent / "5087-hypothesis"
+
+    def fake_ordering(prereg, logs, pins, exempted, atomic_added, disclosures, atomic_detail,
+                      **_kwargs):
+        _kwargs["unreadable_atomic"].append("e1-e2.log")
+        return ["e1-e2.log: not strictly after the pre-registration's add-commit"]
+
+    monkeypatch.setattr(check, "check_ordering", fake_ordering)
+    monkeypatch.setattr(check, "_record_atomic_add", lambda _dir: None)
+    report = check.run(directory, use_corpus=False)
+    assert report["ordering"].startswith("UNPROVEN"), report["ordering"]
+    assert report["ordering_base"] not in ("(not measured)", check.PROPOSED_ORDERING_BASE), report
 
 
 def test_the_armed_rule_reports_its_own_base_and_never_the_ruled_one():
