@@ -1318,21 +1318,75 @@ def test_a_declared_field_that_is_not_compared_refuses():
                    sample=5)
 
 
-def test_an_EMPTY_sealed_day_refuses_rather_than_reading_as_no_sessions(
-        tmp_path):
-    """`gzip.decompress(b"")` is b"" without raising — a 20-byte empty archive
-    would otherwise vanish a day's sessions from the record silently."""
+def test_a_sealed_day_of_NO_RECORDS_is_tolerated_and_DISCLOSED(tmp_path):
+    """P1 (re-pinned): a COMPLETE archive of an empty payload is a day that
+    provably held no records — the seal writes exactly that (`eligible()` has
+    no size floor, `seal_one` compresses whatever it read), so refusing it
+    blocked the census permanently on a state only deleting evidence could
+    clear. Tolerated, and COUNTED so it cannot read as a silent skip.
+
+    Mutation that goes RED here: restoring the old `not any(line.strip())`
+    refusal in the `.gz` branch.
+    """
     import gzip
     archive = tmp_path / "archive"
     archive.mkdir()
     (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b""))
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
-    with pytest.raises(tpc.CensusError, match="EMPTY"):
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert record["empty_days"] == ["2026-10-01.jsonl.gz"]
+    report = tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1",
+                                                         content="[user] hi")}},
+                        record, sample=5)
+    assert report["verdict"] == "CLEAN"
+    # …and the tolerance is IN THE ARTIFACT, not just in the code path.
+    assert report["record"]["empty_days"] == ["2026-10-01.jsonl.gz"]
+
+
+def test_a_tolerated_empty_day_still_cannot_hide_a_graph_turn(tmp_path):
+    """The non-vacuity of the tolerance: the population comes from the GRAPH,
+    so a day that is provably empty cannot certify a turn it should have
+    carried — that turn is `missing_in_record` and the census REFUSES."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b""))
+    # The record needs at least one real session: a record with NO session at
+    # all is refused by the ZERO-sessions guard before comparison, which would
+    # make this test pass for the wrong reason.
+    _local_record(tmp_path, {"s2": _conversation(("user", "other"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    report = tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1",
+                                                         content="[user] hi")}},
+                        record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["parity"]["failed_sessions"][0]["problems"][0]["problem"] \
+        == "missing_in_record"
+
+
+def test_a_ZERO_BYTE_archive_refuses_because_the_write_never_completed(
+        tmp_path):
+    """The REAL hazard, separated from the empty-day state by SIZE: a 20-byte
+    `gzip.compress(b"")` is complete, a 0-byte file is a torn write whose day
+    is now unreadable (the seal already unlinked the plain source).
+
+    Mutation that goes RED here: dropping the `st_size == 0` arm (a 0-byte
+    file decompresses to `b""` WITHOUT raising, so it would be swallowed by
+    the empty-day tolerance).
+    """
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(b"")
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    with pytest.raises(tpc.CensusError, match="ZERO bytes"):
         tpc.read_local_record_turns(tmp_path)
 
 
 def test_a_zero_byte_PLAIN_day_that_is_not_today_refuses(tmp_path):
-    """An old day file emptied is data loss; today's may be created-but-unwritten."""
+    """The writer creates the day file LAZILY, on its first record
+    (`reflect-hook` → `appendFileSync`), so a settled day file that exists can
+    never be legitimately empty: its create/first write was interrupted."""
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
                   name="2026-11-01.jsonl")
     (tmp_path / "2026-10-30.jsonl").write_text("", encoding="utf-8")
@@ -1340,8 +1394,10 @@ def test_a_zero_byte_PLAIN_day_that_is_not_today_refuses(tmp_path):
         tpc.read_local_record_turns(tmp_path)
 
 
-def test_the_NEWEST_plain_day_may_be_empty_because_it_is_created_at_boot(
+def test_the_NEWEST_plain_day_may_be_empty_while_a_writer_creates_it(
         tmp_path):
+    """The newest file is the one a live writer is in the middle of creating
+    (lazy create → the create/first-write window), not a settled day."""
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
                   name="2026-11-01.jsonl")
     (tmp_path / "2026-11-02.jsonl").write_text("", encoding="utf-8")
@@ -1427,18 +1483,26 @@ def test_the_graph_leg_carries_embedding_text_onto_the_node(monkeypatch):
                            "non_turn_shaped": 0}, sample=5)
 
 
-def test_a_whitespace_only_day_is_EMPTY(tmp_path):
-    """Cycle-4 P2: `raw` is ['']-truthy, so a blank day slipped both guards."""
+def test_a_whitespace_only_SEALED_day_holds_no_records_and_is_tolerated(
+        tmp_path):
+    """Cycle-4 P2 re-pinned to the corrected model: `raw` is `['']`-truthy, so
+    a blank sealed day slipped the RECORD-level guard. It holds no records and
+    its archive is complete, so it is tolerated and disclosed here — the
+    zero-records record is caught by the ZERO-sessions guard instead."""
     import gzip
     archive = tmp_path / "archive"
     archive.mkdir()
     (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b"\n"))
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
-    with pytest.raises(tpc.CensusError, match="EMPTY"):
-        tpc.read_local_record_turns(tmp_path)
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["empty_days"] == ["2026-10-01.jsonl.gz"]
+    assert list(record["rows_by_key"]) == ["s1_t0"]
 
 
 def test_a_record_that_parses_ZERO_sessions_refuses(tmp_path):
+    """The guard that makes the empty-day tolerance safe at the RECORD level:
+    days may be tolerably empty, but a record with no session anywhere is not
+    evidence of parity."""
     (tmp_path / "2026-11-02.jsonl").write_text("\n\n", encoding="utf-8")
     with pytest.raises(tpc.CensusError, match="ZERO sessions"):
         tpc.read_local_record_turns(tmp_path)

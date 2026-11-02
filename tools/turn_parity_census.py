@@ -835,37 +835,71 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     occurrences: dict[str, int] = {}
     parsed = 0
     torn_tail: list[dict] = []
+    #: Sealed days that are PROVABLY empty: a complete, round-trip-verified
+    #: gzip stream whose payload holds no records. Disclosed in the artifact —
+    #: a tolerance that is not counted is indistinguishable from a day that
+    #: went missing.
+    empty_days: list[str] = []
     for path in files:
         try:
             if path.name.endswith(".gz"):
+                # ⛔ TWO on-disk states, NOT one (review P1; measured).
+                #
+                # `gzip.decompress(b"")` returns `b""` WITHOUT raising, and a
+                # valid stream of an empty payload also decompresses to `b""`
+                # — so these two are indistinguishable BY CONTENT and must be
+                # separated by SIZE:
+                #
+                #  0 bytes        the archive write never completed. The seal
+                #                 unlinks the plain source only after a
+                #                 verified round-trip (`seal_one`), so a
+                #                 0-byte archive means the only remaining copy
+                #                 of that day is unreadable -> REFUSE.
+                #  20 bytes+      `gzip.compress(b"")` — a COMPLETE archive
+                #                 that provably holds no records. Its payload
+                #                 cannot hide a turn, so it is tolerated with
+                #                 the same posture as the newest plain day and
+                #                 DISCLOSED. Refusing it permanently blocked the
+                #                 census on a state the seal really does write
+                #                 (`eligible()` has no size floor; `seal_one`
+                #                 compresses whatever it read), and the block
+                #                 could only be cleared by deleting audit
+                #                 evidence — a false refusal, not a guard.
+                size = path.stat().st_size
+                if size == 0:
+                    raise CensusError(
+                        f"the sealed day {path.name} is ZERO bytes — a "
+                        "complete gzip of an empty day is 20 bytes, so this "
+                        "archive was never written. The seal removes the "
+                        "plain source only after the archive round-trips, so "
+                        "the only remaining copy of that day is unreadable: "
+                        "an absence is NOT established")
                 raw = gzip.decompress(path.read_bytes()).decode(
                     "utf-8", "replace").splitlines()
-                # `gzip.decompress(b"")` returns b"" WITHOUT raising, and
-                # `gzip.compress(b"")` is a valid 20-byte archive — so a killed
-                # seal and a seal-of-a-0-byte-day both read as "this day held no
-                # sessions" while their records are gone. The seal refuses to
-                # create either (`_read_archive`: "an EMPTY file is not a sealed
-                # day"), so the census refuses to read one.
                 if not any(line.strip() for line in raw):
-                    raise CensusError(
-                        f"the sealed day {path.name} is EMPTY — an empty "
-                        "archive is not a day that held no sessions (the seal "
-                        "never writes one); its records are unreadable, so an "
-                        "absence is NOT established")
+                    empty_days.append(path.name)
+                    continue
             else:
                 raw = path.read_text(encoding="utf-8",
                                      errors="replace").splitlines()
                 # A SETTLED plain day (not the newest) that holds nothing is a
-                # zero-length file where a day of records belongs: the seal only
-                # removes a source once it is provably archived, so this is loss,
-                # not an empty day. The newest plain file is exempt — it is
-                # created at boot and may simply not have been written yet.
+                # zero-length file where a day of records belongs. The writer
+                # (`reflect-hook`) creates the day file LAZILY, on the first
+                # record (`appendFileSync`) — it is never created eagerly at
+                # boot — so a SETTLED day file that exists cannot legitimately
+                # be empty: its create/first-write was interrupted and the
+                # records it may have held are gone. Refuse.
+                # The newest plain file is exempt: it is the one a live writer
+                # is creating right now, so 0 bytes there is the create/first-
+                # write window, not a settled day.
                 if not any(line.strip() for line in raw) \
                         and path != newest_plain:
                     raise CensusError(
                         f"the plain day {path.name} is EMPTY and it is not the "
-                        "current day file — a settled day holds records or does "
-                        "not exist, so its records are unreadable and an "
+                        "current day file — the day file is created on its "
+                        "first record, so a settled day holds records or does "
+                        "not exist; its create/first write was interrupted and "
+                        "the records it may have held are gone, so an "
                         "absence is NOT established")
         except CensusError:
             raise
@@ -992,6 +1026,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         "sessions": len(conversations),
         "lines_parsed": parsed,
         "torn_tail": torn_tail,
+        "empty_days": empty_days,
     }
 
 
@@ -1239,7 +1274,10 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                        "files": record.get("files"),
                        "sessions": record.get("sessions"),
                        "lines_parsed": record.get("lines_parsed"),
-                       "torn_tail": record.get("torn_tail") or []}
+                       "torn_tail": record.get("torn_tail") or [],
+                       # Tolerated AND counted: a sealed day that provably
+                       # holds no records. Never a silent skip (review P1).
+                       "empty_days": record.get("empty_days") or []}
                       if record.get("leg") == "local" else
                       # Verbatim, never collapsed: a SKIPPED leg named
                       # 'hosted' is an artifact claiming a read that never
@@ -1440,6 +1478,12 @@ def main(argv: list[str] | None = None) -> int:
         for torn in record["torn_tail"]:
             print(f"torn tail  : {torn['at']} (mid-write, tolerated, "
                   f"counted — NOT a parity pass)")
+    for empty_day in report["record"].get("empty_days") or []:
+        # Disclosed, never silent: a complete verified archive of no records
+        # cannot hide a turn, but a tolerance nobody can see reads like a day
+        # that went missing.
+        print(f"empty day  : {empty_day} (a sealed day that provably held no "
+              f"records — tolerated and counted, NOT a parity pass)")
     for cls, entries in report["anomalies"].items():
         if entries:
             print(f"anomaly    : {len(entries)} {cls} "
