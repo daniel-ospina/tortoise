@@ -69,17 +69,20 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:   #9984 — first cut, from #10202 (the module as landed, 658 lines).
 #:   #10289 — re-cut: the LEG dimension of measuredness (`main_leg_coverage`) — a leg main
 #:            never EXECUTED is UNMEASURED, never clean. Nothing in the decision changed.
-#:   #10564 — re-cut at review: the leg-coverage claim is scoped to the runs the probe
+#:   #10564 (c561c2edc) — re-cut: the leg-coverage claim is scoped to the runs the probe
 #:            actually READ (`no EXAMINED run executed this leg`), and the counter
 #:            shortcut is documented as sufficient-not-necessary for a green run.
-#:   #10564 (cfbd25685) — re-cut again: the refusal NAMES the executed set, generated
-#:            from `_EXECUTED_CONCLUSIONS` (`", ".join(sorted(...))`) so the words cannot
-#:            drift from the constant, and lists non-executing states with `e.g.` as
-#:            ILLUSTRATIVE (`startup_failure` included — it is the module's own
-#:            `_UNCERTIFIABLE_CONCLUSIONS` member and the shape the probe most often
-#:            reads). No completeness claim: `absent` is not a conclusion. No logic
-#:            change in either re-cut: no new branch, no exit-code change, no polarity
-#:            change.
+#:   #10564 (cfbd25685) — re-cut: the refusal NAMES the executed set, generated from
+#:            `_EXECUTED_CONCLUSIONS` (`", ".join(sorted(...))`) so the words cannot drift
+#:            from the constant.
+#:   #10564 (91188fcfa) — re-cut: the non-executing states are marked `e.g.` ILLUSTRATIVE
+#:            (not exhaustive) and include `startup_failure` — the module's own
+#:            `_UNCERTIFIABLE_CONCLUSIONS` member and the shape the probe most often reads;
+#:            enumerating all six as final would re-seal the claim this line of review
+#:            removed. The test pins the executed-set clause AND the markers. (The commit
+#:            after this one changes this file only, so the digest stays at 91188fcfa's.)
+#:            No logic change in any re-cut: no new branch, no exit-code change, no
+#:            polarity change.
 _GATE_MODULE_SHA256 = "f4108e2e3d4db724a2b046f4ccd18e060a8652f21676d838b4c6f1889cb1886b"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
@@ -1065,6 +1068,13 @@ def test_the_refusal_names_the_conclusions_it_actually_treats_as_not_executed(tm
     for state in ("skipped", "cancelled", "neutral", "stale", "startup_failure",
                   "action_required"):
         assert state in proc.stdout, f"{state!r} missing from the refusal: {proc.stdout!r}"
+    # ...and the list must be MARKED as illustrative, or it reads as the exhaustive
+    # enumeration F1 was raised about (a mutation that drops the marker passed this test
+    # until this assertion existed — the docstring claimed the marker was checked).
+    assert "ILLUSTRATIVE, not exhaustive" in proc.stdout, (
+        f"the example list must be marked illustrative, not exhaustive: {proc.stdout!r}")
+    assert "e.g. " in proc.stdout, (
+        f"the state list must be introduced as examples: {proc.stdout!r}")
     assert "the complement of" not in proc.stdout, (
         "the message must not CERTIFY its example list as complete: the gate reads only "
         "the conclusions it observes, and `absent` is not a conclusion at all")
