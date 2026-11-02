@@ -5481,6 +5481,45 @@ class TestIssueInsightAPI:
         assert payload["repo_not_indexed"] is False
         assert payload["data_points"] == []
         assert "no prior knowledge" in payload["insight"]
+        # #8447 — the route RELAYS the SDK's marker. `config/surface-manifest.yml`
+        # declares `truncated` ALWAYS present on this body, so a route that
+        # dropped it would break a declared contract field while every
+        # SDK-level test stayed green (review round 4, P2: this arm ran no
+        # route assertion at all, so the `api` registration guarded nothing).
+        assert payload["truncated"] is False
+        assert "total_available" not in payload
+
+    def test_the_route_relays_a_truncated_verdict(self, client, monkeypatch):
+        """#8447 — a cut read reaches the BODY with its exact total.
+
+        A marker written on a sink is a developer fact; the contract is about
+        what the caller receives. Driving the real route is what proves the
+        relay rather than the SDK's internal bookkeeping.
+        """
+        import tortoise.hosted_api as hosted_api
+
+        class _FakeSDK:
+            def issue_insight(self, title, body=None, repo=None, limit=2):
+                return {
+                    "has_prior": True, "no_prior_knowledge": False,
+                    "repo_not_indexed": False,
+                    "data_points": [{"kind": "statement", "content": "alpha"}],
+                    "insight": "at least 20 graph hit(s) relate to this issue "
+                               "— check the graph before filing.",
+                    "more_in_graph": "alpha",
+                    "repo_stats": None,
+                    "truncated": True, "total_available": 20,
+                }
+
+        monkeypatch.setattr(hosted_api, "_data_sdk",
+                            lambda org: _FakeSDK())
+
+        r = client.get("/v1/issue-insight", params={"title": "anything"})
+
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["truncated"] is True
+        assert payload["total_available"] == 20
 
     def test_cross_team_isolation(self, client):
         """Team B cannot see Team A's repo stats via the REST mirror."""
