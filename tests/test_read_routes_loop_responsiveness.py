@@ -270,6 +270,25 @@ _CONSTRUCTION_OFFLOADED_READS = frozenset({
 _CONSTRUCTION_CASES = [c for c in _READ_CASES
                        if c[0] in _CONSTRUCTION_OFFLOADED_READS]
 
+#: The read cases that pass ``attach_projection=True`` to
+#: ``_data_sdk_offloaded`` (#10602 cycle-2 review, P1).
+#:
+#: These are the four routes that are about to query the DATA plane, so their
+#: SDK handle must arrive with its projection ALREADY attached — the cold open
+#: (``Projection.__init__``: connect, version probe, ``_ensure_indexes()`` and,
+#: on a restored/DR graph, the index BUILD) is budgeted by
+#: ``probe_setup_timeout()`` (20 s, up to 300 s) and belongs to the ``graph``
+#: construction lane, NOT inside the read lane's 8 s saturation bound. A route
+#: that never touches the projection (registry / control-plane reads: ``team``,
+#: ``sessions-*``, ``dream-health``) deliberately does NOT pass it — it must not
+#: pay a connect it never uses.
+_PROJECTION_ATTACHING_READS = frozenset({
+    "points-list", "point-get", "search", "topic-summary",
+})
+
+_PROJECTION_READ_CASES = [c for c in _READ_CASES
+                          if c[0] in _PROJECTION_ATTACHING_READS]
+
 
 #: Daemon worker THREAD-name prefixes whose SDK builds are NOT the request's
 #: work (#3718 review P2). ``run_on_daemon_worker`` names BOTH sweep lanes
@@ -2806,6 +2825,83 @@ def test_the_anchored_point_read_serves_on_the_read_lane_in_prefer_mode(client):
         f"the prefer-mode record arm never reached the read lane (ops seen: "
         f"{ops!r}) — it is back on the shared default executor, which is the "
         f"measured #10602 shape for the anchored point read")
+
+
+@pytest.mark.parametrize("label,handler,request_kwargs", _PROJECTION_READ_CASES)
+def test_the_cold_projection_open_rides_the_construction_lane(
+        client, monkeypatch, label, handler, request_kwargs):
+    """#10602 review cycle 2, P1: the cold open must NOT be inside the read bound.
+
+    The read lane's bound is 8 s because what it measures is a HOT query against
+    an ALREADY-ATTACHED projection (the measured store answer is 41–80 ms). The
+    cold half of a read — ``Projection.__init__``'s connect, version probe and
+    ``_ensure_indexes()``, which on a restored/DR graph BUILDS the index over the
+    whole graph — is budgeted separately by ``probe_setup_timeout()`` (20 s, up
+    to 300 s) on the ``graph`` construction lane.
+
+    If the attach slid back into the read submission, a HEALTHY store's first
+    read after a restore would be refused as a capacity failure: the 8 s bound
+    would fire during an index build and return a retryable 503 for work that is
+    merely slow-but-legitimate. This pins the ORDERING — the attach is observed
+    before the route's first read-lane submission — so that regression is red.
+
+    RED on the pre-fix shape: the projection is opened lazily inside the query
+    callable, so ``_data_sdk_with_projection`` is never reached at all and there
+    is no attach event to order (the assertion reports the empty list).
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+    _arm_session_endpoints(monkeypatch)
+
+    events: list[str] = []
+    real_attach = getattr(ha_mod, "_data_sdk_with_projection", None)
+    real_read = ha_mod._read_offload
+
+    def _attach(org):
+        events.append("attach")
+        if real_attach is None:  # pragma: no cover - the pre-fix shape
+            raise AssertionError(
+                "_data_sdk_with_projection is gone — the projection attach no "
+                "longer rides the construction lane (#10602 cycle-2 P1)")
+        return real_attach(org)
+
+    async def _read(fn, *, op):
+        events.append(f"read:{op}")
+        return await real_read(fn, op=op)
+
+    monkeypatch.setattr(ha_mod, "_data_sdk_with_projection", _attach)
+    monkeypatch.setattr(ha_mod, "_read_offload", _read)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.request(**request_kwargs())
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 200, (
+        f"[{label}] the request did not complete "
+        f"({response.status_code}: {response.text[:200]})")
+    first_read = next((i for i, e in enumerate(events)
+                       if e.startswith("read:")), None)
+    assert first_read is not None, (
+        f"[{label}] {handler} made no read-lane submission at all (events: "
+        f"{events!r}) — this case no longer exercises the query it pins")
+    attach_at = [i for i, e in enumerate(events) if e == "attach"]
+    assert attach_at, (
+        f"[{label}] {handler} never attached its projection on the "
+        f"construction lane (events: {events!r}) — the cold open is back inside "
+        f"the read callable, so the 8 s saturation bound is measuring an index "
+        f"build and a healthy store's first read after a restore is refused as "
+        f"a capacity failure (#10602 cycle-2 P1)")
+    assert attach_at[0] < first_read, (
+        f"[{label}] {handler} submitted its read BEFORE attaching the "
+        f"projection (events: {events!r}) — the cold open rides the read lane's "
+        f"8 s bound instead of the construction lane's "
+        f"probe_setup_timeout() allowance (#10602 cycle-2 P1)")
 
 
 def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
