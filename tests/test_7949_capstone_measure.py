@@ -272,7 +272,9 @@ def test_the_bars_are_the_frozen_ones():
     assert bars["E3"]["required_share"] == 1.0
     assert bars["E4"] == {"required": 15, "of": 15}
     assert bars["E5"] == {"ratio": 0.9, "raw_absolute": 0.8}
-    assert bars["floors"] == {"e1_objects": 30, "e2b_surviving_units": 30,
+    assert bars["floors"] == {"e1_objects": 30,
+                             "e1_min_before_share": 0.2,
+                             "e2b_surviving_units": 30,
                              "e3_derived_nodes": 30, "e5_rate_min_sentences": 10}
 
 
@@ -312,6 +314,29 @@ def test_a_missing_floor_refuses():
     except ValueError:
         return
     raise AssertionError("a missing floor did not refuse")
+
+
+def test_a_missing_or_unreadable_share_floor_refuses():
+    """E1's SECOND floor is a fraction, so it needs its own reader.
+
+    `e1_min_before_share: 0.2` is not an integer, so the count helper refuses it;
+    omitting it from the map is how `render_log` came to subscript a key
+    `parse_bars` never emitted (#10610 review issue 1). Absent and unreadable
+    both refuse, never "no floor stated", and `True` is an `int` in Python —
+    not a share.
+    """
+    for shape in ("absent", "unreadable", "bool"):
+        record = _prereg()
+        if shape == "absent":
+            del record["denominator_floors"]["e1_min_before_share"]
+        else:
+            record["denominator_floors"]["e1_min_before_share"] = (
+                "0.20" if shape == "unreadable" else True)
+        try:
+            measure.parse_bars(record)
+        except ValueError:
+            continue
+        raise AssertionError(f"{shape} e1_min_before_share did not refuse")
 
 
 def test_a_boolean_floor_is_not_a_count():
@@ -1106,6 +1131,25 @@ def test_the_scores_probe_refuses_a_record_that_does_not_name_the_on_head(
     assert foreign in err, err
 
 
+def _literal_path(node: ast.AST) -> tuple[str, ...] | None:
+    """A chained LITERAL subscript's key path — `bars['floors']['x']` → 3 keys.
+
+    The `e1["k"]` scan below is a single Subscript whose value is a Name, so it
+    structurally cannot see a nested read. This walks the chain so the scan can
+    cover the two maps the renderer reads, not only one of them.
+    """
+    keys: list[str] = []
+    while isinstance(node, ast.Subscript):
+        if not (isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)):
+            return None
+        keys.append(node.slice.value)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    return (node.id, *reversed(keys))
+
+
 def test_every_e1_key_the_renderer_reads_is_one_the_measure_returns():
     """P1 regression: `render_log` crashed AFTER the 7-session LLM measurement.
 
@@ -1113,7 +1157,13 @@ def test_every_e1_key_the_renderer_reads_is_one_the_measure_returns():
     (`declared_prereg` / `declared_result`), so a real run burned its cost and
     wrote nothing. No test rendered a log, so 70 green cases could not see it.
     This asserts the SHAPE statically: every `e1["k"]` the renderer and the
-    machine-record builder read must be a key `measure_e1_e2` returns.
+    machine-record builder read must be a key `measure_e1_e2` returns, and every
+    `bars[…][…]` path they read must be one `parse_bars` emits. The bar half is
+    #10610 review issue 1: `render_log`'s new E1 note subscripted
+    `bars["floors"]["e1_min_before_share"]`, a key `parse_bars` never emitted, so a
+    real run paid its 7-session cost and then died at render time — and the
+    `e1[...]` scan could not see a Subscript of a Subscript, so every pin stayed
+    green. Both maps are now resolved against the committed record.
     """
     returned = set(measure.measure_e1_e2(_REPO))
     tree = ast.parse(PROBE.read_text())
@@ -1122,6 +1172,7 @@ def test_every_e1_key_the_renderer_reads_is_one_the_measure_returns():
     # from under them would crash a real 7-session run exactly as `render_log`'s did.
     watched = {"render_log", "main", "e1_row_note", "e2_row_note"}
     read: set[str] = set()
+    bar_reads: set[tuple[str, ...]] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in watched:
             for inner in ast.walk(node):
@@ -1131,8 +1182,118 @@ def test_every_e1_key_the_renderer_reads_is_one_the_measure_returns():
                         and isinstance(inner.slice, ast.Constant)
                         and isinstance(inner.slice.value, str)):
                     read.add(inner.slice.value)
+                # …and the same rule for the BAR map: a `bars['floors'][…]` read
+                # is a Subscript OF a Subscript, which the `e1[...]` shape above
+                # cannot see at all (#10610 review issue 1 — the renderer
+                # subscripted a floor `parse_bars` never emitted, and every pin
+                # stayed green because nothing resolved a `bars` key).
+                path = _literal_path(inner)
+                if path and path[0] == "bars":
+                    bar_reads.add(path)
     assert read, "the scan found no e1[...] reads — it would prove nothing"
     assert not (read - returned), sorted(read - returned)
+    assert bar_reads, "the scan found no bars[...] reads — it would prove nothing"
+    resolved = measure.parse_bars(_prereg())
+    for path in sorted(bar_reads):
+        node: object = resolved
+        for key in path[1:]:
+            assert isinstance(node, dict) and key in node, (
+                f"{'[' + ']['.join(path) + ']'} — `parse_bars` does not carry "
+                f"{key!r} (it carries {sorted(node) if isinstance(node, dict) else node})")
+            node = node[key]
+
+
+def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
+    """#10610 review issue 1 — the render had never been EXECUTED by any test.
+
+    A static scan can only ask about keys it knows how to find. This runs the real
+    `render_log` over the committed artifacts with no DB, no model and no
+    network: `measure_e1_e2` reads `docs/evidence/9889/e1-e2-scores.json`, the
+    census is canned (`_canned_census`), the E4 receipt is the committed one, and
+    every other argument is a plain dict. Pre-fix this raised
+    `KeyError: 'e1_min_before_share'` — the render-time crash a real run reaches
+    only AFTER burning its LLM budget.
+
+    Non-vacuity: the floor is moved IN THE RECORD (0.2 → 0.35) and the re-render
+    must print the moved number, so the sentence is read from the record rather
+    than typed into the f-string.
+    """
+    census_data = _canned_census(monkeypatch)
+    e1 = measure.measure_e1_e2(_REPO)
+    e4 = measure.load_e4(_REPO)
+
+    def render(record: dict) -> str:
+        bars = measure.parse_bars(record)
+        corpus_sha = record["corpus"]["fixtures_hash"]
+        e1_out = measure.e1_outcome(**_e1_kwargs())
+        e2a_out = (measure.e2a_outcome(e1, bars) if e1["e2a_outcome"] else
+                   measure.outcome(
+                       measured=False, below_floor=False, passed=False,
+                       bar=f"{bars['E2a']['required']} of {bars['E2a']['of']}",
+                       value=f"value_units={e1['e2a_units']} "
+                             f"survived={e1['e2a_survived']}"))
+        e2b_floor = bars["floors"]["e2b_surviving_units"]
+        e2b_share = (e1["fused"] / e1["atomic_points"]
+                     if e1["atomic_points"] else 1.0)
+        e3_out = measure.e3_outcome(anchored=census_data["anchored_total"],
+                                    derived=census_data["derived_total"],
+                                    bars=bars)
+        e5 = {"arms_dir": "docs/evidence/7947/arms", "artifact": "fixture",
+              "raw_loss_count": 3, "raw_n": 25, "raw_loss": 3 / 25,
+              "narrative_loss_count": 4, "narrative_n": 25,
+              "narrative_loss": 4 / 25,
+              "recall": {"raw": {"recalled": 22, "planted": 25},
+                         "narrative": {"recalled": 21, "planted": 25}},
+              "warning": [], "partial_receipts": []}
+        e5_out = measure.e5_outcome(raw_loss=e5["raw_loss"],
+                                    narrative_loss=e5["narrative_loss"],
+                                    sentences=e5["raw_n"], bars=bars)
+        e4_out = measure.e4_outcome(edge_correct=e4["edge_correct"],
+                                    planted=e4["planted"], bars=bars)
+        return measure.render_log(
+            head="f" * 40, prereg_sha="0" * 40, bars=bars,
+            corpus_sha=corpus_sha, graph="capstone_measure_fixture_0",
+            runs=[{"session_id": "s0", "ok": True,
+                   "extraction_mode": "measured", "extracted": 1,
+                   "errors": 0, "turns": 1, "elapsed_s": 1.0,
+                   "stats": {"edus": 1, "chunks": 1,
+                   "entities": 1, "events": 1, "points": 1, "operators": 1,
+                   "search_queries": 1, "search_degraded": 0,
+                   "operator_endpoints_minted": 0, "elapsed_s": 1.0}}],
+            observed={}, unobserved={}, census_data=census_data,
+            e1=e1, e1_aux={"bare_definite": 0, "share": None},
+            e1_out=e1_out,
+            e1b_out=measure.outcome(
+                measured=True, below_floor=False,
+                passed=e1["real_facts"] >= bars["E1b"]["required"],
+                bar=f"{bars['E1b']['required']} of {bars['E1b']['of']}",
+                value=f"real_facts={e1['real_facts']}"),
+            e2a_out=e2a_out,
+            e2b_out=measure.outcome(
+                measured=True,
+                below_floor=e1["atomic_points"] < e2b_floor,
+                passed=e2b_share <= bars["E2b"]["max_fused_share"],
+                bar=f"fused share <= {bars['E2b']['max_fused_share']}",
+                value=f"fused={e1['fused']}/{e1['atomic_points']}"),
+            e3={"verdict": measure.verdict_word(e3_out),
+                "numerator": census_data["anchored_total"],
+                "denominator": census_data["derived_total"],
+                "below_floor": e3_out["below_floor"],
+                "outcome": e3_out["outcome"], "bar": e3_out["bar"],
+                "note": measure.e3_row_note(
+                    composition=census_data.get("point_composition"),
+                    e3_result=e3_out, graph="capstone_measure_fixture_0",
+                    corpus_sha=corpus_sha)},
+            e3_out=e3_out, e4=e4, e4_out=e4_out, e5=e5, e5_out=e5_out,
+            rows=_rows(), out_path="docs/evidence/9889/e1-e2-scores.json")
+
+    text = render(_prereg())
+    assert "e1 note: both before realizations clear E1's own floors" in text
+    assert "e1_min_before_share 0.2" in text, text[-3000:]
+    # The number is READ, not typed: the same render over a moved floor moves it.
+    moved = _prereg()
+    moved["denominator_floors"]["e1_min_before_share"] = 0.35
+    assert "e1_min_before_share 0.35" in render(moved)
 
 
 def test_the_committed_score_record_is_what_the_probe_produces():

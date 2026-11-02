@@ -477,10 +477,12 @@ def parse_bars(prereg: dict) -> dict:
     """EVERY bar and floor, read out of the frozen record — never typed here.
 
     The record states its thresholds as prose in ``criteria[].threshold`` and its
-    floors as integers in ``denominator_floors``. The prose is PARSED rather than
-    transcribed: a bar typed into this file is a bar nobody froze, so a lane could
-    move a threshold by editing the probe. An unparseable threshold refuses the
-    run (ValueError → G0, exit 3) instead of falling back to a default.
+    floors in ``denominator_floors`` — integer COUNTS plus E1's fraction
+    ``e1_min_before_share`` (``0.2``), which is a floor under a SHARE and so is
+    carried as a float. The prose is PARSED rather than transcribed: a bar typed
+    into this file is a bar nobody froze, so a lane could move a threshold by
+    editing the probe. An unparseable threshold refuses the run (ValueError → G0,
+    exit 3) instead of falling back to a default.
     """
     crit = _criteria(prereg)
     floors = prereg.get("denominator_floors")
@@ -493,6 +495,20 @@ def parse_bars(prereg: dict) -> dict:
             raise ValueError(f"denominator_floors[{key!r}] is not an integer: "
                              f"{value!r}")
         return value
+
+    def share_floor(key: str) -> float:
+        """A floor under a SHARE (a fraction), not a count.
+
+        ``bool`` is an ``int`` in Python and a fraction is neither, so the count
+        helper above would refuse ``0.2``; the record really does carry one
+        non-integer floor, and leaving it out of this map is how a renderer came
+        to read a key nothing emitted (#10610 review issue 1).
+        """
+        value = floors.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"denominator_floors[{key!r}] is not a number: "
+                             f"{value!r}")
+        return float(value)
 
     e1b_ok, e1b_total = _ints(r">=\s*(\d+)\s*of\s*(\d+)",
                               _threshold(crit, "E1b"), "E1b")
@@ -520,6 +536,7 @@ def parse_bars(prereg: dict) -> dict:
         "E5": {"ratio": e5_bars[0], "raw_absolute": e5_bars[1]},
         "floors": {
             "e1_objects": floor("e1_objects"),
+            "e1_min_before_share": share_floor("e1_min_before_share"),
             "e2b_surviving_units": floor("e2b_surviving_units"),
             "e3_derived_nodes": floor("e3_derived_nodes"),
             "e5_rate_min_sentences": floor("e5_rate_min_sentences"),
