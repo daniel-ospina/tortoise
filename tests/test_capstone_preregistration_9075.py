@@ -2595,3 +2595,498 @@ def test_a_multi_bundle_json_error_names_the_bundle_it_came_from(tmp_path, capsy
     assert payload["reports"], "the readable bundle's report must survive the other's error"
     assert [e["directory"] for e in payload["errors"]] == [str(empty)]
     assert f"no {check.PREREG_NAME}" in payload["errors"][0]["error"]
+
+
+# ── #10215: the step set the capstone's gate reads ────────────────────────────
+#
+# V5 (`tools/capstone_verdict_check.py`) and G5 (`probes/capstone_run.py`) read
+# the REQUIRED step set out of the frozen record, so this block decides whether
+# a step is required. A silent edit here is a silent weakening of the epic's own
+# gate — which is why the split is checked from both sides and against §4.1's
+# eight ids rather than against itself.
+
+
+def _pins_with_steps(**steps) -> dict:
+    pins = check.parse_pins(PREREG.read_text())
+    block = dict(pins["steps"])
+    block.update(steps)
+    pins = dict(pins, steps=block)
+    return pins
+
+
+def _record_with_steps(**steps) -> dict:
+    rec = _record()
+    rec["steps"] = dict(check.parse_pins(PREREG.read_text())["steps"])
+    rec["steps"].update(steps)
+    return rec
+
+
+def test_the_real_step_declaration_is_a_partition_of_the_eight():
+    """The shipped document + record split §4.1's eight, and they agree."""
+    pins = check.parse_pins(PREREG.read_text())
+    record = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    assert check.check_step_partition(pins, record) == []
+    declared = set(pins["steps"]["unconditional"]) | {
+        e["step"] for e in pins["steps"]["conditional"]}
+    assert declared == set(check.CAPSTONE_STEPS)
+
+
+def test_the_conditional_step_is_s2_3_and_says_when_it_does_not_apply():
+    """The declaration is a CONDITION, not a waiver: it names why, how it is witnessed, and where
+    the measurement lives. Removing any of the three leaves an assertion nobody can check."""
+    entry = check.parse_pins(PREREG.read_text())["steps"]["conditional"][0]
+    assert entry["step"] == "S2.3"
+    for field in check.CONDITIONAL_STEP_FIELDS:
+        assert str(entry[field]).strip(), field
+    assert check._issue_number(entry["evidence_issue"]) == 10215
+    # and the reason it is conditional is the collector's item set, cited in place
+    assert "_collect_classify_items" in entry["condition"]
+    assert "enabled=true" in entry["idle_evidence"]
+
+
+def test_a_step_dropped_from_both_lists_fails():
+    pins = _pins_with_steps(conditional=[])
+    failures = check.check_step_partition(pins, _record_with_steps(conditional=[]))
+    assert any("drops step(s) ['S2.3']" in f for f in failures), failures
+
+
+def test_a_step_declared_both_ways_fails():
+    pins = check.parse_pins(PREREG.read_text())
+    pins["steps"]["unconditional"] = [*pins["steps"]["unconditional"], "S2.3"]
+    failures = check.check_step_partition(pins, _record_with_steps())
+    assert any("BOTH unconditional and conditional" in f for f in failures), failures
+
+
+def test_a_step_id_outside_the_eight_fails():
+    pins = _pins_with_steps(
+        unconditional=[*check.CAPSTONE_STEPS[:3], "S4"])
+    failures = check.check_step_partition(pins, _record_with_steps())
+    assert any("not part of the epic's eight" in f for f in failures), failures
+
+
+def test_a_conditional_entry_without_its_evidence_fails():
+    pins = check.parse_pins(PREREG.read_text())
+    entry = dict(pins["steps"]["conditional"][0])
+    entry.pop("idle_evidence")
+    pins["steps"]["conditional"] = [entry]
+    failures = check.check_step_partition(pins, _record_with_steps())
+    assert any("omits 'idle_evidence'" in f for f in failures), failures
+
+
+def test_a_document_without_the_steps_block_fails():
+    """No declaration means the required step set can change without a reviewable diff."""
+    pins = dict(check.parse_pins(PREREG.read_text()))
+    pins.pop("steps")
+    failures = check.check_step_partition(pins, _record_with_steps())
+    assert any("pins.steps is empty" in f for f in failures), failures
+
+
+def test_a_record_that_diverges_from_the_document_fails():
+    """The probe freezes the RECORD, so a divergence means the gate enforces something the
+    argument never argued."""
+    rec = _record_with_steps()
+    rec["steps"]["unconditional"] = ["S0", "S1", *rec["steps"]["unconditional"]]
+    failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert any("steps.unconditional" in f and "can disagree" in f for f in failures), failures
+
+
+def test_a_conditional_step_without_a_record_block_fails():
+    rec = _record()
+    failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert any("carries no steps block" in f for f in failures), failures
+
+
+# The RECORD's producer is another lane, so its SHAPE is untrusted input — the module's own
+# contract (`_mapping`: "never a bare dict()/.get() crash"). A truthy wrong type on the RECORD
+# half used to raise `TypeError` out of `check_step_partition` ("'int' object is not iterable"),
+# past `run()` (which catches nothing) to `main()` (which catches only CheckError) — escaping as
+# a traceback with exit **1**, the code this tool reserves for FINDINGS. The pins half already
+# refused the same shape with CheckError (exit 2); these two arms hold the record half to it.
+# Both are `raise`-based, so they fail on the pre-fix code as TypeError, not as a mismatch.
+@pytest.mark.parametrize("field, value", [("unconditional", 5), ("conditional", 1)])
+def test_a_wrong_typed_record_steps_field_is_a_parse_error_not_a_crash(field, value):
+    rec = _record_with_steps()
+    rec["steps"][field] = value
+    with pytest.raises(check.CheckError) as excinfo:
+        check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert field in str(excinfo.value), excinfo.value
+    assert "expected a list" in str(excinfo.value), excinfo.value
+
+
+def test_the_wrong_typed_record_field_exits_2_and_says_why(tmp_path, capsys):
+    """End to end: the CLI must report a PARSE error (exit 2), not a traceback with exit 1.
+
+    This is the property the finding is about — the exit CODE is the tool's contract, and an
+    uncaught exception borrows the one reserved for "the table has findings".
+    """
+    directory = _materialise(tmp_path, _record_with_steps(unconditional=5))
+    code = check.main(["--dir", str(directory), "--no-git", "--no-corpus", "--json"])
+    out = capsys.readouterr()
+    assert code == 2, out.err
+    # ⛔ The WHOLE payload, not its last line: `#10468` made the error branch pretty-print
+    # (`indent=2`), so `splitlines()[-1]` is `}` and this assertion parsed nothing. The property
+    # under test is the exit CODE and that the message names the field — never the line shape.
+    body = json.loads(out.out)
+    assert body["ok"] is False
+    assert "unconditional" in body["error"]
+
+
+# ── the steps pin's AUTHORING ORDER (#10215) ─────────────────────────────────
+#
+# ⛔ These build a REAL throwaway git repo (`_repo` rebinds `check.REPO_ROOT`),
+# because the predicate is history. A `tmp_path` bundle never executes the order
+# arm at all — measured at the round-6 review: deleting the whole order branch
+# left every test green, which is the vacuity this section exists to remove.
+
+DEV_DOC_WITHOUT = "# Pre-registration\n\nNo deviation section here.\n"
+DEV_DOC_WITH = ("# Pre-registration\n\n## Deviations\n\n"
+                "### D1 — 2026-11-01 — the step set\n\n"
+                "- **Original rule**: all eight observed.\n"
+                "- **New rule**: seven required + S2.3 conditional.\n"
+                "- **Reason**: the old rule was unsatisfiable.\n")
+
+
+def _dev_repo(tmp_path, monkeypatch, *, steps_first: bool, doc: str = DEV_DOC_WITHOUT,
+              already_pinned: bool = False, null_first: bool = False):
+    """A throwaway repo holding a record, a scored log, and the argument."""
+    repo = _repo(tmp_path, monkeypatch)
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True)
+
+    def write_record(*, with_steps: bool, null_steps: bool = False,
+                     unconditional: list[str] | None = None) -> None:
+        record = {"schema": check.PREREG_SCHEMA,
+                  "written_before_any_scored_run": True,
+                  "written_before_any_scored_run_basis": f"no SCORED run; {check.UNSCORED}",
+                  "document": "PRE-REGISTRATION.md"}
+        if null_steps:
+            record["steps"] = None
+        elif with_steps:
+            record["steps"] = {
+                "unconditional": unconditional or ["S0"],
+                "conditional": [{"step": "S2.3", "condition": "c"}]}
+        (bundle / check.MACHINE_RECORD).write_text(json.dumps(record, indent=2) + "\n")
+
+    def commit(paths, message: str, epoch: int) -> None:
+        for p in paths:
+            _git(repo, "add", str(p.relative_to(repo)))
+        _git(repo, "commit", "-q", "-m", message, epoch=epoch)
+
+    (bundle / check.PREREG_NAME).write_text(doc)
+    record_path = bundle / check.MACHINE_RECORD
+    log_path = bundle / "capstone-measured-e0fc940b.log"
+    log_path.write_text("# generated: 2026-10-23T23:16:55Z\n# result: COMPLETED\n")
+
+    if already_pinned:
+        # The block was pinned BEFORE the run and EDITED after it: a key-presence
+        # test dates this to the first commit and stays silent, which is the shape
+        # round 6 filed and round 7 found untested.
+        write_record(with_steps=True)
+        commit([bundle / check.PREREG_NAME, record_path], "freeze the step set", 1_700_000_000)
+        commit([log_path], "the scored measurement", 1_700_000_100)
+        write_record(with_steps=True, unconditional=["S0", "S1"])
+        commit([record_path], "widen the rule after the number", 1_700_000_200)
+    elif null_first:
+        # `"steps": null` in the definitionally pre-scored commit, filled in later:
+        # `"steps" in record` is True at commit 1, so a key test stays green forever.
+        write_record(with_steps=False, null_steps=True)
+        commit([bundle / check.PREREG_NAME, record_path], "freeze the record", 1_700_000_000)
+        commit([log_path], "the scored measurement", 1_700_000_100)
+        write_record(with_steps=True)
+        commit([record_path], "fill the step set after the number", 1_700_000_200)
+    elif steps_first:
+        write_record(with_steps=True)
+        commit([bundle / check.PREREG_NAME, record_path], "freeze the step set", 1_700_000_000)
+        commit([log_path], "the scored measurement", 1_700_000_100)
+    else:
+        write_record(with_steps=False)
+        commit([bundle / check.PREREG_NAME, record_path], "freeze the record", 1_700_000_000)
+        commit([log_path], "the scored measurement", 1_700_000_100)
+        write_record(with_steps=True)
+        commit([record_path], "pin the step set AFTER the number", 1_700_000_200)
+    return bundle
+
+
+def test_a_steps_pin_authored_AFTER_a_scored_log_without_a_deviation_reds(tmp_path, monkeypatch):
+    """The finding the rule exists for — and the one no earlier test could produce."""
+    bundle = _dev_repo(tmp_path, monkeypatch, steps_first=False)
+    failures = check.check_steps_block_is_pre_scored(bundle)
+    assert failures, "a rule pinned after the number must not pass silently"
+    assert "were added" in failures[0] and "## Deviations" in failures[0], failures
+
+
+def test_a_steps_pin_authored_BEFORE_a_scored_log_passes(tmp_path, monkeypatch):
+    """The honest lifecycle: freeze the rule, then measure. Must not be refused."""
+    assert check.check_steps_block_is_pre_scored(
+        _dev_repo(tmp_path, monkeypatch, steps_first=True)) == []
+
+
+def test_the_same_post_number_pin_passes_once_the_deviation_is_RECORDED(tmp_path, monkeypatch):
+    """§8's actual requirement: the fix for the finding is the ENTRY, not a quieter log."""
+    assert check.check_steps_block_is_pre_scored(
+        _dev_repo(tmp_path, monkeypatch, steps_first=False, doc=DEV_DOC_WITH)) == []
+
+
+def test_a_bare_deviations_HEADING_does_not_clear_the_finding(tmp_path, monkeypatch):
+    """A heading with nothing under it discloses nothing — the "add one line" exit."""
+    bare = "# Pre-registration\n\n## Deviations\n\n- **todo**\n"
+    failures = check.check_steps_block_is_pre_scored(
+        _dev_repo(tmp_path, monkeypatch, steps_first=False, doc=bare))
+    assert failures, "an empty Deviations section must not satisfy §8"
+
+
+def test_an_EDITED_pin_reports_the_EDIT_epoch_not_the_pin_epoch(tmp_path, monkeypatch):
+    """The shape round 6 filed and round 7 found untested.
+
+    The block was pinned BEFORE the run and EDITED after it. A key-presence test
+    (`"steps" in record`) dates it to the first commit and stays green; the content
+    compare must return the EDIT's epoch, so the failure must quote the gap to the
+    scored-log epoch (100s), not to the original pin (200s).
+    """
+    bundle = _dev_repo(tmp_path, monkeypatch, steps_first=True, already_pinned=True)
+    failures = check.check_steps_block_is_pre_scored(bundle)
+    assert failures, "an edited rule after the number must not pass silently"
+    assert "were added" in failures[0], failures
+    assert "100s AFTER" in failures[0], failures
+
+
+def test_a_null_steps_key_filled_in_after_the_number_reds(tmp_path, monkeypatch):
+    """The other key-presence false negative: the KEY is present from the start."""
+    bundle = _dev_repo(tmp_path, monkeypatch, steps_first=False, null_first=True)
+    failures = check.check_steps_block_is_pre_scored(bundle)
+    assert failures and "were added" in failures[0], failures
+
+
+def test_the_RETIRED_declaration_field_is_reported_as_retired(tmp_path):
+    """`steps_pinned_after_scored_log` is dead weight now, and the message says so.
+
+    Round 5 required the field; this branch then refused it on the false premise
+    that it contradicts `written_before_any_scored_run` (it does not — that field
+    describes the record's ORIGINAL freeze, so naming the log the pin postdates is
+    the honest pairing). The message must name the retirement, not accuse the
+    record of an incompatibility that does not exist.
+    """
+    record = {"schema": check.PREREG_SCHEMA,
+              "written_before_any_scored_run": True,
+              "written_before_any_scored_run_basis": f"no SCORED run; {check.UNSCORED}",
+              "steps": {"conditional": [{"step": "S2.3"}]},
+              check.STEPS_PINNED_AFTER: "capstone-measured-e0fc940b.log"}
+    (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(record))
+    (tmp_path / "capstone-measured-e0fc940b.log").write_text("# result: COMPLETED\n")
+    failures = check.check_steps_block_is_pre_scored(tmp_path)
+    assert failures and "RETIRED" in failures[0], failures
+    assert "Delete the field" in failures[0], failures
+
+
+def test_no_steps_block_means_no_deviation(tmp_path):
+    record = {"schema": check.PREREG_SCHEMA, "written_before_any_scored_run": True}
+    (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(record))
+    (tmp_path / "capstone-measured-e0fc940b.log").write_text("x\n")
+    assert check.check_steps_block_is_pre_scored(tmp_path) == []
+
+
+def test_the_deviation_section_is_detected_from_a_REAL_ENTRY_not_a_mention():
+    """This file MENTIONS `## Deviations` inside §8's prose, so a substring search
+    would pass on the rule text alone; and a heading with no entry passes nothing."""
+    assert check._document_has_deviations(PREREG.parent) is True
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / check.PREREG_NAME).write_text(
+            "## 8. Change control\n\nrecorded in a `## Deviations` section appended below\n")
+        assert check._document_has_deviations(d) is False, "a mention is not the section"
+        (d / check.PREREG_NAME).write_text("## Deviations\n\n- nothing yet\n")
+        assert check._document_has_deviations(d) is False, "a bare heading discloses nothing"
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1 — 2026-11-01\n\n- **Original rule**: x\n")
+        assert check._document_has_deviations(d) is True
+        # ⛔ round 7: the body scan ran to EOF, so a bare `### D1` above UNRELATED
+        # prose passed. Both shapes below returned True before the fix.
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1\n\n## 9. Next\n\nunrelated prose\n")
+        assert check._document_has_deviations(d) is False, (
+            "prose in a LATER section is not this entry's body")
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1\n\n# Pre-registration\n\nlots of unrelated prose\n")
+        assert check._document_has_deviations(d) is False
+        # ⛔ round 8: stopping at ANY `#`-line made a properly structured entry read as
+        # bodiless, so the repair the failure message prescribes could not clear it.
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1 — 2026-11-01\n\n#### Original rule\n\n"
+            "all eight observed.\n\n#### New rule\n\nseven required.\n")
+        assert check._document_has_deviations(d) is True, (
+            "a `####`-structured entry carries its body one heading level down")
+        # ⛔ and only the FIRST `### D` was examined: an empty D1 above a filled D2 is
+        # a real disclosure, and reading one entry reported it as absent.
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1\n\n### D2 — 2026-11-01\n\n- **Original rule**: x\n")
+        assert check._document_has_deviations(d) is True, (
+            "every entry is examined, not only the first")
+        # a `##` section that follows still ends the entry
+        (d / check.PREREG_NAME).write_text(
+            "## Deviations\n\n### D1\n\n#### Original rule\n\n## 9. Next\n\nprose\n")
+        assert check._document_has_deviations(d) is False, (
+            "the entry ends at its own level or shallower, not at its own subsections")
+        # ⛔ round 9: an EMPTY Deviations section passed whenever a LATER section had a
+        # `### D…`-prefixed heading — the section was never bounded, so a `### Data
+        # sources` under `## Appendix` donated its body. Measured True before the fix.
+        for later in ("## 9. Provenance\n\n### Denominator floors\n\n| n | src |\n",
+                      "## Appendix\n\n### Data sources\n\ncorpus at x.\n",
+                      "## Appendix\n\n```markdown\n### D1\n\nexample\n```\n"):
+            (d / check.PREREG_NAME).write_text("## Deviations\n\n" + later)
+            assert check._document_has_deviations(d) is False, (
+                f"a heading in a LATER section is not this section's entry: {later!r}")
+
+
+def test_the_shipped_record_carries_no_retired_key():
+    """A SHALLOW-checkout claim only, stated as such.
+
+    On this box (`git rev-parse --is-shallow-repository` → true) the rule abstains at
+    `history_unavailable()` before the order arm runs, so all this test can prove is
+    that the shipped record has not re-gained the RETIRED key. It CANNOT detect a
+    post-scored pin here; the order arm is covered by the `_dev_repo` fixtures above,
+    which build their own non-shallow repository (#10215 round 8).
+    """
+    assert check.check_steps_block_is_pre_scored(PREREG.parent) == []
+    # ⛔ Read the FILE (#10215 round 9): `_record()` is a fixture BUILDER — it parses
+    # the document's pins into a fixed literal dict and never opens the machine record,
+    # so asserting against it was green whatever `preregistration.json` contained.
+    shipped = json.loads((PREREG.parent / check.MACHINE_RECORD).read_text())
+    assert check.STEPS_PINNED_AFTER not in shipped, (
+        "the shipped record re-gained the retired key")
+
+
+# ── #10509 / #10468: the step rule is scoped to the bundles that HAVE a step set ────────────
+#
+# `#10468` put a SECOND pre-registered bundle on the tool's `--dir` (`#10463`'s two-arm S3
+# ablation). That bundle is a different epic with no eight-step concept, so an unscoped
+# `check_step_partition` refused it on every run for not declaring a step set it never had —
+# while `--dir` repeatability is exactly what makes one invocation read both.
+
+#: The other pre-registered bundle on the CI invocation's `--dir` list (#10468).
+NO_STEPS_BUNDLE = REPO_ROOT / "docs" / "evidence" / "5087-hypothesis"
+
+
+def test_the_second_bundle_really_declares_no_step_set():
+    """The premise, asserted rather than assumed: this bundle has no `steps` block on either side.
+
+    If it ever gains one the scope test below stops testing what it claims, so the premise is
+    pinned here rather than left to a comment.
+    """
+    pins = check.parse_pins((NO_STEPS_BUNDLE / check.PREREG_NAME).read_text())
+    assert "steps" not in pins, sorted(pins)
+    record = json.loads((NO_STEPS_BUNDLE / check.MACHINE_RECORD).read_text())
+    assert "steps" not in record, sorted(record)
+
+
+def test_a_bundle_with_no_step_set_is_not_refused_by_the_partition_rule():
+    """REGRESSION (#10509 rebase): the unscoped rule failed this bundle for declaring nothing.
+
+    The message was `pins.steps is empty — the capstone's step gate reads this split…`. True of the
+    capstone; false of a bundle whose epic has no such gate, and it is not the bundle's defect to
+    repair by inventing an eight-step declaration. `#no-git`/`--no-corpus` isolate the rule: the
+    ordering half of this bundle is a separate finding and is not what this test is about.
+    """
+    report = check.run(NO_STEPS_BUNDLE, use_git=False, use_corpus=False)
+    assert not any("pins.steps" in f for f in report["failures"]), report["failures"]
+    assert report["ok"], report["failures"]
+
+
+def test_the_capstone_bundle_is_STILL_governed_even_with_no_step_set_declared(tmp_path):
+    """The scope must not be a blanket waiver: the capstone bundle never escapes by dropping it.
+
+    This is the `DEFAULT_PREREG_DIR` arm of `check_step_partition_applies`. A document that loses
+    its block must still be refused — otherwise "we deleted the split" and "the split was never
+    ours" would read identically, which is the widening the rule exists to prevent.
+    """
+    assert check.check_step_partition_applies(PREREG_DIR, {}, {}) is True
+    assert check.check_step_partition_applies(NO_STEPS_BUNDLE, {}, {}) is False
+
+
+def test_the_CI_multi_bundle_invocation_is_green_on_the_second_bundle(capsys):
+    """End to end, the shape CI runs: `--dir` twice, and the second bundle must not red the run.
+
+    `--no-git`/`--no-corpus` again isolate the rule: the corpus half imports `tortoise`, and the
+    ordering half is this bundle's separate finding (#10509 does not touch it).
+    """
+    code = check.main(["--dir", str(PREREG_DIR), "--dir", str(NO_STEPS_BUNDLE),
+                       "--no-git", "--no-corpus", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    assert payload["ok"] is True
+    assert [r["ok"] for r in payload["reports"]] == [True, True], payload["reports"]
+
+
+# ── #10509 review round: the step rule's own contract, made true ─────────────────────────────
+
+
+def test_a_unicode_digit_issue_number_is_a_mismatch_not_a_traceback():
+    """REGRESSION (#10509 review P2): `isdigit()` is True for characters `int()` REJECTS.
+
+    `_issue_number` tested `str.isdigit()` and then called `int()`, so an `evidence_issue` holding
+    `²` raised an uncaught `ValueError` — past `run()` (catches nothing) to `main()` (catches only
+    `CheckError`) — escaping as a traceback with exit 1, the code this tool reserves for FINDINGS.
+    The conversion must be TOTAL: a non-numeric value becomes a plain comparison mismatch.
+    """
+    assert "²".isdigit() and not int_succeeds("²")
+    assert check._issue_number("²") == "²"
+    assert check._issue_number("#10215") == 10215
+    assert check._issue_number(10215) == 10215
+
+
+def int_succeeds(text: str) -> bool:
+    try:
+        int(text)
+    except ValueError:
+        return False
+    return True
+
+
+def test_a_unicode_digit_in_a_real_record_is_a_finding_not_an_exit_1_traceback():
+    """End to end: the escape above never reaches the CLI as a traceback."""
+    rec = _record_with_steps()
+    rec["steps"]["conditional"][0]["evidence_issue"] = "10²15"
+    # no raise, and the value simply does not match the document's `10215`
+    failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert any("evidence_issue" in f for f in failures), failures
+
+
+def test_a_wrong_typed_pins_step_field_is_a_PARSE_error_on_EVERY_sub_key():
+    """The docstring's contract, on the half that used to contradict it (#10509 review P2).
+
+    `pins.steps = 5` was caught and downgraded to a finding (exit 1) while
+    `pins.steps.unconditional = 5` raised (exit 2) — the SAME malformation, two different answers
+    depending on which sub-key it landed in. All three are parse errors now.
+    """
+    for pins in ({"steps": 5}, {"steps": {"unconditional": 5}},
+                 {"steps": {"conditional": 5}},
+                 {"steps": {"unconditional": ["S0"], "conditional": 5}}):
+        with pytest.raises(check.CheckError) as excinfo:
+            check.check_step_partition(pins, {})
+        assert "steps" in str(excinfo.value), (pins, excinfo.value)
+
+
+def test_an_EMPTY_pins_step_block_stays_a_FINDING_not_a_parse_error():
+    """The deliberate asymmetry: an absent block is a document defect, not unparseable input.
+
+    Keeping this at exit 1 is what lets the capstone bundle's "we deleted the split" shape be
+    reported as a weakened gate rather than as "the tool could not read its subject".
+    """
+    failures = check.check_step_partition({"steps": {}}, {})
+    assert any("pins.steps is empty" in f for f in failures), failures
+
+
+def test_a_malformed_record_conditional_entry_is_REPORTED_not_skipped():
+    """REGRESSION (#10509 review P2): the record arm was weaker than the document arm.
+
+    The pins loop reports `{step: …}`-less entries; the record loop silently dropped them. So a
+    record that KEPT its valid entry and added a junk one compared clean, while the same document
+    written one file over was refused.
+    """
+    rec = _record_with_steps()
+    rec["steps"]["conditional"] = [*rec["steps"]["conditional"], {"condition": "no step key"}]
+    failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
+    assert any("steps.conditional carries an entry that is not a" in f for f in failures), failures

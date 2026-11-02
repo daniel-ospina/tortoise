@@ -163,15 +163,23 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
 
 ## Why no row can be GREEN — the structural cap, re-verified here
 
-`tools/capstone_verdict_check.py:110` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
-"S2.3", "S3", "S5", "S6")`, and `:498` refuses a GREEN row whose run left any step
-out (`missing = [s for s in STEPS if s not in observed]`, message at `:500`).
+`tools/capstone_verdict_check.py:118` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
+"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:379`) refuses a GREEN row whose
+run left a REQUIRED step out: the rule is `missing = [s for s in required if s not in
+observed]`, reported as `GREEN with steps not observed in the run: …`. (Those two inner
+cites are deliberately NOT line numbers — #10215's own review rounds moved them twice
+inside this one PR, once in the commit that had just re-pointed them.)
 
-⚠️ **Those three cites are re-checked BY HAND at the audit head, not by the bundle
-sweep.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches only the three
+⚠️ **The two numbers above are not read by the bundle sweep — a separate pin reads
+them.** `tests/test_7949_capstone_measure.py`'s `_BUNDLE_CITE` matches only the three
 sources this bundle prints numbers for (`sdk.py`, `edges.py`, `extractor_v2.py`), so a
-`tools/*.py` cite and the bare `:N` continuation below are invisible to it — stated
-here so "swept" is never read into a number nothing re-checks.
+`tools/*.py` cite and the bare `:N` continuations above are invisible to it. They are
+pinned by phrase instead, in `test_the_bare_continuation_cites_name_what_they_say`,
+which requires each number to sit on the sentence that names it AND requires the line
+it points at to carry the symbol claimed there; the two claims stated as quoted RULES
+are held against the gate's text by the same pin, so a renamed message cannot leave the
+quote behind. Stated here so "swept" is never read into a number nothing re-checks: a
+**new** `tools/*.py` number in this document is unguarded until it earns a row there.
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
@@ -193,9 +201,14 @@ the already-scored log contains can be certified GREEN, whatever the underlying
 numbers do — that is a limit of the measurement's stamp, not of the verdicts.
 The seam does not by itself move a row: a row moves only by RE-RUNNING
 `probes/capstone_measure.py` at a post-seam head, which is what makes those two
-rows **witnessable** — S2.2 moves on such a re-run, while S2.3 moves only once its
-classify pass carries a non-empty `s2`/`union` (on the measured corpus it is IDLE,
-so a re-run still reports it unobserved). Until such a re-run is committed, the epic's closing rule
+rows **witnessable** — S2.2 moves on such a re-run, while S2.3 needs no such move: since
+`#10215` restated V5/G5 as **all eight accounted**, an idle classify pass is ACCOUNTED
+from the receipt's own facts (flag ON, no activity, no fail-open marker, a positive
+candidate count) instead of being required to appear in `steps_observed` — and this probe
+writes that accounting into its own log (`run.steps_required` / `run.steps_conditional`, read
+from the SAME frozen record G5 reads), because a restatement the scoring probe does not emit
+leaves V5 refusing its rows for the step, which is #10215's own symptom. Until such a
+re-run is committed, the epic's closing rule
 stays unsatisfiable on the committed evidence, ahead of every row's own blocker.
 
 ---
@@ -207,7 +220,7 @@ what would have to move:
 
 | to make this row closable | what has to land first | state (the audit is at `3fbca18ed`; every row re-read at `6986dcd4d`, 2026-10-27; the `#9116` row re-read at this PR's head) |
 |---|---|---|
-| **every row** (GREEN is unreachable) | `#9116`'s seam has **LANDED** (this PR): `stats["step_witness"]` carries `vet` / `classify_later` (and the other six) on the capture receipt, so S2.2/S2.3 are now observable through the capstone's own entry point. What still has to land is a **committed post-seam re-run** — and on the measured corpus that re-run still reports S2.3 unobserved (its classify pass is IDLE), so it refuses at G5 | `#9116` **LANDED** (this PR); what it leaves open is V5's 8/8 scoping — the owner's explicit decision, on that issue |
+| **every row** (GREEN is unreachable) | `#9116`'s seam has **LANDED** (this PR): `stats["step_witness"]` carries `vet` / `classify_later` (and the other six) on the capture receipt, so S2.2/S2.3 are now observable through the capstone's own entry point. What still has to land is a **committed post-seam re-run**. On the measured corpus that re-run's S2.3 pass is IDLE — and since `#10215` restated V5/G5 as **all eight ACCOUNTED** (seven observed + the one step the frozen pre-registration declares conditional, witnessed idle or observed), that idle pass no longer refuses the run: it is accounted from the receipt's own facts, by BOTH probes (`capstone_measure.py` emits `run.steps_required` / `run.steps_conditional` from the same frozen record G5 reads, so a scored row is not refused for the step) | `#9116` **LANDED** (this PR); `#10215` **LANDED** (the step set: seven unconditional + S2.3 conditional, recorded in the pre-registration) |
 | E1 | `#5333` — **its design half is no longer pending; it was DECIDED on 2026-10-26** (`EXTRACTOR-V4-ARCHITECTURE.md:869`, commit `6986dcd4d`, PR `#10069`): a pass may **add**, may execute an authorised `MERGE`, and after COMMIT may not remove a committed row except through **the journaled `restatus` fold where no visible successor exists, or the D7 `ObjectSuperseded` arm where one does** (`ONLY` is scoped to the successorless case and never denies the D7 arm); a physical delete is **foreclosed to every pass**; the journaled `restatus` fold — the only permitted form of removal-from-recall where no visible successor exists — is **deferred until recall cost is measured** and writes nothing until a relocation pass is authorised, while the D7 `ObjectSuperseded` arm is **permitted now** where a visible successor exists (that is pre-existing supersession, not the deferred relocation). The same paragraph records the measurement that settles this row's shape: **"E1's share is moved by no non-destructive mechanism"** (the shipped gate drops 0 of 34 `^the <X>`; `value_gate`'s own docstring says a definite description is *"left to the arbiter, and is reported, not dropped"*). So the ruling did not hand E1 a mechanism — it foreclosed the one that would move the number. What stays open in `#5333` is **task 1, the owner's authorisation to ever RUN a relocation**, and even that buys only a deferred fold, never a delete | `#5333` **OPEN** (design half **decided**) |
 | E2 | `#10360` — the **render half is fixed** (PR `#10382` on `#9775`: every render path carries the carve-out, the compact one included, pinned by `tests/test_v4_declared_mechanisms.py::test_every_render_path_carries_the_carve_out_the_guarantee_requires` and `::test_the_dispatcher_prompts_carry_the_carve_out_once_and_compactly`), so what remains is the OTHER half: nothing in the write path *enforces* retention (`#10360`), and the surviving-value loss (1 of 14) is upstream of the filter, so the row needs the extraction loss fixed, not the gate | `#9775` render half **fixed** (PR `#10382`) / `#10360` **OPEN** |
 | E3 | `#9736` — the registered denominator counts `:Object` mention links, which carry no anchor **by design** (owner option A, `#5199`). Either the metric is re-registered or the model reopened: an owner decision, not a lane's | **OPEN** |

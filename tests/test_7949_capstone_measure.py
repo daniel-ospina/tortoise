@@ -1110,6 +1110,190 @@ def test_every_step_is_witnessed_or_given_a_cause():
     assert not set(observed) & set(unobserved)
 
 
+# ── the conditional step, ACCOUNTED on the SCORING path (#10215 review P1) ──
+#
+# `capstone_run.py`'s G5 learned #10215's rule; THIS probe — the one that produces
+# the E1–E5 numbers — kept emitting neither `steps_required` nor
+# `steps_conditional`, so V5 read every log it writes as the pre-#10215 "all eight
+# required" shape and refused a GREEN row for S2.3. The restatement reached one of
+# the two places its logs come from, which is why #10215's own symptom was still
+# live on the scoring path.
+
+_RECORD_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
+
+
+def _idle_run(session_id: str = "wp01_quarry_debug", **overrides) -> dict:
+    """One measured session holding the classify surface ENABLED with no work.
+
+    Carries a POSITIVE candidate count on the receipt's own witness, because the
+    idle predicates require it: an empty candidate list skips the pass's `try` and
+    leaves the same `enabled=true`/`s2={}`/`union={}` shape, which is why
+    `observe_idle` has four predicates rather than three.
+    """
+    run = _run(session_id=session_id,
+               stats={**_FULL_STATS,
+                      "step_witness": {"map": {"items": {"entities": 4,
+                                                          "events": 1}}}},
+               surfaces={"classify_later": {"enabled": True, "s2": {},
+                                            "union": {}}})
+    run.update(overrides)
+    return run
+
+
+def _with_head() -> str:
+    """The commit under test — `_record_conditional` reads the record FROM git.
+
+    Derived, never typed: the gate resolves the frozen `steps` block out of
+    ``git show <sha>:<artifact>``, so this arm only has teeth against a real
+    commit, and a typed one would re-stale on the next push.
+    """
+    return cvc._git(_REPO, "rev-parse", "HEAD").stdout.strip()
+
+
+def _seven_observed() -> dict:
+    """What a post-seam run witnesses on this corpus: seven, S2.3 absent."""
+    return {step: f"witnessed ({step})" for step in measure.STEPS if step != "S2.3"}
+
+
+def test_the_scoring_probe_emits_the_split_v5_reads_and_the_old_shape_is_what_reds():
+    """The finding, end to end: a GREEN row's step half now passes V5.
+
+    Non-vacuity is the second half of this test, and it IS the finding: the same
+    seven observed steps under the PRE-FIX run block — no `steps_required`, no
+    `steps_conditional` — are refused by the shipped gate for exactly the reason
+    #10215 was filed about. Asserted, not described, so the arm cannot regress to
+    "the gate says it accepts the accounting" on this probe's logs.
+    """
+    required, accounts, gap = measure.step_accounting(
+        measure.read_conditional(_prereg()), [_idle_run()], _seven_observed())
+    assert gap == "", gap
+    assert required == [s for s in cvc.STEPS if s != "S2.3"], required
+    assert [entry["step"] for entry in accounts] == ["S2.3"], accounts
+    assert accounts[0]["state"] == "idle", accounts[0]
+    assert "EMPTY ITEM SET" in accounts[0]["basis"], accounts[0]
+
+    run = {"status": "COMPLETED", "steps_required": required,
+           "steps_conditional": accounts,
+           "steps_observed": [s for s in cvc.STEPS if s != "S2.3"]}
+    assert cvc._step_accounting(_REPO, run, tuple(run["steps_observed"]),
+                                _with_head(), _RECORD_ARTIFACT) == []
+    # ... and the PRE-FIX shape of the same run, which is what this probe emitted:
+    prefix = {"status": "COMPLETED",
+              "steps_observed": [s for s in cvc.STEPS if s != "S2.3"]}
+    assert [(code, msg.split(" — ")[0]) for code, msg in
+            cvc._step_accounting(_REPO, prefix, tuple(prefix["steps_observed"]),
+                                 _with_head(), _RECORD_ARTIFACT)] == [
+        ("V5", "GREEN with steps not observed in the run: S2.3")]
+
+
+def test_the_log_prints_the_split_it_emitted_and_the_gap_when_it_could_not():
+    """The rendering arm, not just the record: a reader sees the same claim V5 reads.
+
+    A log that prints only "6 of 8" hands its reader the pre-#10215 reading of the
+    same numbers. An unaccounted conditional step must print the FALLBACK it
+    actually emitted, or the log and the machine block disagree about the table.
+    """
+    conditional = measure.read_conditional(_prereg())
+    required, accounts, gap = measure.step_accounting(
+        conditional, [_idle_run()], _seven_observed())
+    lines = measure.step_accounting_lines(required, accounts, gap)
+    assert lines[0].startswith("steps required: S0 S1 S2.1 S2.2 S3 S5 S6"), lines
+    assert lines[0].endswith("|  conditional: S2.3=idle"), lines
+    assert lines[1].startswith("conditional S2.3: idle — every one of the 1 "), lines
+    assert len(lines) == 2, lines
+    # the refusal side: all eight required, the step named with its own cause
+    required, accounts, gap = measure.step_accounting(
+        conditional, [_idle_run(errors=["classify(S2) failed: boom"])],
+        _seven_observed())
+    lines = measure.step_accounting_lines(required, accounts, gap)
+    assert lines[0].startswith("steps required: " + " ".join(cvc.STEPS))
+    assert lines[0].endswith("|  conditional: none"), lines
+    assert lines[1].startswith("steps accounting: NOT CLAIMED — "), lines
+    assert "neither observed nor witnessed idle: S2.3" in lines[1], lines
+
+
+def test_the_split_is_the_frozen_records_not_this_probes_choice():
+    """Direction matters: a step is conditional because the RECORD says so.
+
+    A probe that decided its own conditional set could hand itself an accounting it
+    was never granted, and `capstone_run.G5` refuses exactly that. A malformed
+    declaration refuses the RUN too — degrading it to "all eight required" would
+    look identical to correct behaviour.
+    """
+    # the real frozen record declares S2.3 conditional
+    assert set(measure.read_conditional(_prereg())) == {"S2.3"}
+    # a record that declares NOTHING conditional leaves all eight required
+    assert measure.read_conditional({}) == {}
+    required, accounts, gap = measure.step_accounting({}, [_idle_run()],
+                                                     _seven_observed())
+    assert required == list(cvc.STEPS) and accounts == [] and gap == ""
+    # a malformed declaration is a REFUSAL, never a silent "all eight"
+    for broken in ({"steps": []},
+                   {"steps": {"conditional": "S2.3"}},
+                   {"steps": {"conditional": [{"step": "S4"}]}}):
+        try:
+            measure.read_conditional(broken)
+        except SystemExit as exc:
+            assert "unreadable" in str(exc), exc
+            continue
+        raise AssertionError(f"{broken}: a malformed declaration did not refuse")
+
+
+def test_a_failed_classify_pass_is_never_accounted_idle_by_this_probe():
+    """The fail-open `except` leaves the SAME empty counters as an idle pass.
+
+    The receipt says which one it was in `errors` / `diagnostics` (the raw string
+    rides `diagnostics` on the real receipt), so a crashed pass must fall back to
+    the pre-#10215 shape instead of handing the run an idle basis. Without this arm
+    `#10215`'s restatement would make a CRASH look like "nothing to do".
+    """
+    for failure in ({"errors": ["classify(S2) failed: RuntimeError: boom"]},
+                    {"diagnostics": ["classify(union) failed: TimeoutError: slow"]},
+                    {"warnings": ["classify-later init failed"]}):
+        required, accounts, gap = measure.step_accounting(
+            measure.read_conditional(_prereg()), [_idle_run(**failure)],
+            _seven_observed())
+        assert required == list(cvc.STEPS), (failure, required)
+        assert accounts == [], (failure, accounts)
+        assert "neither observed nor witnessed idle: S2.3" in gap, gap
+
+
+def test_an_idle_claim_is_run_wide_so_one_session_can_refute_it():
+    """Seven sessions, one number: an idle step must be idle on ALL of them.
+
+    `observe_idle` grades a single receipt, and this probe measures a corpus. One
+    session's idle block beside another's flag-off (or zero-candidate, or failed)
+    block is not a run-wide idle — and the fallback is the strict direction: the
+    gate then refuses the step for the fact that is true.
+    """
+    conditional = measure.read_conditional(_prereg())
+    idle = _idle_run("wp01_quarry_debug")
+    # two idle sessions: accounted, and the basis names the surface it read
+    required, accounts, gap = measure.step_accounting(
+        conditional, [idle, _idle_run("wp03_ember_design")], _seven_observed())
+    assert gap == "" and accounts[0]["state"] == "idle", (gap, accounts)
+    assert "2 measured session(s)" in accounts[0]["basis"], accounts[0]["basis"]
+    # one flag-off session in the run refutes it
+    flag_off = _idle_run("wp05_retro_writeup",
+                         surfaces={"classify_later": {"enabled": False,
+                                                      "s2": {}, "union": {}}})
+    required, accounts, gap = measure.step_accounting(
+        conditional, [idle, flag_off], _seven_observed())
+    assert accounts == [] and required == list(cvc.STEPS), accounts
+    assert "wp05_retro_writeup" in gap, gap
+    # a session with NO surface at all is the #9116 gap, not a contradiction, and
+    # does not by itself make the run idle either
+    silent = _run(session_id="wp06_bare")
+    required, accounts, gap = measure.step_accounting(
+        conditional, [silent], _seven_observed())
+    assert accounts == [] and "INSTRUMENT gap" in gap, (accounts, gap)
+    # an OBSERVED conditional step is accounted as observed, never as idle
+    observed = dict(_seven_observed(), **{"S2.3": "the pass assigned 3 kinds"})
+    required, accounts, gap = measure.step_accounting(conditional, [idle], observed)
+    assert gap == "" and accounts == [{"step": "S2.3", "state": "observed",
+                                       "basis": "the pass assigned 3 kinds"}], accounts
+
+
 # ── E3's Point denominator is disclosed, not silently mixed (F4) ──────────
 
 def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
@@ -1511,6 +1695,15 @@ _BUNDLE_SOURCES = {
     "extractor_v2": _REPO / "tortoise/extractor_v2.py",
 }
 
+# The GATE the bundle audits, which the bundle also cites by number. Kept OUT of
+# `_BUNDLE_SOURCES` on purpose: `_BUNDLE_CITE` matches `sdk|edges|extractor_v2`
+# only, so putting a key here would imply the sweep proper reads it when it
+# cannot. These are read by `test_the_bare_continuation_cites_name_what_they_say`
+# instead, by phrase — the same mechanism the bare `:NNNN` continuations need.
+_BUNDLE_TOOL_SOURCES = {
+    "capstone_verdict_check": _REPO / "tools/capstone_verdict_check.py",
+}
+
 # `docs/00_index.md` is a shared router of ~140 table rows, so only the ROW that
 # names this bundle is swept: another epic's row citing `sdk.py` must not red the
 # #7949 pin (it would be told to add a phrase for a line it is not about). The
@@ -1871,6 +2064,16 @@ def test_the_bare_continuation_cites_name_what_they_say():
     `:9044` for the early return and `:8781` for the `_edus_from_conversation`
     call: every one of those rows FAILS the two checks below (the number is not
     on the phrase's line, and the old number carries other code).
+
+    A row may name a SOURCE outside the bundle's own three (`_BUNDLE_TOOL_SOURCES`)
+    — the `E1-E5-PROOFS.md` rows read `tools/capstone_verdict_check.py`, which
+    `_BUNDLE_CITE` cannot match at all. Those numbers had NO reader: the document
+    said so in its own words ("re-checked BY HAND at the audit head") and then
+    went stale within one commit — `#10509` review (P2) found its required-step
+    refusal cited at the lines rule 4 (the frozen-record refusal) occupies. On
+    that pre-fix document the third row FAILS twice over: its sentence carries
+    neither `:475` nor `:477`, and `:460`/`:462` carry the conditional-declaration
+    refusal, not the `missing = …` line the prose names.
     """
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
@@ -1902,12 +2105,48 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("9485", 'result["vet"] = {'),
             ("9489", ("exact", "}")),
         )),
+        # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
+        # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
+        # sweep proper — and until these rows existed the document said so in its
+        # own words ("re-checked BY HAND at the audit head"). It then went stale
+        # in the very commit whose message claimed to fix a stale V5 cite pair:
+        # `#10509` review (P2) found `:460`/`:462` landing on rule 4, the
+        # frozen-record refusal, instead of rule 2, the unobserved-required-step
+        # refusal. A hand-recheck did not hold across one commit, so the numbers
+        # are pinned here instead. The sentence wraps over three lines and a row
+        # scopes to ONE line, so the claim takes three rows.
+        ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
+            ("118", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+                    '"S5", "S6")'),
+        ), "capstone_verdict_check"),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:379`) refuses a GREEN row whose", (
+            ("379", "def _step_accounting("),
+        ), "capstone_verdict_check"),
+    )
+    # The SAME document states two of its claims as the RULE's own text rather than a
+    # line number — a quoted rule cannot drift by an insertion above it, which is why
+    # #10215's review moved those two numbers twice inside one PR. A quote still rots
+    # if the gate renames the message, so each quote is held against the gate's text
+    # as well: the doc must carry it (markdown wraps it, so whitespace is normalised)
+    # and the gate must still say it.
+    quotes = (
+        ("E1-E5-PROOFS.md",
+         "missing = [s for s in required if s not in observed]",
+         "capstone_verdict_check"),
+        ("E1-E5-PROOFS.md",
+         "GREEN with steps not observed in the run:",
+         "capstone_verdict_check"),
     )
     docs = dict(_BUNDLE_DOCS)
     sources = {name: path.read_text(encoding="utf-8").splitlines()
-               for name, path in _BUNDLE_SOURCES.items()}
+               for name, path in (*_BUNDLE_SOURCES.items(),
+                                  *_BUNDLE_TOOL_SOURCES.items())}
     failures: list[str] = []
-    for doc_label, phrase, cites in rows:
+    for row in rows:
+        doc_label, phrase, cites = row[0], row[1], row[2]
+        # a row may name its SOURCE; the bundle's own three are the default
+        source_key = row[3] if len(row) > 3 else "extractor_v2"
+        source_label = f"{source_key}.py"
         lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
         hits = [ln for ln in lines if phrase in ln]
         if len(hits) != 1:
@@ -1925,16 +2164,29 @@ def test_the_bare_continuation_cites_name_what_they_say():
                     f"cite :{number} — a bare continuation is invisible to "
                     f"_BUNDLE_CITE, so this pin is the only thing reading it")
                 continue
-            got = sources["extractor_v2"][int(number) - 1]
+            got = sources[source_key][int(number) - 1]
             if isinstance(anchor, tuple):
                 if got.strip() != anchor[1]:
                     failures.append(
-                        f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                        f"{source_label}:{number} (cited by {doc_label}) reads "
                         f"{got.strip()!r}, not exactly {anchor[1]!r}")
             elif anchor not in got:
                 failures.append(
-                    f"extractor_v2.py:{number} (cited by {doc_label}) reads "
+                    f"{source_label}:{number} (cited by {doc_label}) reads "
                     f"{got.strip()!r}, which carries no {anchor!r}")
+    for doc_label, quoted, source_key in quotes:
+        source_label = f"{source_key}.py"
+        doc_text = " ".join(docs[doc_label].read_text(encoding="utf-8").split())
+        if " ".join(quoted.split()) not in doc_text:
+            failures.append(
+                f"{doc_label} no longer carries the rule text {quoted!r} this pin "
+                f"holds {source_label} to — re-quote the rule from the gate rather "
+                f"than dropping the claim")
+        if not any(quoted in ln for ln in sources[source_key]):
+            failures.append(
+                f"{doc_label} quotes {quoted!r} as the rule, but {source_label} no "
+                f"longer says it — re-quote from the gate, do not leave a quote the "
+                f"code has moved past")
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))

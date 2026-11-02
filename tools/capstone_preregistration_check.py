@@ -160,6 +160,13 @@ DOCUMENT_SHA_PIN = "document_sha256"
 #: The status a log carries when no threshold existed to score it against.
 UNSCORED = "UNPREREGISTERED"
 
+#: A RETIRED record field (#10215), kept ONLY so a record that still carries it is
+#: reported as a dead key to delete. An earlier fix required it as an attestation of
+#: the `steps` pin's authoring order; that was a gate satisfied by asserting it, so
+#: the rule now dates the block from history instead and reads the deviation from the
+#: argument's `## Deviations` section. No gate reads this field.
+STEPS_PINNED_AFTER = "steps_pinned_after_scored_log"
+
 #: Every ``verdict=``/``result=`` value in an exempt log must be this. A WHITELIST, not a blacklist
 #: of four known-bad strings: a closed bad-list silently admits the next scored vocabulary, which is
 #: the inverse of the gap the exemption exists to close (#9075 review P2).
@@ -202,6 +209,17 @@ CAPSTONE_RECORD = re.compile(
 
 #: Every pinned corpus quantity the machine record restates and is cross-checked against. A REQUIRED
 #: set: a pins block missing one of these is a failure, never a silently-skipped comparison.
+#: The epic's eight TOP-LEVEL steps (`EXTRACTOR-V4-ARCHITECTURE.md` §4.1). Declared
+#: here so the pre-registration's step partition is validated against the DESIGN's
+#: own list rather than against itself: a check that compared the document with the
+#: record alone would accept both being emptied (#10215).
+CAPSTONE_STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
+
+#: The fields a CONDITIONAL step's declaration may not omit. A `step:` alone is a
+#: waiver: `condition` says WHEN it does not apply, `idle_evidence` says what a run
+#: must show to claim it did not apply, `evidence_issue` says who measured that.
+CONDITIONAL_STEP_FIELDS = ("condition", "idle_evidence", "evidence_issue")
+
 CROSS_CHECKED_CORPUS_KEYS = (
     "fixtures_hash", "sessions", "seed", "schema_version", "planted_units",
     "planted_operator_edges", "value_bearing_units", "hedge_scope_sentences",
@@ -672,6 +690,215 @@ def _list(container: dict, key: str, where: str) -> list:
 
 def _pins_mapping(pins: dict, key: str) -> dict:
     return _mapping(pins, key, "pins")
+
+
+def check_step_partition(pins: dict, record: dict) -> list[str]:
+    """The eight steps split into unconditional + conditional, once and consistently (#10215).
+
+    The capstone's step gate (V5 in ``tools/capstone_verdict_check.py``, G5 in
+    ``probes/capstone_run.py``) reads this split out of the FROZEN record, so the record is what
+    decides whether a step is required. That makes a silent edit here a silent weakening of the
+    epic's gate, which is why the split is checked from both sides and against the design's own
+    step list:
+
+      * every id is one of §4.1's eight, and the two lists are a STRICT partition — a step may be
+        neither dropped nor listed twice;
+      * a conditional entry carries its condition, the idle evidence a run must show, and the issue
+        that measured it — an entry without them is a waiver with no content;
+      * the document's pins fence and the machine record agree, so neither can rot alone;
+      * a wrong-typed field on EITHER side is a parse error (``CheckError`` → exit 2), never a
+        crash — an uncaught exception also exits 1, which is the code this tool reserves for
+        FINDINGS, so a malformed record would read as "the table has findings".
+    """
+    failures: list[str] = []
+    record_steps = _mapping(record, "steps", MACHINE_RECORD)
+    # ⛔ BOTH halves route through the module's own readers, so a wrong-typed field is a PARSE
+    # error on either side — the contract this docstring states. The pins half used to catch
+    # `_pins_mapping`'s CheckError and downgrade it to a finding (exit 1) while
+    # `pins.steps.unconditional` (via `_list`, below) raised (exit 2), so the SAME malformation
+    # got two different answers depending on which sub-key it landed in. Letting it raise here is
+    # what makes the docstring true; the EMPTY declaration stays a finding below, deliberately —
+    # an absent block is a document defect, not unparseable input.
+    pins_steps = _pins_mapping(pins, "steps")
+    if not pins_steps:
+        return [
+            "pins.steps is empty — the capstone's step gate reads this split out of the frozen "
+            "record, so a document that does not declare it lets the required step set change "
+            "without a reviewable diff"
+        ]
+
+    unconditional = _list(pins_steps, "unconditional", "pins.steps")
+    conditional = _list(pins_steps, "conditional", "pins.steps")
+
+    def _cmp_steps(label: str, want, got) -> None:
+        if got != want:
+            failures.append(
+                f"{MACHINE_RECORD} {label} is {got!r} but the pins block says {want!r} — two "
+                "copies of the required step set that can disagree"
+            )
+
+    declared = [str(s) for s in unconditional]
+    entries: dict[str, dict] = {}
+    for entry in conditional:
+        if not isinstance(entry, dict) or not str(entry.get("step") or ""):
+            failures.append(
+                f"pins.steps.conditional carries an entry that is not a {{step: …}} mapping "
+                f"({entry!r}) — it declares nothing"
+            )
+            continue
+        step = str(entry["step"])
+        entries[step] = entry
+        for field in CONDITIONAL_STEP_FIELDS:
+            value = entry.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()) or value == "":
+                failures.append(
+                    f"pins.steps.conditional[{step}] omits {field!r} — a conditional step must "
+                    "state when it does not apply, what a run must show to claim that, and the "
+                    "issue that measured it"
+                )
+
+    unknown = sorted((set(declared) | set(entries)) - set(CAPSTONE_STEPS))
+    if unknown:
+        failures.append(
+            f"pins.steps declares step id(s) {unknown} that are not part of the epic's eight "
+            f"({', '.join(CAPSTONE_STEPS)}) — §4.1 fixes the list, so an invented id is a step the "
+            "gate cannot reach"
+        )
+    both = sorted(set(declared) & set(entries))
+    if both:
+        failures.append(
+            f"pins.steps lists {both} as BOTH unconditional and conditional — the split must be a "
+            "partition, or a step's requirement depends on which list a reader consults"
+        )
+    absent = [s for s in CAPSTONE_STEPS if s not in declared and s not in entries]
+    if absent:
+        failures.append(
+            f"pins.steps drops step(s) {absent} from both lists — the capstone measures the "
+            "pipeline end to end, and a step that is in neither list leaves the gate by omission"
+        )
+    if len(declared) != len(set(declared)):
+        failures.append("pins.steps.unconditional repeats a step id")
+
+    # the record must restate the document's split, field for field: the run probe freezes the
+    # RECORD, so a divergence means the gate enforces something the argument never argued.
+    if not record_steps:
+        failures.append(
+            f"{MACHINE_RECORD} carries no steps block — the run probe reads the required step set "
+            "from the frozen record, so a document alone changes nothing (#10215)"
+        )
+        return failures
+
+    # The RECORD half is untrusted input exactly like the pins half (its producer is another
+    # lane), so it is read through the same readers rather than with a bare `.get()`. A
+    # truthy wrong type (`"unconditional": 5`, `"conditional": 1`) used to raise TypeError
+    # out of here — through `run()`, which catches nothing, to `main()`, which catches only
+    # CheckError — escaping as a traceback with exit 1, the code this tool reserves for
+    # FINDINGS. A wrong-typed field is a PARSE error (exit 2), which is what `_list` raises.
+    _cmp_steps("steps.unconditional", declared,
+               [str(s) for s in _list(record_steps, "unconditional", MACHINE_RECORD)])
+    record_conditional: dict[str, dict] = {}
+    for entry in _list(record_steps, "conditional", MACHINE_RECORD):
+        if isinstance(entry, dict) and str(entry.get("step") or ""):
+            record_conditional[str(entry["step"])] = entry
+        else:
+            # ⛔ Mirror the pins arm above: the record's producer is another lane, so a malformed
+            # entry is untrusted input that must be REPORTED, not skipped. Dropping it made the
+            # record-side rule strictly weaker than the document-side one — a record that kept its
+            # valid entry and added a junk one compared clean, while the same document written one
+            # file over was refused.
+            failures.append(
+                f"{MACHINE_RECORD} steps.conditional carries an entry that is not a "
+                f"{{step: \u2026}} mapping ({entry!r}) — it declares nothing"
+            )
+    if sorted(record_conditional) != sorted(entries):
+        _cmp_steps("steps.conditional (step ids)", sorted(entries),
+                   sorted(record_conditional))
+    else:
+        for step, entry in sorted(entries.items()):
+            for field in CONDITIONAL_STEP_FIELDS:
+                want = entry.get(field)
+                got = record_conditional[step].get(field)
+                if field == "evidence_issue":
+                    # `#10215` and `10215` are the same issue; compare the number.
+                    want, got = _issue_number(want), _issue_number(got)
+                _cmp_steps(f"steps.conditional[{step}].{field}", want, got)
+    return failures
+
+
+def _issue_number(value) -> object:
+    """``#10215`` / ``10215`` / ``"10215"`` as the same integer, and ANYTHING else unchanged.
+
+    ⛔ TOTAL by construction. An earlier cut tested ``str.isdigit()`` and then called ``int()`` — but
+    ``isdigit()`` is True for characters ``int()`` REJECTS (``'\u00b2'.isdigit()`` is True while
+    ``int('\u00b2')`` raises ``ValueError``), so an ``evidence_issue`` holding a Unicode
+    digit-like character escaped as an uncaught ``ValueError``: through ``run()`` (catches nothing)
+    to ``main()`` (catches only ``CheckError``) as a traceback with exit **1** — the code this tool
+    reserves for FINDINGS, which is the exact escape class this function's caller documents.
+    ``try/except`` makes every non-numeric value a plain comparison mismatch instead.
+    """
+    text = str(value).strip().lstrip("#")
+    try:
+        return int(text)
+    except ValueError:
+        return value
+
+
+def _record_for_steps(directory: Path) -> dict:
+    """The machine record as a mapping, ``{}`` when it cannot be read.
+
+    A missing or unreadable record is already reported by :func:`check_machine_record`; this loader
+    exists so the step rule can be checked without raising a second time for the same cause.
+    """
+    try:
+        record = json.loads((directory / MACHINE_RECORD).read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def check_step_partition_applies(directory: Path, pins: dict, record: dict) -> bool:
+    """Whether this bundle is one whose step set :func:`check_step_partition` governs (#10215).
+
+    The step set is a CAPSTONE declaration, not a property of every pre-registration this tool can
+    read. ``tools/capstone_verdict_check.py`` pins conditionality to ONE artifact
+    (``RECORD_ARTIFACT``, ``docs/evidence/7949-capstone/preregistration.json``) for the same reason:
+    a second place a step set can be declared is a second place the epic's gate can be weakened.
+
+    ⛔ The scope is not a hole, and it is not a blanket waiver. `#10468` put a SECOND
+    pre-registered bundle on this tool's ``--dir`` — ``#10463``'s two-arm S3 ablation, which has no
+    eight-step concept at all — so an unscoped rule failed that bundle on every run for not
+    declaring a step set it never had. The rule therefore applies to:
+
+      * the capstone bundle, ALWAYS (``DEFAULT_PREREG_DIR``) — so deleting its ``steps`` block is
+        still a refusal rather than a silent widening of the required step set; and
+      * any bundle that DECLARES a step set on either side — if you declare one, it must be a
+        partition of the epic's eight and the document and record must agree.
+
+    A bundle that declares none is not asked to invent one, and nothing is weakened by skipping
+    it — absence is STRICTER at both gates, never a waiver:
+
+      * V5 (``tools/capstone_verdict_check.py::_step_accounting``) requires all eight observed
+        unless the log's own ``steps_conditional`` claims conditionality, and it refuses a claim
+        the frozen record does not declare (``_record_conditional``, which reads
+        ``RECORD_ARTIFACT`` and nothing else);
+      * G5 (``probes/capstone_run.py::declared_conditional``) documents absence explicitly as the
+        pre-``#10215`` shape — *"the block is absent → ``({}, "")`` … all eight are required (a
+        refusal here would red every run made against an older record)"* — and its artifact comes
+        from the operator-selectable ``--prereg-artifact``, not from V5's pinned ``RECORD_ARTIFACT``.
+
+    So a capstone bundle that loses the block does not slip through either gate: it gets the
+    OLD all-eight-required rule back, which is the stricter one. This pre-check is what makes that
+    loss visible as a document defect instead of silently narrowing the epic's gate.
+    """
+    if record.get("steps"):
+        return True
+    if isinstance(pins, dict) and pins.get("steps"):
+        return True          # declared (even if malformed) — `check_step_partition` owns the shape
+    try:
+        relative = directory.resolve().relative_to(REPO_ROOT)
+    except (ValueError, OSError):
+        return False
+    return relative.as_posix() == DEFAULT_PREREG_DIR
 
 
 def _measured_locations(record: dict) -> list[str]:
@@ -1177,6 +1404,191 @@ def check_single_measured_log(directory: Path) -> list[str]:
     ]
 
 
+def _steps_block_epoch(directory: Path, current: dict | None = None) -> int | None:
+    """The commit epoch that FIRST carried the record's CURRENT ``steps`` block.
+
+    Two weaker predicates were rejected by review, and both are why this compares
+    CONTENT rather than the key's first appearance:
+
+    * ``"steps" in record`` returns at the revision that merely CONTAINS the key, so
+      an author who commits ``"steps": null`` with the record's initial (definitionally
+      pre-scored) commit and fills the real block after seeing the number stays green
+      forever — a key test is not a content test.
+    * an already-pinned block **edited after** a scored log never moves the key's
+      first appearance either, so changing the acceptance rule post-number would be
+      invisible — the exact shape this rule exists to catch.
+
+    So: the oldest revision whose ``steps`` value equals the block the record ships
+    NOW. That is when the operative rule was authored. ``None`` when no revision
+    carries it (or git cannot answer), which the caller reads as "nothing to
+    compare", never as "fine".
+    """
+    path = directory / MACHINE_RECORD
+    if current is None:
+        current = _record_for_steps(directory)
+    wanted = current.get("steps")
+    if not isinstance(wanted, dict) or not wanted:
+        return None                      # an empty/absent block is not a rule
+    try:
+        rel = path.resolve().relative_to(REPO_ROOT)
+    except ValueError:
+        return None
+    try:
+        out = subprocess.run(["git", "log", "--reverse", "--format=%H %ct", "--", str(rel)],
+                             cwd=str(REPO_ROOT), capture_output=True, text=True, check=False)
+    except OSError:                                   # pragma: no cover - git absent
+        return None
+    if out.returncode != 0:
+        return None
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            continue
+        sha, epoch = parts[0], int(parts[1])
+        try:
+            blob = subprocess.run(["git", "show", f"{sha}:{rel}"],
+                                  cwd=str(REPO_ROOT), capture_output=True, text=True,
+                                  check=False)
+            record = json.loads(blob.stdout)
+        except (OSError, json.JSONDecodeError, RecursionError):
+            continue
+        if isinstance(record, dict) and record.get("steps") == wanted:
+            return epoch
+    return None
+
+
+def _heading_level(line: str) -> int:
+    """ATX heading level (1-6), or 0 for a non-heading. `#` must be followed by
+    space/EOL, so `#123` is not a heading."""
+    hashes = len(line) - len(line.lstrip("#"))
+    if not 0 < hashes <= 6:
+        return 0
+    rest = line[hashes:]
+    return hashes if not rest or rest[0] in " \t" else 0
+
+
+def _document_has_deviations(directory: Path) -> bool:
+    """Whether the argument carries a REAL ``## Deviations`` entry (§8).
+
+    ⛔ A bare heading is not a disclosure, and accepting one would restore the
+    "add one line to clear the finding" exit this rule was repaired to close — the
+    same shape, moved from JSON into Markdown. So an entry (``### D…``) must carry a
+    non-blank body line.
+
+    Two bounds, each a defect a review measured:
+
+    * the body ENDS at the next heading of the entry's own level or SHALLOWER
+      (``<= 3``). A scan to EOF let a bare ``### D1`` above a later section's prose
+      pass; stopping at ANY ``#``-line instead made a properly structured entry —
+      ``#### Original rule`` / text / ``#### New rule`` / text — read as bodiless,
+      so the repair the failure message prescribes could not clear the finding.
+    * EVERY ``### D`` entry is examined, not just the first: an empty ``### D1``
+      above a filled ``### D2`` is a real disclosure, and reading only the first
+      reported it as absent.
+    """
+    try:
+        text = (directory / PREREG_NAME).read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    lines = text.splitlines()
+    head = next((i for i, ln in enumerate(lines)
+                 if ln.strip().startswith("## Deviations")), None)
+    if head is None:
+        return False
+    # ⛔ The scan is bounded at the SECTION, not just at the entry (#10215 round 9).
+    # `body = lines[head + 1:]` ran to EOF, so ANY later `### D…`-prefixed heading — a
+    # `### Denominator floors`, a `### Data sources` under `## Appendix`, a fenced
+    # example — donated its body to an otherwise EMPTY Deviations section. Measured:
+    # `## Deviations` / `## Appendix` / `### Data sources` / text returned True. That is
+    # the "add one line to clear the finding" exit round 7 closed, reachable one section
+    # over, and it is a false PASS of a §8 gate. A section ends at the next heading of
+    # level 2 or shallower.
+    section_end = next((j for j in range(head + 1, len(lines))
+                        if 0 < _heading_level(lines[j]) <= 2), len(lines))
+    body = lines[head + 1:section_end]
+    for i, line in enumerate(body):
+        if not line.startswith("### D"):
+            continue
+        stop = next((j for j in range(i + 1, len(body))
+                     if 0 < _heading_level(body[j]) <= 3), len(body))
+        # a body line is any non-blank line that is NOT itself a heading
+        if any(ln.strip() and not _heading_level(ln) for ln in body[i + 1:stop]):
+            return True
+    return False
+
+
+def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
+    """A ``steps`` pin authored AFTER a scored log is a PROTOCOL DEVIATION (#10215).
+
+    ``written_before_any_scored_run`` describes the record's ORIGINAL freeze, and
+    the ``steps`` block is not original: it is the acceptance rule V5 applies
+    (``capstone_verdict_check.py::_step_accounting`` rules 1 and 4). Pinning the
+    rule once a scored log exists is the "rule chosen after the number" shape §8
+    exists to prevent, and the blanket claim makes the record read as if the new
+    content were covered.
+
+    ⛔ **The predicate is AUTHORING ORDER, never a self-declaration.** An earlier
+    cut of this rule required the record to name the log it postdated, which was
+    wrong in both directions: the honest lifecycle — freeze ``steps``, then let
+    the probe write ``capstone-measured-<head8>.log`` into this same directory —
+    arrives with a ``steps`` block and a scored log and was REFUSED, while the
+    only passing exit was to add the declaration, i.e. to clear a false-pass
+    finding by writing one JSON line. A gate satisfied by asserting it is not a
+    gate. Order is computed instead, from the same history ``check_ordering``
+    reads, and where git cannot establish it (a shallow checkout) the rule
+    returns NO verdict rather than demanding an attestation.
+
+    ⛔ ``steps_pinned_after_scored_log`` is NOT required and NOT an incompatibility.
+    Those two claims describe different things — ``written_before_any_scored_run`` is
+    the record's ORIGINAL freeze, while the field names a log the pin postdates — so
+    a record may honestly carry both, and an earlier arm that refused the pairing was
+    wrong. The field is retired: carrying it is reported as a dead key to delete.
+    """
+    record = _record_for_steps(directory)
+    if "steps" not in record:
+        return []
+    scored = sorted(directory.glob(SCORED_LOG_GLOB))
+    if not scored:
+        return []
+
+    failures: list[str] = []
+    # ⛔ `steps_pinned_after_scored_log` is RETIRED (#10215). Round 5 REQUIRED it, which
+    # was wrong in both directions; this branch then began REFUSING it, on the premise
+    # that it contradicts `written_before_any_scored_run`. It does not — that field
+    # describes the record's ORIGINAL freeze, so naming the log the pin postdates is the
+    # honest pairing, and the repair this branch prescribed ("record the deviation") could
+    # never clear it because the return preceded the document read. The gate dates the
+    # block itself now, so the key is dead weight: its presence is reported as exactly
+    # that — a retired key to delete — and nothing else.
+    if record.get(STEPS_PINNED_AFTER) not in (None, ""):
+        failures.append(
+            f"{MACHINE_RECORD} carries {STEPS_PINNED_AFTER}, a RETIRED field (#10215): it was "
+            "the earlier fix's self-declaration, and no gate reads it — the step rule dates the "
+            "record's CURRENT `steps` block from history instead and takes the deviation from "
+            "the argument's `## Deviations` section. Delete the field; nothing needs it"
+        )
+        return failures
+
+    if history_unavailable():
+        return failures          # UNPROVABLE — never demand an attestation instead
+
+    steps_epoch = _steps_block_epoch(directory, record)
+    log_epochs = [epoch for log in scored for epoch in _added_epochs(log)]
+    if steps_epoch is None or not log_epochs:
+        return failures          # nothing to compare; not a finding either way
+    earliest = min(log_epochs)
+    if earliest < steps_epoch and not _document_has_deviations(directory):
+        failures.append(
+            f"{MACHINE_RECORD}'s `steps` block was authored {steps_epoch - earliest}s AFTER "
+            f"the scored log(s) {', '.join(p.name for p in scored)} were added, and "
+            f"{PREREG_NAME} carries no `## Deviations` section — the step set IS the "
+            "acceptance rule V5 applies, so a rule pinned after the number was seen is a "
+            "PROTOCOL DEVIATION (§8): record it with the date, the original rule, the new "
+            "rule and the reason"
+        )
+    return failures
+
+
 def check_completeness(rows: list[dict[str, str]]) -> list[str]:
     failures: list[str] = []
     if not rows:
@@ -1372,6 +1784,15 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
         ordering = "UNVERIFIED (--no-git)"
     report["ordering"] = ordering
     failures += check_machine_record(directory, pins)
+    failures += check_steps_block_is_pre_scored(directory)
+    # #10215: the step set the capstone's gate reads. Checked after the record so both halves are
+    # already known to PARSE; a partition failure here is a weakened gate, not a document nit.
+    # SCOPED to the bundles the rule governs (`check_step_partition_applies`): `#10468` added a
+    # second pre-registered bundle to `--dir` that has no eight-step concept, and demanding one of
+    # it reds a correct tree.
+    steps_record = _record_for_steps(directory)
+    if check_step_partition_applies(directory, pins, steps_record):
+        failures += check_step_partition(pins, steps_record)
 
     if use_corpus:
         corpus_state = "verified"

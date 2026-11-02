@@ -1489,6 +1489,57 @@ def test_a_g5_refusal_names_an_incomplete_seam_as_the_seam(
     assert "accounts for the missing" not in reason, reason
 
 
+def test_a_zero_candidate_g5_refusal_names_the_candidate_count_not_a_marker(
+        tmp_path, monkeypatch):
+    """The FOURTH idle exclusion must be named as itself (#10215 review r2 P2).
+
+    `observe_idle` refuses an idle claim when the receipt carries no candidate count
+    (or zero), because an EMPTY item set skips the pass's `try` and leaves the
+    identical `enabled=true`/`s2={}`/`union={}` shape. G5's cause was still an
+    ELIMINATION over two possibilities — flag off / *"a failure marker for it IS
+    present on the receipt, so the fail-open path fired"* — so this receipt sent its
+    reader to debug a crash that never happened, and the refusal asserted a fact
+    about the receipt that is false: the error surfaces are empty and there is no
+    marker.
+
+    Non-vacuity: on the pre-fix arm the reason contains "failure marker for it IS
+    present" and never mentions the candidate count (measured, #10215 review r2).
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1},
+        steps={"unconditional": [s for s in cvc.STEPS if s != "S2.3"],
+               "conditional": [{"step": "S2.3", "condition": "the map typed "
+                                "everything", "idle_evidence": "enabled, no "
+                                "activity, no failure", "evidence_issue": 10215}]}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    empty_map = {"entities": [], "events": [], "points": [], "operators": []}
+    classify = {"enabled": True, "s2": {}, "union": {}}
+
+    class _ZeroCandidateSDK:
+        def capture_session(self, _turns, session_id=None):
+            # flag ON, no activity, no error surface — and NOTHING to classify
+            return _seam_receipt(classify_later=classify, embed_list=empty_map)
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _ZeroCandidateSDK)
+    out = tmp_path / "g5-zero-candidates.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    # the witness refuses this receipt ...
+    assert probe.observe_idle(_seam_receipt(classify_later=classify,
+                                            embed_list=empty_map)) == {}
+    # ... and G5 names THAT cause instead of a failure marker the receipt lacks
+    assert "candidate count" in reason, reason
+    assert "failure marker" not in reason, reason
+
+
 def test_a_degraded_search_refuses_the_completed_table(tmp_path, monkeypatch):
     """END TO END (#10214 review, P1): a degraded search cannot emit a table.
 
@@ -2989,3 +3040,398 @@ def test_a_corpus_prefix_alone_is_not_a_different_corpus():
                                      corpus_sha256=digest, numerator=1, denominator=2)
     codes = _codes(record)
     assert "V7" not in codes, codes
+
+
+# ── V5's step ACCOUNTING (#10215) ────────────────────────────────────────────
+#
+# V5 required all EIGHT steps unconditionally, and S2.3 has no work whenever the
+# S2 map types every candidate (`_collect_classify_items` collects only
+# missing/unclassified kinds), so no run of any corpus could satisfy it. The
+# restatement keeps the gate strong by requiring every step to be ACCOUNTED FOR:
+# the seven unconditional observed, and the conditional one either observed or
+# witnessed IDLE — with the conditional set read from the FROZEN record, never
+# from the log, so conditionality cannot be self-declared.
+
+REAL_RECORD = "docs/evidence/7949-capstone/preregistration.json"
+
+
+def _idle_green(rec: dict, *, artifact: str = REAL_RECORD,
+                state: str = "idle",
+                basis: str = "flag ON, no activity, no failure marker") -> dict:
+    """A GREEN record whose S2.3 is accounted conditional instead of observed."""
+    _green(rec)
+    required = [s for s in cvc.STEPS if s != "S2.3"]
+    rec["run"]["steps_observed"] = list(required)
+    rec["run"]["steps_required"] = list(required)
+    rec["run"]["steps_conditional"] = [
+        {"step": "S2.3", "state": state, "basis": basis}]
+    rec["prereg"]["artifact"] = artifact
+    return rec
+
+
+def test_the_frozen_record_really_declares_s2_3_conditional():
+    """The fixture the rest of this section leans on — pinned, so a record edit reds HERE."""
+    declared, why = cvc._record_conditional(_REPO, HEAD, REAL_RECORD)
+    assert declared == {"S2.3"}, (declared, why)
+
+
+def test_a_conditional_step_witnessed_idle_does_not_red_the_gate():
+    """S2.3 idle + the record declaring it conditional = an honest, complete accounting."""
+    rec = _idle_green(_record())
+    findings = cvc.check(rec, repo=_REPO, require_green=False)
+    assert not findings, findings.render()
+
+
+def test_a_conditional_step_the_record_does_not_declare_is_a_finding():
+    """A log may not promote a step to conditional on its own authority.
+
+    `e5-rescore.json` is a committed record carrying no `steps` block, so the
+    declaration the log relies on does not exist where the gate reads it.
+    """
+    rec = _idle_green(_record(),
+                      artifact="docs/evidence/7949-capstone/e5-rescore.json")
+    codes = _codes(rec)
+    assert "V5" in codes, codes
+    assert any("conditional" in m for m in _messages(rec)), _messages(rec)
+
+
+def test_a_log_may_not_read_the_conditional_set_out_of_a_file_of_its_CHOOSING():
+    """#10215 review P1 — the artifact path is PINNED, not taken from the log.
+
+    `_record_conditional` used to `git show <sha>:<artifact>` with `artifact` read
+    verbatim from the log, and demanded only a `steps.conditional` list of the
+    blob — so a hand-edited log (this gate's stated threat model) could name any
+    committed JSON, declare `S3` conditional inside it, and drop `S3` out of
+    `steps_required` while the gate reported nothing. `e5-rescore.json` is a
+    committed sibling record, so it is exactly the reachable wrong target; the
+    refusal must be about the PATH even when the file it names would satisfy the
+    comparison.
+    """
+    declared, why = cvc._record_conditional(
+        _REPO, HEAD, "docs/evidence/7949-capstone/e5-rescore.json")
+    assert declared is None, "a non-record artifact must not be readable as the record"
+    assert "preregistration.json" in why and "any other file" in why, why
+
+
+def test_an_artifact_named_with_a_DIFFERENT_spelling_is_refused_too():
+    """The pin is normalised, so `./docs/…` or a backslash path is not a way round it."""
+    for spelling in ("./docs/evidence/7949-capstone/preregistration.json",
+                     "docs\\evidence\\7949-capstone\\preregistration.json"):
+        assert cvc._record_conditional(_REPO, HEAD, spelling)[0] == {"S2.3"}, spelling
+    assert cvc._record_conditional(
+        _REPO, HEAD,
+        "docs/evidence/7949-capstone/../7949-capstone/e1-e2.log")[0] is None
+
+
+def test_a_conditional_step_called_OBSERVED_without_the_observation_is_a_finding():
+    """#10215 review P2 — `observed` is the strongest claim, so it needs the fact.
+
+    `state` was only checked for membership in the vocabulary, so a log could
+    account S2.3 as `"observed"` while `steps_observed` (the pass's own
+    observation set) omitted it — the one claim that should need the most
+    evidence needed none.
+    """
+    rec = _idle_green(_record(), state="observed")
+    assert "S2.3" not in rec["run"]["steps_observed"]
+    codes = _codes(rec)
+    assert "V5" in codes, codes
+    assert any("absent from the run's own" in m for m in _messages(rec)), _messages(rec)
+
+
+def test_an_idle_claim_with_no_basis_is_a_finding():
+    """`{step, state: idle}` alone is a claim; the basis is the run's own evidence."""
+    rec = _idle_green(_record(), basis="")
+    assert "V5" in _codes(rec)
+
+
+def test_an_unknown_conditional_state_is_a_finding():
+    rec = _idle_green(_record(), state="skipped")
+    assert "V5" in _codes(rec)
+
+
+def test_a_step_dropped_from_both_lists_is_a_finding():
+    """The silent-drop shape: not required, not conditional, simply absent."""
+    _green(rec := _record())
+    rec["run"]["steps_observed"] = [s for s in cvc.STEPS if s != "S2.3"]
+    rec["run"]["steps_required"] = [s for s in cvc.STEPS if s != "S2.3"]
+    codes = _codes(rec)
+    assert "V5" in codes, codes
+    assert any("neither observed-required nor declared conditional" in m
+               for m in _messages(rec)), _messages(rec)
+
+
+def test_a_step_declared_both_required_and_conditional_is_a_finding():
+    """Conditionality is not an escape hatch for a step that did not run."""
+    rec = _idle_green(_record())
+    rec["run"]["steps_required"] = list(cvc.STEPS)
+    rec["run"]["steps_observed"] = [s for s in cvc.STEPS if s != "S2.3"]
+    codes = _codes(rec)
+    assert "V5" in codes, codes
+    assert any("BOTH required and conditional" in m for m in _messages(rec)), _messages(rec)
+
+
+def test_a_conditional_step_that_is_observed_is_accounted_as_observed():
+    """A pass that DID run needs no idle claim — observed outranks it.
+
+    DISCRIMINATING on purpose, and the basis is deliberately EMPTY: that same record
+    without the observation is a finding (`test_an_idle_claim_with_no_basis_is_a_finding`),
+    so the only thing keeping this one green is the `step in observed` precedence. Delete
+    that branch and this test reds instead of passing for a reason nobody pinned.
+    """
+    rec = _idle_green(_record(), basis="")
+    rec["run"]["steps_observed"] = list(cvc.STEPS)
+    findings = cvc.check(rec, repo=_REPO, require_green=False)
+    assert not findings, findings.render()
+
+
+def test_a_non_string_step_id_is_a_finding_not_a_traceback():
+    """A malformed log must REFUSE, not crash: `', '.join` on an int raised TypeError,
+    i.e. exit 1 on a traceback — indistinguishable from a real refusal (V3/V8's class)."""
+    rec = _idle_green(_record())
+    rec["run"]["steps_required"] = [1, *rec["run"]["steps_required"]]
+    codes = _codes(rec)
+    assert "V5" in codes, codes
+    assert any("not step ids" in m for m in _messages(rec)), _messages(rec)
+
+
+def test_a_required_step_still_missing_reds_alongside_a_conditional_one():
+    """The restatement must not soften the SEVEN that really are unconditional."""
+    rec = _idle_green(_record())
+    rec["run"]["steps_observed"] = [s for s in rec["run"]["steps_required"]
+                                    if s != "S2.2"]
+    codes = _codes(rec)
+    assert "V5" in codes, codes
+    assert any("steps not observed in the run: S2.2" in m
+               for m in _messages(rec)), _messages(rec)
+
+
+# ── the probe's idle witness and the conditional step gate (#10215) ──────────
+
+
+def _idle_block_result(**over) -> dict:
+    """The extractor's own return with the classify pass ENABLED and idle.
+
+    Carries a POSITIVE candidate count on the receipt's own witness
+    (``stats['step_witness']['map']['items']``), because an idle claim is only
+    honest where there WERE candidates the map typed — an empty candidate list
+    skips the pass's ``try`` entirely and leaves the same empty block (#10215
+    review P2). Pass ``map_items={}`` to build that no-candidates shape.
+    """
+    over.setdefault("stats", {
+        **_extractor_result()["stats"],
+        "step_witness": {"map": {"items": {"entities": 4, "events": 1,
+                                             "points": 2}}},
+    })
+    return _extractor_result(
+        classify_later={"enabled": True, "s2": {}, "union": {}}, **over)
+
+
+def test_an_enabled_pass_with_no_activity_and_no_failure_is_idle():
+    """The positive state the gate needs: enabled, no work, and NOT a fail-open crash."""
+    idle = probe.observe_idle(_idle_block_result())
+    assert set(idle) == {"S2.3"}, idle
+    assert "EMPTY ITEM SET" in idle["S2.3"], idle
+    # the basis states the count it actually read, never a remembered one
+    assert "7 candidate(s)" in idle["S2.3"], idle
+
+
+def test_a_pass_with_NO_candidates_is_not_claimed_idle():
+    """⛔ #10215 review P2 — `if classify_later and embed_list:` means an EMPTY
+    embed list skips the pass's `try` too, and leaves the identical
+    `enabled=true`/`s2={}`/`union={}` shape with no error marker. Without the
+    candidate count the witness would write *"the map had already typed every
+    candidate"* over a run that had no candidates at all — a false fact in a
+    verdict's evidence.
+    """
+    no_candidates = _idle_block_result(stats={
+        **_extractor_result()["stats"],
+        "step_witness": {"map": {"items": {}}}})
+    assert probe.observe_idle(no_candidates) == {}
+    # and with no witness block at all there is no count to read: same refusal
+    no_witness = _extractor_result(
+        classify_later={"enabled": True, "s2": {}, "union": {}})
+    assert probe.observe_idle(no_witness) == {}
+
+
+def test_a_flag_off_pass_is_not_idle():
+    """The flag was off — the pass was never asked to run, so nothing was idled."""
+    assert probe.observe_idle(
+        _extractor_result(classify_later={"enabled": False, "s2": {},
+                                          "union": {}})) == {}
+
+
+def test_a_pass_that_did_work_is_not_idle():
+    assert probe.observe_idle(_extractor_result()) == {}
+
+
+def test_a_failed_classify_pass_is_not_idle():
+    """⛔ The whole reason idle needs a WITNESS: the fail-open `except` leaves the SAME
+    empty counters as an idle pass, so without the error surface a crash would read as
+    'nothing to do' and V5's restatement would hand it a GREEN."""
+    crashed = _idle_block_result(
+        errors=["classify(S2) failed: RuntimeError: boom"])
+    assert probe.observe_idle(crashed) == {}
+    # the raw string rides `diagnostics` on the real receipt (`errors` carries the
+    # human headline) — both counted, because either alone can be the one present
+    crashed_diag = _idle_block_result(
+        diagnostics=["classify(union) failed: TimeoutError: slow"])
+    assert probe.observe_idle(crashed_diag) == {}
+
+
+def test_the_idle_witness_reads_the_receipt_sub_key_the_9116_seam_forwards():
+    """The shipped caller hands back `stats` only; the pass surface rides
+    `stats['step_witness']` (#9116), so an idle claim can be made off the receipt."""
+    receipt = _receipt(stats={
+        **_receipt()["stats"],
+        "step_witness": {"classify_later": {"enabled": True, "s2": {}, "union": {}},
+                         "map": {"items": {"entities": 4}},
+                         "vet": {"enabled": True, "s2": {"kept": 3}, "union": {}}}})
+    idle = probe.observe_idle(receipt)
+    assert set(idle) == {"S2.3"}, idle
+
+
+def test_declared_conditional_reads_only_a_well_formed_record():
+    assert probe.declared_conditional({}) == ({}, "")
+    declared, why = probe.declared_conditional(
+        {"steps": {"conditional": [{"step": "S2.3", "condition": "x"}]}})
+    assert set(declared) == {"S2.3"} and why == ""
+    # malformed declarations REFUSE rather than degrading to "all eight required"
+    for broken in ({"steps": []},
+                   {"steps": {"conditional": "S2.3"}},
+                   {"steps": {"conditional": [{"nope": 1}]}},
+                   {"steps": {"conditional": [{"step": "S4"}]}}):
+        declared, why = probe.declared_conditional(broken)
+        assert declared == {} and why, broken
+
+
+def test_a_conditional_step_g5_can_witness_idle_passes_the_gate(tmp_path, monkeypatch):
+    """END TO END: 7 observed + S2.3 witnessed idle + a record declaring it conditional
+    emits a COMPLETED table whose step accounting V5 accepts — and the SAME receipt with
+    a failed classify pass is refused."""
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1},
+        steps={"unconditional": [s for s in cvc.STEPS if s != "S2.3"],
+               "conditional": [{"step": "S2.3", "condition": "the map typed "
+                                "everything", "idle_evidence": "enabled, no "
+                                "activity, no failure", "evidence_issue": 10215}]}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    # the pipeline surfaces `observe_steps` reads, plus the idle classify block.
+    # The receipt is built by the REAL seam (`_seam_receipt`), because G5 reads
+    # `stats['step_witness']` — a seamless fixture would refuse as the #9116
+    # INSTRUMENT gap before the conditional-step arm is ever reached.
+    surfaces = {"classify_later": {"enabled": True, "s2": {}, "union": {}}}
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            return _seam_receipt(**surfaces)
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "completed.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 0, (code, out.read_text()[:2000])
+    run = cvc.extract_block(out.read_text())["run"]
+    assert run["steps_required"] == [s for s in cvc.STEPS if s != "S2.3"]
+    assert run["steps_conditional"] == [
+        {"step": "S2.3", "state": "idle",
+         "basis": next(iter(probe.observe_idle(_seam_receipt(**surfaces)).values()))}]
+    assert run["status"] == "COMPLETED"
+    # ...and the gate accepts the accounting it just emitted, against the REAL record
+    rec = cvc.extract_block(out.read_text())
+    _green(rec)
+    rec["run"] = dict(run)
+    rec["prereg"] = dict(rec["prereg"], sha=HEAD, status="OK", artifact=REAL_RECORD)
+    rec["rows"][0].update(verdict="GREEN", evidence_kind="measurement",
+                          numerator=31, denominator=50, blocked_by=None,
+                          corpus_sha256="a" * 64)
+    rec["corpus"] = {"path": "corpus.json", "sha256": "a" * 64, "turns": 50}
+    # ONLY the step half is under test here: the emitted rows cite a tmp_path
+    # artifact and carry the run's own corpus digest, so V4/V7/V8 rightly red on
+    # this fixture — a V5 finding is what must NOT appear.
+    codes = [code for code, _w, _m in
+             cvc.check(rec, repo=_REPO, require_green=False).items]
+    assert "V5" not in codes, codes
+
+
+def test_g5_refuses_when_the_conditional_pass_FAILED_instead_of_idling(
+        tmp_path, monkeypatch):
+    """The fail-open arm: present surface, empty counters, and a failure marker — refused."""
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1},
+        steps={"unconditional": [s for s in cvc.STEPS if s != "S2.3"],
+               "conditional": [{"step": "S2.3", "condition": "c",
+                                "idle_evidence": "e", "evidence_issue": 10215}]}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            receipt = _seam_receipt(
+                classify_later={"enabled": True, "s2": {}, "union": {}})
+            receipt["errors"] = ["classify(S2) failed: RuntimeError: boom"]
+            return receipt
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "failed-classify.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    assert "S2.3" in reason, reason
+    # the CAUSE is named, not the union of possibilities (#9823's distinction)
+    assert "failure marker for it IS present" in reason, reason
+
+
+def test_g5_refuses_a_conditional_step_whose_surface_is_absent(tmp_path, monkeypatch):
+    """An absent surface is the #9116 INSTRUMENT gap — never a claim that the pass idled."""
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1},
+        steps={"unconditional": [s for s in cvc.STEPS if s != "S2.3"],
+               "conditional": [{"step": "S2.3", "condition": "c",
+                                "idle_evidence": "e", "evidence_issue": 10215}]}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            return _receipt(search={"found": []}, payload={"points": []},
+                            vet={"enabled": True, "s2": {"kept": 3}})
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "absent-classify.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    assert "#9116" in reason and "INSTRUMENT gap" in reason, reason
+
+
+def test_g5_refuses_a_malformed_step_declaration(tmp_path, monkeypatch):
+    """A record whose `steps` block cannot be read must not silently mean 'all eight'."""
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1},
+        steps={"conditional": "S2.3"}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+    out = tmp_path / "malformed-steps.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    assert "step declaration is unreadable" in reason, reason

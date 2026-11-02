@@ -222,7 +222,11 @@ and file:line — and any table the probe emits records `steps_observed` **and**
 `#9116`'s seam has since landed, so a re-run at a post-seam head can witness **S2.2**; **S2.3**
 moves only once its classify pass carries a non-empty `s2`/`union` — on the measured corpus that
 pass is IDLE (`enabled: true`, both counters empty), so a re-run there still reports S2.3
-unobserved and G5 still refuses. The two scored rows above keep the count the run measured.
+**unobserved** — and since `#10215` that is a **witnessed idle**, not a refusal: `observe_idle`
+accounts it from the receipt's own facts, this probe emits that accounting itself
+(`run.steps_required` / `run.steps_conditional`, read from the SAME frozen record G5 reads), and
+G5/V5 accept it because the pre-registration declares the step conditional. The two scored rows
+above keep the count the run measured.
 
 ⛔ **The count is a measurement, not a constant.** `observe_steps` looks for a `vet` /
 `classify_later` surface in what the run actually holds (the receipt's top-level keys and its
@@ -231,9 +235,11 @@ a non-empty `s2` or `union`, with `enabled` not `false`. The FLAG alone is never
 below). When it is not a witness, the cause reports the number of keys it really inspected instead
 of quoting a remembered one. A step is never *assigned* unwitnessed, and every step ends up in
 exactly one of the two sets (a hole or an overlap refuses the run). So the epic's own GREEN gate —
-V5, all eight steps observed — stays reachable: `#9116`'s seam makes both rows OBSERVABLE (each
-step's own block is on the receipt), and S2.2 then flips on a re-run at a post-seam head (S2.3
-flips only once its pass does work, which the measured corpus' idle classify pass does not). It
+V5, all eight steps **accounted for** — stays reachable: `#9116`'s seam makes both rows OBSERVABLE
+(each step's own block is on the receipt), and S2.2 then flips on a re-run at a post-seam head
+(S2.3 flips only once its pass does work, which the measured corpus' idle classify pass does not —
+which is why `#10215` restated the requirement as seven observed + S2.3 observed-or-witnessed-idle
+from the frozen record; see `PRE-REGISTRATION.md` §10 and §10.3). It
 did **not** come for free and this bundle does not claim it did: the seam landed with this probe's
 observer rewritten (`observe_steps` reads `stats['step_witness']` instead of guessing at a surface
 the receipt never carried) and with the pin that certified the old unreachability replaced by the
@@ -421,9 +427,9 @@ raw absolute             0.4800    (bar >= 0.80 — FAILS)
 two: the ratio alone reads GREEN here while the narrative arm keeps half the qualifiers the raw
 arm loses. The re-score grades the 2026-10-18 arm receipts against **this** commit's gold (the
 gold is inside `fixtures_hash`); the receipts themselves are older, which is disclosed in the
-row's note. #9738 is the row's blocker and carries the rest: §10's prior measurement was visible
-when the record said none was, and the 25-bound (this instrument) vs 29-marker-sentence (the
-record) populations must be reconciled before either number is called final.
+row's note. #9738 is the row's blocker and carries the rest: `EXTRACTOR-V4-ARCHITECTURE.md` §10's
+prior measurement was visible when the record said none was, and the 25-bound (this instrument) vs
+29-marker-sentence (the record) populations must be reconciled before either number is called final.
 
 ## E1 / E2 — why the two rows are BLOCKED, not RED
 
@@ -583,8 +589,10 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   every stage's own facts — and the probe's `observe_steps` was rewritten to read it (the observer
   is part of this change, not something a re-run gets for free). A re-run at a post-seam head moves
   **S2.2**; **S2.3 does not flip**, because its classify pass is IDLE on this corpus and the witness
-  says so (`enabled: true`, empty `s2`/`union`), so G5 still refuses there (see "The eight steps"
-  above).
+  says so (`enabled: true`, empty `s2`/`union`) — since `#10215` that is accounted as a **witnessed
+  idle** (flag ON, no activity, no fail-open marker, a positive candidate count) rather than refused,
+  and the probe emits that split itself (`run.steps_required` / `run.steps_conditional`, read from
+  the frozen record) so G5/V5 accept it where the record declares the step conditional.
 
 ## Reproduce
 
@@ -598,7 +606,9 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
 # seam has LANDED: the receipt carries stats["step_witness"], and the probe reads
 # S2.2/S2.3 there (it still recovers S3/S6 from the live graph). What still bounds a
 # re-run is the CORPUS, not the receipt — the classify pass is IDLE on it, so S2.3
-# is unobserved and G5 still refuses. It writes its own file — never over capstone.log.
+# is witnessed IDLE and accounted, never observed (since #10215 the gate requires it
+# ACCOUNTED, not observed; the conditional set comes from the frozen record).
+# It writes its own file — never over capstone.log.
 # ⛔ AND THE FILE IT SUPERSEDES IS DELETED: exactly ONE scored log may exist, and
 # both the test and the pre-registration gate refuse a second one.
 # NO ARM EXPORTS: the probe forces TORTOISE_VET/TORTOISE_CLASSIFY_LATER itself,
@@ -694,10 +704,14 @@ barred from four of them, and the run's own witness values decide each row — a
 `vet`/`classify_later` in `stats['step_witness']` after the extractor's own top-level keys. The
 SCORED log in this bundle stays what it is — `capstone-measured-e0fc940b.log` was measured at
 `e0fc940b`, BEFORE the seam, and reports 6/8 with S2.2/S2.3 unobserved. A re-run at a post-seam
-head moves **S2.2**; **S2.3 moves only once its classify pass carries a non-empty `s2`/`union`** —
-on the measured corpus that pass is IDLE (`enabled: true`, empty counters), and
-`observe_steps`/`_witness_block` both refuse to count it, so a re-run there still reports S2.3
-unobserved and G5 still refuses. Nothing here relabels a historical measurement.
+head moves **S2.2**; **S2.3 does not move on this corpus** — its classify pass is IDLE
+(`enabled: true`, empty counters, and the map typed every candidate), so `observe_steps` still
+refuses to count it as OBSERVED. Since `#10215` that is a **witnessed idle**, not a refusal:
+`observe_idle` accounts S2.3 from the receipt's own facts (flag ON, empty counters, NO fail-open
+marker, a positive candidate count), this probe writes that accounting into its own log
+(`run.steps_required` / `run.steps_conditional`, from the frozen record — the split the gate reads
+and cannot infer), and G5/V5 accept it because the pre-registration declares the step conditional.
+Nothing here relabels a historical measurement.
 
 ⛔ The distinction the gate keeps, and why it is load-bearing: a receipt with **no**
 `step_witness` at all (a replay, a keyless capture, the M2 lane) is refused as the **INSTRUMENT**
@@ -714,7 +728,7 @@ gated the pass off, or the stage produced nothing.
 | `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its receipt is cited by E4 (`2/15`) |
 | `#5199` the version anchor stops at Points | **CLOSED COMPLETED** — the anchor is on the derivation link by design; #9736 owns the metric contradiction that leaves behind |
 | `#7947` the raw-vs-narrative measurement | **CLOSED COMPLETED** — E5 re-scores its arms |
-| `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, `S2.3` only once its classify pass does work (IDLE on this corpus), and V5's 8/8 scoping is the owner's open decision on the issue |
+| `#9116` the capture receipt's step surface | **LANDED** — this PR's seam copies each stage's own facts onto `stats["step_witness"]`, so `capture_session`'s receipt now names all eight; `S2.2` is witnessed by any post-seam re-run, `S2.3` is IDLE on this corpus and is accounted as a **witnessed idle** since `#10215` restated V5/G5 as all-eight-accounted (the conditional set is read from the frozen record, so the log cannot self-declare it) |
 | `#9736` E3's denominator vs the owner-approved model | **OPEN** — E3's blocker |
 | `#9738` E5's disclosure and population reconciliation | **OPEN** — E5's blocker |
 | `#5333` may any pass remove/relocate an Object (owner ruling) | **OPEN** — E1's blocker (the mechanism that must move the share) |
