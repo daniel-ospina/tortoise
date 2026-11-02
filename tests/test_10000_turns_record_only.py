@@ -2423,19 +2423,18 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     ⛔ THE POPULATION SCAN IS THE SAME ON EVERY ARM, and that is the point. The
     sibling arms are pinned by id space (`_capture_turn_ids`), which asks one id
     derivation on one edge: a writer that invents its own shape would pass them
-    while putting prose in the graph. The scan is a `CONTAINS` over every
-    text-bearing property of every node, so it does not care which arm ran or
-    who wrote the node.
+    while putting prose in the graph. The scan is a `CONTAINS` over EVERY NODE —
+    the properties it searches are the five named below — so it does not care
+    which arm ran or who wrote the node.
 
     ⛔ IT TAKES NO SEAM, AND THAT IS NOT AN OMISSION. A seam's
     `point_contents()` reports what the record was **offered**, not what it
     **committed** — `_RecordSeam(None)` appends the record and then refuses it.
-    So the record half is asserted by the CALLER, and it asserts one of two
-    things: the presence of the `TurnsRecorded` carrier, or a specific
-    `point_contents()` value. ⛔ The seam's `outcome` is its CONSTRUCTOR
-    ARGUMENT (`_RecordSeam.__init__`), so asserting on it proves nothing about
-    the code under test — a round-1 fix removed exactly that tautology, and this
-    sentence used to point a reader back at it.
+    So the record half is asserted by the CALLER, and it asserts one of THREE
+    things: the PRESENCE or the ABSENCE of the `TurnsRecorded` carrier, or a
+    specific `point_contents()` value. ⛔ The seam's `outcome` is its CONSTRUCTOR
+    ARGUMENT (`_RecordSeam.__init__`), so no caller can assert anything with it;
+    asserting on it proves nothing about the code under test.
 
     ⚠️ **The population is FIVE PROPERTY NAMES, not "every property"**: `c`,
     `content`, `text`, `payload`, `props` — the ones the writers in this tree
@@ -2475,14 +2474,20 @@ def test_an_unarmed_capture_puts_the_turn_text_in_the_graph(sdk, monkeypatch):
     reddens this test at `assert graph_hits` with `[]`. That is measured, not
     asserted.
 
-    ⚠️ **Forcing `_record_first` TRUE does NOT redirect this test, and the
-    earlier version of this docstring claimed it did.** Measured on this head:
-    that mutation leaves all five related tests green, because an unarmed record
-    yields `_record_outcome = None` for every turn, `_landed(None)` is False, and
-    the `#10000` OUTCOME fallback then writes `_TURN_WRITE_CYPHER` — so the text
-    is still in the graph and green is the CORRECT verdict. Naming the wrong
-    mutation as proof is the round-1 "claimed a measurement, made an assertion"
-    defect; the arm guard below is what actually pins this test to its arm.
+    ⚠️ **BOTH mutations redden this test, for DIFFERENT reasons — and the
+    reason depends on the stub.** Deleting the graph write (`if not
+    _record_first:` → `if False:`, `_record_first` left REAL) reddens it at
+    `assert graph_hits` with `[]`. Forcing `_record_first` TRUE also reddens it,
+    but at the CARRIER assertion below: the seam stub on this arm reports
+    `APPLIED`, so `_landed` is True and the `#10000` outcome fallback never
+    reaches `_TURN_WRITE_CYPHER`.
+
+    ⛔ Keep that dependency in view when editing this test. Before the stub was
+    added, the forced-arm mutation left it GREEN, because an UNSTUBBED unarmed
+    seam returns `None`, `_landed(None)` is False, and the outcome fallback then
+    wrote the graph. So the same mutation has two different effects across this
+    test's own history, and a docstring that states one of them as the invariant
+    will be wrong on one side of that edit.
 
     ⛔ THE RECORD HALF **IS** ASSERTED, and only the ROW half is unassertable.
     With no DSN there are no record rows to inspect, but the JOURNAL is readable
