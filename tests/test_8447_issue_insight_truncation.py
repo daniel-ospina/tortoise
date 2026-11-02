@@ -190,6 +190,31 @@ class TestIssueInsightTruncation:
             with pytest.raises(ValueError, match="positive int"):
                 sdk.issue_insight(QUERY, limit=bad)
 
+    def test_the_docstring_names_the_one_refusal_the_guard_raises(self, sdk):
+        """The public docstring said "never raises" while the guard 20 lines
+        below it raised `ValueError` (#10570 review, P3 finding 2).
+
+        Read the two TOGETHER, because each is harmless alone: the guard is the
+        behaviour, and the docstring is what a caller reads before deciding
+        whether to wrap the call. `TortoiseSDK.issue_insight.__doc__` IS public
+        surface, so the falsity sat on the reader's side of the contract — a
+        caller who trusted it would type-check `resp["error"]` and never see the
+        `ValueError` an out-of-domain `limit` actually produces.
+
+        Non-vacuity: restoring the pre-fix sentence ("never raises
+        (graph-service failure -> error dict via _safe at the handler)") reds the
+        first assertion, and a sentence that drops the exception's name reds the
+        second — so the leg pins the AGREEMENT, not one wording.
+        """
+        doc = type(sdk).issue_insight.__doc__ or ""
+        assert "never raises" not in doc, (
+            "the docstring claims unconditional non-raising while the `limit` "
+            "guard raises ValueError")
+        assert "ValueError" in doc, doc
+        # …and the exception the doc names is the one the guard really raises.
+        with pytest.raises(ValueError, match="positive int"):
+            sdk.issue_insight(QUERY, limit=0)
+
     def test_the_absence_prose_never_contradicts_the_marker(self, sdk):
         """A non-truncated read must NOT be told "the read was TRUNCATED".
 

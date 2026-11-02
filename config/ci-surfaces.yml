@@ -4973,8 +4973,9 @@ surfaces:
   # response.
   - test_8447_truncation_marker.py
   # #8447: the `issue_insight` marker — `tortoise/sdk.py` (insertions) and
-  # `tortoise/truncation.py` (the consumed instrument, unchanged) fall through
-  # to `core`, so this is the primary arm; DUAL-REGISTERED with `api` (above).
+  # `tortoise/truncation.py` (the consumed instrument, which this change EXTENDS
+  # with `EXACT_KEY`) fall through to `core`, so this is the primary arm;
+  # DUAL-REGISTERED with `api` (above).
   - test_8447_issue_insight_truncation.py
   # #9189 (§17.2): the reconciler's PRODUCTION TRIGGER. `tortoise/reconciliation.py`
   # had a comparison and no production caller (measured at `f96a18da1` and
