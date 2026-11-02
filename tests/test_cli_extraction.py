@@ -427,6 +427,17 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         self.assertIn("_record_first", inspect.getsource(_write_capture_turns))
         self.assertIn("s.turn_count", _DUMP_QUERY)
         self.assertIn("s.turn_max_index", _DUMP_QUERY)
+        # ⛔ THE ORDER IS LOAD-BEARING, NOT JUST THE PRESENCE. A swap of the two
+        # appended columns reads `turn_max_index` as the WINDOW length and the
+        # count as the id-space end, which refuses EVERY HEALTHY capture as a
+        # missing tail (`turn_count=3`, mark=2 → "stop at index 2 while its turn
+        # ids reach 3") — and a presence-only assertion, or the arity pin, stays
+        # green through it. Measured: swapping the RETURN columns kept all 85
+        # tests green before this line existed.
+        self.assertIn("t.id, s.turn_count, s.turn_max_index", _DUMP_QUERY,
+                      "`_session_marks` reads column 6 as turn_count and column "
+                      "7 as turn_max_index — the RETURN must emit them in that "
+                      "order")
 
     def test_turn_order_is_the_turn_index_not_the_batch_timestamp(self):
         # the writer stamps a whole capture batch with ONE `$now`, so
@@ -670,6 +681,78 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
             self.assertIn(fragment, refused,
                           "the operator needs the cause and the remedy, not only "
                           "the verdict")
+
+    def test_a_short_contiguous_session_without_a_mark_still_refuses(self):
+        # The COUNT arm is the only arm that can catch a session which is short
+        # but contiguous with NO declared mark — the tail arm needs the mark and
+        # the coverage arm needs a hole. That is exactly the pre-#10000
+        # population, so it is the arm serving the degraded case, and it had no
+        # discriminating pin (mutating it to `if False and ...` stayed green).
+        rows = [_mark("s1", i, 4, None) for i in (0, 1)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        refused = str(cm.exception)
+        self.assertIn("declares 4 turn(s) but the graph holds only 2", refused)
+        # ⛔ AND THE CAUSE CLAUSE MUST MATCH THE MEASUREMENT. With no
+        # `turn_max_index` there was no record to split with, so the SPLIT
+        # STORE cannot be the cause and `get_session()` cannot arbitrate it
+        # (it reconciles against the same marks) — naming either would send the
+        # operator somewhere that is not at fault, which is #9932 itself.
+        self.assertNotIn("SPLIT STORE", refused,
+                         "a mark-less session cannot have hit the split store")
+        self.assertIn("NO `turn_max_index`", refused)
+        self.assertIn("--allow-partial", refused)
+
+    def test_an_all_residue_dump_names_the_residue_cause_not_the_id_shape(self):
+        # Every matched row is a TURN whose index sits above the session's live
+        # id-space end (a shorter re-capture whose surplus sweep did not land).
+        # This branch had no pin: mutating it to `if False and ...` stayed green.
+        # The message must name the RESIDUE cause — and must NOT claim an
+        # id-shape cause it did not measure.
+        rows = [_mark("s1", i, 2, 1) for i in (2, 3)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        empty = str(cm.exception)
+        self.assertIn("MATCHED 2", empty)
+        self.assertIn("ABOVE their session's `turn_max_index`", empty)
+        self.assertIn("RESIDUE", empty)
+        self.assertNotIn("ID DERIVATION", empty,
+                         "no row was rejected for its id shape — every one "
+                         "carried a turn id and was dropped as residue")
+
+    def test_a_mixed_residue_and_rejected_dump_reports_both_counts(self):
+        # The two drops are DIFFERENT measurements and a message built on one of
+        # them lies about the other: `rejected` alone would say "none carried
+        # the id" while one row did. Both counts and both causes must appear.
+        rows = [_mark("s1", 2, 2, 1),
+                ["session://s1", "event", "user", _frame("user", "claim"),
+                 "2026-11-02T00:00:00+00:00", "s1_note", 2, 1]]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        mixed = str(cm.exception)
+        self.assertIn("MATCHED 2", mixed)
+        self.assertIn("1 DID carry a turn id", mixed)
+        self.assertIn("1 did not carry", mixed)
+        self.assertIn("RESIDUE", mixed)
+        self.assertIn("_is_turn_of", mixed)
 
     def test_the_append_window_is_not_a_false_refusal(self):
         # ⛔ THE TRAP `record_read.served_turn_count` DOCUMENTS, MEASURED: an
