@@ -646,8 +646,9 @@ def session_diverse_order(items: list[dict], *,
     With ``floor_term`` on, an item from a session holding NO window slot
     takes a slot back from a session holding MORE THAN ONE, by evicting that
     session's lowest-ranked windowed item (whose survivor still represents its
-    session — the least information loss available). Three bounds that hold by
-    construction, and the third is why this is OFF by default:
+    session — the least information loss available). Four properties hold by
+    construction, and the FOURTH (the unavoidable density cost) is why this
+    is OFF by default:
 
     * the window never holds more than ``window`` distinct sessions (the lower
       bound is bounded, not a completeness blocker);
@@ -660,29 +661,30 @@ def session_diverse_order(items: list[dict], *,
       keeps the first ``max_chunks_per_session`` IN POOL ORDER) still keeps a
       session's best-ranked chunks — not an artifact of the reorder;
     * **the density cost is NOT avoidable, only minimised.** In the SATURATED
-      regime (>= ``window`` distinct sessions available — the only regime in
-      which admitting a missing session can change the graded top-k) the
-      window has zero spare slots, so admitting a new session necessarily
-      drops a duplicate: the floor term yields ``window`` distinct sessions,
-      the same count ``per_session_cap=1`` yields. Measured over 2000
-      randomised saturated pools: identical distinct-session count on
-      2000/2000, and an ELEMENTWISE identical window to
-      ``per_session_cap=1`` on 8000/8000 further pools — in that regime no
-      duplicate survives, so there is no "which one goes" choice to make. The
-      difference is confined to the UNDER-saturated regime (fewer than
-      ``window`` distinct sessions available), where the floor term keeps a
-      session's later item in rank order instead of pushing it past the
-      window. It spends nothing at all while the pool holds no more than
+      regime (>= ``window`` distinct sessions available) the window has zero
+      spare slots, so admitting a new session necessarily drops a duplicate:
+      the floor term yields ``window`` distinct sessions, the same count
+      ``per_session_cap=1`` yields. Measured over 2000 randomised saturated
+      pools: identical distinct-session count on 2000/2000, and an ELEMENTWISE
+      identical window to ``per_session_cap=1`` on 8000/8000 further pools — in
+      that regime no duplicate survives, so there is no "which one goes"
+      choice to make. Against ``per_session_cap=1`` the difference is confined
+      to the UNDER-saturated regime (fewer than ``window`` distinct sessions
+      available), where the floor term keeps a session's later item in rank
+      order instead of pushing it past the window. ⛔ Against the CAP-ONLY
+      GUARD, though, the admitted session SET differs in BOTH regimes: with
+      fewer than ``window`` distinct sessions the window can still be full of
+      DUPLICATES, so a session ranked past it is admitted here where the
+      cap-only guard deferred it (the 4/0 census row above is exactly that
+      case). It spends nothing at all while the pool holds no more than
       ``ceil(window / per_session_cap)`` distinct sessions — that number is
       structural, not sampled: a ``window``-slot window at
       ``per_session_cap`` needs at least ``ceil(window / per_session_cap)``
       sessions to fill, so below that threshold nothing is displaced. Above
-      it the displacement rate grows with the distinct-session count and is
-      generator-dependent (window=5 cap=2: 0 pools displaced at 3 sessions,
-      roughly half at 4 and roughly four fifths at 5 over randomised pools of
-      uniform session assignment) — the exact fractions are NOT quoted
-      because a bare ratio with an unspecified generator cannot be re-checked
-      by the next reader, which is the failure this note exists to avoid.
+      it the displacement rate rises with the distinct-session count; no
+      ratio is quoted here, because a bare fraction without its generator
+      (pool size, session distribution, seed) cannot be re-checked by the
+      next reader, which is the failure this note exists to avoid.
       It is therefore NOT a density-free alternative to
       ``per_session_cap=1`` — the #2513 §4 projection for ``cap=1`` (residual
       10->5, recall_all@5 0.8592->0.9296, evidence density lost on 20/71) is
@@ -693,9 +695,16 @@ def session_diverse_order(items: list[dict], *,
         return []
     window = max(1, min(window, len(items)))
     counts: dict[str, int] = {}
-    windowed: list[dict] = []
-    deferred: list[dict] = []
-    for h in items:
+    # Both lists carry ``(original_rank, item)`` pairs, not bare items. The rank
+    # is what the tail re-sort needs, and it CANNOT be re-derived afterwards:
+    # a ``{id(h): k for k, h in enumerate(items)}`` map keeps only the LAST
+    # index of an object that appears twice, so the earlier occurrence sorts as
+    # if it sat at the later rank and the tail INVERTS — the exact failure the
+    # sort exists to prevent. Carrying the index the item was read AT makes a
+    # pool with a repeated object agree with its content-equal twin.
+    windowed: list[tuple[int, dict]] = []
+    deferred: list[tuple[int, dict]] = []
+    for k, h in enumerate(items):
         s = _session_of(h, session_key)
         n = counts.get(s, 0)
         if len(windowed) >= window:
@@ -705,31 +714,31 @@ def session_diverse_order(items: list[dict], *,
             # loss available, since the survivor still represents its session.
             if floor_term and n == 0:
                 for j in range(len(windowed) - 1, -1, -1):
-                    sj = _session_of(windowed[j], session_key)
+                    sj = _session_of(windowed[j][1], session_key)
                     if counts.get(sj, 0) > 1:
                         deferred.append(windowed.pop(j))
                         counts[sj] -= 1
-                        windowed.append(h)
+                        windowed.append((k, h))
                         counts[s] = 1
                         break
                 else:
-                    deferred.append(h)
+                    deferred.append((k, h))
             else:
-                deferred.append(h)
+                deferred.append((k, h))
         elif n >= per_session_cap:
-            deferred.append(h)
+            deferred.append((k, h))
         else:
-            windowed.append(h)
+            windowed.append((k, h))
             counts[s] = n + 1
     # An eviction pushes a LOW-ranked item into the tail behind items deferred at
     # higher ranks. Restore original rank order when the arm is on, so no
     # session's own items invert and the re-cap below still keeps its best ones.
+    # Sorting the carried rank (not a re-derived one) is identity-safe.
     if floor_term:
-        rank = {id(h): k for k, h in enumerate(items)}
-        deferred.sort(key=lambda h: rank[id(h)])
+        deferred.sort(key=lambda pair: pair[0])
     # Under-filled window (every remaining item belongs to a capped session):
     # fill from the deferred tail in original order — the cap is a diversity
     # guard, never a completeness blocker.
     while len(windowed) < window and deferred:
         windowed.append(deferred.pop(0))
-    return windowed + deferred
+    return [h for _, h in windowed] + [h for _, h in deferred]

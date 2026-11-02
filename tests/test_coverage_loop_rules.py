@@ -624,3 +624,33 @@ def test_floor_term_keeps_the_per_session_cap_at_a_wide_window():
     assert "e1" in [h["id"] for h in order[:7]], (
         "the unrepresented session is still admitted at a wide window")
     assert sorted(h["id"] for h in order) == sorted(h["id"] for h in items)
+
+
+def test_floor_term_tail_order_is_identity_safe_for_a_repeated_object():
+    """THE TAIL RE-SORT MUST NOT RE-DERIVE RANK FROM A ``{id(h): k}`` MAP.
+
+    That comprehension keeps the LAST index for an object appearing twice in
+    ``items``, so the EARLIER occurrence sorts as if it sat at the later rank
+    and the tail INVERTS — precisely the failure the sort exists to prevent.
+    Pinned against the content-equal TWIN (the repeated object replaced by
+    distinct, elementwise-equal hits), which is the answer the sort is meant
+    to produce, plus the literal id list so the twin cannot drift with it.
+
+    Fails pre-fix: the repeated pool yielded ``a1, a2, w, x, x`` — ``w``
+    (rank 3) emitted BEFORE ``x`` (rank 2).
+    """
+    shared = _hit("x", "A")
+    repeated = [_hit("a1", "A"), _hit("a2", "A"), shared,
+                _hit("w", "A"), shared]
+    twin = [_hit("a1", "A"), _hit("a2", "A"), _hit("x", "A"),
+            _hit("w", "A"), _hit("x2", "A")]
+    got = session_diverse_order(repeated, window=2, per_session_cap=2,
+                                floor_term=True)
+    want = session_diverse_order(twin, window=2, per_session_cap=2,
+                                 floor_term=True)
+    assert [h["id"] for h in got] == ["a1", "a2", "x", "w", "x"], (
+        "a repeated object must keep its FIRST rank; the tail must not invert")
+    assert [h["session_id"] for h in got] == [h["session_id"] for h in want], (
+        "a pool carrying a repeated object must agree with its content-equal "
+        "twin")
+    assert len(got) == len(repeated), "additive: the reorder never drops an item"
