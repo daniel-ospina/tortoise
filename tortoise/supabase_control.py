@@ -4060,6 +4060,18 @@ def graph_metadata(cp, org_id: str) -> list[dict]:
     default_rec = None
     default_name = "default"
     default_id = None
+    # #10452 review P2: the default's NAMESPACE starts as the org pointer (the
+    # pre-graphs-table answer) and is REPLACED by the value on the SAME row the
+    # `stable_id` below comes from. The two are answers about ONE row, and this
+    # function used to take one from `organizations.graph_name` and the other
+    # from a later `public.graphs` statement — two statements, two snapshots
+    # under READ COMMITTED (PostgreSQL 18 §13.2.1), so a
+    # `promote_default_graph` committing between them published the default
+    # with the DEMOTED namespace beside a `stable_id` naming the PROMOTED row.
+    # `backup_sweep.enumerate_org_graphs` keys the dump off exactly this
+    # namespace and labels it "default", so the torn pair dumps the demoted
+    # graph's data under the default object key AND again as a custom graph.
+    default_ns = rows[0]["graph_name"]
     try:
         # #10025: `status` is filtered for the SAME reason
         # `default_graph_id_for` filters it — a tombstoned row is not the
@@ -4068,7 +4080,7 @@ def graph_metadata(cp, org_id: str) -> list[dict]:
         # that the record FK accepts, so a caller following "file rows under
         # stable_id" could file them under a deleted graph.
         drow = cp.query(
-            "graphs", select=["recording", "name", "id"],
+            "graphs", select=["recording", "name", "id", "namespace"],
             filters=[("org_id", "eq", org_id), ("kind", "eq", "default"),
                      ("status", "eq", "active")],
         )
@@ -4077,6 +4089,16 @@ def graph_metadata(cp, org_id: str) -> list[dict]:
             default_id = drow[0].get("id")
             if drow[0].get("name"):
                 default_name = drow[0]["name"]
+            # …and the namespace from THAT row. `20261028000001` §3 pins a
+            # `kind='default'` row's namespace to the org's graph name, so on a
+            # healthy org this is the same value the column carries; only the
+            # torn instant above could tell them apart, and this is what makes
+            # the answer coherent there. The column remains the fallback for
+            # the additive-read degrade (one migration behind, or a row with no
+            # namespace), which is the same direction the id takes (refuse,
+            # don't guess).
+            if drow[0].get("namespace"):
+                default_ns = drow[0]["namespace"]
     except Exception:
         default_rec = None  # one migration behind → no default row support
     default = {
@@ -4093,7 +4115,7 @@ def graph_metadata(cp, org_id: str) -> list[dict]:
         "org_id": org_id,
         "name": default_name,
         "kind": "default",
-        "namespace": rows[0]["graph_name"],
+        "namespace": default_ns,
         "status": "active",
         "recording": default_rec,  # inherit org default when None
     }

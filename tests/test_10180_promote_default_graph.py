@@ -190,6 +190,62 @@ def test_promote_moves_the_kind_and_the_org_namespace(sb):
     assert len(_defaults(fake)) == 1
 
 
+def test_graph_metadata_publishes_the_defaults_own_namespace_and_id():
+    """#10452 review P2: the default's `namespace` and its `stable_id` are answers
+    about ONE `public.graphs` row, so one read must answer both.
+
+    This function took the namespace off `organizations.graph_name` and the id
+    off a LATER `public.graphs` statement. Two statements are two snapshots
+    under READ COMMITTED (PostgreSQL 18 §13.2.1), so a
+    `promote_default_graph` committing between them published the default with
+    the DEMOTED namespace beside a `stable_id` naming the PROMOTED row — the
+    torn pair, three files from where this PR closed it for credentials.
+    `backup_sweep.enumerate_org_graphs` keys the dump off exactly this
+    namespace and labels it `"default"`, so the torn instant dumps the demoted
+    graph's data under the default object key (and again as a custom graph).
+
+    This double IS that instant: the org pointer still names the namespace the
+    promotion moved OFF, while `graphs` already carries the promoted
+    `kind='default'` row. FAIL-ON: resolve the namespace from the org row (the
+    pre-fix code) and the default is described by two different graphs.
+    """
+    from tortoise.supabase_control import graph_metadata
+
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
+                             "org_memberships": [], "invitations": [],
+                             "graphs": []})
+    # t0, BEFORE the promotion commits: the org row still names the old default.
+    fake.seed("organizations", [dict(_ORG)])
+    # t1, AFTER it commits: NEW_ID is the live default; the org's old graph is a
+    # plain custom graph carrying the namespace the org row still names.
+    fake.seed("graphs", [
+        {"id": OLD_ID, "org_id": TEAM, "name": "default", "kind": "custom",
+         "namespace": f"org_{TEAM}", "status": "active", "recording": None},
+        {"id": NEW_ID, "org_id": TEAM, "name": "new-extractor",
+         "kind": "default", "namespace": f"org_{TEAM}_{NEW_ID}",
+         "status": "active", "recording": None},
+    ])
+
+    default = next(r for r in graph_metadata(fake, TEAM) if r["kind"] == "default")
+    assert default["stable_id"] == NEW_ID
+    assert default["namespace"] == f"org_{TEAM}_{NEW_ID}", (
+        "the default is published with the DEMOTED graph's namespace while its "
+        "stable_id names the PROMOTED row — that pair is what makes the backup "
+        "sweep dump the wrong graph under the 'default' key; resolve both halves "
+        "from ONE row")
+    # …and the two halves name ONE row: the row the sentinel resolves to.
+    row = next(r for r in fake.tables["graphs"] if r["id"] == default["stable_id"])
+    assert default["namespace"] == row["namespace"]
+    # The degrade arm is unchanged: no live default row → the org pointer is the
+    # answer and `stable_id` refuses, exactly as before.
+    for row in fake.tables["graphs"]:
+        row["status"] = "deleted"
+    degraded = next(r for r in graph_metadata(fake, TEAM)
+                    if r["kind"] == "default")
+    assert degraded["stable_id"] is None
+    assert degraded["namespace"] == f"org_{TEAM}"
+
+
 def test_the_response_states_the_in_flight_consequence(sb):
     """The switch must say what happens to work already admitted — a caller
     cannot infer it from the id, and 'silently re-home them' would be wrong."""
