@@ -39,7 +39,7 @@ justify (the bundle prefix `docs/evidence/7949-capstone/`, landed by #9076, alre
 `core` for a PROBE-ONLY diff — measured, not assumed), and **add** one for the gate source
 (`tools/capstone_verdict_check.py`), because a GATE-ONLY diff selected no surface at all while
 the bundle prefix covers only the probe/evidence paths (pinned by
-`tests/test_ci_selection.py::test_the_capstone_change_selects_core_not_tier1`) — and add a pin
+`tests/test_ci_selection.py::test_the_capstone_gate_change_selects_core_not_tier1`) — and add a pin
 that no `CORE_ALSO` row is shadowed by a parent prefix; the surface re-cut the new caller forces
 (`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`); and two test-side edits —
 `tests/test_ci_check_repair.py` (the `gh` launcher stub) and
@@ -563,7 +563,7 @@ this note and not the registration's item 2.
 
 ⛔ **The registration is NOT edited to say this, and its own terms are why.** `preregistration.json`
 pins the document by BYTES (`document_sha256`, asserted by
-`tests/test_s3_prior_ablation.py::test_the_record_pins_the_documents_digest`), and an amendment is a
+`tests/test_s3_prior_ablation.py::test_the_frozen_pre_registration_is_still_the_document_its_record_pins`), and an amendment is a
 NEW linked record — never an edit to the frozen one, which is the `#10463` ruling and the reason a
 silent edit is the failure the gate exists to catch in the first place. Leaving item 2 as the only
 statement of the rule is the other failure: a lane that reads the authoritative protocol, orders its

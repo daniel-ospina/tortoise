@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -307,6 +308,87 @@ def test_the_bundle_records_the_superseded_ordering_rule_its_registration_states
             "(`document_sha256`)")
 
 
+#: `tests/<file>::<symbol>` — a TEST cited by name from an evidence bundle, in the form a reader is
+#: meant to RUN (`pytest path::symbol`). A bare name in prose is a historical mention, not an
+#: address, so it is out of scope. The trailing group is the `-k` glob form
+#: (`tests/x.py::test_census_probe_*`), which resolves by PREFIX instead of by exact name.
+_BUNDLE_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+)(\*?)")
+
+
+def _missing_bundle_refs(refs) -> list[str]:
+    """`[(test file, symbol[, glob])]` -> the citations their target file does not support.
+
+    An exact symbol must be DEFINED by the named file. A glob (`…::test_census_probe_*`, pytest's
+    own `-k` form) must match at least one defined name — a renamed prefix collects nothing, which
+    is the same phantom one level out. A missing FILE resolves to an empty set, so a bundle that
+    sends a reader to a test file which no longer exists reds here too.
+    """
+    import ast  # local: the resolve is the whole cost, and one caller does not want it at import
+
+    defined: dict[str, set[str]] = {}
+    missing: list[str] = []
+    for rel, name, glob in refs:
+        if rel not in defined:
+            path = REPO_ROOT / rel
+            if not path.exists():
+                defined[rel] = set()
+            else:
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+                defined[rel] = {
+                    node.name
+                    for node in ast.walk(tree)
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                }
+        if glob:
+            if not any(n.startswith(name) for n in defined[rel]):
+                missing.append(f"{rel}::{name}* (matches none of the names that file defines)")
+            continue
+        if name not in defined[rel]:
+            near = sorted(n for n in defined[rel] if name[:24] in n or n[:24] in name)
+            missing.append(f"{rel}::{name}" + (f" (did you mean {near[0]}?)" if near else ""))
+    return missing
+
+
+def test_every_test_name_the_evidence_bundles_cite_exists():
+    """⛔ A BUNDLE THAT CITES A TEST WHICH DOES NOT EXIST READS AS CONFIRMATION, not as a typo.
+
+    `docs/evidence/7949-capstone/README.md` cited
+    `tests/test_s3_prior_ablation.py::test_the_record_pins_the_documents_digest` — a name no test in
+    the tree carried. Nothing redded, and the wrong outcome is not a broken link: that section exists
+    so a lane reads IT instead of the digest-pinned registration, and its whole argument is "the
+    document's bytes are pinned, so do not edit it". `pytest -k test_the_record_pins_the_documents_
+    digest` collects ZERO tests, and the green "no tests ran" reads as "the pin holds" — the same
+    relay class `test_every_test_name_the_runbook_names_exists` pins for the runbook (#10186 review,
+    FINDING 1), one surface over. A second phantom (a `test_the_capstone_change_…` that the file
+    never defined) was in the same README's scope paragraph.
+
+    Resolved against the AST, so a name a file defines — or a class that holds it — passes, while a
+    name that was renamed, moved or invented reds with the nearest real names.
+
+    Non-vacuity, asserted in-test rather than claimed: the resolver is required to REJECT a name that
+    cannot exist, so a version of this pin that resolved everything would red on its own guard.
+    """
+    phantom = ("tests/test_s3_prior_ablation.py", "test_this_name_deliberately_does_not_exist", "")
+    assert _missing_bundle_refs([phantom]), (
+        "the resolver accepted a test name no file carries, so this pin would pass over exactly the "
+        "phantoms it exists to refuse")
+
+    refs: set[tuple[str, str, str]] = set()
+    for path in sorted((REPO_ROOT / "docs" / "evidence").rglob("*")):
+        if path.is_file() and path.suffix in {".md", ".json"}:
+            refs.update(_BUNDLE_TEST_REF.findall(
+                path.read_text(encoding="utf-8", errors="replace")))
+    assert refs, (
+        "no evidence bundle cites a test by name any more — re-anchor this pin rather than deleting "
+        "it; a pin over an empty reference set checks nothing")
+
+    missing = _missing_bundle_refs(sorted(refs))
+    assert not missing, (
+        "an evidence bundle sends a reader to a test that does not exist — a `-k` filter over a "
+        "phantom name collects zero tests and its green \"no tests ran\" reads as confirmation. "
+        "Repair the citation to the real symbol (or rename the test): " + "; ".join(missing))
+
+
 def test_a_mutated_pin_fails_instead_of_re_basing_the_thresholds():
     pins = check.parse_pins(PREREG.read_text())
     pins["corpus"]["planted_units"] = 91
@@ -358,6 +440,30 @@ def _repo(tmp_path: Path, monkeypatch) -> Path:
     # The tool resolves add-commits relative to REPO_ROOT, so the throwaway repo must BE it.
     monkeypatch.setattr(check, "REPO_ROOT", repo.resolve())
     return repo
+
+
+def _seed_with_the_real_bundle(repo: Path) -> Path:
+    """Copy the REAL 7949 bundle — and the model file E3's class-set arm derives from — into `repo`.
+
+    ⛔ The model file is not decoration. `#10525` (#9736/#9738) made E3's denominator follow the
+    writer's own `_DERIVATION_REFERENCES_LABELS`, read out of `tortoise/projection/edges.py` under
+    `REPO_ROOT`, and an absent file is a `CheckError` — correctly, because a gate that cannot see the
+    model would green the rows it exists to refuse. A fixture that copies the bundle's machine record
+    (which asks for that basis) but not the model therefore reds on the FIXTURE instead of on what
+    the test is about, so the file comes with it: both `check.run` and the CLI derive the class set
+    from `REPO_ROOT`, which the depth-1 fixtures point at a throwaway clone.
+
+    The file is COMMITTED, not merely written: a `--depth 1` clone carries only committed content.
+    """
+    bundle = repo / "docs" / "evidence" / "7949-capstone"
+    bundle.mkdir(parents=True, exist_ok=True)
+    for item in PREREG_DIR.iterdir():
+        if item.is_file():
+            (bundle / item.name).write_bytes(item.read_bytes())
+    model = repo / check.DERIVATION_LABELS_PATH
+    model.parent.mkdir(parents=True, exist_ok=True)
+    model.write_bytes((REPO_ROOT / check.DERIVATION_LABELS_PATH).read_bytes())
+    return bundle
 
 
 def _write_and_commit(repo: Path, name: str, epoch: int) -> Path:
@@ -4484,12 +4590,8 @@ def test_a_depth_one_checkout_without_a_base_reports_the_unresolved_base(tmp_pat
     reported fact; what it must NOT do is turn the unprovable third outcome into a failure.
     """
     origin = _repo(tmp_path, monkeypatch)
-    bundle = origin / "docs" / "evidence" / "7949-capstone"
-    bundle.mkdir(parents=True, exist_ok=True)
-    for item in PREREG_DIR.iterdir():
-        if item.is_file():
-            (bundle / item.name).write_bytes(item.read_bytes())
-    _git(origin, "add", "docs")
+    _seed_with_the_real_bundle(origin)
+    _git(origin, "add", "docs", "tortoise")
     _git(origin, "commit", "-q", "-m", "the real bundle", epoch=1_700_000_100)
     _git(origin, "branch", "-m", "contrib")
 
@@ -4729,12 +4831,8 @@ def test_a_depth_one_clone_of_main_reports_no_measured_base_even_though_one_reso
     measured line says what actually happened.
     """
     origin = _repo(tmp_path, monkeypatch)
-    bundle = origin / "docs" / "evidence" / "7949-capstone"
-    bundle.mkdir(parents=True, exist_ok=True)
-    for item in PREREG_DIR.iterdir():
-        if item.is_file():
-            (bundle / item.name).write_bytes(item.read_bytes())
-    _git(origin, "add", "docs")
+    _seed_with_the_real_bundle(origin)
+    _git(origin, "add", "docs", "tortoise")
     _git(origin, "commit", "-q", "-m", "the real bundle", epoch=1_700_000_100)
     _git(origin, "branch", "-m", "main")
 

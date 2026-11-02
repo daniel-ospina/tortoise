@@ -4606,8 +4606,10 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     capstone relay below was re-derived seven times and falsified an eighth by the commit that
     inserted 56 lines above it — a number is asserted by nothing between edits, so it decays
     silently, which is the exact defect this pin exists to refuse one level up. `symbol_citations`
-    holds those anchors: the target must carry the sentence exactly once, and the citing file must
-    still cite the target, so the relay is verified while the address can never go stale.
+    holds those anchors: the target must carry the sentence exactly once, so the relay is verified
+    while the address can never go stale. ⛔ What is NOT asserted is that the citing paragraph still
+    points at the target — the block below records why that check was written, measured DEAD and
+    removed rather than shipped; read it before adding that clause back.
     """
     # (target file, cited line) -> a regex the CITED LINE ITSELF must match
     anchors: dict[tuple[str, int], str] = {
