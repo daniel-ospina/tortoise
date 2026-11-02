@@ -4260,7 +4260,7 @@ LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before jud
 #:   * 68x the observed p99 loop lag (8.8s) on the live machine.
 #: It is NOT above an unbounded model call: ``_scaled_deadline(600, max_tokens)``
 #: is ~819s at a 16K budget (``tortoise/extractor_v2.py:11715``). That path is
-#: OFF the loop by the #3060 invariant (hosted_api.py:15744-15760), so it cannot
+#: OFF the loop by the #3060 invariant (hosted_api.py:15742-15760), so it cannot
 #: provide the tick-blocking bound — but it is the reason this is a ceiling on
 #: the LOOP, not a general "operation is slow" timeout.
 #: The measured wedge exceeded 600s (696s max lag) within minutes, so it binds.
@@ -4277,7 +4277,9 @@ LOOP_STALL_HARD_EXIT_S = 0.0       # 0 == hard ceiling DISABLED (the default)
 #: healthy, which would make the hard ceiling below ``os._exit`` a HEALTHY
 #: process every ``LOOP_STALL_HARD_EXIT_S`` until the platform's
 #: ``max_retries`` are spent and the machine is left STOPPED (Fly's restart
-#: policy is ``on-fail`` with ``max_retries 10`` — fly.toml:206) — a silent
+#: policy is ``on-fail`` with ``max_retries 10``, verified 2026-11-02 via
+#: ``fly machine status 8654509b634758 --display-config`` — fly.toml:199-204
+#: records why that is a MACHINE attribute and not a file key) — a silent
 #: hang replaced by a silent stop. So the ceiling must be able to tell "the
 #: loop is wedged" from "the ticker is gone", and refuse to act in the
 #: second case.
@@ -4330,7 +4332,8 @@ def heartbeat_task_is_dead() -> bool:
     DERIVED FROM THE TASK, never a module latch (#2850 R3 review P2): a latched
     flag was STICKY, so one ticker death disarmed the ceiling for the rest of
     the process even after ``_start_liveness`` re-armed a fresh ticker
-    (hosted_api.py:1955-1962 supports exactly that), and it leaked across
+    (hosted_api.py:1957-1964 cancels the previous ticker and installs a fresh
+    one), and it leaked across
     tests. Here the verdict follows the ticker that is ACTUALLY recorded, and
     a re-armed ticker re-arms the ceiling.
 
@@ -4635,7 +4638,7 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
             # (review P2): that gate exists so a slow BOOT is not mistaken for
             # a wedge, and its rationale is about the first seconds — a loop
             # that wedges during startup, before the real ticker lands its
-            # second tick (hosted_api.py:1959-1962 leaves the synthetic tick at
+            # second tick (hosted_api.py:1960 leaves the synthetic tick at
             # 1), never advances ``ticks`` and would otherwise hang forever
             # with the ceiling armed. ``age is None`` (never ticked) is still
             # excluded: with no timestamp at all there is nothing to measure.

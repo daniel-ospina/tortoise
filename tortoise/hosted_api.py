@@ -1938,9 +1938,12 @@ def _start_liveness(app) -> None:
     (proving it is scheduling before the watchdog exists to judge it), then
     the heartbeat task, then the listener, then the watchdog. Starting the
     watchdog before the heartbeat would let it fire on a loop that simply had
-    not ticked yet. The watchdog additionally refuses to judge until at least
+    not ticked yet. The SOFT path additionally refuses to judge until at least
     one REAL tick has landed (``LOOP_STALL_EXIT_MIN_TICKS``), so the slow-
-    starting part of the startup half cannot be mistaken for a wedge.
+    starting part of the startup half cannot be mistaken for a wedge. The HARD
+    ceiling (#10585 review P2) is exempt from that gate: past
+    ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` a boot that never ticked again IS the
+    wedge, and holding the ceiling off for it means hanging indefinitely.
     """
     loop = asyncio.get_running_loop()
     # A previous lifespan of the SAME app instance (in-process restart,

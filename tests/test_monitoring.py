@@ -3505,7 +3505,7 @@ class TestStallWatchdog:
 
         The old ``_HEARTBEAT_TASK_DEAD`` was a one-way latch, so one ticker
         death disarmed the ceiling for the whole process even after
-        ``_start_liveness`` installed a fresh ticker (hosted_api.py:1955-1962).
+        ``_start_liveness`` installed a fresh ticker (hosted_api.py:1957-1964).
         Every end state of the CURRENT task must disarm, and a re-armed running
         ticker must re-arm the ceiling.
         """
