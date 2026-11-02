@@ -776,3 +776,22 @@ if __name__ == "__main__":  # the standalone form the docstring advertises
 
     os.environ.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ── cycle 8: the container ENDS the fence (blank line, or lost indent) ───────
+
+@pytest.mark.parametrize("body,expected", [
+    # A blank line ends a blockquote, and a fenced block ends with its container,
+    # so the `> Closes` after it is a NEW blockquote's prose — a real claim.
+    ("> ```\n> a\n\n> Closes #10541\n> ```\n", [10541]),
+    # A 4-space indented ``` is an INDENTED CODE BLOCK, not a fence, so the
+    # column-0 prose after it is prose (review c8-2).
+    ("    ```\nCloses #10541\n", [10541]),
+    ("    ```\nCloses #12\n    ```\n", [12]),
+    # …while content that stays inside the container is still stripped.
+    ("> ```\n> a\n>\n> Closes #20\n> ```\n", []),
+    ("- item:\n\n  ```\n  Closes #40\n  ```\n", []),
+])
+def test_the_container_ends_the_fence(body, expected):
+    assert cl.parse_closing_refs(body) == expected
+    assert cl.parse_closing_refs(body, None, strict=True) == expected

@@ -164,8 +164,8 @@ def _quote_depth(line: str) -> int:
     return _CONTAINER_PREFIX_RE.match(line).group(0).count(">")
 
 
-def _fence_run(line: str) -> tuple[str, int, int] | None:
-    """(character, run length, blockquote depth) of a leading fence, if any.
+def _fence_run(line: str) -> tuple[str, int, int, int] | None:
+    """(character, run length, blockquote depth, indent) of a leading fence.
 
     Blockquote prefixes (`> `, `> > `) are seen through: a fenced block inside a
     quote is still a fence, and `_fence_run` not seeing it made the block's
@@ -177,8 +177,16 @@ def _fence_run(line: str) -> tuple[str, int, int] | None:
     claims. Blanking it was a silent PASS over the inert shape (review c7-2).
     """
     body = _CONTAINER_PREFIX_RE.sub("", line)
-    m = re.match(r"(`{3,}|~{3,})", body.lstrip())
-    return (m.group(1)[0], len(m.group(1)), _quote_depth(line)) if m else None
+    stripped = body.lstrip()
+    m = re.match(r"(`{3,}|~{3,})", stripped)
+    if not m:
+        return None
+    # The INDENT is carried out for the same reason as the depth: a 4-space
+    # indented ``` is not a fence at all (CommonMark renders it as an indented
+    # code block whose content is the literal ```` ``` ````), so the column-0
+    # prose after it is prose — blanking it swallowed a real claim (review c8-2).
+    indent = len(body) - len(stripped)
+    return (m.group(1)[0], len(m.group(1)), _quote_depth(line), indent)
 
 
 def strip_code(body: str, strict: bool = False) -> str:
@@ -212,16 +220,22 @@ def strip_code(body: str, strict: bool = False) -> str:
     safe direction (an extra warning, never a pass) and is accepted.
     """
     out: list[str] = []
-    fence: tuple[str, int, int] | None = None
+    fence: tuple[str, int, int, int] | None = None
     for line in body.splitlines():
         run = _fence_run(line)
         if strict and (line.startswith("    ") or line.startswith("\t")):
             out.append("")
             continue
         if fence is not None:
-            # A line that leaves the quote ENDS the block (a fenced block has no
-            # lazy continuation), so it is prose again — including its keywords.
-            if line.strip() and _quote_depth(line) < fence[2]:
+            # A line that leaves the CONTAINER ends the block — a fenced block has
+            # no lazy continuation. It leaves when it drops out of the quote
+            # (INCLUDING on a blank line: a blank line ends a blockquote, and the
+            # block ends with it) or when its indent falls below an indented
+            # opener's. Such a line is prose again, so its keywords stay claims —
+            # blanking them was a silent PASS (review c8-1, c8-2).
+            if _quote_depth(line) < fence[2] or (
+                    line.strip() and not run
+                    and len(line) - len(line.lstrip()) < fence[3]):
                 fence = None
                 out.append(line)
                 continue
