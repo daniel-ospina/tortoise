@@ -85,7 +85,7 @@ rows"* case §4 item 3 requires to flip the marker — and it stays `false`. Rea
 this surface as *"the candidate cut did not fire"*, never as *"nothing was lost"*: the two SILENT
 bounds are named here rather than folded into the marker because folding them in is a code change
 (the return is already a `dict`, so it is additive and needs no surface approval — the sibling search
-path does exactly this at `sdk.py:34617-34624`), and this document is the census, not the fix.
+path does exactly this at `sdk.py:34571-34579`), and this document is the census, not the fix.
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
@@ -138,7 +138,7 @@ being tracked.
 
 ⚠️ **hosted `GET /v1/points` is NOT one of these, and is not parked on an approval.** Its body is a
 **dict**, not a list — `return {"points": results, "count": len(results)}` (`hosted_api.py:10267`) —
-and the route declares no `response_model` (`:10207-10208`), so a marker rides it **additively**,
+and the route declares no `response_model` (`:10208-10209`), so a marker rides it **additively**,
 exactly as it rides `/v1/search`: build the body, then `response.update(truncation_field(…))`
 (`:10747`, `:10756`). #10500 recorded that shape as a `response_fields` row in
 `config/surface-manifest.yml` (`:121-143`), **not** as an MCP/SDK surface approval — and its own
