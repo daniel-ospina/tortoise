@@ -2772,22 +2772,33 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
     # IMPL=65 INPUT=68 NAND=14, a combination no artifact ever measured
     # (`e0fc940b5` pairs 433/338/50/45 with IMPL=57 INPUT=58 NAND=10). The old form of
     # this leg REQUIRED that fusion, because it was written when the eight-step table WAS
-    # the shipped run's; it now holds the row to one run instead.
+    # the shipped run's; it now holds the row to one run — in BOTH directions. The first
+    # form of the fix gated everything on the superseded census literal, so the MIRROR
+    # fusion (shipped census `397 derived nodes` beside the superseded triple) passed
+    # every leg; measured, and the reason both branches below are asserted.
     s5_row = next(ln for ln in readme.splitlines()
                   if ln.startswith("| S5 CONNECT"))
     shipped_triple = (f"IMPL={measured.group(1)} INPUT={measured.group(2)} "
                       f"NAND={measured.group(3)}")
+    superseded_triple = "IMPL=57 INPUT=58 NAND=10"
+    shipped_census = "397 derived nodes" in s5_row
     superseded_census = "433 derived nodes" in s5_row
-    assert not (superseded_census and shipped_triple in s5_row), (
-        "the S5 row pairs the SUPERSEDED run's census (433 derived nodes) with THIS "
-        f"run's operator triple ({shipped_triple}) — no artifact measured that "
-        "combination. The eight-step table is the superseded run's (see the banner), "
-        f"so its row carries that run's own triple: {s5_row[:400]}")
+    assert shipped_census or superseded_census, (
+        "the S5 row quotes neither run's census, so nothing here can tell which run it "
+        f"describes: {s5_row[:400]}")
+    assert not (shipped_census and superseded_census), (
+        f"the S5 row quotes BOTH runs' census counts: {s5_row[:400]}")
     if superseded_census:
-        assert "IMPL=57 INPUT=58 NAND=10" in s5_row, (
-            "the S5 row quotes the SUPERSEDED run's census, so its operator triple must "
-            "be that run's too (`e0fc940b5`'s `step S5` line pairs 433 derived nodes "
-            f"with IMPL=57 INPUT=58 NAND=10): {s5_row[:400]}")
+        assert superseded_triple in s5_row and shipped_triple not in s5_row, (
+            "the S5 row quotes the SUPERSEDED run's census (433 derived nodes), so its "
+            "operator triple must be that run's too (`e0fc940b5`'s `step S5` line pairs "
+            f"433 with {superseded_triple}) — not this run's {shipped_triple}: "
+            f"{s5_row[:400]}")
+    else:
+        assert shipped_triple in s5_row and superseded_triple not in s5_row, (
+            "the S5 row quotes THIS run's census (397 derived nodes), so its operator "
+            f"triple must be this run's too ({shipped_triple}), not the superseded "
+            f"{superseded_triple}: {s5_row[:400]}")
 
 
 # ── the bundle's STATE LEDGER must describe the seam that SHIPPED ──────────
