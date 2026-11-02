@@ -1919,3 +1919,57 @@ def test_backoff_honours_retry_after_then_reset_then_jitter():
         R._rate_limit_sleep_s("secondary rate limit", 1)
     for v in (lo, hi):
         assert R.RATE_LIMIT_BASE_S <= v <= min(R.RATE_LIMIT_BASE_S * 2, R.RATE_LIMIT_MAX_SLEEP_S)
+
+
+# ── 14. the zero-job read must not fight a flood, and must not add load ─────
+
+def test_a_starved_zero_job_run_is_named_but_never_rerun():
+    """A measured FLOOD is repaired by the governor, never by a per-head rerun.
+
+    Under a flood EVERY queued run has zero jobs, so naming them must not turn into
+    "re-run them": that adds load to the flood they are starving behind, and it burns
+    the attempt budget the post-flood repair needs (leaving the context EXHAUSTED).
+    """
+    runs = [aged_run(10, jobs=0, age_s=3600.0, path="ci.yml", name="CI")]
+    plan = R.classify(pr(), [], runs, ["docs"], EMITTERS, max_attempts=3,
+                      queue_starved=True)
+    assert [d["run"] for d in plan.no_verdict] == [10], "it is still NAMED"
+    assert plan.rerun == [], "a starved context is repaired by NOTHING"
+    assert plan.exhausted == []
+    assert plan.starved == ["docs"]
+
+
+def test_job_reads_stop_after_the_aggregate_failure_bound(monkeypatch):
+    """A refused jobs read abstains, and the pass stops probing — it must not pay a
+    rate-limit sleep once per queued run (11 measured runs ~ 22 min against a 15-min
+    workflow timeout: the job gets KILLED instead of exiting 2)."""
+    calls = {"n": 0}
+
+    def refuse(argv):
+        calls["n"] += 1
+        return _fake(1, "", LIMITED)
+
+    monkeypatch.setattr(R, "_run", refuse)
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    monkeypatch.setattr(R, "_JOB_READ_FAILURES", 0)
+    monkeypatch.setattr(R, "_READ_CACHE", {})
+    ids = [R.job_count("o/r", 100 + i) for i in range(10)]
+    assert ids == [None] * 10, "every unreadable probe ABSTAINS (never a zero)"
+    assert calls["n"] == R.JOB_READ_FAILURE_LIMIT, (
+        f"probed {calls['n']} times for 10 runs; expected to stop at the bound")
+
+
+def test_approval_parked_runs_are_not_probed_at_all(monkeypatch):
+    probed: list[int] = []
+    monkeypatch.setattr(R, "job_count", lambda repo, rid, attempt=0: probed.append(rid))
+    monkeypatch.setattr(R, "_READ_CACHE", {})
+    monkeypatch.setattr(R, "_paginate", lambda path, key: [
+        {"id": 1, "name": "CI", "path": ".github/workflows/ci.yml", "status": "waiting",
+         "conclusion": None, "run_attempt": 1, "event": "pull_request",
+         "created_at": "2026-11-02T18:00:00Z"},
+        {"id": 2, "name": "CI", "path": ".github/workflows/ci.yml", "status": "queued",
+         "conclusion": None, "run_attempt": 1, "event": "pull_request",
+         "created_at": "2026-11-02T18:00:00Z"}])
+    runs = R.runs_at_head("o/r", "a" * 40)
+    assert probed == [2], "only the queued run can change a verdict"
+    assert [r.job_count for r in runs] == [None] * 2

@@ -211,6 +211,18 @@ RATE_LIMIT_MAX_SLEEP_S = float(os.environ.get("CI_REPAIR_RATE_LIMIT_MAX_SLEEP_S"
 #: mean "refused because of the budget"; a permission 403 keeps its own error.
 _RATE_LIMIT_RE = re.compile(r"rate limit|secondary rate|HTTP 429", re.I)
 
+#: ⛔ THE JOB READS HAVE THEIR OWN AGGREGATE BOUND. The main reads retry a refusal
+#: (they are few and each one gates the whole pass); a job count is a PER-RUN probe
+#: that can only ADD a distinction to one context, and there are as many of them as
+#: there are queued runs. Retrying each one would pay the rate-limit sleeps once per
+#: run — measured 11 zero-job runs, ~2 min each, against a workflow whose
+#: `timeout-minutes` is 15, so the job is KILLED instead of exiting 2 and the whole
+#: measurement is lost. So: no per-call retry, and after `JOB_READ_FAILURE_LIMIT`
+#: failures the pass STOPS probing and every later run abstains (None). Abstaining is
+#: the honest outcome — it never reads as a stall — and the pass still reports.
+JOB_READ_FAILURE_LIMIT = 2
+_JOB_READ_FAILURES = 0
+
 #: Statuses whose zero-job runs are NOT the stall this module names. `waiting` is a
 #: run parked for MANUAL APPROVAL or an environment gate: it has no jobs by design,
 #: no age makes it start, and a `rerun` cannot obtain an approval — re-running it
@@ -421,13 +433,25 @@ def job_count(repo: str, run_id: int, attempt: int = 0) -> int | None:
     will arrive" (`classify`), because an unreadable jobs surface says nothing about
     whether jobs exist and inferring a stall from it is the fail-open direction this
     module refuses everywhere else.
+
+    NO PER-CALL RETRY, and a bounded aggregate (see `JOB_READ_FAILURE_LIMIT`): this is
+    a per-run probe, so a refusal here abstains for that run and, after a couple of
+    failures, stops probing for the rest of the pass rather than sleeping through the
+    workflow's own timeout once per queued run.
     """
+    global _JOB_READ_FAILURES
+    if _JOB_READ_FAILURES >= JOB_READ_FAILURE_LIMIT:
+        return None
     try:
         data = _cached(("jobs", repo, run_id, attempt),
-                       lambda: gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=1"))
+                       lambda: gh_json(["api",
+                                        f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=1"],
+                                       retries=0))
     except (MeasureError, subprocess.TimeoutExpired):
+        _JOB_READ_FAILURES += 1
         return None
     if not isinstance(data, dict):
+        _JOB_READ_FAILURES += 1
         return None
     total = data.get("total_count")
     return total if isinstance(total, int) else None
@@ -463,7 +487,7 @@ def runs_at_head(repo: str, sha: str) -> list[Run]:
         # in-progress one demonstrably has jobs, so reading those is pure budget —
         # which is the currency the rate-limit handling above exists to protect.
         for r in runs:
-            if r.status in QUEUED_STATUSES:
+            if r.status in QUEUED_STATUSES and r.status not in _APPROVAL_PARKED_STATUSES:
                 r.job_count = job_count(repo, r.id, r.run_attempt)
         return runs
 
@@ -642,6 +666,15 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                         {"run": r.id, "workflow": r.name or r.path, "status": r.status,
                          "jobs": r.job_count,
                          "age_seconds": round(age_seconds(r.created_at) or 0)})
+                # ⛔ A STARVED CONTEXT IS STILL NOT REPAIRED (#9115). This is decided
+                # BEFORE the rerun below and it is load-bearing: under a measured
+                # flood EVERY queued run is a zero-job run, so naming them must not
+                # become "re-run them" — that adds load to the flood it is starving
+                # behind, and it spends each run's attempt budget so the repair that
+                # would have worked after the flood is gone (EXHAUSTED). The module's
+                # recorded rule is that a starved context is repaired by NOTHING.
+                if queue_starved and all(x.status in QUEUED_STATUSES for x in runs):
+                    continue
                 if r.run_attempt >= max_attempts:
                     if ctx not in plan.exhausted:
                         plan.exhausted.append(ctx)
@@ -833,7 +866,9 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
     plans: list[PrPlan] = []
     # A PASS IS THE CACHE SCOPE. Two passes in one process (a launcher that polls)
     # must not reuse a verdict measured against a head that has since moved.
+    global _JOB_READ_FAILURES
     _READ_CACHE.clear()
+    _JOB_READ_FAILURES = 0
     for pr in open_prs(repo, include_drafts):
         head = pr.get("headRefOid") or ""
         if not head:
