@@ -602,12 +602,18 @@ def reader_window_displacement(
       claim-text-less hit spends no item slot and a cap-failing hit is
       skipped without one (``tortoise/retrieval.py``), and with the
       evidence-package arm on, the reader gets a reordered, deduplicated
-      list. So "inside the window" is an UPPER BOUND on the delivered
-      surface, not the surface itself. This module already states the same
-      residual class for ``seeded_sessions`` (*"matches the reader MODULO
-      the budget caps"*); a reuse at a different window, or alongside the
-      packaging arm, needs the same ``admitted=``/counterfactual treatment
-      before the number is read as delivered evidence.
+      list. The count is also taken BEFORE the C2 evidence-mark boost
+      (``_apply_evidence_boost``, which the eval lane applies to the pool
+      AFTER this census and before ``_assemble_context``), so with
+      ``TORTOISE_LME_EVIDENCE_BOOST`` on — the re-validation run's own
+      default — the census window is the PRE-boost order and the reader's
+      is the post-boost one. So "inside the window" is an UPPER BOUND on
+      the delivered surface, not the surface itself. This module already
+      states the same residual class for ``seeded_sessions`` (*"matches the
+      reader MODULO the budget caps"*); a reuse at a different window, or
+      alongside the packaging or boost arms, needs the same ``admitted=``/
+      counterfactual treatment before the number is read as delivered
+      evidence.
 
     ⛔ The TOP-5 is NOT where this happens, and a probe that counts base
     hits at final rank ``>= 5`` says otherwise: it reports 35 for that shape
