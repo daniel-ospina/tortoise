@@ -1488,17 +1488,20 @@ _GRAPH_DISCLOSURE_KEY = "graph_resolution"
 
 
 def _graph_disclosure(graph_ref: str | None,
-                      *, dry_run: bool = False) -> dict[str, Any] | None:
+                      *, preview: bool = False) -> dict[str, Any] | None:
     """What graph THIS dispatch targets, for a write that named none (#10084).
 
     Read at the seam, from the scope the CREDENTIAL resolution already applied:
 
-    * no workspace at all (`_current_org_id` unset — stdio / a bare self-host
-      server) — there is no "workspace default" to name: `_get_org_sdk`
-      delegates to `_get_base_sdk`, which opens the graph the SERVER is
-      configured with (the URI's graph, else `tortoise`). Naming `"default"`
-      there would be a graph id that does not exist on that surface, so the arm
-      reports `server-configured` with no id rather than inventing one.
+    * **no hosted workspace** — `_current_org_id` unset (stdio), OR set to
+      `SELFHOST_ORG_ID` by `TransportModeMiddleware` on the self-host daemon
+      (`auth_mode in static|none`). Those two are ONE lane for this purpose and
+      the predicate here is the RESOLVER's own (`plan_graph_target` refuses any
+      named `graph` on `org_id in (None, SELFHOST_ORG_ID)`), so the disclosure
+      cannot tell a self-host caller to name a graph that lane would refuse.
+      `_get_org_sdk` opens `namespace='selfhost'` (`org_selfhost`, else the URI's
+      graph) — never an id spelled `"default"`, so this arm reports
+      `server-configured` with NO id rather than inventing one.
     * `_current_graph_id` is None for an org-wide credential (OAuth, a workspace
       key, session) — `mcp_auth._get_org_sdk` then opens `namespace=<org>`,
       i.e. the workspace DEFAULT graph, whose id the readers spell `"default"`
@@ -1517,27 +1520,28 @@ def _graph_disclosure(graph_ref: str | None,
     value is therefore documented as the ACCEPTED REF, which is what the caller
     can check its own request against.
 
-    `dry_run` never changes WHAT is disclosed, only whether the reply may say the
-    write happened (see `_graph_disclosure_message`) — a preview targets the same
-    graph and must not read as a completed write.
+    `preview` never changes WHAT is disclosed, only whether the reply may say the
+    write happened (see `_graph_disclosure_message`).
     """
     if graph_ref is not None:
         if not isinstance(graph_ref, str):
             return None
         info = {"graph": graph_ref, "requested": graph_ref,
                 "defaulted": False, "source": "argument"}
-    elif not _mcp_auth._current_org_id.get():
-        info = {"graph": None, "requested": None,
-                "defaulted": True, "source": "server-configured"}
     else:
-        bound = _mcp_auth._current_graph_id.get()
-        landed = bound or _mcp_auth._DEFAULT_GRAPH_ID
-        info = {"graph": landed, "requested": None, "defaulted": True,
-                "source": "credential-graph" if bound else "workspace-default"}
-    if dry_run:
-        # A preview's landing has not happened. Recorded as its own fact so a
-        # consumer (and the prose below) cannot read a dry run as a completed
-        # write — `tortoise_delete`'s FIRST call changes nothing by default.
+        org = _mcp_auth._current_org_id.get()
+        if not org or org == _mcp_auth.SELFHOST_ORG_ID:
+            info = {"graph": None, "requested": None,
+                    "defaulted": True, "source": "server-configured"}
+        else:
+            bound = _mcp_auth._current_graph_id.get()
+            info = {"graph": bound or _mcp_auth._DEFAULT_GRAPH_ID,
+                    "requested": None, "defaulted": True,
+                    "source": "credential-graph" if bound else "workspace-default"}
+    if preview:
+        # A preview's write has not happened. Recorded as its own fact so a
+        # consumer (and the prose below) cannot read a preview as a completed
+        # write.
         info["preview"] = True
     return info
 
@@ -1580,22 +1584,70 @@ def _graph_disclosure_message(info: dict[str, Any]) -> str:
             f"({graph!r})." + preview)
 
 
+def _payload_says_preview(result: Any) -> bool:
+    """Whether the tool's own payload declares the call a preview (#10084).
+
+    The marker already exists: `tortoise_delete`'s unconfirmed first call and
+    every `dry_run` tool return `dry_run: True` in the receipt — including the
+    `confirmation is None` path, which sets no `dry_run` ARGUMENT at all. Reading
+    the receipt is therefore the only way that call is labelled correctly, and it
+    is the same marker the design already standardises on.
+    """
+    payload = getattr(result, "structured_content", None)
+    if not isinstance(payload, dict):
+        return False
+    inner = payload.get("result")
+    for candidate in (payload, inner if isinstance(inner, dict) else None):
+        if isinstance(candidate, dict) and candidate.get("dry_run") is True:
+            return True
+    return False
+
+
+def _is_preview(name: str, arguments: dict[str, Any] | None, result: Any) -> bool:
+    """Whether this dispatch wrote nothing — the two shapes that mean it (#10084).
+
+    * the `dry_run` ARGUMENT, read with `is True` and NOT `bool(...)`: `arguments`
+      is the raw PRE-validation dict (the same trap the metering path at
+      `maybe_record_mcp_read` documents, #4057), so `{"dry_run": "false"}` — a
+      string the handler coerces to `False` — would otherwise be reported as a
+      preview while a REAL write ran. A disclosure that says "nothing was
+      written" over an executed write is the worst possible failure of this
+      feature, so the truthiness coercion is deliberately not used.
+    * the tool's own receipt marker (`_payload_says_preview`), which is the only
+      way an unconfirmed `tortoise_delete` — no `dry_run` argument at all,
+      nothing written — is labelled correctly.
+    """
+    declared = name in _dry_run_tool_names()
+    return ((declared and isinstance(arguments, dict)
+             and arguments.get("dry_run") is True)
+            or _payload_says_preview(result))
+
+
 def _disclose_graph_resolution(result: Any, name: str,
                                graph_ref: str | None,
-                               *, dry_run: bool = False) -> Any:
+                               arguments: dict[str, Any] | None = None) -> Any:
     """Attach the #10084 disclosure to a successful WRITE's result.
 
     Writes only: a read's target is not a change to the caller's data, and the
     GROUP that must be excluded from it is `GRAPH_ARGUMENT_EXCLUDED` — the
     registry's own declaration that a tool "targets the WORKSPACE or names its
     graph explicitly". Those are writes (`tortoise_org_create` provisions a
-    workspace, `tortoise_graph_set_recording` takes its own `graph_id`) and
-    naming the credential's graph on them would assert a target the call never
-    had: the wrong-graph claim this issue exists to remove, emitted by us.
-    `WRITE_TOOL_NAMES` is the registry's DERIVED write set (`risk in
-    write|destructive|admin`), so neither side can drift from the surface.
+    workspace) and naming the credential's graph on them would assert a target
+    the call never had: the wrong-graph claim this issue exists to remove,
+    emitted by us. `WRITE_TOOL_NAMES` is the registry's DERIVED write set
+    (`risk in write|destructive|admin`), so neither side can drift from the
+    surface.
 
-    Anything that is not a plain successful `ToolResult` is returned untouched —
+    ⚠️ One member of that set is excluded on a CONDITION the registry states and
+    this seam cannot improve on: `tortoise_graph_set_recording` takes its own
+    `graph_id` **when given**, and with it omitted resolves to
+    `_current_graph_id.get() or "default"` — the same silent default this issue
+    is about. It is skipped here because the tool's own PAYLOAD already returns
+    `{graph_id, recording}`, i.e. the caller is told the resolved target by the
+    tool itself; a second statement here could only disagree with it. Disclosing
+    for it would mean re-deriving a target this seam does not own.
+
+    Returns `None` for anything that is not a plain successful `ToolResult` —
     a refusal, a `_safe`-answered failure and a schema-repaired payload all
     already say what happened, and a disclosure on top of them would be noise
     claiming a landing that may not have occurred.
@@ -1604,7 +1656,7 @@ def _disclose_graph_resolution(result: Any, name: str,
         return result
     if not isinstance(result, ToolResult) or getattr(result, "is_error", False):
         return result
-    info = _graph_disclosure(graph_ref, dry_run=dry_run)
+    info = _graph_disclosure(graph_ref, preview=_is_preview(name, arguments, result))
     if info is None:
         return result
     from mcp.types import TextContent
@@ -1950,8 +2002,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # a landing on a dispatch that failed, and only on an `ok` row.
         if status == "ok":
             result = _disclose_graph_resolution(
-                result, name, graph_ref,
-                dry_run=bool((arguments or {}).get("dry_run")))
+                result, name, graph_ref, arguments)
         return result
     except asyncio.CancelledError:
         # A cancelled dispatch is neither an "ok" nor an exec error — classifying

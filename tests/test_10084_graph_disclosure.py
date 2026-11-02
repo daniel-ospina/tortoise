@@ -39,7 +39,8 @@ import pytest
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import FunctionTool
 
-from tortoise import mcp_auth, mcp_server as ms
+from tortoise import mcp_auth
+from tortoise import mcp_server as ms
 
 ORG_A = "org_a"
 ORG_B = "org_b"
@@ -176,9 +177,8 @@ async def test_a_write_naming_an_unreachable_graph_is_refused_before_any_tool_ru
     refused with the SHIPPED wording (`mcp_auth.py:490-491`), before any tool
     runs, and the refusal is a `ToolError` — not "any exception", which would
     accept a crash that never reached the resolver."""
-    with _workspace():
-        with pytest.raises(ToolError) as excinfo:
-            await ms.mcp.call_tool(PROBE, {"graph": "g_other", "note": "hi"})
+    with _workspace(), pytest.raises(ToolError) as excinfo:
+        await ms.mcp.call_tool(PROBE, {"graph": "g_other", "note": "hi"})
     message = str(excinfo.value)
     assert "No graph 'g_other' is reachable from this workspace" in message, message
     # the refusal keeps its CLASSIFIER (an argument error, not an exec error),
@@ -193,19 +193,30 @@ async def test_a_write_naming_an_unreachable_graph_is_refused_before_any_tool_ru
 def test_a_refusal_result_carries_no_disclosure():
     """The other half of "refused, and disclosed nothing": a refusal that DID
     return a result object (the transport wait bound, `_safe`-answered failures)
-    must not be stamped with a landing that may not have happened."""
+    must not be stamped with a landing that may not have happened.
+
+    Driven with a REAL write name on purpose — with the probe's name the
+    function would return at its write-set check and this assertion would pass
+    for a reason that has nothing to do with the `is_error` guard.
+    """
     from fastmcp.tools import ToolResult
 
     refusal = ToolResult(content=[], structured_content=None, is_error=True)
     assert ms._disclose_graph_resolution(
-        refusal, PROBE, "g_other") is refusal
+        refusal, "tortoise_create_point", "g_other") is refusal
+    # ...and the same result DOES get one when it is not an error, so the guard
+    # above is the discriminating half.
+    ok = ToolResult(content=[], structured_content=None, is_error=False)
+    with _workspace():
+        disclosed = ms._disclose_graph_resolution(
+            ok, "tortoise_create_point", "g_other")
+    assert disclosed is not ok, "the write-set/error gate short-circuited both ways"
 
 
 @pytest.mark.asyncio
 async def test_a_soft_deleted_graph_is_refused_the_same_way(probe):
-    with _workspace():
-        with pytest.raises(ToolError) as excinfo:
-            await ms.mcp.call_tool(PROBE, {"graph": "g_gone", "note": "hi"})
+    with _workspace(), pytest.raises(ToolError) as excinfo:
+        await ms.mcp.call_tool(PROBE, {"graph": "g_gone", "note": "hi"})
     assert "No graph 'g_gone' is reachable from this workspace" in str(excinfo.value)
     assert probe == []
 
@@ -308,35 +319,70 @@ async def test_a_dry_run_is_disclosed_as_a_preview(monkeypatch):
         with _workspace():
             result = await ms.mcp.call_tool(PROBE, {"dry_run": True})
             written = await ms.mcp.call_tool(PROBE, {"dry_run": False})
+            # The raw PRE-validation dict trap: a JSON string the handler coerces
+            # to False must not be reported as a preview over an executed write.
+            coerced = await ms.mcp.call_tool(PROBE, {"dry_run": "false"})
     finally:
         with contextlib.suppress(Exception):
             ms.mcp.local_provider.remove_tool(PROBE)
 
-    assert seen == [True, False]
+    assert seen == [True, False, False]
     assert _disclosure(result)["preview"] is True
     assert "preview" in _text(result).lower()
     assert "preview" not in _text(written).lower()
     assert "preview" not in _disclosure(written)
+    assert "preview" not in _disclosure(coerced), (
+        'a string "false" was read as a preview while the write executed')
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_delete_shape_is_labelled_a_preview(monkeypatch):
+    """`tortoise_delete` with no `confirmation` writes nothing and sets NO
+    `dry_run` argument — it marks its own receipt instead. That receipt marker is
+    the only thing that can label it, and without it the same nothing-happened
+    call would read as a completed write."""
+    monkeypatch.setattr(ms, "WRITE_TOOL_NAMES", frozenset({PROBE}))
+
+    def _receipt(dry_run_arg: bool = False) -> dict:
+        return {"dry_run": True, "token": "tok_1", "preview": True}
+
+    ms.mcp.add_tool(FunctionTool.from_function(_receipt, name=PROBE,
+                                               description=PROBE))
+    try:
+        with _workspace():
+            result = await ms.mcp.call_tool(PROBE, {})
+    finally:
+        with contextlib.suppress(Exception):
+            ms.mcp.local_provider.remove_tool(PROBE)
+
+    assert _disclosure(result)["preview"] is True
+    assert "Nothing was written" in _text(result)
 
 
 @pytest.mark.asyncio
 async def test_a_transport_with_no_workspace_does_not_invent_a_default_graph(probe):
-    """On stdio / a bare self-host server there is no workspace and the graph
-    opened is the SERVER's configured one — never an id spelled `default`."""
-    tokens = [mcp_auth._current_org_id.set(None),
-              mcp_auth._current_graph_id.set(None)]
-    try:
-        result = await ms.mcp.call_tool(PROBE, {"note": "hi"})
-    finally:
-        mcp_auth._current_graph_id.reset(tokens[1])
-        mcp_auth._current_org_id.reset(tokens[0])
+    """No hosted workspace — `_current_org_id` unset (stdio) OR set to
+    `SELFHOST_ORG_ID` (the self-host daemon's `TransportModeMiddleware`). The
+    resolver's own predicate covers both (`plan_graph_target` refuses any named
+    `graph` on `org_id in (None, SELFHOST_ORG_ID)`), so the disclosure must not
+    tell a self-host caller to name a graph that lane would refuse."""
+    for org in (None, mcp_auth.SELFHOST_ORG_ID):
+        tokens = [mcp_auth._current_org_id.set(org),
+                  mcp_auth._current_graph_id.set(None)]
+        try:
+            result = await ms.mcp.call_tool(PROBE, {"note": "hi"})
+        finally:
+            mcp_auth._current_graph_id.reset(tokens[1])
+            mcp_auth._current_org_id.reset(tokens[0])
 
-    disclosure = _disclosure(result)
-    assert disclosure["source"] == "server-configured"
-    assert disclosure["graph"] is None, disclosure
-    assert "no workspace" in _text(result)
-    assert "'default'" not in _text(result), (
-        "a graph id that does not exist on that surface was named")
+        disclosure = _disclosure(result)
+        assert disclosure["source"] == "server-configured", (org, disclosure)
+        assert disclosure["graph"] is None, disclosure
+        assert "no workspace" in _text(result)
+        assert "'default'" not in _text(result), (
+            "a graph id that does not exist on that surface was named")
+        assert "pass `graph`" not in _text(result), (
+            "the reply told a caller to name a graph this lane's resolver refuses")
 
 
 # ── 5. scope: writes only, and never on a failure ─────────────────────────
@@ -379,18 +425,32 @@ def test_the_disclosure_reports_the_arms_distinctly():
 def test_the_named_arm_reports_the_ref_as_given_not_a_canonical_id():
     """The resolver accepts an id, a `stable_id`, a NAMESPACE or a name; the
     canonicalised id lives inside the dispatch task (#9762) and is not readable
-    from the seam. So the field is documented as the accepted REF — a caller can
-    check its own request against it — and must never be presented as an id."""
+    from the seam. So the field carries the caller's own ref — which is what a
+    caller can check its request against — and must not be presented as an id."""
     for ref in ("g_fund_b", f"org_{ORG_A}_g_fund_b", "Fund B / Research"):
         assert ms._graph_disclosure(ref)["graph"] == ref
-    assert "ACCEPTED REF" in (ms._graph_disclosure.__doc__ or "")
 
 
-def test_a_non_tool_result_is_returned_untouched():
-    """A tool with no output schema and a bare return has nothing to disclose
-    onto; wrapping it would change a working tool's shape."""
+def test_a_bare_return_is_not_wrapped():
+    """Belt-and-braces on a public helper: nothing to disclose ONTO means no
+    new object is invented (the seam itself always sees a `ToolResult`, which is
+    exactly why this can only be pinned at the unit level)."""
     sentinel = {"id": "pt_1"}
-    assert ms._disclose_graph_resolution(sentinel, "tortoise_create_point", None) is sentinel
+    assert ms._disclose_graph_resolution(
+        sentinel, "tortoise_create_point", None) is sentinel
+
+
+def test_the_excluded_writer_with_its_own_selector_is_skipped():
+    """`tortoise_graph_set_recording` names its target with `graph_id`, so a
+    disclosure from this seam could only disagree with the `{graph_id}` payload
+    the tool itself returns. Skipped — and the registry, not prose, is the
+    authority for that set."""
+    from fastmcp.tools import ToolResult
+
+    ok = ToolResult(content=[], structured_content=None, is_error=False)
+    assert "tortoise_graph_set_recording" in mcp_auth.GRAPH_ARGUMENT_EXCLUDED
+    assert ms._disclose_graph_resolution(
+        ok, "tortoise_graph_set_recording", None) is ok
 
 
 def test_an_error_result_is_not_disclosed():
