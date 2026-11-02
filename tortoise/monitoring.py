@@ -2380,7 +2380,15 @@ def _fresh_context(snapshot: contextvars.Context) -> contextvars.Context:
 
 
 def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
-    """Wrap ``fn`` so EVERY invocation runs in a FRESH copy of the caller's context.
+    """Wrap ``fn`` so every invocation runs in a fresh copy of the WRAP-TIME context.
+
+    The context is captured when THIS function is called, not when the wrapper
+    is invoked — each invocation then works on its own copy of that captured
+    set. A wrapper may therefore be re-used freely for re-entry safety, but it
+    is bound to the tenant/actor it was captured under: a wrapper captured while
+    serving request A and invoked later from request B answers under A's
+    org/graph/actor. ``hosted_api`` wraps per submission for exactly that
+    reason; re-wrap whenever the submitting context may have changed.
 
     This is the re-entry-proof replacement for the hand-rolled offload idiom
     ``functools.partial(contextvars.copy_context().run, fn)``, which is correct
@@ -2399,9 +2407,10 @@ def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
     Two properties are preserved from the idiom it replaces, so this is a
     drop-in:
 
-    * **isolation** — the snapshot is taken in the SUBMITTING thread, so a var
-      the callable sets is confined to that invocation and cannot survive into
-      the NEXT request a process-lifetime pool thread serves;
+    * **isolation** — the snapshot is taken in the WRAPPING call (the
+      submitting thread), so a var the callable sets is confined to that
+      invocation and cannot survive into the NEXT request a process-lifetime
+      pool thread serves;
     * **freshness** — each invocation gets its own ``Context``, so retries,
       re-submissions and overlapping workers cannot collide.
 
@@ -2419,7 +2428,10 @@ def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
     migrated here: each builds its ``Context`` per call and runs it once, so
     none can re-enter, and none is on the hosted request path this change is
     about. A caller that may run its wrapped callable MORE than once (a retry,
-    a re-submission, an overlap) belongs here instead.
+    a re-submission, an overlap) belongs here instead — because a re-submitted
+    wrapper carries the WRAP-TIME values, one captured in request A and
+    re-submitted from request B answers under A's tenant. Re-wrap per
+    submission; do not cache the wrapper across requests.
     """
     snapshot = contextvars.copy_context()
     name = getattr(fn, "__name__", None) or repr(fn)

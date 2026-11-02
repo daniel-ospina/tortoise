@@ -221,11 +221,11 @@ def test_unreproducible_context_fails_closed_and_named(monkeypatch) -> None:
         return "answer"
 
     def _poison(_snapshot):
-        # The only way a factory that must RETURN a Context can fail. A Context
-        # from `Context.copy()` is never already-entered, so the realistic
-        # failure is `copy()` itself raising (MemoryError in practice) — which
-        # is exactly what the `except` in `_confined` exists to convert.
-        raise RuntimeError("cannot enter context: simulated")
+        # A plausible way a factory that must RETURN a Context can fail:
+        # `copy()` raising (MemoryError in practice) — which is exactly what the
+        # `except` in `_confined` exists to convert. Deliberately NOT shaped
+        # like a re-entry error: that mode is the one this change removes.
+        raise MemoryError("simulated: allocation failure while copying the context")
 
     monkeypatch.setattr(monitoring, "_fresh_context", _poison)
 
