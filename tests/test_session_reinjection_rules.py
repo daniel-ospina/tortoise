@@ -1033,7 +1033,16 @@ def test_reader_window_displacement_names_the_sessions_injection_evicts():
     """The shipped budgets (per-session 3, total 10) over 40 hits / 8
     sessions: the injection's cost lands ENTIRELY on the two lowest-ranked
     sessions, which lose all five hits each. ``injected_merged`` reports a
-    healthy 10 either way — that is the blind spot this key closes."""
+    healthy 10 either way — that is the blind spot this key closes.
+
+    ⚠️ This fixture is the **full-window** case (40 base hits, window 40),
+    where the function's own residual 2 makes ``base_displaced``
+    algebraically EQUAL to ``injected_in_window`` — the one case the
+    docstring says does not corroborate. It therefore cannot tell the two
+    keys apart on its own: an implementation that aliased
+    ``base_displaced := injected_in_window`` passes it. The partial-window
+    test below is what pins ``base_displaced`` independently.
+    """
     pool = _corpus()
     _added, _order, merged = _merge(pool, [3, 3, 3, 1])
     out = reader_window_displacement(pool, merged, window=40)
@@ -1052,6 +1061,39 @@ def test_reader_window_displacement_names_the_sessions_injection_evicts():
     top5_base = {h["id"] for h in fair_base[:5]}
     top5_merged = {h["id"] for h in merged[:5]}
     assert top5_base <= top5_merged, (top5_base - top5_merged)
+
+
+def test_reader_window_displacement_partial_window_separates_the_two_keys():
+    """``base_displaced`` is NOT ``injected_in_window`` — pinned where they
+    must diverge, which the full-window fixture above cannot do.
+
+    Same pool and same 10 injected items, read at three windows. Only the
+    middle one is partial, and there the two keys disagree (10 injected in
+    the window, but just 5 base hits displaced, because the window already
+    contains all 40 base hits: 45 - 10 = 35). ``sessions_lost`` narrows with
+    it. Full window (50) is the other degenerate end: everything fits, so
+    nothing is lost and the counters are not the same number.
+
+    An aliasing implementation (``base_displaced = injected_in_window``)
+    passes at 40 and at 50 and FAILS at 45 with ``10 == 5``; an
+    implementation that replaced ``base_window`` with the whole
+    ``base_pool`` likewise fails there, because the base pool is exactly 40
+    in the fixtures the other tests use.
+    """
+    pool = _corpus()
+    _added, _order, merged = _merge(pool, [3, 3, 3, 1])
+    assert len(pool) == 40 and len(merged) == 50, (len(pool), len(merged))
+
+    partial = reader_window_displacement(pool, merged, window=45)
+    assert partial["injected_in_window"] == 10
+    assert partial["base_displaced"] == 5, "must not alias injected_in_window"
+    assert partial["sessions_lost"] == ["s7"]
+    assert (partial["sessions_before"], partial["sessions_after"]) == (8, 7)
+
+    full = reader_window_displacement(pool, merged, window=50)
+    assert (full["injected_in_window"], full["base_displaced"]) == (10, 0)
+    assert full["sessions_lost"] == []
+    assert (full["sessions_before"], full["sessions_after"]) == (8, 8)
 
 
 def test_reader_window_displacement_is_zero_without_injection():

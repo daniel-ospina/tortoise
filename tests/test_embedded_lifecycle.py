@@ -64,48 +64,44 @@ def _isolate_atexit_budget():
     embedded_lifecycle._atexit_deadline = None
 
 
-#: Where a Linux command line lives. A module constant, not an inline f-string,
-#: so the no-procfs arm below is reachable from a test (the portability the
-#: probe now claims must be executable, not asserted in prose).
-_PROC_CMDLINE_PATH = "/proc/{pid}/cmdline"
+#: Does this host expose ``/proc``? Decided ONCE, at import: a /proc-less
+#: host (macOS — this file otherwise runs there) must fall back to ``ps``,
+#: because a /proc-only read returns ``None`` for EVERY pid there. That is
+#: not a slow answer, it is the false-PASS shape: ``_server_still_alive``
+#: would say "no leak" about a server that is still running, and the
+#: assertion it guards would pass vacuously.
+_HAVE_PROC = os.path.exists("/proc/self/cmdline")
 
 
 def _server_cmdline(pid: int) -> str | None:
-    """The ``pid``'s command line, or ``None`` when it could not be read.
+    """The ``pid``'s command line, or ``None`` when that pid is gone.
 
-    Two source questions are asked of a server pid — "is THIS pid still
-    there?" (liveness) and "is it still the redislite server we started?"
-    (the pid-recycling guard). Only the SECOND needs an argv, and liveness is
-    read portably by :func:`_pid_alive`, so the argv read must not carry a
-    platform dependency of its own:
+    ``/proc`` is preferred — one read, no fork, asked up to ~120 times by the
+    poll below — and ``ps`` is the fallback for a host that has no ``/proc``
+    at all. The only questions this module asks about a server are "is THIS
+    pid still there?" and "is it still the redislite server we started?"
+    (the second guards pid recycling).
 
-    * ``/proc/<pid>/cmdline`` (NUL-separated argv) on Linux;
-    * ``ps -ww -o command= -p <pid>`` (space-joined argv) where ``/proc`` does
-      not exist — macOS/BSD, a platform this suite supports
-      (``tortoise/embedded_reaper.py``: *"macOS has no /proc"*) and on which
-      the ``/proc``-only form made a LIVE server invisible. That is the same
-      failure class this probe was rewritten to remove, moved from "shared
-      runner" to "the developer's machine": the main test then passed
-      vacuously and its positive control reddened after a full 30 s.
-
-    ``None`` therefore means "no argv available from either source". A host
-    with neither procfs NOR ``ps`` has no attribution capability and the
-    control test reds loudly on it — deliberately, rather than collapsing
-    "cannot read" into "gone" and letting the main test pass for the wrong
-    reason (#5049 rule 4: an under-specified substrate is a harness defect,
-    which is a FAIL; a silent pass is not). ``ps`` is POSIX-mandated, so that
-    arm is unreachable on any host this suite runs on.
+    The two arms are deliberately NOT interchangeable: on a host WITH
+    ``/proc``, an ``OSError`` means the pid is gone and ``None`` is the right
+    answer (falling through to ``ps`` would fork per poll to re-learn it);
+    on a host WITHOUT ``/proc``, ``None`` from the ``/proc`` arm would be a
+    claim about the host, not about the pid. ``tests/test_fork_slot_wedge_3845.py``'s
+    ``_ps_command`` keeps the same fallback for the same reason.
     """
+    if _HAVE_PROC:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                return fh.read().replace(b"\0", b" ").decode(
+                    "utf-8", "replace").strip()
+        except OSError:
+            return None  # a real /proc answered: this pid is gone
     try:
-        with open(_PROC_CMDLINE_PATH.format(pid=pid), "rb") as fh:
-            return fh.read().replace(b"\0", b" ").decode(
-                "utf-8", "replace").strip()
-    except OSError:
-        pass  # no procfs (or the pid vanished): try the portable source
-    try:
-        out = _subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
-                              capture_output=True, text=True, timeout=10)
-    except (OSError, _subprocess.SubprocessError):
+        return _subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.strip() or None
+    except (OSError, _subprocess.TimeoutExpired):
         return None
     if out.returncode != 0:
         return None  # no pid matched: a COMPLETED measurement of "it is gone"
