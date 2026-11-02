@@ -1995,18 +1995,33 @@ def test_the_bundle_does_not_state_the_pre_seam_receipt_as_the_current_one():
 #: observing S2.2/S2.3 these sentences become true again and the guard stands
 #: down, so it cannot outlive the artifact it depends on. Each phrase was
 #: measured present in at least one pre-fix document (#10601 round 2, P1).
+#: ⛔ Eleven entries, and EVERY one was re-measured present at `fdb19441f` in
+#: round 3 — one of them (`"S2.3`, which the measured corpus' idle classify pass
+#: does not"`) matched no document at any revision and was replaced; a ban that
+#: cannot fire is exactly the no-op this bundle exists to refuse, so any future
+#: entry lands with the same flatten-and-grep evidence this one carries.
 _BUNDLE_STALE_STEP_PREDICTION = (
     "so a re-run there still reports S2.3",
     "S2.3 does not flip",
     "S2.3 does not move on this corpus",
-    # Measured at `7caace29c`: the bundle's own dependency table said `S2.3` was
-    # "IDLE on this corpus" while the log this PR ships carries
-    # `step S2.3 WITNESSED … assigned_llm: 7`. The seven spellings above were
-    # blindness-by-paraphrase: this one named a DIFFERENT failure (idle, not
-    # "cannot move") and so survived the guard written for the class of
+    # Measured present at `fdb19441f` (and at `7caace29c`): the bundle's own
+    # dependency table said `S2.3` was "IDLE on this corpus" while the log this
+    # PR ships carries `step S2.3 WITNESSED … assigned_llm: 7`. The spellings
+    # above were blindness-by-paraphrase: these name a DIFFERENT failure (idle,
+    # not "cannot move") and so survived the guard written for the class of
     # "the bundle states a step prediction its own artifact refutes".
+    #
+    # ⛔ The last of them was a NO-OP for one review cycle (#10601 round 3): it
+    # was registered as ``"S2.3`, which the measured corpus' idle classify pass
+    # does not"`` — a `S2.3`,`` prefix the pre-fix sentence never carries (it
+    # reads ``(S2.3 flips only once its pass does work, which the measured
+    # corpus' idle classify pass does not``), so the entry matched no document at
+    # ANY revision and a ban that cannot fire is not a ban. Measured across
+    # `origin/main`, `fdb19441f`, `7caace29c`, `d7c48ff95` and this head: the
+    # prefixed form is absent from all five; this spelling is present in
+    # README at the first three and absent at the last two.
     "S2.3` is IDLE on this corpus",
-    "S2.3`, which the measured corpus' idle classify pass does not",
+    "which the measured corpus' idle classify pass does not",
     "the classify pass is IDLE on it, so S2.3",
     "on the measured corpus the pass is IDLE",
     "Until such a re-run is committed",
@@ -2052,13 +2067,14 @@ def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
     sentences. If a future re-run stops witnessing S2.3, those sentences become
     true again and this test stands DOWN rather than lying in the other direction.
 
-    Non-vacuity (measured against the pre-fix tree at `fdb19441f`): every phrase
-    below is present in at least one of the two documents — README carries the
-    "a re-run there still reports S2.3", "S2.3 does not flip", "S2.3 does not move
-    on this corpus", "stay unwitnessed for THIS run" and "stays what it is —
-    `capstone-measured-e0fc940b.log`" shapes, and E1-E5-PROOFS carries "Until such
-    a re-run is committed" and "what still has to land is a **committed post-seam
-    re-run**". All seven red there, and none is present at this head.
+    Non-vacuity (measured against the pre-fix tree at `fdb19441f`, all eleven
+    phrases, by flattening each document and grepping): README carries the "a
+    re-run there still reports S2.3", "S2.3 does not flip", "S2.3 does not move on
+    this corpus", the four IDLE paraphrases, "stay unwitnessed for THIS run" and
+    "stays what it is — `capstone-measured-e0fc940b.log`" shapes, and
+    E1-E5-PROOFS carries "Until such a re-run is committed" and "what still has to
+    land is a **committed post-seam re-run**". All eleven red there, and none is
+    present at this head.
     """
     shipped = _newest_log(_scored_logs())
     run = cvc.extract_block(shipped.read_text())["run"]

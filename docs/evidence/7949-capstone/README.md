@@ -725,7 +725,9 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   relationships (`IMPL=65 INPUT=68 NAND=14` — the log's `step S5`
   line carry the same three numbers) are a *step witness*, not the 15-edge gold.
 - **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
-  the record's denominator is 29 marker-bearing sentences. #9738 owns that, and this bundle says
+  the record's denominator is 29 marker-bearing sentences. `#5087` carries that reconciliation
+  (`#9738`, which owned it until 2026-11-02, CLOSED that morning on its own §10 *record*
+  correction — which is not a measurement of this number), and this bundle says
   so instead of calling the numbers final.
 - **The gate cannot detect a fabricated evidence file** with a plausible sha. Its stated limit: it
   closes *inference* (green rows with no artifact), not forgery.
