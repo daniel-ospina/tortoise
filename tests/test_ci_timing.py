@@ -6381,6 +6381,80 @@ def test_a_note_block_that_opens_of_its_own_is_never_this_rows() -> None:
 # them from two refreshes ago, which is the stale-provenance shape #9134's P2
 # exists to prevent. Nothing caught it: no test asserted one basis per row, and the
 # one row it happens to is not synthetic — the refresh itself wrote that layout.
+#
+# ⛔ EVERY expectation below is read from the ARTIFACT, never from its current
+# value. This row is the map's only wrapped one AND one of its two most volatile
+# (its own note calls it fleet-contention sensitive, 2.3-3.2), while
+# `tests/test_ci_timing.py` is registered on `sdk` ONLY and the weekly refresh PR is
+# data-only (`config/*` → `core`) — so a guard pinned to today's `2.3` goes red on a
+# HEALTHY map at the next sweep, in whichever later unrelated leg selects `sdk`, and
+# this PR cannot see its own time bomb (#10575 review, P2).
+_BASIS_LABEL_RE = re.compile(
+    r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2}")
+
+
+def _durations_row_note(text: str, key: str) -> str:
+    """`key`'s note in map `text`, joined across its continuations.
+
+    The join is the writer's own (`_joined_note_tail`), so what this reads is the
+    note the cutters see — a wrapped note is ONE note.
+    """
+    lines = text.split("\n")
+    index = next(i for i, ln in enumerate(lines) if ln.startswith(f"  {key}: "))
+    match = ci_timing._DURATION_LINE_RE.match(lines[index])
+    assert match is not None, lines[index]
+    continuation = ci_timing._row_continuation_lines(lines, index)
+    return (ci_timing._joined_note_tail(match.group("tail"),
+                                       [lines[j] for j in continuation])
+            if continuation else match.group("tail"))
+
+
+def _durations_row_value(text: str, key: str) -> float:
+    """`key`'s committed weight, at the precision the map stores it."""
+    line = next(ln for ln in text.split("\n") if ln.startswith(f"  {key}: "))
+    match = ci_timing._DURATION_LINE_RE.match(line)
+    assert match is not None, line
+    return round(float(match.group("value")), 1)
+
+
+def _assert_a_re_base_supersedes_the_newest_basis(text: str) -> None:
+    """The mid-note prune's contract, asserted against ARTIFACT `text`.
+
+    The contract is stated relative to whatever `text` commits, on purpose: a
+    re-base must (a) make this render's basis the NEWEST one, (b) drop the newest
+    basis `text` carried, and (c) not grow the note's basis count. Those three are
+    exactly what the pre-fix module violates — it left the superseded span standing
+    AND appended this render's — and unlike a literal `"was 2.3"` they stay true
+    after any weekly sweep re-values the row, including the HOLD outcome where
+    `#9134`'s P2 deliberately keeps an older ADOPTED basis beside the new one.
+    """
+    key = "test_source_staleness_sweep_5038.py"
+    committed_note = _durations_row_note(text, key)
+    committed_bases = _BASIS_LABEL_RE.findall(committed_note)
+    assert committed_bases, f"the row states no basis to supersede: {committed_note}"
+    previous = _durations_row_value(text, key)
+    # A date STRICTLY newer than everything `text` cites, derived rather than
+    # hard-coded: the assertion is "the newest committed basis is GONE", and a fixed
+    # label would quietly stop meaning that as soon as a sweep reached its date.
+    year = max(int(b.rsplit(" ", 1)[-1][:4]) for b in committed_bases)
+    label = f"ci-timing junit-census+top-15 {year + 1}-01-01 (run 41379999999)"
+    rebased, _ = ci_timing.render_refreshed_manifest(
+        text, {key: previous + 2.7}, f"{year + 1}-01-02T00:00:00Z", sample_label=label)
+    note = _durations_row_note(rebased, key)
+    bases = _BASIS_LABEL_RE.findall(note)
+    assert bases[-1] == f"ci-timing junit-census+top-15 {year + 1}-01-01", (
+        f"this render's basis is not the newest one: {note}")
+    assert committed_bases[-1] not in bases, (
+        f"the superseded basis survived the re-base: {note}")
+    assert len(bases) <= len(committed_bases), (
+        f"the note gained a basis instead of replacing one: {note}")
+    assert f"was {previous:.1f}" in note, (
+        f"the new basis lost the value it replaced: {note}")
+    # The prune replaces the SPAN, not the note: the row's own text is untouched.
+    assert "deliverable 3: 34 tests" in note, note
+    assert "never correct a weight downward" in note, note
+
+
 def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
     """A mid-note prior basis is replaced, not accumulated (#10575 review, P3).
 
@@ -6394,30 +6468,57 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
 
     Non-vacuity, measured against the pre-fix module at this commit's parent: the
     re-base emitted the stale `2026-11-02 …; was 3.2` clause on the row line and the
-    new `2026-11-09 …; was 2.3` on the last continuation — two bases in one note, so
-    `len(bases) == 1` and `"2026-11-02" not in note` both fail.
+    new basis on the last continuation — two bases in one note, so both "the
+    superseded basis survived" and `len(bases) <= len(committed_bases)` fail.
+
+    Every expectation is DERIVED from the map (see the helper): this row is
+    re-valued by most sweeps, and
+    `test_the_wrapped_row_prune_guard_survives_the_next_sweep` pins the sweep
+    outcomes that a value-pinned version of this test used to red on a healthy map.
     """
-    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    _assert_a_re_base_supersedes_the_newest_basis(
+        (REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
+
+
+def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
+    """The prune guard must not red a map the writer's own sweep has re-valued.
+
+    The writer re-derives this row every week, so a guard whose expectation is the
+    committed VALUE or the committed BASIS COUNT inherits the sweep as a test
+    dependency. Both ordinary sweep outcomes are driven here and the guard's own body
+    is then re-run on the map each produces:
+
+    * ADOPT — an upward reading is taken unconditionally (`measured > previous` never
+      sets `kept`), so the committed value moves and the note's basis is replaced;
+    * HOLD — a lower reading whose denominator the census cannot cover keeps the
+      weight, and `#9134`'s P2 keeps the older ADOPTED basis beside the new one, so
+      the note legitimately ends up with TWO bases.
+
+    The pre-fix guard failed both: `"was 2.3"` stopped matching the moment the value
+    moved, and `len(bases) == 1` / `"2026-11-02" not in note` failed on the held
+    shape (#10575 review, P2). Neither is a compact on the row — both are the writer
+    working correctly, on a map that is healthy in every respect.
+    """
     key = "test_source_staleness_sweep_5038.py"
-    rebased, _ = ci_timing.render_refreshed_manifest(
-        text, {key: 5.0}, "2026-11-09T00:00:00Z",
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    previous = _durations_row_value(text, key)
+    adopted, _ = ci_timing.render_refreshed_manifest(
+        text, {key: previous + 1.0}, "2026-11-09T00:00:00Z",
         sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
-    lines = rebased.split("\n")
-    index = next(i for i, ln in enumerate(lines) if ln.startswith(f"  {key}: "))
-    match = ci_timing._DURATION_LINE_RE.match(lines[index])
-    assert match is not None, lines[index]
-    continuation = ci_timing._row_continuation_lines(lines, index)
-    note = (ci_timing._joined_note_tail(match.group("tail"),
-                                        [lines[j] for j in continuation])
-            if continuation else match.group("tail"))
-    bases = re.findall(r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2}", note)
-    assert len(bases) == 1, f"the re-based row states {len(bases)} bases: {note}"
-    assert "2026-11-09" in bases[0], note
-    assert "2026-11-02" not in note, f"the superseded basis survived the re-base: {note}"
-    assert "was 2.3" in note, f"the new basis lost the value it replaced: {note}"
-    # The prune replaces the SPAN, not the note: the row's own text is untouched.
-    assert "deliverable 3: 34 tests" in note, note
-    assert "never correct a weight downward" in note, note
+    assert _durations_row_value(adopted, key) == previous + 1.0, (
+        "the simulated ADOPT sweep did not take the new reading, so it does not "
+        "exercise the state a value-pinned guard failed on")
+    held, _ = ci_timing.render_refreshed_manifest(
+        text, {key: 0.1}, "2026-11-09T00:00:00Z", coverage={key: (0, 0)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert _durations_row_value(held, key) == previous, (
+        "the simulated HOLD sweep did not keep the weight, so it does not exercise "
+        "the two-basis shape a value-pinned guard failed on")
+    for swept, outcome in ((adopted, "ADOPT"), (held, "HOLD")):
+        try:
+            _assert_a_re_base_supersedes_the_newest_basis(swept)
+        except AssertionError as exc:  # pragma: no cover - the failure message
+            raise AssertionError(f"after one {outcome} sweep: {exc}") from exc
 
 
 def _indented_block_shape(text: str) -> tuple[int, int, int]:
