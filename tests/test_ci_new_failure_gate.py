@@ -385,29 +385,49 @@ def _ruff_binary() -> str:
     return found
 
 
-def test_the_gate_module_is_clean_under_the_required_lint_leg():
-    """A lint error in THIS file reds a REQUIRED check, whatever the verdict does.
+#: The paths THIS suite is responsible for: the module that authors the required
+#: check's verdict, and this file. BOTH are touched by a change to this layer, so BOTH
+#: must be linted for the case below to hold the claim it makes — a case that linted only
+#: the module stayed green while the OTHER touched file redded the leg (#10564 review, P3:
+#: this file gained ~490 lines, three local `import` blocks and a `shutil` use; a
+#: `UP`/`E`/`I` violation in any of them was covered by nothing).
+_LINTED_PATHS = (GATE, Path(__file__).resolve())
 
-    `agent-infra-ci / lint` runs `ruff check .` (`.github/workflows/ci.yml`) and is a
-    required check, so one UP037/E501-class violation here blocks the PR while all 20
-    verdict cases stay green. That is how #10564's first head redded: UP037 on
+
+def test_the_gate_and_its_test_file_are_clean_under_the_required_lint_leg():
+    """A lint error in EITHER file here reds a REQUIRED check, whatever the verdict does.
+
+    `agent-infra-ci / lint` runs `ruff check .` over the whole tree
+    (`.github/workflows/ci.yml`) and is a required check, so one UP037/E501-class
+    violation in a file this change touches blocks the PR while all 36 verdict cases
+    stay green. That is how #10564's first head redded: UP037 on
     `main_leg_coverage(runner: "Runner", …)`, a quoted annotation the module's own
-    `from __future__ import annotations` makes unnecessary. The case runs the same
-    single-file check under the same tree-wide config the leg uses, so the local signal
-    and the required check cannot disagree. It fails on that pre-fix module (rc=1,
-    `UP037`), which is the non-vacuity this file's other cases get from their stubs.
+    `from __future__ import annotations` makes unnecessary.
+
+    Every path in `_LINTED_PATHS` is checked, under the same tree-wide config the leg
+    uses: ruff resolves the `pyproject.toml` closest to EACH analyzed file, so an
+    explicit path gets the identical config `ruff check .` would give it (the only
+    difference — an explicit path is analyzed even if `exclude`/gitignore would have
+    skipped it — is in the fail-closed direction, and `[tool.ruff]` sets no `exclude`
+    here). That is what makes the local signal and the required leg agree about THESE
+    files, and the claim is scoped to them rather than to the whole tree.
+
+    It fails on the pre-fix module (rc=1, `UP037`) and on any violation introduced in
+    `_LINTED_PATHS`, which is the non-vacuity this file's other cases get from their
+    stubs.
     """
-    proc = subprocess.run(
-        [_ruff_binary(), "check", "--no-cache", str(GATE)],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, (
-        f"{GATE.relative_to(REPO)} must be ruff-clean — the `agent-infra-ci / lint` leg "
-        f"runs `ruff check .` over this path and is REQUIRED; got rc={proc.returncode}:"
-        f"\n{proc.stdout}{proc.stderr}"
-    )
+    for path in _LINTED_PATHS:
+        proc = subprocess.run(
+            [_ruff_binary(), "check", "--no-cache", str(path)],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, (
+            f"{path.relative_to(REPO)} must be ruff-clean — the `agent-infra-ci / lint` "
+            f"leg runs `ruff check .` over this path and is REQUIRED; got "
+            f"rc={proc.returncode}:\n{proc.stdout}{proc.stderr}"
+        )
 
 
 def test_the_job_slug_matches_the_shared_producer():
