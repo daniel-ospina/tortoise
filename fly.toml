@@ -203,11 +203,19 @@ kill_timeout = 30
   # block), so a machine recreated without it turns this exit into a STOPPED
   # machine. Re-check it after any recreate before trusting the self-heal.
   # 600s is DERIVED, not asserted (#10585 review P2): the longest BOUNDED
-  # synchronous operation that can run on the loop is the synchronous LLM call —
-  # `urlopen(req, timeout=self.timeout)` at 60s (tortoise/models.py:183,233) and
-  # `httpx timeout=(10, 60)` (tortoise/model_adapters.py:159,276), the same 60s
-  # bound LOOP_STALE_AFTER's own comment names. So 600s = 10x one such call /
-  # 3.3x the enabled-threshold floor (max(120, 2*LOOP_STALE_AFTER) = 180s) /
+  # synchronous operation that can run on the loop is the synchronous LLM call,
+  # and there are two bounds — the LARGER one is what 600s has to clear:
+  #   * 60s — `OpenAICompatModel(timeout=60)` (tortoise/models.py:128) issued by
+  #     `urlopen(req, timeout=self.timeout)` at :183, plus `httpx timeout=(10,
+  #     60)` (tortoise/model_adapters.py:159,276). This is the bound
+  #     LOOP_STALE_AFTER's own comment names, and the one the hosted app's
+  #     on-loop calls actually use.
+  #   * 300s — `OllamaModel(timeout=300)` (tortoise/models.py:201) issued by the
+  #     same `urlopen` at :233. Not reachable from the hosted loop (callers are
+  #     ingest.py:799 and session_indexer.py:481, which passes timeout=30), but
+  #     the module default is not hosted-only, so it must clear this too.
+  # So 600s = 10x the 60s bound / 2x the 300s Ollama bound / 3.3x the
+  # enabled-threshold floor (max(120, 2*LOOP_STALE_AFTER) = 180s) /
   # 6.7x LOOP_STALE_AFTER (where /healthz already reports stale) / 68x the
   # observed p99 loop lag (8.8s). It is NOT above the ~819s token-scaled model
   # deadline (extractor_v2.py:11715) — that path is OFF the loop by the #3060

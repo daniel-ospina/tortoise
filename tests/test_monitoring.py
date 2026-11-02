@@ -3651,7 +3651,8 @@ class TestStallWatchdog:
 
         ``min_ticks`` exists so a slow BOOT is not mistaken for a wedge, which
         is about the first seconds. A loop that wedges during startup — only the
-        synthetic tick at hosted_api.py:1959, never the real ticker's second
+        synthetic tick at hosted_api.py:1962 (``heartbeat_record()``), never the
+        real ticker's second
         tick — never advances ``ticks``, so it hung indefinitely with the
         ceiling armed. Past the ceiling the boot rationale no longer applies.
         """
@@ -3751,6 +3752,79 @@ class TestStallWatchdog:
         assert len(refusals) == 1, (
             f"the refusal was logged {len(refusals)} times across ~30 polls — "
             "it must be latched to once per process")
+
+    def test_the_soft_path_also_refuses_a_dead_ticker(self, monkeypatch,
+                                                      caplog):
+        """#10585 review P2: the ticker verdict had ONE call site — inside the
+        HARD branch. With soft armed BELOW the ceiling (the reachable ordering:
+        an operator sets ``TORTOISE_LOOP_STALL_EXIT_S=300`` beside the shipped
+        600s ceiling), a dead ticker freezes the heartbeat forever; at
+        ``age >= 300`` the hard branch is not true yet, so control reached the
+        soft path, which never looked at the ticker and exited a HEALTHY
+        process after ``consecutive_windows`` — repeatedly, up to the
+        platform's ``max_retries``: the exact restart-loop the hard-branch
+        guard was added to prevent.
+
+        Pre-fix this test fires: nothing in the soft path consulted the task.
+        """
+        import logging
+        import threading
+        import time
+
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        monitoring.note_heartbeat_task(
+            self._fake_ticker(done=True, exc=RuntimeError("boom")))
+        thread = None
+        try:
+            monitoring.heartbeat_record()
+            monitoring.heartbeat_record()   # ticks >= LOOP_STALL_EXIT_MIN_TICKS
+            with caplog.at_level(logging.CRITICAL):
+                thread = monitoring.start_stall_watchdog(
+                    0.15, exit_fn=fired.append, stop_event=stop,
+                    poll_interval=0.02, consecutive_windows=1)
+                assert thread is not None, (
+                    "a programmatic soft threshold must still arm the watchdog")
+                time.sleep(0.4)
+        finally:
+            self._disarm(thread, stop)
+        assert fired == [], (
+            "the SOFT path exited on a heartbeat frozen by a DEAD TICKER, not "
+            "by a wedged loop — a healthy process would restart-loop up to the "
+            "platform's max_retries")
+        refusals = [r for r in caplog.records
+                    if "not provably a wedge" in r.getMessage()]
+        assert len(refusals) == 1, (
+            f"the soft-path refusal was logged {len(refusals)} times across "
+            "~20 polls — it shares the hard branch's once-per-process latch")
+
+    def test_the_env_contract_declares_the_hard_ceiling(self):
+        """#10585 review P2: the knob the HOSTED deployment arms in fly.toml
+        was absent from ``.env.example`` — the repo's declared env contract —
+        while its sibling got a full paragraph. An operator looking for the
+        name found nothing, and the paragraph that WAS there stated the loop
+        exit "also requires … no request in flight", which is false for the
+        mechanism the hosted app runs and is the exact belief the 97-minute
+        outage sat behind.
+        """
+        from pathlib import Path
+
+        contract = (Path(__file__).resolve().parent.parent
+                    / ".env.example").read_text(encoding="utf-8")
+        lines = contract.splitlines()
+        decl = [i for i, line in enumerate(lines)
+                if "TORTOISE_LOOP_STALL_HARD_EXIT_S" in line]
+        assert decl, (
+            "the hard ceiling must be declared where an operator looks for the "
+            "name to set — .env.example — not only in fly.toml")
+        block = "\n".join(lines[max(0, decl[0] - 20):decl[0]])
+        assert "in-flight" in block, (
+            "its paragraph must say what makes it different from the soft "
+            "path: it IGNORES the in-flight gauge")
 
     def test_hard_ceiling_parser_is_fail_closed(self, monkeypatch):
         """Every unusable value must DISABLE the ceiling (fail closed) — a
