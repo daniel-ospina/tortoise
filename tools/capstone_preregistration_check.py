@@ -1179,9 +1179,21 @@ def _note(scopes: list[str] | None, message: str) -> None:
     Two kinds are declared here, both because an undeclared one is a false green: an ARM this bundle
     is not asked (see the caller's docstring), and a RESIDUAL the rule can see but must not fail on
     because the decision behind it is owner-gated (``_note_unchecked_probe_spelling``).
+
+    ⛔ ``scopes`` IS OPTIONAL, BUT AN OMITTED ONE IS NOT A SILENT ONE (#10525 review, residual). It
+    defaults to ``None`` so an existing caller with nowhere to put the notes need not build a list;
+    the cost of that default is that ``append`` has no list to append to, and the note would then
+    evaporate — a gate that skipped an arm and said nothing, which is exactly the false green this
+    function exists to prevent. So the no-list path writes the same declaration to ``stderr``, the
+    stream this tool already uses for ``ERROR:`` lines. There is no fifth state in which a note is
+    neither carried nor printed; ``tests/test_capstone_preregistration_9075.py``
+    (``test_a_caller_that_carries_no_scope_list_still_declares_the_skips``) holds that.
     """
-    if scopes is not None:
-        scopes.append(message)
+    if scopes is None:
+        print(f"NOTE — declared, not carried (the caller passed no scope list): {message}",
+              file=sys.stderr)
+        return
+    scopes.append(message)
 
 
 #: The MEASURED ground for an arm a NAMED bundle is not asked, keyed by (bundle directory, arm).

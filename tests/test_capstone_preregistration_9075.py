@@ -2918,6 +2918,29 @@ def test_the_sibling_bundle_is_not_failed_by_the_arms_it_never_declared():
     assert any("names no graph class" in s for s in scopes), scopes
 
 
+def test_a_caller_that_carries_no_scope_list_still_declares_the_skips(capsys):
+    """A skip nobody reads is a green nobody measured — so omitting `scopes` may not silence it.
+
+    `scopes` is optional (a caller with nowhere to put the notes need not build a list), and until
+    the #10525 review's residual was closed that default cost the DECLARATION: `_note` appended
+    nothing and printed nothing, so an arm this gate did not enforce left no trace anywhere. The
+    no-list path now writes the same sentence to `stderr`, where this tool's `ERROR:` lines already
+    go, so the two states are "carried" and "printed" and there is no third.
+
+    Non-vacuity, measured against the pre-fix `_note`: it returned without printing when
+    `scopes is None`, so `readouterr().err` was empty and both assertions below red.
+    """
+    text = (SIBLING_DIR / check.PREREG_NAME).read_text()
+    failures = check.check_registry_contradictions(
+        SIBLING_DIR, check.parse_criteria_rows(text), check.parse_pins(text)
+    )
+    assert failures == [], failures
+    err = capsys.readouterr().err
+    assert "declared, not carried" in err, err
+    assert "#9738" in err, err
+    assert "names no graph class" in err, err
+
+
 def test_a_record_that_carries_no_visibility_field_is_not_asked_the_9738_rule(tmp_path):
     """A record that predates the field makes no claim, so there is nothing to contradict."""
     directory = tmp_path / "bundle"
