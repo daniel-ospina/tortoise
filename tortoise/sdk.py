@@ -3104,7 +3104,7 @@ def _write_capture_turns(
         # REMOVES the property, so an ON→OFF re-capture (or the fail-soft arm
         # where the extractor model cannot be built and `enrich_on` is False)
         # reverts the node to the raw-only shape. The record's upsert is a MERGE
-        # (`props = point.props || EXCLUDED.props`, `record_projection.py:1879`)
+        # (`props = point.props || EXCLUDED.props`, `record_projection._upsert_statement`)
         # and an ABSENT key in the right operand leaves the left value intact
         # (PostgreSQL: "the union of their keys, taking the second object's value
         # when there are duplicate keys"), so simply OMITTING the key — which is
@@ -41469,8 +41469,8 @@ class TortoiseSDK:
                         # so the node must not keep the writer-minted
                         # `embeddingText` it was never computed from —
                         # `update_point` clears it in exactly this position
-                        # (`sdk.py:16584`), and round 3 closed that door without
-                        # reaching this one. Tenant-reachable as
+                        # (in its caller-vector door), and round 3 closed that
+                        # door without reaching this one. Tenant-reachable as
                         # `tortoise_update_entity(id, props={"embedding": […]})`,
                         # and SILENT afterwards: `embedding_text_hash` is
                         # payload-only (`consistency.py:179`) and

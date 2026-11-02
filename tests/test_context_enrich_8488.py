@@ -723,7 +723,8 @@ def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text
     """#10523 review (P1): the SIBLING `:Point` update door into the same rule.
 
     `update_point` clears `embeddingText` when the vector is replaced or cleared
-    (`sdk.py:16584`); `_update_entity` — `sdk.py:40627` calls it *"the SECOND
+    (`update_point`'s caller-vector door); `_update_entity` — the door's own
+    docstring calls it *"the SECOND
     documented UPDATE door onto a `:Point`"* — applies caller props with a bare
     `SET n += $p`, and its `if "embedding" in props:` block touched only
     `embedding_verbatim`. So a caller vector landed BESIDE the enriched text it
@@ -772,7 +773,7 @@ def test_a_caller_vector_does_not_resurrect_the_enriched_text_on_rebuild(
     """#10523 review (P2): the caller-vector CLEAR must replay, not just happen.
 
     `update_point(embedding=[…])` / `update_point(embedding=None)` journals a
-    `PointRevised` carrying `embeddingText: None` (`sdk.py:16585` sets it beside
+    `PointRevised` carrying `embeddingText: None` (the writer sets it beside
     `embedding_verbatim`, and `emit_props` carries it). `_revise_point` folded
     that field ONLY inside its `new_content is not None` re-encode branch, so
     this door's clear was journalled and never replayed — `rebuild()` restored a
@@ -890,6 +891,77 @@ def test_check_consistency_does_not_red_a_faithful_enriched_graph(
             "pure fold")
         assert "embeddingText" not in _diverged_fields(
             check_consistency(log_path, s._get_proj()), t2[0])
+    finally:
+        s.close()
+
+
+def test_an_unwritable_content_edit_keeps_the_text_in_BOTH_folds(
+        embedder, enrichment_on, tmp_path):
+    """#10523 review (P2): the CONTENT-EDIT gate must be the GRAPH fold's gate.
+
+    ``_revise_point`` NULLS its own ``new_content`` local when the value is one
+    the store cannot take (#3689), so its ABSOLUTE ``n.embeddingText = NULL`` is
+    never emitted for such a record — the text is KEPT. ``_apply_one`` leaves
+    its local alone (its guard is an inline conjunction, it does not reassign),
+    so a bare ``new_content is not None`` made the SAME record count as a
+    content edit here and POPPED ``embeddingText``. The two folds then disagreed
+    on one journal: ``check_consistency`` — whose reference view IS
+    ``_apply_one`` — named a divergence on a graph the GRAPH fold itself had
+    just produced, with an `action` ("replay the journal") that reproduces
+    exactly that graph and so can never clear it (the #8317/#5048/#3817 class,
+    and a breach of the module's own #330 parity contract).
+
+    Record shape: a ``PointRevised`` whose ``new_content`` is unwritable and
+    which does NOT state ``embeddingText`` at all — the corrupt/hand-edited
+    JSONL shape the #3689 guards exist to survive. ⚠️ The
+    ``embeddingText: None`` variant does NOT discriminate: there the
+    presence-conditional arm clears it in BOTH folds, so both already agree and
+    a leg built on it would pass either way. The absent key is what separates
+    the two gates.
+
+    Non-vacuity: on the pre-fix fold this reds with ``fields=["embeddingText"]``
+    (the graph kept the creation's enriched text; the pure fold dropped it). The
+    two prior assertions pin the premise — that the graph fold KEEPS the text —
+    so the leg cannot pass by both folds clearing.
+    """
+    import json
+
+    from tortoise.consistency import check_consistency
+    from tortoise.log import EventLog
+
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
+    try:
+        s.capture_session(CONV, session_id="sess-unwritable")
+        rows = _turn_rows(s, "sess-unwritable")
+        pid = rows[0][0]
+        enriched = rows[0][2]
+        assert enriched == "[user] the auth flow is blocked", rows
+
+        # Append the record the #3689 gate is written for: content the store
+        # cannot take (a NUL string), and NO `embeddingText` key.
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "type": "PointRevised",
+                "id": pid,
+                "new_content": "a\x00b",
+                "initiated_by": "hand-edited",
+            }) + "\n")
+
+        # The GRAPH fold is the reference for what this record means.
+        s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
+        rebuilt = _turn_rows(s, "sess-unwritable")
+        assert rebuilt[0][2] == enriched, (
+            "the graph fold dropped the text for an UNWRITABLE content edit — "
+            "the premise of this leg is gone, so it no longer tests the gate",
+            rebuilt)
+
+        # ... and the PURE fold must agree with it, which is what reds pre-fix.
+        result = check_consistency(log_path, s._get_proj())
+        assert result["ok"], (
+            "the reference fold disagrees with the graph the GRAPH fold built, "
+            "for an unwritable content edit: "
+            f"{result.get('divergent_points')}")
     finally:
         s.close()
 

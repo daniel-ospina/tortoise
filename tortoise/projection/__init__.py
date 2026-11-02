@@ -9470,11 +9470,12 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 if _pk in ev and _store_holds_prop_value(ev[_pk]):
                     p[_pk] = ev[_pk]
             # #10523 review (P2): fold the ``embeddingText`` CLEAR — parity with
-            # ``_revise_point`` (:20085 absolute, :20140-20143 presence-
-            # conditional). Both journaled clear paths write the key into the
-            # record (`update_point(embedding=…)`/`embedding=None` and the
-            # content-edit re-encode branch), and the GRAPH fold honours both,
-            # but this arm folded neither — so ``check_consistency`` (whose
+            # ``_revise_point`` (its ABSOLUTE clear, inside the ``new_content``
+            # re-encode branch, plus the PRESENCE-conditional caller-vector
+            # clause emitted after it). Both journaled clear paths write the key
+            # into the record (`update_point(embedding=…)`/`embedding=None` and
+            # the content-edit re-encode branch), and the GRAPH fold honours
+            # both, but this arm folded neither — so ``check_consistency`` (whose
             # reference view IS this function, `consistency.py::_fold_journal`)
             # kept the creation's enriched text and reported a FALSE
             # ``divergence="content"`` naming ``embeddingText`` on a graph the
@@ -9487,10 +9488,21 @@ def _apply_one(points: dict[str, dict], ev: dict,
             #   1. a CONTENT EDIT re-encodes the vector from the new content, so
             #      the text the OLD vector described is gone — ABSOLUTE (not
             #      presence-conditional), exactly like the graph's clause, which
-            #      clears even for a record that does not state the key. The
-            #      ``new_content`` local is already nulled above for a value the
-            #      store cannot take (#3689), which is the same gate
-            #      ``_revise_point`` applies at :19852 before its re-encode.
+            #      clears even for a record that does not state the key. ⛔ The
+            #      WRITABILITY gate is the graph's gate, and it is applied HERE:
+            #      ``_revise_point`` NULLS its ``new_content`` local before its
+            #      re-encode, so an unwritable value never reaches that branch —
+            #      but this arm leaves the local alone (the guard above is an
+            #      inline conjunction), so the bar has to be restated in
+            #      ``_content_edit`` itself. #10523 review (P2): a bare
+            #      ``is not None`` made an UNWRITABLE ``new_content`` (a
+            #      NUL/lone-surrogate str, a map, a non-finite float — the #3689
+            #      class) count as a content edit here while the graph fold
+            #      dropped it and emitted no clear — so the pure fold REMOVED
+            #      ``embeddingText`` and the graph fold KEPT it, and
+            #      ``check_consistency`` reported a divergence, with an `action`
+            #      that reproduces the graph already on disk, on a faithful
+            #      graph.
             #   2. a CALLER-VECTOR write (`embedding=[…]` / `embedding=None`)
             #      journals ``embeddingText: None`` and no ``new_content``. Here
             #      live is a bare ``SET n += $props``, so PRESENCE-conditional is
@@ -9507,7 +9519,8 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # divergence.
             # The two arms are NAMED rather than nested, so a reader can tell
             # which one fired (and why they are not the same rule).
-            _content_edit = new_content is not None
+            _content_edit = (new_content is not None
+                             and _annotator_value_ok(new_content))
             _caller_vector_clear = (
                 "embeddingText" in ev
                 and (ev["embeddingText"] is None
@@ -20155,7 +20168,7 @@ class FalkorProjection(
         #
         # `update_point(embedding=[…])` / `update_point(embedding=None)` journals
         # a `PointRevised` with `embeddingText: None` (the writer sets it beside
-        # `embedding_verbatim`, `sdk.py:16585`, and `emit_props` carries it). The
+        # `embedding_verbatim`, and `emit_props` carries it). The
         # only clause that folded that field sat INSIDE the
         # `new_content is not None` re-encode branch above, so this door's clear
         # was journalled and never replayed: `rebuild()` restored a text the LIVE
