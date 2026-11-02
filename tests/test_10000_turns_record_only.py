@@ -2449,12 +2449,12 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
     Cypher parameter spelled `SET n += $props`). A writer that carried turn text
     under a SIXTH name (`body`, `summary`, `raw`…) would be outside this
     population. That is not hypothetical: this tree derives the session's first
-    substantive utterance into a `summary`
-    (`sdk._session_source_metadata`) and writes it to the session `:Source`
-    (`sdk.py`, `s.summary=$sum`), so a `:Source.summary` hit is a route this
-    scan cannot see. The scan therefore guards against a changed label, id space
-    or wiring — the shapes the sibling id-space assertions cannot see — and not
-    against a renamed property. Read the claim no wider than that.
+    substantive utterance into a `summary` (`sdk._session_source_metadata`) and
+    writes it on the session `:Source` (`s.summary=$sum`), so a `:Source.summary`
+    hit is a route this scan cannot see. The scan therefore guards against a
+    changed label, id space or wiring — the shapes the sibling id-space
+    assertions cannot see — and not against a renamed property. Read the claim no
+    wider than that.
 
     ⚠️ `tests/test_10017_record_carrier.py::_text_hits` is a SECOND copy of this
     same query (both predate this diff). A change to the property list has to
@@ -2479,11 +2479,8 @@ def _assert_the_text_is_in_exactly_one_store(proj, needle: str, *, in_graph: boo
 def test_an_unarmed_capture_puts_the_turn_text_in_the_graph(sdk, monkeypatch):
     """The capability fallback, stated as a PRESENCE, not as an absence.
 
-    ⛔ THIS IS THE TRIPWIRE FOR THE `#9548` DELETION, AND THE MUTATION THAT
-    PROVES IT IS A SPECIFIC ONE. Deleting the graph write — `if not
-    _record_first:` → `if False:` at `sdk.py`, with `_record_first` left REAL —
-    reddens this test at `assert graph_hits` with `[]`. That is measured, not
-    asserted.
+    ⛔ THIS IS THE TRIPWIRE FOR THE `#9548` DELETION, and the mutations that
+    prove it are the two stated below — measured, not asserted.
 
     ⚠️ **BOTH mutations redden this test, for DIFFERENT reasons — and the
     reason depends on the stub.** Deleting the graph write (`if not
