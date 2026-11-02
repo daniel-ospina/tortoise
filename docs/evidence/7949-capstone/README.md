@@ -86,7 +86,13 @@ replaced (#10537). The CURRENT run's numbers are in the verdict table at the top
 in `capstone-measured-9152448d.log` (E3 `157/397`, `Point` 354/150 anchored, `:Event` 7/43,
 `:Object` 64, composition `159 + 150 + 34 + 11`, derivation figure `150/161 = 0.931677`,
 `IMPL=65 INPUT=68 NAND=14`, 397 derived nodes, **8 of 8 steps** witnessed). Do not read the sections
-below as current; where the two disagree, the log at `9152448d7` wins. The supersede chain is the bundle's own rule:
+below as current; where the two disagree, the log at `9152448d7` wins. **The one exception is a
+passage that NAMES the shipped log while quoting it** — the E1-aux paragraph ("**64 `:Object`
+nodes** … 14/64 = 0.21875 … the `e1-aux` line") and the operator-triple note in "What this bundle
+does NOT establish" — which state what `9152448d7` measured and are checked against it by
+`test_no_document_quotes_the_superseded_runs_e1_aux_numbers_as_current` and
+`test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measured`. A re-derivation
+pass must NOT rewrite those two to the dead run's numbers: they are already the current run's. The supersede chain is the bundle's own rule:
 a row moves only by RE-RUNNING the probe and deleting the file it replaces, so the old log is gone
 from the tree while the numbers it produced stay citable from history. Where the two disagree, the
 log at `9152448d7` wins.
@@ -723,8 +729,9 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   so instead of calling the numbers final.
 - **The gate cannot detect a fabricated evidence file** with a plausible sha. Its stated limit: it
   closes *inference* (green rows with no artifact), not forgery.
-- **Nothing about the five dependencies beyond their state** — the states above are a fresh read
-  (2026-10-23), but *why* each is open is the issue body's decomposition, not re-derived.
+- **Nothing about the five dependencies beyond their state** — the states above are the tracker
+  states recorded in `blocker-states.json` at its `checked_at` (`2026-11-02T14:22:24Z`, re-confirmed
+  by running the gate), but *why* each is open is the issue body's decomposition, not re-derived.
 - **The two unwitnessed steps stay unwitnessed for the SUPERSEDED run — not for this bundle's.**
   The 6-of-8 count belongs to `capstone-measured-e0fc940b.log`, measured before `#9116`'s seam,
   when `capture_session`'s receipt carried no step surface, so S2.2/S2.3 are `UNOBSERVED` there for
