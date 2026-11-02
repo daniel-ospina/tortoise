@@ -18661,11 +18661,13 @@ class TortoiseSDK:
         # judged here, on the pair the graph will hold after the write.
         #
         # ⛔ ONE predicate: ``claim_class.direction_blocks_create``, fed the
-        # edge's stored direction canonicalized with ``_canonical_direction`` —
-        # the same predicate and the same canonicalizer as ``create_operator``,
-        # ``create_direct_edge``, ``ingest``'s partial-absorb branch and
-        # #10195's operator pre-flight above. A second copy of "may this edge
-        # exist" would be a finding of its own. The REFUSAL message is that
+        # edge's stored direction — a string verbatim, the edge TYPE's default
+        # when ABSENT, both ways for a present non-string (see the per-row
+        # note) — and, for the first two, the same canonicalizer as
+        # ``create_operator``, ``create_direct_edge``, ``ingest``'s
+        # partial-absorb branch and #10195's operator pre-flight above. A
+        # second copy of "may this edge exist" would be a finding of its own.
+        # The REFUSAL message is that
         # predicate's own (``override_refusal``), with this surface named —
         # the caller's ways out are the same ones it states.
         #
@@ -18686,19 +18688,21 @@ class TortoiseSDK:
         def _direct_incident_edges(_direction: str) -> list:
             """The 2a-DIRECT population for ONE direction (query + op filter).
 
-            ONE collection, read by the pre-flight above AND by the transfer
-            loop below: the population the door judges and the population it
-            mutates must be the same set, and two queries that drifted apart
-            would be a fail-open nobody notices.
+            ONE collection IMPLEMENTATION — every caller reads its own CURRENT
+            state. Two queries that drifted apart would be a fail-open nobody
+            notices, so the query and its operator filter live here only. The
+            pre-flight's up-front snapshot and each transfer pass's re-read are
+            deliberately separate (see the transfer loop's note): the
+            ``out`` pass mutates the graph the ``in`` pass must then read, so
+            hoisting ONE capture into both passes is the measured
+            double-re-point defect, not a de-duplication.
             """
             if _direction == "out":
                 _dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
-                       "RETURN type(r), r, t.id, ID(r), labels(t), "
-                       "coalesce(t.claimClass, 'asserted')")
+                       "RETURN type(r), r, t.id, ID(r), labels(t)")
             else:
                 _dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
-                       "RETURN type(r), r, t.id, ID(r), labels(t), "
-                       "coalesce(t.claimClass, 'asserted')")
+                       "RETURN type(r), r, t.id, ID(r), labels(t)")
             _rows = proj.g.query(_dq, params={"old_id": old_id}).result_set
             if not _rows:
                 return []
@@ -18721,7 +18725,20 @@ class TortoiseSDK:
                 params={"ids": _other_ids},
             ).result_set
             _op_set = {r[0] for r in _op_rows}
-            return [row for row in _rows if row[2] not in _op_set]
+            # ⛔ The operator filter must not hide a row that is DELETED rather
+            # than re-pointed (#9727). ``tid == new_id`` only ever deletes (the
+            # phantom self-edge branch), and a successor that is an operator by
+            # the CANONICAL population but not by the lifecycle guard's
+            # narrower ``is_operator`` test (an ``op_type``-only node —
+            # ``live.LIFECYCLE_FANOUT_QUERY`` reads the flag alone) would
+            # otherwise be filtered HERE, so the ``in`` pass never saw the
+            # transient ``(new)-[T]->(old)`` edge the ``out`` pass had just
+            # minted and left it stranded on the superseded point — with its
+            # ``derived -> asserted`` leg flowing. MEASURED (raw self-loop +
+            # an ``op_type``-only successor): the supersede returned
+            # ``edges_transferred=1`` with no refusal and that edge survived.
+            return [row for row in _rows
+                    if row[2] not in _op_set or row[2] == new_id]
 
         def _epistemic_label(node_id: str) -> str | None:
             """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
@@ -18788,9 +18805,11 @@ class TortoiseSDK:
                     # phantom self-edge case) — nothing is re-pointed.
                     # ``tid == old_id``: a SELF-LOOP at the predecessor, which
                     # the out/in passes consume between them (see the
-                    # ``_direct_incident_edges`` note) — no surviving wiring to
-                    # judge, and judging the ``in`` copy of it would refuse a
-                    # supersede over an edge that ends up deleted.
+                    # ``_direct_incident_edges`` note) PROVIDED the transient
+                    # row reaches the ``in`` pass — which is what that helper's
+                    # ``or row[2] == new_id`` exception guarantees. Judging the
+                    # ``in`` copy of it would refuse a supersede over an edge
+                    # that ends up deleted.
                     continue
                 _row_labels = set(_row[4] or ()) if len(_row) > 4 else set()
                 # The transfer writes an edge only when BOTH endpoints resolve
@@ -18819,17 +18838,52 @@ class TortoiseSDK:
                 # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
                 # and ``direction_flows`` tests membership in a frozenset — so
                 # handing it over aborts the supersede with a ``TypeError`` the
-                # guard is not about. A NON-SCALAR reads as ABSENT (the edge
-                # type's own default), the same reading
-                # ``claim_class.normalize`` gives a hand-edited marker: never a
-                # third state. ⚠️ A *string* outside the vocabulary is NOT
-                # remapped: it passes through and ``direction_flows`` reads it
-                # as both ways — deliberately, because that is the leg set the
-                # EP backstop sees for the same token (a door that read it more
-                # narrowly would keep a factor the load side drops).
+                # guard is not about. ⚠️ The three cases below are DIFFERENT,
+                # and none is read off ``create_direct_edge`` blindly: a string
+                # is judged on the leg set ``direction_flows`` gives it, a
+                # present non-string is judged BOTH ways (the hashable reader
+                # verdict, and the fail-closed stand-in where no reader verdict
+                # exists), and only the ABSENT case takes the creation door's
+                # canonical form — because that is the token the door WRITES,
+                # so no reader ever sees a door-made absent edge. A *string*
+                # token passes through verbatim (one outside the vocabulary is
+                # read by ``direction_flows`` as both ways — the leg set the EP
+                # backstop sees, so a door reading it more narrowly would judge
+                # ONE leg of a two-leg factor (the backstop NARROWS, it does not
+                # drop — measured: such a factor loads as ``'<-'`` with
+                # ``skipped == []``); an ABSENT token takes the
+                # edge TYPE's default (what ``create_direct_edge``
+                # canonicalizes it to before judging — deliberately NOT
+                # ``ep.py``'s ``coalesce(r.direction, 'bidirectional')``, which
+                # would be the over-refusal the directionless-NAND pin exists to
+                # prevent); a PRESENT non-string token is judged BOTH ways: a
+                # HASHABLE one (``3``, ``True``) is read as both ways by
+                # ``direction_flows`` and ``ep.py``, so both ways matches the
+                # leg set they see, while an UNHASHABLE one (list/map) makes
+                # ``direction_flows`` raise ``TypeError`` — there is no reader
+                # verdict to mirror, so both ways is the fail-closed stand-in
+                # (and keeps that value out of a frozenset membership test).
                 _raw_dir = _rdict.get("direction")
-                _eff_dir = self._canonical_direction(
-                    _rtype, _raw_dir if isinstance(_raw_dir, str) else None)
+                if isinstance(_raw_dir, str):
+                    _eff_dir = self._canonical_direction(_rtype, _raw_dir)
+                elif _raw_dir is None:
+                    # ABSENT: the edge TYPE's own default (NAND ->
+                    # ``unidirectional``), exactly as ``create_direct_edge``
+                    # canonicalizes it before judging.
+                    _eff_dir = self._canonical_direction(_rtype, None)
+                else:
+                    # ⛔ A PRESENT non-string token is NOT "absent" to any
+                    # reader: ``live.direction_flows`` reads it as BOTH ways
+                    # (unknown ⇒ the mutual default), which is also the leg set
+                    # ``ep.py`` sees. Judging it as the type default would judge
+                    # ONE leg of a two-leg wiring — for NAND that let a supersede
+                    # write ``asserted -[NAND {junk}]-> derived``, whose backward
+                    # leg is the override ``create_direct_edge(NAND, …,
+                    # 'bidirectional')`` refuses (measured). Both ways is the
+                    # fail-CLOSED reading, and it also keeps the unhashable case
+                    # away from ``direction_flows``' frozenset membership (which
+                    # raises ``TypeError``).
+                    _eff_dir = "bidirectional"
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
                     _src_classes, _tgt_classes = _new_classes, _tid_classes
@@ -18847,7 +18901,8 @@ class TortoiseSDK:
                         surface=(f"supersede_point: re-pointing the "
                                  f"{_rtype} edge {_src_id!r}->{_tgt_id!r} "
                                  f"(from {old_id!r} to {new_id!r}, "
-                                 f"direction {_eff_dir!r})")))
+                                 f"direction {_raw_dir!r} "
+                                 f"(judged {_eff_dir!r}))")))
 
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
