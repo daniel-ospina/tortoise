@@ -1104,9 +1104,15 @@ def test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure():
     the WITHDRAWN log is outside the glob, every log that IS in it has a PROVEN order (so none of
     them needs a disclosure), and no disclosure is recorded or accepted as inert. Anything smuggled
     back in still reds on the ordering half, which is what the last two assertions read.
+
+    ⛔ THE HISTORY-FREE HALF RUNS BEFORE THE SKIP (#10546 review cycle 20, IS-2). It used to sit
+    entirely behind `history_unavailable()`, which is TRUE in every CI `test` job (fetch-depth 1) —
+    so the pin this test is advertised as skipped in 100% of CI runs and no merge gate ever
+    evaluated it. The glob membership, the `withdrawn/` placement and the record key need no git
+    history at all, so they are asserted FIRST; only the ordering half (`check.run`) stays behind
+    the skip. Cycle 16 applied the same standard to the sibling CLI test; this is that standard
+    applied here.
     """
-    if check.history_unavailable():
-        pytest.skip("needs full history — CI test jobs check out at fetch-depth:1")
     directory = PREREG_DIR.parent / "5087-hypothesis"
     present = sorted(p.name for p in directory.glob(check.EVIDENCE_LOG_GLOB))
     assert "s3-ablation-a1075dfc.log" not in present, (
@@ -1116,6 +1122,12 @@ def test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure():
         "the withdrawn log must stay under withdrawn/, which the non-recursive glob does not read "
         "— deleting it is not the fix this test pins"
     )
+    assert check._record_atomic_add(directory) == {}
+    if check.history_unavailable():
+        pytest.skip(
+            "the ordering half needs full history (CI test jobs check out at fetch-depth:1) — "
+            "the glob, placement and record assertions above already ran"
+        )
     report = check.run(directory, use_corpus=False)
     assert report["ok"] is True, report["failures"]
     assert report["ordering_atomic_add"] == [], report["ordering_atomic_add"]
@@ -1123,6 +1135,39 @@ def test_the_withdrawn_bundle_no_longer_carries_an_atomic_disclosure():
     # A bare "verified" — the ordering half compared no log at all for this bundle.
     assert report["ordering"] == "verified"
     assert check._record_atomic_add(directory) == {}
+
+
+def test_the_atomic_add_record_key_documents_every_required_field():
+    """The comment that DEFINES the disclosure schema may not prescribe the refused shape.
+
+    ⛔ (#10546 review cycle 20, IS-1) `ATOMIC_ADD_KEY`'s `#:` block is the ONLY definition of the
+    key an author reads, and it documented a TWO-field shape — `{log name: {reason,
+    branch_commits}}` — while `_atomic_add_failure` requires a third, `squash_merge`, and refuses
+    the two-field block as "not a usable disclosure" (pinned by
+    `test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason`). The omitted field is the
+    one pointer a reader can RESOLVE: a squash leaves `branch_commits` unreachable from `main`, so
+    `squash_merge` is the only commit the disclosure can be checked against.
+
+    Read from the source rather than restated, so the two cannot drift apart again: the contiguous
+    `#:` block immediately above the assignment must name every required field. On the pre-fix
+    code it names two, so this fails there.
+    """
+    lines = Path(check.__file__).read_text(encoding="utf-8").splitlines()
+    at = next(
+        n for n, line in enumerate(lines) if line.split("=")[0].strip() == "ATOMIC_ADD_KEY"
+    )
+    block: list[str] = []
+    for line in reversed(lines[:at]):
+        if not line.startswith("#:"):
+            break
+        block.append(line)
+    assert block, f"no `#:` block documents {check.ATOMIC_ADD_KEY}"
+    documented = "\n".join(reversed(block))
+    for field in ("reason", "branch_commits", "squash_merge"):
+        assert field in documented, (
+            f"{check.ATOMIC_ADD_KEY}'s only definition omits {field!r}, which the validator "
+            f"REQUIRES — an author following it writes a block the tool refuses:\n{documented}"
+        )
 
 
 def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, monkeypatch):

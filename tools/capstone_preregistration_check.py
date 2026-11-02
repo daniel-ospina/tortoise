@@ -1609,7 +1609,12 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
 
 
 #: The MACHINE RECORD key that discloses an ATOMIC ADD: a pre-registration and an evidence log that
-#: entered the repository in the SAME commit. Per-log: ``{log name: {reason, branch_commits}}``.
+#: entered the repository in the SAME commit. Per-log, and ALL THREE fields are REQUIRED:
+#: ``{log name: {reason, branch_commits, squash_merge}}``. A block that omits ``squash_merge`` is
+#: REFUSED as "not a usable disclosure": a squash leaves the ``branch_commits`` unreachable from
+#: main, so ``squash_merge`` is the ONE pointer a reader can resolve and verify. This block used to
+#: document the two-field shape the validator rejects — an author following the only definition of
+#: the key wrote a disclosure the tool refused (#10546 review cycle 20, IS-1).
 #:
 #: ⛔ IT IS NOT A WAIVER UNLESS THE ARM IS ARMED (#10546 review cycle 17, IS-1). The block is read
 #: only when ``--allow-atomic-disclosure`` is passed; without it an atomic pair is REFUSED and a

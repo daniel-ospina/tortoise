@@ -4628,11 +4628,15 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # history claims and the S3 re-measurement added five lines above the pinned sentence),
         # then 2586 by this cycle's re-derivation of the 5087-withdrawal test's docstring (fourteen
         # lines that state WHY "no evidence log in the directory" stopped being the invariant once
-        # #10554 landed its re-measurement) — the pin landing
-        # rather than drifting, because a plausible offset is what it exists to refuse. ⛔
+        # #10554 landed its re-measurement), then 2631 by its cycle-20 fix of that test's PLACEMENT
+        # (the history-free half — glob membership, `withdrawn/` placement and the record key — now
+        # runs BEFORE the `history_unavailable()` skip, so the pin is evaluated in the fetch-depth:1
+        # `test` shards instead of skipping in every CI run) and the new source-derived schema pin
+        # (`test_the_atomic_add_record_key_documents_every_required_field`, thirty lines) — the pin
+        # landing rather than drifting, because a plausible offset is what it exists to refuse. ⛔
         # Re-derive this number, never delete the entry: the whole point is that a citation which
         # names a line that does not say it is a dead pointer.
-        ("tests/test_capstone_preregistration_9075.py", 2586):
+        ("tests/test_capstone_preregistration_9075.py", 2631):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
