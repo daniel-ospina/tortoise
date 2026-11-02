@@ -1010,3 +1010,112 @@ class TestTheCensusNamesItsEvidenceHome:
         assert "'s body" not in section, (
             "§5 sends C2's mutation evidence to a PR body, which is not the "
             "artifact a lane reads (and was the P3 finding)")
+
+
+# ── the marker-site REGISTER: the docstring list a new site must join ────
+#
+# `tortoise/truncation.py`'s docstring is the authoritative register of the
+# surfaces that write the marker, and the ⛔ rule beside it ("A new marker site
+# joins this list") only means something if the list is TRUE. It has now shipped
+# wrong TWICE as a cardinality claim — first "the only place the marker is
+# written" (when `/v1/search` was already the second site), then "TWO sites meet
+# it today" (when `sdk.py::issue_insight` had been a third site all along, and
+# already had its own `truncated` row in the rendered surface doc). A lane
+# auditing #8447 starts from this register, so a count that has quietly gone
+# stale makes it conclude a real site does not write the marker — the same
+# re-derived-conclusion defect as a stale census row, one level down.
+
+class TestTheMarkerSiteRegisterIsComplete:
+    """Every `mark_truncation` call site in the tree is NAMED in the register.
+
+    The list is derived from the tree (an AST scan), never restated here, so
+    this test cannot itself go stale: adding a marker site without adding it to
+    the register reds, which is exactly what the docstring's ⛔ rule promises.
+    """
+
+    @staticmethod
+    def _module_docstring() -> str:
+        import tortoise.truncation as truncation
+
+        assert truncation.__doc__, "tortoise/truncation.py lost its docstring"
+        return truncation.__doc__
+
+    @staticmethod
+    def _call_sites() -> set[str]:
+        """`<module>::<outermost enclosing function>` for every call site.
+
+        The OUTERMOST def, not the innermost: a site inside a helper closure
+        still belongs to the entry point a reader can find and grep for.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent / "tortoise"
+        assert root.is_dir(), f"the package root is missing: {root}"
+        sites: set[str] = set()
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            parents = {child: node for node in ast.walk(tree)
+                       for child in ast.iter_child_nodes(node)}
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = (func.attr if isinstance(func, ast.Attribute)
+                        else getattr(func, "id", ""))
+                if name not in ("mark_truncation", "_mark_truncation"):
+                    continue
+                owner = ""
+                cursor = node
+                while cursor in parents:
+                    cursor = parents[cursor]
+                    if isinstance(cursor, (ast.FunctionDef,
+                                           ast.AsyncFunctionDef)):
+                        owner = cursor.name
+                sites.add(f"{path.relative_to(root.parent).as_posix()}"
+                          f"::{owner}")
+        return sites
+
+    def test_the_scan_finds_the_three_sites_the_register_names(self):
+        """Guard against a vacuous scan: the AST really does see all three."""
+        sites = self._call_sites()
+        assert sites == {
+            "tortoise/hosted_api.py::list_points",
+            "tortoise/sdk.py::issue_insight",
+            "tortoise/sdk.py::tortoise_fts_query",
+        }, sites
+
+    def test_every_marker_call_site_is_named_in_the_register(self):
+        doc = self._module_docstring()
+        missing = sorted(s for s in self._call_sites() if s not in doc)
+        assert not missing, (
+            "these surfaces write `truncated` but the REACHABILITY register in "
+            "tortoise/truncation.py does not name them — a lane auditing #8447 "
+            f"would conclude they are unmarked: {missing}")
+
+    def test_issue_insight_is_registered_as_a_marker_site(self):
+        """The site that was silently absent while the register said TWO.
+
+        Pre-fix the docstring listed the search path and hosted `/v1/points`
+        only, so `issue_insight` — a `[:limit]` cut with no offset and no
+        cursor, on a tool that already publishes a `truncated` row — was
+        invisible to anyone reading the register.
+        """
+        doc = self._module_docstring()
+        assert "tortoise/sdk.py::issue_insight" in doc, (
+            "the register omits `issue_insight`, which calls `_mark_truncation` "
+            "at sdk.py:34655 on a plain `[:limit]` cut — no offset, no cursor")
+
+    def test_the_register_states_no_cardinality_that_can_re_stale(self):
+        """A count is a claim that goes stale; the site list cannot.
+
+        Both shipped wordings are pinned out by their own claim form (the
+        docstring is allowed to narrate that they went stale — it is not allowed
+        to make the claim again).
+        """
+        doc = " ".join(self._module_docstring().split())  # unwrap the prose
+        for stale in ("TWO sites meet it today",
+                      "the only place the marker is written"):
+            assert stale not in doc, (
+                f"the register re-introduced the stale cardinality claim "
+                f"{stale!r} — name the sites, let the AST scan keep the count")

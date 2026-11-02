@@ -87,12 +87,22 @@ whether the dropped rows are REACHABLE: the offset/cursor paths
 cursor walks) already report ``total``/``hasMore`` and hand the caller the next
 page, so they are never marked here. The criterion is REACHABILITY, and it is
 applied per surface rather than stated once: the marker is written where a row
-dropped at the cap is unreachable by any subsequent call. TWO sites meet it
-today — the limit-capped search path (``result_ids[:limit]``, no offset and no
-cursor; ``/v1/search``) and hosted ``GET /v1/points``
-(``hosted_api.py::list_points``, a store-side ``LIMIT`` with no offset and no
-cursor). Every such site must be on a DICT body; a field cannot ride a bare
-``list``, so a list-shaped surface needs a return-shape decision first
+dropped at the cap is unreachable by any subsequent call. Every site that meets
+it today is named below by ``<module>::<function>``, and
+``tests/test_8447_truncation_marker.py::TestTheMarkerSiteRegisterIsComplete``
+derives that list from the tree so this register cannot re-stale — it has
+already shipped wrong once as a count ("the only place", then "TWO sites"):
+
+- ``tortoise/sdk.py::tortoise_fts_query`` — the limit-capped search path
+  (``result_ids[:limit]``, no offset and no cursor; ``/v1/search``).
+- ``tortoise/sdk.py::issue_insight`` — ``semantic_hits[:limit]`` over its own
+  default bound of 2, with no offset and no cursor (the
+  ``tortoise_issue_insight`` surface).
+- ``tortoise/hosted_api.py::list_points`` — hosted ``GET /v1/points``, a
+  store-side ``LIMIT`` with no offset and no cursor.
+
+Every such site must be on a DICT body; a field cannot ride a bare ``list``, so
+a list-shaped surface needs a return-shape decision first
 (``config/surface-manifest.yml``). ⛔ A new marker site joins this list — it
 does not mint a third predicate.
 """
