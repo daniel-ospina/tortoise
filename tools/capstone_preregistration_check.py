@@ -2849,7 +2849,13 @@ def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
         return failures          # UNPROVABLE — never demand an attestation instead
 
     steps_epoch = _steps_block_epoch(directory, record)
-    log_epochs = [epoch for log in scored for epoch in _added_epochs(log)]
+    # ⛔ `_added_commits`, not an epoch-only reader: #10529's change REPLACED the old
+    # `_added_epochs` helper with one that carries the add-commit SHA, because an epoch alone
+    # cannot distinguish one commit from two in the same second (see its docstring). This rule
+    # only needs the epochs, so it drops the sha explicitly rather than reintroducing a second,
+    # epoch-only reader of the same history — one reader, so the two rules cannot disagree about
+    # when a log was added.
+    log_epochs = [epoch for log in scored for epoch, _sha in _added_commits(log)]
     if steps_epoch is None or not log_epochs:
         return failures          # nothing to compare; not a finding either way
     earliest = min(log_epochs)
