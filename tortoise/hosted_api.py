@@ -190,7 +190,10 @@ from tortoise.projection import (
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
-from tortoise.quota import with_limit_contact  # #5425 refusal seam
+from tortoise.quota import (  # #5425 refusal seam; #4051 count-scope split
+    TENANT_GRAPH_RESOURCES,
+    with_limit_contact,
+)
 
 # #9555 / R7: the ONE spelling of §9.1's narrative carrier type. Its record home
 # is `public.session_narrative` and it materialises no node (§9.1: "not in the
@@ -8486,9 +8489,20 @@ def _key_limit_refusal(
 #: tenant-graph branch). For these the gate must count the graph the request
 #: actually opens; the registry-scoped resources (`api_keys`/`users`/`graphs`)
 #: are counted in the control plane and take no data SDK (#4051).
-#: This SUPERSEDES the `_TENANT_GRAPH_RESOURCES` literal #10180 added here: same
-#: members, and one name for the one set, so the two cannot drift.
-_GRAPH_SCOPED_QUOTA_RESOURCES = frozenset({"points", "sessions", "documents"})
+#:
+#: ⛔ IMPORTED, never re-listed here. `quota.TENANT_GRAPH_RESOURCES` DERIVES the
+#: set (`_RESOURCE_LIMIT_KEYS` + the derived `documents` cap, minus
+#: `quota.REGISTRY_SCOPED_RESOURCES`), and `_count_resource` branches on that
+#: same declaration. A hand-copied literal equalled the truth only on the day it
+#: was written: add one gate-able resource to `_RESOURCE_LIMIT_KEYS` and this
+#: gate would return `None` for it — counting the org's DEFAULT graph while the
+#: write opens its own, which is exactly the #4051 defect — and nothing would
+#: red, because a literal cannot drift from a fact it does not share a source
+#: with (round-3 review, P2).
+#:
+#: This SUPERSEDES the `_TENANT_GRAPH_RESOURCES` literal #10180 added on this
+#: line: one name for the one set, so the two cannot drift.
+_GRAPH_SCOPED_QUOTA_RESOURCES = TENANT_GRAPH_RESOURCES
 
 
 def _gate_sdk_for(org: dict, resource: str):

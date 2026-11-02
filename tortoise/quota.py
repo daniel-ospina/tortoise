@@ -318,6 +318,34 @@ _RESOURCE_LIMIT_KEYS = {
 }
 
 
+#: WHERE a resource's count is READ — the ONE declaration of the split, derived
+#: from by `_count_resource`'s branch AND by every caller that must know which
+#: graph a count reads (#4051).
+#:
+#: These three are counted in the CONTROL PLANE (the registry / Supabase seam):
+#: api keys, memberships and graph rows. They are NOT tenant-graph counts, so a
+#: caller gating them must pass no data SDK — building one would be pure cost on
+#: the key-mint path.
+REGISTRY_SCOPED_RESOURCES = frozenset({"api_keys", "users", "graphs"})
+
+#: The resources whose count reads the TENANT GRAPH — i.e. `_count_resource`'s
+#: catch-all branch. **DERIVED, never enumerated**: the truthful set is "every
+#: resource that has a limit key, plus the derived `documents` cap, minus the
+#: registry-scoped ones", so a resource added to `_RESOURCE_LIMIT_KEYS` enters it
+#: automatically.
+#:
+#: This exists so no caller can hand-copy the set and silently return to the
+#: #4051 defect on the next resource added: `hosted_api._gate_sdk_for` must count
+#: the graph a write will OPEN for every resource in here, and `None` (the
+#: control plane, or the org's DEFAULT graph) for the rest. A literal in
+#: `hosted_api` equalled this set only on the day it was written — the drift
+#: class this constant removes (the same "constant living in hosted_api" shape
+#: that hid the shared #5425 gate, see the note above).
+TENANT_GRAPH_RESOURCES = (
+    frozenset(_RESOURCE_LIMIT_KEYS) | {"documents"}
+) - REGISTRY_SCOPED_RESOURCES
+
+
 # #4614: the machine-readable CATEGORY of a quota refusal — the one value a
 # caller branches on. The message text is for humans only; nothing may key on
 # it (the clients ship independently of the server's wording).
@@ -838,7 +866,10 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
     """
     try:
         # ── Registry-scoped counts (api_keys, users, graphs) ──
-        if resource in ("api_keys", "users", "graphs"):
+        # The membership test is the SAME declaration `TENANT_GRAPH_RESOURCES`
+        # derives from, so the branch and every gate that mirrors it cannot
+        # disagree (#4051).
+        if resource in REGISTRY_SCOPED_RESOURCES:
             # #765 (plan Task 8 quota paths): in Supabase control-plane mode
             # the count reads Supabase via the seam — post-flip the registry
             # is DELETED, so a registry count would fail-open (0 nodes) or
