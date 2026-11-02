@@ -6432,9 +6432,10 @@ async def health():
     counter snapshot, or an unread tenancy resolution degrades ``status``.
 
     Build check (#10447): ``build`` names the build that is SERVING — commit,
-    package version, whether the tree was dirty at build time (`null` until the
-    deploy stamps `TORTOISE_GIT_DIRTY`; see `_build_identity`), process start
-    time, and the highest schema migration this image carries. It is the same
+    whether the tree was dirty at build time (stamped by the deploy; `null` means
+    NOT STATED, never "clean" — see `_build_identity`), the image reference the
+    Machine was created from, process start time, and the highest schema
+    migration this image carries. It is the same
     VALUE ``/v1/version`` returns (one resolver, ``_build_identity``), because
     "is this deployed?" was previously unanswerable from this endpoint: a stale
     build served ``status: ok`` and every other block happily. Like
@@ -6568,13 +6569,22 @@ async def health_security():
 #: can see a restart (a deploy that landed) without a log grep — and can see that
 #: a build is OLD by comparing it to the deploy it was supposed to pick up.
 #:
-#: `commit_dirty` is published but is NULL on every real deployment today:
-#: nothing stamps `TORTOISE_GIT_DIRTY`. The deploy workflow's propagation block is
-#: pinned by `tests/test_fly_secret_drift.py` (whose harness stubs PATH to
-#: fly/flyctl only) and a new stamp would also need a declaration in
-#: `.github/scripts/fly-managed-secrets.txt` or the drift check blocks every later
-#: deploy — a deploy-surface change, filed separately rather than smuggled in here.
-#: A `null` here is the honest reading; it must not be read as "clean".
+#: #10447 (reopen): `commit_dirty` NOW HAS A PRODUCER. `deploy-hosted.yml`
+#: stamps `TORTOISE_GIT_DIRTY` from the build's own `git status --porcelain`
+#: (declared `workflow` in `.github/scripts/fly-managed-secrets.txt`, which the
+#: drift gate requires before the name can be staged at all). Before that stamp
+#: existed the field was published and permanently `null` on production — and
+#: because the identified predicate treated an unstated flag as "not dirty", a
+#: build from a modified tree still claimed `build_identified: true`. An unstamped
+#: deployment is now read as UNSTATED (see `build_identified_reason`), never as
+#: clean: a `null` here is silence, and silence is not the claim "this is the
+#: commit".
+#:
+#: The image identity is published the same way, from the platform rather than
+#: from a constant: Fly injects `FLY_IMAGE_REF` (the image reference the Machine
+#: was created from) into every Machine's environment, so the artefact is named
+#: by the runtime that chose it — no deploy step has to learn the digest after the
+#: fact, and there is no second rollout to carry it.
 _PROCESS_STARTED_AT: str = datetime.now(UTC).isoformat(timespec="seconds")
 
 
@@ -6736,13 +6746,50 @@ def _build_identity() -> dict:
     # which is what the pin's own title claims and what a reader keyed on
     # `build_identified` alone must not be told the opposite of. `commit_sha` stays
     # RAW so `/v1/version`'s two-key contract carries exactly what the deploy staged.
-    identified = (bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
-                  and not dirty_flag)
+    # ⛔ SILENCE IS NOT "CLEAN" (the #10447 reopen). The predicate used to be
+    # `not dirty_flag`, and `not None` is True — so a build from a MODIFIED tree,
+    # on any deployment that had not stamped the flag, published
+    # `build_identified: true`. That is the false PASS this whole block exists to
+    # refuse: "is this the commit, or a modified tree?" was answered "the commit"
+    # by an absent reading. Production now stamps the flag, and an unstamped one
+    # is reported as UNSTATED.
+    sha_is_commit = bool(re.fullmatch(r"[0-9a-f]{7,40}", sha or ""))
+    identified = sha_is_commit and dirty_flag is False
+    # WHY, not just "false" (reopen: "unknown with a reason"). Four different
+    # worlds produce the same `false` and a reader must not have to guess which:
+    # nothing deployed a stamp (selfhost/local dev), the stamp is not a commit
+    # (`main`, `unknown`, an unexpanded `${GITHUB_SHA}`), the tree really was
+    # dirty, or the deploy did not say whether it was.
+    if identified:
+        reason = None
+    elif sha is None:
+        reason = "no_commit_stamp"
+    elif not sha_is_commit:
+        reason = "commit_stamp_not_a_sha"
+    elif dirty_flag is True:
+        reason = "tree_dirty"
+    else:
+        reason = "tree_dirt_unstated"
+    # THE ARTEFACT, FROM THE PLATFORM. `flyctl deploy --remote-only` builds the
+    # image during the deploy, so a digest CANNOT be staged into the environment
+    # beforehand — a deploy that read `flyctl image show` and re-staged it would
+    # restart the fleet a second time to publish the id of the image it had just
+    # started. Fly injects `FLY_IMAGE_REF` into every Machine instead, which names
+    # the image the machine was CREATED FROM: the artefact->runtime link the issue
+    # asked for, with no deploy-order dance and no value a human can edit.
+    # `TORTOISE_IMAGE_REF` is the non-Fly (selfhost/container) spelling; it is
+    # read first so a deployment that knows its own ref can state it.
+    image = ((os.environ.get("TORTOISE_IMAGE_REF") or "").strip()
+             or (os.environ.get("FLY_IMAGE_REF") or "").strip() or None)
     return {
         "version": tortoise.__version__,
         "commit_sha": sha,
         "commit_dirty": dirty_flag,
         "build_identified": identified,
+        "build_identified_reason": reason,
+        # The image (build artefact) the serving process was started from —
+        # `null` when nothing stated one (a local run), never a placeholder.
+        "image": image,
         "started_at": _PROCESS_STARTED_AT,
         # CARRIED by this image, never "applied in the database" — see
         # `_migrations_head`'s docstring for why the two diverge and why the

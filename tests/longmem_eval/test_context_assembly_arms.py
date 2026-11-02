@@ -37,8 +37,10 @@ if str(_REPO_ROOT) not in sys.path:
 import tools.longmem_eval.context_assembly_arms as caa  # noqa: E402
 from tools.longmem_eval import gold_evidence_claims as gec  # noqa: E402
 from tools.longmem_eval import leakage_guard as lg  # noqa: E402
+from tortoise.aggregate import detect_aggregative_intent  # noqa: E402
 from tortoise.reader import (  # noqa: E402
     LLMReader,
+    _system_prompt_for_question,
     build_reader_user_message,
     system_prompt_for,
 )
@@ -631,9 +633,19 @@ def test_four_arms_share_one_prompt_scaffolding(monkeypatch):
     assert len(result["reports"]) == 4
 
     question = _row()["question"]
+    # Premise asserted, not assumed: this control question is NOT an
+    # aggregation, so the #10539 clause is not composed for it and the composed
+    # prompt coincides with the bare per-type one.
+    assert detect_aggregative_intent(question).is_aggregative is False
+    composed = _system_prompt_for_question("multi-session", question)
+    assert composed == system_prompt_for("multi-session")
     suffix = f"\n\nQuestion: {question}\n\nAnswer:"
     systems = {system for system, _ in model.calls}
-    assert systems == {system_prompt_for("multi-session")}
+    # The arms consume the COMPOSED prompt (#10539 composes one level up, in
+    # `_system_prompt_for_question`, so `system_prompt_for`'s frozen signature
+    # stays unchanged) — comparing against the bare per-type prompt would read
+    # green while the reader was sent something else.
+    assert systems == {composed}
     evidences = []
     for _system, user in model.calls:
         assert user.startswith("Memory context:\n")
@@ -649,6 +661,53 @@ def test_prompt_hash_covers_the_scaffolding_and_is_stable():
     assert caa.reader_prompt_hash() == caa.reader_prompt_hash()
     assert len(caa.reader_prompt_hash()) == 16
     assert caa.reader_prompt_hash() != caa.stopwords_hash()
+
+
+def test_both_recorded_prompt_sources_name_the_composed_prompt():
+    """§5 / A2 plan D9: both recorded prompt identities must describe the
+    prompt the reader is actually sent.
+
+    #10539 composes the conditional aggregation clause one level up, in
+    ``tortoise/reader.py::_system_prompt_for_question`` — NOT in
+    ``system_prompt_for``, whose signature is frozen by the A1 plan's
+    CONDITIONAL GATES. So a manifest source string that stops at
+    ``system_prompt_for`` names a prompt the reader no longer receives: the
+    persisted methodology hash would then describe a stale scaffolding, which
+    is the hazard D9 exists to prevent.
+    """
+    from tools.longmem_eval import run as runner
+
+    reader = LLMReader(_RecordingModel(), model_id="test-reader",
+                       model_spec="test:reader")
+    manifest = caa.build_manifest(
+        arms=("B",), gold_path="g", gold_sha="s", max_words=1,
+        reader=reader, judge=_FakeJudge(), serializer_git_sha="x",
+        embedder_model="m")
+    for source in (runner.reader_prompt_source(),
+                   manifest["reader_prompt_source"]):
+        assert "_system_prompt_for_question" in source
+        assert "aggregation" in source
+
+
+def test_the_aggregation_source_string_states_the_restatement_exception():
+    """A2 plan D9, one level down: the recorded source string must not assert
+    the negation of the rule the prompt it identifies carries.
+
+    ``_AGGREGATION_FRAGMENT`` dedupes a restatement ACROSS two session dates
+    when it refers back to the earlier occurrence — behaviourally pinned by
+    ``tests/test_longmem_reader_aggregation.py::
+    test_aggregation_clause_counts_an_explicit_restatement_once``. A source
+    string that says *only* a same-session restatement is a duplicate
+    therefore describes a prompt that is not shipped.
+    """
+    from tools.longmem_eval import run as runner
+    from tortoise.reader import _AGGREGATION_FRAGMENT
+
+    source = runner.reader_prompt_source()
+    assert "only a same-session restatement" not in source
+    assert "back-reference" in source
+    # The string and the fragment it appends verbatim agree on the exception.
+    assert "unless it is explicitly a restatement" in _AGGREGATION_FRAGMENT
 
 
 # ══ metric 5 — answer-bearing-claim presence ══════════════════════════════

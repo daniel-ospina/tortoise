@@ -1566,6 +1566,12 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # node property — the fold's `_POINT_HANDLED` drops them too).
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_preserved",
+    # #10010 review P1: the dedup fold's RECORD flag (a description of the
+    # record, never node state — `_POINT_HANDLED` drops it on replay too). It
+    # states that this creation-shaped record folded evidence into an EXISTING
+    # Point; without the entry it would fall into the record's `props` jsonb and
+    # `cache_projection._props_from_row` would copy it back onto the node.
+    "evidence_fold",
 })
 
 
@@ -3315,8 +3321,9 @@ def _envelope_relation_statements(
 #:
 #: ⛔ FOUR TYPES, NOT TWO — AND THE FOLD'S TWO ROUTES DO NOT AGREE ABOUT THEM.
 #: `apply()` materialises a Point from FOUR arms, and three of them reach
-#: `_upsert_point_edges` (which reads `extractedFrom` off the payload with no
-#: type gate of its own):
+#: `_upsert_point_edges` (which reads the payload's FULL ref set through
+#: `_point_all_source_refs` — `extractedFromAll` when the payload states a
+#: non-empty list, else `extractedFrom` — with no type gate of its own):
 #:
 #:   * `PointAdded` / `OperatorAdded` → `self._upsert(p)`;
 #:   * `PointPromoted` → `self._upsert(gated_promote_payload(p, …))`;
@@ -3349,6 +3356,18 @@ _POINT_PROPERTY_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
     ("PointPromoted", "extractedFrom", "extractedFrom", "Source"),
     ("OperatorPromoted", "extractedFrom", "extractedFrom", "Source"),
 )
+
+#: The one declared POINT property whose refs the record reads through the fold's
+#: own fallback (`_point_all_source_refs`) instead of off the named property.
+#: `_fold_source_evidence` keeps it a scalar and carries the folded set beside it
+#: on `extractedFromAll` (#7704), so the record has to read the SET — the same
+#: selector the journal replay's `_upsert_point_edges` uses — or it materialises
+#: one edge where the graph holds N.
+#: ⚠️ All four declared rows name this ONE property today, so the selector's
+#: `else` arm (`_point_property_refs` off the named prop) is a FORWARD guard for
+#: a second declared point property, not a live branch: nothing constructs it
+#: and no pin reds if it is wrong. Said here so it is not read as coverage.
+_POINT_FOLDED_PROP = "extractedFrom"
 
 
 #: ``tortoise/source_identity.py``'s canonicalisation constants, restated for the
@@ -3465,6 +3484,48 @@ def _point_property_refs(value: Any) -> list[str]:
             if _writable_endpoint_id(ref)]
 
 
+def _point_all_source_refs(snapshot: Mapping[str, Any]) -> list[Any]:
+    """`_point_all_source_refs`'s rule: the Point's FULL held ref set (#7704).
+
+    A dedup fold keeps the convenience property ``extractedFrom`` a SCALAR (or
+    the array the Point was born with) — it is what ``query`` matches by
+    EQUALITY — and carries the folded set on ``extractedFromAll``. The two
+    replay-side writers that must see EVERY ref read this: the ``#5256``
+    carrier filter (`_point_source_transit`) and the edge fold
+    (`_upsert_point_edges`). A payload from before that split carries no
+    ``extractedFromAll`` at all, so the scalar/array is the FALLBACK — never
+    ``[]``, which would silently drop a pre-#7704 record's provenance.
+
+    Restated rather than imported for the same STANDALONE reason as the
+    siblings, and pinned EQUAL to the fold's own over a value table by
+    `tests/test_record_projection.py::test_the_fold_ref_selector_is_the_records_own`.
+
+    ⛔ The record lane needed this for a reason the journal lane does not have:
+    `_fold_source_evidence` emits its `PointAdded` through
+    `_write_record_projection`, so a fold's payload is a RECORD too. Read off
+    the scalar alone, the record of a folded claim derived ONE `relation` row
+    and ONE carrier pair where the graph holds N — record POORER than graph,
+    the direction `_point_property_relation_statements` names as forbidden, and
+    invisible to `check_consistency` (which compares graph against JOURNAL).
+    """
+    all_refs = snapshot.get("extractedFromAll")
+    if isinstance(all_refs, (list, tuple)) and all_refs:
+        return [ref for ref in all_refs if ref]
+    return _point_raw_refs(snapshot.get("extractedFrom"))
+
+
+def _point_all_property_refs(snapshot: Mapping[str, Any]) -> list[str]:
+    """The FOLD's ref set, filtered by the same writer gate as
+    :func:`_point_property_refs` — one `relation` statement per surviving ref.
+
+    Applied to `_point_all_source_refs` rather than to a property, because the
+    fold's set spans two properties: the scalar `extractedFrom` and the folded
+    list beside it.
+    """
+    return [ref for ref in _point_all_source_refs(snapshot)
+            if _writable_endpoint_id(ref)]
+
+
 def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
     """The `{raw ref: hash}` anchors the fold stamps on those edges (#5256).
 
@@ -3475,8 +3536,14 @@ def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
     1. the carrier is accepted ALL-OR-NOTHING — one malformed pair (not a
        2-element `[str, str]` with both members non-blank) and the payload
        contributes NO anchor, rather than the well-formed half of one;
-    2. no `extractedFrom` ref at all ⇒ no anchor (the carrier is a transit for
-       an edge that will be written, so a stray carrier writes nothing);
+    2. no ref at all ⇒ no anchor (the carrier is a transit for an edge that
+       will be written, so a stray carrier writes nothing). The ref set is the
+       Point's FULL one — `extractedFromAll` when the payload states it, else
+       `extractedFrom` (#7704), which is the fold's own
+       `_point_all_source_refs`: a fold re-keys a retained pair to the spelling
+       its own list uses, and that spelling lives on the folded surface, so a
+       scalar-only gate would drop a held ref's recorded read-version from the
+       record while the journal replay stamped it;
     3. a pair naming a ref this Point does NOT carry is dropped
        (`kept = [[k, h] for k, h in pairs if any(k == r for r in refs)]`), so a
        carrier whose every pair is foreign yields NO anchor;
@@ -3496,7 +3563,7 @@ def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
                 and isinstance(pair[0], str) and pair[0].strip()
                 and isinstance(pair[1], str) and pair[1].strip()):
             return {}
-    refs = _point_raw_refs(snapshot.get("extractedFrom"))
+    refs = _point_all_source_refs(snapshot)
     if not refs:
         return {}
     return {pair[0]: pair[1] for pair in pairs if pair[0] in refs}
@@ -3592,7 +3659,21 @@ def _point_property_relation_statements(
     statements: list[Statement] = []
     for prop, rel_type, tgt_label in declared:
         versions = _point_source_versions(snapshot)
-        for ref in _point_property_refs(snapshot.get(prop)):
+        # #7704: the FOLD's set, not the property it happens to leave a scalar.
+        # `_fold_source_evidence` keeps `extractedFrom` as the survivor's OWN
+        # creating source (so the EQUALITY read door keeps answering) and
+        # carries the folded refs on `extractedFromAll`, which the journal
+        # replay already reads through `_point_all_source_refs`. Read off the
+        # scalar here, the record derived ONE row for a claim the graph holds N
+        # edges for, and a record-sourced rebuild (`rebuild_from_record`,
+        # #9556) then materialised N-1 fewer `extractedFrom` edges than live
+        # and than `rebuild_all`. Nothing reported it: `check_consistency`
+        # compares graph against JOURNAL, never graph against record.
+        # The `else` arm is a FORWARD guard (all four declared rows name
+        # `_POINT_FOLDED_PROP` today), named at that constant.
+        for ref in (_point_all_property_refs(snapshot)
+                    if prop == _POINT_FOLDED_PROP
+                    else _point_property_refs(snapshot.get(prop))):
             # Mirror `resolve_source_key`: the raw ref, the canonical SPELLING,
             # and its canonical FORM, with the CANONICAL match preferred (that
             # is the order it queries in: canonicalUrl first, return there;
