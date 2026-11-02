@@ -48,7 +48,37 @@ from pathlib import Path
 import pytest
 
 EVIDENCE = Path(__file__).resolve().parent.parent / "docs" / "evidence" / "5087-hypothesis"
-RECORDED_LOG = EVIDENCE / "s3-ablation-a1075dfc.log"
+
+#: The recorded run's log, by name. The #10463 ruling (item 3) orders this file **moved** to
+#: `withdrawn/` (carried by #10544), so it is resolved rather than pinned to one path: a single
+#: hardcoded path dies `FileNotFoundError` inside the module-scoped `logs` fixture the moment the
+#: withdrawal lands, i.e. all five pins ERROR instead of running — the guard stops guarding — and
+#: #10544 cannot carry this file, because on its branch this module does not exist.
+RECORDED_LOG_NAME = "s3-ablation-a1075dfc.log"
+
+
+def _resolve_recorded_log(evidence: Path) -> Path:
+    """Locate the recorded run's log in **either** place the ruling can leave it.
+
+    `withdrawn/` is preferred: once #10544 lands, the withdrawn copy is the live one and the
+    top-level file is gone. The top-level entry keeps this module green on a tree where the
+    withdrawal has not landed yet, so neither merge order can red the other lane.
+    """
+    candidates = (
+        evidence / "withdrawn" / RECORDED_LOG_NAME,
+        evidence / RECORDED_LOG_NAME,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"the recorded run's log is at neither location the #10463 ruling leaves it in: "
+        f"{candidates[0]} or {candidates[1]} — a moved evidence log must be re-pointed, "
+        f"not deleted"
+    )
+
+
+RECORDED_LOG = _resolve_recorded_log(EVIDENCE)
 THIS_LOG = EVIDENCE / "s3-ablation-a83c23a8.log"
 RECORD = EVIDENCE / "REMEASUREMENT-a83c23a8.md"
 
@@ -139,6 +169,54 @@ def record_text() -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def test_the_recorded_log_loads_from_either_side_of_the_ordered_withdrawal(
+    tmp_path: Path,
+) -> None:
+    """The guard must LOAD its own evidence under both trees the #10463 ruling can leave.
+
+    Ruling item 3 orders `s3-ablation-a1075dfc.log` moved into `withdrawn/` (#10544), and #10544
+    cannot re-point this module (it does not exist on that branch). A module that pins one path
+    therefore goes from five green pins to five ERRORS on whichever tree lands second — the
+    instrument stops guarding rather than refusing, and `main` goes red on the one check this
+    PR adds. Both trees are simulated here from the real log's bytes, so the pin cannot be
+    satisfied by a path helper that never reads anything.
+    """
+    body = RECORDED_LOG.read_text()
+    decoy = body.replace("OFF=284 ON=247", "OFF=999 ON=247")
+
+    def tree(name: str, *, withdrawn: bool, also_top_level: bool = False) -> Path:
+        root = tmp_path / name
+        placed = root / "withdrawn" if withdrawn else root
+        placed.mkdir(parents=True, exist_ok=True)
+        (placed / RECORDED_LOG_NAME).write_text(body)
+        if also_top_level:
+            (root / RECORDED_LOG_NAME).write_text(decoy)
+        return root
+
+    before_withdrawal = tree("before", withdrawn=False)
+    after_withdrawal = tree("after", withdrawn=True)
+    both = tree("both", withdrawn=True, also_top_level=True)
+
+    assert _resolve_recorded_log(before_withdrawal) == before_withdrawal / RECORDED_LOG_NAME
+    assert (
+        _resolve_recorded_log(after_withdrawal)
+        == after_withdrawal / "withdrawn" / RECORDED_LOG_NAME
+    )
+    # With both present the WITHDRAWN copy wins — the decoy's different COUNTS prove the
+    # resolution is by location, not by whichever path was tried first and happened to parse.
+    assert _resolve_recorded_log(both) == both / "withdrawn" / RECORDED_LOG_NAME
+    assert _counts(_resolve_recorded_log(both)) == _counts(RECORDED_LOG)
+    assert _counts(both / RECORDED_LOG_NAME) != _counts(RECORDED_LOG)
+
+    # Reading from the moved location works end to end: this is the call that raises
+    # FileNotFoundError in the fixture on a pinned single path.
+    assert _counts(_resolve_recorded_log(after_withdrawal)) == _counts(RECORDED_LOG)
+    assert _per_session_deltas(_resolve_recorded_log(after_withdrawal))
+
+    with pytest.raises(FileNotFoundError, match="withdrawn"):
+        _resolve_recorded_log(tmp_path / "absent")
+
+
 def test_the_drift_and_its_percent_are_the_ones_the_logs_produce(
     logs: dict[str, object], record_text: str
 ) -> None:
@@ -158,7 +236,7 @@ def test_the_drift_and_its_percent_are_the_ones_the_logs_produce(
         f"the record says the untreated arm drifted {m.group(1)} nodes; the two committed "
         f"logs say {drift} ({logs['recorded'][0]} vs {logs['this'][0]})"
     )
-    assert abs(float(m.group(2)) - pct) < 0.05, (  # noqa: PLR2004 - one-decimal agreement
+    assert abs(float(m.group(2)) - pct) < 0.05, (
         f"the record says the drift is {m.group(2)} %; {drift}/{logs['recorded'][0]} is "
         f"{pct:.2f} %"
     )
@@ -191,7 +269,8 @@ def test_the_warning_does_not_understate_the_drift_against_the_effect(
         f"the record calls the ON-OFF difference {m.group(2)} nodes; the logs say "
         f"{logs['effect']} (|{logs['this'][0]} - {logs['this'][1]}|)"
     )
-    assert abs(stated - multiplier) <= 1.5, (  # noqa: PLR2004 - "roughly" + rounding
+    # `roughly` + one-decimal rounding is the tolerance this pin allows.
+    assert abs(stated - multiplier) <= 1.5, (
         f"the record says the drift is roughly {stated}x the ON-OFF difference; "
         f"{logs['drift']}/{logs['effect']} is {multiplier:.2f}x. An understated multiplier "
         f"makes the drift look smaller than the effect, which is the defect this pins."
@@ -281,7 +360,8 @@ def test_every_session_percentage_the_record_states_is_the_logs_arithmetic(
     for session, sign, number in stated:
         assert session in known, f"the record names {session!r}, which no log's table carries"
         value = float(number) * (1.0 if sign == "+" else -1.0)
-        assert any(abs(candidate - value) < 0.05 for candidate in known[session].values()), (  # noqa: PLR2004
+        # 0.05 = half of the one decimal place the record prints.
+        assert any(abs(candidate - value) < 0.05 for candidate in known[session].values()), (
             f"the record states {session} at {sign}{number} %; the logs' per-session tables "
             f"give {known[session]} — a stated swing must be one the logs support"
         )
