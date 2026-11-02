@@ -3247,3 +3247,112 @@ def test_a_base_where_the_log_predates_the_registration_refuses_an_ordered_contr
     # No squash collapse here, so the withdrawal diagnostic must NOT fire: the remedy is a proper
     # ordering, not a withdrawal.
     assert "SAME commit" not in failures[0], failures[0]
+
+
+# ── cycle 12: "no pair was compared" is not "verified" ───────────────────────
+
+
+def _bundle_with_published_registration(tmp_path, monkeypatch):
+    """A repo whose registration is on `origin/main`, and the bundle directory.
+
+    Two obligations of `run()` are irrelevant to what these tests measure — the corpus half and the
+    machine record — so they are satisfied rather than exercised (see `_measurement_only`).
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    # The REAL document, so the completeness half passes and the only subject under test is the
+    # ordering report. Its pins block is supplied by `_measurement_only` instead of read from the
+    # file, because the real pins exempt a log these fixtures deliberately do not create.
+    prereg = _commit_prereg(repo, epoch=1_700_000_100,
+                            text=(PREREG_DIR / check.PREREG_NAME).read_text())
+    _publish_base(repo)
+    return repo, prereg.parent
+
+
+def _measurement_only(monkeypatch):
+    """Strip the two halves that are not under test, so the ORDERING claim is the only variable."""
+    monkeypatch.setattr(check, "parse_pins", lambda text: {"e4_denominator": 15})
+    monkeypatch.setattr(check, "check_machine_record", lambda directory, pins: [])
+
+
+def test_a_bundle_with_no_log_does_not_claim_a_measured_ordering(tmp_path, monkeypatch, capsys):
+    """A registration on the base and ZERO logs: the loop compares nothing, so nothing was measured.
+
+    ⛔ The `if not logs:` guard in `check_ordering` sits INSIDE `if not prereg_epochs:` — it fires
+    only when the registration is ABSENT from the base. With the registration published and no
+    evidence log, control reaches the per-log loop, the loop body never runs, `unmeasured` stayed
+    empty, and `run()` therefore took the `else` branch: `ordering = "verified"` and
+    `ordering_base = origin/main`, over zero comparisons. Measured on this PR's own CI command, half
+    of it (the `docs/evidence/5087-hypothesis` bundle, after its log was withdrawn) printed
+
+        evidence logs: 0
+        machine record run-order claim: verified
+        ordering measured against: origin/main
+
+    That is the silent-green `ordering_base` exists to remove — the same lie the RETURN arms told,
+    one step outside every one of them. A withdrawn log is an honest end state for a bundle, so the
+    bundle must be able to say "there is nothing here to order" without saying "I measured it".
+    """
+    repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    assert list(bundle.glob(check.EVIDENCE_LOG_GLOB)) == [], "the fixture must carry NO evidence log"
+    _measurement_only(monkeypatch)
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering"].startswith(check.ORDERING_UNMEASURED), report["ordering"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+    assert report["ordering_base_candidate"] == "origin/main", report["ordering_base_candidate"]
+
+    assert check.main(["--dir", str(bundle), "--no-corpus"]) == 0
+    out = capsys.readouterr().out
+    assert "ordering measured against: origin/main" not in out, out
+    assert "ordering measured against: (not measured)" in out, out
+    assert "would be measured against: origin/main" in out, out
+    assert f"machine record run-order claim: {check.ORDERING_UNMEASURED}" in out, out
+
+
+def test_a_bundle_whose_only_log_is_untracked_does_not_claim_a_measured_ordering(
+        tmp_path, monkeypatch, capsys):
+    """"Every log is untracked" is the other way to walk the loop and compare nothing.
+
+    The untracked-log skip is CORRECT — an uncommitted file cannot predate a commit that already
+    exists, and it re-enters the gate the moment it is committed. What was wrong was the report:
+    the comparison counter never advanced, so the bundle was announced as measured. Same defect as
+    the zero-log case, reached through the `continue` rather than through an empty list — which is
+    why the counter is incremented where an epoch is ESTABLISHED, not derived from `len(logs)`.
+    """
+    repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    scratch = bundle / "brand-new.log"
+    scratch.write_text("x\n")  # written, never `git add`-ed
+    assert check._is_tracked(scratch) is False, "the log must be untracked"
+    _measurement_only(monkeypatch)
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering"].startswith(check.ORDERING_UNMEASURED), report["ordering"]
+    assert report["ordering_base"] == "(not measured)", report["ordering_base"]
+
+    assert check.main(["--dir", str(bundle), "--no-corpus"]) == 0
+    out = capsys.readouterr().out
+    assert "ordering measured against: origin/main" not in out, out
+    assert "ordering measured against: (not measured)" in out, out
+
+
+def test_one_comparable_pair_is_enough_to_report_the_bundle_as_measured(tmp_path, monkeypatch):
+    """⛔ The counter is bundle-level on purpose: a measured pair is NOT reported as unmeasured.
+
+    A per-log `unmeasured` append would report this bundle — one ordered log plus one untracked
+    log, i.e. a REAL measurement — as `UNMEASURED`, which is the same class of lie in the other
+    direction, and it would make the arm useless the first time a lane had a scratch log open.
+    """
+    repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    ordered = bundle / "a-ordered.log"
+    ordered.write_text("x\n")
+    _git(repo, "add", str(ordered.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "log after the registration", epoch=1_700_000_200)
+    (bundle / "scratch.log").write_text("x\n")  # untracked, and irrelevant
+    _measurement_only(monkeypatch)
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert report["ok"] is True, report["failures"]
+    assert report["ordering"] == "verified", report["ordering"]
+    assert report["ordering_base"] == "origin/main", report["ordering_base"]

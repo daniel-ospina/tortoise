@@ -1218,6 +1218,12 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # decide: a shared add-commit means the two artefacts landed in ONE squash merge, and the
     # refusal's remedy is then a withdrawal rather than a re-ordering.
     prereg_add_commits = set(_add_commits_on(base, prereg))
+    # How many (registration, log) pairs actually got compared. ⛔ Tracked because `unmeasured == []`
+    # is NOT the same fact as "an epoch pair was compared": a bundle with zero logs, or whose only
+    # logs are untracked, walks the loop and compares NOTHING, and the caller would then print
+    # `ordering measured against: <base>` over an empty comparison — the same silent-green
+    # `ordering_base` exists to remove, one step outside every RETURN arm (#10463 review cycle 12).
+    compared = 0
     for log in logs:
         base_log_epochs = _added_epochs_on(base, log)
         if base_log_epochs:
@@ -1234,6 +1240,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     )
                 continue  # untracked log: it cannot predate a commit that already exists
             log_epoch = min(log_epochs)
+        compared += 1
         if log.name in exempt:
             if log_epoch > prereg_epoch:
                 failures.append(
@@ -1288,6 +1295,13 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     base=base, sha=sorted(shared)[0][:12]
                 )
             failures.append(failure)
+    if compared == 0 and unmeasured is not None:
+        # Appended ONCE, for the bundle — never per log: a 3-log bundle whose fourth log is
+        # untracked did measure, and a per-log append would report a real measurement as unmeasured.
+        unmeasured.append(
+            "no ordering pair was compared — this bundle has no evidence log the base and this "
+            "history can both date"
+        )
     return failures
 
 
@@ -1703,10 +1717,11 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
                                        unmeasured=unmeasured)
             report["ordering_exempt"] = sorted(content_exempt)
             if unmeasured:
-                # ⛔ The arm RETURNED before it compared a single epoch (an untracked
-                # registration, a registration absent from the base, a bundle with no log). The
-                # refusal it produced can be exactly right while nothing was measured, so
-                # "verified" + a resolved base would be the F2 lie on a path F2 did not cover.
+                # ⛔ The arm marks the outcome only when NOTHING was compared (review cycle 12):
+                # a registration ReadError, a registration absent from the base, a bundle with no
+                # log the history can date, or every log untracked. A bundle with no log at ALL and
+                # no registration on the base returns from the branch above; a bundle that DID
+                # compare a pair is measured, whatever else failed.
                 ordering = f"{ORDERING_UNMEASURED} ({unmeasured[0]})"
             else:
                 ordering = "verified"
