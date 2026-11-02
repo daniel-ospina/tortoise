@@ -616,12 +616,14 @@ response_fields:
   field: truncated
   emitted_when: 'ALWAYS on the `tortoise_issue_insight` body (and the SDK verb `TortoiseSDK.issue_insight`, and
     GET /v1/issue-insight) — the #8447 truncation marker on the read whose whole job is to say "there is more in
-    the graph": true when the delivered `data_points` are NOT the whole set this read matched. Two seams make it
-    true and the caller can reach neither — the `[:limit]` cut (`_issue_insight_rank(...)[:limit]`, shipped default
-    `limit=2`) and a candidate pool that saturated its own bound (`max(limit*5, 20)`), where matches past the pool
-    were never read. `false` only when nothing was dropped. It answers "did I get everything this read matched?",
-    NOT "did the cap fire?", and it rides its OWN field — never a fifth term of the recorded status vocabulary
-    (`tortoise/status_vocabulary.py` forbids one; `tortoise/truncation.py` is the marker''s ONE home)'
+    the graph": true when the delivered `data_points` are NOT the whole set this read matched. THREE seams make it
+    true and the caller can reach none of them: the `[:limit]` cut (`_issue_insight_rank(...)[:limit]`, shipped
+    default `limit=2`); a candidate pool that saturated its OWN retrieval window, where matches past it were never
+    read; and an ASKED retrieval leg that never answered (it raised, missed the deadline, or its breaker refused) —
+    a read where nothing was cut from the visible set and the missing rows are just as unreachable. `false` only
+    when nothing was dropped. It answers "did I get everything this read matched?", NOT "did the cap fire?". It
+    rides its OWN field — never a fifth term of the recorded status vocabulary (`tortoise/status_vocabulary.py`
+    forbids one; `tortoise/truncation.py` is the marker''s ONE home)'
   unchanged_when_off: n/a — not flag-gated. The key is emitted on EVERY response path of this read (including the
     `no_prior_knowledge` and `repo_not_indexed` bodies, which make POSITIVE claims of absence), because a marker
     that defaults off preserves exactly the defect it fixes. Callers that read only the pre-existing keys are
@@ -629,11 +631,16 @@ response_fields:
     hit count)
 - response: tortoise_issue_insight
   field: total_available
-  emitted_when: 'the `tortoise_issue_insight` body, ONLY when `truncated` is true AND the count is EXACT — the
-    relevance gate saw every match in a candidate pool that came back SHORT of its own bound and whose retrieval
-    path reported nothing dropped. ABSENT means the exact total is UNKNOWN, never zero: a saturated pool is a
-    lower bound, and publishing it as a total is the same defect one level down (Elasticsearch carries
-    `hits.total.relation: eq|gte` for exactly this)'
+  emitted_when: 'the `tortoise_issue_insight` body, ONLY when `truncated` is true AND the count is EXACT — and
+    "exact" is the RETRIEVAL path''s own recorded proof, RELAYED and never re-derived here — this read consumes it
+    and adds nothing to it. ⛔ Deliberately stated without enumerating the proof''s conditions: exactness is
+    WITHHELD both by a saturated retrieval window (or a lost ASKED leg) AND, independently, by any post-window
+    filter that shrank the union, and by the snapshot fallback arm — an enumeration that names only the first is
+    falsified by the code. What can be said precisely is what a caller needs: a candidate pool that returns EXACTLY
+    its own bound `max(limit*5, 20)` is still EXACT (nothing was cut from it) and DOES publish a total (pinned by
+    `test_a_pool_at_exactly_its_bound_is_not_marked_cut`: 20 matches at `limit=2` → `total_available: 20`). ABSENT
+    means the exact total is UNKNOWN, never zero — a lower bound published as a total is the same defect one level
+    down (Elasticsearch carries `hits.total.relation: eq|gte` for exactly this)'
   unchanged_when_off: n/a — not flag-gated; the key is absent on every complete or unprovable read
 - response: tortoise_update_point
   field: valid_to_shaped

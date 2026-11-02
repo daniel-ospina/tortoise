@@ -175,6 +175,23 @@ class TestIssueInsightTruncation:
         # bug, not "complete" (`truncation.truncation_field` refuses to guess).
         assert resp[TRUNCATED_FIELD] is False
 
+    def test_the_absence_prose_never_contradicts_the_marker(self, sdk):
+        """A non-truncated read must NOT be told "the read was TRUNCATED".
+
+        Keying that sentence on `_exact` was wrong: `_exact` is also False on
+        reads that dropped NOTHING — an empty query (no retrieval ran) or a
+        fallback arm whose proof is withheld — and the body then asserted
+        truncation next to `truncated: false`. Prose that contradicts the field
+        beside it is the defect this issue exists to remove, inverted.
+        """
+        _seed(sdk, 3)
+
+        resp = sdk.issue_insight("", limit=2)   # no text -> no retrieval at all
+
+        assert resp[TRUNCATED_FIELD] is False
+        assert resp["insight"] == "No graph matches for this issue title."
+        assert "TRUNCATED" not in resp["insight"]
+
     def test_every_response_path_carries_the_marker(self, sdk):
         """`repo_not_indexed` and `no matches` are responses too, and they make
         POSITIVE claims — the marker must ride them, or the caller cannot tell
@@ -202,11 +219,14 @@ class TestIssueInsightTruncation:
                              entity_type="point")
 
         cut = sdk.issue_insight(QUERY, limit=2)
-        assert cut["insight"] == "No graph matches for this issue title."
         assert cut["data_points"] == []
-        # 25 > the pool bound (20): matches past it were never read.
+        # 25 > the pool's own retrieval window: matches past it were never read,
+        # so the read may not assert ABSENCE — not in the marker, and not in the
+        # prose an agent actually reads.
         assert cut[TRUNCATED_FIELD] is True
         assert TOTAL_AVAILABLE_FIELD not in cut
+        assert cut["insight"] != "No graph matches for this issue title."
+        assert "TRUNCATED" in cut["insight"], cut["insight"]
 
         # the SAME shape below the pool bound is genuinely complete
         sdk2 = sdk

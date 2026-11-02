@@ -33802,12 +33802,21 @@ class TortoiseSDK:
         (graph-service failure -> error dict via _safe at the handler).
         data_points never exceeds `limit` rows (repo-stage append is capped).
 
-        #8447 — every reply carries `truncated` (true when `data_points` are NOT
-        the whole set this read matched: the `limit` cut fired, or the candidate
-        pool saturated its own bound so matches past it were never read).
-        `total_available` rides it ONLY when the count is EXACT; its absence
-        means unknown, never zero. A caller that must not reason over a subset
-        reads `truncated` before `data_points`.
+        #8447 — every reply carries `truncated`, true when `data_points` are NOT
+        the whole set this read matched. THREE seams make it true and the caller
+        can reach none of them: (1) the `[:limit]` cut on the ranked hits, (2) a
+        candidate pool that saturated ITS window, so matches past it were never
+        read, and (3) an ASKED retrieval leg that never answered — a read where
+        nothing was cut from the visible set and the missing rows are just as
+        unreachable. `total_available` rides it ONLY when the count is EXACT, and
+        "exact" is the RETRIEVAL path's own proof RELAYED (never re-derived
+        here). That proof is withheld by a saturated window or a lost leg, and
+        independently by any post-window filter that shrank the union and by the
+        snapshot fallback arm — so this docstring does not try to enumerate it.
+        What matters to a caller: `total_available` is either the true population
+        or ABSENT (unknown, never zero), and a pool that returned EXACTLY
+        `max(limit*5, 20)` rows is still exact. A caller that must not reason
+        over a subset reads `truncated` before `data_points`.
         """
         proj = self._get_proj()
         count_rows = proj.g.query(
@@ -33983,7 +33992,18 @@ class TortoiseSDK:
                 "no_prior_knowledge": False,
                 "repo_not_indexed": False,
                 "data_points": [],
-                "insight": "No graph matches for this issue title.",
+                # ⛔ Keyed on the MARKER's own verdict, never on `_exact`: a
+                # read can be exactness-withheld (a post-window filter, the
+                # snapshot fallback arm) while nothing was dropped, and telling
+                # that caller "the read was TRUNCATED" would be prose
+                # contradicting the field next to it — the same defect this
+                # branch exists to remove, inverted (#8447 review round 4).
+                "insight": (
+                    "No graph matches for this issue title."
+                    if not _trunc_out.get("truncated") else
+                    "No graph matches among the matches this read could see — "
+                    "the read was TRUNCATED (see `truncated`), so absence is "
+                    "NOT proven."),
                 "more_in_graph": None,
                 "repo_stats": repo_stats,
             })
