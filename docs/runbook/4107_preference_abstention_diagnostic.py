@@ -77,12 +77,13 @@ GOLD_TURN_HEAD = (
 #: (``system_prompt_for(None)``), kept under its original label so the committed
 #: receipt's schema still matches what this instrument emits. It is NOT assumed
 #: to be what the lane emitted — the emitted prompt is compared against
-#: ``system_prompt_for(resolved question_type, question=...)`` below, which is a
-#: different (question-aware) derivation for an aggregative question. The others
+#: ``reader._system_prompt_for_question(resolved question_type, question)``
+#: below, which is the composition the lane itself performs (#10539). The others
 #: are the two
 #: hypotheses #4107 names: route to the preference fragment, or add a
 #: targeted advice sentence (the option (b) candidate).
 from tortoise.reader import system_prompt_for  # noqa: E402
+from tortoise.reader import _system_prompt_for_question  # noqa: E402
 
 #: The advice/opinion sentence. Deliberately NOT in the shipped prompt — this
 #: diagnostic measures whether the gap is reachable, not whether it should be
@@ -226,7 +227,8 @@ def measure(*, replay: bool) -> dict:
                 al._ask_reader_complete = saved_complete
                 al._reset_ask_reader_cache_for_tests()
             evidence = res["evidence"]
-            system = system_prompt_for(res["question_type"], question=q["question"])
+            system = _system_prompt_for_question(res["question_type"],
+                                                q["question"])
             # The stub captured the wire (system, user) the lane actually
             # sent. Re-derive it and assert equality, so "the emitted prompt"
             # is EVIDENCE rather than a parallel re-computation: if the lane
@@ -236,7 +238,7 @@ def measure(*, replay: bool) -> dict:
             assert len(wire) == 1, f"expected exactly one reader call, captured {len(wire)}"
             assert wire[0]["system"] == system, (
                 "the lane's wire system prompt differs from "
-                "system_prompt_for(resolved question_type, question=...)"
+                "_system_prompt_for_question(resolved question_type, question)"
             )
             out["emitted"] = {
                 "question_type": res["question_type"],

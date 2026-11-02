@@ -474,13 +474,12 @@ def reader_prompt_constants() -> tuple[str, dict[str, str]]:
         # 'abstention' (the A1 name, #1546) — not a question_type
         "abstention": _ABSTRACTION_FRAGMENT,
         # conditional clause appended when the QUESTION (not its type) is an
-        # aggregation — see _AGGREGATION_FRAGMENT / system_prompt_for
+        # aggregation — see _AGGREGATION_FRAGMENT / _system_prompt_for_question
         "aggregation": _AGGREGATION_FRAGMENT,
     }
 
 
-def system_prompt_for(question_type: str | None, *,
-                     question: str | None = None) -> str:
+def system_prompt_for(question_type: str | None) -> str:
     """The reader system prompt for a question, type-tailored.
 
     Unknown/absent types get the hardened generic prompt; temporal-reasoning,
@@ -495,17 +494,42 @@ def system_prompt_for(question_type: str | None, *,
     the context (partial evidence is still presence); PHASE 2 abstains only
     on genuine absence.
 
-    #10539: when `question` is supplied and the EXISTING aggregative-intent
-    detector (#2521, ``tortoise.aggregate.detect_aggregative_intent``) says
-    the question is a counting aggregation, the aggregation fragment is
-    appended on top of whatever type fragment won. Type selection is a
-    single-winner precedence, so a count phrased over a date cue
-    ("how many items did I buy last month") would otherwise silently lose
-    counting discipline. Passing `question` is optional for backward
-    compatibility; omitting it reproduces the pre-#10539 prompt exactly.
+    ⛔ This signature is FROZEN by
+    ``docs/plans/2026-08-20-1546-a1-abstention.md`` §⛔ CONDITIONAL GATES ("No
+    new reader interface surface … signatures are UNCHANGED … must be rejected
+    in review"). #10539's aggregation clause therefore composes one level up,
+    in :func:`_system_prompt_for_question`, which takes the question the call
+    site already holds — so this function's output is byte-identical to
+    pre-#10539 for every ``question_type``, and the committed prompts that pin
+    it (the #4107 wire capture, the #4837 receipt) stay valid unmeasured.
     """
-    prompt = (_SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
-              + _TYPE_FRAGMENTS.get(question_type, ""))
+    return (_SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
+            + _TYPE_FRAGMENTS.get(question_type, ""))
+
+
+def _system_prompt_for_question(question_type: str | None,
+                               question: str | None) -> str:
+    """The reader system prompt for a QUESTION (#10539):
+    :func:`system_prompt_for` plus the conditional aggregation clause.
+
+    When the EXISTING aggregative-intent detector (#2521,
+    ``tortoise.aggregate.detect_aggregative_intent``) says the question is a
+    counting aggregation, ``_AGGREGATION_FRAGMENT`` is appended on top of
+    whatever type fragment won. The append is keyed on the QUESTION, not on
+    ``question_type``: type selection is a single-winner precedence classifier,
+    so a count phrased over a date cue ("how many items did I buy last month")
+    resolves to ``temporal-reasoning`` and would otherwise silently lose
+    counting discipline. The predicate is #2521's detector — this adds no
+    second one (#1178).
+
+    ⛔ It is a module-private COMPOSER, not new reader surface: it passes
+    nothing to the reader that the reader call shape does not already carry
+    (the question crosses today via ``build_reader_user_message``), and it
+    leaves ``system_prompt_for``'s frozen signature untouched. The eval
+    instrument re-exports the private fragments next to it for the same
+    reason — prompt provenance, not an API.
+    """
+    prompt = system_prompt_for(question_type)
     if question and _is_aggregative_question(question):
         prompt += _AGGREGATION_FRAGMENT
     return prompt
@@ -896,7 +920,7 @@ class LLMReader:
         """
         user = build_reader_user_message(evidence, question)
         raw = self._model.complete(
-            system=system_prompt_for(question_type, question=question),
+            system=_system_prompt_for_question(question_type, question),
             user=user)
         # None-guard: a provider response with empty content (refusal / empty
         # generation) must surface as the empty string, not crash the caller

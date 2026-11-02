@@ -49,6 +49,7 @@ from tortoise.sdk import TortoiseSDK  # noqa: E402, F401, I001, RUF100
 
 from tools.longmem_eval.reader import (  # noqa: E402, RUF100
     LLMReader, _ABSTRACTION_FRAGMENT, _AGGREGATION_FRAGMENT,
+    _system_prompt_for_question,
     _KNOWLEDGE_UPDATE_FRAGMENT, _MULTI_SESSION_FRAGMENT, _SYSTEM_PROMPT,
     _TYPE_FRAGMENTS, system_prompt_for,
 )
@@ -349,8 +350,8 @@ def test_msr_same_fact_restated_is_one_event():
     hits = _restated_in_two_sessions()
     question = "Where did Ava decide to go?"
     # the premise of the split, asserted rather than assumed
-    assert _AGGREGATION_FRAGMENT not in system_prompt_for(
-        "multi-session", question=question)
+    assert _AGGREGATION_FRAGMENT not in _system_prompt_for_question(
+        "multi-session", question)
     reader = LLMReader(_AggregationFaithfulModel(), model_id="a2-faithful")
     hyp = reader.answer(context_hits=hits,
                         question=question,
@@ -371,14 +372,14 @@ def test_aggregative_restatement_on_two_dates_counts_two_items():
     re-affirmed decision from a second one, and under-counting is the direction
     #10539 exists to fix.
 
-    Non-vacuous by construction: delete `question=question` at
-    `tortoise/reader.py`'s `LLMReader.answer_with_evidence` and the clause never
-    reaches the prompt, the model falls back to MSR-only dedupe, and this
-    assertion (2) fails while the pin above still passes.
+    Non-vacuous by construction: revert `LLMReader.answer_with_evidence` to
+    the bare `system_prompt_for(question_type)` (`tortoise/reader.py`) and the
+    clause never reaches the prompt, the model falls back to MSR-only dedupe,
+    and this assertion (2) fails while the pin above still passes.
     """
     hits = _restated_in_two_sessions()
     question = "How many times did Ava decide on Tokyo?"
-    prompt = system_prompt_for("multi-session", question=question)
+    prompt = _system_prompt_for_question("multi-session", question)
     assert _MULTI_SESSION_FRAGMENT in prompt
     assert _AGGREGATION_FRAGMENT in prompt    # both rules compose for this class
     reader = LLMReader(_AggregationFaithfulModel(), model_id="a2-faithful")

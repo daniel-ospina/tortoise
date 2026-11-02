@@ -35,7 +35,7 @@ the SAME pinned reader and the SAME call shape (temperature 0, max_tokens
 500), so a variant difference is a prompt difference, not a budget or
 retrieval difference:
 
-  V1 ``v1_shipped``          — ``system_prompt_for(resolved question_type, question=item["question"])``.
+  V1 ``v1_shipped``          — ``_system_prompt_for_question(resolved question_type, item["question"])``.
   V2 ``v2_universal_advice`` — V1 + the #4107 ``ADVICE_SENTENCE`` verbatim.
   V3 ``v3_gated_fragment``   — a DETECTOR-GATED bidirectional advice fragment:
                                 the fragment is emitted only when
@@ -356,7 +356,7 @@ def load_battery() -> list[dict]:
 
 
 def _run_item(sdk, al, item: dict, *, replay: bool) -> dict:
-    from tortoise.reader import build_reader_user_message, system_prompt_for
+    from tortoise.reader import _system_prompt_for_question, build_reader_user_message
 
     _seed_memory(sdk, item)
     qdate = _to_iso_date(item.get("question_date") or "")
@@ -373,14 +373,14 @@ def _run_item(sdk, al, item: dict, *, replay: bool) -> dict:
 
     evidence = res["evidence"]
     qtype = res["question_type"]
-    shipped = system_prompt_for(qtype, question=item["question"])
+    shipped = _system_prompt_for_question(qtype, item["question"])
     wire = captured.get("calls") or []
     if len(wire) != 1:
         raise SystemExit(f"{item['question_id']}: expected 1 reader call, captured {len(wire)}")
     if wire[0]["system"] != shipped:
         raise SystemExit(
             f"{item['question_id']}: the lane's wire system prompt differs from "
-            "system_prompt_for(resolved question type, question=...) — the emitted-prompt claim "
+            "_system_prompt_for_question(resolved question type, question) — the emitted-prompt claim "
             "would be a parallel re-computation, not evidence")
 
     normalized = " ".join(evidence.split()).lower()

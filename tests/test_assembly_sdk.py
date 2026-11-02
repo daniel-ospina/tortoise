@@ -1476,13 +1476,13 @@ def test_10539_run_ask_assembled_passes_the_question_to_the_prompt(
     """WIRING pin for the second of the two unpinned call sites (#10550 review P1).
 
     ``run_ask_assembled`` is the EVAL ARM's reader path (#2165 Task 6):
-    ``tools/longmem_eval`` drives the reader through this shape. Dropping
-    ``question=question`` from its reader call left this entire file green
+    ``tools/longmem_eval`` drives the reader through this shape. Composing that
+    call with the bare ``system_prompt_for(qtype)`` left this entire file green
     (measured: 33 passed) — so a later edit could silently delete #10539's
     counting discipline from an eval path with no test red.
 
-    RED mutation: drop ``question=question`` at ``ask_lane.py``'s
-    ``run_ask_assembled`` reader call -> the aggregative arm stops carrying
+    RED mutation: revert ``ask_lane.py``'s ``run_ask_assembled`` reader call to
+    ``system_prompt_for(qtype)`` -> the aggregative arm stops carrying
     ``_AGGREGATION_FRAGMENT`` while the non-aggregative control still matches.
     """
     import tortoise.ask_lane as _al

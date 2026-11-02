@@ -50,20 +50,24 @@ DISCIPLINE_MARKER = "aggregation instructions"
 def _prompt(question: str) -> str:
     """The exact system prompt the ask lane hands the reader for `question`.
 
-    The ``TypeError`` arm is deliberate and is NOT a compatibility shim for a
-    shipped path: it is what makes this file's RED run meaningful. On the
-    pre-fix tree there is no question-aware seam at all, so the fallback
-    returns the prompt the reader genuinely received — and the counting-
-    discipline assertions then fail on their own merits rather than on an
-    argument error. On the fixed tree the keyword is accepted and the real
-    path is used, so a later signature regression re-reddens these tests
-    instead of hiding behind the fallback.
+    Composition is ``_system_prompt_for_question(qtype, question)`` — a
+    module-private composer, because ``system_prompt_for``'s signature is frozen
+    by `docs/plans/2026-08-20-1546-a1-abstention.md` §⛔ CONDITIONAL GATES ("No
+    new reader interface surface"). The ``getattr`` fallback is deliberate and
+    is NOT a compatibility shim for a shipped path: it is what makes this
+    file's RED run meaningful. On the pre-fix tree no question-aware composer
+    exists at all, so the fallback returns the prompt the reader genuinely
+    received — and the counting-discipline assertions then fail on their own
+    merits rather than on a missing symbol. On the fixed tree the composer is
+    used, so a later regression (or a ``question=`` keyword creeping back onto
+    the frozen signature) re-reddens these tests instead of hiding behind the
+    fallback.
     """
     qtype = detect_question_type(question)
-    try:
-        return system_prompt_for(qtype, question=question)
-    except TypeError:  # pre-fix tree: no aggregation-aware seam exists yet
+    compose = getattr(_reader_mod, "_system_prompt_for_question", None)
+    if compose is None:  # pre-fix tree: no aggregation-aware composer exists
         return system_prompt_for(qtype)
+    return compose(qtype, question)
 
 
 # ── the two red-on-pre-fix cases ───────────────────────────────────────────
@@ -239,9 +243,10 @@ def test_aggregation_seam_failure_keeps_the_pre_10539_prompt_and_warns_once(
                         raising=False)
     q = "How many clothing items did I buy last month?"
     qtype = detect_question_type(q)
+    compose = getattr(_reader_mod, "_system_prompt_for_question")
     with caplog.at_level(_logging.WARNING):
-        first = system_prompt_for(qtype, question=q)
-        second = system_prompt_for(qtype, question=q)
+        first = compose(qtype, q)
+        second = compose(qtype, q)
     # byte-identical to the pre-#10539 prompt: the seam failure changes nothing
     assert first == system_prompt_for(qtype)
     assert second == first

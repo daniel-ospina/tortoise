@@ -305,15 +305,15 @@ def test_n6_lane_call_sends_the_shipped_system_prompt(monkeypatch):
 def test_10539_lane_sends_counting_discipline_for_an_aggregative_question(monkeypatch):
     """The WIRING half of #10539 — the half that is actually the fix.
 
-    `system_prompt_for` gaining an aggregation clause is worthless if the ask
-    lane stops passing the question, and that is exactly the failure this issue
+    The composer gaining an aggregation clause is worthless if the ask lane
+    stops composing through it, and that is exactly the failure this issue
     closes: #2521 shipped an aggregative detector whose only consumer was the
-    eval lane, so no reader ever saw counting discipline. A unit test on
-    `system_prompt_for` cannot see that — deleting `question=question` from
-    `ask_lane.py` leaves every one of them green.
+    eval lane, so no reader ever saw counting discipline. A unit test on the
+    composer cannot see that — reverting `ask_lane.py`'s reader call to the
+    bare `system_prompt_for(qtype)` leaves every one of them green.
 
-    RED mutation: drop `question=question` from the lane's reader call → the
-    captured wire system prompt no longer carries `_AGGREGATION_FRAGMENT`,
+    RED mutation: revert the lane's reader call to `system_prompt_for(qtype)`
+    → the captured wire system prompt no longer carries `_AGGREGATION_FRAGMENT`,
     while the non-aggregative control question still matches exactly.
     """
     import tortoise.ask_lane as al
@@ -336,8 +336,8 @@ def test_10539_lane_sends_counting_discipline_for_an_aggregative_question(monkey
         result = al.run_ask_lane(sdk, q, question_date="2026-08-29")
         assert cap.calls == 1
         assert reader.detect_question_type(q) == "multi-session"
-        assert cap.last_system == reader.system_prompt_for(
-            result["question_type"], question=q)
+        assert cap.last_system == reader._system_prompt_for_question(
+            result["question_type"], q)
         assert reader._AGGREGATION_FRAGMENT in (cap.last_system or ""), \
             "the lane sent an aggregative question without counting discipline"
         # the combined prompt carries BOTH clauses and the precedence rule that
