@@ -124,7 +124,7 @@ import json
 import posixpath
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 SCHEMA = "capstone-verdict-v1"
