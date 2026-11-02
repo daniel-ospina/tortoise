@@ -1435,11 +1435,14 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 continue  # the specific field failure is already reported above
             if log.name not in atomic:
                 if record_unreadable:
-                    # ⛔ RETURN, do not fall through (#10531 review cycle 7, P1). The record itself
-                    # could not be read, so there is nothing declared and nothing to index —
-                    # `atomic[log.name]` below raised KeyError straight out of run()/main(),
-                    # printing a traceback and NO findings, on exactly the state this flag exists
-                    # for. `check_machine_record` owns the diagnosis.
+                    # ⛔ DO NOT FALL THROUGH (#10531 review cycle 7, P1; wording corrected in
+                    # cycle 14, P3). The `continue` skips the rest of THIS LOG's arms — it does not
+                    # return from the function (the earlier comment said "RETURN", which a future
+                    # reader would act on by converting it). The record itself could not be read, so
+                    # there is nothing declared and nothing to index — `atomic[log.name]` below
+                    # raised KeyError straight out of run()/main(), printing a traceback and NO
+                    # findings, on exactly the state this flag exists for.
+                    # `check_machine_record` owns the diagnosis.
                     # It is REPORTED (#10531 review cycle 8, P2): the ordering half decided nothing
                     # here, so `run_order_claim` must not read `verified`.
                     if unreadable_atomic is not None:
