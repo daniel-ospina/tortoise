@@ -1124,25 +1124,30 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # OAuth credential resolvers call too, so all three credential classes name
     # the default tenant the same way (or refuse it the same way).
     #
-    # ⚠️ RECORDED RESIDUAL (accepted, not forgotten): `graph_namespace` above
-    # comes from the org row while this id comes from `public.graphs`, i.e. two
-    # reads inside one auth call — so a `promote_default_graph` committing
-    # between them can hand the credential a namespace from one default and an
-    # id from the other. It is the same class the org-id-only lanes closed by
-    # reading the pair once (`hosted_api._org_default_graph`, #10180 review); it
-    # is NOT closed here because both fields of the credential dict are already
-    # a single snapshot from the request's point of view (the data plane opens
-    # `graph_namespace` and the record files under `default_graph_id`, both from
-    # THIS dict), the promotion is an org-admin action rather than a per-write
-    # one, and re-reading here would add a control-plane round trip to every
-    # org-wide API-key auth. Closing it means resolving both from one row in
-    # this function — the same `default_graph_row_for` shape — not a third read.
+    # #10180 (review F2): the org-wide namespace and id are answers about ONE
+    # row, so a single read answers both. They used to be resolved by TWO reads
+    # — the namespace from the `organizations` row read above, the id from
+    # `public.graphs` — and `git`-less reasoning about that pair is not enough:
+    # under READ COMMITTED every statement takes its own snapshot (PostgreSQL
+    # "Transaction Isolation" §13.2.1), so a `promote_default_graph` commit
+    # landing between the two hands the credential the DEMOTED namespace with
+    # the PROMOTED id. That is the `derived != measured` split #10025 exists to
+    # remove (measured: 128 org-wide keys in production), re-created on the
+    # credential class with the most instances — and on the MCP lane the pair
+    # then survives the resolver cache's 60 s TTL. `default_graph_tenant_for_
+    # credential` returns BOTH halves from `default_graph_row_for`'s one row;
+    # the org row's `graph_name` is kept only for the mint-on-miss arm, where no
+    # row exists to read a namespace from and the mint writes the namespace it
+    # is given.
     if graph_id:
         default_graph_id = None
     else:
-        default_graph_id = default_graph_id_for_credential(
-            cp, org_id, org_row.get("graph_name"),
-            context="api-key auth self-heal")
+        default_graph_id, pair_namespace = (
+            default_graph_tenant_for_credential(
+                cp, org_id, org_row.get("graph_name"),
+                context="api-key auth self-heal"))
+        if pair_namespace:
+            graph_namespace = pair_namespace
     return {
         "org_id": org_id,
         "key_id": key_id,
@@ -1293,6 +1298,38 @@ def default_graph_id_for(cp, org_id: str) -> str | None:
     return row["id"] if row else None
 
 
+def default_graph_tenant_for_credential(
+        cp, org_id: str, graph_name: str | None = None, *,
+        context: str) -> tuple[str | None, str | None]:
+    """The org's default-graph ``(id, namespace)`` from ONE row, minting on a miss.
+
+    THE pair-shape home for the two questions a credential asks about the same
+    row: "which graph do I OPEN" (the data-plane namespace) and "which graph do
+    I FILE UNDER" (the record tenant's id). Two reads would be two instants —
+    under READ COMMITTED a `promote_default_graph` commit can land between them,
+    and the credential then opens the DEMOTED graph while filing every record
+    row under the PROMOTED one. `default_graph_row_for` selects both columns
+    from one row; taking them together is therefore free, not a round trip.
+
+    Returns ``(row_id, row_namespace)``. On a MISS — no live default row, or an
+    unreadable table — the id comes from the best-effort mint and the namespace
+    is ``None``: there is no row to read one from, and the mint writes the
+    namespace the caller passes, so the caller's own resolution stays the only
+    answer. A caller must treat ``None`` as "keep what you resolved" and never
+    as a namespace.
+    """
+    row = default_graph_row_for(cp, org_id)
+    if row is not None:
+        row_id = row.get("id")
+        if row_id is not None:
+            return row_id, row.get("namespace")
+        # A row without an id cannot name a tenant; fall through to the mint
+        # (which is itself convergent under a race) rather than returning a
+        # half-answer.
+    return (_mint_default_graph_row_best_effort(
+        cp, org_id, graph_name, context=context), None)
+
+
 def default_graph_id_for_credential(cp, org_id: str,
                                    graph_name: str | None = None, *,
                                    context: str) -> str | None:
@@ -1323,6 +1360,10 @@ def default_graph_id_for_credential(cp, org_id: str,
     the write REFUSED rather than misfiled.
 
     ``context`` names the calling resolver in the mint's log lines.
+
+    A caller that needs the NAMESPACE as well takes
+    :func:`default_graph_tenant_for_credential` instead — the same read, both
+    halves (see the pair split it exists to prevent).
     """
     row_id = default_graph_id_for(cp, org_id)
     if row_id is None:

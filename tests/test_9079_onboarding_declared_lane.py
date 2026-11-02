@@ -212,7 +212,10 @@ _STATED_OTHERS = {
         "private; reached from remove_decide_completed_edge, which IS exercised",
     # #10180 review P2: the anchor-carry's two READS are private and reached
     # ONLY from `carry_onboards_edge`, which the write walk exercises (both the
-    # decline arm and the carried arm, so their statements are seen).
+    # decline arm and the carried arm, so their statements are seen). The
+    # carried arm's reads run against its raw SOURCE handle (not recorded) and
+    # its mutating MERGE runs against the GUARDED target — which is what the
+    # `test_the_subject_anchor_mint_is_not_widened` pin reads.
     "_read_subject_anchor":
         "private; reached from carry_onboards_edge, which IS exercised",
     "_subject_anchor_name_taken":
@@ -241,19 +244,27 @@ def _walk_the_hosted_write_set(proj, org_id: str = ORG) -> None:
     # in this lane that can MINT a `:Subject` from a SOURCE graph, so the class
     # check must see its real arms rather than assume it: the LINK/DECLINE arm
     # first (the anchor already in the target, which is the arm a re-promotion
-    # takes), then the CARRIED arm into a second graph so the mutating MERGE is
-    # actually issued through the declared lane and attributed to it.
+    # takes), then the CARRIED arm — whose TARGET is this projection.
+    #
+    # ⛔ The carried arm's target must be the GUARDED handle. `LaneProbe` records
+    # at `_GuardedGraph.query` (#9256) and attributes by handle identity, so a
+    # carry whose target is a raw `proj.db.select_graph(...)` is recorded for
+    # NOBODY — and a pin that reads `own()` then constrains every writer EXCEPT
+    # the one it was written for. Measured (review F1): with a raw target, the
+    # walk's own test-side seed supplied the expectation's text, so reverting
+    # this arm to the stub-minting `write_onboards_edge` — the shape its
+    # docstring exists to forbid — left the suite GREEN.
     _os.carry_onboards_edge(proj, proj, org_id, f"anchor-{org_id}")
-    # …and the CARRIED arm, which needs a source anchor that HAS an identity.
-    # The seed statement below is deliberately the SAME shape the carry writes,
-    # so the walk introduces no third `:Subject` statement into the census the
-    # `test_the_subject_anchor_mint_is_not_widened` pin reads.
-    _os._run(proj, "MERGE (s:Subject {id: $sid}) SET s.name = $name, "
+    # …and the CARRIED arm, which needs a SOURCE anchor that HAS an identity.
+    # The SOURCE is a raw handle on purpose: the seed must not enter the census
+    # (a seed carrying the expectation's own text is what made the pin vacuous),
+    # and the carry is the writer that has to issue that shape.
+    src = proj.db.select_graph(f"carry_src_{org_id}")
+    _os._run(src, "MERGE (s:Subject {id: $sid}) SET s.name = $name, "
                    "s.subjectKind = $subjectKind, s.org_id = $org_id",
              {"sid": f"carry-{org_id}", "name": f"Carry Anchor {org_id}",
               "subjectKind": "organization", "org_id": org_id})
-    _os.carry_onboards_edge(proj, proj.db.select_graph(f"carry_{org_id}"),
-                            org_id, f"carry-{org_id}")
+    _os.carry_onboards_edge(src, proj, org_id, f"carry-{org_id}")
     _os.write_status(proj, org_id, _os.STATUS_COMPLETE)
     _os.write_compact(proj, org_id, True)
     _os.write_fork_unsure_at(proj, org_id, "2026-10-19T00:00:00Z")
@@ -461,6 +472,22 @@ def test_the_subject_anchor_mint_is_not_widened(sdk_with_journal, monkeypatch):
     subject_statements = [c for c, _r, w in seen if w and "Subject" in c]
     assert subject_statements, (
         "no statement touching `:Subject` was issued — this pin would be vacuous"
+    )
+    # ⛔ The census must COVER the carry, not merely tolerate it (review F1).
+    # `cypher in expected` only bounds the shapes; a walk that never issues the
+    # carry's identity-carrying write is bounded vacuously. Measured: reverting
+    # `carry_onboards_edge`'s carried arm to the stub-minting
+    # `write_onboards_edge(dst_graph, …)` left this suite GREEN, because that
+    # statement is `expected[0]` — legitimately issued by three other writers.
+    # So the arm's own write is asserted PRESENT: that is what makes the
+    # mutation above red here.
+    assert expected[1] in subject_statements, (
+        "the promote carry's identity-carrying `:Subject` write is missing from "
+        "the census — the walk no longer exercises `carry_onboards_edge`'s "
+        "CARRIED arm (or it was reverted to the id-only stub its docstring "
+        "forbids), so the shape check below constrains every writer EXCEPT the "
+        "one it exists for:\n"
+        f"  expected to see: {expected[1]}\n  saw:             {subject_statements}"
     )
     for cypher in subject_statements:
         assert cypher in expected, (

@@ -1487,6 +1487,65 @@ def test_the_oauth_lane_carries_the_default_namespace(monkeypatch):
     assert ha._default_graph_name(org) == promoted
 
 
+def test_the_api_key_seam_resolves_both_halves_from_one_row():
+    """#10180 (review F2): an org-wide API key's namespace AND its record tenant
+    are answers about ONE `public.graphs` row, so one read must answer both.
+
+    The window is real and not hypothetical: under READ COMMITTED every statement
+    takes its own snapshot (PostgreSQL "Transaction Isolation" §13.2.1), so a
+    `promote_default_graph` commit landing between the `organizations` read (the
+    namespace) and the `graphs` read (the id) hands the credential the DEMOTED
+    namespace with the PROMOTED id. `hosted_api._data_sdk` then opens the demoted
+    graph while `_bind_record_tenant` files every row under the promoted one —
+    the `derived != measured` split #10025 exists to remove, on the credential
+    class with the most production instances (128 org-wide keys at #10025's
+    measurement), and on the MCP lane it survives the resolver cache's 60 s TTL.
+
+    This double IS that instant: `organizations.graph_name` still names the
+    namespace the promotion moved OFF, while `graphs` already carries the
+    promoted `kind='default'` row.
+
+    FAIL-ON: resolve `graph_namespace` from the org row (the pre-fix code) and
+    this credential reads `org_{TEAM}` against `default_graph_id == NEW_ID` —
+    two different graphs described by one credential.
+    """
+    from tortoise.auth import lookup_hash
+    from tortoise.supabase_control import resolve_api_key
+
+    key = "tk_10180pair0123456789"
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
+                             "org_memberships": [], "invitations": [],
+                             "graphs": []})
+    # t0, BEFORE the promotion commits: the org row still names the old default.
+    fake.seed("organizations", [dict(_ORG)])
+    # t1, AFTER it commits: NEW_ID is the live default; the org's old graph is a
+    # plain custom graph carrying the namespace the org row still names.
+    fake.seed("graphs", [
+        {"id": OLD_ID, "org_id": TEAM, "name": "default", "kind": "custom",
+         "namespace": f"org_{TEAM}", "status": "active", "recording": None},
+        {"id": NEW_ID, "org_id": TEAM, "name": "new-extractor",
+         "kind": "default", "namespace": f"org_{TEAM}_{NEW_ID}",
+         "status": "active", "recording": None},
+    ])
+    fake.seed("api_keys", [{
+        "id": "key-10180pair", "org_id": TEAM, "lookup_hash": lookup_hash(key),
+        "key_prefix": key[:10], "created_via": "bootstrap",
+        "created_by": OWNER, "expires_at": None, "revoked_at": None,
+    }])
+
+    cred = resolve_api_key(fake, key)
+    assert cred["graph_id"] is None, (
+        "an org-wide key must not widen into a graph binding")
+    assert cred["default_graph_id"] == NEW_ID
+    assert cred["graph_namespace"] == f"org_{TEAM}_{NEW_ID}", (
+        "the credential names the DEMOTED graph's namespace while filing its "
+        "records under the PROMOTED id — resolve both halves from ONE row")
+    # …and the two halves name ONE graph: the row the tenant points at.
+    row = next(r for r in fake.tables["graphs"]
+               if r["id"] == cred["default_graph_id"])
+    assert cred["graph_namespace"] == row["namespace"]
+
+
 def test_every_hosted_auth_seam_stamps_the_same_field():
     """Source pin for the CLASS: each hosted seam that resolves an org-wide
     credential must put `graph_namespace` on the dict, because the resolver
