@@ -107,7 +107,9 @@ _UNCERTIFIABLE_CONCLUSIONS = frozenset({"cancelled", "startup_failure", "stale"}
 # `neutral` and an absent job all mean the leg did not execute, so it measured nothing
 # (`timed_out` is a KILLED leg whose failure set IS read, so it counts — the membership is
 # the producer's `tested` arm byte for byte, which is what makes the counting argument in
-# `main_leg_coverage` hold). MEASUREDNESS, not redness — `cancelled`/`stale` stay NON-RED
+# `main_leg_coverage` hold — an equality that is ASSERTED, not pinned: no test checks
+# it, so the parity pin is filed as #10566 rather than claimed here). MEASUREDNESS, not
+# redness — `cancelled`/`stale` stay NON-RED
 # (`_UNCERTIFIABLE_CONCLUSIONS` above, a recorded decision): a leg that never ran is not a
 # failure, and it is not a measurement either. Two different questions, and this set only
 # ever answers the second; no recorded polarity is flipped here.
@@ -582,9 +584,16 @@ def main_leg_coverage(runner: "Runner", provenance: Path, tested: int,
     a `success` python-ci run is evidence that every selected leg executed and was clean.
     `tested > len(examined)` proves such a run exists without a jobs call (`tested` =
     success|failure|timed_out, `examined` = failure|timed_out|startup_failure, so the
-    excess can only be `success`). Without it the window is all-red and each failing
-    run's job listing is the only evidence there is — probed in order, stopping as soon
-    as every leg is covered, so the usual cost is one call.
+    excess can only be `success`). That is a SUFFICIENT condition, not a necessary one:
+    it is an inequality over aggregate counters, so a small window can hold a `success`
+    run and still fail it (one `startup_failure`, or one red run that never expanded a
+    job, is enough to make `tested <= len(examined)`). The probe therefore reads the
+    EXAMINED (failing) runs only, and what its outcome states is exactly that: **no
+    examined run executed this leg** — never "no run in which the leg executed", which
+    is a claim about a run set this function did not read. That residual limit is filed
+    (#10567: coverage is inferred from aggregate counters, not probed over green runs)
+    rather than papered over. Each failing run's job listing is probed in order,
+    stopping as soon as every leg is covered, so the usual cost is one call.
     THE BASIS IS RETURNED, not assumed: `green-run` is an INFERENCE from the aggregate's
     own fail-closed leg table, and printing it as a mere "executed" would be the exact
     misuse of that word this change exists to stop. An ABSENT provenance file is NOT the
@@ -688,10 +697,12 @@ def evaluate(args: argparse.Namespace) -> int:
         if never_ran:
             raise Unmeasured(
                 "leg(s) " + ", ".join(repr(leg) for leg in never_ran)
-                + " produced this run's failure(s), but main's baseline window holds no"
-                " run in which the leg EXECUTED (every examined run had it skipped,"
-                " cancelled or absent) — the rate is measured over the WINDOW, not over"
-                " this leg, so the failure cannot be certified as introduced here")
+                + " produced this run's failure(s), but no EXAMINED run of main's"
+                " baseline window executed the leg (every failing run this window read"
+                " had it skipped, cancelled, neutral, stale or absent — the complement of"
+                " _EXECUTED_CONCLUSIONS) — the rate is measured over the"
+                " WINDOW, not over this leg, so the failure cannot be certified as"
+                " introduced here")
 
         blocked_path = outdir / "blocked.txt"
         verdict_path = outdir / "verdict.txt"

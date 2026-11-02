@@ -69,7 +69,13 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:   #9984 — first cut, from #10202 (the module as landed, 658 lines).
 #:   #10289 — re-cut: the LEG dimension of measuredness (`main_leg_coverage`) — a leg main
 #:            never EXECUTED is UNMEASURED, never clean. Nothing in the decision changed.
-_GATE_MODULE_SHA256 = "c5e44dcdb57aee46723b7d5cb4afbe9938436a27264275dd9872d42621e48881"
+#:   #10564 — re-cut at review: the leg-coverage claim is scoped to the runs the probe
+#:            actually READ (`no EXAMINED run executed this leg`), its case list covers
+#:            the COMPLEMENT of `_EXECUTED_CONCLUSIONS` (skipped, cancelled, neutral,
+#:            stale, absent), and the counter shortcut is documented as
+#:            sufficient-not-necessary for a green run. No logic change: no new branch,
+#:            no exit-code change, no polarity change.
+_GATE_MODULE_SHA256 = "fb209788cb9fa7218453e2de168bb750c7e7d5a3acb4725ca32f023e2f975e34"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box
@@ -955,6 +961,15 @@ _MAIN_WINDOW_LEG_SKIPPED = {
     for run_id in ("1001", "1002", "1003")
 }
 
+#: The same window with the leg `neutral` on main — the fifth non-executing
+#: conclusion. It exists so the refusal's own CASE LIST is pinned to
+#: `_EXECUTED_CONCLUSIONS`' complement: a message that names three of the five states
+#: states a fact narrower than what the code did (#10564 review).
+_MAIN_WINDOW_LEG_NEUTRAL = {
+    run_id: _jobs((1, "changes", "success"), (2, "test-slow (d)", "neutral"))
+    for run_id in ("1001", "1002", "1003")
+}
+
 #: The same window with the leg EXECUTED (and clean) — the control: a leg that main
 #: measured must still let a genuinely new PR failure block.
 _MAIN_WINDOW_LEG_EXECUTED = {
@@ -1002,6 +1017,31 @@ def test_a_leg_main_never_executed_is_Unmeasured_not_introduced(tmp_path):
     assert "leg coverage: test-slow=NOT EXECUTED" in proc.stdout
     assert "NEW FAILURE" not in proc.stdout
     assert "'test-slow'" in proc.stdout, "the refusal must NAME the unmeasured leg"
+    # ⛔ THE REFUSAL STATES ONLY WHAT IT READ (#10564 review, ISSUE 2). The probe scans
+    # the EXAMINED (failing) runs; `tested <= len(examined)` is sufficient-but-not-
+    # necessary for a green run, so a `success` run may exist in this window unprobed.
+    # The words must therefore scope to the run set that was actually read — the
+    # unscoped form ("the window holds no run in which the leg EXECUTED") is a claim
+    # about runs nothing measured, the same class as the absent-provenance defect.
+    assert "no EXAMINED run of main's" in proc.stdout, proc.stdout
+    assert "window holds no" not in proc.stdout, (
+        "the refusal must not claim the whole window; only the examined runs were read")
+
+
+def test_the_refusal_names_the_conclusions_it_actually_treats_as_not_executed(tmp_path):
+    """The parenthetical must cover `_EXECUTED_CONCLUSIONS`' COMPLEMENT, not three of it.
+
+    A `neutral` (or `stale`) leg on main is `NOT EXECUTED` — the set the code uses is
+    `{success, failure, timed_out}` — so a refusal that enumerates only `skipped,
+    cancelled, absent` describes a narrower thing than it did. Same class as the
+    run-set overstatement this commit fixes, one level down.
+    """
+    proc = _leg_case(tmp_path, main_jobs=_MAIN_WINDOW_LEG_NEUTRAL)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "leg coverage: test-slow=NOT EXECUTED" in proc.stdout
+    assert "neutral" in proc.stdout, (
+        "the refusal's case list must name every non-executing state it acted on; "
+        f"`neutral` is missing from: {proc.stdout!r}")
 
 
 def test_a_leg_main_did_execute_still_blocks_a_genuinely_new_failure(tmp_path):
