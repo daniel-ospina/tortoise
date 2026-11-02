@@ -427,14 +427,21 @@ def test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm(
     """#10540: the reader-window census is a MEASUREMENT, so its failure must
     not decide whether the treatment is applied.
 
-    The census has its own ``except`` and sits AFTER ``pool = _merged``. If
-    it is ever moved back onto the arm's decision path (or its exception is
-    allowed to reach the outer fail-open handler), the merge reverts to the
-    control pool: ``injected_merged`` drops to 0 and NO injected id reaches
-    ``hits`` — which is exactly what this asserts against. The census itself
-    must read the UNMEASURED shape (``measured: False`` and ``None`` values),
-    never the zeroed one: a zero there would be indistinguishable from "no
-    crowding" and from a merge-stage failure at the same time.
+    The census has its own ``except`` and sits AFTER ``pool = _merged``, and
+    the two halves of that are what this pins — they fail DIFFERENTLY:
+
+      * if it is moved back onto the arm's decision path, the merge reverts to
+        the control pool and the injected ids vanish from ``hits``;
+      * if its exception is instead allowed to reach the OUTER fail-open
+        handler, the merged pool still stands (``hits`` keep the injected
+        ids) and only the MERGED counters are cleared — that handler's own
+        contract is "the SEED and FETCH censuses are NOT wiped", so
+        ``fetch_ok`` is deliberately still True on that path.
+
+    Either way the census itself must read the UNMEASURED shape
+    (``measured: False`` and ``None`` values), never the zeroed one: a zero
+    there would be indistinguishable from "no crowding" and from a
+    merge-stage failure at the same time.
     """
     from tools.longmem_eval.retrieve import retrieve_for_question
     from tortoise import session_reinjection as _sr
@@ -443,7 +450,8 @@ def test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm(
     measure = dict(ks=(5,), top_k=10, pool_size=60,
                    session_reinjection=True)
     # the same run with the census WORKING is the counterfactual: a census
-    # failure may change the census key and NOTHING else.
+    # failure may change the census key and the LATENCY, and no other
+    # OUTCOME key.
     ok = retrieve_for_question(seeded_sdk, q, **measure)
     st_ok = ok["session_reinjection_stats"]
     assert st_ok["reader_window_displacement"]["measured"] is True
@@ -456,8 +464,12 @@ def test_census_failure_is_UNMEASURED_and_does_not_decide_the_arm(
     ret = retrieve_for_question(seeded_sdk, q, **measure)
     st = ret["session_reinjection_stats"]
     # (1) the ARM was still applied, byte-identically: a census failure did
-    # not revert the pool, clear the merged counters, or reach the outer
-    # fail-open handler (`fetch_ok` would drop and the injected ids vanish).
+    # not revert the pool, clear the merged counters, or let its exception
+    # reach the outer fail-open handler (which would clear ``injected_merged``
+    # to 0 and leave the zeroed ``measured: True`` census shape).
+    # ``fetch_ok`` stays True on every fail-open path BY DESIGN — the outer
+    # handler's contract is "only the MERGED counters are cleared", so this
+    # assertion documents that contract rather than discriminating a branch.
     assert st["fetch_ok"] is True
     assert [h["id"] for h in ret["hits"]] == [h["id"] for h in ok["hits"]]
     assert st["injected_merged"] == st_ok["injected_merged"] > 0
