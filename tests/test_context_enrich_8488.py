@@ -553,29 +553,39 @@ def _attestable(point: dict) -> bool:
     """Whether ``_record_embedding_identity`` can REACH its text comparison.
 
     ONE predicate, used by EVERY derivation in the mismatch test below, so the
-    populations they compare cannot SKEW (review cycle 3, P3). It mirrors that
-    function's early returns **in order**, because a record that returns before
-    ``j_text != cur_text_hash`` can never warn — counting it would demand a
-    contract production never makes and would false-red on a legitimate record:
+    populations they compare cannot SKEW (review cycle 3, P3). It mirrors
+    **in order** every gate between the replayed record and the comparison,
+    because a record that returns before ``j_text != cur_text_hash`` can never
+    warn — counting it would demand a contract production never makes and
+    would false-red on a legitimate record:
 
-      1. no RESTORED vector — the identity/text check is only reached on the
-         branch that writes the journalled vector
-         (``projection/entities.py:2508-2509``). This clause tests only that
-         the FIELD carries a value; production additionally requires the value
-         to be *restorable* (`_writable_journalled_vector`, `:2483`) and, at
-         the call site, of the store's WIDTH (`:2488-2508`). Neither is
-         representable in this fixture, so the predicate below is exactly
-         production's population — and the mismatch test PINS that with a
-         premise assertion rather than making this pure predicate
-         store-dependent. A future
-         fixture that journals a refused width or a non-finite value reds that
-         premise instead of silently counting a record the replay never
-         attests (last-review non-blocking note 2);
-      2. no identity **and** no revision (``:943-952``) — "stay silent": the
+      1. NOT an operator — the call site enters the identity/text check only
+         on ``not op`` (``projection/entities.py:2484``), where ``op`` is the
+         Point's ``operator`` dict. An operator attests no text at all, so
+         this is the FIRST gate; leaving it out let clause 4 rescue the
+         population only by accident (operators happen to carry no
+         ``content``);
+      2. a RESTORABLE vector — ``_writable_journalled_vector`` (``:2483``)
+         refuses ``None``, an empty/non-list value, a non-finite or
+         non-numeric element, and an implausible length. It is a PURE function
+         of the value, so it belongs here; the store-DEPENDENT width gate is
+         the one that does not (see below);
+      3. no identity **and** no revision (``:943-952``) — "stay silent": the
          record cannot attest its origin, which is exactly the shape
          ``stamp_journal_embedding(creating=False)`` emits;
-      3. no string ``embedding_text_hash``, or no string text to hash
-         (``:963-971``), where the text is ``embeddingText or content``.
+      4. no string ``embedding_text_hash``, or no string text to hash
+         (``:963-971``), where the text is ``embeddingText or content``;
+      5. text that cannot be HASHED — ``_content_hash`` is
+         ``text.encode("utf-8")``, which raises on a lone surrogate; the
+         replay catches that and returns (``:976-990``). Such a record is
+         uncomparable, not divergent.
+
+    NOT modelled, deliberately: the call-site WIDTH refusal
+    (``:2488-2489``) reads ``required_embedding_dim`` — store STATE, which would
+    make this pure predicate store-dependent. It cannot narrow the population
+    in this module (``pytestmark = embedded_only``; an embedded store has no
+    width constraint, ``projection/__init__.py:19814``), and the mismatch test
+    pins that as an explicit premise instead.
 
     The identity clause is BELT-AND-BRACES for every journal the seam can
     produce: ``stamp_journal_embedding`` stamps the hash and the identity inside
@@ -583,14 +593,23 @@ def _attestable(point: dict) -> bool:
     hand-edited record could carry a hash alone; such a record is genuinely
     unattestable and must not be counted.
     """
-    if point.get("embedding") is None:
+    if isinstance(point.get("operator"), dict):
+        return False
+    if _writable_journalled_vector(point.get("embedding")) is None:
         return False
     if (point.get("embedding_model") is None
             and point.get("embedding_revision") is None):
         return False
     if not isinstance(point.get("embedding_text_hash"), str):
         return False
-    return isinstance(point.get("embeddingText") or point.get("content"), str)
+    text = point.get("embeddingText") or point.get("content")
+    if not isinstance(text, str):
+        return False
+    try:
+        content_hash(text)
+    except UnicodeEncodeError:  # a lone surrogate: production cannot compare it
+        return False
+    return True
 
 
 def _attested_text(point: dict) -> str:
@@ -607,48 +626,56 @@ def _attested_text(point: dict) -> str:
     return point.get("embeddingText") or point.get("content")
 
 
-def test_the_attestable_predicate_mirrors_the_replay_early_returns():
-    """The mismatch test's derivations must not be a SUPERSET of what the
-    replay attests (review cycle 3, P3 — measured there as ``warnings = 2`` vs
-    ``pairs = 3``).
+def test_the_attestable_predicate_pins_each_replay_gate_boundary():
+    """Every clause of `_attestable` is pinned at its BOUNDARY here.
 
-    Each clause of `_attestable` mirrors an early return in
-    `_record_embedding_identity`; dropping one makes the test's derived
-    expectations unreachable in production, so this pins the parity directly
-    rather than only through a journal that happens to carry every field.
+    The predicate is a local helper, so this test cannot execute the replay
+    gate it mirrors — what it can do (and now says it does) is pin the exact
+    boundary of each clause, so a later edit that widens or narrows one reds a
+    fast unit leg instead of silently changing which records the mismatch
+    test's derivations count. The mismatch test's derivations must not be a
+    SUPERSET of what the replay attests (review cycle 3, P3 — measured there as
+    ``warnings = 2`` vs ``pairs = 3``).
+
     The identity clause is the one no seam-produced journal exercises — the
-    hash and the identity are stamped in the same `creating` branch — so it is
-    pinned HERE instead of through a synthetic replay record.
+    hash and the identity are stamped in the same `creating` branch — so it can
+    only be pinned HERE.
     """
     base = {"id": "p", "content": "raw", "embedding": [1.0],
             "embeddingText": "enriched", "embedding_text_hash": "h",
             "embedding_model": "bge-small-en-v1.5",
             "embedding_revision": "rev"}
     assert _attestable(base), base
-    # 1. the field is journalled but carries NO usable vector → never restored.
+    # 1. an OPERATOR never reaches the check: the call site guards `not op`
+    #    (`projection/entities.py:2484`).
+    assert not _attestable(dict(base, operator={"id": "op"}))
+    assert _attestable(dict(base, operator=None)), (
+        "a non-dict `operator` is what a Point carries, not what an operator "
+        "does — `op = p.get('operator')` is truthy only for the dict shape")
+    # 2. restorability IS in the predicate (`_writable_journalled_vector`,
+    #    `:2483`): an absent, empty, non-finite or implausibly long vector is
+    #    never restored, so the replay never compares it.
     assert not _attestable(dict(base, embedding=None))
-    # 1b. UNMODELLED BY THIS PREDICATE, deliberately and pinned: restorability
-    #     (`_writable_journalled_vector`) and store WIDTH are CALL-SITE gates
-    #     (`projection/entities.py:2483`, `:2488-2508`) needing state a pure
-    #     predicate does not have, so an empty/refused vector still reads as
-    #     attestable
-    #     here. The mismatch test asserts the FIXTURE premise that no such
-    #     record exists, which keeps the two populations identical. Adding a
-    #     restorability clause HERE instead would red this line — correctly, as
-    #     it would make the predicate claim more than it can know.
-    assert _attestable(dict(base, embedding=[]))
-    # 2. no identity at all → the replay stays silent; either half alone is
+    assert not _attestable(dict(base, embedding=[]))
+    assert not _attestable(dict(base, embedding=[float("nan")]))
+    assert not _attestable(dict(base, embedding=[float("inf")]))
+    assert not _attestable(dict(base, embedding=list(range(9000))))
+    # 3. no identity at all → the replay stays silent; either half alone is
     #    enough for it to compare.
     assert not _attestable(dict(base, embedding_model=None,
                                 embedding_revision=None))
     assert _attestable(dict(base, embedding_model=None))
     assert _attestable(dict(base, embedding_revision=None))
-    # 3. no string hash → nothing to compare against.
+    # 4. no string hash → nothing to compare against.
     assert not _attestable(dict(base, embedding_text_hash=None))
     assert not _attestable(dict(base, embedding_text_hash=123))
-    # 4. the text is `embeddingText or content`, and it must be a string.
+    # 5. the text is `embeddingText or content`, and it must be a string.
     assert _attestable(dict(base, embeddingText=None))
     assert not _attestable(dict(base, embeddingText=None, content=None))
+    # 6. text the replay cannot HASH (`_content_hash` -> `.encode('utf-8')`
+    #    raises on a lone surrogate, caught at `:976-990`) is uncomparable.
+    assert not _attestable(dict(base, embeddingText="\ud800"))
+    assert not _attestable(dict(base, embeddingText=None, content="\ud800"))
 
 
 def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
@@ -719,46 +746,26 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     points = [ev.get("point") or {} for ev in events]
 
     # ⛔ ONE predicate (`_attestable`, module level) used by EVERY derivation
-    # below so they cannot SKEW (review cycle 3, P3). It mirrors
-    # `_record_embedding_identity`'s early returns in order — no restored
-    # vector, no identity (`projection/entities.py:943-952`), no string hash
-    # (`:963-971`). A re-emitted snapshot —
+    # below so they cannot SKEW (review cycle 3, P3). It mirrors the replay's
+    # gates in order — not an operator (`projection/entities.py:2484`), a
+    # restorable vector (`:2483`), no identity (`:943-952`), no string hash or
+    # text (`:963-971`), unhashable text (`:976-990`). A re-emitted snapshot —
     # `stamp_journal_embedding(creating=False)` — deliberately carries NEITHER a
     # hash nor an identity (its own docstring says so), so counting it here
     # would demand a contract production never makes and would false-red on a
     # legitimate record.
 
-    # PREMISE (last-review non-blocking note 2): the call site gates the
-    # identity/text check on `_writable_journalled_vector(...) is not None`
-    # (non-empty list, finite, plausible length) AND on the width matching
-    # `FalkorProjection.required_embedding_dim` (`projection/entities.py:2488-
-    # 2508`); neither is expressible in a pure predicate, and neither fires on
-    # this fixture's vectors. Asserting it keeps the population identity —
-    # `_attestable` == what the replay attests — a checkable fact instead of an
-    # observation: a future fixture that journals a wrong-width or non-finite
-    # vector reds HERE instead of quietly demanding a warning production can
-    # never emit.
-    unwritable = [
-        p.get("id") for p in points
-        if _attestable(p)
-        and _writable_journalled_vector(p.get("embedding")) is None]
-    assert not unwritable, (
-        "premise: these attestable records carry a vector the replay REFUSES "
-        "(`_writable_journalled_vector` -> None), so it never reaches the "
-        f"text comparison: {unwritable}")
-    # The WIDTH half of that gate is unreachable in THIS lane: the fixture is
-    # embedded (`pytestmark = embedded_only`), and an embedded store skips
-    # vector-index creation by design, so `required_embedding_dim` is None
-    # (`projection/__init__.py:19814`) and the refusal at `:2489` cannot
-    # narrow the population. Asserted BOTH ways so the reasoning is checked, not
-    # assumed: unreachable ⇒ say so; reachable ⇒ every vector must match it.
-    if store_dim is None:
-        assert all(
-            _writable_journalled_vector(p.get("embedding")) is not None
-            for p in points if _attestable(p)), (
-            "premise: an embedded store has NO width constraint, so the only "
-            "call-site refusal left is restorability — and a record failed it")
-    else:
+    # PREMISE: the ONE gate left out of the predicate is the call-site WIDTH
+    # refusal (`projection/entities.py:2488-2508`), because it reads
+    # `required_embedding_dim` — store STATE — and the predicate is pure. It
+    # cannot narrow the population in THIS lane: the module is
+    # `embedded_only`, and an embedded store skips vector-index creation by
+    # design so `required_embedding_dim` is None
+    # (`projection/__init__.py:19814`) and `:2489` never refuses. Asserted
+    # conditionally rather than assumed, and NOT re-asserted in the None arm:
+    # restorability is now clause 2 of the predicate, so there is nothing left
+    # for that arm to check (a premise that cannot fail is not a premise).
+    if store_dim is not None:
         wrong_width = [
             p.get("id") for p in points
             if _attestable(p)
@@ -789,15 +796,30 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     assert tampered_ids, (
         "premise: the journal carried no attestable enriched record, so this "
         "test would be vacuous")
-    # DERIVED, not assumed (review cycle 1, P3): the ids whose stored hash no
-    # longer matches the (now tampered) text.
-    mismatched_ids = [
-        str(p.get("id")) for p in points
-        if _attestable(p)
-        and p.get("embedding_text_hash") != content_hash(_attested_text(p))]
-    assert mismatched_ids, (
+    # DERIVED, not assumed (review cycle 1, P3): the (journalled hash, current
+    # hash) PAIRS whose stored hash no longer matches the (now tampered) text,
+    # each mapped to the ids that carry it — computed ONCE, because leg 2's
+    # two premises and its attribution all read the same derivation.
+    mismatched = {}
+    for p in points:
+        if not _attestable(p):
+            continue
+        pair = (p.get("embedding_text_hash"), content_hash(_attested_text(p)))
+        if pair[0] != pair[1]:
+            mismatched.setdefault(pair, set()).add(str(p.get("id")))
+    assert mismatched, (
         "premise: tampering did not produce a hash mismatch, so leg 2 has "
         "nothing to detect")
+    # PREMISE (review cycle 3, P3): `len(messages) == len(mismatched)` can only
+    # catch "report only the FIRST" when there are at least TWO distinct pairs.
+    # A later edit to CONV/the rewriter that left both turns with the same
+    # enriched text collapses this to 1 and the mutation kill vanishes silently,
+    # with the suite still green — the same reasoning leg 1's premise assertion
+    # carries above.
+    assert len(mismatched) >= 2, (
+        "premise: the fixture produces fewer than 2 distinct (journal hash, "
+        "text hash) pairs, so this assertion cannot catch 'report only the "
+        "first' — it would pass vacuously")
     Path(log_path).write_text(
         "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
 
@@ -819,28 +841,28 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
         # reports"; review cycle 2, P3). Asserting one warning per POINT would
         # demand a stronger contract than the code makes and would red on a
         # fixture whose turns share a text — a legitimate, intended de-dup.
-        pairs = {
-            (p.get("embedding_text_hash"), content_hash(_attested_text(p)))
-            for p in points
-            if _attestable(p)
-            and p.get("embedding_text_hash") != content_hash(_attested_text(p))}
-        # PREMISE (review cycle 3, P3): `len(messages) == len(pairs)` can only
-        # catch "report only the FIRST" when there are at least TWO distinct
-        # pairs. A later edit to CONV/the rewriter that left both turns with the
-        # same enriched text collapses this to 1 and the mutation kill vanishes
-        # silently, with the suite still green — the same reasoning leg 1's
-        # premise assertion carries above.
-        assert len(pairs) >= 2, (
-            "premise: the fixture produces fewer than 2 distinct (journal hash, "
-            "text hash) pairs, so this assertion cannot catch 'report only the "
-            "first' — it would pass vacuously")
-        assert len(messages) == len(pairs), (
+        assert len(messages) == len(mismatched), (
             "one warning per DISTINCT (journal hash, text hash) pair is the "
-            f"contract — got {len(messages)} warning(s) for {len(pairs)} "
+            f"contract — got {len(messages)} warning(s) for {len(mismatched)} "
             f"distinct pair(s): {messages}")
-        assert all(any(tid in m for tid in mismatched_ids) for m in messages), (
-            "a text-hash warning named no Point that is actually mismatched "
-            f"({mismatched_ids}): {messages}")
+        # ⛔ ATTRIBUTION, not mere presence (last-review note 3): requiring only
+        # *some* mismatched id per message let a warning that named the WRONG
+        # mismatched Point pass (ids where one is a prefix of another are
+        # ambiguous under a substring test). Each warning names the pair's two
+        # hashes, so bind it to THAT pair and require the Point it names to be
+        # one of that pair's own records.
+        for msg in messages:
+            bound = [pair for pair in mismatched
+                     if pair[0] in msg and pair[1] in msg]
+            assert len(bound) == 1, (
+                "a text-hash warning did not identify exactly ONE mismatched "
+                f"(journal hash, text hash) pair: {msg}")
+            pair = bound[0]
+            named = [pid for pid in mismatched[pair]
+                     if f"(Point {pid}: " in msg]
+            assert named, (
+                "a text-hash warning named no Point belonging to the pair it "
+                f"reports {pair} ({sorted(mismatched[pair])}): {msg}")
     finally:
         s.close()
 
