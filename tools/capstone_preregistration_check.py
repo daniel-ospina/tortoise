@@ -3791,6 +3791,18 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
                 # no registration on the base returns from the branch above; a bundle that DID
                 # compare a pair is measured, whatever else failed.
                 ordering = f"{ORDERING_UNMEASURED} ({unmeasured[0]})"
+            elif unreadable_atomic:
+                # ⛔ THE RULED PATH CAN DECIDE NOTHING TOO (#10546 merge). When the machine record
+                # cannot be read AT ALL, `check_ordering` reports that log as `unreadable_atomic`
+                # instead of inventing an ordering finding (`check_machine_record` owns the
+                # diagnosis), so `ordering_failures` is empty and — without this arm — the claim
+                # would read `verified` for a half that concluded nothing about that log. That is
+                # the cycle-6 defect class on the path the merge introduced: the field a machine
+                # consumer reads by NAME may not dress "decided nothing" as "verified".
+                ordering = (
+                    "UNPROVEN (the machine record is unreadable, so the atomic add of "
+                    + ", ".join(sorted(unreadable_atomic)) + " could not be judged)"
+                )
             elif ordering_failures:
                 # ⛔ "verified" is a claim about the ORDERING, so it may not be taken from the
                 # absence of an `unmeasured` note alone (review cycle 13, finding 2). On a

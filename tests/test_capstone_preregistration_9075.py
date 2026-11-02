@@ -2571,6 +2571,32 @@ def test_run_defaults_to_the_ruled_verdict_not_the_proposal():
             .parameters["allow_atomic_disclosure"].default is False)
 
 
+def test_ruled_run_says_unproven_when_the_record_it_could_not_read_mattered(tmp_path, monkeypatch):
+    """The RULED path may not report `verified` for an atomic log whose record could not be read.
+
+    With no readable machine record there is nothing to judge the atomic add against, and
+    `check_ordering` reports that log through `unreadable_atomic` rather than inventing an ordering
+    finding (`check_machine_record` owns the diagnosis and reds the tree). `run_order_claim` is the
+    field a machine consumer reads by NAME, so it may not read `verified` beside a half that
+    concluded nothing — the defect class the exemption half already qualifies its claim for.
+    """
+    # The REAL 5087 bundle: it passes every other half of `run()` with `use_corpus=False`, so the
+    # ordering claim is the only variable.
+    directory = PREREG_DIR.parent / "5087-hypothesis"
+
+    def fake_ordering(prereg, logs, pins, exempted, atomic_added, disclosures, atomic_detail,
+                      **_kwargs):
+        # The ruled arm's own shape when the record is unreadable: no failure, one unproven log.
+        _kwargs["unreadable_atomic"].append("e1-e2.log")
+        return []
+
+    monkeypatch.setattr(check, "check_ordering", fake_ordering)
+    monkeypatch.setattr(check, "_record_atomic_add", lambda _dir: None)
+    report = check.run(directory, use_corpus=False)
+    assert report["ordering"].startswith("UNPROVEN"), report["ordering"]
+    assert "e1-e2.log" in report["ordering"], report["ordering"]
+
+
 def test_the_armed_rule_reports_its_own_base_and_never_the_ruled_one():
     """`run()` under the PROPOSED rule says which base it did NOT consult (#10546 merge).
 
