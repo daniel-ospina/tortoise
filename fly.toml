@@ -194,10 +194,10 @@ kill_timeout = 30
 # exists to prevent. It used to be a MACHINE attribute read by hand
 # (`fly machine status 8654509b634758 --display-config`, 2026-11-02:
 # `on-failure` / `max_retries 10`) and asserted nowhere, so any recreate could
-# drop it without a signal. Fly DOES accept it in this file — see
+# drop it without a signal. The block below is the versioned form; see
 # https://fly.io/docs/machines/guides-examples/machine-restart-policy/ §"Set a
 # restart policy in your fly.toml" (`policy = "<never | always | on-failure>"`,
-# `retries`, `processes`) — and `on-fail` with 10 retries is Fly's default for
+# `retries`, `processes`), and `on-fail` with 10 retries is Fly's default for
 # deploy-created machines, so this block pins what production already runs and
 # makes the dependency reviewable instead of a past observation. Asserted by
 # `tests/test_monitoring.py::TestStallWatchdog

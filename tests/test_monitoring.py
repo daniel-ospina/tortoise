@@ -3869,6 +3869,133 @@ class TestStallWatchdog:
                 "a restart policy with zero retries never restarts: "
                 f"{b}")
 
+    def test_the_derivation_names_an_operation_that_is_actually_on_the_loop(
+            self):
+        """#10585 review P2: the 600s derivation was sized against a premise the
+        tree contradicts — and the stale preamble ~100 lines above it said the
+        opposite of the new block.
+
+        The derivation claimed "the longest BOUNDED synchronous operation that
+        can run ON the loop … is the synchronous LLM call". At this head both
+        hosted extraction lanes are submitted through ``_run_capture_bounded``
+        (``_submit_off_loop`` -> ``_CAPTURE_EXECUTOR``) by the #3060 invariant,
+        as are the turn write, its embeddings and the tenant vocabulary
+        compile — so no model call blocks the hosted loop, and the arithmetic
+        that followed ("ten single 60s calls, or five stages of two") modelled
+        on-loop staging that no longer exists.
+
+        The assertion is on the CLAIM, and it cross-checks the claim against
+        the code it describes: the prose must name the real turn cap
+        (``quota.MAX_SESSION_TURNS``, not the request model's 1000), must name
+        the off-loop invariant, and both extraction lanes must still be
+        submitted off-loop in ``hosted_api.py`` — the fact the prose depends
+        on. The 600 is re-derived from the socket bounds rather than trusted.
+        """
+        import tomllib
+        from pathlib import Path
+
+        from tortoise import projection
+        from tortoise.quota import MAX_SESSION_TURNS
+
+        root = Path(__file__).resolve().parent.parent
+        mon = (root / "tortoise" / "monitoring.py").read_text(encoding="utf-8")
+        api = (root / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+        mon_flat = " ".join(mon.split())
+        api_flat = " ".join(api.split())
+
+        # ── the preamble the old text shipped, in the block that introduces
+        # the SOFT knob (an operator sizes THAT knob from it).
+        pre_start = mon.index("# WHY the default flipped")
+        pre_end = mon.index("# The correct split, therefore:")
+        preamble = " ".join(mon[pre_start:pre_end].split())
+        assert "1000 turns" not in preamble, (
+            "the preamble still claims up to 1000 turns: the window is capped "
+            f"at MAX_SESSION_TURNS = {MAX_SESSION_TURNS} and refused above it")
+        assert f"MAX_SESSION_TURNS = {MAX_SESSION_TURNS}" in preamble, (
+            "the preamble must state the REAL turn cap it is reasoning about")
+        assert "SYNCHRONOUSLY" not in preamble, (
+            "the preamble still says the extractor is called synchronously on "
+            "the loop — it is submitted through _run_capture_bounded (#3060)")
+
+        # ── the derivation of the HARD ceiling.
+        der_start = mon.index("DERIVED, not asserted")
+        der_end = mon.index("LOOP_STALL_HARD_EXIT_S = 0.0")
+        derivation = " ".join(mon[der_start:der_end].split())
+        assert "and that operation is the synchronous LLM call" not in derivation, (
+            "the ceiling is sized against an operation that is OFF the loop by "
+            "the #3060 invariant — a reader then sizes the knob against work "
+            "that is not there")
+        assert "no model call runs on the loop" in derivation, (
+            "the derivation must say plainly that the LLM bound does not set "
+            "this ceiling for the deployment that arms it")
+        assert "_run_capture_bounded" in derivation, (
+            "and must name the submission that keeps it off the loop")
+        assert "_socket_timeouts" in derivation and (
+            "_DB_TIMEOUT_MAX_S" in derivation), (
+            "what DOES block the loop is graph I/O; the derivation must name "
+            "its bound rather than leave a number standing on air")
+
+        # ── the facts the prose depends on, checked against the code.
+        for lane in ("sdk._extract_session_llm", "sdk._extract_session_v2"):
+            assert f"await _run_capture_bounded( slot, {lane}" in api_flat, (
+                f"{lane} is no longer submitted off-loop — the derivation's "
+                "premise (and the #3060 invariant) no longer hold, so the "
+                "prose must be re-derived, not silently kept")
+
+        # ── re-derive the shipped 600 from the socket bounds it cites.
+        with (root / "fly.toml").open("rb") as fh:
+            shipped = float(tomllib.load(fh)["env"][
+                "TORTOISE_LOOP_STALL_HARD_EXIT_S"])
+        worst_on_loop = ((1 + projection._EMBEDDED_RETRY_COUNT)
+                         * projection._DB_TIMEOUT_MAX_S)
+        assert projection._DB_TIMEOUT_MAX_S == 60.0
+        assert projection._DB_SOCKET_TIMEOUT_DEFAULT == 10.0
+        assert shipped >= 5 * worst_on_loop, (
+            f"the armed ceiling ({shipped:.0f}s) is no longer 5x the worst "
+            f"bounded on-loop operation ({worst_on_loop:.0f}s): re-derive it")
+
+    def test_a_hard_ceiling_below_the_floor_is_reported_as_unclamped(
+            self, monkeypatch, caplog):
+        """#10585 review P2: the floor never protected the HARD ceiling, but
+        the only message an operator got said it had been applied.
+
+        Reachable shape: ``TORTOISE_LOOP_STALL_HARD_EXIT_S=5`` with the soft
+        knob unset. ``threshold_s`` is taken from the ceiling (5s), then the
+        destructive-path clamp raises it to the 180s floor and logs "… below
+        the safe floor (180s) … clamping" — while the hard branch still
+        compares ``age >= hard_exit_s`` (5s) and ``os._exit``s. So the last
+        thing an operator read before walking away was that the process-killing
+        path had been floored to 180s when it would fire after ~5s.
+
+        ``stop_event`` is SET before the thread starts, so the watchdog body
+        never runs: this drives the real ``exit_fn is None`` construction path
+        (the clamp lives inside it) without arming ``os._exit`` in the runner.
+        """
+        import logging
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "5")
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        floor = monitoring._loop_stall_floor_s()
+        assert 5.0 < floor, "this test needs a ceiling below the floor"
+
+        stop = threading.Event()
+        stop.set()   # the body never runs => no os._exit in the test process
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="tortoise.monitoring"):
+            thread = monitoring.start_stall_watchdog(stop_event=stop)
+        assert thread is not None, "the ceiling must arm the watchdog"
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "NOT clamped" in text, (
+            "a ceiling armed below the floor exits at its ARMED value; the "
+            f"log must say the floor does not apply to it. Got:\n{text}")
+        assert "5.000s" in text, (
+            "the message must name the value that actually exits")
+        assert f"{floor:.0f}s" in text, (
+            "and the floor it is being compared against")
+
     def test_the_module_contract_scopes_the_idle_gate_to_the_soft_path(self):
         """#10585 review P2: the #2850 gate contract AGED against the code.
 
@@ -4087,13 +4214,15 @@ class TestStallWatchdog:
 
     def test_sync_on_loop_block_far_longer_than_threshold_is_not_killed_by_default(
             self, monkeypatch):
-        """#2850 review P0 regression: the shipped default must survive the
-        app's real (unbounded, synchronous) on-loop work.
+        """#2850 review P0 regression: the shipped default must survive a
+        request that legitimately blocks the loop far past any plausible
+        threshold.
 
-        ``_capture_session_impl`` calls the LLM extractor synchronously with a
-        60s HTTP timeout and can run thousands of synchronous DB round trips,
-        so one free-tier request can freeze the loop far past any plausible
-        threshold. Under the DEFAULT configuration the process must not die.
+        #10585 review P2: this docstring used to say ``_capture_session_impl``
+        runs the extractor and thousands of DB round trips ON the loop. It does
+        not (they are on the capture pool, #3060/#3551) — but a synchronous
+        block on the loop is still the shape the DEFAULT must be safe against,
+        so the scenario stands and only the premise moved.
         """
         monkeypatch.delenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", raising=False)
 

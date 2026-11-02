@@ -3510,26 +3510,25 @@ LOOP_HEARTBEAT_INTERVAL = 0.25   # tick period of the loop-side heartbeat task
 #: Age (seconds) past which /healthz reports 503 "the loop is not currently
 #: scheduling".
 #:
-#: WHY 90s, and what the signal does NOT mean (review P2). This app still
-#: makes SYNCHRONOUS calls on the event loop, so "the loop did not tick" is
-#: NOT proof of a wedge — a busy loop looks identical to a hung one:
-#:   * the LLM extractor is called synchronously from ``_capture_session_impl``
-#:     with HTTP timeouts of 60s (``tortoise/models.py`` urlopen(timeout=60),
-#:     ``tortoise/model_adapters.py`` httpx timeout=(10, 60)), and the v2 path
-#:     runs several stages;
-#:   * the FalkorDB client's own socket timeouts are 2s connect / 10s read
-#:     (``projection._socket_timeouts``), and one request can run a per-turn
-#:     loop of synchronous queries.
+#: WHY 90s, and what the signal does NOT mean (review P2). The loop still runs
+#: SYNCHRONOUS work — no model call (every extraction lane is off the loop by
+#: the #3060 invariant: see the HARD ceiling's derivation below), but the
+#: handlers issue synchronous FalkorDB queries whose own socket timeouts are
+#: 2s connect / 10s read (``projection._socket_timeouts``), and a busy loop
+#: looks identical to a hung one from the outside:
+#:   * an ordinary request runs several such queries, back to back;
+#:   * a wedged request that BLOCKS the loop produces the same absent tick.
 #: A low threshold therefore flaps 503 on ordinary slow requests. The value is
-#: set ABOVE the longest single bounded on-loop operation (the 60s LLM call) so
-#: it distinguishes "wedged" from "busy" for the single-operation case. It is
-#: still not a load signal: multi-stage extraction can legitimately exceed it,
+#: set ABOVE the largest identified single bounded on-loop operation (a 10s
+#: socket read; 60s at the operator maximum) so it distinguishes "wedged" from
+#: "busy" for the single-operation case. It is still not a load signal: a
+#: request path can legitimately exceed it,
 #: which is exactly why the destructive self-kill below is opt-in and, on its
 #: SOFT path, gated on an idle workload (the HARD ceiling
 #: ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` is the exception and deliberately
 #: bypasses that gate — a request in flight does not stop the loop ticking, so
 #: a MISSING TICK is the evidence of a wedge), and why the durable remedy is
-#: offloading these synchronous calls rather than tuning this number.
+#: keeping synchronous calls OFF the loop rather than tuning this number.
 LOOP_STALE_AFTER = 90.0
 
 #: monotonic timestamp of the last loop tick; 0.0 == the loop has NEVER ticked
@@ -4154,20 +4153,34 @@ def stop_health_listener(server: ThreadingHTTPServer | None = None) -> None:
 #
 # WHY the default flipped (review P0). The pre-review default (30s, exit on
 # the first stale poll) would have caused the very outage it was meant to
-# prevent. This app still performs UNBOUNDED synchronous work on the event
-# loop:
-#   * ``_capture_session_impl`` (hosted_api) calls the LLM extractor
-#     SYNCHRONOUSLY — not awaited, not offloaded — with HTTP timeouts of 60s
-#     (models.py urlopen(timeout=60); model_adapters httpx timeout=(10, 60)),
-#     and the v2 path runs several stages back to back;
-#   * the same handler runs a per-turn loop of synchronous
-#     ``proj.g.query()`` calls (up to 1000 turns; SessionRequest.conversation
-#     max_length=1000), i.e. thousands of sequential round trips with no
-#     ``await``.
-# So ONE authenticated request (free-tier signup is open) can stall the loop
-# for 60-180s+, and a heartbeat-age self-kill would ``os._exit`` the process
-# mid-request, killing every other tenant's in-flight work — repeatedly, in a
-# restart loop. That converts transient provider slowness into a total outage.
+# prevent, because at the time this app ran UNBOUNDED synchronous work on the
+# event loop: ``_capture_session_impl`` (hosted_api) called the LLM extractor
+# inline — not awaited, not offloaded — with HTTP timeouts of 60s (models.py
+# urlopen(timeout=60); model_adapters httpx timeout=(10, 60)) and several
+# stages back to back, and the same handler ran a per-turn loop of synchronous
+# ``proj.g.query()`` calls. ONE authenticated request (free-tier signup is
+# open) could therefore stall the loop for 60-180s+, and a heartbeat-age
+# self-kill would ``os._exit`` the process mid-request, killing every other
+# tenant's in-flight work — repeatedly, in a restart loop. That converts
+# transient provider slowness into a total outage.
+#
+# CORRECTION (#10585 review P2) — that work is no longer ON the loop, so do not
+# size a knob against it. Everything named above now runs on the capture pool
+# by the #3060 invariant: the window write + its scrub
+# (``hosted_api._write_session_and_turns``, #3551), the turn embeddings
+# (#4194), the tenant vocabulary compile (#3086), and BOTH extraction lanes
+# (``_run_capture_bounded`` -> ``_submit_off_loop``: M2 at the
+# ``sdk._extract_session_llm`` call, v2 at ``sdk._extract_session_v2``). The
+# window is capped at ``quota.MAX_SESSION_TURNS = 500`` (refused above it at
+# the top of ``_capture_session_impl``), not by ``SessionRequest.conversation``'s
+# ``max_length`` — and the per-turn queries the old text named are off the loop
+# too. What remains on
+# the loop is graph I/O, bounded by its own socket timeouts (see the HARD
+# ceiling's derivation below).
+# The default stays OFF for the reason that SURVIVES: the idle gate is TRUE by
+# construction for the wedge it was built for (CONTRACT OF THE IDLE GATE,
+# below), and the hard ceiling below is the answer to that — as an opt-in
+# operator escape hatch, not as the shipped default.
 #
 # The correct split, therefore:
 #   * the /healthz signal (above) is the DETECTOR — it publishes staleness;
@@ -4266,35 +4279,43 @@ LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before jud
 #: and silent.
 #:
 #: DERIVED, not asserted (review P2). The ceiling must sit above the longest
-#: BOUNDED synchronous operation that can run ON the loop, and that operation is
-#: the synchronous LLM call. There are TWO such bounds and the LARGER one is
-#: what the ceiling has to clear (#10585 review P2: the first version of this
-#: derivation cited ``models.py:183,233`` as one 60s bound, but :233 is the
-#: Ollama lane's 300s one):
-#:   * 60s — ``OpenAICompatModel(timeout: int = 60)`` (``tortoise/models.py:128``),
-#:     issued by ``urlopen(req, timeout=self.timeout)`` at ``:183``, plus
-#:     ``httpx timeout=(10, 60)`` (``tortoise/model_adapters.py:159,276``). This
-#:     is the bound ``LOOP_STALE_AFTER``'s comment names, and the bound the
-#:     HOSTED app's on-loop calls actually use.
-#:   * 300s — ``OllamaModel(timeout: int = 300)`` (``tortoise/models.py:201``),
-#:     issued by the same ``urlopen`` at ``:233``. Not reachable from the hosted
-#:     loop (its callers are ``ingest.py:799`` and ``session_indexer.py:481``,
-#:     which passes ``timeout=30``), but a self-hoster that runs ingest
-#:     synchronously on the loop owns this lane, and this constant is not
-#:     hosted-only — so 600s must clear the 300s bound, not just the 60s one.
-#: 600s is therefore:
-#:   * 10x the 60s bound (ten single 60s calls, or five stages of two) and 2x
-#:     the 300s Ollama bound (two such calls, one stage, still fit);
+#: BOUNDED operation that can run ON the loop. #10585 review P2: the first
+#: version of this derivation named the synchronous LLM call as that
+#: operation. It is NOT one — no model call runs on the loop on the hosted
+#: capture path: both extraction lanes are submitted through
+#: ``_run_capture_bounded`` (``_submit_off_loop`` -> ``_CAPTURE_EXECUTOR``) by
+#: the #3060 invariant, as are the turn write, its embeddings and the tenant
+#: vocabulary compile. So the LLM bounds do NOT size this ceiling for the
+#: deployment that arms it; they are stated for a SELF-HOSTER that drives the
+#: SDK synchronously on its own loop (the SDK itself has no loop), which is
+#: the only shape they apply to:
+#:   * 60s — ``OpenAICompatModel(timeout: int = 60)`` (``tortoise/models.py``),
+#:     issued by ``urlopen(req, timeout=self.timeout)``, plus
+#:     ``httpx timeout=(10, 60)`` (``tortoise/model_adapters.py``).
+#:   * 300s — ``OllamaModel(timeout: int = 300)`` (``tortoise/models.py``),
+#:     issued by the same ``urlopen``. Not reachable from the hosted loop (its
+#:     callers are ``ingest.py`` and ``session_indexer.py``, which passes
+#:     ``timeout=30``), but a self-hoster that runs ingest synchronously on the
+#:     loop owns this lane, and this constant is not hosted-only.
+#: What actually blocks THIS app's loop is graph I/O issued from async
+#: handlers, and each operation carries its own socket timeout:
+#: ``projection._socket_timeouts`` defaults to 2s connect / 10s read and
+#: clamps the read at ``projection._DB_TIMEOUT_MAX_S`` = 60s, and the embedded
+#: lane adds ONE retry (``projection._EMBEDDED_RETRY_COUNT``), so the worst
+#: single on-loop operation is ~2 x 60s = 120s at the operator maximum and
+#: ~2 x 10s = 20s at the defaults (both before the retry backoff).
+#: 600s is therefore conservative BY CONSTRUCTION:
+#:   * 5x the worst bounded on-loop operation at the operator-maximum socket
+#:     timeout (120s), and 30x it at the defaults (20s);
 #:   * 3.3x the enabled-threshold floor (``_loop_stall_floor_s`` = max(120s,
 #:     2 * LOOP_STALE_AFTER) = 180s) and 6.7x LOOP_STALE_AFTER itself, which is
 #:     where /healthz already declares the loop stale;
 #:   * 68x the observed p99 loop lag (8.8s) on the live machine.
 #: It is NOT above an unbounded model call: ``_scaled_deadline(600, max_tokens)``
-#: is ~819s at a 16K budget (``tortoise/extractor_v2.py:11715``). That path is
-#: OFF the loop by the #3060 invariant
-#: (``tortoise/hosted_api.py::_capture_session_impl``), so it cannot
-#: provide the tick-blocking bound — but it is the reason this is a ceiling on
-#: the LOOP, not a general "operation is slow" timeout.
+#: is ~819s at a 16K budget (``tortoise/extractor_v2.py``). That path is OFF
+#: the loop by the #3060 invariant (``_capture_session_impl``), so it cannot
+#: provide the tick-blocking bound either — but it is the reason this is a
+#: ceiling on the LOOP, not a general "operation is slow" timeout.
 #: The measured wedge exceeded 600s (696s max lag) within minutes, so it binds.
 #:
 #: DISABLED BY DEFAULT (``0``), preserving the shipped "no destructive action in
@@ -4630,6 +4651,23 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
     # reads the assignment as what makes the ceiling reachable (it does not:
     # the hard branch compares `age >= hard_exit_s` directly).
     hard_exit_s = _loop_stall_hard_exit_s()
+    # #10585 review P2: the floor does NOT apply to this ceiling (see
+    # ``_loop_stall_hard_exit_s``: a value ABOVE the floor is the whole point,
+    # and a small one is the operator's own bounded trade). So a ceiling armed
+    # BELOW the floor must be reported as exactly what it is. The clamp below
+    # raises the SOFT threshold, and saying only "clamping" told an operator
+    # the process-killing path had been floored to 180s while the hard branch
+    # would still ``os._exit`` at the armed value.
+    hard_below_floor = 0 < hard_exit_s < _loop_stall_floor_s()
+    if hard_below_floor:
+        logger.warning(
+            "start_stall_watchdog: the HARD loop-stall ceiling %.3fs is below "
+            "the safe floor (%.0fs) and is NOT clamped — the hard branch "
+            "compares the heartbeat age against the ARMED value, so the "
+            "process exits after %.3fs without a loop tick. The floor applies "
+            "to the SOFT path only, where a sub-second threshold turns a GC "
+            "pause into a crash loop",
+            hard_exit_s, _loop_stall_floor_s(), hard_exit_s)
     if not math.isfinite(threshold_s) or threshold_s <= 0:
         if hard_exit_s <= 0:
             logger.warning(
@@ -4655,9 +4693,12 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
         if threshold_s < floor:
             logger.warning(
                 "start_stall_watchdog: programmatic threshold %.3fs is below "
-                "the safe floor (%.0fs) for the destructive exit path — "
-                "clamping; a sub-second threshold turns a GC pause into a "
-                "crash loop", threshold_s, floor)
+                "the safe floor (%.0fs) for the SOFT exit path — clamping "
+                "that path; a sub-second threshold turns a GC pause into a "
+                "crash loop%s", threshold_s, floor,
+                "" if not hard_below_floor else
+                ("; the HARD ceiling is NOT clamped and still exits at "
+                 f"{hard_exit_s:.3f}s"))
             threshold_s = floor
         exit_fn = os._exit
     if stop_event is None:
