@@ -763,7 +763,8 @@ def completed_rows(*, head: str, corpus_sha: str,
             "denominator": receipt["denominator"] if cid == "E4" else None,
             "corpus_sha256": corpus_sha,
             "sibling": None, "blocked_by": owner,
-            "note": "the run completed all eight steps; this criterion's "
+            "note": "the run completed with all eight steps accounted for; "
+                    "this criterion's "
                     "evidence artifact is still owned by " + owner,
         })
         if cid in ALSO_BLOCKED_BY:
@@ -1209,6 +1210,32 @@ def main(argv: list[str] | None = None) -> int:
     if not ok:
         return refuse(why, prereg_ok=True, code=3, corpus=corpus)
 
+    # G5's DECLARATION, read BEFORE the pass spends one (#10215 review).
+    #
+    # The declaration is a property of the FROZEN RECORD, not of the pass, so a
+    # record whose `steps` block cannot be read is refused here rather than after
+    # G4. Two reasons, both measured:
+    #
+    #  * a malformed declaration cannot be repaired by running the pipeline, so
+    #    spending a model pass to discover it is a cost with no possible return;
+    #  * refusing AFTER the pass made the exit code depend on the EXTRACTION
+    #    environment instead of on the record. A machine where the entry point
+    #    raised, or where the receipt carried no `stats.llm`, answered **4** (a
+    #    pipeline refusal) instead of **5** (the declaration refusal) — so one
+    #    malformed record graded the same fact two ways depending on where it ran.
+    #    That is exactly what red `test_g5_refuses_a_malformed_step_declaration`
+    #    on one CI runner and passed it on another.
+    conditional, steps_error = declared_conditional(prereg_record)
+    if steps_error:
+        return refuse(
+            f"the pre-registration's step declaration is unreadable: "
+            f"{steps_error} — G5 cannot tell which steps are unconditional, and "
+            "a malformed declaration must not silently mean 'all eight'. Refused "
+            "BEFORE the pass: the declaration is a property of the frozen record, "
+            "so no run can repair it and the answer cannot depend on the "
+            "extraction environment",
+            prereg_ok=True, code=5, corpus=corpus)
+
     # G4 — ONE pass through the REAL entry point
     from tortoise.sdk import TortoiseSDK  # imported late: the gates above need no client
 
@@ -1241,13 +1268,10 @@ def main(argv: list[str] | None = None) -> int:
     # `observe_idle` — and never simply waived: requiring all eight
     # unconditionally was false by construction, while dropping a step outright
     # would hand a crashed fail-open pass the same green as an idle one.
-    conditional, steps_error = declared_conditional(prereg_record)
-    if steps_error:
-        return refuse(
-            f"the pre-registration's step declaration is unreadable: "
-            f"{steps_error} — G5 cannot tell which steps are unconditional, and "
-            "a malformed declaration must not silently mean 'all eight'",
-            prereg_ok=True, code=5, corpus=corpus)
+    #
+    # `conditional` / `steps_error` were read ABOVE, before the pass: the
+    # declaration is a property of the frozen record, and a record that cannot be
+    # read is refused outright rather than graded under either shape.
     required = [s for s in STEPS if s not in conditional]
     observed = observe_steps(result)
     idle = observe_idle(result)

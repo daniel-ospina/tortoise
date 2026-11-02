@@ -2343,6 +2343,73 @@ def test_the_per_surface_prose_cites_are_the_probe_tables_own_numbers():
                     f"cited spans: {sorted(spans)}")
 
 
+#: The documents that carry §10's BY-DESIGN argument and are read by NO sweep:
+#: `_BUNDLE_DOCS` covers README / E1-E5-PROOFS / the probes / the index / the
+#: architecture doc, and `_BARE_CITE_DOCS` only the two that print the per-surface
+#: numbers. That gap was measured: `#10513`/`#10360` inserted 1,101 lines into
+#: `tortoise/extractor_v2.py`, the foreward merge re-pointed 99 cites in four
+#: bundle files — and left these two behind, so §10 argued its whole "not a
+#: relaxation" case from `:8666` (payload-event assembly) and `:9209` (a
+#: `refused_value_contents` lookup) while `README.md` carried the correct derived
+#: `:10310`/`:10442` two files over, i.e. ONE PR shipping two documents that
+#: disagree about where its own load-bearing code lives. The record is the
+#: hash-pinned artifact the gate revises itself by (`RECORD_ARTIFACT`), so a wrong
+#: cite there is inside the one file the epic treats as change-controlled.
+_PREREG_STEP_CITE_DOCS = (
+    ("PRE-REGISTRATION.md",
+     _REPO / "docs/evidence/7949-capstone/PRE-REGISTRATION.md"),
+    ("preregistration.json",
+     _REPO / "docs/evidence/7949-capstone/preregistration.json"),
+)
+
+
+def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
+    """§10's three code sites are DERIVED from the tree, never typed twice.
+
+    A typed number can only be repaired by another hand re-derivation — the class
+    this bundle has already filed twice (`#10377`, `#5095`) and re-derived by hand
+    once more at `68b2e617d`. The numbers here come out of `_extractor_lineno` /
+    `_EXTRACTOR_SITES`, the same readers the rest of this file resolves cites with,
+    so moving the classifier in `extractor_v2.py` moves the document with it.
+
+    Non-vacuity: at `68b2e617d` the pre-registration cited `:8666`/`:8666-8690`/
+    `:9209`/`:9341` while the tree carried `:9767`/`:9767-9789`/`:10310`/`:10442`,
+    and this leg reds on every one of them.
+    """
+    collector = _extractor_lineno("def _collect_classify_items(")
+    # The collector's EXTENT is read, not assumed: the cited end is a claim too, and
+    # the pre-#10215 range ran two lines past `return items` into the blank lines
+    # before the next `def`. `ast` is what knows where a function ends.
+    end = next(
+        node.end_lineno for node in ast.walk(
+            ast.parse((_REPO / _EXTRACTOR).read_text()))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_collect_classify_items")
+    gates = (_EXTRACTOR_SITES["classify_later"]["items_s2"],
+             _EXTRACTOR_SITES["classify_later"]["items_union"])
+    for doc_name, path in _PREREG_STEP_CITE_DOCS:
+        text = path.read_text(encoding="utf-8")
+        assert f"tortoise/extractor_v2.py:{collector}" in text, (
+            f"{doc_name} does not cite the collector at "
+            f"tortoise/extractor_v2.py:{collector} — §10's argument rests on "
+            f"`_collect_classify_items`, so a cite that points anywhere else is an "
+            "argument from code the classify pass never reaches")
+        if doc_name == "preregistration.json":
+            # the record states the condition in one folded scalar; the RANGE and
+            # the two gates are the document's table/text, not the record's.
+            continue
+        assert f"tortoise/extractor_v2.py:{collector}-{end}" in text, (
+            f"{doc_name} does not cite the collector's extent as "
+            f"tortoise/extractor_v2.py:{collector}-{end} (the `def` through "
+            f"`return items`) — a range that runs past the body names the next "
+            "function's lines")
+        for gate in gates:
+            assert f"`{gate}`" in text, (
+                f"{doc_name} does not cite the `if items:` gate at {gate} — the "
+                f"classify passes are gated on the collector's list being "
+                f"non-empty, which is the whole of S2.3's conditionality")
+
+
 #: A bare CONTINUATION cite in either backtick spelling: the probes are
 #: docstrings, so they write ``:13334`` (RST) where the markdown writes `:13334`.
 _BARE_CONTINUATION = re.compile(r"`{1,2}(:\d+(?:-\d+)?)`{1,2}")

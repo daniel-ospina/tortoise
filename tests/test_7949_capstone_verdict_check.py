@@ -3421,7 +3421,23 @@ def test_g5_refuses_a_conditional_step_whose_surface_is_absent(tmp_path, monkeyp
 
 
 def test_g5_refuses_a_malformed_step_declaration(tmp_path, monkeypatch):
-    """A record whose `steps` block cannot be read must not silently mean 'all eight'."""
+    """A record whose `steps` block cannot be read must not silently mean 'all eight'.
+
+    ⛔ And it must be refused WITHOUT spending a pass (#10215 review). The
+    declaration lives in the FROZEN RECORD, so the extraction's outcome cannot
+    change the answer — but this arm used to run the real `TortoiseSDK`, refuse
+    at G5 only after G4 had returned, and therefore answer **4** (the pipeline
+    refusal) on any machine where the pass raised or carried no `stats.llm`
+    instead of **5**. That is not hypothetical: it red exactly like this on
+    `pi-runner-vm-2` while passing on another runner, which is a verdict that
+    depends on the box, not on the record.
+
+    The exploding SDK is the lever, not decoration: it makes "no pass was spent"
+    an assertion. Pre-fix the raise is caught by G4 and answers 4; post-fix the
+    refusal happens above G4 and the fake is never constructed.
+    """
+    import tortoise.sdk as sdk_mod
+
     corpus = tmp_path / "corpus.json"
     corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
     _read_prereg_ok(monkeypatch, _frozen_prereg(
@@ -3429,9 +3445,17 @@ def test_g5_refuses_a_malformed_step_declaration(tmp_path, monkeypatch):
         steps={"conditional": "S2.3"}))
     monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
     monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _ExplodingSDK:
+        def __init__(self):
+            raise AssertionError(
+                "the malformed declaration was refused AFTER a pass was spent")
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _ExplodingSDK)
     out = tmp_path / "malformed-steps.log"
     code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
                        "--out", str(out)])
     assert code == 5, code
     reason = cvc.extract_block(out.read_text())["run"]["reason"]
     assert "step declaration is unreadable" in reason, reason
+    assert "BEFORE the pass" in reason, reason
