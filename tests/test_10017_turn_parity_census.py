@@ -1557,3 +1557,37 @@ def test_expect_empty_does_NOT_skip_the_hosted_leg(tmp_path, monkeypatch):
     # …and without the flag the same empty graph still refuses.
     assert tpc.main(["--uri", "docker://x", "--graph-name", "g",
                      "--local-record-dir", str(tmp_path / "absent")]) == 3
+
+
+def test_the_docstring_documents_every_flag_the_parser_accepts():
+    """Review P2: the module docstring IS this gate's definition, and it had
+    drifted — it documented only the hosted flags, so the flag the owner ruling
+    makes the AUTHORITY (`--local-record-dir`) was absent from the contract a
+    reader decides on.
+
+    Mutation that goes RED here: deleting the `--local-record-dir` line from
+    the USAGE block (the pre-fix state).
+    """
+    import re
+    source = Path(tpc.__file__).read_text(encoding="utf-8")
+    flags = sorted(set(re.findall(r'add_argument\(\s*"(--[a-z][a-z0-9-]*)"',
+                                  source)))
+    assert flags, "no parser flags found — the scan is broken, not the doc"
+    undocumented = [f for f in flags if f not in (tpc.__doc__ or "")]
+    assert not undocumented, (
+        f"flags accepted but absent from the module docstring: {undocumented}")
+
+
+def test_the_docstring_states_the_local_legs_DECLARED_ABSENT_fields():
+    """The other half of the same drift: the artifact declares these absent, so
+    the contract must name them — a reader must not expect them compared."""
+    doc = tpc.__doc__ or ""
+    for name in tpc._LOCAL_RECORD_DECLARED_ABSENT:
+        assert name in doc, f"declared-absent field {name!r} is not in the doc"
+    assert "DECLARED ABSENT" in doc or "declared_absent" in doc
+    # The exact contradiction finding 2 named: the contract listed `kind`,
+    # `status` and `createdAt` under COMPARED EXACTLY for BOTH legs while the
+    # local leg declares all three absent. The qualification that resolves it
+    # must be in the contract, not only in the code.
+    assert "HOSTED leg ONLY" in doc, (
+        "the contract must qualify which leg compares kind/status/createdAt")

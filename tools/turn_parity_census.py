@@ -89,8 +89,25 @@ boundary can never split a node's rows and lose a wiring.
 THE PARITY DEFINITION (field by field — ambiguity here is how a purge becomes
 an incident)
 =============================================================================
+There are TWO record legs, and this definition is per-leg. **Which leg ran is
+in the artifact** (`report["record"]["leg"]`), together with
+`compared_fields` and `declared_absent`, so a narrower comparison can never
+read as the strong one.
+
+  * the **HOSTED** leg (`--record-dsn`) reads `public.point` through the
+    tenant-scoped door.
+  * the **LOCAL** leg (`--local-record-dir`) reads the per-session JSONL under
+    `~/.tortoise/session-events/` (plain day files AND the sealed
+    `archive/<day>.jsonl.gz`), rendered into stored text through the writer's
+    own `_capture_turn_window` + `_capture_turn_texts_with_redactions`. **This
+    is the AUTHORITY for #10017** (owner ruling 2026-11-01, relayed on the
+    issue): the record that must provably hold every turn is the local one,
+    and a parity census against the hosted store alone would be measuring the
+    wrong authority.
+
 For every in-population graph turn node, a record row (`public.point`,
-`node_key = t.id`, `is_episodic IS TRUE`) must exist, and:
+`node_key = t.id`, `is_episodic IS TRUE` — or the local leg's row derived from
+the session window) must exist, and:
 
     COMPARED EXACTLY           graph                     record
     ─────────────────────────────────────────────────────────────
@@ -102,10 +119,18 @@ For every in-population graph turn node, a record row (`public.point`,
     createdAt                  t.createdAt               created_at
     embedding (when the graph holds one)  t.embedding    embedding
 
-    `is_episodic` is the population PREDICATE on both sides (the graph leg
-    reads `is_episodic = true`, the record leg filters `is_episodic IS TRUE`),
-    so comparing it would be vacuous: it is not in `_EXACT_FIELDS` and must not
-    be listed as a compared field here.
+    ⛔ `kind`, `status`, `createdAt` and `embedding` are compared on the
+    HOSTED leg ONLY. The LOCAL record carries NO such columns — the capture
+    line holds `session_id` + `conversation` and nothing else — so on the
+    local leg they are DECLARED ABSENT (`_LOCAL_RECORD_DECLARED_ABSENT`,
+    surfaced as the `NOT COMPARED` line and `report["declared_absent"]`)
+    rather than fabricated from constants and then counted as compared. A
+    `declared_absent` name outside `_DECLARABLE_FIELDS` is an invented claim
+    in an artifact an owner decides on, and REFUSES. `is_episodic` is the
+    population PREDICATE on both sides (the graph leg reads `is_episodic =
+    true`, the record leg filters `is_episodic IS TRUE`), so comparing it
+    would be vacuous: it is not in `_EXACT_FIELDS` and must not be listed as a
+    compared field here.
 
     ALLOWED TO DIFFER, WITH THE REASON
     ─────────────────────────────────────────────────────────────
@@ -121,12 +146,18 @@ For every in-population graph turn node, a record row (`public.point`,
                                false on turns; a turn node carrying true is an
                                anomaly, not a parity field.
 
-    EMBEDDING RULE. The graph stores `vecf32` (IEEE-754 binary32); the record
-    stores the journal's float list as jsonb (binary64). Same length, and each
-    record component equal to the graph's after rounding THROUGH binary32 —
-    the storage the graph itself applies — is parity. `graph NULL + record
-    present` PASSES (the record holds a superset; the purge loses nothing);
-    `graph present + record absent/different` FAILS (the vector would be lost).
+    EMBEDDING RULE. On the HOSTED leg the graph stores `vecf32` (IEEE-754
+    binary32); the record stores the journal's float list as jsonb (binary64).
+    Same length, and each record component equal to the graph's after rounding
+    THROUGH binary32 — the storage the graph itself applies — is parity.
+    `graph NULL + record present` PASSES (the record holds a superset; the
+    purge loses nothing); `graph present + record absent/different` FAILS (the
+    vector would be lost). On the LOCAL leg `embedding` is DECLARED ABSENT:
+    the capture line holds no vector, and the graph's vector is a pure function
+    of `content` (the same rule as `content_hash`), so the transcript is not
+    what is being waived — but a per-turn `field_mismatch` on every embedded
+    deployment would be a permanent false refusal, so the limit is stated
+    rather than emitted as a defect.
 
     COUNT RULE. Parity is `record ⊇ graph` per key with field equality — NOT
     count equality. A session captured before the cutover and APPENDED to
@@ -140,6 +171,15 @@ For every in-population graph turn node, a record row (`public.point`,
     the answer is a backfill from the graph into the record (#10017's own
     ordering), never a delete. A record row with no graph node is expected
     (post-#10000 captures) and passes.
+
+    This rule is what makes the local leg's declared-absent fields safe: the
+    population comes from the GRAPH, so a record that is missing a row —
+    including a day the record provably holds no records for — cannot certify
+    it. A sealed day that decompresses to zero records is TOLERATED and
+    DISCLOSED (`empty_days`, printed as `empty day : …`), because a complete
+    verified archive of no records cannot hide a turn; a 0-byte archive is a
+    torn write and REFUSES, because the day's only remaining copy is then
+    unreadable.
 
 THE PASS CRITERION AND THE EXIT CODES
 =====================================
@@ -187,6 +227,13 @@ Nothing in this tool may be weakened to make a census pass.
 
 USAGE
 =====
+    # THE AUTHORITY (owner ruling on #10017): the local capture record.
+    python tools/turn_parity_census.py \
+        --uri 'docker://:@127.0.0.1:16398/tortoise_test_matrix' \
+        --local-record-dir ~/.tortoise/session-events \
+        [--json out.json] [--sample 5] [--expect-empty]
+
+    # The HOSTED leg (the store the ruling says is NOT the authority):
     python tools/turn_parity_census.py \
         --uri 'docker://:@127.0.0.1:16398/tortoise_test_matrix' \
         --record-dsn 'postgresql://tortoise_record_app:...@host/db' \
@@ -195,6 +242,21 @@ USAGE
 
     --uri            the FalkorDB URI of the TARGET graph (or --db-path for
                      an embedded graph). Read-only queries only.
+    --local-record-dir   the per-session capture log directory (env fallback
+                     TORTOISE_FALLBACK_DIR; default ~/.tortoise/session-events).
+                     THE AUTHORITY for #10017. Reads BOTH surfaces: plain
+                     `<day>.jsonl` day files and the sealed
+                     `archive/<day>.jsonl.gz` the seal writes for days older
+                     than the keep window — a census that saw only the plain
+                     files would call every pre-cutover turn
+                     `missing_in_record`. An explicit flag WINS over an
+                     ambient TORTOISE_RECORD_DSN (an ambient DSN silently
+                     changing the authority would measure the wrong store).
+                     Compares key/text/speaker and DECLARES ABSENT
+                     status/created_at/point_kind/embedding — see the parity
+                     definition above; `compared_fields` and
+                     `declared_absent` are in the artifact, and the
+                     `NOT COMPARED` line says it on stdout.
     --record-dsn     defaults to TORTOISE_RECORD_DSN. Must connect as a role
                      the tenant scope accepts (the app role) — a superuser/
                      owner DSN is refused with exit 3, because RLS would be
