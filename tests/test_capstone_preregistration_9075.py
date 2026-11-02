@@ -35,6 +35,11 @@ from tools import capstone_preregistration_check as check  # noqa: E402
 PREREG_DIR = REPO_ROOT / "docs" / "evidence" / "7949-capstone"
 PREREG = PREREG_DIR / "PRE-REGISTRATION.md"
 
+#: The SECOND bundle the gate's own CI step checks (`--dir … --dir …`, #10468). It is measured here
+#: because the two #9736/#9738 arms were written for the capstone bundle and, applied
+#: unconditionally, red-ed this one for seven things it never said (#10525).
+SIBLING_DIR = REPO_ROOT / "docs" / "evidence" / "5087-hypothesis"
+
 #: The ordering half reads COMMIT HISTORY, and CI test jobs check out at `fetch-depth: 1` — a
 #: settled, documented property of this repo (`tests/test_lint_tripwire.py`: *"CI test jobs use
 #: shallow fetch-depth:1"*). In a depth-1 clone git grafts the tip, so every path reports as added by
@@ -2574,6 +2579,719 @@ def test_an_exempted_log_is_named_in_the_report_not_waived_silently(tmp_path, mo
     exempted: list[str] = []
     assert check.check_ordering(prereg, [log], None, exempted) == []
     assert exempted == ["capstone.log"], exempted
+
+
+# ── the registry may not contradict the history or the model (#9736, #9738) ──
+
+
+def _record_copy(tmp_path: Path, drop: tuple[str, ...] = (), **patches) -> Path:
+    """A throwaway evidence directory: the REAL document + a MUTATED copy of the real record."""
+    (tmp_path / check.PREREG_NAME).write_text(PREREG.read_text())
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    rec.update(patches)
+    for key in drop:
+        rec.pop(key, None)
+    (tmp_path / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    return tmp_path
+
+
+def _crit(rec: dict, cid: str) -> dict:
+    return next(c for c in rec["criteria"] if c["id"] == cid)
+
+
+def _contradictions(directory: Path, scopes: list[str] | None = None) -> list[str]:
+    text = (directory / check.PREREG_NAME).read_text()
+    return check.check_registry_contradictions(
+        directory, check.parse_criteria_rows(text), check.parse_pins(text), scopes
+    )
+
+
+def test_the_real_record_discloses_every_visible_measurement():
+    """The committed pair, held to itself: every `true` is cited and every citation is `true`."""
+    assert _contradictions(PREREG_DIR) == []
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    assert _crit(rec, "E5")["measurement_visible_to_author"] is True
+    assert rec["prior_measurements"]["E5"]["commit"] == "ecc7bc8ca"
+    # E3's measurement POSTDATES the registration, so the field is honestly false and carries no
+    # `prior_measurements` entry — the distinction the two fields exist to keep apart.
+    assert _crit(rec, "E3")["measurement_visible_to_author"] is False
+    assert "E3" not in rec["prior_measurements"]
+    assert _crit(rec, "E3")["post_registration_measurement"]
+    # E4's `false` is RIGHT and, until #10525's review, unexplained — the shape that made it
+    # indistinguishable from a stale one. It stays false (its receipt ran 2026-10-19, before the
+    # record, but landed at `d50217273` on 2026-10-22, AFTER it, so nothing measured by the row was
+    # in the tree its author wrote), and it now has to say so.
+    e4 = _crit(rec, "E4")
+    assert e4["measurement_visible_to_author"] is False
+    assert "E4" not in rec["prior_measurements"]
+    basis = e4["measurement_visible_to_author_basis"]
+    assert "2026-10-19" in basis and "d50217273" in basis, basis
+    assert "a6085af84" in basis, basis
+
+
+def test_a_false_with_no_stated_ground_is_refused(tmp_path):
+    """THE MUTATION PROOF for the #10525 review's E4 finding.
+
+    `measurement_visible_to_author: false` was held to `prior_measurements` only, so a `false`
+    for a measurement that EXISTS but is not cited was invisible to every arm: E4 shipped exactly
+    that way — the field right, the reason nowhere, and the §0 row beside it asserting "no
+    measurement existed", which the receipt's own `date` (2026-10-19T01:39:26Z, two days before
+    the registration) refutes. A bare `false` is therefore refused, in both directions of the
+    reader's question (when did it run, and was the artefact in the tree).
+    """
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    _crit(rec, "E4").pop("measurement_visible_to_author_basis")
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("E4" in f and "measurement_visible_to_author_basis" in f for f in failures), failures
+    # the ground is asked of the `false` direction ONLY: a `true` is already held to a citation,
+    # so removing E5's basis must not red anything (it never had one).
+    assert not any("E5" in f for f in failures), failures
+
+
+def test_an_empty_basis_is_not_a_basis(tmp_path):
+    """Whitespace is the shape a field takes when a lane fills it in to pass the rule."""
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    _crit(rec, "E3")["measurement_visible_to_author_basis"] = "   "
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("E3" in f and "measurement_visible_to_author_basis" in f for f in failures), failures
+
+
+def test_e5_flipped_back_to_false_is_refused(tmp_path):
+    """THE MUTATION PROOF for #9738: flip the field back and the gate goes RED.
+
+    This is the node the issue names — the shipped pair used to read exactly this — so the test
+    recreates it rather than reasoning about it.
+    """
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    _crit(rec, "E5")["measurement_visible_to_author"] = False
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("E5" in f and "falsified" in f for f in failures), failures
+    assert any("ecc7bc8ca" in f for f in failures), failures
+
+
+def test_a_visible_measurement_with_no_citation_is_refused(tmp_path):
+    """The other direction: a `true` no artefact backs is the same sentence minus the evidence."""
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    rec["prior_measurements"].pop("E5")
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("E5" in f and "uncheckable" in f for f in failures), failures
+
+
+def test_a_pins_record_commit_disagreement_is_refused(tmp_path):
+    """Two copies of a commit pin that can disagree sends a reader to the wrong history."""
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    rec["prior_measurements"]["E5"]["commit"] = "deadbeef0"
+    rec["prior_measurements"]["E5"]["artifact"] = "nowhere.md"
+    directory = tmp_path / "capstone"
+    directory.mkdir()
+    (directory / check.PREREG_NAME).write_text(PREREG.read_text())
+    (directory / check.MACHINE_RECORD).write_text(json.dumps(rec, indent=2))
+    failures = _contradictions(directory)
+    assert any("pins.prior_measurements" in f for f in failures), failures
+
+
+def test_the_e3_class_set_is_derived_from_the_writer_constant():
+    """E3's `Event`/`Document` are not prose choices: they are the writer's own constant (#9736)."""
+    labels = check.derivation_label_classes()
+    assert {"Event", "Document"} <= set(labels), labels
+    assert "Object" not in labels, labels
+
+
+def test_the_real_e3_row_names_exactly_the_anchored_classes():
+    """EVERY cell, not their union (#10525 review P1) — the union is what let a narrower numerator by."""
+    rows = {r["id"]: r for r in check.parse_criteria_rows(PREREG.read_text())}
+    anchored = set(check.SELF_ANCHORED_CLASSES) | check.derivation_label_classes()
+    for cell in check.E3_CLASS_CELLS:
+        named = check._classes_named(rows["E3"][cell])
+        assert named == anchored, (cell, sorted(named), sorted(anchored))
+
+
+def test_an_e3_row_spelling_the_document_class_as_source_is_accepted():
+    """#10525 review P1, MEASURED: the honest alternative was a CI FAILURE, not a choice.
+
+    The writer documents `_DERIVATION_REFERENCES_LABELS` as a set of RELATION SPELLINGS, not node
+    labels (`edges.py:716-744`: "the discriminator is the caller-supplied RELATION spelling … not
+    the target's node label"), and `edges.py:738-744` states that POST-D10 the `:Document` LABEL is
+    retired — the derivation is stored as `(Source)-[:references]->(Source)`. Holding E3's cells to
+    that flat set therefore REFUSED `Source` ("counts ['Source'] … an unanchored class in the
+    numerator") and DEMANDED `Document`, `0` nodes in the shipped census — settling the owner's
+    still-open #9736 ruling (*"the honest set may be `Point` + `Event` + `Source`-as-document … a
+    question for your ruling, not something a lane may settle by picking the one that parses"*) by
+    making one reading a red check.
+
+    Non-vacuity: on the pre-fix rule this row produced TWO failures — `counts ['Source'] among its
+    derived nodes` and `omits ['Document'] from its metric` — so `failures == []` reds on it.
+    """
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event` + `:Source`) carrying a "
+                  "version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` + `:Source` "
+                       "(the classes the model anchors: `Point` on the node, `Event` and the "
+                       "document derivation on their link; floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
+    )
+    assert failures == [], failures
+    # The accepted set is DERIVED, never typed: the pair is the writer's spelling plus the node
+    # label the writer's own comment names for the retired spelling.
+    groups = check.e3_required_class_groups()
+    assert frozenset({"Document", "Source"}) in groups, groups
+    assert frozenset({"Point"}) in groups and frozenset({"Event"}) in groups, groups
+    assert not any("Object" in group for group in groups), groups
+
+
+def test_an_e3_row_naming_neither_document_spelling_is_still_refused():
+    """The refusal that MATTERS survives: dropping the document class is #9736 one level down.
+
+    Accepting `Source` must not turn the omission arm into a pass. A cell naming `Point` + `Event`
+    and no document class at all still cannot reach a denominator that counts the document
+    derivation, and the message names BOTH spellings so a reader is not sent to the one the gate
+    happens to prefer.
+    """
+    row = {"line": "269", "metric": "", "denominator": ""}
+    cells = {"metric": check._classes_named("`Point` + `Event`"),
+             "denominator": check._classes_named("`Point` + `Event`")}
+    failures = check._e3_class_set_failures(row, cells, check.e3_required_class_groups())
+    assert len(failures) == 2, failures
+    for failure in failures:
+        assert "omits the document-derivation class" in failure, failure
+        assert "Document" in failure and "Source" in failure, failure
+
+
+def test_an_e3_row_spelled_in_prose_case_is_REFUSED_not_skipped():
+    """#10525 review ROUND 3, P2 — MEASURED: case sensitivity alone bought a SKIP.
+
+    Making the class matcher case-sensitive closed the prose-noun false accept and opened the inverse
+    hole: a row whose cells are spelled `point + object + event` names no canonical class, so the
+    caller's "names no graph class at all" arm skipped it — and the PRE-FIX matcher REFUSED that same
+    row for naming `Object`. A lower-cased row is a SPELLING error, never a criterion measured over
+    something else, so it must FAIL.
+
+    Non-vacuity: on the round-2 code (case-sensitive `_classes_named`, no
+    `_class_words_mentioned`) this row produced `failures == []` plus the "names no graph class"
+    scope note, so the `len(failures) >= 1` assertion below reds on it.
+    """
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (point + object + event) carrying a version "
+                  "anchor",
+        "denominator": "**all** derived nodes written by the run — point + object + event "
+                       "(floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "270",
+    })
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text()), scopes
+    )
+    assert len(failures) >= 1, (failures, scopes)
+    assert any("LABEL spelling" in f for f in failures), failures
+    assert all("names no graph class at all" not in s for s in scopes), scopes
+    # and the genuine non-class row is still a DECLARED skip, not a failure
+    assert check._class_words_mentioned(
+        "session-arms whose receipt proves the arm's S3 state") == set()
+
+
+def test_an_e3_row_naming_the_NOUN_source_instead_of_the_class_is_refused():
+    """#10525 review ROUND 2, P2 — MEASURED: the ordinary English noun satisfied the arm.
+
+    The class matcher casefolded the cell and matched the lower-case token, so E3's own wording —
+    *"``Point`` + ``Event`` … that are the SOURCE of at least one ``extractedFrom`` relationship"*
+    — named `{Point, Event, Source}` and PASSED, i.e. a cell naming NO document class at all was
+    accepted by the very arm written to refuse it, against §7 item 6's *"a denominator that omits a
+    class the model does anchor fails too"* (quoted as that rule states it — the document-class
+    requirement is this arm's own derivation from it, not a sentence the registration contains).
+    A Cypher node label is case-sensitive: the class is
+    spelled `Source`/`Document`, the prose noun is `source`/`SOURCE` and names nothing.
+
+    Non-vacuity: on the pre-fix matcher both spellings yielded `Source` in the named set and
+    `_e3_class_set_failures` returned `[]` — so the `len(failures) == 2` below reds on it.
+    """
+    row = {"line": "269", "metric": "", "denominator": ""}
+    for prose in ("the SOURCE of at least one `extractedFrom` relationship",
+                  "the source of at least one `extractedFrom` relationship"):
+        cell = f"`Point` + `Event` that are {prose}"
+        named = check._classes_named(cell)
+        assert named == {"Point", "Event"}, (prose, sorted(named))
+        cells = {"metric": named, "denominator": set(named)}
+        failures = check._e3_class_set_failures(row, cells, check.e3_required_class_groups())
+        assert len(failures) == 2, (prose, failures)
+        for failure in failures:
+            assert "omits the document-derivation class" in failure, failure
+    # ...and the CLASS spelling is still accepted, including the owner-gated retired one.
+    assert "Source" in check._classes_named("`Point` + `Event` + `:Source`")
+    assert "Document" in check._classes_named("`Point` + `Event` + `Document`")
+
+
+def test_an_e3_numerator_narrower_than_its_denominator_is_refused():
+    """THE MUTATION PROOF for #10525 P1, measured on the pre-fix code.
+
+    With `metric` naming `Point` + `Event` and the shipped `denominator` still naming `Point` +
+    `Event` + `Document`, the union test returned `[]` — a numerator that cannot reach its own
+    denominator, which is #9736 one level down, passed the rule written to refuse it.
+    """
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event`) carrying a version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` + `Document` "
+                       "(the classes the model anchors; floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
+    )
+    assert any(
+        "E3" in f and "omits" in f and "from its metric" in f and "Document" in f for f in failures
+    ), failures
+    # The denominator IS complete: the rule must name the cell that is short, not both.
+    assert not any("from its denominator" in f for f in failures), failures
+
+
+def test_an_e3_denominator_missing_an_anchored_class_is_refused():
+    """Symmetric arm: a complete numerator does not excuse a denominator that scores a subset."""
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event` + `Document`) carrying a "
+                  "version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` (floor ≥ 30)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
+    )
+    assert any("omits" in f and "from its denominator" in f and "Document" in f for f in failures), \
+        failures
+    assert not any("from its metric" in f for f in failures), failures
+
+
+def test_the_two_arms_are_asked_of_the_capstone_bundle():
+    """Non-vacuity for the scope: the bundle they were WRITTEN for is asked both, and skips none."""
+    scopes: list[str] = []
+    assert _contradictions(PREREG_DIR, scopes) == []
+    assert scopes == [], scopes
+
+
+def test_the_sibling_bundle_is_not_failed_by_the_arms_it_never_declared():
+    """REGRESSION, measured: 7 failures on the merged tree before the scope existed (#10525).
+
+    `docs/evidence/5087-hypothesis` lands in the SAME CI invocation as the capstone bundle
+    (#10468). Its record predates `measurement_visible_to_author` entirely — no field on any
+    criterion, no `prior_measurements` block — so it makes no visibility claim to contradict; and
+    its E3 is a SESSION-ARM receipt check naming no graph class at all, so the anchor model, which
+    never scored it, is not its subject. Six non-boolean failures plus one "omits every class" is
+    what an unconditional rule says about a bundle that said none of it.
+    """
+    text = (SIBLING_DIR / check.PREREG_NAME).read_text()
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(
+        SIBLING_DIR, check.parse_criteria_rows(text), check.parse_pins(text), scopes
+    )
+    assert failures == [], failures
+    assert len(scopes) == 2, scopes
+    assert any("#9738" in s for s in scopes), scopes
+    assert any("names no graph class" in s for s in scopes), scopes
+
+
+def test_a_caller_that_carries_no_scope_list_still_declares_the_skips(capsys):
+    """A skip nobody reads is a green nobody measured — so omitting `scopes` may not silence it.
+
+    `scopes` is optional (a caller with nowhere to put the notes need not build a list), and until
+    the #10525 review's residual was closed that default cost the DECLARATION: `_note` appended
+    nothing and printed nothing, so an arm this gate did not enforce left no trace anywhere. The
+    no-list path now writes the same sentence to `stderr`, where this tool's `ERROR:` lines already
+    go, so the two states are "carried" and "printed" and there is no third.
+
+    Non-vacuity, measured against the pre-fix `_note`: it returned without printing when
+    `scopes is None`, so `readouterr().err` was empty and both assertions below red.
+    """
+    text = (SIBLING_DIR / check.PREREG_NAME).read_text()
+    failures = check.check_registry_contradictions(
+        SIBLING_DIR, check.parse_criteria_rows(text), check.parse_pins(text)
+    )
+    assert failures == [], failures
+    err = capsys.readouterr().err
+    assert "declared, not carried" in err, err
+    assert "#9738" in err, err
+    assert "names no graph class" in err, err
+
+
+def test_a_record_that_carries_no_visibility_field_is_not_asked_the_9738_rule(tmp_path):
+    """A record that predates the field makes no claim, so there is nothing to contradict."""
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    (directory / check.MACHINE_RECORD).write_text(json.dumps({
+        "schema": "capstone-prereg-v1",
+        "criteria": [{"id": "E5", "metric": "m", "denominator": "d"}],
+    }))
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(
+        directory, check.parse_criteria_rows(PREREG.read_text()), {}, scopes
+    )
+    assert failures == [], failures
+    assert any("#9738" in s for s in scopes), scopes
+
+
+def test_dropping_one_visibility_field_does_not_opt_out_of_the_rule(tmp_path):
+    """The scope is a schema declaration, NOT a per-criterion escape hatch.
+
+    A record that declares the field anywhere still owes it EVERYWHERE: otherwise deleting the one
+    criterion you would have had to disclose would be the way past a rule about disclosure.
+    """
+    rec = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    _crit(rec, "E3").pop("measurement_visible_to_author")
+    directory = _record_copy(tmp_path, criteria=rec["criteria"])
+    scopes: list[str] = []
+    failures = _contradictions(directory, scopes)
+    assert any("E3" in f and "not a boolean" in f for f in failures), failures
+    assert not any("#9738" in s for s in scopes), scopes  # the arm APPLIED, it was not skipped
+
+
+def test_a_skipped_arm_is_declared_in_the_report_and_on_the_human_path(tmp_path, capsys):
+    """A skip that is not declared is the silent-green shape this tool exists to refuse."""
+    code = check.main(["--dir", str(SIBLING_DIR), "--no-git", "--no-corpus", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload["failures"]
+    assert payload["ok"] is True
+    assert len(payload.get("registry_scopes") or []) == 2, payload.get("registry_scopes")
+
+    code = check.main(["--dir", str(SIBLING_DIR), "--no-git", "--no-corpus"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "registry arm NOT applied" in out
+
+    # …and the capstone bundle, which both arms ARE asked of, says nothing.
+    code = check.main(["--dir", str(PREREG_DIR), "--no-git", "--no-corpus"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "registry arm NOT applied" not in out
+
+
+def test_e3_counting_an_unanchored_class_is_refused(tmp_path):
+    """THE MUTATION PROOF for #9736: put `:Object` back and the gate goes RED.
+
+    `:Object` mention links carry no `sourceVersion` by design (#5199 option A), so a denominator
+    counting them makes `= 1.000` unreachable — the exact row the shipped registration carried.
+    """
+    text = PREREG.read_text()
+    mutated = text.replace(
+        "| **E3** | derived nodes written by the run (`Point` + `Event` + `Document`) carrying a version anchor |",
+        "| **E3** | derived nodes written by the run (`Point` + `Object` + `Event`) carrying a version anchor |",
+    )
+    assert mutated != text, "the shipped E3 metric row moved — this mutation test is stale"
+    target = tmp_path / check.PREREG_NAME
+    target.write_text(mutated)
+    # the record must be READABLE for the rule to run at all: an absent record is
+    # `check_machine_record`'s failure, and this rule stays silent rather than doubling it.
+    (tmp_path / check.MACHINE_RECORD).write_text((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    pins = check.parse_pins(mutated)
+    failures = check.check_registry_contradictions(
+        tmp_path, check.parse_criteria_rows(mutated), pins
+    )
+    assert any("E3" in f and "Object" in f and "#9736" in f for f in failures), failures
+
+
+def test_e3_omitting_an_anchored_class_is_refused():
+    """Symmetric arm: a numerator that cannot count an anchored class cannot reach its denominator.
+
+    Built as a ROW rather than by editing the document: the shipped denominator also names
+    `Document` in its explanatory clause, so a text mutation that drops the list entry still names
+    the class — and this arm is about the rule, not about the document's phrasing.
+    """
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event`) carrying a version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` (floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
+    )
+    assert any("E3" in f and "omits" in f for f in failures), failures
+
+
+def test_an_unreadable_derivation_constant_is_an_error_not_a_pass(monkeypatch):
+    """A gate that cannot see the model must never green the row it was written to refuse."""
+    monkeypatch.setattr(check, "DERIVATION_LABELS_PATH", Path("tortoise/projection/absent.py"))
+    with pytest.raises(check.CheckError):
+        check.derivation_label_classes()
+
+
+def test_a_colon_spelled_class_is_visible_to_the_rule():
+    """#9736 review P2, MEASURED: `(?<![\\w:])` made the canonical `:Object` spelling invisible.
+
+    Two failures in opposite directions, both from one lookbehind: a row written
+    `Point` + `:Object` + `Event` (the spelling §3.4 itself uses) named only `{Point, Event}` and
+    PASSED the rule written to refuse it, while a correct row spelled entirely with colons named
+    nothing and was FALSELY red-ed for omitting all three classes.
+    """
+    assert check._classes_named("`Point` + `:Event` + `:Document`") == {"Point", "Event", "Document"}
+    assert check._classes_named("`Point` + `:Object` + `Event`") == {"Point", "Object", "Event"}
+    # a word that merely CONTAINS a class name is still not a class
+    assert check._classes_named("the fooObject list, and the pointed remark") == set()
+
+
+def test_a_colon_spelled_object_re_reds_the_e3_rule():
+    """The mutation that survived the first pass: the refused class, written the canonical way."""
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `:Object` + `:Event`) carrying an anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `:Event` (`:Document` too); floor ≥ 30",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    failures = check.check_registry_contradictions(
+        PREREG_DIR, rows, check.parse_pins(PREREG.read_text())
+    )
+    assert any("E3" in f and "Object" in f for f in failures), failures
+
+
+def test_the_measurement_probe_derives_the_same_class_set():
+    """#9736 must not be fixed on paper only — the INSTRUMENT's set is the same set.
+
+    `probes/capstone_measure.py` hardcoded `("Point", "Object", "Event")` with the comment "not a
+    choice this probe makes", and that WAS a choice: a re-run emitted `148/433` while the
+    registration now names `148/383`. A single measured criterion may not be computed two ways.
+    """
+    import ast
+
+    source = (PREREG_DIR / "probes" / "capstone_measure.py").read_text()
+    assert "_DERIVATION_REFERENCES_LABELS" in source
+    tree = ast.parse(source)
+    assignments = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(getattr(t, "id", "") == "DERIVED_LABELS" for t in node.targets)
+    ]
+    assert assignments, "the probe no longer defines DERIVED_LABELS — this test is stale"
+    for node in assignments:
+        hardcoded = isinstance(node.value, ast.Tuple) and all(
+            isinstance(e, ast.Constant) for e in node.value.elts
+        )
+        assert not hardcoded, (
+            "DERIVED_LABELS is a hardcoded literal again — it must follow "
+            "`_DERIVATION_REFERENCES_LABELS` + Point, or the probe and the registration measure "
+            "different criteria (#9736)"
+        )
+
+
+# ── the record's description of its own gate, and the routing row a reader arrives through ──
+
+
+def test_the_records_e3_rule_states_the_rule_the_gate_implements():
+    """§7 item 6 is the record's statement of its own MECHANICAL enforcement, so it must be true.
+
+    #10525 review P3, MEASURED: §7 said E3's cells must name **exactly** `{Point} ∪
+    _DERIVATION_REFERENCES_LABELS`, while the gate holds each cell to one ALIAS GROUP per anchored
+    class — so a row spelling the document-derivation class `Source` (the node label it is stored on
+    once `Document`'s label retires) PASSED a rule the record told a reader refuses it. §7 is the
+    section whose whole job is to be the checkable statement of what is enforced; it stated the
+    opposite, and no test compared the sentence with the code.
+
+    The requirement is derived FROM the code (`e3_required_class_groups`), so the prose cannot drift
+    again: every member of every anchored-class group must be named in §7 item 6, and the flat-set
+    claim that replaced a group with a single spelling must not come back.
+
+    Non-vacuity: at the pre-fix head the paragraph carried `**exactly**` and `{Point} ∪ that set`
+    and named neither `Document` nor `Source` as alternatives, so this reds on it.
+    """
+    text = PREREG.read_text()
+    start = text.index("**E3's class set is re-derived")
+    paragraph = text[start:].split("\n\n", 1)[0]
+    for group in check.e3_required_class_groups():
+        for member in sorted(group):
+            assert f"`{member}`" in paragraph, (
+                f"§7 item 6 never names `{member}`, which the gate requires — a reader would "
+                f"conclude the rule refuses a row this gate accepts: {paragraph!r}"
+            )
+    assert "{Point} ∪ that set" not in paragraph, (
+        "§7 item 6 claims the required set is the FLAT `{Point} ∪ _DERIVATION_REFERENCES_LABELS`, "
+        "but the gate holds a cell to one alias GROUP per class — the sentence is false in the "
+        "direction that lets an accepted spelling read as a refused one"
+    )
+    assert "**exactly**" not in paragraph, (
+        "§7 item 6 says the cells must name *exactly* one set; the document-derivation class has "
+        "two accepted spellings, so `exactly` cannot be what is enforced"
+    )
+
+
+def test_a_source_spelled_e3_row_declares_the_probe_cannot_see_it():
+    """The gate accepts `Source` and must SAY that it does not check the instrument (#10525 P2).
+
+    Either spelling of the document-derivation class passes (`RETIRED_SPELLING_LABELS`, #9736 is
+    owner-gated), but nothing in the tool reads `probes/capstone_measure.py`: the probe's
+    `DERIVED_LABELS` is derived from the writer's constant, so no sentence in the record can move
+    it and a `Source` registration registers a node class the probe never enumerates. Enforcing it
+    would settle #9736 (a red check on the owner's open alternative); saying nothing would let a
+    registration and its instrument part company with no trace. So it is DECLARED — and this test
+    is the trace.
+
+    Non-vacuity: on the pre-fix gate `scopes` stayed `[]` for the `Source` row, because no arm
+    compared the spelling with anything — so the `assert scopes` below reds on it.
+    """
+    text = PREREG.read_text()
+    pins = check.parse_pins(text)
+    rows = [r for r in check.parse_criteria_rows(text) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "derived nodes written by the run (`Point` + `Event` + `:Source`) carrying a "
+                  "version anchor",
+        "denominator": "**all** derived nodes written by the run — `Point` + `Event` + `:Source` "
+                       "(floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(PREREG_DIR, rows, pins, scopes)
+    assert failures == [], failures
+    assert len(scopes) == 1, scopes
+    note = scopes[0]
+    assert "probes/capstone_measure.py" in note, note
+    assert "Source" in note, note
+    assert "DERIVED_LABELS" in note, note
+
+    # …and the SHIPPED row (the writer's `Document` spelling) declares nothing, because the
+    # registration and the probe agree by construction: a note here would be the false red.
+    shipped: list[str] = []
+    assert check.check_registry_contradictions(
+        PREREG_DIR, check.parse_criteria_rows(text), pins, shipped) == []
+    assert shipped == [], shipped
+
+
+def test_the_records_e3_rule_claims_no_enforcement_over_the_probe():
+    """§7 item 6 must not promise a check on the INSTRUMENT that the gate cannot perform.
+
+    #10525 review P2: the paragraph said a `Source` registration "also moves the probe's
+    `DERIVED_LABELS` with it (§10.1) — otherwise the registration and the measurement part
+    company, which is the very divergence this rule exists to refuse." Two clauses that cannot both
+    hold: the gate accepts either spelling and never reads the probe, and the probe's set is derived
+    from the writer's constant, so the RECORD cannot move it. §7 is the section whose whole job is
+    to be the checkable statement of what is enforced, so a promise of enforcement it does not have
+    is the defect class this bundle exists to remove — and it sat in the sentence a lane reads when
+    it is deciding how to spell the class.
+
+    What must be there instead: the obligation stated as an obligation ON THE AMENDMENT, and the
+    disclosure that the gate DECLARES the divergence rather than refusing it.
+
+    Non-vacuity: at the pre-fix head the paragraph carried "the very divergence this rule exists to
+    refuse" and never named the probe's path or the declared note, so this reds on it.
+    """
+    text = PREREG.read_text()
+    start = text.index("**E3's class set is re-derived")
+    paragraph = text[start:].split("\n\n", 1)[0]
+    assert "the very divergence this rule exists to refuse" not in paragraph, (
+        "§7 item 6 claims the rule REFUSES a registration/instrument divergence; the gate accepts "
+        "either spelling and never reads `probes/capstone_measure.py`, so the claim is false"
+    )
+    assert "probes/capstone_measure.py" in paragraph, (
+        "§7 item 6 must name the instrument it cannot check, or a lane reads the sentence as a "
+        "check that exists"
+    )
+    assert "obligation" in paragraph and "amendment" in paragraph, (
+        "moving the probe with the spelling is the AMENDMENT's obligation — §7 must say so rather "
+        "than attribute it to the rule"
+    )
+    assert "declare" in paragraph, (
+        "the gate declares a `Source` row's divergence (`_note_unchecked_probe_spelling`); §7 must "
+        "state that instead of claiming a refusal"
+    )
+    # The gate really is what §7 now describes: the declared-note helper exists and is reachable
+    # from the class-set arm, so the prose is checked against the code, not against itself.
+    assert callable(check._note_unchecked_probe_spelling)
+    source = (REPO_ROOT / "tools" / "capstone_preregistration_check.py").read_text()
+    assert "_note_unchecked_probe_spelling(scopes, directory, row, cells)" in source, (
+        "the helper must be CALLED by the class-set arm, or §7 describes a declaration that is "
+        "never emitted"
+    )
+
+
+def test_the_routing_index_carries_both_e3_readings():
+    """A reader arrives through `docs/00_index.md`, so the amendment has to reach that row too.
+
+    #10525 review P2: §10.1, the README and the E-row audit were all extended with the amended
+    reading, and the index row was not — it still published `148/433` and "the frozen `= 1.000` is
+    unreachable as registered", which is the interpretation §10 records as the registration's
+    DEFECT. The surface the repo routes readers through therefore said the amendment had not
+    happened, which is the artefact-contradicts-artefact class §10 exists to remove.
+
+    Non-vacuity: the pre-fix row carried neither `148/383` nor the `OPEN` marker, so this reds.
+    """
+    row = next(
+        ln for ln in (REPO_ROOT / "docs" / "00_index.md").read_text().splitlines()
+        if ln.startswith("| **`#7949` / `#9080`")
+    )
+    assert "148/433" in row, "the AS-REGISTERED reading must stay published — it is not erased"
+    assert "148/383" in row and "0.38642" in row, (
+        "the index row publishes only the pre-amendment reading; §10.1 re-registers the denominator "
+        f"to the anchored class set, so the row is stale: {row[:200]!r}"
+    )
+    assert "#9736" in row and "OPEN" in row, (
+        f"the row must say #9736 remains OPEN and owner-gated — the amendment does not close it: {row[:200]!r}"
+    )
+
+
+def test_a_skipped_arm_names_the_bundle_that_skipped_it(tmp_path):
+    """A declared skip must name its OWN subject (#10525 review P3, MEASURED).
+
+    The class-set note hardcoded `docs/evidence/5087-hypothesis`'s evidence, and it is emitted for
+    WHICHEVER bundle skipped the arm — so stripping the class names from the CAPSTONE's own E3 row
+    made the gate explain the capstone's skip with the sibling's session-arm receipt criterion. A
+    skip whose declaration names the wrong subject reads as a checked one, which is the class this
+    tool exists to refuse.
+
+    Non-vacuity: at the pre-fix head the note carried `docs/evidence/5087-hypothesis's E3 is a
+    session-arm receipt check` for this bundle, so both assertions red on it.
+    """
+    directory = tmp_path / "a-named-bundle"
+    directory.mkdir()
+    _record_copy(directory)
+    rows = [r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] != "E3"]
+    rows.append({
+        "id": "E3",
+        "metric": "every derived node the run writes carries a version anchor",
+        "denominator": "every derived node the run writes (floor ≥ 30 nodes)",
+        "threshold": "`= 1.000` (zero unanchored)",
+        "line": "269",
+    })
+    scopes: list[str] = []
+    failures = check.check_registry_contradictions(
+        directory, rows, check.parse_pins(PREREG.read_text()), scopes
+    )
+    assert failures == [], failures
+    class_set = [s for s in scopes if "names no graph class" in s]
+    assert class_set, scopes
+    assert all("a-named-bundle" in s for s in class_set), class_set
+    assert not any("5087-hypothesis" in s for s in class_set), (
+        f"the skip for THIS bundle is explained with a sibling's evidence: {class_set}"
+    )
 
 # ── the multi-bundle CLI: `--dir` is repeatable, a failure names its bundle (#10468) ────────
 

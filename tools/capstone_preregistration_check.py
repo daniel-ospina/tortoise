@@ -6,7 +6,7 @@ the discipline that made `#3011` usable."* A registration that is a document onl
 can be edited after the numbers land, and a threshold chosen after the run is the exact failure the
 constraint exists to prevent. This tool is what makes the artefact executable.
 
-It verifies five things, and it fails on each of them for a specific reason:
+It verifies six things, and it fails on each of them for a specific reason:
 
 1. **Every criteria row carries a metric, a denominator AND a numeric threshold.** A row with a
    placeholder (*"to be decided"*, *"TBD"*, an em dash) is a row that will be decided later — which is
@@ -78,6 +78,30 @@ It verifies five things, and it fails on each of them for a specific reason:
    the same rule, in both directions: the measured log names only five of the seven frozen bars, so
    the record's restatement is what holds the other two — `corroboration_min_sessions`, which decides
    the published `not-majority-of-sessions` qualifier, and the emitted-only `sessions_total`.
+
+6. **The record may not contradict the history or the model it describes.** Two contradictions, one
+   rule, because both are the same defect: a frozen artefact asserting something the tree already
+   refutes, with no number changing to reveal it.
+
+   * ``measurement_visible_to_author`` is a claim about **history** — the one thing a registry can be
+     wrong about while staying internally consistent. E5 read ``false`` for a metric whose
+     measurement had landed two days BEFORE the record (#9738). The field is therefore held to
+     ``prior_measurements`` in BOTH directions: ``false`` with a citation is the falsified claim, and
+     ``true`` with none is a claim no artefact backs.
+   * **A ``false`` must carry its BASES** (``measurement_visible_to_author_basis``). A citation is
+     only one of the two ways a ``false`` can be wrong: the other is that the measurement exists
+     but no citation names it, and then NO arm can see it — ``prior_measurements`` is the only table
+     this gate reads. E4 shipped in exactly that shape (#10525 review): the field was right
+     (its receipt ran 2026-10-19, before the record, but landed at ``d50217273`` on 2026-10-22,
+     after it, so nothing was in the tree the author read) and the reason was stated NOWHERE, while
+     the §0 row beside it said "no measurement existed" — which the measurement's own date refutes.
+     A bare ``false`` cannot be told apart from a stale one, by a reader or by a rule, so the ground
+     is required.
+   * **E3's class set** is re-derived from ``_DERIVATION_REFERENCES_LABELS`` in
+     ``tortoise/projection/edges.py`` (plus ``Point``, which carries the anchor on the node). Naming
+     ``:Object`` counts a class the model leaves unanchored BY DESIGN (#5199 option A), so ``= 1.000``
+     is unreachable as registered and a run would report a recorded decision as a defect (#9736).
+     Omitting an anchored class fails symmetrically.
 
 What it deliberately does NOT do: it does not judge whether the thresholds are *right*. That is the
 argument in the document, and an argument is reviewed, not grepped.
@@ -187,6 +211,46 @@ EXIT_KEY = re.compile(r"(?<!\w)exit\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
 
 #: Punctuation a value may be glued to at end-of-token (``result=UNPREREGISTERED,``).
 VALUE_TRAILING = ",;."
+
+#: Where the writer states WHICH node classes carry a version anchor on their DERIVATION LINK —
+#: ``_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`` at
+#: ``tortoise/projection/edges.py``. E3's class set is re-derived from this constant rather than from
+#: the registration's prose (#9736): the constant is what the model does, and the row must follow it.
+DERIVATION_LABELS_PATH = Path("tortoise/projection/edges.py")
+DERIVATION_LABELS_NAME = "_DERIVATION_REFERENCES_LABELS"
+
+#: ``:Point`` carries the anchor on the NODE (#5038, ``extractedFrom``), so it is a derived class that
+#: is not a *link* label — E3's numerator is ``Point`` plus every entry in the constant above.
+SELF_ANCHORED_CLASSES = ("Point",)
+
+#: The node LABEL each RETIRED relation spelling is actually stored on — the writer's own statement,
+#: not this gate's reading (#10525 review P1). ``edges.py:738-744``: *"POST-D10 the ``:Document``
+#: LABEL is retired (a document is a ``:Source``) … the stored edge is
+#: ``(Source)-[:references]->(Source)`` either way, while the alias is what still marks it a
+#: DERIVATION."* So a row may honestly spell the document-derivation class either way, and the
+#: shipped census proves the ambiguity costs a real count: ``Document`` is ``0`` nodes.
+#:
+#: ⛔ THIS TABLE EXISTS SO THE GATE DOES NOT SETTLE THE QUESTION (#9736 is OWNER-GATED). The ruling
+#: on #9736 is *"the honest set may be ``Point`` + ``Event`` + ``Source``-as-document … a question
+#: for your ruling, not something a lane may settle by picking the one that parses."* A rule that
+#: DEMANDED ``Document`` and REFUSED ``Source`` settled it — by turning the owner's open alternative
+#: into a CI failure. The gate now accepts either member, and decides only what is mechanically
+#: decidable: a cell that names NO document class at all still fails (that is #9736's own shape one
+#: level down), and a cell that names an unanchored class (``Object``) still fails.
+RETIRED_SPELLING_LABELS = {"Document": "Source"}
+
+#: Every node class E3's metric/denominator may NAME, keyed by the token that appears in prose. A
+#: class outside ``{Point} | labels | the retired spellings' labels`` is a class the model does not
+#: anchor for this criterion: naming it makes the row's own numerator unable to reach its
+#: denominator (#9736, #5199 option A). ``Source`` is IN for the reason ``RETIRED_SPELLING_LABELS``
+#: states — it is the label the document derivation is stored on, not an extra class.
+NODE_CLASS_TOKENS = {
+    "point": "Point",
+    "event": "Event",
+    "document": "Document",
+    "object": "Object",
+    "source": "Source",
+}
 
 #: The capstone verdict bundle's machine record, as the log carries it. Read from the LOG's own
 #: bytes — never from a pin — so a log edited into a scored one cannot keep riding an exemption.
@@ -672,6 +736,487 @@ def _list(container: dict, key: str, where: str) -> list:
 
 def _pins_mapping(pins: dict, key: str) -> dict:
     return _mapping(pins, key, "pins")
+
+
+def derivation_label_classes() -> frozenset[str]:
+    """The link-anchored derivation classes, read from the writer's OWN constant (#9736).
+
+    Read with :mod:`ast`, not by importing ``tortoise``: this rule must run in the CI job that does
+    NOT install the package (``--no-corpus``), and an import constraint would make the rule skip in
+    exactly the cheap place it should always run. A constant this reader cannot find is a check that
+    could not read its subject — ``CheckError`` (exit 2), never a silent pass, because a gate that
+    cannot see the model would green every row it was written to refuse.
+    """
+    import ast
+
+    path = REPO_ROOT / DERIVATION_LABELS_PATH
+    try:
+        tree = ast.parse(path.read_text())
+    except OSError as exc:
+        raise CheckError(
+            f"cannot read {DERIVATION_LABELS_PATH} to derive E3's class set ({exc}) — the rule "
+            "that E3's denominator follows the model cannot be performed"
+        ) from exc
+    except SyntaxError as exc:  # pragma: no cover - a broken writer module is a tree problem
+        raise CheckError(f"{DERIVATION_LABELS_PATH} does not parse: {exc}") from exc
+
+    found: set[str] | None = None
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if not any(isinstance(t, ast.Name) and t.id == DERIVATION_LABELS_NAME for t in targets):
+            continue
+        call = value
+        if isinstance(call, ast.Call) and call.args:
+            call = call.args[0]
+        if isinstance(call, (ast.Set, ast.List, ast.Tuple)):
+            literals = {
+                elt.value
+                for elt in call.elts
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            }
+            if literals:
+                found = literals
+    if not found:
+        raise CheckError(
+            f"{DERIVATION_LABELS_PATH} carries no readable {DERIVATION_LABELS_NAME} — E3's class "
+            "set is derived from it, so a constant that cannot be read is not a passing row"
+        )
+    return frozenset(found)
+
+
+def _classes_named(cell: str) -> set[str]:
+    """Which graph classes a cell NAMES, by the prose tokens above (``:Object`` folded in).
+
+    ⚠️ THE ANCHOR IS ``(?<![\\w])``, NOT ``(?<![\\w:])`` (#9736 review P2). A previous revision
+    excluded a preceding colon to avoid matching ``tuple:point``-shaped words — which made the
+    CANONICAL ``:Object`` spelling invisible: a row written ``Point`` + ``:Object`` + ``Event`` (the
+    spelling §3.4 itself uses) named only ``{Point, Event}`` and PASSED the very rule written to
+    refuse it, while a correct row spelled entirely with colons named nothing and was FALSELY red-ed
+    for omitting all three classes. A colon is exactly the markdown/Cypher class prefix, so it must
+    not block a match; ``fooObject`` still does not match because ``o`` is a word character.
+
+    ⛔ THE BACKSLASHES ABOVE ARE DOUBLED ON PURPOSE (#10525 review P2): this is a NORMAL docstring,
+    so a single-backslash ``\\w`` is an invalid escape sequence — a ``SyntaxWarning`` on every run
+    that imports this gate (measured: ``-W error::SyntaxWarning`` turns it into a ``SyntaxError`` at
+    this line), and a hard error once invalid escapes stop being tolerated. It is also an asymmetry
+    inside one commit: the sibling docstring in ``tests/test_capstone_preregistration_9075.py``
+    already writes the same text escaped, and now both compile clean.
+
+    ⛔ THE MATCH IS CASE-SENSITIVE AND SPELLS THE LABEL (#10525 review round 2, P2 — MEASURED). The
+    first revision casefolded the cell and matched the lower-case token, so the ORDINARY ENGLISH
+    NOUN satisfied the rule: E3's own wording — *"``Point`` + ``Event`` … that are the SOURCE of at
+    least one ``extractedFrom`` relationship"* — yielded ``{'Point', 'Event', 'Source'}`` and PASSED,
+    i.e. a cell naming NO document class at all was accepted by the very arm written to refuse it,
+    against §7 item 6's *"a denominator that omits a class the model does anchor fails too"* (quoted
+    here as that rule states it; the document-class requirement is this arm's own derivation from it,
+    not a sentence the registration contains). A Cypher node
+    label is case-sensitive, so ``Point``/``Event``/``Document``/``Object``/``Source`` are the class
+    spellings and ``SOURCE``/``source`` are prose. The canonical name is the TOKEN's value
+    (``NODE_CLASS_TOKENS``), which is exactly the label spelling, so it is matched rather than the
+    lower-case key; the plural stays tolerated (``Points`` names the class too).
+
+    ⛔ CASE ALONE MAY NOT BUY A SKIP (#10525 review round 3, P2 — MEASURED). Making the match
+    case-sensitive opened the inverse hole: a row whose cells are spelled ``point + object + event``
+    names no canonical class, so the caller's "names no graph class at all" arm SKIPPED it — and on
+    the previous matcher that same row was REFUSED for naming ``Object``. A lower-cased row is a
+    SPELLING error, never a criterion measured over something else, which is why
+    ``_class_words_mentioned`` exists: the caller asks it before treating an empty ``named`` set as
+    "not a class-set row".
+    """
+    plain = _plain(cell)
+    return {
+        canonical
+        for token, canonical in NODE_CLASS_TOKENS.items()
+        if re.search(rf"(?<![\w]){re.escape(canonical)}s?(?![\w])", plain)
+    }
+
+
+def _class_words_mentioned(cell: str) -> set[str]:
+    """Which class WORDS a cell mentions at all, IGNORING case — the spelling-error detector.
+
+    It answers one question only: is this cell talking about graph classes but spelling them in
+    prose case? A cell that mentions nothing (``docs/evidence/5087-hypothesis``'s E3 is a session-arm
+    receipt check) is a genuine non-class row and is declared skipped; a cell that mentions a class
+    word in prose case is a spelling error and FAILS, so lower-casing a row can never opt it out of
+    the arm. The returned values are the CANONICAL labels the prose tokens point at, so the failure
+    message can say what the row meant.
+    """
+    plain = _plain(cell).casefold()
+    return {
+        canonical
+        for token, canonical in NODE_CLASS_TOKENS.items()
+        if re.search(rf"(?<![\w]){token}s?(?![\w])", plain)
+    }
+
+
+def check_registry_contradictions(directory: Path, rows: list[dict[str, str]],
+                                  pins: dict, scopes: list[str] | None = None) -> list[str]:
+    """The registry may not contradict the history it describes — nor the model it scores (#9736).
+
+    TWO CONTRADICTIONS, one rule, because both are the same defect: a frozen artefact asserting
+    something the tree already refutes, with no number changing to reveal it.
+
+    1. **``measurement_visible_to_author`` versus ``prior_measurements``.** The field is a claim about
+       HISTORY, and history is the one thing a registry can be wrong about at zero cost to its own
+       consistency. E5 was: the field read ``false`` for a metric whose measurement had landed two
+       days BEFORE the record (#9738). A claim is therefore held to a citation in both directions —
+       ``false`` with a citation is the falsified claim, and ``true`` with none is a claim no artefact
+       backs (uncheckable is not harmless: it is the same sentence, minus the evidence).
+    2. **E3's class set versus the model.** ``_DERIVATION_REFERENCES_LABELS`` is what the writer
+       actually anchors; a denominator naming ``:Object`` counts a class the model leaves unanchored
+       BY DESIGN (#5199 option A), which makes ``= 1.000`` unreachable as registered and reports a
+       recorded decision as a defect (#9736). Omitting an anchored class fails symmetrically: the
+       numerator then cannot reach a denominator it must equal. ⛔ WHICH SPELLING of the
+       document-derivation class is honest (``Document`` — the writer's retained relation alias,
+       ``0`` nodes in the shipped census — or ``Source``, the label it is stored on post-D10) is the
+       owner's #9736 ruling, NOT this gate's: both are accepted, see ``RETIRED_SPELLING_LABELS``.
+       The gate settles nothing here; it refuses a cell that names NEITHER, and a cell that names an
+       unanchored class. ⛔ What it ALSO cannot do is check the INSTRUMENT: it never reads
+       ``probes/capstone_measure.py``, whose class set is derived from the writer's constant and so
+       cannot be moved by anything written in the record. A row taking the ``Source`` spelling is
+       therefore DECLARED in ``scopes`` rather than passed quietly or failed — see
+       ``_note_unchecked_probe_spelling``.
+
+    ``[]`` when the record cannot be read at all: ``check_machine_record`` owns that failure, and
+    reporting it twice would make one defect look like two.
+
+    ⛔ SCOPE — AN ARM IS ASKED ONLY OF A BUNDLE THAT MAKES ITS CLAIM (#10525 review, MEASURED).
+    This gate is invoked on TWO bundles in one CI step
+    (``--dir docs/evidence/7949-capstone --dir docs/evidence/5087-hypothesis``), and these two arms
+    were written for the first. Applied unconditionally they red-ed the second for seven things it
+    never said: six criteria that carry no ``measurement_visible_to_author`` field and no
+    ``prior_measurements`` block (a record that predates the field makes no visibility claim, so it
+    has no claim to contradict), and an E3 that is a SESSION-ARM criterion naming no graph class at
+    all (comparing it with the anchor model is a category error — the model never scored it). So:
+
+      * the visibility arm is asked of a record that carries the schema — ``prior_measurements``, or
+        the per-criterion field on at least one criterion. Deleting ONE criterion's field does not
+        opt out: the record still declares the schema, so the deleted one fails as a non-boolean;
+      * the class-set arm is asked of an E3 row that names at least one graph class. A row naming
+        none is declared in ``scopes`` instead. A row that names classes must name every anchored
+        CLASS in EVERY cell — either spelling of the document-derivation class counts, neither
+        being what #9736's ruling picks (see ``e3_required_class_groups``) — so narrowing the
+        numerator to escape it is itself a failure.
+
+    ``scopes``, when given, collects one human-readable line per arm NOT applied to this bundle. A
+    skip that is not declared is the silent-green shape this tool exists to refuse, so the caller
+    prints them (``--json`` carries them as ``registry_scopes``); a bundle that declares nothing is
+    told so rather than passed quietly.
+    """
+    failures: list[str] = []
+    path = directory / MACHINE_RECORD
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        record = None
+    if not isinstance(record, dict):
+        return []
+
+    criteria = [c for c in _list(record, "criteria", MACHINE_RECORD) if isinstance(c, dict)]
+    prior = _mapping(record, "prior_measurements", MACHINE_RECORD)
+    by_id = {str(c.get("id") or ""): c for c in criteria}
+
+    #: Whether this record carries the #9738 schema at all. Not `bool(prior)`: an empty
+    #: `prior_measurements: {}` is a DECLARATION that there are none, and a record that declares the
+    #: mechanism must still answer the per-criterion field (a bundle cannot opt out by emptying it).
+    declares_visibility = "prior_measurements" in record or any(
+        "measurement_visible_to_author" in c for c in criteria
+    )
+    if not declares_visibility and by_id:
+        _note(scopes, f"{directory.name}: the record carries no `prior_measurements` block and no "
+                      "criterion carries `measurement_visible_to_author`, so the #9738 rule is not "
+                      "asked of it — a record that makes no visibility claim has no claim to "
+                      f"contradict{_skip_evidence(directory, 'visibility')}")
+
+    for cid in sorted(prior):
+        entry = prior[cid]
+        where = f"{MACHINE_RECORD} prior_measurements[{cid!r}]"
+        if cid not in by_id:
+            failures.append(
+                f"{where} names a criterion the record does not carry — a citation for nothing"
+            )
+            continue
+        if not isinstance(entry, dict):
+            failures.append(f"{where} is {type(entry).__name__}, expected a mapping of its provenance")
+            continue
+        for part in ("artifact", "commit", "date"):
+            if not str(entry.get(part) or "").strip():
+                failures.append(
+                    f"{where} carries no {part} — a prior measurement a reader cannot date or locate "
+                    "cannot carry the disclosure it exists for"
+                )
+        if by_id[cid].get("measurement_visible_to_author") is False:
+            failures.append(
+                f"criterion {cid} declares measurement_visible_to_author=false while "
+                f"prior_measurements cites {entry.get('artifact')!r} at {entry.get('commit')!r} "
+                f"({entry.get('date')!r}) — a measurement EXISTS, so the claim is falsified "
+                "(#9738). Either disclose it (flip the field and record what was known and when) "
+                "or delete the citation; the two may not stand together"
+            )
+
+    for cid, crit in (by_id.items() if declares_visibility else ()):
+        visible = crit.get("measurement_visible_to_author")
+        if not isinstance(visible, bool):
+            failures.append(
+                f"criterion {cid} carries measurement_visible_to_author={visible!r}, which is not a "
+                "boolean — the field is what a machine consumer reads to learn whether the bar's "
+                "author could see a number"
+            )
+            continue
+        if visible and cid not in prior:
+            failures.append(
+                f"criterion {cid} declares measurement_visible_to_author=true and names no "
+                "prior_measurements entry — an undisclosed disclosure is uncheckable, and this "
+                "field's whole value is that a reader can follow it to the artefact"
+            )
+        #: A bare `false` is UNFALSIFIABLE — the #10525 review's E4 shape. `prior_measurements`
+        #: is the only table this gate reads, so a `false` for a metric whose measurement exists
+        #: but is NOT cited is invisible to every arm here; and to a reader it is
+        #: indistinguishable from a `false` nobody has revalidated. E4 was that `false`: right
+        #: (the measurement ran before the record but its artifact landed after it, so nothing was
+        #: in the tree the author read) with the reason stated nowhere, beside a §0 row asserting
+        #: "no measurement existed". The ground is therefore required, not merely encouraged.
+        if visible is False and not str(
+                crit.get("measurement_visible_to_author_basis") or "").strip():
+            failures.append(
+                f"criterion {cid} declares measurement_visible_to_author=false and carries no "
+                "measurement_visible_to_author_basis — a `false` with no stated ground cannot be "
+                "told apart from a stale one, and it hides a measurement that exists but is not "
+                "cited. State when the measurement ran relative to the registration and whether "
+                "its artefact was in the tree (E4: ran 2026-10-19, artifact landed d50217273 on "
+                "2026-10-22, AFTER a6085af84 — right, and previously unstated)"
+            )
+
+    pins_prior = _pins_mapping(pins, "prior_measurements")
+    pins_map = {str(k): str(v) for k, v in pins_prior.items()}
+    rec_map = {
+        str(k): str((v or {}).get("commit")) if isinstance(v, dict) else ""
+        for k, v in prior.items()
+    }
+    if pins_map != rec_map:
+        failures.append(
+            f"pins.prior_measurements is {pins_map!r} but {MACHINE_RECORD} cites {rec_map!r} — two "
+            "copies of a commit pin that can disagree is how a reader is sent to the wrong history"
+        )
+
+    e3 = [r for r in rows if r["id"] == "E3"]
+    if not e3:
+        # ⛔ SCOPED ON THE RIGHT SUBJECT (#10525 review round 2 P3, corrected round 3 P3 — MEASURED).
+        # The existence failure was unconditional, then gated on `declares_visibility` — a field of
+        # the RECORD's #9738 schema — while its subject is the DOCUMENT's E3 row. That reproduced the
+        # same false red one level down: a record that adopts the visibility schema but raises no E3
+        # criterion was refused for a criterion it never registered. The subject is a DISAGREEMENT
+        # between the two artifacts, so it fails only when the DOCUMENT registers E3 and the record
+        # does not; a bundle that registers neither is DECLARED skipped (an undeclared skip is the
+        # silent-green shape this tool refuses, and a failure on a subject the bundle never raised is
+        # its mirror).
+        document_registers_e3 = any(r["id"] == "E3" for r in rows)
+        if document_registers_e3:
+            failures.append(
+                "no E3 row — the DOCUMENT registers an E3 criterion but the machine record carries "
+                "none, so the class set it fixes cannot be compared with the model"
+            )
+        else:
+            _note(scopes, "no E3 criterion is registered by this bundle, so its class set cannot "
+                          "be compared with the model — the #9736 arm is not asked of it (the same "
+                          "declared-skip rule as the #9738 arm above)")
+    groups: tuple[frozenset[str], ...] | None = None
+    for row in e3:
+        cells = {name: _classes_named(row[name]) for name in E3_CLASS_CELLS}
+        named = cells["metric"] | cells["denominator"]
+        if not named:
+            mentioned = (_class_words_mentioned(row["metric"])
+                         | _class_words_mentioned(row["denominator"]))
+            if mentioned:
+                # ⛔ A LOWER-CASED ROW IS A SPELLING ERROR, NOT A NON-CLASS ROW (#10525 review
+                # round 3 P2 — MEASURED). Treating it as "measured over something else" skipped the
+                # arm for a row that names `Object`, the one class the arm exists to refuse.
+                failures.append(
+                    f"E3 (line {row['line']}) mentions {', '.join(sorted(mentioned))} but names no "
+                    "graph class by its LABEL spelling — a Cypher node label is case-sensitive "
+                    "(`Point`/`Event`/`Document`/`Object`/`Source`), and prose case is a SPELLING "
+                    "error, not a criterion measured over something other than written nodes. "
+                    "Spell the label, or declare a criterion that is not a class-set row"
+                )
+                continue
+            _note(scopes, f"{directory.name}: E3 (line {row['line']}) names no graph class at "
+                          "all, so the anchor model does not apply to it — a criterion measured "
+                          "over something other than written nodes is not a class-set"
+                          f" row{_skip_evidence(directory, 'class_set')}")
+            continue
+        if groups is None:
+            groups = e3_required_class_groups()
+        failures += _e3_class_set_failures(row, cells, groups)
+        _note_unchecked_probe_spelling(scopes, directory, row, cells)
+    return failures
+
+
+#: The two cells that must each name every anchored class group (#9736). Both, not their union:
+#: a numerator narrower than its own denominator cannot reach it, which is the #9736 defect one
+#: level down, and a union test passes exactly that row.
+E3_CLASS_CELLS = ("metric", "denominator")
+
+
+#: Why a class missing from each cell fails, in the words of the cell it is missing from.
+_E3_CELL_OMISSION_REASON = {
+    "metric": "a numerator that cannot count an anchored class cannot reach the denominator it must "
+              "equal (#9736)",
+    "denominator": "a denominator that does not count an anchored class scores a subset of the "
+                   "nodes the model writes, so `= 1.000` measures something narrower than the row "
+                   "claims (#9736)",
+}
+
+
+def e3_required_class_groups() -> tuple[frozenset[str], ...]:
+    """Each anchored class as the set of TOKENS a row may name it by (#10525 review P1).
+
+    One group per anchored class, and a cell must satisfy **every** group — which is what keeps the
+    per-cell (not union) discipline. A class whose relation spelling has a documented retired node
+    label (``Document`` → ``Source``) is ONE group with two members: the owner's #9736 ruling is
+    still open on which spelling is honest, so a row naming either satisfies it and the gate
+    settles nothing (see ``RETIRED_SPELLING_LABELS``). ``Point`` and ``Event`` are single-token
+    groups because both are real node labels in the census — there is no second way to spell them.
+    """
+    groups = [frozenset(SELF_ANCHORED_CLASSES)]
+    for spelling in sorted(derivation_label_classes()):
+        label = RETIRED_SPELLING_LABELS.get(spelling)
+        groups.append(frozenset({spelling, label}) if label else frozenset({spelling}))
+    return tuple(groups)
+
+
+def _e3_class_set_failures(row: dict[str, str], cells: dict[str, set[str]],
+                           groups: tuple[frozenset[str], ...]) -> list[str]:
+    """E3's class set, held to the model **cell by cell** (#10525 review P1).
+
+    The previous revision compared ``metric | denominator`` with one flat set. That made the
+    omission arm inert against the shape it was written for: each class only had to appear in ONE
+    of the two cells, so a metric counting ``Point`` + ``Event`` against a denominator counting
+    ``Point`` + ``Event`` + ``Document`` — #9736's own defect, one level down — produced no failure.
+    Measured on the shipped row with only the metric cell mutated: baseline ``[]``, metric-only
+    omission ``[]``. Every cell is now held to the anchored set on its own.
+
+    ⛔ THE CLASS IS THE UNIT, NOT THE SPELLING (#10525 review P1). The flat set was built from
+    ``_DERIVATION_REFERENCES_LABELS``, which the writer documents as a set of RELATION SPELLINGS
+    (``edges.py:716-744``), not node labels — and post-D10 ``Document`` is retired as a LABEL while
+    the derivation is stored as ``(Source)-[:references]->(Source)``. Holding cells to that flat set
+    therefore made ``Source`` (exactly the anchored ``references`` target) an UNANCHORED class to be
+    REFUSED, and made ``Document`` — ``0`` nodes in the shipped census — MANDATORY. Both are the
+    gate settling #9736's open question; with alias groups, whichever the owner rules is a row this
+    rule accepts.
+    """
+    permitted = frozenset().union(*groups)
+    failures: list[str] = []
+    counted = sorted((cells["metric"] | cells["denominator"]) - permitted)
+    if counted:
+        where = " and ".join(name for name in E3_CLASS_CELLS if cells[name] & set(counted))
+        failures.append(
+            f"E3 (line {row['line']}) counts {counted} among its derived nodes in its {where}, but "
+            f"the model anchors only {sorted(permitted)} ({DERIVATION_LABELS_NAME} + "
+            f"{list(SELF_ANCHORED_CLASSES)}; a retired spelling's node label counts as that class) "
+            "— an unanchored class in the numerator makes `= 1.000` unreachable as registered, and "
+            "reports a recorded decision (#5199 option A) as a defect (#9736)"
+        )
+    for name in E3_CLASS_CELLS:
+        for group in groups:
+            if cells[name] & group:
+                continue
+            reason = _E3_CELL_OMISSION_REASON[name]
+            if len(group) == 1:
+                missing = sorted(group)
+                failures.append(
+                    f"E3 (line {row['line']}) omits {missing} from its {name}, but the model "
+                    f"anchors {sorted(permitted)} — {reason}"
+                )
+            else:
+                spellings = " nor ".join(f"`{member}`" for member in sorted(group))
+                failures.append(
+                    f"E3 (line {row['line']}) omits the document-derivation class from its "
+                    f"{name}, naming neither {spellings} — the model anchors that class, and "
+                    f"{reason}"
+                )
+    return failures
+
+
+def _note_unchecked_probe_spelling(scopes: list[str] | None, directory: Path,
+                                   row: dict[str, str], cells: dict[str, set[str]]) -> None:
+    """Declare the ONE thing this rule cannot check: the INSTRUMENT's own class set (#10525 P2).
+
+    The gate accepts either spelling of the document-derivation class
+    (``RETIRED_SPELLING_LABELS``), because which one is honest is #9736's owner-gated ruling. But
+    nothing in this tool reads ``probes/capstone_measure.py``: the probe derives its
+    ``DERIVED_LABELS`` from the WRITER's constant (``("Point", *sorted(
+    _derivation_label_classes()))``), so no sentence in the record can move it. A registration that
+    takes the ``Source`` spelling therefore registers a node class the probe never enumerates —
+    ``Document`` is the writer's own spelling and is ``0`` nodes in the shipped census, ``Source`` is
+    counted nowhere — so the derivations that spelling names contribute ``0`` to E3 by construction.
+
+    ⛔ DECLARED, NOT ENFORCED AND NOT SILENT (#9736 IS OWNER-GATED). Failing the row would turn the
+    owner's open alternative into a red check — the gate settling the ruling it must not settle; and
+    saying nothing would let a registration and the instrument that scores it part company with no
+    trace anywhere, which is the divergence §7 item 6 is about.
+    """
+    drifted = sorted((cells["metric"] | cells["denominator"])
+                     & set(RETIRED_SPELLING_LABELS.values()))
+    if not drifted:
+        return
+    _note(scopes, f"{directory.name}: E3 (line {row['line']}) spells the document-derivation "
+                  f"class {drifted}, which this rule ACCEPTS (#9736's spelling is owner-gated) and "
+                  "which it does NOT check against the instrument — probes/capstone_measure.py "
+                  f"derives DERIVED_LABELS from {DERIVATION_LABELS_NAME} alone "
+                  f"({sorted(derivation_label_classes())}), so it enumerates no `Source` and the "
+                  "derivations this spelling names count 0 in E3; moving the probe with the "
+                  "spelling is the amendment's obligation, not this gate's check")
+
+
+def _note(scopes: list[str] | None, message: str) -> None:
+    """Declare something this gate did NOT enforce — never a silent skip, never a silent pass.
+
+    Two kinds are declared here, both because an undeclared one is a false green: an ARM this bundle
+    is not asked (see the caller's docstring), and a RESIDUAL the rule can see but must not fail on
+    because the decision behind it is owner-gated (``_note_unchecked_probe_spelling``).
+
+    ⛔ ``scopes`` IS OPTIONAL, BUT AN OMITTED ONE IS NOT A SILENT ONE (#10525 review, residual). It
+    defaults to ``None`` so an existing caller with nowhere to put the notes need not build a list;
+    the cost of that default is that ``append`` has no list to append to, and the note would then
+    evaporate — a gate that skipped an arm and said nothing, which is exactly the false green this
+    function exists to prevent. So the no-list path writes the same declaration to ``stderr``, the
+    stream this tool already uses for ``ERROR:`` lines. There is no fifth state in which a note is
+    neither carried nor printed; ``tests/test_capstone_preregistration_9075.py``
+    (``test_a_caller_that_carries_no_scope_list_still_declares_the_skips``) holds that.
+    """
+    if scopes is None:
+        print(f"NOTE — declared, not carried (the caller passed no scope list): {message}",
+              file=sys.stderr)
+        return
+    scopes.append(message)
+
+
+#: The MEASURED ground for an arm a NAMED bundle is not asked, keyed by (bundle directory, arm).
+#:
+#: ⛔ KEYED BY BUNDLE, NOT BAKED INTO THE MESSAGE (#10525 review P3, MEASURED). The note is emitted
+#: for WHICHEVER bundle skipped the arm, so a sibling's evidence written into the sentence explained
+#: the capstone's own skip with `docs/evidence/5087-hypothesis`'s receipt criterion — reproduced by
+#: stripping the class names from the capstone's E3 row, which the gate then explained as the
+#: sibling's criterion. A declared skip whose declaration names the wrong subject reads as a checked
+#: one, which is the class this tool exists to refuse. A bundle with NO entry here still gets the
+#: note (naming it is what makes the skip checkable); it gets no evidence clause rather than
+#: somebody else's.
+_BUNDLE_SKIP_EVIDENCE = {
+    ("5087-hypothesis", "visibility"): "this bundle's record predates the field",
+    ("5087-hypothesis", "class_set"): "this bundle's E3 is a session-arm receipt check",
+}
+
+
+def _skip_evidence(directory: Path, arm: str) -> str:
+    """The measured clause for THIS bundle's skip — empty when nobody measured one for it."""
+    measured = _BUNDLE_SKIP_EVIDENCE.get((directory.name, arm))
+    return f" (measured: {measured})" if measured else ""
+
 
 
 def _measured_locations(record: dict) -> list[str]:
@@ -1350,6 +1895,8 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     failures: list[str] = []
     failures += check_completeness(rows)
     failures += check_e4_denominator(rows, text, pins)
+    registry_scopes: list[str] = []
+    failures += check_registry_contradictions(directory, rows, pins, registry_scopes)
 
     logs = sorted(directory.glob(EVIDENCE_LOG_GLOB))
     report["evidence_logs"] = [p.name for p in logs]
@@ -1407,6 +1954,11 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
         # exists to refuse (#9075 review r6 P1).
         corpus_state = "UNVERIFIED (--no-corpus)"
     report["corpus"] = corpus_state
+
+    if registry_scopes:
+        # A rule this bundle is not asked is a DECLARED skip, printed by `main` and carried in the
+        # JSON — the same treatment `--no-corpus` gets, for the same reason (#10525).
+        report["registry_scopes"] = registry_scopes
 
     report["failures"] = failures
     report["ok"] = not failures
@@ -1498,6 +2050,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL — {len(report['failures'])} problem(s):")
             for f in report["failures"]:
                 print(f"  - {f}")
+        for note in report.get("registry_scopes", []):
+            print(f"registry arm NOT applied — {note}")
         exempt_note = ""
         if report.get("ordering_exempt"):
             exempt_note = (f" (exempt by CONTENT, measured nothing: "

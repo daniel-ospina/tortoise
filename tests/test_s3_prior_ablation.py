@@ -366,9 +366,9 @@ def _checker():
 
     Loaded for ONE thing: `EVIDENCE_LOG_GLOB`, so the test below globs the same set the ordering
     half globs instead of a private copy of the literal. The glob is deliberately a named constant
-    in the guard (`tools/capstone_preregistration_check.py:134`, *"Widening it is a deliberate
-    act"*), and a second copy here would be exactly the two-copies-that-can-disagree shape this
-    file refuses for the bars.
+    in the guard (`tools/capstone_preregistration_check.py::EVIDENCE_LOG_GLOB`, whose comment says
+    *"Widening it is a deliberate act"*), and a second copy here would be exactly the
+    two-copies-that-can-disagree shape this file refuses for the bars.
     """
     spec = importlib.util.spec_from_file_location(
         "_capstone_preregistration_check",
