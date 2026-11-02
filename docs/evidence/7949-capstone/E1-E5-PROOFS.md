@@ -178,6 +178,7 @@ receipt folds the extractor's `stats` and `error_census` and nothing else —
 `tortoise/sdk.py:15287` is the meta fold — while the extractor builds
 `result["classify_later"]` (`tortoise/extractor_v2.py:10576`) and `result["vet"]`
 (`tortoise/extractor_v2.py:10586`) on the extractor's OWN return.
+
 ⛔ **`#9116`'s seam has since LANDED, and this paragraph is the pre-seam state
 it was written in.** The fold no longer forwards `stats` alone — it calls
 `_capture_stats_with_step_witness`, which copies each stage's own counts onto
