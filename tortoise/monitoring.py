@@ -4221,6 +4221,7 @@ LOOP_STALL_EXIT_S = 0.0            # 0 == self-kill DISABLED (the default)
 LOOP_STALL_EXIT_FLOOR_S = 120.0    # lower bound on an ENABLED threshold
 LOOP_STALL_EXIT_WINDOWS = 3        # consecutive stale polls required to exit
 LOOP_STALL_EXIT_MIN_TICKS = 2      # at least one REAL heartbeat tick before judging
+#: (the HARD ceiling is exempt: past it, a startup wedge must still be replaced)
 
 #: HARD CEILING — the in-flight gauge CANNOT veto this one. 0 == disabled.
 #:
@@ -4528,9 +4529,12 @@ def start_stall_watchdog(threshold_s: float | None = None, *, exit_fn=None,
     process. Read the constant block above for why that is the safe default.
 
     EXCEPTION — the hard ceiling (``TORTOISE_LOOP_STALL_HARD_EXIT_S``) bypasses
-    condition 3 deliberately: past that age the in-flight request is not
+    conditions 2 and 3 deliberately: past that age the in-flight request is not
     evidence of progress but the measure of the wedge (see
-    ``LOOP_STALL_HARD_EXIT_S``). Everything below describes the SOFT path.
+    ``LOOP_STALL_HARD_EXIT_S``), and the ``min_ticks`` boot rationale is about
+    the first seconds, not 600 of them — a loop that wedges before the real
+    ticker lands its second tick must still be replaced. Everything below
+    describes the SOFT path.
 
     When explicitly enabled, an exit requires ALL of:
 
