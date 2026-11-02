@@ -73,7 +73,13 @@ USAGE (the workflow's only invocation)
       --agent-infra .ci-predicate
 
   Test injection (no network, no `gh`): `--jobs-json FILE` (the jobs listing, JSON or
-  JSONL) and `--logs-dir DIR` holding `<job_id>.log` files.
+  JSONL), `--logs-dir DIR` holding `<job_id>.log` files, and `--main-jobs-dir DIR`
+  holding `<run_id>.jsonl` listings of main's window — the leg dimension's only input.
+  ⛔ The third one is NOT optional for a no-network run: `main_leg_coverage` probes the
+  examined runs through `Runner.jobs(run_id, main_jobs_dir)`, so without it the leg
+  dimension calls `gh api …/runs/<id>/jobs` for every examined run. A caller that injects
+  only the first two gets live API traffic on exactly the shape this check exists for
+  (a window whose runs never executed the leg), or a fail-closed exit 2 on CI.
 """
 
 from __future__ import annotations
@@ -102,6 +108,36 @@ _FAILED_CONCLUSIONS = frozenset({"failure", "timed_out"})
 
 # `ci-failure-set.sh` reads these three too; a leg that ended this way has no set.
 _UNCERTIFIABLE_CONCLUSIONS = frozenset({"cancelled", "startup_failure", "stale"})
+
+# A leg that EXECUTED: its job produced a VERDICT. `skipped`, `cancelled`, `stale`,
+# `neutral` and an absent job all mean the leg did not execute, so it measured nothing
+# (`timed_out` is a KILLED leg whose failure set IS read, so it counts — the membership is
+# the producer's `tested` arm byte for byte, which is what makes the counting argument in
+# `main_leg_coverage` hold — an equality that is ASSERTED, not pinned: no test checks
+# it, so the parity pin is filed as #10566 rather than claimed here). MEASUREDNESS, not
+# redness — `cancelled`/`stale` stay NON-RED
+# (`_UNCERTIFIABLE_CONCLUSIONS` above, a recorded decision): a leg that never ran is not a
+# failure, and it is not a measurement either. Two different questions, and this set only
+# ever answers the second; no recorded polarity is flipped here.
+_EXECUTED_CONCLUSIONS = frozenset({"success", "failure", "timed_out"})
+
+# The legs `python-ci-gate` runs UNCONDITIONALLY: its own leg table's selector column is
+# `-` for these, not a `changes.outputs.*` diff gate (`.github/workflows/python-ci.yml`,
+# the LEGS heredoc). The distinction is LOAD-BEARING for `main_leg_coverage`, not
+# bookkeeping: the aggregate reds a `skipped` leg whose selector is anything but `false`
+# (#5219), so on a `-` row a green run PROVES the job executed — while on a diff-gated row
+# the selector may answer `false`, the leg is then `skipped`-BY-DECLINE and the aggregate
+# PASSES it (`python-ci.yml`, `skipped) -> continue` when selected=false). A `success`
+# python-ci run is therefore NO evidence about a diff-gated leg, which is why a run-level
+# counter may credit only the rows below (#10564 review P1; GitHub documents the same
+# asymmetry from the other side — a job skipped by an `if:` still reports SUCCESS to the
+# checks API, so the run conclusion cannot distinguish "ran" from "declined").
+# `ci-introduced-failure` is `-` in that table too and is deliberately ABSENT here: it is
+# the verdict job itself, and a verdict that credits itself measures nothing.
+_UNCONDITIONAL_LEGS = frozenset({
+    "changes", "manifest-integrity", "workflow-lint",
+    "test-d14-hosted-api", "test-record-postgres", "surface-guard",
+})
 
 
 class Unmeasured(Exception):
@@ -219,9 +255,28 @@ class Runner:
         return proc.stdout
 
     def jobs(self, run_id: str, jobs_json: str | None) -> list[dict]:
-        """The run's job list. Injected from a recorded fixture in the tests."""
+        """The run's job list. Injected from a recorded fixture in the tests.
+
+        `jobs_json` may be a FILE (the PR run's listing, one `gh` call) or a DIRECTORY
+        holding `<run_id>.jsonl` (the main-window listings the leg dimension reads, one
+        file per run). A directory with no file for `run_id` is UNMEASURED, never an
+        empty job list: "we hold no listing" is not "the run had no jobs", and the leg
+        coverage a caller would derive from it would silently read as unexecuted.
+        """
         if jobs_json:
-            raw = Path(jobs_json).read_text(encoding="utf-8", errors="replace")
+            path = Path(jobs_json)
+            if path.is_dir():
+                path = path / f"{run_id}.jsonl"
+            if not path.is_file():
+                raise Unmeasured(
+                    f"no recorded job listing for run {run_id} at {path} — a listing "
+                    "we do not hold is not a run that had no jobs")
+            try:
+                raw = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise Unmeasured(
+                    f"the recorded job listing for run {run_id} is unreadable "
+                    f"({exc}) — never an empty listing") from exc
         else:
             raw = self._run(
                 [
@@ -474,8 +529,10 @@ def main_baseline(runner: Runner, failure_set: Path, head: str, runs: int,
         "bash", str(failure_set), "--repo", runner.repo,
         "--workflow", "python-ci.yml", "--exclude", head,
     ]
+    provenance_path = outdir / "main-provenance.txt"
     rates = runner.shell(
-        [*common, "--main-union-rates", str(runs), "--runs-report", str(report_path)],
+        [*common, "--main-union-rates", str(runs), "--runs-report", str(report_path),
+         "--provenance", str(provenance_path)],
         what="main's rate baseline (ci-failure-set.sh --main-union-rates)",
     )
     sigs = runner.shell(
@@ -496,7 +553,7 @@ def main_baseline(runner: Runner, failure_set: Path, head: str, runs: int,
             "(ci-failure-set.sh writes no report when the listing fails). A missing "
             "check is not a green check"
         )
-    tested = int(report.get("tested") or 0)
+    tested = counter(report, "tested")
     if tested <= 0:
         raise Unmeasured(
             "main's baseline window holds no run that finished a measurement "
@@ -509,6 +566,119 @@ def main_baseline(runner: Runner, failure_set: Path, head: str, runs: int,
             "refused rather than used"
         )
     return str(rates_path), str(sigs_path), report
+
+
+def counter(report: dict[str, str], key: str) -> int:
+    """A `<key>=<n>` counter from the shared producer's report, or refuse.
+
+    An unparsable counter is UNMEASURED, never 0 and never a traceback: `main()` maps
+    only `Unmeasured`/`_Blocked` to its three exits, so a `ValueError` here would leave
+    the process at exit 1 — i.e. it would report "NEW FAILURE — introduced by this PR"
+    for a malformed counter.
+    """
+    raw = (report.get(key) or "").strip()
+    try:
+        return int(raw or 0)
+    except ValueError as exc:
+        raise Unmeasured(
+            f"main's runs report carries {key}={raw!r}, which is not a number — the "
+            "window's counters are unreadable") from exc
+
+
+def main_leg_coverage(runner: Runner, provenance: Path, tested: int,
+                      legs: list[str], main_jobs_dir: str | None
+                      ) -> dict[str, str]:
+    """{leg: BASIS} for the legs main's window is MEASURED to have EXECUTED.
+
+    `tested` is a RUN-level counter: a `completed` run that finished a measurement
+    credits it WITHOUT probing its jobs (agent-infra `ci-failure-set.sh`, "FINISHED IS
+    NOT TESTED" plus the `drop_superseded_runs` limit filed as agent-infra #1401). So a
+    window whose runs each had `test-slow` SKIPPED — the shape a failing `changes` job
+    produces, every dependent job skipped behind it — reads `tested=10, measured` while
+    that leg was never executed at all. Every PR failure from it then reads as NEW.
+
+    This is the extension of the existing `tested <= 0` refusal from the RUN dimension to
+    the LEG dimension: one instrument arriving one question deeper, not a second
+    predicate (constraint 7). The RUN SET is the shared producer's, never re-listed here:
+    `--provenance` emits the examined failing runs of the SAME widened window the rate
+    table came from, so a second window selector cannot drift from the rail's.
+
+    ⛔ A RUN-LEVEL COUNTER PROVES NOTHING PER LEG ON ITS OWN (#10564 review, P1).
+    `tested > len(examined)` proves a `success` python-ci run EXISTS (`tested` =
+    success|failure|timed_out, `examined` = failure|timed_out|startup_failure, so the
+    excess can only be `success`). It does NOT prove every leg executed: the aggregate
+    reds only a `skipped` leg the selector SELECTED (#5219), and it deliberately PASSES
+    one the selector DECLINED (`skipped) -> continue` when selected=false). `test-slow`,
+    `test-carve-out`, `test`, `test-concurrency-falkor`, `packs-compile` and `test-track-b`
+    are diff-gated, so a green run in which the selector declined one of them is green
+    with that leg never having run — crediting it would be the very "measured" claim
+    this module exists to refuse. So a run-level counter credits ONLY
+    `_UNCONDITIONAL_LEGS` (selector `-`: the aggregate can never pass them skipped);
+    every other leg is covered only by PROBING a run's own job listing, where
+    `_EXECUTED_CONCLUSIONS` is read per job.
+
+    That is a SUFFICIENT condition, not a necessary one, so the probe runs whenever the
+    shortcut did not cover every leg: a small window can hold a `success` run and still
+    fail the inequality (one `startup_failure`, or one red run that never expanded a job,
+    is enough to make `tested <= len(examined)`). The probe reads the EXAMINED (failing)
+    runs only, and what its outcome states is exactly that: **no examined run executed
+    this leg** — never "no run in which the leg executed", which is a claim about a run
+    set this function did not read. On a full-matrix push lane (this repo's only
+    main-writing trigger, `on: push: branches: [main]`) a diff-gated leg DOES execute, so
+    one examined run normally covers it; the refusal fires when the window holds no
+    examined run to read. That residual limit is filed (#10567: coverage is inferred from
+    aggregate counters, not probed over green runs) rather than papered over. Each
+    failing run's job listing is probed in order, stopping as soon as every leg is
+    covered, so the usual cost is one call.
+    THE BASIS IS RETURNED PER LEG, not assumed: `green-run` is an INFERENCE from the
+    aggregate's own fail-closed leg table, `probed` is a reading, and printing either as
+    a mere "executed" would be the exact misuse of that word this change exists to stop.
+    An ABSENT provenance file is NOT the all-green case — it is an unreadable run set,
+    and it refuses.
+    """
+    examined: list[str] = []
+    if not provenance.is_file():
+        raise Unmeasured(
+            f"main's leg dimension: no --provenance file at {provenance} — the examined "
+            "run set is unreadable, so leg coverage cannot be claimed")
+    # ⛔ AN UNREADABLE RUN SET IS UNMEASURED, NEVER A TRACEBACK (#10564 review). Every
+    # other read this PR adds is wrapped (`Runner.jobs`, `counter()`); this one was not,
+    # so a `PermissionError`/`UnicodeDecodeError` escaped `main()` — which maps only
+    # `Unmeasured`/`_Blocked` — and the process exited 1, the code that means "NEW
+    # FAILURE — introduced by this PR". A thing we could not read must never become
+    # that, which is the same contract `counter()`'s docstring states.
+    try:
+        text = provenance.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Unmeasured(
+            f"main's provenance file at {provenance} is UNREADABLE ({exc}) — the "
+            "examined run set cannot be read, so leg coverage cannot be claimed") from exc
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        _sha, _, run_id = line.rpartition(":")
+        if not run_id.strip():
+            raise Unmeasured(
+                f"main's baseline provenance line {line!r} names no run id — the "
+                "leg dimension cannot be read, so measuredness cannot be claimed")
+        examined.append(run_id.strip())
+    bases: dict[str, str] = {}
+    if tested > len(examined):
+        # ONLY the selector-independent legs. See the docstring: a `success` run cannot
+        # have skipped them, and the aggregate could not have passed them skipped.
+        bases.update({leg: "green-run" for leg in legs if leg in _UNCONDITIONAL_LEGS})
+    uncovered = set(legs) - set(bases)
+    if uncovered:
+        # The counter proof does not reach these, so MEASURE them instead of inferring.
+        for run_id in examined:
+            for job in runner.jobs(run_id, main_jobs_dir):
+                if job.get("conclusion") in _EXECUTED_CONCLUSIONS:
+                    bases.setdefault(leg_base(job.get("name")), "probed")
+            uncovered = set(legs) - set(bases)
+            if not uncovered:
+                break
+    return bases
 
 
 def evaluate(args: argparse.Namespace) -> int:
@@ -566,6 +736,41 @@ def evaluate(args: argparse.Namespace) -> int:
             runner, failure_set, args.head, args.main_runs, outdir)
         print("main baseline: window "
               + " ".join(f"{k}={v}" for k, v in sorted(report.items())))
+
+        # THE LEG DIMENSION (#9984/#10289 finding). `tested` says the WINDOW measured;
+        # it does not say the LEG this run failed in was ever executed on main. Refused
+        # per leg, so the message names the leg that was unmeasured instead of reading
+        # a stale baseline as fine.
+        pr_legs = sorted({leg_base(j.get("name")) for j in failed})
+        basis = main_leg_coverage(
+            runner, outdir / "main-provenance.txt", counter(report, "tested"),
+            pr_legs, args.main_jobs_dir)
+        print("leg coverage: " + ", ".join(
+            f"{leg}=" + (f"executed ({basis[leg]})" if leg in basis else "NOT EXECUTED")
+            for leg in pr_legs))
+        never_ran = [leg for leg in pr_legs if leg not in basis]
+        if never_ran:
+            # A diff-gated leg has a SECOND reason to be uncovered, and it is not the
+            # probe's outcome — the run-level counter was never allowed to reach it.
+            gated = [leg for leg in never_ran if leg not in _UNCONDITIONAL_LEGS]
+            raise Unmeasured(
+                "leg(s) " + ", ".join(repr(leg) for leg in never_ran)
+                + " produced this run's failure(s), but no EXAMINED run of main's"
+                " baseline window executed the leg: in every failing run this window"
+                " read, its job concluded something other than "
+                + ", ".join(sorted(_EXECUTED_CONCLUSIONS))
+                + " (e.g. skipped, cancelled, neutral, stale, startup_failure,"
+                " action_required — or no such job at all; the list is ILLUSTRATIVE,"
+                " not exhaustive) — the rate is measured over the WINDOW, not over this"
+                " leg, so the failure cannot be certified as introduced here"
+                + ("; and a COMPLETED (green) main run credits only the legs"
+                   " `python-ci-gate` runs unconditionally ("
+                   + ", ".join(sorted(_UNCONDITIONAL_LEGS))
+                   + "), because the selector may DECLINE a diff-gated leg and a"
+                   " declined leg that is skipped still PASSES the aggregate — so a"
+                   " green run is no evidence that "
+                   + ", ".join(repr(leg) for leg in gated)
+                   + " ever executed" if gated else ""))
 
         blocked_path = outdir / "blocked.txt"
         verdict_path = outdir / "verdict.txt"
@@ -636,6 +841,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="test seam: a recorded jobs listing instead of the API")
     ev.add_argument("--logs-dir", default=None,
                     help="test seam: recorded <job_id>.log files instead of the API")
+    ev.add_argument("--main-jobs-dir", default=None,
+                    help="test seam: recorded <run_id>.jsonl main-window job listings "
+                         "instead of the API (the leg dimension's only input)")
     ev.set_defaults(func=evaluate)
     return parser
 

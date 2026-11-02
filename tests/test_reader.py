@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tortoise.reader import (  # noqa: E402, RUF100
     _ABSTAINED_PHRASES,
     _ABSTRACTION_FRAGMENT,
+    _AGGREGATION_FRAGMENT,
     _SYSTEM_PROMPT,
     _TYPE_FRAGMENTS,
     DEFAULT_READER_MAX_TOKENS,
@@ -117,7 +118,16 @@ def test_reader_prompt_constants_covers_a1() -> None:
     generic, fragments = reader_prompt_constants()
     assert generic == _SYSTEM_PROMPT
     assert fragments["abstention"] == _ABSTRACTION_FRAGMENT
-    assert set(fragments) == {"abstention", *(_TYPE_FRAGMENTS.keys())}
+    # #10539: 'aggregation' is the one CONDITIONAL fragment — appended per
+    # question (not per question_type) when the aggregative-intent detector
+    # fires. It is recorded here because a live fragment absent from this dict
+    # is silent prompt drift: the reader's prompt would change while the
+    # recorded hash stayed identical. This exact-set pin is the deliberate-diff
+    # guard for that, so the new key is added openly rather than the pin
+    # loosened to a subset check.
+    assert fragments["aggregation"] == _AGGREGATION_FRAGMENT
+    assert set(fragments) == {"abstention", "aggregation",
+                              *(_TYPE_FRAGMENTS.keys())}
 
 
 def test_no_evidence_text_pinned() -> None:
