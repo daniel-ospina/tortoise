@@ -3719,6 +3719,107 @@ class TestStallWatchdog:
             "the ceiling was degraded to max(threshold, ceiling): an operator "
             "who arms soft 5s beside a 0.15s ceiling must still exit at 0.15s")
 
+    def test_hard_ceiling_does_not_fire_on_a_healthy_loop(self, monkeypatch):
+        """The ceiling's NEGATIVE (#10585 review P2): an ARMED ceiling must
+        leave a still-ticking loop completely alone.
+
+        Every other test that arms the ceiling drives ``age`` PAST it (or never
+        enters the branch), so the whole six-test set passes an INVERTED
+        comparison — ``age < hard_exit_s``, i.e. exit while the loop is
+        HEALTHY. ``<`` and ``>=`` are each other's default mutation operator
+        (PIT's ``NEGATE_CONDITIONALS``, active by default), and only a test
+        that asserts the FALSE branch kills that mutant.
+
+        Why it matters in the deployed shape rather than in the abstract:
+        ``fly.toml`` arms 600s with ``poll_interval = min(2.0, ceiling/4)``
+        (``monitoring.py``), so an inverted comparison ``os._exit(1)``s a
+        healthy machine within ~2s of EVERY boot, up to ``retries = 10``, and
+        leaves it STOPPED — the "silent hang replaced by a silent stop" this
+        PR's own ``fly.toml`` comment names as the worst direction, and the one
+        the dead-ticker disarm exists to prevent. ``conftest.py`` pins the
+        ceiling to 0 for the session, so the soft path's negative
+        (``test_does_not_fire_on_a_healthy_loop``) cannot cover it.
+        """
+        import threading
+        import time
+
+        # The REAL env parser, not a monkeypatched constant (same reason as
+        # ``test_hard_ceiling_fires_even_with_a_request_in_flight``).
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.15")
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        assert monitoring._loop_stall_hard_exit_s() == 0.15
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+
+        def _ticker() -> None:
+            while not stop.is_set():
+                monitoring.heartbeat_record()
+                time.sleep(0.02)
+
+        ticker = threading.Thread(
+            target=_ticker, name="test-hb-ticker", daemon=True)
+        thread = None
+        ticker.start()
+        try:
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop,
+                poll_interval=0.05)
+            assert thread is not None, "the armed ceiling must start the thread"
+            time.sleep(1.0)   # ~7x the ceiling, heartbeat kept fresh throughout
+        finally:
+            self._disarm(thread, stop)
+            ticker.join(timeout=2)
+        assert fired == [], (
+            "the armed HARD ceiling exited a HEALTHY, still-ticking loop — in "
+            "the deployed shape (600s ceiling, <=2s poll) that is a kill "
+            "within ~2s of every boot until the retries are spent and the "
+            "machine is left STOPPED")
+
+    def test_hard_ceiling_never_ticked_neither_fires_nor_kills_the_thread(
+            self, monkeypatch):
+        """#10585 review P2: dropping the ``age is not None`` guard is
+        unpinned, and it does NOT fail safe.
+
+        Every armed-ceiling test starts at ``ticks >= 1``, so the ``ticks ==
+        0`` case never executes: there ``age`` is ``None`` and ``None >=
+        hard_exit_s`` raises ``TypeError`` INSIDE the watchdog thread, which
+        silently kills the thread — losing the ceiling entirely, while the
+        process still looks armed (the thread object is alive for a moment and
+        then just dies). A never-ticked loop is not evidence of anything, so the
+        correct behaviour is to record nothing and keep polling.
+        """
+        import threading
+        import time
+
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0.02")
+        monkeypatch.delenv("TORTOISE_LOOP_STALL_EXIT_S", raising=False)
+        fired: list = []
+        stop = threading.Event()
+        monitoring._reset_heartbeat()
+        monitoring._reset_workload()
+        monitoring._reset_heartbeat_task()
+        thread = None
+        try:
+            assert monitoring.heartbeat_read()[1] == 0
+            assert monitoring.loop_heartbeat_age() is None
+            thread = monitoring.start_stall_watchdog(
+                None, exit_fn=fired.append, stop_event=stop,
+                poll_interval=0.01)
+            assert thread is not None
+            time.sleep(0.3)   # ~30 polls, all with ``ticks == 0``
+            assert thread.is_alive(), (
+                "the watchdog thread DIED on a never-ticked loop — an "
+                "exception inside it loses the ceiling silently, and the "
+                "deployment still believes the ceiling is armed")
+        finally:
+            self._disarm(thread, stop)
+        assert fired == [], (
+            "a loop with no timestamp at all is not evidence of a wedge; "
+            "there is nothing to measure")
+
     def test_dead_ticker_branch_logs_once_not_once_per_poll(
             self, monkeypatch, caplog):
         """R3 review P2: the dead-ticker branch ``continue``d with no latch —

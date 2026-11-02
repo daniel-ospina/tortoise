@@ -4188,9 +4188,13 @@ def stop_health_listener(server: ThreadingHTTPServer | None = None) -> None:
 #   * the in-process self-kill exists only as an operator escape hatch, and on
 #     the SOFT path (``TORTOISE_LOOP_STALL_EXIT_S``) it demands (a) N
 #     CONSECUTIVE stale windows (hysteresis), (b) an IDLE WORKLOAD — never "the
-#     loop is busy serving a request" — and (c) TWO real heartbeat ticks
-#     (``LOOP_STALL_EXIT_MIN_TICKS``), so a slow boot is never mistaken for a
-#     wedge. See ``start_stall_watchdog``.
+#     loop is busy serving a request" — and (c) TWO recorded heartbeat ticks,
+#     at least one of them REAL (``LOOP_STALL_EXIT_MIN_TICKS``), so a slow boot
+#     is never mistaken for a wedge. See ``start_stall_watchdog``.
+#     (c) is stated that way on purpose (#10585 review P3): the first of the
+#     two is the SYNTHETIC tick ``hosted_api._start_liveness`` records on the
+#     loop, so ``ticks >= 2`` means ONE real tick — which is what the
+#     constant's own comment and ``start_stall_watchdog``'s docstring say.
 #     The HARD ceiling (``TORTOISE_LOOP_STALL_HARD_EXIT_S``, defined below) is a
 #     DIFFERENT mechanism and does NOT inherit those conditions (review P2: this
 #     block, the contract an operator reads before arming a process-killing
