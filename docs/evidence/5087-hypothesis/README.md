@@ -265,10 +265,12 @@ it touches no count, no denominator and no bar.
     evidence that its bars came from a document that preceded it is the one it already carried — its
     `prereg=` line and, on the contribution branch, the commit ordering. ⛔ **That ordering is not
     readable from merged history** (the squash merge collapsed both add-commits into one), so the
-    ordering half of `capstone_preregistration_check.py` now examines **no** log for this bundle — the
-    log is under `withdrawn/`, outside its non-recursive glob — and the provenance is withdrawn (see
-    `withdrawn/WITHDRAWN.md`; #10463 records it PROVISIONAL). **No number moves**; the guards can only
-    refuse a
+    ordering half of `capstone_preregistration_check.py` now examines **no** log of the recorded run —
+    that log is under `withdrawn/`, outside its non-recursive glob — and the provenance is withdrawn
+    (see `withdrawn/WITHDRAWN.md`; #10463 records it PROVISIONAL). The ordering half does still read
+    the re-measurement's own log (`s3-ablation-a83c23a8.log`, top level): that run's add-commit is
+    strictly after the registration's, which is the ordering the re-measurement claims and this log
+    is where it is shown. **No number moves**; the guards can only refuse a
     run.
 
 No bar, denominator, corpus or metric definition was touched by any of this, and the run was **not**
@@ -397,9 +399,10 @@ survive because they are parsed out of the **commit**, never this file.
    add-commit (`325f2a1a5`, `00:26:01Z`), and the bars are read out of that commit rather than the
    worktree. ⛔ That ordering is **not readable from merged history** — the squash merge collapsed
    both add-commits into one commit, so *at the squash* `capstone_preregistration_check.py`'s
-   ordering half read the *same* epoch for the two paths, and at this head it reads **no** log for
-   this bundle at all (the log is under `withdrawn/`, outside the non-recursive glob). The
-   provenance is therefore **withdrawn** (see
+   ordering half read the *same* epoch for the two paths, and at this head it reads **no** log of
+   the recorded run at all (that log is under `withdrawn/`, outside the non-recursive glob; the
+   re-measurement's own `s3-ablation-a83c23a8.log` at the top level is read, and its add-commit is
+   strictly later). The provenance is therefore **withdrawn** (see
    `withdrawn/WITHDRAWN.md`; #10463 records the ordering claim as PROVISIONAL). This sentence keeps
    the history, not the assurance. **No
    bar, floor, denominator or number moves**; the defect is a process claim, and it is withdrawn
