@@ -10104,7 +10104,7 @@ class TortoiseSDK:
         Returns {"events": [payload dicts ordered by seq], "next_cursor": opaque}.
         after=None → tail (oldest retained). Expired cursor → ValueError(
         'cursor expired — replay from tail'); malformed → ValueError('invalid cursor').
-        Types are validated against the EventCodec registry (unknown → ValueError).
+        Types and limit are validated (unknown type, or limit outside 1..MAX_PAGE → ValueError).
         Events live in THIS SDK's graph namespace (the org partition).
 
         #9208: when a change-feed write for THIS graph has been REFUSED or lost,

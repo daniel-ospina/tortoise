@@ -890,6 +890,16 @@ def _event_row_exists(proj, event_id: str) -> bool | None:
 #: two places (#8447 row #6) and silently clamped in two others: this seam
 #: (`max(1, min(int(limit), 1000))`, the defect) and the `webhook_delivery`
 #: page read, which carried its own copy of the literal.
+#:
+#: OVERRIDES: AIP-158's coerce-down for a `page_size` above the declared maximum
+#: (the Google-approved default — an over-max ask is coerced DOWN to the
+#: maximum, and only a NEGATIVE one is an INVALID_ARGUMENT). Coercing here
+#: would be the silent truncation #8447 forbids: `read_after` returns a bare
+#: `list[dict]` and `poll_events`' `next_cursor` is never empty, so a coerced
+#: page is indistinguishable from a drained stream — which is exactly why
+#: AIP-158 permits coerce-down only alongside an empty `next_page_token` that
+#: marks end-of-collection. An out-of-domain ask is REFUSED instead. The
+#: ruling is recorded on #8447.
 MAX_PAGE = 1000
 
 
@@ -916,7 +926,9 @@ def read_after(proj, after_seq: int, types: list[str] | None = None,
     operation returns complete results or says it is incomplete, never a
     silently truncated page indistinguishable from a complete one). Refusing
     at the reference point — rather than capping the caller's ask — is the same
-    instrument ``next_seq`` uses for an out-of-domain ``seq`` (#5379).
+    instrument ``next_seq`` uses for an out-of-domain ``seq`` (#5379). It also
+    departs from AIP-158's coerce-down default; see the ``OVERRIDES:`` line
+    above ``MAX_PAGE`` for why that departure is deliberate.
 
     Dedup: a duplicate event_id (defense in depth — the unique constraint
     normally prevents them) keeps the FIRST occurrence.

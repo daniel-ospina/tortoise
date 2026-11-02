@@ -32,6 +32,7 @@ narrower claim than "they pass on the pre-fix tree": two of them name
 ERROR.
 """
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -237,3 +238,37 @@ def test_poll_events_at_the_cap_still_answers(sdk_factory, tmp_path):
     reply = sdk.poll_events(limit=event_store.MAX_PAGE)
     assert len(reply["events"]) == event_store.MAX_PAGE
     assert reply["next_cursor"]  # a page of the allowed size, continued by cursor
+
+
+def test_the_contract_change_and_its_departure_are_stated_where_they_are_read():
+    """The domain is disclosed on the public method, and the departure is marked.
+
+    This PR changes what ``poll_events(limit=5000)`` DOES — it raises where it
+    used to answer a 1000-row page — so the domain belongs in the docstring a
+    caller reads, not only in the message they get after the fact.
+    ``tortoise/sdk.py`` is otherwise not in this diff: the sentence is a
+    NET-ZERO-LINE edit inside the existing "Types are validated …" line,
+    because ADDING lines there moves ``_extract_session_v2`` and its call site
+    and reddens the FROZEN citation pins in ``tests/test_7949_capstone_*``
+    (that is what ``c437c2c6d`` was for).
+
+    The second half pins the ``OVERRIDES:`` marker. Coerce-down for an
+    over-max page size is AIP-158's (Google-approved) default, so refusing is
+    a deliberate departure — a lane holding that AIP must find the ruling
+    before "fixing" the refusal back into a silent clamp.
+
+    Both halves fail on the pre-fix tree: neither the sentence nor the marker
+    existed.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    doc = TortoiseSDK.poll_events.__doc__ or ""
+    assert "1..MAX_PAGE" in doc, (
+        "poll_events' docstring must name the limit domain — it is the public "
+        "method whose behaviour this PR changes (#8447 row #6)")
+
+    src = Path(event_store.__file__).read_text(encoding="utf-8")
+    marker = [ln for ln in src.splitlines()
+              if ln.lstrip("#: ").startswith("OVERRIDES:")]
+    assert len(marker) == 1, f"expected one OVERRIDES line, found {marker}"
+    assert "AIP-158" in marker[0] and "coerce-down" in marker[0], marker[0]
