@@ -361,6 +361,43 @@ def test_the_withdrawn_log_still_hashes_to_the_digest_its_note_publishes(probe):
         "A note that additionally publishes OTHER digests is fine: only this file's must be here")
 
 
+def test_the_withdrawn_log_is_not_back_in_the_checked_directory(probe):
+    """The withdrawal moves the log out of the glob — and NOTHING pinned it staying out.
+
+    Ruling item 2 on #10463: *"Do not re-add the log in a fresh commit to obtain a later
+    add-commit. That satisfies the letter of the check while the real ordering is unchanged — it is
+    precisely the fabrication the guard exists to prevent."* That ruling is unenforced by
+    construction: the guard requires only `log_add_epoch > prereg_add_epoch` over every `*.log` it
+    globs NON-recursively (`EVIDENCE_LOG_GLOB`, `directory.glob(...)`), and the single-measured-log
+    rule counts only `capstone-measured-*.log`. A copy put back here in a FRESH commit therefore
+    has a LATER add-commit than the registration and is blessed — `evidence logs: 1`, ordering
+    "verified" — i.e. the exact fabrication, now wearing a green gate.
+
+    The temptation is real and this PR's own note invites it: `withdrawn/WITHDRAWN.md` says the
+    claim stays PROVISIONAL until re-measured with the registration already on the base branch,
+    and the registration IS on the base branch now — so the cheapest-looking way to drop the
+    "provisional" is to move the file back.
+
+    Compared by BYTES, not by name: a copy under any filename is the same act. A genuine
+    re-measurement writes DIFFERENT bytes, so it is not refused here.
+    """
+    import hashlib
+
+    withdrawn = hashlib.sha256((probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_bytes()).hexdigest()
+    back = sorted(
+        p.name for p in probe.EVIDENCE_DIR.glob("*.log")
+        if hashlib.sha256(p.read_bytes()).hexdigest() == withdrawn)
+    assert not back, (
+        "the withdrawn log's measured bytes are back in the checked directory "
+        f"({back}): that directory is what the ordering half orders, and re-adding the log in a "
+        "fresh commit to obtain a later add-commit is the fabrication #10463 item 2 forbids — the "
+        "withdrawal, not a gate edit, is what keeps `main` green (see `withdrawn/WITHDRAWN.md`)")
+    assert not (probe.EVIDENCE_DIR / "s3-ablation-a1075dfc.log").exists(), (
+        "the withdrawn log is back AT THE PATH the ordering half reads. That is item 2's "
+        "fabrication whether the bytes are the measured ones or edited ones: a fresh add-commit "
+        "satisfies the letter of the ordering check while the real ordering is unchanged")
+
+
 def test_the_log_header_names_every_bar_and_floor(probe):
     """Five of seven bars were emitted before; `corroboration_min_sessions` decides a qualifier."""
     import ast
