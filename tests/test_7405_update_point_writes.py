@@ -59,14 +59,19 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import types
 import uuid
+from pathlib import Path
 
 import pytest
 import redis.exceptions as redis_exc
 
 from tortoise import embeddings
 from tortoise.sdk import TortoiseSDK
+
+#: Repo root — this file's source-level pins read the tree, not the graph.
+_REPO = Path(__file__).resolve().parent.parent
 
 # The MEASURED v6 literal (see #7685): one sentence for two realities — a
 # rebuild and a plain deletion. Which one it was is decided by the graph KEY's
@@ -4338,3 +4343,110 @@ def test_a_LANDED_update_still_runs_the_ep_side_effects(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+# ── the presence fold's projection references are SYMBOLS, not line cites ──
+#
+# `_apply_journal_presence` reads the same journal records the projection does and
+# says so in comments; so do the promote notes beside it and the `sourceVersion`
+# anchor in `_write_relation`. Every one of those references used to be a
+# `file:line` cite — and NOTHING resolves a `projection/` or `record_projection.py`
+# line cite: the bundle's `_BUNDLE_CITE` sweep matches `sdk|edges|extractor_v2`
+# only and reads DOCUMENTS (not `sdk.py`), and `_PREREG_STEP_CITE_DOCS` reads the
+# extractor's own cites. So those numbers re-staled in silence, and all five had
+# drifted by PR #10543's head (measured, each target read back):
+#
+#   `projection/__init__.py:8060`   — the `PointsMerged` presence scan. The line
+#                                     sat mid-docstring in
+#                                     `plan_point_restamp_folds`; the scan it
+#                                     means had moved on.
+#   `projection/__init__.py:1074`   — the `PointPromoted` replay arm. The line
+#                                     was delete-masking prose (#8256).
+#   `projection/__init__.py:1082`   — the `OperatorPromoted` replay arm. Same.
+#   `projection/edges.py:504`       — `_anchor_on_create`. The line was
+#                                     `_mint_subject_stub`'s Subject arm.
+#   `record_projection.py:2061-2068`— the "re-link must not ADVANCE a recorded
+#                                     version" rule. The line was a cache-tier
+#                                     UPDATE.
+#
+# The durable fix is the one the #9675 index row already records — "cite the
+# symbol, not the line". This leg refuses the numeric form for the two modules
+# nothing sweeps, and resolves each symbol the comments now name against the file
+# they attribute it to, so a rename reds here instead of leaving a comment
+# pointing at a stranger.
+
+#: The modules `sdk.py` cites but no sweep resolves. `projection/` is the fast-
+#: moving one; `record_projection.py` carries the same `sourceVersion` vocabulary.
+_UNCWEPT_CITE = re.compile(
+    r"(?<![\w.])(?:tortoise/)?(?:projection/[\w]+|record_projection)\.py:\d+")
+
+
+def _decommented(path: Path) -> str:
+    """The source with comment markers collapsed.
+
+    A cite can be WRAPPED across two ``#`` lines — the ``PointPromoted`` one was
+    written as ``(projection/`` newline ``# __init__.py:1074)`` — and a
+    line-scoped scan does not match that at all, which is how it survived every
+    earlier re-derivation. The marker is removed with NO separator so the halves
+    of a wrapped cite rejoin exactly; that is the only way the ``:1074`` form is
+    visible to a scanner at all.
+    """
+    text = path.read_text(encoding="utf-8")
+    return re.sub(r"\s+", " ", re.sub(r"\s*#\s*", "", text))
+
+
+def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
+    """Nothing sweeps these numbers, so they must not be numbers.
+
+    Non-vacuity: at the pre-fix head `tortoise/sdk.py` carried five live cites of
+    exactly this shape (listed above), so the refusal reds; after them, the
+    symbol-resolution arms are the ones that can fail.
+    """
+    sdk_path = _REPO / "tortoise" / "sdk.py"
+    found = _UNCWEPT_CITE.findall(_decommented(sdk_path))
+    assert not found, (
+        f"`tortoise/sdk.py` cites an unswept module by LINE again: {sorted(found)} "
+        "— no sweep resolves a `projection/` or `record_projection.py` line cite "
+        "(the bundle's `_BUNDLE_CITE` matches `sdk|edges|extractor_v2` in the "
+        "bundle DOCUMENTS only), so the number rots silently on the next insertion "
+        "above it; cite the symbol")
+
+    # The scanner itself is not vacuous: it DOES see both spellings, including the
+    # wrapped one, on text where they are live. (The range's END is not matched —
+    # a ban does not need it, and refusing `:2061` is what stops the number.)
+    probe = "  # see (projection/\n  # __init__.py:1074) and record_projection.py:2061-2068\n"
+    assert sorted(_UNCWEPT_CITE.findall(
+        re.sub(r"\s+", " ", re.sub(r"\s*#\s*", "", probe)))) == [
+            "projection/__init__.py:1074", "record_projection.py:2061"]
+
+    sdk = sdk_path.read_text(encoding="utf-8")
+    proj = (_REPO / "tortoise" / "projection" / "__init__.py").read_text(
+        encoding="utf-8")
+    edges = (_REPO / "tortoise" / "projection" / "edges.py").read_text(
+        encoding="utf-8")
+    record = (_REPO / "tortoise" / "record_projection.py").read_text(
+        encoding="utf-8")
+    for symbol, owner, source in (
+        ("plan_point_restamp_folds", "projection/__init__.py", proj),
+        ("FalkorProjection", "projection/__init__.py", proj),
+        ("_promotion_point_with_operator", "projection/__init__.py", proj),
+        ("_anchor_on_create", "projection/edges.py", edges),
+        ("_relation_upsert_statement", "record_projection.py", record),
+    ):
+        assert symbol in sdk, (
+            f"`{symbol}` is no longer named in `tortoise/sdk.py` — the comment "
+            "that used to cite it by line now cites nothing, so its claim is "
+            "unattributable")
+        assert symbol in source, (
+            f"`tortoise/sdk.py` attributes a claim to `{symbol}` in `{owner}`, but "
+            f"`{owner}` no longer defines it — re-derive the symbol the mechanic "
+            "moved to")
+
+    # The CLAIM the presence-fold comment makes still holds: the projection folds
+    # a merged-away id to NOT-present (a pending delete), the same verdict this
+    # module's `PointsMerged` arm reaches.
+    assert 'pending_deleted.add(("Point", mid))' in proj, (
+        "the comment on `_apply_journal_presence`'s `PointsMerged` arm claims "
+        "`plan_point_restamp_folds` folds every merged id to NOT-present; the "
+        "projection's pending-delete fold is gone — re-derive the claim, do not "
+        "delete the assertion")
