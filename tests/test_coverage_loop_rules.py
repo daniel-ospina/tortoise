@@ -631,10 +631,26 @@ def test_floor_term_keeps_the_per_session_cap_at_a_wide_window():
     Rewriting that line as ``counts[s] = n`` (reusing the value read above,
     which is 0 for an admitted session) leaves the count at ZERO, so the same
     session can eject a duplicate AGAIN on its next item and walk past
-    ``per_session_cap``. Discriminating that needs a window wide enough for
-    three sessions to hold two each — ``window >= 7`` — which no other test
-    here uses. Measured: real top-7 is ``{A:2, B:2, C:1, D:1, E:1}``; the
-    mutant gives E THREE of seven slots under ``per_session_cap=2``.
+    ``per_session_cap``. Discriminating that needs a window in which THREE
+    sessions can hold two slots each — six — AND no fourth session is left to
+    absorb the spare slot. The pool below therefore carries ``D`` for exactly
+    that reason, which is why THIS pool needs ``window >= 7``; both halves of
+    that were measured, and the second is the one an earlier version of this
+    docstring got wrong by asserting the bare rule "window >= 7" against a
+    reason that only explains six:
+
+    * with ``d1`` present — the pool used below — ``window=6`` does NOT expose
+      the mutant: the real code returns ``{A:2, B:1, C:1, D:1, E:1}`` and the
+      mutant ``{A:1, B:1, C:1, D:1, E:2}``, so BOTH stay inside a cap of 2 —
+      ``D`` absorbs the spare slot instead. At ``window=7`` the real code
+      returns ``{A:2, B:2, C:1, D:1, E:1}`` and the mutant gives E THREE of
+      seven slots (``{A:1, B:1, C:1, D:1, E:3}``) under a cap of 2.
+    * with ``d1`` REMOVED (A, B, C, E only), ``window=6`` is already enough: the
+      real code returns ``{A:2, B:2, C:1, E:1}`` and the mutant returns
+      ``{A:1, B:1, C:1, E:3}``.
+
+    So the necessity is a property of the POOL as much as of the window, and
+    the test keeps the 7-wide pool because it also exercises a fourth session.
     """
     items = [_hit("a1", "A"), _hit("a2", "A"), _hit("b1", "B"),
              _hit("b2", "B"), _hit("c1", "C"), _hit("c2", "C"),
