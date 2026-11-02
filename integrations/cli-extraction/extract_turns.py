@@ -115,14 +115,76 @@ def state_dir() -> Path:
 
 # ── dump ─────────────────────────────────────────────────────────────
 
+#: The predicate `dump` reads: the CAPTURE lane's real shape (#9932).
+#:
+#: `sdk._TURN_WRITE_CYPHER` — the ONE turn store, called by both capture lanes
+#: (SDK `capture_session` and the hosted commit path) — MERGEs each turn as a
+#: `:Point` carrying `content`, `pointKind`, `is_episodic`, `speaker` and
+#: wires it `(s:Session)-[:CONTAINS]->(t)`. It sets **no** `extractedFrom`
+#: property, so an `extractedFrom STARTS WITH …` predicate matched ZERO rows
+#: against every session this repo captures, and `authoredBy` (the human-author
+#: property) is absent too — the role lives on `speaker`. Reading those two
+#: names is what broke the documented dump→run→write workflow.
+#:
+#: The `session://` prefix makes a transcript key the CAPTURE session id — the
+#: id the operator passed to `capture_session`, and the same tail-key rule
+#: `build_transcripts` already applies to a hand-built `session://` file.
+_DUMP_QUERY = (
+    "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
+    "WHERE t.is_episodic = true AND t.pointKind = 'event' "
+    "RETURN 'session://' + s.id, t.pointKind, t.speaker, t.content, t.createdAt, t.id "
+    "ORDER BY t.id"
+)
+
+#: The capture store's own frame (`_capture_turn_text`, ``"[role] body"``).
+#: The turn's `content` property holds the FRAMED text and `speaker` holds the
+#: un-bracketed role, so a transcript line built verbatim from `content` says
+#: the speaker twice. `_capture_turn_role_text` is the reader's inverse — this
+#: is a local copy of it because `dump` maps rows on the HOST, where `tortoise`
+#: is not necessarily importable (the whole lane talks to the container).
+_FRAME_RE = re.compile(r"^\[([^\]\n]+)\]\s?(.*)$", re.S)
+
+
+def _turn_order(row) -> tuple:
+    """Sort key: (session, turn index).
+
+    `createdAt` CANNOT order a session's turns: the writer stamps the whole
+    batch with one `$now` (`coalesce(t.createdAt,$now)`), so every turn in a
+    capture carries the SAME timestamp and the graph returns them in arbitrary
+    order — a scrambled transcript that reds nothing. The turn index in the
+    deterministic id (`_capture_turn_id` -> `{session}_t{i}`) is the order, and
+    it is parsed as an INTEGER because a lexicographic sort puts `t10` before
+    `t2`.
+    """
+    sid = str(row[0])
+    m = re.search(r"_t(\d+)$", str(row[5]))
+    return (sid, int(m.group(1)) if m else 0)
+
+
+#: One graph row -> one turns-file record. The `by` key carries the turn ROLE
+#: (`speaker`), which is what `build_transcripts` renders as the prompt's
+#: per-line speaker and what lets the engine separate user text from assistant
+#: text. `kind` rides along for the writer's tiering.
+def _turn_record(row) -> dict:
+    role, text = row[2], row[3] or ""
+    framed = _FRAME_RE.match(text)
+    if framed:
+        role = role or framed.group(1)
+        text = framed.group(2)
+    return {"src": row[0], "kind": row[1], "by": role,
+            "content": text, "at": str(row[4])}
+
 
 def dump(out: Path, allow_empty: bool = False):
-    """Pull captured turn Points (codex:// thread sources) from the container.
+    """Pull the captured session turns out of the container.
 
-    This is the integration's ONE private graph read (a prefix query —
-    `STARTS WITH` — has no public equivalent); everything else goes through
-    public SDK doors. Fails loudly on zero rows unless --allow-empty: an
-    empty capture usually means capture is off or the schema moved.
+    This is the integration's ONE private graph read (walking
+    `(s:Session)-[:CONTAINS]->(t:Point)` has no public equivalent); everything
+    else goes through public SDK doors. Fails loudly on zero rows unless
+    --allow-empty: an empty capture usually means capture is off, the schema
+    moved, or — on a deployment with the Postgres record armed
+    (`TORTOISE_RECORD_DSN`) — the turns live in the RECORD and the graph was
+    never written, which this integration cannot read (#10000).
     """
     ns = _cfg("TORTOISE_NAMESPACE", "selfhost")
     log = _cfg("TORTOISE_EVENT_LOG", f"/data/events/{ns}.jsonl")
@@ -131,11 +193,9 @@ def dump(out: Path, allow_empty: bool = False):
         "from tortoise.sdk import TortoiseSDK\n"
         f"sdk = TortoiseSDK(namespace={ns!r}, event_log_path={log!r})\n"
         "g = sdk._get_proj().g\n"
-        "rows = g.query(\"MATCH (p:Point) WHERE p.extractedFrom STARTS WITH 'codex://' \"\n"
-        "               \"RETURN p.extractedFrom, p.pointKind, p.authoredBy, p.content, p.createdAt \"\n"
-        "               \"ORDER BY p.createdAt\").result_set\n"
+        f"rows = g.query({_DUMP_QUERY!r}).result_set\n"
         "for r in rows:\n"
-        "    print(json.dumps({'src': r[0], 'kind': r[1], 'by': r[2], 'content': r[3], 'at': str(r[4])}))\n"
+        "    print(json.dumps([r[0], r[1], r[2], r[3], str(r[4])]))\n"
         "sdk.close()\n"
     )
     try:
@@ -145,7 +205,9 @@ def dump(out: Path, allow_empty: bool = False):
     except subprocess.TimeoutExpired as exc:
         raise SystemExit(f"dump: docker exec timed out after {DOCKER_TIMEOUT}s "
                          "— is the container healthy?") from exc
-    out.write_text(r.stdout)
+    rows = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip()]
+    out.write_text("".join(json.dumps(_turn_record(row)) + "\n"
+                           for row in sorted(rows, key=_turn_order)))
     with out.open() as fh:
         n = sum(1 for _ in fh)
     if n == 0 and not allow_empty:
@@ -178,6 +240,18 @@ def build_transcripts(turns_path: Path):
                 key = m.group(1)
             elif t["src"].startswith("codex://"):
                 raise ValueError(f"unexpected codex source shape: {t['src']!r}")
+            elif t["src"].startswith("session:"):
+                # A CAPTURE-turn source (what `dump` emits): the key is the
+                # session id itself, so `--transcript <session-id>` works.
+                # A remainder carrying `/` or `#` would silently merge two
+                # sessions into one key — the failure this function raises on
+                # for the codex shape — so refuse it here too.
+                sm = re.fullmatch(r"session:(?://)?([^/#]+)(?:#message=[^/]*)?",
+                                  t["src"])
+                if sm is None:
+                    raise ValueError(
+                        f"unexpected session source shape: {t['src']!r}")
+                key = sm.group(1)
             else:
                 # hand-built turns files: full tail id, fragment stripped —
                 # no truncation (a length cut would silently re-introduce the

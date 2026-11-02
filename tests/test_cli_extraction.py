@@ -31,8 +31,11 @@ from extract_turns import (
     KIND_MAP,
     PROMPT,
     WRITER_SCRIPT,
+    _DUMP_QUERY,
     _parse_json_block,
     _sum_usage,
+    _turn_order,
+    _turn_record,
     _wrap_transcript,
     build_transcripts,
     call_engine,
@@ -285,6 +288,104 @@ class TestBuildTranscripts(unittest.TestCase):
             resolve_transcript("aaaaaaaa", ts)
         with self.assertRaises(SystemExit):  # no such thread
             resolve_transcript("dddddddd", ts)
+
+
+class TestDumpReadsTheCaptureShape(unittest.TestCase):
+    """#9932: `dump` must read the shape a capture lane actually writes.
+
+    The regression this pins: `dump` used `p.extractedFrom STARTS WITH
+    'codex://'` + `p.authoredBy`, and the ONE turn store writes neither — it
+    MERGEs `(s:Session)-[:CONTAINS]->(t:Point)` and stores the role as
+    `speaker`. Against a real capture the documented dump→run→write workflow
+    therefore started at 0 rows.
+    """
+
+    def test_predicate_is_coupled_to_the_turn_writers_real_properties(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from tortoise.sdk import _TURN_WRITE_CYPHER
+
+        writer = _TURN_WRITE_CYPHER
+        # every node property the dump query filters on or returns is SET by
+        # the writer, so a renamed property reds HERE and not at 0 rows.
+        for prop in ("is_episodic", "pointKind", "speaker", "content",
+                     "createdAt"):
+            self.assertIn(f"t.{prop}=", writer,
+                          f"dump reads t.{prop}, the turn store never sets it")
+        # the two names the old predicate used: absent from the writer by
+        # construction, which is why the query matched nothing.
+        self.assertNotIn("extractedFrom", writer)
+        self.assertNotIn("authoredBy", writer)
+        self.assertIn("MATCH (s:Session {id:$sid}) ", writer)
+        # the pointKind VALUE the query filters on is built outside that string
+        # (`turn_rows[...] = {"k": "event", ...}`): a changed literal would
+        # leave the name-level assertion green while dump returned 0 rows.
+        import inspect
+        from tortoise.sdk import _write_capture_turns
+        self.assertIn('"k": "event"', inspect.getsource(_write_capture_turns))
+
+        # ...and the query walks the wiring the writer creates.
+        self.assertIn("CONTAINS", _DUMP_QUERY)
+        self.assertNotIn("extractedFrom", _DUMP_QUERY)
+        self.assertNotIn("authoredBy", _DUMP_QUERY)
+
+    def test_turn_order_is_the_turn_index_not_the_batch_timestamp(self):
+        # the writer stamps a whole capture batch with ONE `$now`, so
+        # `createdAt` cannot order a session's turns. The index in the id is
+        # the order, parsed as an integer: `t10` must sort AFTER `t2`.
+        ts = "2026-11-02T00:00:00+00:00"
+        rows = [["session://s1", "event", f"r{i}", f"[r] m{i}", ts, f"s1_t{i}"]
+                for i in range(11)]
+        got = [r[5] for r in sorted(reversed(rows), key=_turn_order)]
+        self.assertEqual(got, [f"s1_t{i}" for i in range(11)])
+        # two sessions never interleave
+        mixed = [["session://b", "event", "r", "[r] x", ts, "b_t0"],
+                 ["session://a", "event", "r", "[r] x", ts, "a_t1"],
+                 ["session://a", "event", "r", "[r] x", ts, "a_t0"]]
+        self.assertEqual([r[5] for r in sorted(mixed, key=_turn_order)],
+                         ["a_t0", "a_t1", "b_t0"])
+
+    def test_turn_record_unframes_the_written_turn_text(self):
+        # `content` holds the writer's own `[role] body` frame and `speaker`
+        # holds the role, so passing content through verbatim says it twice.
+        rec = _turn_record(["session://s1", "event", "user", "[user] hello", None])
+        self.assertEqual(rec["by"], "user")
+        self.assertEqual(rec["content"], "hello")
+        # an unframed / hand-built record is passed through unchanged
+        plain = _turn_record(["session://s1", "event", None, "hello", None])
+        self.assertEqual(plain["content"], "hello")
+
+    def test_ambiguous_session_source_is_refused_not_merged(self):
+        # two sessions whose ids share a tail must never collapse into one
+        # transcript key (the mis-grouping `build_transcripts` raises on).
+        for src in ("session://teamA/run-7", "session://x#frag"):
+            with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+                f.write(json.dumps({"src": src, "kind": "event", "by": "user",
+                                    "content": "x", "at": None}) + "\n")
+            self.addCleanup(os.unlink, f.name)
+            with self.assertRaises(ValueError, msg=src):
+                build_transcripts(Path(f.name))
+
+    def test_turn_record_carries_speaker_as_the_role(self):
+        rec = _turn_record(["session://s1", "event", "user", "hello", None])
+        self.assertEqual(rec["src"], "session://s1")
+        self.assertEqual(rec["by"], "user", "the role is `speaker`, not `authoredBy`")
+        self.assertEqual(rec["kind"], "event")
+        self.assertEqual(rec["content"], "hello")
+
+    def test_dumped_record_keys_a_transcript_by_session_id(self):
+        # the dumped shape must flow through build_transcripts to one
+        # transcript keyed by the capture session id — the whole point of the
+        # lane is that this chain starts at non-zero rows.
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps(_turn_record(["session://s1", "event", "user",
+                                             "hello", "2026-11-02T00:00:00Z"])) + "\n")
+            f.write(json.dumps(_turn_record(["session://s1", "event", "assistant",
+                                             "hi", "2026-11-02T00:00:01Z"])) + "\n")
+        self.addCleanup(os.unlink, f.name)
+        ts = build_transcripts(Path(f.name))
+        self.assertEqual(list(ts), ["s1"])
+        self.assertIn("[2026-11-02] user: hello", ts["s1"])
+        self.assertIn("[2026-11-02] assistant: hi", ts["s1"])
 
 
 class TestPromptContract(unittest.TestCase):

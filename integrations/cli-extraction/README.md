@@ -11,16 +11,26 @@ No SDK or MCP surface changes: this is a client-side integration. Its writes
 go through public SDK doors (`create_point`, `set_source_tier`,
 `get_source_reliability`, `compute_confidence`, `query`); `dump` uses one
 private read (`sdk._get_proj().g`) because no public API offers a
-`STARTS WITH` prefix query — that is the only private surface, it is
-read-only, and it is documented here rather than glossed.
+`(s:Session)-[:CONTAINS]->(t:Point)` walk — no public API offers it — that is
+the only private surface, it is read-only, and it is documented here rather
+than glossed.
+
+`dump` reads the turns the capture lane actually writes (the ONE turn store,
+`tortoise/sdk.py`'s `_TURN_WRITE_CYPHER`, used by both the SDK and the hosted
+capture path): the `:Point` nodes wired to a `:Session`, with the role taken
+from `t.speaker`. It no longer reads `codex://`-tagged Points — no capture lane
+in this repo ever wrote one (`#9932`). A hand-built turns *file* in the
+`codex://threads/<id>#message=<id>` shape is still accepted, and a deployment
+whose turns live in the Postgres record rather than the graph (record armed,
+`#10000`) is not readable by this integration at all.
 
 ## How it works
 
 ```text
-capture (per-turn hook, #3963)      codex://threads/<id>#message=<id>
-        │                                   │
-        ▼                                   ▼
-   dump: turn Points out of the graph  ──►  turns_raw.jsonl   (~/.tortoise/cli-extraction/)
+capture (tortoise/sdk.py: _TURN_WRITE_CYPHER)  (s:Session)-[:CONTAINS]->(t:Point)
+        │                                      │   {speaker, content, is_episodic}
+        ▼                                      ▼
+   dump: session turn Points out of the graph ──►  turns_raw.jsonl   (~/.tortoise/cli-extraction/)
         │
         ▼
    run: one CLI engine extracts durable claims (fixed prompt, JSON-only, transcript as data)
@@ -33,17 +43,22 @@ Three composable phases, one file:
 
 ```bash
 python3 extract_turns.py dump                       # turns -> turns_raw.jsonl (fails on 0 rows; --allow-empty to accept)
-python3 extract_turns.py run --transcript 01a1102f --out ex.json
+python3 extract_turns.py run --transcript <session-id> --out ex.json
                                                     # prefix is fine if unambiguous; defaults: claude-haiku-5-5 @ high
 python3 extract_turns.py write --extraction ex.json \
     --source session://extraction-2026-10-24-haiku-high-thread-01a1102f \
     --domain my-project
 ```
 
-Transcripts are keyed by the **full** thread id (a truncated key would merge
-distinct threads: UUIDv7 ids share their leading hex across a ~65-second
-window, so parallel agent runs collide). `--transcript` accepts an exact id
-or an unambiguous prefix, and errors with the candidate list otherwise.
+Transcripts are keyed by the **capture session id** — the id passed to
+`capture_session`, read from the `(s:Session)-[:CONTAINS]->(t:Point)` wiring
+that `tortoise/sdk.py`'s `_TURN_WRITE_CYPHER` (the ONE turn store, used by
+both capture lanes) writes, with the turn role taken from `t.speaker`. A
+hand-built `codex://threads/<id>#message=<id>` turns file is still accepted
+and keyed by its **full** thread id: a truncated key would merge distinct
+threads, because UUIDv7 ids share their leading hex across a ~65-second
+window, so parallel agent runs collide. `--transcript` accepts an exact id or
+an unambiguous prefix, and errors with the candidate list otherwise.
 Outputs default to the state dir (`~/.tortoise/cli-extraction/`,
 `TORTOISE_STATE_DIR`), never the repo tree.
 
