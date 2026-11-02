@@ -820,7 +820,7 @@ def test_a_green_row_on_a_missing_artifact_is_refused():
               "run": {"status": "COMPLETED", "steps_observed": list(cvc.STEPS)},
               "rows": rows}
     codes = [code for code, _w, _m in
-             cvc.check(record, repo=_REPO, require_green=False).items]
+             cvc.check(record, repo=_build_gate_repo(), require_green=False).items]
     assert "V4" in codes, codes
 
 
@@ -1051,6 +1051,43 @@ def test_the_durations_map_carries_one_row_per_file():
             f"\n  {row[:90]}" for row in rows))
 
 
+def _build_gate_repo() -> Path:
+    """A throwaway git work tree with NO promisor remote, carrying the real `docs/`.
+
+    `cvc.check` resolves every row / pre-registration sha through
+    `git cat-file -e`, and the pins below stamp SYNTHETIC shas (`"a"*40`,
+    `"c"*40`) that resolve nowhere by design. On a FULL clone that answer comes
+    back `False` instantly; on a PARTIAL clone — `blob:none`, which is how every
+    worktree of this repo is checked out — git treats the missing object as a
+    PROMISOR object and lazy-fetches it from `origin`, one network round trip per
+    sha. The result is not a failing assertion but a hang: measured at this head,
+    `test_a_green_e2_at_thirteen_of_fourteen_is_not_refused_for_its_own_blocker`
+    and `test_a_green_row_on_a_missing_artifact_is_refused` both died at
+    `Failed: Timeout (>300.0s)` inside `tools/capstone_verdict_check.py::_git`
+    (stack: `_resolves` → `_git` → `subprocess.run`), the same environment class
+    the sibling `test_7949_capstone_verdict_check.py` disclosed.
+
+    A throwaway repo has no promisor remote, so an unresolvable sha is the
+    instant `False` CI sees. `docs/` is symlinked in so V4's artifact-existence
+    check still reads the REAL bundle rather than an empty directory.
+
+    Rebuilt per call (no `lru_cache`): this suite reaps its per-test `TMPDIR`
+    after every test, so a cached path would hand the NEXT test a `cwd` that no
+    longer exists (`FileNotFoundError` out of `subprocess.run`).
+    """
+    repo = Path(tempfile.mkdtemp(prefix="capstone-gate-repo-"))
+    (repo / "docs").symlink_to(_REPO / "docs", target_is_directory=True)
+    (repo / "README.md").write_text("throwaway work tree for the gate pins\n")
+    cvc._git(repo, "init", "-q")
+    cvc._git(repo, "add", "README.md")
+    cvc._git(repo, "-c", "user.email=pin@example.invalid",
+             "-c", "user.name=pin", "commit", "-qom", "pin", "README.md")
+    assert cvc._is_git_repo(repo), repo
+    assert not cvc._resolves(repo, "a" * 40), (
+        "the throwaway repo must not be able to resolve a synthetic sha")
+    return repo
+
+
 def _gate_codes(rows: list[dict]) -> list[str]:
     record = {"schema": cvc.SCHEMA, "prereg": {"sha": "a" * 40, "status": "OK"},
               "corpus": {"sha256": "sha256:" + "e" * 64},
@@ -1058,7 +1095,7 @@ def _gate_codes(rows: list[dict]) -> list[str]:
                       "steps_observed": list(cvc.STEPS)},
               "rows": list(rows)}
     return [code for code, _w, _m in
-            cvc.check(record, repo=_REPO, require_green=False).items]
+            cvc.check(record, repo=_build_gate_repo(), require_green=False).items]
 
 
 def test_a_green_e2_at_thirteen_of_fourteen_is_not_refused_for_its_own_blocker():
