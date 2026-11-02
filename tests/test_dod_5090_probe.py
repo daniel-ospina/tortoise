@@ -31,6 +31,11 @@ claims:
 | `test_a_duplicate_writer_identity_holds_bullet_two_at_partial` | bullet 2's honesty | a writer whose label could not be resolved stops holding the row, while bullet 1 still reports the same hole |
 | `test_the_tool_parses_under_the_floor` | the `#5128` guard is PROTECTIVE, not documentary | 3.12-only syntax (PEP 701) creeps back in, so the file dies in the tokenizer before its own guard can refuse |
 | `test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default` | bullet 1's `on_by_default` input | a line that *documents* the flag (prose, a workflow step name, a commented list item) is scored as a shipped ON |
+| `test_an_assignment_shaped_line_inside_a_block_scalar_is_not_a_shipped_default` | the same input, on the one shape whose error direction is toward `MET` | a `>-` body line shaped like `KEY: 1` (documentation) reads as a shipped ON |
+| `test_a_real_mapping_after_a_block_scalar_still_reads_as_shipped_ON` | the block-scalar fix, in the other direction | ending the scalar drops the assignments that follow it from the walk |
+| `test_a_function_local_pattern_is_not_a_second_predicate_owner` | §12.2a's count is "module scope", as its docstring says | a helper's LOCAL `re.compile` in the population reads `count: 2 / DRIFT`, redding a required check on a correct change |
+| `test_a_class_level_pattern_still_counts_as_an_owner` | the same pruning must not become a false `MET` | a pattern list owned at IMPORT time (class body) is skipped by the module-scope walk |
+| `test_a_surface_that_quotes_the_dod_bullet_does_not_publish_a_ruling` | bullet 4 is the OWNER GATE — nothing may publish a ruling the owner did not make | a doc that restates `BULLETS[3]` (which contains the marker itself) scores `PARTIAL` |
 | `test_every_real_assignment_shape_still_reads_as_shipped_ON` | the same input, in the other direction | tightening the test makes a REAL shipped ON (compose map/array, `.env`, Dockerfile, `export`) read as a false `False` |
 | `test_searched_is_the_walk_not_the_list_of_mentions` | the documented `searched` contract | `searched` reports the mentions, so "what 'nowhere' covered" is `[]` for the case the function exists for |
 | `test_an_unreadable_surface_is_named_not_silently_excluded` | the `UNMEASURED` rule, applied to the walk | a file the walk could not read is folded into a measured `False` |
@@ -41,6 +46,12 @@ claims:
 | `test_the_census_note_does_not_break_the_markdown_table` | the note is safe in the artifact a reader sees | a note carries a `|` into `Row.observed`, which `_table` emits raw into a 4-column row (GFM: an unescaped pipe is a cell separator) |
 | `test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible` | an out-of-vocabulary class is NAMED as UNCLASSIFIED, and the census segments still ACCOUNT for the population | a class outside `CENSUS_CLASSES` falls through both `by_class` and `unclassified`, so the writer is named nowhere and the segments sum to `0` against a header claiming `N` |
 | `test_the_census_note_names_the_population_it_counted` | the total does not claim a population wider than it counted | a duplicate is listed as an unresolved writer while the note claims to cover the whole unresolved set and silently omits it |
+| `test_every_census_citation_re_derives_at_this_head` | `WRITER_CENSUS`'s own promise — *"the entries below were READ at their seam"* — which `#5090`/`#10541` quote as evidence | a citation names a symbol that file does not define, or a needle that is no longer inside the symbol it is cited for (the `file:line` form drifted silently when `sdk.py` grew) |
+| `test_the_citation_check_has_teeth_on_an_INJECTED_drift` | the same guard can FAIL | a drifted symbol, a missing needle, an unclassed entry or orphan evidence passes |
+| `test_an_executed_workflow_run_body_is_a_shipped_setting` | bullet 1 reads what the CI EXECUTES | a `run: |` body carrying `export FLAG=1` is counted as documentation, so row 1 reports `set ON in: none` |
+| `test_a_workflow_prose_block_is_still_documentation` | the same fix must not call every workflow block a command | a `note: >-` body (text) inside a workflow starts voting on `on_by_default` |
+| `test_a_run_key_outside_the_workflow_surface_is_not_executed` | the executed-key rule is SCOPED to the surface that runs it | any `.yml` with a `run:` block is scanned as shell, so a config tool's own field completes a DoD row |
+| `test_a_MATCH_label_is_not_credited_as_the_writers_label` | the writer map credits the label the WRITE names | a read's `MATCH (n:Point)` resolves a writer's stored label — how a label the writer never writes can read as "covered" |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
 measurement-only; the instrument is read-only and its pin must be too.
@@ -177,6 +188,78 @@ def test_the_seam_module_is_scanned_for_its_own_patterns():
     )
     # …and the widening must NOT drag in the imports it was excluded for:
     assert "tortoise/api.py" not in population, population
+
+
+def test_a_function_local_pattern_is_not_a_second_predicate_owner(tmp_path, monkeypatch):
+    """A helper's LOCAL `re.compile` is not a second rule set — module scope is.
+
+    `count_embed_predicates`'s docstring has always said *`re.compile` at module
+    scope*, while the code ran `ast.walk()` over each top-level statement — which
+    descends into `FunctionDef.body`. One ordinary helper-local pattern in any
+    module of the population therefore read `count: 2 / verdict: DRIFT` and
+    reddened `test_the_embed_decision_has_exactly_one_predicate`, a required
+    `core` leg, on a change that is NOT drift: a guard that refutes a correct
+    tree, whose cheapest-looking repair is to delete it (review, P3).
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_A = re.compile(r'#\\d+')\nRULES = ('r',)\n"
+        "def identifier_only(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nRULE_SET = value_gate.RULES\n"
+        "def embedding_verdict(t):\n    return None\n",
+        encoding="utf-8",
+    )
+    # The shape a helper grows: compiled when CALLED, not when imported.
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "from . import embed_gate\n"
+        "def _is_precomputed(text):\n"
+        "    import re\n"
+        "    pat = re.compile(r'^sha256:[0-9a-f]{64}$')\n"
+        "    return bool(pat.match(text))\n"
+        "def encode_for_row(t, d):\n    return embed_gate.embedding_verdict(t)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "PREDICATE_MODULE", "tortoise/value_gate.py")
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 1, (
+        f"a function-LOCAL pattern is not a module-scope predicate owner: {counted}")
+    assert counted["verdict"] == "MET", counted
+
+
+def test_a_class_level_pattern_still_counts_as_an_owner(tmp_path, monkeypatch):
+    """The module-scope prune must not become the false `MET` it guards against.
+
+    A class body executes at IMPORT time, so a pattern list there IS owned then
+    and is a real second rule set. Pruning function bodies must not take the
+    class with it — over-reporting drift is this file's stated safe direction,
+    and a false `MET` is the failure the whole instrument exists to remove.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "value_gate.py").write_text(
+        "import re\n_A = re.compile(r'#\\d+')\nRULES = ('r',)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embed_gate.py").write_text(
+        "from . import value_gate\nRULE_SET = value_gate.RULES\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "from . import embed_gate\n"
+        "class _Skip:\n"
+        "    import re\n"
+        "    _PATS = [re.compile(r'^sha256:')]\n"
+        "def encode_for_row(t, d):\n    return embed_gate.embedding_verdict(t)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(probe, "PREDICATE_MODULE", "tortoise/value_gate.py")
+    counted = probe.count_embed_predicates()
+    assert counted["count"] == 2, counted
+    assert counted["verdict"] == "DRIFT", counted
 
 
 def test_a_pattern_list_in_the_seam_module_reads_as_drift(tmp_path, monkeypatch):
@@ -1107,6 +1190,139 @@ def test_every_real_assignment_shape_still_reads_as_shipped_ON(
     assert shipped["files"], shipped
 
 
+def test_an_assignment_shaped_line_inside_a_block_scalar_is_not_a_shipped_default(
+        tmp_path, monkeypatch):
+    """A `>-` body is SCALAR CONTENT, so `KEY: 1` there is prose, not a setting.
+
+    YAML 1.2.2 models block scalars as a *scalar node style* (§8.1), separate
+    from *block mappings* (§8.2.2) — *"Block scalar formats … all express
+    strings"* — so nothing inside the body is a mapping entry. The line scan had
+    no notion of structure and read it as a shipped ON, and `on_by_default` is
+    the clause that separates bullet 1's `PARTIAL` from `MET`.
+
+    This is the one shape in the file whose error direction is toward `MET`, and
+    the natural edit is the one that trips it: this repo already documents THIS
+    flag inside a `>-` block (`config/v4-mechanisms.yml:426-433`), so adding a
+    usage line there must not complete a DoD row (review, P3).
+    """
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "x.yml").write_text(
+        "meta:\n"
+        "  note: >-\n"
+        "    TORTOISE_EMBED_GATE: 1\n"
+        "    A usage line here is documentation, not a shipped default.\n"
+        "  off_by_default: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    # …and the exclusion is REPORTED, because it is a decision about a line that
+    # looks exactly like a setting. A silent skip would be a new hole.
+    assert shipped["documented_only"] == 1, shipped
+
+
+def test_an_executed_workflow_run_body_is_a_shipped_setting(
+        tmp_path, monkeypatch):
+    """A `run: |` body is a SHELL SCRIPT, not documentation (round 17, P3).
+
+    YAML models a block scalar as a scalar node (§8.1), so no line inside it is
+    a mapping entry — but that says nothing about whether the text is a VALUE.
+    On `.github/workflows` a `run:` body is executed by the shell (*"each line
+    runs in the same shell"*), so `export FLAG=1` there IS a shipped setting.
+    Counting it into `documented_only` printed `set ON in: none` over a workflow
+    that sets it — the measured-looking-nowhere shape this instrument refuses
+    elsewhere, and the one surface where a gate flag is actually TURNED ON.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n"
+        "  t:\n"
+        "    steps:\n"
+        "      - name: run the suite with the embed gate ON\n"
+        "        run: |\n"
+        "          export TORTOISE_EMBED_GATE=1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is True, shipped
+    assert shipped["files"] == [
+        ".github/workflows/ci.yml: export TORTOISE_EMBED_GATE=1"], shipped
+    # It is a SETTING, so it must not be double-reported as documentation.
+    assert shipped["documented_only"] == 0, shipped
+
+
+def test_a_workflow_prose_block_is_still_documentation(
+        tmp_path, monkeypatch):
+    """The over-correction guard: not every workflow block scalar is a command.
+
+    Only the KEY decides. A `note:` / `description:` body is text even inside a
+    workflow, so scanning every block body as shell would let a documentation
+    edit move `on_by_default` — the exact fail-open shape round 8 closed.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n"
+        "  t:\n"
+        "    steps:\n"
+        "      - name: x\n"
+        "        note: >-\n"
+        "          TORTOISE_EMBED_GATE: 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    assert shipped["documented_only"] == 1, shipped
+
+
+def test_a_run_key_outside_the_workflow_surface_is_not_executed(
+        tmp_path, monkeypatch):
+    """`run:` is a shell command only where this repo's CI runs it.
+
+    `config/*.yml` is read by tools, not by GitHub, so a `run:` key there is
+    that tool's own field. Treating it as shell would let an unrelated config
+    schema complete a DoD row.
+    """
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "x.yml").write_text(
+        "run: |\n"
+        "  export TORTOISE_EMBED_GATE=1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    assert shipped["documented_only"] == 1, shipped
+
+
+def test_a_real_mapping_after_a_block_scalar_still_reads_as_shipped_ON(
+        tmp_path, monkeypatch):
+    """The block predicate must END where the scalar does.
+
+    Skipping a body is only correct if the walk resumes at the next real
+    mapping key; a scanner that never ends the block would drop genuine
+    assignments and report `off by default` for a flag that ships ON.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  app:\n"
+        "    note: >-\n"
+        "      TORTOISE_EMBED_GATE is documented here, not set.\n"
+        "    environment:\n"
+        "      TORTOISE_EMBED_GATE: \"true\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is True, shipped
+    assert shipped["files"] == [
+        'docker-compose.yml: TORTOISE_EMBED_GATE: "true"'], shipped
+
+
 def test_searched_is_the_walk_not_the_list_of_mentions(tmp_path, monkeypatch):
     """`searched` must answer "what did 'nowhere' cover?" — the documented contract.
 
@@ -1534,6 +1750,90 @@ def test_an_untrimmed_census_over_a_resolved_set_is_red() -> None:
         "be green, or the trim contract can never be satisfied")
 
 
+def test_every_census_citation_re_derives_at_this_head() -> None:
+    """`WRITER_CENSUS` promises *"READ at their seam"* — so re-derive it.
+
+    The first version cited `file:line`. `sdk.py` then grew ~43 lines on `main`
+    and every `tortoise.sdk::*` citation pointed at unrelated code, silently:
+    `_census_class` reads `entry[0]` only, so nothing ever executed them while
+    `#5090`/`#10541` quote this census as their justification (round 17, P3 —
+    the same defect class the whole PR exists to remove, in the evidence it
+    ships). The citations are `(path, symbol, needle)` now and this falsifier
+    resolves each one, so an ordinary edit cannot rot them and a seam that
+    leaves the named function still reds.
+    """
+    violations = probe.census_evidence_violations()
+    assert not violations, "\n".join(violations)
+
+
+def test_the_citation_check_has_teeth_on_an_INJECTED_drift() -> None:
+    """The citation guard's RED directions, on injected evidence.
+
+    Durable on purpose: it does not depend on today's tree still holding a
+    drifted citation — an entry with no evidence, evidence for no entry, a
+    symbol that file does not define, and a needle that is not inside that
+    symbol must each be reported, or the check greens a census nobody
+    re-derived. Every case is self-contained (`overrides={}`), so it measures
+    the checker and not the live tree.
+    """
+    tree = Path(probe.__file__).resolve().parent.parent
+    clean = probe.WRITER_CENSUS["tortoise.vector_write::set_embedding_clause"]
+    key = "tortoise.q::_classed"
+
+    def violations(census, evidence):
+        return probe.census_evidence_violations(
+            census=census, evidence=evidence, root=tree, overrides={})
+
+    orphan = {f"{key}_orphan": (("tortoise/api.py", "_point", "x"),)}
+    assert violations({key: clean}, orphan) == [
+        f"{key}: classed with no re-derivable evidence",
+        f"{key}_orphan: evidence for an entry that does not exist",
+    ]
+    # A symbol the cited file does not define.
+    assert "which that file does not define" in str(violations(
+        {key: clean}, {key: (("tortoise/api.py", "_pointX", "x"),)}))
+    # A real symbol whose needle has moved out of it.
+    assert "does not carry" in str(violations(
+        {key: clean}, {key: (("tortoise/api.py", "_point", "NOPE"),)}))
+    # A cited file that is gone.
+    assert "cannot be read" in str(violations(
+        {key: clean}, {key: (("tortoise/nope.py", "_point", "x"),)}))
+    # The GREEN direction: the real citation for this entry resolves.
+    assert violations({key: clean}, {
+        key: probe.CENSUS_EVIDENCE["tortoise.vector_write::set_embedding_clause"],
+    }) == []
+
+
+def test_a_MATCH_label_is_not_credited_as_the_writers_label(
+        tmp_path, monkeypatch):
+    """A `MATCH` is a READ; the map must credit the label the WRITE names.
+
+    The comment said `MERGE`/`CREATE` while the pattern also took `MATCH`
+    (round 17, P3). The direction that fails is the bad one: on the module-stem
+    fallback a read's label is the one path that can RESOLVE a label the writer
+    never writes, and bullet 2 then reports it as covered.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    (tmp_path / "tortoise" / "alpha.py").write_text(
+        "from .embeddings import encode_for_row\n"
+        "def _upsert_document(x):\n"
+        "    vec = encode_for_row('x', None)\n"
+        "    return 'MERGE (d:Document {id: $id})'\n"
+        "def _upsert_point(x):\n"
+        "    vec = encode_for_row('x', None)\n"
+        "    return 'MATCH (n:Point {id: $id}) RETURN n'\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    writers = probe.embedding_writers()
+    assert writers["tortoise.alpha::_upsert_document"]["label"] == "Document", writers
+    assert writers["tortoise.alpha::_upsert_point"]["label"] == "UNKNOWN", (
+        "a MATCH's label was credited as the writer's stored label: "
+        f"{writers['tortoise.alpha::_upsert_point']}"
+    )
+
+
 def test_the_census_guard_has_teeth_on_an_INJECTED_map() -> None:
     """The `#10541` guard's RED and GREEN directions, both on an injected set.
 
@@ -1623,8 +1923,18 @@ def test_the_census_note_names_only_the_unresolved_producers(monkeypatch):
     assert not [n for n in row.notes if "UNCLASSIFIED" in n], row.notes
 
 
+def _cell_count(line: str) -> int:
+    """Pipes that SEPARATE cells in a GFM row: an escaped `\\|` is literal text.
+
+    `line.count("|")` counts the escape too, so a guard built on it either
+    passes an unescaped pipe's neighbour or — once the emitter escapes — reds a
+    correct row. Both directions were wrong, so the count is on the separator.
+    """
+    return line.replace("\\|", "").count("|")
+
+
 def test_the_census_note_does_not_break_the_markdown_table(monkeypatch):
-    """`_table` emits `Row.observed` RAW, so a note must not carry a pipe.
+    """`_table` emits `Row.observed` as ONE cell, so a note must not split it.
 
     GFM: an unescaped `|` inside a table cell is a cell separator. The row that
     carries the most evidence rendered with three spurious columns on the one
@@ -1646,10 +1956,69 @@ def test_the_census_note_does_not_break_the_markdown_table(monkeypatch):
     monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
     table = probe._table([probe.score_path_bullet()])
     lines = [ln for ln in table.splitlines() if ln.startswith("|")]
-    widths = {ln.count("|") for ln in lines}
+    widths = {_cell_count(ln) for ln in lines}
     assert len(widths) == 1, (
         f"the table's row has a different cell count than its header: {widths} — "
-        f"a note embedded a `|`: {lines}")
+        f"a note split a cell: {lines}")
+
+
+def test_the_table_escapes_a_pipe_in_every_row_not_only_row_two():
+    """The docstring above says "any future note is covered"; this is that claim.
+
+    It was not: the guard built exactly ONE row (`score_path_bullet`), while
+    three of the four rows carry text the tool does not author — row 1's
+    `shipped["files"]` config lines and row 4's `open:` / `restates the DoD
+    bullet` lines read out of `V1_SURFACES`, one of which,
+    `docs/architecture/STORAGE-ARCHITECTURE.md`, keeps its V1 discussion in
+    markdown TABLE rows (pipe-bearing by construction). Measured at `d0f31cfa4`:
+    no live `open:` line carries a `|`, so this is a latent hole and an
+    over-claiming guard, not a current malformation — which is exactly why the
+    falsifier drives the EMITTER with all four bullet numbers instead of
+    trusting today's note text.
+    """
+    rows = [
+        probe.Row(bullet=n, text=f"a bullet | with a pipe {n}", verdict="MET",
+                  command=f"uv run python tools/dod_5090_probe.py --row {n}",
+                  observed=f"a note | with a pipe {n}")
+        for n in (1, 2, 3, 4)
+    ]
+    table = probe._table(rows)
+    lines = [ln for ln in table.splitlines() if ln.startswith("|")]
+    widths = {_cell_count(ln) for ln in lines}
+    assert len(widths) == 1, (
+        f"a pipe in a row's text or note split a cell: {widths} — {lines}")
+    # Escaped, not silently DROPPED: the pipe survives as text, so the rendered
+    # cell still reads what the note says.
+    assert all("\\|" in ln for ln in lines[2:]), lines
+
+
+@pytest.mark.parametrize("span", ["{p}", "`{p}`", "**{p}**", "_{p}_", "[{p}](u)"])
+def test_the_table_escape_holds_inside_every_inline_span_a_note_carries(span):
+    """Escaping at the emitter is only correct because the CELL is the exception.
+
+    The general GFM rule is that a backslash escape does NOT work in a code
+    span, an autolink or raw HTML — so "escape every pipe" is a bug outside a
+    table. GFM §4.10 (*Tables*) carves the cell out explicitly: *"Include a pipe
+    in a cell's content by escaping it, including inside other inline spans"*,
+    and its own examples escape a pipe in prose, in a code span and in
+    `<strong>`. That is what makes `_cell` sound rather than lucky, and it is
+    the half that a future “fix” skipping spans would silently trade away.
+
+    The shapes are not hypothetical: `Row.observed` carries row 1's
+    `path: <config line>` (prose, and a config line can carry a `|` — a
+    compose map or a shell pipe), row 2's backticked counts, row 3's
+    ``mechanism: value`` pairs, and row 4's `open: docs/...:1234: | **V1** |`
+    — a markdown table row read out of a `docs/` document.
+    """
+    note = span.format(p="a|b")
+    cell = probe._cell(note)
+    assert cell.count("|") == note.count("|"), cell  # a pipe is CARRIED, never dropped
+    assert "\\|" in cell, f"the pipe inside {span!r} was left unescaped: {cell}"
+    row = probe.Row(bullet=1, text="a bullet", verdict="PARTIAL",
+                    command="c", observed=note)
+    lines = [ln for ln in probe._table([row]).splitlines() if ln.startswith("|")]
+    assert len({_cell_count(ln) for ln in lines}) == 1, (
+        f"a pipe inside {span!r} split the cell: {lines}")
 
 
 def test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible(
@@ -1799,6 +2168,44 @@ def test_row_four_never_reaches_MET_even_with_a_decided_marker(tmp_path, monkeyp
     row = probe.score_v1_bullet()
     assert row.verdict == "PARTIAL", row.verdict
     assert "decided markers found: 2" in row.observed, row.observed
+
+
+def test_a_surface_that_quotes_the_dod_bullet_does_not_publish_a_ruling(
+        tmp_path, monkeypatch):
+    """Quoting the bullet is NOT a record — row 4 is the epic's owner gate.
+
+    One marker (`v1 is decided`) is a substring of the requirement being checked
+    (`BULLETS[3]` = "V1 is decided and implemented."), so a doc that **restates
+    the bullet** — the most likely edit to `V1_SURFACES`, and the style this PR
+    uses everywhere — registered as a ruling and flipped row 4 from `NOT MET` to
+    `PARTIAL`: publishing "a V1 ruling exists, implementation unproven" when the
+    owner has not ruled. The code comment at the marker anticipated only the
+    harmless direction; this one fabricates a decision (review, P3).
+
+    Four quotation SHAPES, because each defeats a different naive test: the
+    bullet verbatim, an emphasised/checklisted copy, a backticked copy, and a
+    WRAPPED copy whose first line is a PREFIX of the bullet (a same-line
+    substring test cannot see that one).
+    """
+    shapes = [
+        probe.BULLETS[3],
+        f"- [x] **{probe.BULLETS[3]}**",
+        f"`{probe.BULLETS[3].rstrip('.')}` (the epic's fourth bullet)",
+        "V1 is decided and\n   implemented.",
+    ]
+    for shape in shapes:
+        for rel in probe.V1_SURFACES:
+            path = tmp_path / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# DoD\n{shape}\n", encoding="utf-8")
+        monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+        row = probe.score_v1_bullet()
+        assert row.verdict == "NOT MET", (
+            f"a doc QUOTING the bullet published a V1 ruling: {row.verdict!r} "
+            f"for shape {shape!r} ({row.observed})")
+        assert "decided markers found: 0" in row.observed, row.observed
+        # Reported, not silently dropped — the read says what it dismissed.
+        assert "restates the DoD bullet" in row.observed, row.observed
 
 
 def _fake_rule_tree(tmp_path) -> None:
