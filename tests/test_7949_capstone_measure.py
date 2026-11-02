@@ -1997,19 +1997,30 @@ def _flat(text: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
-#: Table rows are STRUCTURED, so they can be checked without guessing at prose. A row that
-#: names the classify step and also asserts an idle/unwitnessed state is the defect in its
-#: machine-shaped form; the one allowlisted spelling is the REFUTATION itself.
-_STALE_STATE_ROW = re.compile(r"\bidle\b|not witnessed|never observed", re.IGNORECASE)
-_STALE_STATE_ROW_REFUTED = re.compile(
-    # The refutation ("not an idle pass", "does work", "witnessed by"), OR `#10215`'s general
-    # idle-ACCOUNTING rule — which is TRUE of any corpus and must stay sayable in a row
-    # ("seven unconditional + S2.3 conditional", "accounted as a witnessed idle"). Measured
-    # while tuning: without these two frames the check false-reds BOTH a real rule row in
-    # `E1-E5-PROOFS.md` and the `#9116` row here — the wrongly-brittle guard this repo keeps
-    # paying for. With them it still reds the pre-fix `S2.3 CLASSIFY` row at `7caace29c` and
-    # at `27808f958`, which is the discrimination the pin exists for.
-    r"not an idle|not idle|does work|witnessed by|accounted|conditional|witnessed idle",
+#: Table rows are STRUCTURED, so they can be checked without parsing prose — but the
+#: DISCRIMINATOR has to be right, and two earlier attempts were measured wrong (both are
+#: recorded here so a future round does not re-invent them):
+#:
+#: 1. a SENTENCE-level prose regex pairing S2.3 with "idle" — false-RED on `#10215`'s general
+#:    idle-accounting rule in `E1-E5-PROOFS.md`, which is true of any corpus;
+#: 2. a row ban whose allowlist was the bare words `accounted`/`conditional` — false-RED on a
+#:    row stating the SUPERSEDED run's history (which the sibling message explicitly asks to
+#:    keep) AND false-GREEN on "the pass is IDLE on this corpus, accounted".
+#:
+#: This is attempt 3. A row that names S2.3 and asserts a NEGATIVE witness state (idle / not
+#: witnessed / never observed / "come back empty") must also name the SCOPE it applies to —
+#: the superseded run, the general rule, a prediction, or the refutation itself. Measured in
+#: both directions: passes all three S2.3 rows in this tree; REDs the pre-fix witness row at
+#: `7caace29c` and at `27808f958`; REDs both paraphrases above; passes "SUPERSEDED run …
+#: 6-of-8", "accounted as a witnessed idle … conditional", and "was NOT idle: assigned_llm=7".
+_STALE_STATE_NEGATIVE = re.compile(
+    r"\bidle\b|\bidled\b|not witnessed|never observed|unwitnessed|"
+    r"c(?:o|a)me(?:s)? back empty|no witness|empty `s2`",
+    re.IGNORECASE)
+_STALE_STATE_SCOPED = re.compile(
+    r"superseded|e0fc940b|6-of-8|history|prior run|prediction|"
+    r"not an? idle|not idle|does work|witnessed by|witnessed idle|"
+    r"accounted as|general rule|conditional",
     re.IGNORECASE)
 
 
@@ -2072,27 +2083,25 @@ def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
         # ⛔ The phrase list above is spelling-based, and a spelling is the thing a
         #    paraphrase walks around: measured at `27808f958`, round 3 added the
         #    "`S2.3` is IDLE on this corpus" spelling while the SAME claim survived
-        #    in three other shapes ("the measured corpus' idle classify pass does
-        #    not", "the classify pass is IDLE on it", "on the measured corpus the
-        #    pass is IDLE"). Two of those are prose, and prose cannot be parsed
-        #    honestly — but the third lived in a TABLE, and a table row is
-        #    machine-shaped. So rows that name the classify step are checked
-        #    structurally, which catches the paraphrase the spellings cannot.
-        #    (A sentence-level prose regex was tried here first and REJECTED: it
-        #    false-red on `#10215`'s general idle-accounting rule in
-        #    `E1-E5-PROOFS.md`, i.e. the wrongly-brittle doc guard this repo keeps
-        #    paying for. Structured rows do not have that failure mode.)
+        #    in three other shapes. Two of those were prose (unpinnable without
+        #    false-redding `#10215`'s true general rule — see `_STALE_STATE_NEGATIVE`
+        #    for the two attempts and why each was rejected), but the third lived in
+        #    a TABLE, and a row is machine-shaped. So rows naming the classify step
+        #    are checked structurally. The blockquote strip is load-bearing: the
+        #    bundle's HEADLINE verdict table is written `> | **E1** | …`, so a
+        #    `startswith("|")` test skips exactly the table a lane reads first.
         for line in path.read_text().splitlines():
-            if not line.lstrip().startswith("|") or "S2.3" not in line:
+            row = re.sub(r"^\s*(?:>\s*)+", "", line)
+            if not row.lstrip().startswith("|") or "S2.3" not in row:
                 continue
-            assert not (_STALE_STATE_ROW.search(line)
-                        and not _STALE_STATE_ROW_REFUTED.search(line)), (
+            assert not (_STALE_STATE_NEGATIVE.search(row)
+                        and not _STALE_STATE_SCOPED.search(row)), (
                 f"{name} has a TABLE ROW naming S2.3 while asserting an idle/"
-                f"unwitnessed state: {line[:300]!r} — {shipped.name} WITNESSES S2.3 "
-                "(assigned_llm: 7), so the row states what this bundle's own "
-                "artifact refutes. Say what the shipped log measured (the witness "
-                "is non-empty and why), or state the general idle-accounting rule "
-                "without claiming THIS corpus is idle")
+                f"unwitnessed state and naming no scope for it: {row[:300]!r} — "
+                f"{shipped.name} WITNESSES S2.3 (assigned_llm: 7), so the row "
+                "states what this bundle's own artifact refutes. Say what the "
+                "shipped log measured; if you mean the SUPERSEDED run's 6-of-8 or "
+                "`#10215`'s idle-accounting rule, name that scope in the row")
 
 
 #: The `e1-aux` triple of the SUPERSEDED run — `capstone-measured-e0fc940b.log`
