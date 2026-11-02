@@ -1249,6 +1249,63 @@ def test_a_sealed_archive_day_is_read_not_silently_invisible(tmp_path):
                               "archive/2026-10-01.jsonl.gz"]
 
 
+def test_both_shapes_in_both_directories_are_read_not_just_two(tmp_path):
+    """Review P2: the local record is FOUR surfaces, not two.
+
+    The substrate's own enumerator reads both shapes in both directories
+    (`session_events_drain._candidate_files`: `for directory in (root /
+    "archive", root)`), because a plain file under `archive/` and a `.gz` left in
+    `root` are both readable substrates. This leg read only
+    `root/*.jsonl` + `archive/*.jsonl.gz`, so the other two were dropped
+    without a diagnostic while `files` reported itself as the coverage.
+    """
+    import gzip
+
+    def _gz(path, sid):
+        path.write_bytes(gzip.compress(
+            (json.dumps({"session_id": sid,
+                         "conversation": _conversation(("user", sid))})
+             + "\n").encode()))
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    _local_record(tmp_path, {"s_plain_root": _conversation(("user", "a"))},
+                  name="2026-11-02.jsonl")
+    _gz(tmp_path / "2026-11-01.jsonl.gz", "s_gz_root")
+    _local_record(tmp_path,
+                  {"s_plain_archive": _conversation(("user", "c"))},
+                  name="archive/2026-10-31.jsonl")
+    _gz(archive / "2026-10-30.jsonl.gz", "s_gz_archive")
+
+    record = tpc.read_local_record_turns(tmp_path)
+
+    assert sorted(record["rows_by_key"]) == [
+        "s_gz_archive_t0", "s_gz_root_t0",
+        "s_plain_archive_t0", "s_plain_root_t0"]
+    assert record["files"] == [
+        "2026-11-01.jsonl.gz", "2026-11-02.jsonl",
+        "archive/2026-10-30.jsonl.gz", "archive/2026-10-31.jsonl"]
+
+
+def test_a_day_in_both_shapes_with_the_same_session_refuses(tmp_path):
+    """A sealed `.gz` plus a re-created plain file is read once per shape, as
+    the drain reads it — and where their session ids OVERLAP the leg cannot
+    tell which window is `t0`, so it REFUSES rather than picking one."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    same = {"session_id": "s1",
+            "conversation": _conversation(("user", "hi")),
+            "metadata": {"capturedAt": "2026-10-01T00:00:00Z"}}
+    _local_record(tmp_path, {"s1": same["conversation"]},
+                  name="2026-10-01.jsonl")
+    (archive / "2026-10-01.jsonl.gz").write_bytes(
+        gzip.compress((json.dumps(same) + "\n").encode()))
+
+    with pytest.raises(tpc.CensusError, match="MULTIPLE windows"):
+        tpc.read_local_record_turns(tmp_path)
+
+
 def test_a_corrupt_archive_refuses_rather_than_hiding_a_session(tmp_path):
     archive = tmp_path / "archive"
     archive.mkdir()
