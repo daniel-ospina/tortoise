@@ -31,7 +31,7 @@ does not already know the population size.
 
 ---
 
-## 2. The census — every bounded surface, classified by whether the caller can TELL
+## 2. The census — bounded surfaces classified by whether the caller can TELL
 
 Three states, and only three:
 
@@ -51,9 +51,14 @@ Measured on this tree:
 | MCP `tortoise_search` (`tool_registry.py:474`) · `GET /search` (selfhost, `selfhost_api.py:365`) | `limit` | **SILENT** | both return a bare list (`response_model=list[PointResponse]` on the route); named by PR #10500's own body as **deliberately left** list-shaped, because a marker here is a return-shape change |
 | `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py:26725` — `return items[:limit]`; the method's contract is `-> list[dict]` (`:26676`), so there is no field in which to say "there are more" |
 | `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py:33753` — `results = results[:limit]`, returning `results` at `:33801`; declared `-> list[dict]` (`:33699`) |
+| `GET /v1/points` (hosted, `hosted_api.py:10142`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **SILENT** | `return {"points": results, "count": len(results)}` at `hosted_api.py:10201` — `count` is rows delivered; no marker |
+| `GET /points` (selfhost, `selfhost_api.py:315`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
+| `GET /v1/events` (hosted, `hosted_api.py:10096`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `Query(ge=1)` refuses 0 at the route; the seam below it (`read_after`) refuses both ends — see §3 |
 
-The **SILENT** rows are the same defect as the ones PR #10500 and PR #10518 fixed, and they are the
-reason this document exists rather than a follow-up issue per surface.
+⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
+NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
+either. Read the absence of a surface from this table as **UNMEASURED**, never as compliant: the
+failure mode this document exists to prevent is exactly "we audited the instance, not the class".
 
 ### 2a. Why the remaining SILENT surfaces are parked, not fixed
 
@@ -72,9 +77,11 @@ Surface Approval*). So they are recorded here as:
 > a return-shape change from a bare list to a marked result; the contract cannot be honoured on a
 > bare `list[dict]` without one.
 
-`tortoise_search` and the selfhost `GET /search` are the same shape and need the same decision, but
-they are a published **HTTP response model** rather than an SDK method, so they are recorded as
-**SILENT (deliberately left by #10500)** with the same return-shape dependency.
+`tortoise_search`, selfhost `GET /search`, hosted `GET /v1/points` and selfhost `GET /points` are the
+same shape and need the same decision, but they are published **HTTP response models** rather than
+SDK methods, so they are recorded as **SILENT** with the same return-shape dependency. The deferral
+is recorded on **#8447's 2026-11-01 comment** (§1 census, rows #13/#14: *"list-shaped surfaces — a
+field cannot ride a list … an MCP/SDK surface decision (owner-only)"*), not on any PR body.
 
 ⛔ Do not "fix" any of these by adding a sentinel row, a magic string, or a warning log — a sentinel
 is a row the caller asked not to receive, and a log is exactly the *"recorded somewhere the caller
@@ -110,11 +117,18 @@ scoped to a seam that has none.
 
 A marker is only an instrument if a caller can act on it. Therefore:
 
-1. **It says how many there are, or that more exist** — `truncated: true` alone is weaker than
-   `total_available`; either is acceptable, silence is not.
+1. **It says how many there are, or that more exist** — `total_available` when the total was
+   *proved exact*, `truncated: false` when the result is complete. Either is an instrument; silence
+   is not.
 2. **It is in the same object as the rows** — not a side channel, not a log line, not a metric.
-3. **It is present at exactly-at-limit and absent when complete** — a marker that is always `true`
-   carries no information, and one that is always `false` is worse than none.
+3. **`truncated` is ALWAYS present, and is `false` at exactly-at-limit** — the implemented rule
+   (`tortoise/truncation.py::mark_truncation` sets it on every call; `truncation_field` always
+   publishes it, and clears a stale `total_available` first), pinned by
+   `tests/test_8447_truncation_marker.py::test_exactly_at_limit_is_not_truncation` and
+   `::test_complete_is_positively_marked_complete`. It flips only when the bound actually cut rows
+   or a downstream leg lost rows. ⚠️ A marker that is `true` at exactly-at-limit is the *false*
+   incompleteness that trains callers to ignore the field (`sdk.py:33990-33993`) — the opposite
+   failure, and just as damaging.
 4. **It is applied at the bound, not at the deserialisation** — a marker computed after a second
    truncation silently reports the first cut only.
 
@@ -124,6 +138,7 @@ A marker is only an instrument if a caller can act on it. Therefore:
 - #5388 — the closed instance: `_iter_registered_orgs` could not distinguish a *complete* 1000-org
   fleet from a PostgREST-truncated page. We fixed the instance, not the class; this is the class.
 - PR #10500 — merged: `GET /v1/search` marks its result incomplete (`truncated` + `total_available`
-  via `truncation.py`); the list-shaped search surfaces stay silent by that PR's own scope note.
+  via `truncation.py`); the list-shaped surfaces are a recorded deferral on #8447's 2026-11-01
+  comment (§1 census rows #13/#14), not a scope note on that PR.
 - PR #10518 — `read_after` refuses an out-of-domain `limit` instead of rewriting it.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` — the storage seams these bounds sit on.
