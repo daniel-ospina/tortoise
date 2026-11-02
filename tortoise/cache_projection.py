@@ -1294,7 +1294,18 @@ _LIFECYCLE_EVENTS_SQL = (
     # carrier. Without it, `create_object(name, status='superseded')` rebuilt
     # from the record with NO status — which `live._terminal_excluded` reads as
     # LIVE, i.e. a terminal Object answered as current after a rebuild.
-    f"       , {_PAYLOAD_EVENT} ->> 'status'  AS birth_status "
+    # ⛔ THE `jsonb_typeof` GUARD IS NOT DECORATION (review round 2 P2, round 3
+    # NOT-FIXED — this is the line that made it real): `payload ->> 'status'` in
+    # Postgres returns TEXT for a JSON NUMBER too, so a bare `->>` folds `'5'` for
+    # `create_object(name, status=5)` — accepted by the object door (it validates
+    # nothing) and stored by the live fold as the INT 5. The state-op sister leg
+    # above guards exactly this way, so the two agree on what a legal lifecycle
+    # value is: a non-string birth status folds as "the record states none"
+    # instead of inventing its text spelling (pinned DB-free by
+    # `tests/test_cache_projection.py::
+    # test_the_birth_column_guards_a_non_string_status`).
+    f"       , CASE WHEN jsonb_typeof({_PAYLOAD_EVENT} -> 'status') = 'string' "
+    f"              THEN {_PAYLOAD_EVENT} ->> 'status' END AS birth_status "
     "FROM public.journal_event "
     "WHERE org_id = %s AND graph_id = %s "
     "  AND (event_type = 'EventRecorded' "

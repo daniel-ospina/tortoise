@@ -1023,11 +1023,30 @@ def _project_journal_rows(sql: str, rows, params):
     # birth leg's own `IN ('ObjectRegistered', 'SubjectAdded')`, so a naive first
     # match would model the narrowing as birth-only and drop every `restatus`.
     _type_sets = list(_EVENT_TYPE_SET_RE.finditer(sql))
+    _type_sets = list(_EVENT_TYPE_SET_RE.finditer(sql))
     id_event_types = (frozenset(_QUOTED_RE.findall(_type_sets[-1].group(1)))
                       if _type_sets else frozenset())
+    # #9974 review round 3 (P2): the BASE statement's event-type selection is a
+    # SEPARATE predicate from the narrowing's, and it was unmodelled — MEASURED,
+    # shrinking the base set to `IN ('ObjectRegistered')` left 130/130 green while
+    # Postgres drops every `SubjectAdded` row (a Subject born terminal then
+    # rebuilds with no status and reads LIVE, #9974's harm one label over). The
+    # fake now models the SELECTION the statement declares: every
+    # `event_type = '<X>'` literal plus every `IN (...)` set, so a row type the
+    # statement cannot select never reaches the fold. A statement that names no
+    # type at all selects everything — the honest reading of an unpredicated
+    # stream.
+    selectable = (frozenset(m.group(1) for m in
+                            re.finditer(r"event_type = '([^']*)'", sql))
+                  | frozenset(lit for s in _type_sets
+                              for lit in _QUOTED_RE.findall(s.group(1))))
     out = []
     for row in rows:
         payload = row.get("payload")
+        # A row handed over ALREADY column-shaped (no `payload`) is outside the
+        # statement's model — this file's contract for such rows is "pass through
+        # unchanged" — so the selection predicate is applied to RECORD rows only.
+        from_record = "payload" in row
         if isinstance(payload, dict) or "payload" in row:
             row = dict(row)
             nested = payload.get("event") if isinstance(payload, dict) else None
@@ -1070,6 +1089,18 @@ def _project_journal_rows(sql: str, rows, params):
             )
             if not matched:
                 continue
+        # The SELECTION half: a row whose type the statement cannot select must
+        # not reach the fold, or a shrunken `IN (...)` passes the suite while
+        # production drops the row. Only RECORD rows carry a type the statement
+        # decides (`from_record`); a column-shaped row was handed over whole.
+        # ⚠️ Only where the row RESOLVES a type. Postgres reads `event_type` from
+        # the `public.journal_event` COLUMN, which a payload-only fixture does not
+        # model, so an unresolvable type is "unknown", never "excluded" — the
+        # filter must not invent an exclusion the statement did not make.
+        etype = row.get("event_type")
+        if from_record and selectable and isinstance(etype, str) and etype \
+                and etype not in selectable:
+            continue
         out.append(row)
     return out
 
@@ -2270,6 +2301,33 @@ def test_a_nested_creation_record_is_read_by_the_id_narrowing():
         f"the single-row door answered {read!r} while the rebuild folded "
         f"{obj.props.get('status')!r} — a nested creation record the record "
         f"itself materialises"
+    )
+
+
+def test_the_birth_column_guards_a_non_string_status():
+    """The birth column must be guarded, not merely filtered in the FAKE.
+
+    Review round 3 (P2) measured the shape this pin exists for: the batch-2 fix
+    described a `CASE WHEN jsonb_typeof(...) = 'string'` guard that never reached
+    the STATEMENT — the fake applied it alone, so the fake and Postgres disagreed
+    on the exact input round 2 named: on postgres:16 `{"status": 5}` selects
+    `birth_status = '5'` (a JSON number textifies), while the fake returned none.
+    A fake-only guard cannot pin a statement the fake itself invents.
+
+    The assertion mirrors the DB-free pin the `restatus` leg already has: the
+    column expression must carry the type guard, so a bare `->> 'status'` reds
+    here instead of relying on a faked cursor.
+    """
+    sql = cp._LIFECYCLE_EVENTS_SQL
+    assert "jsonb_typeof(" in sql[sql.index("birth_status") - 160:
+                                  sql.index("birth_status")], (
+        "the birth column has no `jsonb_typeof(...) = 'string'` guard — "
+        "Postgres textifies a JSON number, so `create_object(name, status=5)` "
+        "would fold the STRING '5' the live graph stores as the int 5"
+    )
+    bare = "       , {_PAYLOAD_EVENT} ->> 'status'  AS birth_status"
+    assert bare not in sql, (
+        "the unguarded birth column is back — the guard lives in the FAKE only"
     )
 
 
