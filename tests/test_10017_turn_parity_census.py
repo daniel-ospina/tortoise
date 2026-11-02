@@ -1183,18 +1183,71 @@ def test_a_shifted_window_mismatches_on_text_and_never_certifies(tmp_path):
     assert _problems(report, "s1")[0]["field"] == "text"
 
 
-def test_an_interior_unparsable_line_refuses_because_it_names_no_session(
+def test_an_interior_unparsable_line_is_DROPPED_disclosed_and_still_FAILS_CLOSED(
         tmp_path):
-    """Torn INTERIOR lines are corruption: the lost session cannot be exempted."""
+    """Review P1: dropping the line is fail-closed; refusing the LEG was not.
+
+    The old posture refused the whole read, and on the authority store it was
+    measured against (ten lost-newline merges) that meant #10017's gate could
+    never open — an instrument that answers nothing is not a guard. The
+    replacement must satisfy BOTH halves, and this pin asserts both, because
+    the disclosure alone is not a safety property:
+
+      (a) the line is dropped, NAMED in `unparsable_lines`, and the readable
+          sessions of the same record still read; and
+      (b) a graph turn for the session the dropped line described is
+          `missing_in_record` -> REFUSED. That is what makes the drop safe,
+          and it holds because the POPULATION COMES FROM THE GRAPH.
+    """
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
                   name="2026-11-01.jsonl")
     bad = tmp_path / "2026-11-02.jsonl"
     good = json.dumps({"session_id": "s3",
                        "conversation": _conversation(("user", "x"))})
+    # `s2`'s record lost its newline, so it merged into `s3`'s line.
     bad.write_text('{"session_id": "s2", "conversation": [{"role": "user",\n'
                    + good + "\n", encoding="utf-8")
-    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
-        tpc.read_local_record_turns(tmp_path)
+    record = tpc.read_local_record_turns(tmp_path)
+    # `s1` and `s3` are readable; only the truncated `s2` line was dropped.
+    assert list(record["rows_by_key"]) == ["s1_t0", "s3_t0"]
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "2026-11-02.jsonl:1"]
+
+    # (b) the fail-closed consequence: s2 has turns in the graph, its record
+    # line was dropped, so the session is missing_in_record -> REFUSED. A drop
+    # can never reach CLEAN over a turn the graph holds.
+    nodes = {"s2_t0": _graph_node("s2_t0", "s2", content="[user] lost")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert "missing_in_record" in [p["problem"] for p in _problems(report, "s2")]
+
+
+def test_a_dropped_interior_line_is_never_PARTIALLY_recovered(tmp_path):
+    """The parseable half of a merged line is NOT used.
+
+    A lost newline between two concurrent appends produces ONE line holding two
+    session records: the leading one is truncated and the trailing one parses.
+    Recovering that trailing record would certify a session whose sibling
+    record was lost — a false pass — so the whole line is dropped, and BOTH
+    sessions are then absent (the graph's copy is what decides them).
+    """
+    # A SETTLED day, so this is corruption and not the tolerance-able tail.
+    # `s2`'s record lost its newline, so it merged into `s3`'s line: TWO
+    # records on ONE line, the leading one truncated and the trailing one
+    # perfectly parseable.
+    truncated = '{"session_id": "s2", "conversation": [{"role": "user"'
+    trailing = json.dumps({"session_id": "s3",
+                           "conversation": _conversation(("user", "b"))})
+    merged = truncated + trailing
+    (tmp_path / "2026-11-01.jsonl").write_text(merged + "\n", encoding="utf-8")
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    # NEITHER half is recovered: not the truncated `s2`, and not the
+    # parseable `s3` that shares its line.
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert len(record["unparsable_lines"]) == 1
+    assert record["unparsable_lines"][0]["at"] == "2026-11-01.jsonl:1"
 
 
 def test_a_torn_tail_is_COUNTED_and_reported_never_silently_dropped(tmp_path):
@@ -1207,16 +1260,24 @@ def test_a_torn_tail_is_COUNTED_and_reported_never_silently_dropped(tmp_path):
     assert record["torn_tail"][0]["at"] == "2026-11-02.jsonl:2"
 
 
-def test_an_interior_torn_line_in_the_NEWEST_file_also_refuses(tmp_path):
-    """Tail tolerance is the LAST line only — not every line of that file."""
+def test_an_interior_torn_line_in_the_NEWEST_file_is_dropped_not_a_tail(
+        tmp_path):
+    """Tail tolerance is the LAST line only — not every line of that file.
+
+    An interior unparsable line is now DROPPED and named (review P1) rather than
+    refusing the leg, but the distinction the old pin drew is still held: it is
+    NOT a `torn_tail`, so the artifact never calls corruption a mid-write tip.
+    """
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
                   name="2026-11-01.jsonl")
     newest = tmp_path / "2026-11-02.jsonl"
     newest.write_text('{"session_id": "s2", "conversa\n'
                       '{"session_id": "s3", "conversation": []}\n',
                       encoding="utf-8")
-    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
-        tpc.read_local_record_turns(tmp_path)
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "2026-11-02.jsonl:1"]
 
 
 def test_a_duplicated_session_is_HELD_BACK_not_a_whole_record_refusal(
@@ -1324,6 +1385,37 @@ def test_an_EMPTY_local_record_dir_never_falls_back_to_the_hosted_leg(
     # Whitespace-only is the same state: no path is being named.
     assert tpc.main(["--db-path", str(tmp_path / "g.db"),
                      "--local-record-dir", "   "]) == 1
+
+
+def test_an_EMPTY_record_dsn_never_falls_back_to_the_AMBIENT_one(
+        tmp_path, monkeypatch, capsys):
+    """Review P1: the SAME empty-vs-unset rule the local flag already had.
+
+    `--record-dsn "$UNSET_VAR"` is a SET-BUT-EMPTY value. `args.record_dsn or
+    os.environ.get(...)` treated it as absent, so an ambient
+    `TORTOISE_RECORD_DSN` (a drill/scratch/stale record, `docs/infra-runbook.md`
+    treats that as a real category) was measured under the OPERATOR'S OWN
+    tenant and could exit 0 CLEAN over a store they never named.
+
+    Mutation that goes RED here: restoring `args.record_dsn or os.environ.get(`
+    (the run then takes the hosted leg and exits 3 at the unreachable graph,
+    not 1 at the flag).
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://ambient/db")
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--record-dsn", "",
+                     "--org-id", "o", "--graph-id", "g"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "EMPTY" in err
+    assert "TORTOISE_RECORD_DSN" in err
+    # Whitespace-only is the same state: no store is being named.
+    assert tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--record-dsn", "   ",
+                     "--org-id", "o", "--graph-id", "g"]) == 1
+    # …and an ABSENT flag still honours the documented ambient default.
+    assert tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--org-id", "o", "--graph-id", "g"]) != 1
 
 
 def test_the_local_leg_reads_only_the_keys_it_was_asked_for(tmp_path):
@@ -1599,13 +1691,13 @@ def test_a_sealed_day_of_NO_RECORDS_is_tolerated_and_DISCLOSED(tmp_path):
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
     record = tpc.read_local_record_turns(tmp_path)
     assert list(record["rows_by_key"]) == ["s1_t0"]
-    assert record["empty_days"] == ["2026-10-01.jsonl.gz"]
+    assert record["empty_days"] == ["archive/2026-10-01.jsonl.gz"]
     report = tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1",
                                                          content="[user] hi")}},
                         record, sample=5)
     assert report["verdict"] == "CLEAN"
     # …and the tolerance is IN THE ARTIFACT, not just in the code path.
-    assert report["record"]["empty_days"] == ["2026-10-01.jsonl.gz"]
+    assert report["record"]["empty_days"] == ["archive/2026-10-01.jsonl.gz"]
 
 
 def test_a_tolerated_empty_day_still_cannot_hide_a_graph_turn(tmp_path):
@@ -1753,19 +1845,31 @@ def test_an_unlistable_surface_refuses_instead_of_reading_as_empty(
         tpc.read_local_record_turns(tmp_path)
 
 
-def test_a_torn_line_is_tolerated_ONLY_in_the_newest_plain_file(tmp_path):
-    """The tail exception is the append-only tip, not every settled day."""
+def test_a_torn_line_is_NOT_A_TAIL_outside_the_newest_plain_file(tmp_path):
+    """The tail exception is the append-only tip, not every settled day.
+
+    Review P1 changed the CONSEQUENCE (drop + disclose, not refuse-the-leg) but
+    not this distinction: a settled day's unparsable line is corruption, so it
+    lands in `unparsable_lines`, never in `torn_tail`.
+    """
     old = tmp_path / "2026-11-01.jsonl"
     old.write_text(json.dumps({"session_id": "s1",
                                "conversation": _conversation(("user", "a"))})
                    + '\n{"session_id": "s2", "conversa', encoding="utf-8")
     _local_record(tmp_path, {"s3": _conversation(("user", "c"))})
-    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
-        tpc.read_local_record_turns(tmp_path)
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "2026-11-01.jsonl:2"]
 
 
-def test_a_torn_line_inside_a_sealed_archive_always_refuses(tmp_path):
-    """A `.gz` day is written whole and verified by the seal: never a tail."""
+def test_a_torn_line_inside_a_sealed_archive_is_DROPPED_and_NAMED(tmp_path):
+    """A `.gz` day is written whole and verified by the seal: never a tail.
+
+    Dropped + disclosed (review P1), and the disclosed path is ROOT-RELATIVE so
+    it is addressable — `archive/2026-10-01.jsonl.gz`, not a bare file name that
+    also matches a root day (review P2).
+    """
     import gzip
     archive = tmp_path / "archive"
     archive.mkdir()
@@ -1774,20 +1878,22 @@ def test_a_torn_line_inside_a_sealed_archive_always_refuses(tmp_path):
             + '\n{"session_id": "s2", "conversa')
     (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(body.encode()))
     _local_record(tmp_path, {"s3": _conversation(("user", "c"))})
-    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
-        tpc.read_local_record_turns(tmp_path)
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "archive/2026-10-01.jsonl.gz:2"]
 
 
-def test_a_torn_PLAIN_line_under_archive_always_refuses(tmp_path):
+def test_a_torn_PLAIN_line_under_archive_is_corruption_not_a_tail(tmp_path):
     """The tail exemption is the LIVE directory only — and this is the pin
     that holds that conjunct (review P2).
 
     `plain` is filtered on BOTH `f.parent == root` and `not ...".gz"`, and the
     only archive-side torn-line pin uses a `.gz`, which the second conjunct
     excludes anyway — so deleting `f.parent == root` left all 94 tests green
-    while a torn line in a SETTLED `archive/<day>.jsonl` became tolerated.
+    while a torn line in a SETTLED `archive/<day>.jsonl` became a tail.
     A plain file under `archive/` is not an in-flight append: the writer never
-    touches it, so a torn line there is corruption, not a mid-write tip.
+    touches it, so an unparsable line there is corruption.
     """
     archive = tmp_path / "archive"
     archive.mkdir()
@@ -1796,10 +1902,12 @@ def test_a_torn_PLAIN_line_under_archive_always_refuses(tmp_path):
                     "conversation": _conversation(("user", "a"))})
         + '\n{"session_id": "s2", "conversa', encoding="utf-8")
     # A newer plain day in the LIVE directory, so the newest-plain term alone
-    # would have allowed a tail — only the parent filter can refuse this.
+    # would have allowed a tail — only the parent filter can separate this.
     _local_record(tmp_path, {"s3": _conversation(("user", "c"))})
-    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
-        tpc.read_local_record_turns(tmp_path)
+    record = tpc.read_local_record_turns(tmp_path)
+    assert record["torn_tail"] == []
+    assert [b["at"] for b in record["unparsable_lines"]] == [
+        "archive/2026-10-31.jsonl:2"]
 
 
 def test_a_same_day_plain_collision_is_disclosed_not_silently_dropped(tmp_path):
@@ -1872,7 +1980,7 @@ def test_a_whitespace_only_SEALED_day_holds_no_records_and_is_tolerated(
     (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b"\n"))
     _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
     record = tpc.read_local_record_turns(tmp_path)
-    assert record["empty_days"] == ["2026-10-01.jsonl.gz"]
+    assert record["empty_days"] == ["archive/2026-10-01.jsonl.gz"]
     assert list(record["rows_by_key"]) == ["s1_t0"]
 
 
@@ -2059,5 +2167,5 @@ def test_the_CLI_prints_the_tolerated_empty_days(tmp_path, capsys, monkeypatch):
                      "--local-record-dir", str(tmp_path / "session-events")])
     out = capsys.readouterr().out
     assert code == 0, out
-    assert "empty day  : 2026-10-01.jsonl.gz" in out
+    assert "empty day  : archive/2026-10-01.jsonl.gz" in out
     assert "NOT a parity pass" in out

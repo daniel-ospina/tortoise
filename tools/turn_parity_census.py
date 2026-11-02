@@ -971,22 +971,32 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     both are needed and both are read. Neither case can reach `CLEAN` wrongly.
 
     A torn line is CORRUPTION, not a tail to be tolerated — except at the tail.
-    An append-only log's newest final line may be mid-write; every other
-    unparsable line is unreadable data, so it REFUSES (exit 3, the leg's own
-    doctrine: an absence is NOT established). Tolerating a torn interior line
-    would silently drop a session's transcript from the record and then certify
-    the graph's copy as redundant.
+    An append-only log's newest final line may be mid-write, so it is
+    `torn_tail`. Every OTHER unparsable line is DROPPED and named in
+    `unparsable_lines`, and it is **never partially recovered**.
 
-    ⚠️ A reference measurement: this box's record DID hold interior lines of
-    this kind — two session records merged by a lost newline between concurrent
-    appends — so the state is real and not hypothetical. ⛔ The list is NOT a
-    closed inventory and must not be read as one: the refusing file/line moves
-    as the record grows, so re-measure with `--json` rather than clearing the
-    sites named in an older artifact. Part of such a
-    line IS attributable (the trailing record parses; the truncated one does
-    not), so this leg refuses rather than recovering a partial: a recovery that
-    silently kept the parseable half would certify a session whose sibling was
-    lost. Recovering them is a deliberate change to this leg, not a bug fix.
+    ⛔ WHY DROPPING IS NOT A FALSE PASS (and why it replaced a whole-leg
+    refusal — review P1). A merged line really does have an attributable half:
+    the trailing record parses and the truncated one does not. Recovering that
+    half would certify a session whose sibling record was lost, so this leg
+    does not. But REFUSING THE WHOLE LEG is not the safe alternative it looks
+    like: the same non-vacuity argument the torn-tail arm and the empty-day arm
+    already rest on applies unchanged — **the POPULATION COMES FROM THE
+    GRAPH.** A dropped line contributes no keys to `rows_by_key`, so every
+    graph turn it may have described is `missing_in_record` -> that session is
+    REFUSED. A turn the graph does not hold cannot make a verdict wrong. So
+    dropping is fail-closed by construction, while a whole-leg refusal blocks
+    every OTHER session the record CAN certify — with no repair path except
+    editing audit evidence.
+
+    That distinction is load-bearing and was measured, not assumed: this box's
+    authority store held TEN such lines (all lost-newline merges of two
+    concurrent appends), so the refusing posture meant the gate #10017 waits on
+    could never open on the store the 2026-11-01 ruling names as the authority
+    — an instrument that reports nothing is not a guard. Pinned by
+    `test_an_interior_unparsable_line_is_DROPPED_disclosed_and_still_FAILS_CLOSED`,
+    which asserts the DISCLOSURE and the fail-closed verdict TOGETHER: the
+    disclosure alone would not be a safety property.
     """
     root = Path(directory).expanduser()
     if not root.is_dir():
@@ -1069,6 +1079,11 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     occurrences: dict[str, int] = {}
     parsed = 0
     torn_tail: list[dict] = []
+    #: Unparsable lines that are NOT the append-only tip: corruption, a
+    #: lost-newline merge of two concurrent appends, a truncated write that a
+    #: later append did not complete. DROPPED and DISCLOSED — never partially
+    #: recovered (see the module contract's `unparsable_lines`).
+    unparsable_lines: list[dict] = []
     #: Sealed days that are PROVABLY empty: a complete, round-trip-verified
     #: gzip stream whose payload holds no records. Disclosed in the artifact —
     #: a tolerance that is not counted is indistinguishable from a day that
@@ -1120,7 +1135,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 raw = gzip.decompress(path.read_bytes()).decode(
                     "utf-8", "replace").splitlines()
                 if not any(line.strip() for line in raw):
-                    empty_days.append(path.name)
+                    empty_days.append(str(path.relative_to(root)))
                     continue
             else:
                 raw = path.read_text(encoding="utf-8",
@@ -1144,7 +1159,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 # session is `missing_in_record` -> REFUSED. The tolerance is
                 # non-vacuous, and it is DISCLOSED below rather than silent.
                 if not any(line.strip() for line in raw):
-                    empty_days.append(path.name)
+                    empty_days.append(str(path.relative_to(root)))
                     continue
         except CensusError:
             raise
@@ -1164,17 +1179,23 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 at_tail = (newest_plain is not None
                            and path == newest_plain
                            and pos == len(nonempty) - 1)
-                where = f"{path.name}:{lineno}"
-                if not at_tail:
-                    raise CensusError(
-                        f"the local record has an UNPARSABLE line at {where} "
-                        f"({exc}) and it is not the tolerance-able torn tail — "
-                        "this leg does not recover the parseable half of a "
-                        "merged line (that would certify a session whose "
-                        "sibling record was lost), so no session it may have "
-                        "held can be certified. The record cannot be read, so "
-                        "an absence is NOT established") from exc
-                torn_tail.append({"at": where, "error": str(exc)})
+                where = str(path.relative_to(root)) + f":{lineno}"
+                if at_tail:
+                    # The append-only TIP: a mid-write line the next append
+                    # completes, or one a crash cut. Counted, never silent.
+                    torn_tail.append({"at": where, "error": str(exc)})
+                else:
+                    # ⛔ CORRUPTION: dropped and NAMED. The line is NOT
+                    # partially recovered — the parseable half of a merged
+                    # line describes a session whose sibling record was lost,
+                    # so certifying from it would be a false pass. Dropping it
+                    # cannot be one either: the POPULATION COMES FROM THE
+                    # GRAPH, and a turn whose record line was lost is absent
+                    # from `rows_by_key`, so its session is
+                    # `missing_in_record` -> REFUSED. See the module
+                    # contract.
+                    unparsable_lines.append({"at": where,
+                                             "error": str(exc)})
                 continue
             parsed += 1
             if not isinstance(entry, dict):
@@ -1312,6 +1333,9 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         "sessions": len(conversations),
         "lines_parsed": parsed,
         "torn_tail": torn_tail,
+        # Corruption that was DROPPED (never partially recovered). Named so a
+        # tolerance nobody can see never reads as a parity pass.
+        "unparsable_lines": unparsable_lines,
         "empty_days": empty_days,
         "duplicate_window": duplicate_window,
         "filed_window": filed_window,
@@ -1480,7 +1504,15 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                 "record_turn_rows": 0,
                 "counts_equal": False,
                 "problems": [{
-                    "node": f"{sid}_t*", "field": "key",
+                    # ⛔ NO SYNTHETIC NODE ID (review P2). `f"{sid}_t*"` is not
+                    # a turn id, and every consumer treats `node` as one —
+                    # `purge_legacy_turns.classify_sessions` collected it into
+                    # `sample_ids`, so a report could name a node it can never
+                    # resolve. The held-back nodes are the real ids the graph
+                    # holds for this session, and they are ALREADY in
+                    # `graph_turn_nodes`; `node` stays None and consumers skip
+                    # it.
+                    "node": None, "field": "key",
                     "problem": "duplicate_window",
                     "detail": (
                         "the record holds "
@@ -1598,6 +1630,10 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                        "sessions": record.get("sessions"),
                        "lines_parsed": record.get("lines_parsed"),
                        "torn_tail": record.get("torn_tail") or [],
+                       # Corruption dropped from the read, named: the surface
+                       # the verdict rests on is stated, not implied.
+                       "unparsable_lines":
+                           record.get("unparsable_lines") or [],
                        # Tolerated AND counted: an empty day (sealed or
                        # plain). Never a silent skip (review P1).
                        "empty_days": record.get("empty_days") or [],
@@ -1757,7 +1793,27 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         record_dsn = ""
     else:
-        record_dsn = args.record_dsn or os.environ.get("TORTOISE_RECORD_DSN", "")
+        # ⛔ THE EXACT SAME RULE ON THE HOSTED SIDE (review P1) — it was applied
+        # to `--local-record-dir` above and NOT here, so `--record-dsn ""` (a
+        # shell expansion of an unset variable) fell through to an ambient
+        # `TORTOISE_RECORD_DSN` and measured a store the operator never named,
+        # under their own tenant — the drill/scratch-DSN class that reads as a
+        # CLEAN verdict about production. Presence of the flag selects exactly
+        # its value; an empty value is "no record leg named", never a fallback.
+        if args.record_dsn is not None:
+            if not args.record_dsn.strip():
+                sys.stderr.write(
+                    "turn_parity_census: --record-dsn was passed but is EMPTY "
+                    "(a shell expansion like --record-dsn \"$UNSET_VAR\" "
+                    "yields nothing). An empty flag value is NOT 'no flag': "
+                    "falling through would silently measure an ambient "
+                    "TORTOISE_RECORD_DSN the operator did not name, so this "
+                    "refuses instead of reading either store. The record "
+                    "cannot be read, so an absence is NOT established.\n")
+                return 1
+            record_dsn = args.record_dsn
+        else:
+            record_dsn = os.environ.get("TORTOISE_RECORD_DSN", "")
         if not record_dsn:
             sys.stderr.write(
                 "turn_parity_census: no record leg — pass --record-dsn / set "
@@ -1883,6 +1939,12 @@ def main(argv: list[str] | None = None) -> int:
         for torn in record["torn_tail"]:
             print(f"torn tail  : {torn['at']} (mid-write, tolerated, "
                   f"counted — NOT a parity pass)")
+    for bad in report["record"].get("unparsable_lines") or []:
+        # Disclosed, never silent, and never recovered: the line was dropped,
+        # so any graph turn it may have described is `missing_in_record`.
+        print(f"unparsable : {bad['at']} ({bad['error']}) — the line was "
+              f"DROPPED, not recovered; any turn it described is "
+              f"missing_in_record, so this is NOT a parity pass")
     for empty_day in report["record"].get("empty_days") or []:
         # Disclosed, never silent: a complete verified archive of no records
         # cannot hide a turn, but a tolerance nobody can see reads like a day
