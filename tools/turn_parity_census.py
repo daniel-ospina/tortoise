@@ -327,6 +327,42 @@ _EXACT_FIELDS = (
     ("createdAt", "created_at", "createdAt"),
 )
 
+#: The fields a record leg may NEVER decline to compare: they ARE the
+#: transcript, so declaring one "absent" would turn this gate into a key-only
+#: check and certify a purge over a record holding the right ids with the wrong
+#: text — the exact incident shape #10017 exists to prevent. A source that
+#: cannot compare them is not a record leg for this gate.
+_UNDECLINABLE_FIELDS = frozenset({"content", "speaker"})
+
+#: What the LOCAL record structurally cannot carry (owner ruling, 2026-11-01,
+#: relayed on #10017: *"the authority is the local record (the per-session
+#: JSONL under `~/.tortoise/session-events/`), not the hosted store"*). Its rows
+#: are `{session_id, conversation: [{role, content}], metadata, harness,
+#: machine_id, model}` — the transcript and the turn ORDER, nothing else. There
+#: is no per-turn `status` (graph write state), no per-turn `created_at` (only
+#: the session-level `metadata.capturedAt`), and no vector (the embedder runs on
+#: the capture path, not on this file). All three are declared here, by name, so
+#: the report can never present the weaker comparison as the strong one — a
+#: declared-absent field is printed as NOT COMPARED, never as a pass.
+#:
+#: `embedding` is on this list deliberately (review finding, P1): a graph turn
+#: carries a vector whenever the embedder is installed, and leaving the field
+#: compared would emit a per-turn `field_mismatch` on EVERY session of every
+#: embedded deployment — a permanent false refusal that reads as a per-turn
+#: defect rather than as a limit of the source. The vector is a pure function
+#: of `content` (same rule as `content_hash`), so the transcript is not what is
+#: being waived. It is still printed as NOT COMPARED.
+_LOCAL_RECORD_DECLARED_ABSENT = ("status", "created_at", "embedding")
+
+#: The field names a record leg may declare absent: the compared columns plus
+#: `embedding` (compared by `_embedding_parity`, not by `_EXACT_FIELDS`). A name
+#: outside this set is an invented claim in an artifact an owner decides on.
+_DECLARABLE_FIELDS = frozenset(
+    {rcol for _, rcol, _ in _EXACT_FIELDS} | {"embedding"})
+
+#: The day-addressed capture-log files the local record is made of.
+_LOCAL_RECORD_GLOB = "*.jsonl"
+
 
 class CensusError(Exception):
     """A side could not be read — never a parity verdict (exit 3)."""
@@ -668,9 +704,216 @@ def read_record_turns(record_dsn: str, org_id: str,
     return {"rows_by_key": rows_by_key, "non_turn_shaped": non_turn_shaped}
 
 
+def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
+                            ) -> dict[str, dict]:
+    """The record leg the OWNER named as the authority — the local JSONL.
+
+    Why this leg exists at all. `read_record_turns` reads `public.point` in the
+    hosted Postgres record. That is the *hosted* record, and the owner ruled on
+    2026-11-01 that **hosted setup is postponed** and that until it is lifted
+    *"the authority is the local record (the per-session JSONL under
+    `~/.tortoise/session-events/`), not the hosted store"*. #10017 gates an
+    irreversible delete on *"the record provably holds every turn the graph
+    holds"* — so a census that can only read the hosted store measures a store
+    the owner has ruled is not the authority, and on a postponed deployment it
+    measures an EMPTY one. This leg reads what he named.
+
+    THE MAPPING, and why it is exact or refused. A local record line is one
+    session's captured conversation:
+
+        {session_id, conversation: [{role, content}, ...], metadata, ...}
+
+    Order is the only index the file carries, so entry `i` IS turn `i` of that
+    session and its key is `f"{session_id}_t{i}"` — the SAME
+    `<session>_t<digits>` identity `sdk._capture_turn_ids` derives (one rule,
+    both records). The framed text is built with the writer's OWN frame
+    (`sdk._capture_turn_frame`, the single definition #5445/#4897/#5394 all
+    route through) and the speaker with the writer's own inverse
+    (`sdk._capture_turn_role_text`) — so this leg cannot drift from what the
+    writer stored by re-deriving a format.
+
+    WHY A MISALIGNED RECORD CANNOT CERTIFY. A session captured twice appends a
+    second window (a `turn_offset`), so a positional map could in principle
+    line up the WRONG entry. Every such case fails CLOSED rather than passing
+    silently: a duplicated session id is refused outright (two windows, one
+    file, no way to tell which is `t0`); a window shorter than the graph's turn
+    ids reads as `missing_in_record`; and a shifted window mismatches on TEXT,
+    which is a refusal. There is no path from a misaligned local record to
+    `CLEAN`.
+
+    A torn line is CORRUPTION, not a tail to be tolerated — except at the tail.
+    An append-only log's newest final line may be mid-write; every other
+    unparsable line is unreadable data, so it REFUSES (exit 3, the leg's own
+    doctrine: an absence is NOT established). Tolerating a torn interior line
+    would silently drop a session's transcript from the record and then certify
+    the graph's copy as redundant.
+
+    ⚠️ The real record on the reference box has THREE such interior lines
+    (`2026-10-31.jsonl:34`, `:67`, `2026-11-02.jsonl:76`), each two session
+    records merged by a lost newline between concurrent appends. Part of such a
+    line IS attributable (the trailing record parses; the truncated one does
+    not), so this leg refuses rather than recovering a partial: a recovery that
+    silently kept the parseable half would certify a session whose sibling was
+    lost. Recovering them is a deliberate change to this leg, not a bug fix.
+    """
+    root = Path(directory).expanduser()
+    if not root.is_dir():
+        raise CensusError(
+            f"the local record directory does not exist ({root}) — the record "
+            "cannot be read, so an absence is NOT established")
+    files = sorted(root.glob(_LOCAL_RECORD_GLOB))
+    if not files:
+        raise CensusError(
+            f"no {_LOCAL_RECORD_GLOB} files under {root} — the local record is "
+            "EMPTY, and an empty record is not evidence of parity (it is the "
+            "shape that would certify deleting every turn). An absence is NOT "
+            "established")
+
+    try:
+        from tortoise.sdk import (
+            _capture_turn_role_text, _capture_turn_texts_with_redactions,
+            _capture_turn_window,
+        )
+    except Exception as exc:  # an unimportable frame is an unreadable side
+        raise CensusError(
+            f"the SDK's stored-text definition could not be imported "
+            f"({type(exc).__name__}: {exc}) — the local record cannot be "
+            "rendered into the writer's own stored text, so an absence is NOT "
+            "established") from exc
+
+    wanted = None if node_keys is None else {str(k) for k in node_keys}
+    conversations: dict[str, list] = {}
+    occurrences: dict[str, int] = {}
+    parsed = 0
+    torn_tail: list[dict] = []
+    for path in files:
+        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        nonempty = [(n + 1, ln) for n, ln in enumerate(raw) if ln.strip()]
+        for pos, (lineno, line) in enumerate(nonempty):
+            try:
+                entry = json.loads(line)
+            except Exception as exc:
+                at_tail = (path == files[-1] and pos == len(nonempty) - 1)
+                where = f"{path.name}:{lineno}"
+                if not at_tail:
+                    raise CensusError(
+                        f"the local record has an UNPARSABLE line at {where} "
+                        f"({exc}) and it is not the tolerance-able torn tail — "
+                        "this leg does not recover the parseable half of a "
+                        "merged line (that would certify a session whose "
+                        "sibling record was lost), so no session it may have "
+                        "held can be certified. The record cannot be read, so "
+                        "an absence is NOT established") from exc
+                torn_tail.append({"at": where, "error": str(exc)})
+                continue
+            parsed += 1
+            if not isinstance(entry, dict):
+                raise CensusError(
+                    f"the local record's line at {path.name}:{lineno} is not a "
+                    "JSON object — the record cannot be read")
+            sid = entry.get("session_id")
+            if not isinstance(sid, str) or not sid:
+                raise CensusError(
+                    f"the local record's line at {path.name}:{lineno} carries no "
+                    "`session_id` — a turn's key cannot be derived, so no "
+                    "session can be certified")
+            conversation = entry.get("conversation")
+            if conversation is None:
+                conversation = []
+            if not isinstance(conversation, list):
+                raise CensusError(
+                    f"the local record's session {sid} carries a "
+                    f"`conversation` that is {type(conversation).__name__}, not "
+                    "a list — the record cannot be read")
+            occurrences[sid] = occurrences.get(sid, 0) + 1
+            conversations[sid] = conversation
+
+    duplicated = sorted(s for s, n in occurrences.items() if n > 1)
+    if duplicated:
+        # Two windows for one session: order is the only index the record
+        # carries, so a second capture's window cannot be placed against the
+        # graph's `t<i>` space without guessing. Refuse — never guess.
+        raise CensusError(
+            "the local record holds MULTIPLE windows for "
+            f"{len(duplicated)} session(s) (first: {duplicated[0]}, "
+            f"{occurrences[duplicated[0]]} windows) — entry order is the only "
+            "index this record carries, so a positional key for a re-captured "
+            "session is a guess. An absence is NOT established")
+
+    rows_by_key: dict[str, dict] = {}
+    for sid, conversation in conversations.items():
+        # ⛔ THE WRITER'S STORED TEXT, NOT A RE-FRAME OF THE RAW TURN (review
+        # finding, P1). What the node stores is
+        # `_capture_turn_texts_with_redactions(_capture_turn_window(conv))` —
+        # windowed to the capture cap and scrubbed of secrets — and only THEN
+        # framed. Framing the raw turn made every clipped or redacted turn a
+        # TEXT MISMATCH, i.e. a permanent false refusal on exactly the sessions
+        # whose briefs contain a connection URL (`docker://:falkordb@…` becomes
+        # `docker://:[REDACTED:connection_url]@…` in the graph). Measured: 5
+        # turns in 5 sessions of the reference box's local record.
+        # Residual, stated not hidden: the redaction table is VERSION-BOUND
+        # (#5394), so a record written by a client running an older table than
+        # this tree can still mismatch — which refuses, and is correct.
+        try:
+            texts = _capture_turn_texts_with_redactions(
+                _capture_turn_window(conversation))[0]
+        except Exception as exc:
+            raise CensusError(
+                f"the local record's session {sid} could not be rendered "
+                f"through the writer's own stored-text definition "
+                f"({type(exc).__name__}: {exc}) — an absence is NOT "
+                "established") from exc
+        for index, framed in enumerate(texts):
+            key = f"{sid}_t{index}"
+            if wanted is not None and key not in wanted:
+                continue
+            rows_by_key[key] = {
+                "node_key": key,
+                "content": framed,
+                "speaker": _capture_turn_role_text(framed)[0],
+                "point_kind": "event",
+                # Declared absent, never fabricated: see
+                # _LOCAL_RECORD_DECLARED_ABSENT.
+                "status": None,
+                "created_at": None,
+                "embedding": None,
+                "is_episodic": True,
+            }
+    return {
+        "rows_by_key": rows_by_key,
+        "non_turn_shaped": 0,
+        "declared_absent": list(_LOCAL_RECORD_DECLARED_ABSENT),
+        "sessions": len(conversations),
+        "lines_parsed": parsed,
+        "torn_tail": torn_tail,
+        "record_dir": str(root),
+    }
+
+
 def census(graph: dict, record: dict, *, sample: int) -> dict:
     """The comparison and the classification. Pure: no I/O, no verdict I/O."""
     nodes, rows = graph["nodes"], record["rows_by_key"]
+    # The record's own declaration of what it cannot compare. It narrows the
+    # comparison, so it is validated HERE and surfaces in the report — a
+    # narrower comparison that looked exactly like the strong one would be the
+    # vacuous-certification shape this gate exists to refuse.
+    declared_absent = set(record.get("declared_absent") or ())
+    undeclinable = sorted(declared_absent & _UNDECLINABLE_FIELDS)
+    if undeclinable:
+        raise CensusError(
+            f"the record declared {', '.join(undeclinable)} ABSENT, and "
+            f"{', '.join(undeclinable)} IS the transcript — a source that "
+            "cannot compare it cannot certify this purge")
+    invented = sorted(declared_absent - _DECLARABLE_FIELDS)
+    if invented:
+        raise CensusError(
+            f"the record declared {', '.join(invented)} ABSENT, which is not a "
+            "field this census compares — an artifact must not carry a "
+            "narrowing claim about a field that was never on the table")
+    compared_fields = ["key"] + [rcol for _, rcol, _ in _EXACT_FIELDS
+                                 if rcol not in declared_absent]
+    if "embedding" not in declared_absent:
+        compared_fields.append("embedding")
     unidentifiable = graph.get("unidentifiable") or []
 
     # The anomaly partition: turn-shaped nodes the deterministic id space
@@ -766,6 +1009,8 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                 })
                 continue
             for gprop, rcol, human in _EXACT_FIELDS:
+                if rcol in declared_absent:
+                    continue
                 gval, rval = node.get(gprop), rec.get(rcol)
                 if gval is None and rval is None:
                     continue
@@ -775,8 +1020,8 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                         "problem": "field_mismatch",
                         "graph": gval, "record": rval,
                     })
-            ok, why = _embedding_parity(node.get("embedding"),
-                                        rec.get("embedding"))
+            ok, why = (True, "") if "embedding" in declared_absent else \
+                _embedding_parity(node.get("embedding"), rec.get("embedding"))
             if not ok:
                 problems.append({
                     "node": tid, "field": "embedding",
@@ -826,6 +1071,8 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
     anomaly_ids = sorted({a["id"] for entries in anomalies.values()
                           for a in entries})
     return {
+        "compared_fields": compared_fields,
+        "declared_absent": sorted(declared_absent),
         "population": {
             # The read population is the DELETE SET (`is_episodic = true`).
             # `turn_shaped_nodes` is the TURN SHAPE inside it — NOT the purge
@@ -901,7 +1148,13 @@ def main(argv: list[str] | None = None) -> int:
                              "or 'tortoise' for --db-path); applies to BOTH "
                              "legs")
     parser.add_argument("--record-dsn", default=None,
-                        help="record DSN (default: TORTOISE_RECORD_DSN)")
+                        help="hosted record DSN (default: TORTOISE_RECORD_DSN)")
+    parser.add_argument("--local-record-dir", default=None,
+                        help="the LOCAL record leg instead of the hosted one: "
+                             "the day-addressed capture-log directory (e.g. "
+                             "~/.tortoise/session-events). This is the store "
+                             "the owner named as the authority while hosted "
+                             "setup is postponed (2026-11-01 ruling, #10017)")
     parser.add_argument("--org-id", default=os.environ.get(
         "TORTOISE_RECORD_ORG_ID", ""), help="record tenant org")
     parser.add_argument("--graph-id", default=os.environ.get(
@@ -920,13 +1173,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.sample < 0:
         parser.error("--sample must be >= 0")
 
-    record_dsn = args.record_dsn or os.environ.get("TORTOISE_RECORD_DSN", "")
-    if not record_dsn:
-        sys.stderr.write("turn_parity_census: no record DSN — pass "
-                         "--record-dsn or set TORTOISE_RECORD_DSN. The record "
-                         "cannot be read, so an absence is NOT established.\n")
+    if args.local_record_dir and args.record_dsn:
+        sys.stderr.write(
+            "turn_parity_census: --local-record-dir and --record-dsn are "
+            "mutually exclusive — the census compares against ONE record, and "
+            "silently preferring one would measure the wrong authority.")
         return 1
-    if not args.org_id or not args.graph_id:
+    record_dsn = args.record_dsn or os.environ.get("TORTOISE_RECORD_DSN", "")
+    if not record_dsn and not args.local_record_dir:
+        sys.stderr.write("turn_parity_census: no record leg — pass "
+                         "--record-dsn / set TORTOISE_RECORD_DSN for the "
+                         "hosted record, or --local-record-dir for the local "
+                         "one. The record cannot be read, so an absence is NOT "
+                         "established.\n")
+        return 1
+    if record_dsn and (not args.org_id or not args.graph_id):
         sys.stderr.write(
             "turn_parity_census: --org-id/--graph-id (or "
             "TORTOISE_RECORD_ORG_ID/TORTOISE_RECORD_GRAPH_ID) are required — "
@@ -936,7 +1197,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         graph = read_graph_turns(args.uri, args.db_path, args.graph_name)
-        record = read_record_turns(record_dsn, args.org_id, args.graph_id)
+        if args.local_record_dir:
+            record = read_local_record_turns(args.local_record_dir)
+        else:
+            record = read_record_turns(record_dsn, args.org_id, args.graph_id)
     except CensusError as exc:
         sys.stderr.write(f"turn_parity_census: {exc}\n")
         return 3
@@ -962,7 +1226,11 @@ def main(argv: list[str] | None = None) -> int:
             "the graph is known to hold no turn nodes.\n")
         return 3
 
-    report = census(graph, record, sample=args.sample)
+    try:
+        report = census(graph, record, sample=args.sample)
+    except CensusError as exc:
+        sys.stderr.write(f"turn_parity_census: {exc}\n")
+        return 3
     if args.json:
         Path(args.json).write_text(
             json.dumps(report, indent=2, default=str), encoding="utf-8")
@@ -974,6 +1242,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"record     : {report['record']['turn_rows_total']} turn rows "
           f"({report['record']['episodic_rows_not_turn_shaped']} episodic "
           f"rows not turn-shaped)")
+    if report.get("declared_absent"):
+        # A narrower comparison must never read as the strong one.
+        pronoun = "it" if len(report["declared_absent"]) == 1 else "them"
+        print(f"NOT COMPARED: {', '.join(report['declared_absent'])} "
+              f"(the record does not carry {pronoun}; compared: "
+              f"{', '.join(report['compared_fields'])})")
+    if record.get("torn_tail"):
+        for torn in record["torn_tail"]:
+            print(f"torn tail  : {torn['at']} (mid-write, tolerated, "
+                  f"counted — NOT a parity pass)")
     for cls, entries in report["anomalies"].items():
         if entries:
             print(f"anomaly    : {len(entries)} {cls} "

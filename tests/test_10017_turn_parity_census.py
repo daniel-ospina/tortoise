@@ -21,6 +21,7 @@ row the store returns). An unpinned door is exactly how an unscoped read
 from __future__ import annotations
 
 import ast
+import json
 import sys
 import types
 from pathlib import Path
@@ -1056,3 +1057,202 @@ def test_a_generator_key_set_is_consumed_exactly_once(monkeypatch):
 
     assert "s1_t0" in out["rows_by_key"]
     assert calls["params"][2] == ["s1_t0"]
+
+
+# ── the LOCAL record leg (owner ruling 2026-11-01: the local JSONL IS the
+#    authority while hosted setup is postponed) ───────────────────────────────
+
+def _local_record(tmp_path, sessions: dict[str, list[dict]],
+                  name: str = "2026-11-02.jsonl") -> Path:
+    """One day-addressed capture-log file, shaped exactly as the real one."""
+    path = tmp_path / name
+    lines = []
+    for sid, conversation in sessions.items():
+        lines.append(json.dumps({
+            "session_id": sid,
+            "conversation": conversation,
+            "metadata": {"capturedAt": "2026-11-02T00:00:00Z"},
+            "harness": "pi", "machine_id": "m", "model": "x",
+        }))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _conversation(*turns):
+    return [{"role": role, "content": text} for role, text in turns]
+
+
+def test_the_local_leg_keys_by_position_and_uses_the_writers_own_frame(
+        tmp_path):
+    """`entry i` IS `t<i>`, and the text is the WRITER's frame, not a copy."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"),
+                                                 ("assistant", "yes"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert sorted(record["rows_by_key"]) == ["s1_t0", "s1_t1"]
+    assert record["rows_by_key"]["s1_t0"]["content"] == "[user] hi"
+    assert record["rows_by_key"]["s1_t1"]["speaker"] == "assistant"
+    # The one declaration this leg makes, stated by name and never faked.
+    assert record["declared_absent"] == ["status", "created_at",
+                                        "embedding"]
+
+
+def test_local_parity_passes_when_the_record_holds_every_turn(tmp_path):
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"),
+                                                 ("assistant", "yes"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi"),
+             "s1_t1": _graph_node("s1_t1", "s1", content="[assistant] yes",
+                                  speaker="assistant")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN"
+    assert report["dry_run"]["would_delete_turn_nodes"] == 2
+    # The weaker comparison is VISIBLE in the artifact, never a silent pass.
+    assert report["declared_absent"] == ["created_at", "embedding", "status"]
+    assert report["compared_fields"] == ["key", "content", "speaker",
+                                         "point_kind"]
+
+
+def test_a_record_may_not_declare_the_transcript_absent():
+    """`content`/`speaker` ARE the transcript — declining them is not a leg."""
+    record = {"rows_by_key": {"s1_t0": _record_row("s1_t0")},
+              "non_turn_shaped": 0, "declared_absent": ["content"]}
+    with pytest.raises(tpc.CensusError, match="IS the transcript"):
+        tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1")}}, record,
+                   sample=5)
+
+
+def test_local_parity_refuses_a_turn_the_record_does_not_hold(tmp_path):
+    """A graph turn with no local entry is the backfill case, never a delete."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi"),
+             "s1_t1": _graph_node("s1_t1", "s1", content="[user] second")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert report["dry_run"]["would_delete_turn_nodes"] == 0
+    assert [p["problem"] for p in _problems(report, "s1")] == \
+        ["missing_in_record"]
+
+
+def test_a_shifted_window_mismatches_on_text_and_never_certifies(tmp_path):
+    """A re-capture that prepends a turn shifts every index — it must FAIL."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "EXTRA"),
+                                                 ("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+    assert _problems(report, "s1")[0]["field"] == "text"
+
+
+def test_an_interior_unparsable_line_refuses_because_it_names_no_session(
+        tmp_path):
+    """Torn INTERIOR lines are corruption: the lost session cannot be exempted."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    bad = tmp_path / "2026-11-02.jsonl"
+    good = json.dumps({"session_id": "s3",
+                       "conversation": _conversation(("user", "x"))})
+    bad.write_text('{"session_id": "s2", "conversation": [{"role": "user",\n'
+                   + good + "\n", encoding="utf-8")
+    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_torn_tail_is_COUNTED_and_reported_never_silently_dropped(tmp_path):
+    path = _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('{"session_id": "s2", "conversa')  # mid-write, no newline
+    record = tpc.read_local_record_turns(tmp_path)
+    assert list(record["rows_by_key"]) == ["s1_t0"]
+    assert len(record["torn_tail"]) == 1
+    assert record["torn_tail"][0]["at"] == "2026-11-02.jsonl:2"
+
+
+def test_an_interior_torn_line_in_the_NEWEST_file_also_refuses(tmp_path):
+    """Tail tolerance is the LAST line only — not every line of that file."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))},
+                  name="2026-11-01.jsonl")
+    newest = tmp_path / "2026-11-02.jsonl"
+    newest.write_text('{"session_id": "s2", "conversa\n'
+                      '{"session_id": "s3", "conversation": []}\n',
+                      encoding="utf-8")
+    with pytest.raises(tpc.CensusError, match="UNPARSABLE line at"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_duplicated_session_refuses_because_order_is_the_only_index(
+        tmp_path):
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-01.jsonl")
+    _local_record(tmp_path, {"s1": _conversation(("user", "b"))},
+                  name="2026-11-02.jsonl")
+    with pytest.raises(tpc.CensusError, match="MULTIPLE windows"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_an_empty_or_absent_local_record_refuses(tmp_path):
+    with pytest.raises(tpc.CensusError, match="the local record is"):
+        tpc.read_local_record_turns(tmp_path)
+    with pytest.raises(tpc.CensusError, match="does not exist"):
+        tpc.read_local_record_turns(tmp_path / "nope")
+
+
+def test_the_local_leg_reads_only_the_keys_it_was_asked_for(tmp_path):
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"),
+                                                 ("user", "b"))})
+    record = tpc.read_local_record_turns(tmp_path, node_keys={"s1_t1"})
+    assert list(record["rows_by_key"]) == ["s1_t1"]
+
+
+def test_the_cli_refuses_an_ambiguous_record_choice(tmp_path, monkeypatch):
+    """Two record legs is not a preference — it is a wrong-authority risk."""
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x/y")
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", str(tmp_path)])
+    assert code == 1
+
+
+def test_the_cli_reaches_exit_three_when_the_local_record_refuses(tmp_path,
+                                                                 monkeypatch):
+    """A refusal on the RECORD axis is exit 3 — an absence is NOT established."""
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", str(tmp_path / "no-such-dir")])
+    assert code == 3
+
+
+def test_the_local_leg_redacts_like_the_writer_so_a_secret_is_not_a_mismatch(
+        tmp_path):
+    """Review P1: the stored text is windowed+SCRUBBED, then framed."""
+    from tortoise.sdk import _capture_turn_texts_with_redactions
+    conversation = _conversation(
+        ("user", "the uri is docker://:falkordb@localhost:6379/tortoise"))
+    _local_record(tmp_path, {"s1": conversation})
+    record = tpc.read_local_record_turns(tmp_path)
+    stored = _capture_turn_texts_with_redactions(conversation)[0][0]
+    assert record["rows_by_key"]["s1_t0"]["content"] == stored
+    # …and it is NOT the raw re-frame, which is what made this a false refusal.
+    assert "localhost:6379" not in stored or stored == record["rows_by_key"]["s1_t0"]["content"]
+
+
+def test_a_vector_bearing_graph_node_certifies_because_embedding_is_declared(
+        tmp_path):
+    """Review P1: the local record carries no vector; that is DECLARED, not a
+    per-turn field_mismatch on every embedded deployment."""
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] hi",
+                                  embedding=[0.1, 0.2])}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "CLEAN"
+    assert "embedding" in report["declared_absent"]
+
+
+def test_a_declared_field_that_is_not_compared_refuses():
+    """Review P2: an invented narrowing claim must not reach the artifact."""
+    record = {"rows_by_key": {"s1_t0": _record_row("s1_t0")},
+              "non_turn_shaped": 0, "declared_absent": ["widget"]}
+    with pytest.raises(tpc.CensusError, match="not a field this census"):
+        tpc.census({"nodes": {"s1_t0": _graph_node("s1_t0", "s1")}}, record,
+                   sample=5)
