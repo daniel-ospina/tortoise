@@ -9209,12 +9209,15 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
 
     #10612 P1: the copy is ``monitoring.confine_context``'s — a FRESH context
     per invocation, not one ``Context`` captured once. A bound miss abandons the
-    await while the worker keeps running (CPython #87185), so a retry that
+    await while the worker keeps running (CPython #87185), so a caller that
     re-submits a one-shot ``partial(copy_context().run, fn)`` re-enters a
     context that is already entered: ``RuntimeError``, which is not a
-    ``ControlPlaneOffloadError``, so it used to escape this seam's fail-closed
-    mapping and surface on ``/v1/search`` and ``/v1/topics/{t}/summary`` as a
-    bare unlabelled 500 the client cannot retry.
+    ``ControlPlaneOffloadError``, so it escapes this seam's fail-closed mapping
+    and surfaces on the caller's route as a bare unlabelled 500 the client
+    cannot retry. That is a LATENT trap today — this wrapper submits ONCE, so
+    it cannot fire — and a MEASURED one on #10612's branch, whose #4055
+    cold-setup re-arm re-submits one wrapped callable (blast radius there:
+    ``/v1/search`` and ``/v1/topics/{t}/summary``).
 
     Telemetry: graph ops land in the seam's SHARED offload-record buffer under
     graph-specific op names (``data_sdk``, ``check_org_limit.points``), so they

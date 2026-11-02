@@ -2346,13 +2346,12 @@ class ContextConfinementError(RuntimeError):
     NEVER RAN either — the hosted seam maps it onto the same retryable 503
     (see ``hosted_api._cp_offload``), because both are "no work was done".
 
-    Reachability: this is a DEFENSIVE arm, not an observed mode. Today the only
-    way to get here is for ``contextvars.Context()`` / ``Context.items()`` to
-    fail, which does not happen on a working interpreter — the seam test drives
-    it by monkeypatching ``_fresh_context``. It exists so that no FUTURE
-    implementation of ``_fresh_context`` can degrade into the one answer that is
-    worse than a refusal: running the callable under the worker's ambient
-    context. Do not read a log line from here as an incident class.
+    Reachability: this is a DEFENSIVE arm, not an observed mode. ``Context.copy()``
+    does not realistically fail; the seam test drives this by monkeypatching
+    ``_fresh_context``. It exists so that no FUTURE implementation of
+    ``_fresh_context`` can degrade into the one answer that is worse than a
+    refusal: running the callable under the worker's ambient context. Do not
+    read a log line from here as an incident class.
     """
 
 
@@ -2365,21 +2364,19 @@ def _fresh_context(snapshot: contextvars.Context) -> contextvars.Context:
     another's (PEP 567; https://docs.python.org/3/library/contextvars.html:
     *"A Context cannot be entered while already entered, including from another
     thread"*). A stored ``Context`` is therefore unusable for anything that may
-    execute MORE THAN ONCE — a retry, a second submission, an overlap — and a
-    bounded offload produces exactly that overlap: ``_await_future``'s bound
-    cancels the AWAIT and never the thread (CPython #87185), so the first
-    callable is still inside its ``ctx.run`` when a retry arrives (#10612 P1,
-    measured: ``RuntimeError: cannot enter context ... already entered``).
+    execute MORE THAN ONCE, and a bounded offload can produce exactly that
+    overlap: ``_await_future``'s bound cancels the AWAIT and never the thread
+    (CPython #87185), so a first callable can still be inside its ``ctx.run``
+    when a retry arrives — measured on #10612's branch as
+    ``RuntimeError: cannot enter context ... already entered``.
 
-    ``copy_context()`` cannot be reused and the supported CPython versions have
-    no ``Context.copy()``, so the values are re-materialised here — the same
-    shallow-copy semantics as ``copy_context`` (the VALUES are shared; only the
-    mapping is new).
+    ``Context.copy()`` (3.7+) returns a DISTINCT, never-entered context sharing
+    the same values (the HAMT is shared, so this is O(1) — cheaper than walking
+    ``items()``), which is exactly the per-invocation handle this needs. The
+    copy is shallow in the same way ``copy_context`` is: the VALUES are shared,
+    only the mapping is new.
     """
-    fresh = contextvars.Context()
-    for var, value in snapshot.items():
-        fresh.run(var.set, value)
-    return fresh
+    return snapshot.copy()
 
 
 def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
@@ -2392,9 +2389,12 @@ def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
     entered by the first run, so the second raises ``RuntimeError: cannot enter
     context: ... is already entered`` — inside a worker, i.e. NOT a
     ``ControlPlaneOffloadError``, so it escapes the offload seam's fail-closed
-    mapping and lands on a route's blanket ``except Exception`` as an \u200bunlabelled
-    **500** the client cannot act on (#10612 P1: ``/v1/search`` and
-    ``/v1/topics/{t}/summary``).
+    mapping and lands on a route's blanket ``except Exception`` as an unlabelled
+    **500** the client cannot act on. That is a LATENT trap on this seam
+    (``hosted_api`` wraps once per submission today, so it cannot fire), and a
+    MEASURED one on #10612's branch, whose #4055 cold-setup re-arm re-submits a
+    single wrapped callable — the blast radius there was ``/v1/search`` and
+    ``/v1/topics/{t}/summary``.
 
     Two properties are preserved from the idiom it replaces, so this is a
     drop-in:
@@ -2409,16 +2409,17 @@ def confine_context(fn: Callable[..., object]) -> Callable[..., object]:
     taken in the worker would capture the worker's ambient context instead of
     the request's — the leak this exists to prevent.
 
-    Cost: one dict-ish iteration over the vars the request set (a handful) per
-    invocation, against a call whose budget is measured in tens of milliseconds.
+    Cost: one ``Context.copy()`` (O(1), shared HAMT) per invocation, against a
+    call whose budget is measured in tens of milliseconds.
 
-    Two other in-repo sites still carry the plain idiom —
-    ``tortoise/selfhost.py`` and ``tortoise/indexer/github_indexer.py`` — and are
-    deliberately NOT migrated here: each builds its ``Context`` per call and
-    submits it once, so neither can re-enter, and neither is on the hosted
-    request path this change is about. A caller that may run its wrapped
-    callable MORE than once (a retry, a re-submission, an overlap) belongs here
-    instead.
+    Three other in-repo sites still carry the plain idiom —
+    ``tortoise/selfhost.py`` (``_submit_probe``),
+    ``tortoise/indexer/github_indexer.py`` (``_submit_index_off_loop``) and
+    ``tortoise/extractor_v2.py`` (``_call_once``) — and are deliberately NOT
+    migrated here: each builds its ``Context`` per call and runs it once, so
+    none can re-enter, and none is on the hosted request path this change is
+    about. A caller that may run its wrapped callable MORE than once (a retry,
+    a re-submission, an overlap) belongs here instead.
     """
     snapshot = contextvars.copy_context()
     name = getattr(fn, "__name__", None) or repr(fn)

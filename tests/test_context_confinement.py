@@ -8,13 +8,17 @@ Measured at PR #10612's head (comment 6586045159) on ``/v1/search`` and
     RETRY RAISED: RuntimeError : cannot enter context: <_contextvars.Context object at 0x...> is already entered
 
 The mechanism is a single-entry ``contextvars.Context`` submitted TWICE. The
-offload idiom was ``submitted = functools.partial(contextvars.copy_context().run, fn)``
+branch's offload idiom was ``submitted = functools.partial(contextvars.copy_context().run, fn)``
 built ONCE and reused by a re-arm loop; a bound miss cancels the AWAIT and never
 the running thread (CPython #87185), so the first submission is still inside
 ``ctx.run`` when the retry enters the same context — ``RuntimeError``, which is
 NOT a ``ControlPlaneOffloadError``, so it escaped the offload seam's fail-closed
 mapping onto the route's blanket ``except Exception``: HTTP 500 ``"Search
 failed"`` / ``"Topic summary failed"``, no ``error_code``, not retryable.
+
+``hosted_api`` wraps once per submission, so that shape is a LATENT trap there
+rather than a live one; these tests pin the MECHANISM at the seam so neither the
+branch nor any future caller can reintroduce it.
 
 The fix is ``monitoring.confine_context``: ONE place that re-materialises a
 FRESH copy of the submitting context per invocation, so a retry, a
@@ -313,3 +317,32 @@ def test_submit_off_loop_preserves_positional_and_keyword_args() -> None:
         assert future.result(timeout=_TIMEOUT) == "pos:kw"
     assert seen["thread"] != threading.main_thread().name, (
         "the callable must run OFF the calling thread")
+
+
+def test_submit_off_loop_still_propagates_the_caller_context() -> None:
+    """The seam's documented REASON to exist ("preserving contextvars").
+
+    The diff replaced its mechanism (``ctx.run`` + ``partial`` →
+    ``confine_context``), so the property has to be pinned: dropping the copy
+    (``executor.submit(fn, ...)``) is silent, not loud — ``graph_ops._ACTIVE``
+    defaults to ``None``, so a lost context makes graph-op accounting a no-op.
+    Mirrors ``test_graph_offload_isolates_the_caller_context``.
+    """
+    var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+        "ctxvar_submit_off_loop_probe", default=None)
+
+    def fn():
+        inherited = var.get()
+        var.set("written-in-the-worker")
+        return inherited, var.get()
+
+    var.set("caller-value")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        inherited, in_worker = ha._submit_off_loop(executor, fn).result(
+            timeout=_TIMEOUT)
+
+    assert inherited == "caller-value", (
+        "the caller's contextvars must reach the worker")
+    assert in_worker == "written-in-the-worker"
+    assert var.get() == "caller-value", (
+        "the worker's write must NOT leak back into the caller's context")
