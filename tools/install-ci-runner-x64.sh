@@ -407,7 +407,7 @@ is_foreign_arch_label() {
 }
 # Is $1 a VERSION-PINNED HOSTED label (`ubuntu-24.04`, `ubuntu-22.04-arm`, …)? Same class/shape as
 # `tools/runner_autoscale.py::VERSION_PINNED_HOSTED_LABEL` — one invariant, two writers. The pool's
-# DEFAULT is `ubuntu-latest`, never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:87-88`: the
+# DEFAULT is `ubuntu-latest`, never an `ubuntu-<version>` (`docs/ops/ci-runner-x64.md:90-91`: the
 # `CI_RUNNER_OS_LABEL=on|auto` suspension) — the pin a leg names to escape this pool, and
 # `ubuntu-2204-tools` is NOT in the class (boundary test in `tests/test_runner_autoscale.py`). ⛔ A
 # HERE-STRING, never a builtin writer piped into a quiet grep (#841): under `pipefail` the quiet
