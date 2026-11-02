@@ -9505,11 +9505,14 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # write is the carrier's ``n.embeddingText=$et`` in
             # ``_upsert_point_props``). Writing one here would be the opposite
             # divergence.
-            if new_content is not None:
-                p.pop("embeddingText", None)
-            elif "embeddingText" in ev and (
-                    ev["embeddingText"] is None
-                    or not _store_holds_prop_value(ev["embeddingText"])):
+            # The two arms are NAMED rather than nested, so a reader can tell
+            # which one fired (and why they are not the same rule).
+            _content_edit = new_content is not None
+            _caller_vector_clear = (
+                "embeddingText" in ev
+                and (ev["embeddingText"] is None
+                     or not _store_holds_prop_value(ev["embeddingText"])))
+            if _content_edit or _caller_vector_clear:
                 p.pop("embeddingText", None)
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /

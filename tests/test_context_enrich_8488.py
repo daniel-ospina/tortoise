@@ -840,7 +840,6 @@ def test_check_consistency_does_not_red_a_faithful_enriched_graph(
         that simply returned `ok` everywhere could not satisfy it.
     """
     from tortoise.consistency import check_consistency
-    from tortoise.log import EventLog
 
     def _diverged_fields(result, pid):
         for row in result.get("divergent_points") or []:
