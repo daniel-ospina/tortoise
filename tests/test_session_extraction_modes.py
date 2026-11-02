@@ -396,17 +396,37 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
     # reports ``no-provider`` and skips extraction silently: the #8133 symptom
     # class on the opposite axis (review cycle 2, P2; measured — a registry-only
     # entry left every guard green).
+    #
+    # Parsed from the AST, NOT a whole-source substring: a comment or docstring
+    # that merely NAMES the provider must not satisfy this (review cycle 3, P2 —
+    # a substring test reported green for a registered-but-unrouted provider as
+    # soon as its name appeared in a comment). What counts is a provider name
+    # used as a `_chain(...)` argument or as the literal in an
+    # `explicit == "…"` comparison: the two places the function routes.
+    import ast as _ast
     import inspect as _inspect
 
-    routed = _inspect.getsource(resolve_extractor_provider)
-    unrouted = [p for p in _PROVIDER_KEY_ENV if f'"{p}"' not in routed]
+    fn_ast = _ast.parse(_inspect.getsource(resolve_extractor_provider))
+    routed: set[str] = set()
+    for node in _ast.walk(fn_ast):
+        if isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) \
+                and node.func.id == "_chain":
+            for arg in node.args:
+                if isinstance(arg, _ast.Constant) and isinstance(arg.value, str):
+                    routed.add(arg.value)
+        if isinstance(node, _ast.Compare) and len(node.comparators) == 1 \
+                and isinstance(node.comparators[0], _ast.Constant) \
+                and isinstance(node.comparators[0].value, str):
+            routed.add(node.comparators[0].value)
+    unrouted = [p for p in _PROVIDER_KEY_ENV if p not in routed]
     assert not unrouted, (
         f"provider(s) {sorted(unrouted)} are registered in _PROVIDER_KEY_ENV "
-        f"but never named in resolve_extractor_provider's routing order — "
-        f"their key would be read and never used, so a deployment configured "
-        f"with only that key resolves (None, None) and the capture silently "
-        f"skips extraction. Add the provider to the resolver's `_chain(...)` "
-        f"calls, or remove it from the registry."
+        f"but never named in resolve_extractor_provider's routing order (its "
+        f"`_chain(...)` arguments / `explicit == ...` comparisons) — their key "
+        f"would be read and never used, so a deployment configured with only "
+        f"that key resolves (None, None) and the capture silently skips "
+        f"extraction. Add the provider to the resolver's `_chain(...)` calls, "
+        f"or remove it from the registry."
     )
 
     # The explicit-selector enum is a POLICY set, not the registry; it may only

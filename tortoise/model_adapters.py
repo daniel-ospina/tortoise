@@ -586,9 +586,14 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 #: nothing — its key is read and then never used, and a deployment holding only
 #: that key reports `no-provider` and silently skips extraction, the #8133
 #: symptom class on the opposite axis.
-#: `test_the_v2_resolver_honours_exactly_the_provider_key_map` pins BOTH
-#: directions: nothing outside this map can be honoured, and every provider in
-#: it must appear in the resolver's own routing literals.
+#: `test_the_v2_resolver_honours_exactly_the_provider_key_map` pins both
+#: directions as far as an assertion can (review cycle 3): nothing OUTSIDE this
+#: map can be honoured through a literal routing name, and every provider IN it
+#: must appear in the resolver's `_chain(...)` arguments or its explicit-selector
+#: comparisons (parsed from the AST, so a comment naming a provider does not
+#: satisfy it). NOT pinned: a provider honoured through a module-level constant
+#: (`os.environ.get(_X)` with `_X` bound at module scope) — that is the AST
+#: guard's documented residual, and no test here claims otherwise.
 #:
 #: ⚠️ Coverage, stated exactly (review cycle 1): this map is the single source
 #: for the V2 RESOLVER's key PRESENCE. Two consumers still hold their own inline
@@ -596,11 +601,16 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 #: builds a hand-written `keyed` dict from the same three vars, and
 #: `_SPEC_FAMILY_PROVIDERS`/`_providers_can_serve` never read this map at all.
 #: Those are the #8133 shape surviving on another lane. Register a provider here
-#: and the ask lane will not see it; make it ask-servable too (add it to
-#: `_SPEC_FAMILY_PROVIDERS`) and the ask lane still has to be taught its key in
-#: `keyed`, or `keyed[explicit]` raises `KeyError` (500 on the ask lane) —
-#: measured: without the `_SPEC_FAMILY_PROVIDERS` edit the lane fails closed
-#: earlier, with a `ValueError` naming the unservable family (review cycle 2).
+#: and the ask lane will not see it. Teaching the ask lane is a THREE-step chain,
+#: and each step has its own gate (measured, review cycle 3):
+#:   1. absent from `_ASK_PROVIDERS` → `ValueError: TORTOISE_ASK_PROVIDER=<p>
+#:      invalid — valid values: auto | deepseek-direct | openrouter | venice`
+#:      (the ENUM gate fires first, before any family or key check);
+#:   2. in `_ASK_PROVIDERS`, absent from `_SPEC_FAMILY_PROVIDERS` →
+#:      `ValueError: … cannot serve <model> — the <family> family is served
+#:      only by deepseek-direct, openrouter, venice`;
+#:   3. also in `_SPEC_FAMILY_PROVIDERS`, absent from `keyed` →
+#:      `KeyError` (500 on the ask lane).
 #: Unifying the ask lane is a separate change — this comment names the residual
 #: rather than claiming it is closed.
 #:
