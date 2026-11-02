@@ -1495,6 +1495,16 @@ def test_an_untrimmed_census_over_a_resolved_set_is_red() -> None:
     The contract is about an UNTRIMMED census, not about today's literal, so an
     injected map keeps it executable after the real census is emptied — the
     same shape `test_the_census_guard_has_teeth_on_an_INJECTED_map` uses.
+
+    ⛔ What is measured here is the HELPER's contract, never another test's
+    PROSE. A previous version also asserted that the live falsifier's docstring
+    did (or did not) contain three given phrases; that was deleted (review on
+    this PR, P3) because a fragment like `is a GREEN tree` is a TRUE sentence in
+    this file's own voice — `a trimmed census over an empty live set is a GREEN
+    tree` is exactly right — so the pin would red the lane that finishes
+    `#5090` on a CORRECT prose edit, and it is vacuous under `-OO`, where
+    `__doc__` is `None`. Do not re-add it: the two assertions below are the
+    contract, and `_census_violations` is what a prose claim is checked against.
     """
     resolved = "tortoise.q::_resolved_since"
     also_resolved = "tortoise.q::_also_resolved"
@@ -1522,19 +1532,6 @@ def test_an_untrimmed_census_over_a_resolved_set_is_red() -> None:
         [], {}, probe.CENSUS_CLASSES, probe.CENSUS_BYPASS) == [], (
         "a trimmed census over a resolved set is the FINISHED state and must "
         "be green, or the trim contract can never be satisfied")
-    # ⛔ INVERTED pin on the paragraph that used to misdescribe this state:
-    # assert the KNOWN-FALSE claims are ABSENT rather than requiring one
-    # specific true sentence to be PRESENT. The positive pin made any unrelated
-    # prose correction a RED (review on this PR, P2); this one reds only if the
-    # inversion comes BACK, which is the regression `4b0e8caed` actually fixed.
-    doc = test_every_unresolved_writer_carries_a_census_class.__doc__ or ""
-    for false_claim in ("turns this green without touching it",
-                        "an empty live set here is a",
-                        "is a GREEN tree"):
-        assert false_claim not in doc, (
-            "the live falsifier's docstring re-asserts the pre-fix claim that "
-            f"an empty live set is green without a trim — {false_claim!r}: "
-            f"{doc}")
 
 
 def test_the_census_guard_has_teeth_on_an_INJECTED_map() -> None:
