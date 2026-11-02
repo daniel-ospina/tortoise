@@ -6135,14 +6135,26 @@ def test_the_changes_job_carries_no_job_scope_env():
     assertions below fail on that tree.
 
     ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:866`
-    and the capstone pin's re-cut history (`tests/test_capstone_preregistration_9075.py:1759`)
-    both send an operator here by name, and both advertised
+    and the capstone pin's re-cut history (in `tests/test_capstone_preregistration_9075.py`,
+    the comment ending "… and job scope is now forbidden by
+    `test_the_changes_job_carries_no_job_scope_env`.") both send an operator here by name, and
+    both advertised
     `test_the_changes_job_carries_no_job_scope_env` while the function carried a
     longer, unrelated name — so `pytest -k test_the_changes_job_carries_no_job_scope_env`
     collected ZERO tests and its green "no tests ran" read as confirmation
     (#10186 review, FINDING 1). Renamed to the name the documents already
     advertise; `test_every_test_name_the_runbook_names_exists` in
     `tests/test_ci_runner_x64_install.py` now keeps the two in sync.
+
+    ⛔ THE CAPSTONE RELAY IS CITED BY SYMBOL, NOT BY `path:line`, AND THE REASON IS MEASURED. The
+    number was re-derived seven times (1590 → 1596 → 1673 → 1682 → 1693 → 1701 → 1703) because
+    that file is the one this branch edits, and the eighth falsification came from the very commit
+    that added the paragraph arguing against re-deriving numbers: it inserted 56 lines above the
+    sentence and left this cite pointing at an unrelated `#:` line, so
+    `test_the_relays_a_sibling_test_file_makes_land_on_what_they_name` redded. A bare number here
+    is asserted by nothing between edits, so it goes stale silently; the sentence below does not.
+    The pin anchors this relay on that sentence (must match exactly once in the target) instead of
+    on a line index.
     """
     from tests.test_capstone_preregistration_9075 import _SAFE_JOB_ENV
 

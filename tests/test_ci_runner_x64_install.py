@@ -4601,6 +4601,13 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     concurrency.py`'s citation at a line that does not carry the inventory row reds with `cites
     docs/ops/ci-runner-x64.md:<n>, but that line is …`; with this pin absent the same edit is
     silent, because no other surface reads that file.
+
+    ⛔ AND A CITE INTO A FILE THIS BRANCH EDITS IS ANCHORED BY SENTENCE, NOT BY LINE NUMBER. The
+    capstone relay below was re-derived seven times and falsified an eighth by the commit that
+    inserted 56 lines above it — a number is asserted by nothing between edits, so it decays
+    silently, which is the exact defect this pin exists to refuse one level up. `symbol_citations`
+    holds those anchors: the target must carry the sentence exactly once, and the citing file must
+    still cite the target, so the relay is verified while the address can never go stale.
     """
     # (target file, cited line) -> a regex the CITED LINE ITSELF must match
     anchors: dict[tuple[str, int], str] = {
@@ -4609,22 +4616,44 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
             r"from tortoise\.commit_schema import Point, point_content_id",
         # the reference-surface relay that drifted: the runbook sentence naming the test
         ("docs/ops/ci-runner-x64.md", 866): r"test_the_changes_job_carries_no_job_scope_env",
-        # the capstone pin's re-cut history, which names it too (re-derived at #10468's head: the
-        # re-cut comments this PR added to that file pushed it 1590 → 1596, and the record↔bars
-        # tests added above at the same head pushed it 1596 → 1673, then 1682 when the disagreement
-        # case was widened from the two log-invisible bars to all seven, then 1693, and 1701 for the
-        # base-ancestry tests this branch added, then 1703 when review cycle 7's `ordering_base`
-        # outcome assertions added two lines to the acceptance test, then 1759 when a later commit
-        # appended 56 lines of cycle-11 tests to the same file — the pin landing rather than
-        # drifting, because a plausible offset is what it exists to refuse. That last shift is the
-        # argument for citing this symbol in PROSE by name: the anchor test catches the drift, but
-        # only after someone runs it)
-        ("tests/test_capstone_preregistration_9075.py", 1759):
-            r"test_the_changes_job_carries_no_job_scope_env",
+        # ⛔ the capstone pin's re-cut history is NOT here, and its absence is the fix, not a gap:
+        # it used to be ("tests/test_capstone_preregistration_9075.py", 1703), and that number was
+        # re-derived SEVEN times (1590 → 1596 → 1673 → 1682 → 1693 → 1701 → 1703) because the
+        # target is a file this branch edits. The eighth falsification needed no edit at all: the
+        # commit that added the paragraph arguing against re-deriving numbers inserted 56 lines
+        # above the sentence and left the cite pointing at an unrelated `#:` line, redding this
+        # pin. Re-deriving to 1759 would only re-arm that decay. It is a SYMBOL citation now —
+        # see `symbol_citations` below, which anchors on the SENTENCE the target must carry.
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
         ("docs/ops/ci-runner-x64.md", 25): r"^\| `ubuntu-latest` \|",
     }
+
+    # (citing file, target file, sentinel regex) — citations written WITHOUT a line number.
+    # ⛔ THE LINE NUMBER IS THE PART THAT DECAYS, so for a relay into a file this branch EDITS the
+    # number is not the assertion: the SENTENCE is. Each sentinel must match EXACTLY ONE line of
+    # the target, so a deleted sentence (no relay left) and a duplicated one (no single landing
+    # site) both red. The `path:line` half above keeps discovering every NUMERIC citation —
+    # including any new one somebody adds to these files — so dropping this one number does not
+    # open a hole in the two-way scan.
+    #
+    # ⛔ DELIBERATELY NOT CHECKED: whether the CITING paragraph still points at the target. A
+    # version of that check was written and measured DEAD — the citing file names the target twice
+    # and the symbol five times, so "the target appears near the symbol" stays true after the
+    # parenthetical is deleted. A check that cannot fail reads as coverage it does not provide,
+    # which is the defect this whole pin exists to refuse, so it was removed rather than shipped.
+    # Its absence loses no verdict: if that parenthetical is dropped, no relay is wrong — the
+    # sentence still exists, still names the test, and the other two anchors still land.
+    symbol_citations: list[tuple[str, str, str]] = [
+        (
+            # the capstone pin's re-cut history, which advertises this test's name (#10186). Cited
+            # by symbol because the line was re-derived seven times and falsified an eighth by a
+            # commit that inserted 56 lines above it (see `anchors`).
+            _CITING_TEST_FILE,
+            "tests/test_capstone_preregistration_9075.py",
+            r"and job scope is now forbidden by `test_the_changes_job_carries_no_job_scope_env`",
+        ),
+    ]
 
     ref = re.compile(r"((?:tests/[A-Za-z0-9_/]+\.py)|(?:docs/ops/ci-runner-x64\.md)):(\d+)")
     runbook_ref = re.compile(r"(docs/ops/ci-runner-x64\.md):(\d+)")
@@ -4674,3 +4703,18 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         "a citation names a line that does not say it — re-derive the number at this head: "
         + "; ".join(wrong)
     )
+
+    # ── the symbol citations: no number, so nothing to re-derive ────────────────────────────
+    for citer, target, sentinel in symbol_citations:
+        target_path = REPO_ROOT / target
+        assert target_path.is_file(), f"symbol citation names a missing file: {target}"
+        hits = [
+            n for n, line in enumerate(target_path.read_text().splitlines(), 1)
+            if re.search(sentinel, line)
+        ]
+        assert len(hits) == 1, (
+            f"{citer} cites {target} by SYMBOL, so the sentence it anchors on must exist exactly "
+            f"once in that file — found {len(hits)} match(es) at {hits}. A deleted sentence is a "
+            "relay that no longer says what the citing paragraph claims; a duplicated one no "
+            "longer identifies a single landing site. Re-anchor on the sentence the tree carries."
+        )
