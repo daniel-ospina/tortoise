@@ -70,9 +70,13 @@ _SHELL_TEST = re.compile(r'\[ -[zn] "\$([A-Z0-9_]+)" \]')
 # it for TORTOISE_GIT_SHA).
 _ARRAY_ELEMENT = re.compile(r"ARGS\+?=\(([^)]*)\)")
 _ARRAY_PAIR = re.compile(r'([A-Z0-9_]+)="\$\{?([A-Z0-9_]+)\}?"')
-# The one argv pair whose value is a GitHub BUILT-IN, not an env-bound secret.
-# Exempted by name, so the parser can accept the brace spelling without the
-# exemption depending on a regex that misses it.
+# The argv pairs whose value is NOT an env-bound secret: `GITHUB_SHA` is a GitHub
+# built-in, and `TORTOISE_GIT_DIRTY` is workflow-computed from the build's own tree
+# (#10447) and can never be empty (the payload defaults to `unknown`, which /health
+# reads as null). Exempted BY NAME, so the parser can accept the brace spelling
+# without the exemption depending on a regex that misses it — and this set also
+# authorises an UNCONDITIONALLY staged value (no `-n` guard), so the count in
+# `test_optional_fly_appends_are_n_guarded`'s docstring must track it.
 _NON_SECRET_PAIRS = {("TORTOISE_GIT_SHA", "GITHUB_SHA"),
                      # #10447: workflow-COMPUTED from the build's own tree, never an
                      # env-bound secret, and never empty — an unreadable tree stages
@@ -378,8 +382,10 @@ def test_optional_fly_appends_are_n_guarded(workflow_text):
     three-key array and the Stripe pair), and
     `TORTOISE_GIT_SHA="${GITHUB_SHA}"` — GITHUB_SHA is a GitHub built-in that is
     always set, not an env-bound secret, so it needs no guard (`_NON_SECRET_PAIRS`).
-    A third is the #4126 versioned default (`_UNCONDITIONAL_BY_DECISION`), which
-    pushes a recorded non-secret constant, never an empty value."""
+    A third is `TORTOISE_GIT_DIRTY="${TORTOISE_GIT_DIRTY_STAMP}"` (#10447) — also
+    workflow-computed and never empty. A fourth is the #4126 versioned default
+    (`_UNCONDITIONAL_BY_DECISION`), which pushes a recorded non-secret constant,
+    never an empty value."""
     run = _steps()[_SET_STEP]["run"]
     for line in run.splitlines():
         m = re.search(r"ARGS\+=\(([^)]*)\)", line)

@@ -167,7 +167,15 @@ def _workflow_step_run(step_name_prefix: str) -> str:
     raise AssertionError(f"no step named {step_name_prefix!r} in deploy-hosted.yml")
 
 
-def _run_record_step(cwd: Path, *, git_available: bool, stamp: Path | None = None) -> str:
+def _git_head(cwd: Path) -> str:
+    """The scratch repo's HEAD, so `GITHUB_SHA` names the commit it was checked out at."""
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(cwd), env=_git_env(),
+                          capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
+def _run_record_step(cwd: Path, *, git_available: bool, stamp: Path | None = None,
+                     github_sha: str | None = None) -> str:
     """Execute the workflow's OWN `record the built tree` step and return the stamp
     file's contents.
 
@@ -185,7 +193,14 @@ def _run_record_step(cwd: Path, *, git_available: bool, stamp: Path | None = Non
     # The workflow writes a fixed path; substitute a scratch one so a test never
     # touches a real /tmp marker an earlier run left behind.
     body = body.replace("/tmp/tortoise-deploy-git-dirty", str(stamp))
-    env = {**_git_env(), "PATH": "/usr/bin:/bin" if git_available else "/nonexistent-bin"}
+    git_bin = os.path.dirname(shutil.which("git") or "/usr/bin/git")
+    env = {**_git_env(),
+           "PATH": f"{git_bin}:/usr/bin:/bin" if git_available else "/nonexistent-bin",
+           # The step compares the checkout HEAD with the deploy commit, so the
+           # scratch repo's HEAD must be what GITHUB_SHA names (review P2).
+           "GITHUB_SHA": _git_head(cwd) if git_available else "0" * 40}
+    if github_sha is not None:
+        env["GITHUB_SHA"] = github_sha
     proc = subprocess.run([_BASH, "-e", "-c", body], cwd=str(cwd), env=env,
                           capture_output=True, text=True)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
@@ -281,6 +296,12 @@ def test_the_deploy_stamps_whether_the_built_tree_was_dirty(tmp_path):
     )
     assert _run_payload_read(repo, stamp=stamp) == "true", "the dirty reading must reach the argv"
 
+    assert _run_record_step(repo, git_available=True, stamp=stamp,
+                            github_sha="0" * 40) == "unknown", (
+        "a clean tree at a HEAD the deploy did not name must stamp `unknown` — "
+        "`false` there would publish build_identified: true for a commit the image "
+        "was not built from"
+    )
     assert _run_record_step(repo, git_available=False, stamp=stamp) == "unknown", (
         "an UNREADABLE tree must stamp `unknown` (→ null, NOT STATED). Stamping "
         "`false` here is the false PASS: a positive 'provably clean' claim from a "

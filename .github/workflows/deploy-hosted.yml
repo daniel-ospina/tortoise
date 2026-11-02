@@ -408,8 +408,9 @@ jobs:
     # kill grace each) + 4 × 45 s = 60.5 min worst case (each attempt is
     # `timeout`-bounded — `--wait-timeout 420` bounds only the release wait, not
     # the remote build — and `-k 30s` makes that bound unconditional), and this
-    # job has THIRTEEN other steps sharing the same budget (the dependency parity
-    # gate alone runs two `uv` commands). So:
+    # job has FOURTEEN other steps sharing the same budget (the dependency parity
+    # gate alone runs two `uv` commands; the #10447 record step is one `git status`,
+    # well inside the headroom below). So:
     #   60.5  loop worst case
     # +  0.42 non-Deploy steps — MEASURED max over 8 deploy-api jobs 2026-10-27
     #         (0.22, 0.27, 0.32, 0.33, 0.38, 0.40, 0.40, 0.42)
@@ -837,9 +838,16 @@ jobs:
         # PATH that carries ONLY fly/flyctl, so a `git` call inside it is refused
         # as "a command this harness does not model" (the fail-closed state, not
         # a warning) — it cannot tell whether a git-dependent assignment happens.
-        # Computing the reading here and reading the RESULT with a bash builtin
-        # (`$(< file)`) keeps the payload answerable under the stub without
-        # loosening the gate.
+        # Computing the reading here and reading the RESULT with bash BUILTINS
+        # (`IFS= read -r`, which forks nothing) keeps the payload answerable under
+        # the stub without loosening the gate.
+        #
+        # ⛔ ONE RULE FOR THIS FILE: the payload uses `IFS= read -r`, NOT
+        # `$(< file)`. The substitution shortcut fires only when its body is
+        # EXACTLY the redirect; with any extra redirection it runs a redirect-only
+        # command that writes nothing, so the staged value came back EMPTY and
+        # `commit_dirty` stayed null on every production deploy (review P1,
+        # measured). Do not "simplify" the payload back to it.
         #
         # The reading is `git status --porcelain` over the SAME working tree
         # `flyctl deploy --remote-only` uploads as its build context, so it
@@ -857,13 +865,24 @@ jobs:
         # `git ls-files --others --ignored` would flag a normal `.venv`/`dist`
         # checkout and make every deploy permanently "dirty".
         run: |
+          # ⛔ THE CHECKOUT MUST BE THE DEPLOY COMMIT. A clean tree at the WRONG
+          # HEAD would stamp `false` and `/health` would publish
+          # `build_identified: true` for a commit this image was not built from —
+          # the same false PASS one indirection away. No current trigger diverges
+          # (push and workflow_dispatch both leave HEAD == GITHUB_SHA); this is the
+          # guard that keeps it true if a `ref:`/`path:` input or a merge-queue sha
+          # ever does. Unstated (not "clean") is the honest answer there.
+          head="$(git rev-parse HEAD 2>/dev/null || true)"
+          if [ -z "$head" ] || [ "$head" != "${GITHUB_SHA:-}" ]; then
+            printf 'unknown' > /tmp/tortoise-deploy-git-dirty
+            echo "::warning::the checkout HEAD (${head:-unreadable}) is not the deploy commit (${GITHUB_SHA:-unset}) — the tree reading is UNSTATED (/health will report commit_dirty: null), NOT clean"
           # ⛔ A FAILED READING IS 'unknown', NEVER 'false'. `-e` does not save this:
           # the exit status that decides the branch is `[`'s, not the
           # substitution's, so `git status` failing (not a repo, a broken git) used
           # to fall through to the `-z` test succeeding and write `false` — the
           # "provably clean" claim this field exists to refuse, produced by a
           # reading that never happened (review P1).
-          if ! dirty="$(git status --porcelain)"; then
+          elif ! dirty="$(git status --porcelain)"; then
             printf 'unknown' > /tmp/tortoise-deploy-git-dirty
             echo "::warning::git status failed — the tree reading is UNSTATED (/health will report commit_dirty: null, build_identified_reason: tree_dirt_unstated), NOT clean"
           elif [ -z "$dirty" ]; then
