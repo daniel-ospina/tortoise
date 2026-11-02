@@ -75,12 +75,15 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:   #10564 (cfbd25685) — re-cut: the refusal NAMES the executed set, generated from
 #:            `_EXECUTED_CONCLUSIONS` (`", ".join(sorted(...))`) so the words cannot drift
 #:            from the constant.
-#:   #10564 (91188fcfa) — re-cut: the non-executing states are marked `e.g.` ILLUSTRATIVE
-#:            (not exhaustive) and include `startup_failure` — the module's own
-#:            `_UNCERTIFIABLE_CONCLUSIONS` member and the shape the probe most often reads;
-#:            enumerating all six as final would re-seal the claim this line of review
-#:            removed. The test pins the executed-set clause AND the markers. (The commit
-#:            after this one changes this file only, so the digest stays at 91188fcfa's.)
+#:   #10564 (91188fcfa) — re-cut: the MODULE's non-executing states are marked `e.g.`
+#:            ILLUSTRATIVE (not exhaustive) and include `startup_failure` — the module's
+#:            own `_UNCERTIFIABLE_CONCLUSIONS` member and the shape the probe most often
+#:            reads; enumerating all six as final would re-seal the claim this line of
+#:            review removed.
+#:   #10564 (ebf0b5e6a) — this file only, so the digest is UNCHANGED from 91188fcfa:
+#:            the test now also pins the `e.g.` / ILLUSTRATIVE MARKERS (until then a
+#:            mutation that dropped them passed), and the history block was re-attributed
+#:            line by line.
 #:            No logic change in any re-cut: no new branch, no exit-code change, no
 #:            polarity change.
 _GATE_MODULE_SHA256 = "f4108e2e3d4db724a2b046f4ccd18e060a8652f21676d838b4c6f1889cb1886b"
@@ -202,8 +205,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -n "$report" ] && [ "${STUB_NO_REPORT:-0}" != "1" ]; then
-  printf 'examined=12\\nextracted=3\\ncompleted=12\\ntested=%s\\npending=0\\n' \\
-    "${STUB_TESTED:-10}" > "$report"
+  printf 'examined=%s\\nextracted=3\\ncompleted=12\\ntested=%s\\npending=0\\n' \\
+    "${STUB_EXAMINED:-12}" "${STUB_TESTED:-10}" > "$report"
 fi
 # The examined FAILING runs of the same window (#10289) — the leg dimension's run set.
 [ -n "$prov" ] && printf '%s' "${STUB_PROV:-}" > "$prov"
@@ -987,8 +990,10 @@ _MAIN_WINDOW_LEG_EXECUTED = {
 }
 
 #: The window's counters and its examined failing runs. `tested=3` EQUALS the examined
-#: count on purpose: `tested > len(examined)` is the proof that a GREEN run exists, and a
-#: green run covers every leg — so an all-red window is the only shape that probes.
+#: count on purpose: `tested > len(examined)` is the SUFFICIENT proof that a GREEN run
+#: exists, and a green run covers every leg — so a window that fails it is the shape that
+#: probes (it does not have to be all-red; a `startup_failure` or a debited zero-job run
+#: is enough, which is why the refusal scopes its claim to the EXAMINED runs).
 _STUB_PROV = {"STUB_PROV": "aaa:1001\nbbb:1002\nccc:1003\n",
               "STUB_TESTED": "3", "STUB_EXAMINED": "3"}
 
@@ -1055,8 +1060,11 @@ def test_the_refusal_names_the_conclusions_it_actually_treats_as_not_executed(tm
     proc = _leg_case(tmp_path, main_jobs=_MAIN_WINDOW_LEG_NEUTRAL)
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "leg coverage: test-slow=NOT EXECUTED" in proc.stdout
-    # The EXECUTED set is GENERATED from the constant, so the words cannot drift from
-    # the code: a message naming a stale subset fails here the moment the constant moves.
+    # ⛔ WHAT THIS ENFORCES, exactly: the message equals the join of the constant, so a
+    # STALE or PARTIAL list reds the moment `_EXECUTED_CONCLUSIONS` moves. A hardcoded
+    # literal that happens to match is behaviourally identical and passes — that is the
+    # digest pin's job (any module byte moves it), not this assertion's. Claiming more
+    # than that here is the same overstatement class this whole review pass is about.
     executed = ", ".join(sorted(module._EXECUTED_CONCLUSIONS))
     assert f"something other than {executed}" in proc.stdout, (
         "the refusal must name the conclusions that DO count as executed, generated "
