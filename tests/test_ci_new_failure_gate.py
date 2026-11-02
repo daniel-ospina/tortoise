@@ -95,9 +95,17 @@ EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 #:            block now lists `--main-jobs-dir` as the third test seam and says it is
 #:            not optional for a no-network run (without it the leg dimension calls
 #:            `gh`). Docstring only — no executable line moved.
+#:   #10564 (UP037 lint) — re-cut IN THE SAME COMMIT, as a LINT fix rather than a review
+#:            one: `main_leg_coverage(runner: "Runner", …)` carried an unnecessary
+#:            quoted annotation. The module has `from __future__ import annotations`
+#:            (line 85), so the quotes changed nothing at runtime, `Runner` is defined
+#:            above the function (line 213) so no forward reference needed them — but
+#:            `ruff check .` reds UP037 on them, and that redded the REQUIRED
+#:            `agent-infra-ci / lint` check on this PR's first head while every verdict
+#:            case stayed green. Unquoted; no executable behaviour moved.
 #:            No logic change in any other re-cut: no new branch, no exit-code change,
 #:            no polarity change.
-_GATE_MODULE_SHA256 = "3f4575d95a72600dd6d7da0ffd117fcacf3671db10fe192b4c1c86ecfa74cecf"
+_GATE_MODULE_SHA256 = "83b4b79cc6ebd513c8bd0ee2bc3ddeab58b1a02ebdb5b9318068332be670621b"
 
 #: The shared decision, reached through the machine-local `scripts/` pointer
 #: (`$AGENT_INFRA_PATH`, gitignored, NOT tracked — #9475). Missing off a developer box
@@ -312,6 +320,46 @@ def test_the_verdicts_author_is_pinned_by_content():
         "_GATE_MODULE_SHA256 in this file. That module authors the required check's "
         "verdict (python-ci-gate delegates every deferrable failure to it), so the edit "
         "is re-cut DELIBERATELY, with a line in the re-cut history, or not at all.")
+
+
+def _ruff_binary() -> str:
+    """The ruff binary the `agent-infra-ci / lint` leg runs, or a skip.
+
+    Lint is not exercised anywhere else in this suite: the gate's own verdict cases drive
+    the module as a SCRIPT, and a `ruff` error is invisible to every one of them.
+    """
+    pinned = REPO / ".venv" / "bin" / "ruff"
+    if pinned.exists():
+        return str(pinned)
+    found = shutil.which("ruff")
+    if not found:
+        pytest.skip("ruff is not installed in this environment")
+    return found
+
+
+def test_the_gate_module_is_clean_under_the_required_lint_leg():
+    """A lint error in THIS file reds a REQUIRED check, whatever the verdict does.
+
+    `agent-infra-ci / lint` runs `ruff check .` (`.github/workflows/ci.yml`) and is a
+    required check, so one UP037/E501-class violation here blocks the PR while all 20
+    verdict cases stay green. That is how #10564's first head redded: UP037 on
+    `main_leg_coverage(runner: "Runner", …)`, a quoted annotation the module's own
+    `from __future__ import annotations` makes unnecessary. The case runs the same
+    single-file check under the same tree-wide config the leg uses, so the local signal
+    and the required check cannot disagree. It fails on that pre-fix module (rc=1,
+    `UP037`), which is the non-vacuity this file's other cases get from their stubs.
+    """
+    proc = subprocess.run(
+        [_ruff_binary(), "check", "--no-cache", str(GATE)],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        f"{GATE.relative_to(REPO)} must be ruff-clean — the `agent-infra-ci / lint` leg "
+        f"runs `ruff check .` over this path and is REQUIRED; got rc={proc.returncode}:"
+        f"\n{proc.stdout}{proc.stderr}"
+    )
 
 
 def test_the_job_slug_matches_the_shared_producer():

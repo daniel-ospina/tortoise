@@ -567,7 +567,7 @@ def counter(report: dict[str, str], key: str) -> int:
             "window's counters are unreadable") from exc
 
 
-def main_leg_coverage(runner: "Runner", provenance: Path, tested: int,
+def main_leg_coverage(runner: Runner, provenance: Path, tested: int,
                       legs: list[str], main_jobs_dir: str | None
                       ) -> tuple[str, set[str]]:
     """(BASIS, covered legs) — did main's baseline window EXERCISE each leg?
