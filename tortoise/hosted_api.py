@@ -163,6 +163,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
+    note_heartbeat_task,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,
@@ -223,6 +224,7 @@ from tortoise.sdk import (
     UnapprovedKindNamespace,  # #5475: the named pack-approved refusal, mapped to 422 too
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _attach_source_change_notices,  # #5516: the ONE home for the capture receipt's source-change notice
+    _capture_enriched_texts,  # #8488 scope 1: the enriched embeddingText (gate OFF → None)
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_extraction_window,  # #6246: the shared extraction view (both lanes)
     _capture_gate_window,  # #4897: strip synthetic markers before the empty/blank gate
@@ -1946,9 +1948,12 @@ def _start_liveness(app) -> None:
     (proving it is scheduling before the watchdog exists to judge it), then
     the heartbeat task, then the listener, then the watchdog. Starting the
     watchdog before the heartbeat would let it fire on a loop that simply had
-    not ticked yet. The watchdog additionally refuses to judge until at least
+    not ticked yet. The SOFT path additionally refuses to judge until at least
     one REAL tick has landed (``LOOP_STALL_EXIT_MIN_TICKS``), so the slow-
-    starting part of the startup half cannot be mistaken for a wedge.
+    starting part of the startup half cannot be mistaken for a wedge. The HARD
+    ceiling (#10585 review P2) is exempt from that gate: past
+    ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` a boot that never ticked again IS the
+    wedge, and holding the ceiling off for it means hanging indefinitely.
     """
     loop = asyncio.get_running_loop()
     # A previous lifespan of the SAME app instance (in-process restart,
@@ -1966,15 +1971,29 @@ def _start_liveness(app) -> None:
             prev.cancel()
     heartbeat_record()
     app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    # #2850: record that ticker's death, so the hard stall ceiling can tell a
+    # wedged LOOP from a dead TICKER and never restart-loop a healthy process.
+    note_heartbeat_task(app.state._loop_heartbeat_task)
     # #3944: the analytics canary heartbeat. Armed with the liveness block
     # (cheap, synchronous, no I/O at arm time — the coroutine sleeps first).
     app.state._analytics_canary_task = loop.create_task(_analytics_canary_loop())
     app.state._healthz_server = start_health_listener()
     app.state._loop_watchdog_stop = threading.Event()
-    # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
-    # unset this returns None — the /healthz listener is the signal and the
-    # destructive action lives in the out-of-band watchdog. Enabling it here
-    # also requires 3 consecutive stale windows and an idle workload.
+    # DISABLED BY DEFAULT (#2850 review P0): the SOFT, idle-gated self-kill is
+    # what this comment used to describe. TORTOISE_LOOP_STALL_EXIT_S is unset,
+    # so THAT path stays off: the /healthz listener is the signal and the
+    # destructive action lives in the out-of-band watchdog. When armed it
+    # requires 3 consecutive stale windows AND an idle workload.
+    #
+    # The HARD ceiling (#10585) is the exception, and it is the one the HOSTED
+    # deployment actually runs: fly.toml [env] arms
+    # TORTOISE_LOOP_STALL_HARD_EXIT_S=600 while leaving its sibling unset, so
+    # this call does NOT return None in production. That branch deliberately
+    # bypasses the idle gate and the hysteresis — the in-flight gauge is TRUE by
+    # construction during the wedge it guards (an open `GET /mcp` SSE stream is
+    # an in-flight request), so an idle-gated exit could never fire. It keeps
+    # only the dead-TICKER disarm, and relies on fly.toml's [[restart]] block
+    # (policy `on-failure`) to turn the non-zero exit into a RESTART.
     app.state._loop_watchdog = start_stall_watchdog(
         stop_event=app.state._loop_watchdog_stop)
 
@@ -15542,7 +15561,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         actor_user_id=_actor_uid, machine_id=body.machine_id,
         model=body.model, session_existed=session_existed,
         embed_fn=lambda texts: _capture_turn_embeddings(
-            texts, proj.required_embedding_dim))
+            texts, proj.required_embedding_dim),
+        # #8488 scope 1: the enriched ``embeddingText`` (owner ruling #8932),
+        # kept in parity with ``sdk.capture_session`` (the ONE shared writer).
+        enrich_fn=_capture_enriched_texts)
     _turn_texts = _capture_write["turn_texts"]
     _capture_redactions = _capture_write["redacted_total"]
 

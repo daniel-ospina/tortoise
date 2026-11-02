@@ -45,6 +45,18 @@ from extract_turns import (
 )
 
 
+def _mark(session: str, index: int, count, mark, role: str = "assistant") -> list:
+    """A dump row carrying the `:Session`'s OWN account (columns 6/7).
+
+    `turn_count` is the WINDOW length the writer stores and `turn_max_index` the
+    session's live inclusive id-space end (`sdk._write_session_and_turns`) — the
+    two witnesses a PARTIAL dump is decided from, so a fixture that leaves them
+    out cannot exercise that decision at all.
+    """
+    return ["session://" + session, "event", role, _frame(role, f"m{index}"),
+            "2026-11-02T00:00:00+00:00", _turn_id(session, index), count, mark]
+
+
 def _turn_id(session: str, index: int) -> str:
     """A turn Point id, built by the WRITER's own derivation.
 
@@ -382,6 +394,51 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         self.assertNotIn("extractedFrom", _DUMP_QUERY)
         self.assertNotIn("authoredBy", _DUMP_QUERY)
 
+    def test_the_completeness_check_is_coupled_to_the_writers_declaration(self):
+        # `_dump_shortfall` reads the session's DECLARATION, so the two names it
+        # reads must be the ones the writer SETS — the same seam as the
+        # predicate coupling above, one level up. Without this pin a writer
+        # rename leaves `_session_marks` returning `None`, which deliberately
+        # degrades to "cannot be shown" rather than refusing (so an old graph is
+        # not refused for a mark it never had) — and the split-store partial run
+        # then walks through again with every other test in this file green.
+        # Measured: dropping `s.turn_count, s.turn_max_index` from `_DUMP_QUERY`
+        # reds this pin and the arity pin, and NOT the refusal pins.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import inspect
+
+        from tortoise.sdk import _write_capture_turns, _write_session_and_turns
+
+        # The declaration is set by the :Session MERGE in the shared Session
+        # writer; `_write_capture_turns` is where the SAME call decides which
+        # STORE takes each turn — the two facts the split state is made of.
+        writer = inspect.getsource(_write_session_and_turns)
+        for set_clause in ("s.turn_count=$tc", "s.turn_max_index=$tmi"):
+            self.assertIn(set_clause, writer,
+                          "dump reads a declaration the writer no longer "
+                          f"makes: {set_clause}")
+        # ⛔ and they are NOT interchangeable (#10021): `$tc` is a WINDOW
+        # LENGTH while `$tmi` is the ID SPACE's end — a reader that treats one
+        # as the other either reports a healthy append as partial or misses a
+        # refused tail.
+        self.assertIn('"tc": turn_count', writer)
+        self.assertIn('"tmi": turn_offset + turn_count - 1', writer)
+        # ...and the per-TURN store decision the split state comes from at all.
+        self.assertIn("_record_first", inspect.getsource(_write_capture_turns))
+        self.assertIn("s.turn_count", _DUMP_QUERY)
+        self.assertIn("s.turn_max_index", _DUMP_QUERY)
+        # ⛔ THE ORDER IS LOAD-BEARING, NOT JUST THE PRESENCE. A swap of the two
+        # appended columns reads `turn_max_index` as the WINDOW length and the
+        # count as the id-space end, which refuses EVERY HEALTHY capture as a
+        # missing tail (`turn_count=3`, mark=2 → "stop at index 2 while its turn
+        # ids reach 3") — and a presence-only assertion, or the arity pin, stays
+        # green through it. Measured: swapping the RETURN columns kept all 85
+        # tests green before this line existed.
+        self.assertIn("t.id, s.turn_count, s.turn_max_index", _DUMP_QUERY,
+                      "`_session_marks` reads column 6 as turn_count and column "
+                      "7 as turn_max_index — the RETURN must emit them in that "
+                      "order")
+
     def test_turn_order_is_the_turn_index_not_the_batch_timestamp(self):
         # the writer stamps a whole capture batch with ONE `$now`, so
         # `createdAt` cannot order a session's turns. The index in the id is
@@ -506,26 +563,33 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
                           "a pre-#947 graph has no `is_episodic` flag, so the "
                           "predicate matches nothing — that cause needs naming")
 
-    def test_dump_payload_round_trips_six_columns(self):
+    def test_dump_payload_round_trips_eight_columns(self):
         # the container emitter and `_DUMP_QUERY`'s RETURN arity must agree;
         # a short row is an IndexError inside the sort, not a red test, unless
         # this drives `dump()` itself with the subprocess mocked.
+        #
+        # Columns 6/7 are the `:Session`'s own account (`turn_count`,
+        # `turn_max_index`) — the witness a partial dump is detected from. A
+        # column added to (or dropped from) EITHER side is an `IndexError` in
+        # the middle of a dump, so the count is asserted here rather than
+        # trusted.
         emitted = json.dumps(["session://s1", "event", "user",
-                              _frame("user", "hello"), "2026-11-02T00:00:00Z", _turn_id("s1", 0)])
+                              _frame("user", "hello"), "2026-11-02T00:00:00Z",
+                              _turn_id("s1", 0), 1, 0])
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "turns.jsonl"
             with mock.patch("extract_turns.subprocess.run") as run:
                 run.return_value = types.SimpleNamespace(stdout=emitted + "\n", stderr="")
                 dump(out)
             self.assertEqual(build_transcripts(out), {"s1": "[2026-11-02] user: hello"})
-            # the emitter and the query's RETURN arity must agree: a column
-            # added to (or dropped from) either side is the cycle-2 P0
-            # (`IndexError` inside the sort), so assert the two counts here
-            # rather than trusting the mocked payload.
             script = run.call_args[0][0][-1]
             ret = _DUMP_QUERY.split("RETURN ", 1)[1].split(" ORDER BY ", 1)[0]
             cols = len([c for c in ret.split(",")])
-            self.assertEqual(cols, 6)
+            self.assertEqual(cols, 8)
+            for column in ("s.turn_count", "s.turn_max_index"):
+                self.assertIn(column, ret,
+                              "the session's declared count and id-space end are "
+                              "the witness a PARTIAL dump is detected from (#10000)")
             self.assertIn("r[5]", script)
             for i in range(cols):
                 self.assertIn(f"r[{i}]", script,
@@ -544,11 +608,17 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         # stamps a capture batch with one `$now`), so a timestamp sort cannot
         # rescue this the way the old predicate did. `s1_t10` must come last:
         # a lexicographic sort would put it between t0/t1 and before t2.
+        #
+        # ⛔ THE IDS ARE CONTIGUOUS 0..10, because that is what a capture
+        # mints (`_capture_turn_id`, a running index). A sparse fixture
+        # (t0, t2, t10) is a session with two REFUSED turns — the partial shape
+        # `dump` now refuses — so it cannot double as an ordering fixture.
         ts = "2026-11-02T00:00:00+00:00"
+        order = [10, 2, 0, 7, 4, 9, 1, 8, 3, 6, 5]
         rows = [
             ["session://s1", "event", "assistant", _frame("assistant", f"m{i}"), ts,
              _turn_id("s1", i)]
-            for i in (10, 2, 0)
+            for i in order
         ] + [
             # a turn-shaped point whose id is NOT a turn: it must be dropped,
             # not spliced in by the sort.
@@ -565,19 +635,297 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
             # ...and the file is the transcript the operator actually reads.
             transcripts = build_transcripts(out)
         self.assertEqual([r["content"] for r in written],
-                         ["m0", "m2", "m10"],
+                         [f"m{i}" for i in range(11)],
                          "dump must write the turn INDEX order, and t10 last")
         self.assertNotIn("claim", [r["content"] for r in written],
                          "a non-turn id is rejected, never sorted in")
         self.assertEqual(
             transcripts,
-            {"s1": "[2026-11-02] assistant: m0\n"
-                   "[2026-11-02] assistant: m2\n"
-                   "[2026-11-02] assistant: m10"})
+            {"s1": "\n".join(f"[2026-11-02] assistant: m{i}" for i in range(11))})
 
     def test_turn_order_refuses_a_turn_id_with_no_index(self):
         with self.assertRaises(ValueError):
             _turn_order(["session://s1", "event", "r", _frame("r", "x"), None, "no-index"])
+
+    # ── THE SPLIT STORE: a dump can be PARTIAL (#10574 review P1) ─────────────
+    #
+    # `dump` read the graph for the whole session while the WRITER decides each
+    # turn's store per turn (`sdk._write_capture_turns`: a refused record write
+    # goes to the graph), so a mid-capture refusal leaves part of the transcript
+    # in each store. `rows` was the only witness, so a graph holding the failed
+    # subset was indistinguishable from a complete session and `dump` reported
+    # success over a truncated transcript — which `run`+`write` then landed as
+    # that session's durable output. The witness is the `:Session`'s OWN account
+    # (`turn_count`, `turn_max_index`), the same reconciliation
+    # `record_read._shortfall` performs on the read door.
+
+    def test_a_partial_dump_refuses_and_writes_no_file(self):
+        # The tail is gone in the shape `turn_count` CANNOT see: `_t0.._t2` held
+        # against a `turn_count` of 2 (a window length, so 3 rows is not "short")
+        # and a `turn_max_index` of 3 — an append window whose `_t3` was refused.
+        # Three contiguous rows, a satisfied count, and a missing HIGHEST turn.
+        rows = [_mark("s1", i, 2, 3) for i in (0, 1, 2)]
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(
+                    stdout="\n".join(json.dumps(r) for r in rows) + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists(),
+                             "a refused dump must leave NO file: `run` would "
+                             "otherwise consume the truncated transcript")
+        refused = str(cm.exception)
+        for fragment in ("PARTIAL", "TAIL", "#10000", "TORTOISE_RECORD_DSN",
+                        "PER TURN", "get_session", "--allow-partial"):
+            self.assertIn(fragment, refused,
+                          "the operator needs the cause and the remedy, not only "
+                          "the verdict")
+        # ⛔ A MARK BEING READ IS NOT PROOF THE STORE SPLIT. The same short shape
+        # comes from a capture whose TURN write failed after the `:Session`
+        # MERGE (the MERGE precedes the turn write, `sdk._write_session_and_
+        # turns`) on a deployment with NO record — and there `get_session()`
+        # cannot separate the two, because with no record it serves this same
+        # graph copy. So the marked branch names BOTH causes; naming only the
+        # split store sends that operator to a remedy that republishes the
+        # truncation as complete.
+        for fragment in ("SPLIT STORE", "TURN write failed AFTER", "cannot separate"):
+            self.assertIn(fragment, refused,
+                          "a mark was READ here, which admits two causes, not one")
+
+    def test_the_gap_arm_carries_no_split_witness_without_a_mark(self):
+        # The gap arm is decidable from the rows ALONE, so it fires for sessions
+        # that declare nothing — and the witness it reports must therefore be
+        # `False` there. Nothing pinned that: forcing the gap arm's witness to
+        # `True` kept the suite green and reinstated, in the one arm nothing
+        # guarded, exactly the F1 defect round 2 removed (a mark-less session
+        # sent to `TORTOISE_RECORD_DSN`/`get_session()`).
+        rows = [_mark("s1", i, None, None) for i in (0, 2)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        gap = str(cm.exception)
+        self.assertIn("no turn for index 1", gap, "the gap arm, not a count arm")
+        self.assertNotIn("SPLIT STORE", gap,
+                         "no mark was read, so the split store is not a cause "
+                         "this measurement admits")
+        self.assertIn("NO `turn_max_index`", gap)
+        self.assertIn("cannot settle this either", gap,
+                      "a graph-only deployment's `get_session()` serves these "
+                      "same rows — it does not report the shortfall")
+
+    def test_a_short_contiguous_session_without_a_mark_still_refuses(self):
+        # The COUNT arm is the only arm that can catch a session which is short
+        # but contiguous with NO declared mark — the tail arm needs the mark and
+        # the coverage arm needs a hole. That is exactly the pre-#10000
+        # population, so it is the arm serving the degraded case, and it had no
+        # discriminating pin (mutating it to `if False and ...` stayed green).
+        rows = [_mark("s1", i, 4, None) for i in (0, 1)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        refused = str(cm.exception)
+        self.assertIn("declares 4 turn(s) but the graph holds only 2", refused)
+        # ⛔ AND THE CAUSE CLAUSE MUST MATCH THE MEASUREMENT. With no
+        # `turn_max_index` there was no record to split with, so the SPLIT
+        # STORE cannot be the cause and `get_session()` cannot arbitrate it
+        # (it reconciles against the same marks) — naming either would send the
+        # operator somewhere that is not at fault, which is #9932 itself.
+        self.assertNotIn("SPLIT STORE", refused,
+                         "a mark-less session cannot have hit the split store")
+        self.assertIn("NO `turn_max_index`", refused)
+        # ⛔ AND `get_session()` MUST NOT BE OFFERED AS THE ARBITER. The mark-less
+        # population IS the pre-#10000 population, and on a graph-only
+        # deployment the door publishes the session's count over the copy
+        # (`sdk._read_captured_session`: `served_turn_count(answer=None, …)`
+        # returns `declared`, no refusal) — so "it reports this same shortfall"
+        # is FALSE exactly where these sessions live. It may say the door cannot
+        # settle the question and WHY; it may not promise it refuses.
+        self.assertIn("cannot settle this either", refused)
+        self.assertIn("serves these same graph rows", refused,
+                      "the reason it cannot settle is that on that arm the door "
+                      "serves this same copy — it does not report short")
+        self.assertIn("--allow-partial", refused)
+
+    def test_a_marked_partial_names_every_cause_it_admits(self):
+        # ⛔ A MARK IS NOT A VERDICT. `turn_max_index is not None` witnesses that
+        # the session was captured under #10000, NOT that the record was armed —
+        # so the split store is one ADMITTED cause, never "the" cause. The shape
+        # below is the writer's own documented residual, not a split store:
+        # capture 1 landed (`_t0`/`_t1`), capture 2 appended `_t2`/`_t3`, its
+        # :Session MERGE landed (count 2, mark 3) and its turn write was refused
+        # (`sdk._write_session_and_turns`: the MERGE precedes the turn write).
+        # There is no record on that deployment, so there is no union for
+        # `get_session()` to serve — and the door cannot arbitrate a one-store
+        # cause at all. The old text asserted the split store categorically and
+        # offered `get_session()` unconditionally.
+        rows = [_mark("s1", i, 2, 3) for i in (0, 1)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        refused = str(cm.exception)
+        self.assertIn("TAIL", refused)
+        self.assertIn("SPLIT STORE", refused,
+                      "the split store is still one admitted cause")
+        self.assertNotIn("The cause is the SPLIT STORE", refused,
+                         "no single-cause verdict from a measurement that "
+                         "admits three")
+        self.assertIn("TURN write failed AFTER", refused,
+                      "the refused-write cause must be named beside the split "
+                      "store — this shape is exactly what it produces")
+        self.assertIn("purge, a backfill copy or a hand edit", refused,
+                      "and the removed-row cause too: the review asked for "
+                      "every cause the measurement admits, and a mark proves "
+                      "the store was SPLIT-capable, never that it split")
+        self.assertIn("only where that record is armed", refused,
+                      "the union remedy is conditional: with one store there "
+                      "is nothing to union")
+        self.assertIn("cannot separate", refused,
+                      "the door is not offered as the arbiter of a one-store "
+                      "cause")
+
+    def test_an_all_residue_dump_names_the_residue_cause_not_the_id_shape(self):
+        # Every matched row is a TURN whose index sits above the session's live
+        # id-space end (a shorter re-capture whose surplus sweep did not land).
+        # This branch had no pin: mutating it to `if False and ...` stayed green.
+        # The message must name the RESIDUE cause — and must NOT claim an
+        # id-shape cause it did not measure.
+        rows = [_mark("s1", i, 2, 1) for i in (2, 3)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        empty = str(cm.exception)
+        self.assertIn("MATCHED 2", empty)
+        self.assertIn("ABOVE their session's `turn_max_index`", empty)
+        self.assertIn("RESIDUE", empty)
+        self.assertNotIn("ID DERIVATION", empty,
+                         "no row was rejected for its id shape — every one "
+                         "carried a turn id and was dropped as residue")
+
+    def test_a_mixed_residue_and_rejected_dump_reports_both_counts(self):
+        # The two drops are DIFFERENT measurements and a message built on one of
+        # them lies about the other: `rejected` alone would say "none carried
+        # the id" while one row did. Both counts and both causes must appear.
+        rows = [_mark("s1", 2, 2, 1),
+                ["session://s1", "event", "user", _frame("user", "claim"),
+                 "2026-11-02T00:00:00+00:00", "s1_note", 2, 1]]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        mixed = str(cm.exception)
+        self.assertIn("MATCHED 2", mixed)
+        self.assertIn("1 DID carry a turn id", mixed)
+        self.assertIn("1 did not carry", mixed)
+        self.assertIn("RESIDUE", mixed)
+        self.assertIn("_is_turn_of", mixed)
+
+    def test_the_append_window_is_not_a_false_refusal(self):
+        # ⛔ THE TRAP `record_read.served_turn_count` DOCUMENTS, MEASURED: an
+        # APPEND at `turn_offset=2` leaves 4 rows `_t0.._t3` against a
+        # `turn_count` of 2 (a WINDOW length, not a running total). A
+        # `len(rows) < turn_count` rule refuses this HEALTHY, COMPLETE session —
+        # so the witness is the id-space COVERAGE, not a count comparison.
+        rows = [_mark("s1", i, 2, 3) for i in range(4)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out)
+            self.assertEqual(len(out.read_text().splitlines()), 4,
+                             "a complete append writes every turn")
+
+    def test_an_interior_hole_from_a_refused_record_write_is_caught(self):
+        # The append shape as a PARTIAL: `_t2`/`_t3` in the graph, `_t0`/`_t1`
+        # still in the record. The count (a window length) cannot see it and the
+        # tail is intact — only the coverage check can.
+        rows = [_mark("s1", i, 2, 3) for i in (2, 3)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        self.assertIn("no turn for index 0, 1", str(cm.exception))
+
+    def test_allow_partial_writes_the_transcript_and_says_so(self):
+        rows = [_mark("s1", i, 4, 3) for i in (0, 1)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            printed = io.StringIO()
+            with mock.patch("extract_turns.subprocess.run") as run, \
+                    contextlib.redirect_stdout(printed):
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out, allow_partial=True)
+            self.assertEqual(len(out.read_text().splitlines()), 2,
+                             "the flag is the declared escape hatch")
+        self.assertIn("WARNING", printed.getvalue(),
+                      "an accepted partial must never be silent")
+        self.assertIn("PARTIAL", printed.getvalue())
+
+    def test_residue_above_the_mark_is_dropped_not_written(self):
+        # A shorter re-capture (`_t0.._t1`) whose surplus sweep did not land: the
+        # rows above `turn_max_index` are the session's OLD turns, and the read
+        # door drops them (`record_read.merge_turn_payloads`). Writing them would
+        # publish turns the session no longer owns; SILENTLY writing them is what
+        # #10021 review P3 rejected.
+        rows = [_mark("s1", i, 2, 1) for i in range(4)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            printed = io.StringIO()
+            with mock.patch("extract_turns.subprocess.run") as run, \
+                    contextlib.redirect_stdout(printed):
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out)
+            written = [json.loads(ln) for ln in out.read_text().splitlines() if ln]
+        self.assertEqual([r["content"] for r in written], ["m0", "m1"])
+        self.assertIn("dropped 2 row(s)", printed.getvalue(),
+                      "a deletion the operator cannot see is not a report")
+
+    def test_a_session_with_no_declared_marks_degrades_rather_than_refuses(self):
+        # A pre-#10000 capture carries no `turn_max_index` (the property did not
+        # exist) and an older emitter carries neither column. `None` degrades to
+        # the checks that do not need it — the same rule `record_read._shortfall`
+        # states — so an old graph is not refused for a mark it never had.
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            payload = "\n".join(json.dumps(["session://s1", "event", "user",
+                                            _frame("user", f"m{i}"), None,
+                                            _turn_id("s1", i)])
+                                for i in (3, 0, 1, 2))
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out)
+            self.assertEqual(len(out.read_text().splitlines()), 4)
 
     def test_a_non_turn_point_is_not_spliced_into_the_transcript(self):
         # `is_episodic` + `pointKind='event'` is not enough: only the derived
