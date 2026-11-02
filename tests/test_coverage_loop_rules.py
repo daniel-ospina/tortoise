@@ -561,3 +561,13 @@ def test_a_represented_session_never_evicts_a_duplicate():
     assert "a3" not in [h["id"] for h in order[:5]]
     assert "e1" in [h["id"] for h in order[:5]], (
         "the arriving UNREPRESENTED session E is the one that gets the slot")
+    # n == 1 is the ONLY step that discriminates ``n == 0`` from "any session
+    # below the cap": B holds ONE slot and its SECOND item arrives at a full
+    # window, so it must be DEFERRED — never admitted by evicting A's
+    # duplicate, which would spend another session's slot for zero
+    # representation gain.
+    items2 = [_hit("a1", "A"), _hit("a2", "A"), _hit("b1", "B"),
+             _hit("c1", "C"), _hit("d1", "D"), _hit("b2", "B")]
+    assert [h["id"] for h in session_diverse_order(
+        items2, window=5, per_session_cap=2, floor_term=True)[:5]] == \
+        ["a1", "a2", "b1", "c1", "d1"]
