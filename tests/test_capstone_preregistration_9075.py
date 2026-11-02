@@ -4484,9 +4484,18 @@ def _bundle_with_published_registration(tmp_path, monkeypatch):
 
 
 def _measurement_only(monkeypatch):
-    """Strip the two halves that are not under test, so the ORDERING claim is the only variable."""
+    """Strip the halves that are not under test, so the ORDERING claim is the only variable."""
     monkeypatch.setattr(check, "parse_pins", lambda text: {"e4_denominator": 15})
     monkeypatch.setattr(check, "check_machine_record", lambda directory, pins: [])
+    # …and the #10215 step-set arm, which is the THIRD subject these tests do not measure. It is
+    # scoped by PATH (`check_step_partition_applies` asks whether the bundle IS `DEFAULT_PREREG_DIR`)
+    # and these fixtures monkeypatch `REPO_ROOT` to a throwaway repo whose bundle sits at exactly
+    # that relative path — so the arm applies here while the fixture's stubbed pins carry no `steps`
+    # block, and it refuses with `pins.steps is empty` about a document it never reads. That arm has
+    # its own tests in the `#10215` block below, which read the REAL record and document; stubbing it
+    # here keeps each block's coverage in the block that owns it, instead of making every ordering
+    # test depend on a step declaration the ordering rule does not consume.
+    monkeypatch.setattr(check, "check_step_partition_applies", lambda directory, pins, record: False)
 
 
 def test_a_bundle_with_no_log_does_not_claim_a_measured_ordering(tmp_path, monkeypatch, capsys):
