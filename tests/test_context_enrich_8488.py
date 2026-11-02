@@ -36,6 +36,8 @@ network call.
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 from pathlib import Path
 from typing import ClassVar
@@ -544,6 +546,131 @@ def test_attestation_prefers_embedding_text_when_present():
     q = {"id": "y", "content": "raw", "embedding": [1.0]}
     stamp_journal_embedding(q, creating=True)
     assert q["embedding_text_hash"] == content_hash("raw")
+
+
+def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
+        embedder, enrichment_on, tmp_path, caplog):
+    """#8932 §2 / #4194 — the attestation is CHECKABLE, and a mismatched pair
+    is not accepted silently.
+
+    The ruling obliges the link between the vector and the text it was computed
+    from to be PERSISTED so a reader can verify what the vector describes.
+    `stamp_journal_embedding` mints `embedding_text_hash` over `embeddingText`
+    (asserted above), and `_record_embedding_identity` RE-DERIVES that hash at
+    replay and compares. No test exercised the MISMATCH leg, so both halves of
+    that check could be broken with the suite fully green:
+
+      * **deleted** — a hand-edited record whose vector describes text the node
+        no longer holds would restore silently, which is the quiet #4194 lie
+        the attestation exists to catch. The journal IS a FILE (hand-editable,
+        truncatable, writable by an older build), `stamp_journal_embedding`'s
+        own docstring states that threat model, and this test feeds it exactly
+        that record (`preventable` rather than a hypothetical);
+      * **re-pointed at `content`** — the PRE-#8488 spelling. On an enriched
+        turn `content` ("the release is blocked") is not the text the vector
+        was computed from ("the auth flow is blocked"), so a faithful rebuild
+        would emit a false divergence on every enriched Point.
+
+    Non-vacuity, both halves — the test reds on EITHER mutation:
+      * the FAITHFUL leg asserts NO text-hash warning (re-pointing the check at
+        `content` fires one here);
+      * the TAMPERED leg asserts the warning DOES fire and names the Point
+        (deleting the comparison emits nothing here).
+    """
+    from tortoise.log import EventLog
+
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    s = TortoiseSDK(str(tmp_path / "m.db"), event_log_path=log_path)
+    try:
+        s.capture_session(CONV, session_id="sess-mismatch")
+    finally:
+        s.close()
+
+    def _text_hash_warnings(records):
+        return [r.getMessage() for r in records
+                if r.levelname == "WARNING"
+                and "text-hash does not match" in r.getMessage()]
+
+    # ── leg 1: a FAITHFUL enriched journal must not look like a divergence ──
+    s = TortoiseSDK(str(tmp_path / "m.db"), event_log_path=log_path)
+    try:
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            caplog.clear()
+            s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
+        assert _text_hash_warnings(caplog.records) == [], (
+            "a FAITHFUL enriched rebuild reported a text-hash divergence: the "
+            "record's embeddingText still matches its attested hash, so this "
+            "is a FALSE divergence. The likely cause is the check comparing "
+            "against `content` rather than `embeddingText` (the pre-#8488 "
+            "spelling), which no longer describes the vector on an enriched "
+            f"turn: {_text_hash_warnings(caplog.records)}")
+    finally:
+        s.close()
+
+    # ── tamper the record: the enriched text no longer matches its hash ─────
+    events = [json.loads(line) for line in
+              Path(log_path).read_text().splitlines() if line.strip()]
+    # PREMISE for leg 1 (review P2): the ABSENCE of a divergence is only
+    # discriminating if some record's vector describes text that DIFFERS from
+    # `content` — otherwise a check re-pointed at `content` agrees by accident
+    # and leg 1 cannot tell the two spellings apart. Derived, never assumed: a
+    # later edit to CONV/the rewriter that left every turn an identity rewrite
+    # would silently remove one of the two mutation kills and keep the suite
+    # green, which is the exact false confidence this test exists to prevent.
+    differing_from_content = [
+        p.get("id") for ev in events for p in [ev.get("point") or {}]
+        if p.get("embeddingText") and p.get("embedding") is not None
+        and p.get("embeddingText") != p.get("content")]
+    assert differing_from_content, (
+        "premise: no journalled record has embeddingText != content, so leg 1 "
+        "cannot distinguish an embeddingText check from a `content` check — "
+        "the faithful leg would pass against the pre-#8488 spelling")
+    tampered_ids = []
+    for ev in events:
+        point = ev.get("point") or {}
+        if point.get("embeddingText") and point.get("embedding") is not None:
+            point["embeddingText"] = point["embeddingText"] + " (tampered)"
+            tampered_ids.append(point.get("id"))
+    assert tampered_ids, (
+        "premise: the journal carried no enriched PointAdded record, so this "
+        "test would be vacuous")
+    # DERIVED, not assumed (review P3): the ids whose stored hash no longer
+    # matches the (now tampered) text. Every one of them must be REPORTED —
+    # `_record_embedding_identity`'s contract is that each DISTINCT divergence
+    # is recorded, so a regression that reported only the first would pass an
+    # `any(...)` assertion while silently dropping the rest.
+    mismatched_ids = [
+        str(p.get("id")) for ev in events for p in [ev.get("point") or {}]
+        if p.get("embeddingText") and p.get("embedding") is not None
+        and p.get("embedding_text_hash") != content_hash(p["embeddingText"])]
+    assert mismatched_ids, (
+        "premise: tampering did not produce a hash mismatch, so leg 2 has "
+        "nothing to detect")
+    Path(log_path).write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+
+    # ── leg 2: the tampered pair MUST be detected and named ────────────────
+    s = TortoiseSDK(str(tmp_path / "m.db"), event_log_path=log_path)
+    try:
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            caplog.clear()
+            s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
+        messages = _text_hash_warnings(caplog.records)
+        assert messages, (
+            "a journalled vector whose embeddingText no longer matches its "
+            "attested hash was restored SILENTLY — the #4194 identity is not "
+            "checkable, which is the one property schema A′ exists to keep")
+        unreported = [tid for tid in mismatched_ids
+                      if not any(tid in m for m in messages)]
+        assert not unreported, (
+            "a divergence was reported for only SOME of the tampered Points "
+            f"(missing {unreported} of {mismatched_ids}) — "
+            "`_record_embedding_identity` must report every DISTINCT "
+            f"divergence, not just the first: {messages}")
+    finally:
+        s.close()
 
 
 # ── 8. The ruling's acceptance test #1: turn discrimination survives ───────
