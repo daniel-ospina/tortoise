@@ -28,6 +28,7 @@ claims:
 | `test_an_unmeasurable_run_exits_two` | the documented exit-code contract | a run that could not measure exits 0 or 1, so a caller reads "could not measure" as "a row was NOT MET" |
 | `test_the_instrument_is_selected_by_its_own_subjects` | the pins above actually RUN in CI | a subject diff stops selecting this file — a falsifier that never executes |
 | `test_two_package_inits_keep_distinct_writer_identities` | the writer map's exhaustiveness | two writers in one package collapse into one key, so a label bullet 2 compares vanishes |
+| `test_a_collision_is_classified_whichever_exit_writes_it` | the duplicate guard itself, DRIVEN rather than injected | the collision rule is consulted at only one of the four exits, so a later `unresolved_write`/two-label definition silently overwrites a `gated` one and the collision reads as an ordinary unresolved producer (order-dependent, and no test drove it) |
 | `test_a_duplicate_writer_identity_holds_bullet_two_at_partial` | bullet 2's honesty | a writer whose label could not be resolved stops holding the row, while bullet 1 still reports the same hole |
 | `test_the_tool_parses_under_the_floor` | the `#5128` guard is PROTECTIVE, not documentary | 3.12-only syntax (PEP 701) creeps back in, so the file dies in the tokenizer before its own guard can refuse |
 | `test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default` | bullet 1's `on_by_default` input | a line that *documents* the flag (prose, a workflow step name, a commented list item) is scored as a shipped ON |
@@ -1609,6 +1610,85 @@ def test_a_same_named_point_writer_in_another_module_gets_no_override(
     assert probe._overridden_writers() == {"tortoise.api::_point"}, (
         probe._overridden_writers()
     )
+
+
+def test_a_collision_is_classified_whichever_exit_writes_it(tmp_path, monkeypatch):
+    """Every exit applies the COLLISION rule — the guard must not be order-dependent.
+
+    `_embedding_writers` has four exits per function and only ONE of them
+    consulted the guard, so the result depended on `ast.walk` order: when the
+    FIRST definition of a key was `gated`/`ungated`/`producer` and a later one
+    was an `unresolved_write` or a two-label writer, the later entry silently
+    OVERWROTE the earlier one and `kind` never became `"duplicate"` — bullet
+    1's duplicate note never fired and bullet 2's map carried the wrong
+    producer class for a name that collided (this PR's review, P3).
+
+    ⛔ This test DRIVES the detector. Every other duplicate test in this file
+    `monkeypatch.setattr`s the writers map, so deleting the guard left the
+    whole suite green — the removal direction had no falsifier at all.
+    """
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "embeddings.py").write_text(
+        "def encode_for_row(t, d):\n    return None\n", encoding="utf-8")
+    gated = (
+        "def _upsert_point(ev):\n"
+        "    vec = encode_for_row('x', None)\n"
+        "    return 'MERGE (n:Point {id: 1}) SET n.embedding = $vec'\n"
+    )
+    # No recognised producer call, but the _EMBED_WRITE needle sees the clause,
+    # so this is the exit that used to assign the map DIRECTLY (`unresolved_write`).
+    unresolved = (
+        "def _upsert_point(ev):\n"
+        "    return 'MATCH (n:Point) SET n.embedding = $v'\n"
+    )
+    # Two labels in one writer's Cypher: the OTHER exit that assigned directly.
+    twolabel = (
+        "def _upsert_point(ev):\n"
+        "    vec = encode_for_row('x', None)\n"
+        "    a = 'MERGE (n:Point {id: 1}) SET n.embedding = $vec'\n"
+        "    b = 'MERGE (m:Object {id: 1}) SET m.embedding = $vec'\n"
+        "    return a + b\n"
+    )
+    (tmp_path / "tortoise" / "gated_then_unresolved.py").write_text(
+        "from .embeddings import encode_for_row\n" + gated + unresolved,
+        encoding="utf-8")
+    (tmp_path / "tortoise" / "unresolved_then_gated.py").write_text(
+        "from .embeddings import encode_for_row\n" + unresolved + gated,
+        encoding="utf-8")
+    (tmp_path / "tortoise" / "gated_then_twolabel.py").write_text(
+        "from .embeddings import encode_for_row\n" + gated + twolabel,
+        encoding="utf-8")
+    # Control, in the same tree: two DISTINCT names must both survive, so a
+    # guard that simply marked everything `duplicate` would fail here.
+    (tmp_path / "tortoise" / "distinct.py").write_text(
+        "from .embeddings import encode_for_row\n"
+        "def _upsert_point(ev):\n"
+        "    vec = encode_for_row('x', None)\n"
+        "    return 'MERGE (n:Point {id: 1}) SET n.embedding = $vec'\n"
+        "def _upsert_object(ev):\n"
+        "    vec = encode_for_row('x', None)\n"
+        "    return 'MERGE (o:Object {id: 1}) SET o.embedding = $vec'\n",
+        encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    writers = probe.embedding_writers()
+    collided = [
+        f"tortoise.{module}::_upsert_point"
+        for module in ("gated_then_unresolved", "unresolved_then_gated",
+                       "gated_then_twolabel")
+    ]
+    for key in collided:
+        assert key in writers, sorted(writers)
+        assert writers[key]["kind"] == "duplicate", (
+            f"{key} was not classified as a collision: {writers[key]}")
+        assert writers[key]["label"] == probe.DUPLICATE_LABEL, writers[key]
+        # ...and bullet 2 reads the SAME classification, instead of the
+        # `unresolved producer` sentence the overwritten entry used to carry.
+        assert probe.written_labels(writers)[key] == probe.DUPLICATE_LABEL, (
+            probe.written_labels(writers)[key])
+    assert writers["tortoise.distinct::_upsert_point"]["kind"] == "gated"
+    assert writers["tortoise.distinct::_upsert_object"]["kind"] == "gated"
+    assert not [k for k, d in writers.items()
+                if d["kind"] == "duplicate" and k.startswith("tortoise.distinct")]
 
 
 def test_a_duplicate_writer_identity_holds_bullet_two_at_partial(monkeypatch):

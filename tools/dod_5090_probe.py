@@ -591,10 +591,44 @@ def _module_name(path: Path, root: Path) -> str:
     return ".".join(parts)
 
 
+#: The label a COLLIDED writer carries. One spelling, because `written_labels()`
+#: maps every `duplicate` onto it — the stored `label` is never read for one.
+DUPLICATE_LABEL = "UNKNOWN(duplicate writer name)"
+
+
 @functools.lru_cache(maxsize=8)
 def _embedding_writers(root: Path) -> dict[str, dict]:
     writers: dict[str, dict] = {}
     overridden: set[str] = set()
+
+    def _put(key: str, entry: dict) -> None:
+        """Record a writer, applying the COLLISION rule at every exit.
+
+        ⛔ ONE door for all four exits (`#10519`'s review, P3). Three of them
+        used to assign `writers[key]` DIRECTLY and only the fourth consulted
+        the guard, so when the FIRST definition of a key was `gated`/
+        `ungated`/`producer` and a LATER one was an `unresolved_write` or a
+        two-label writer, the later entry silently OVERWROTE the earlier one
+        and `kind` never became `"duplicate"`: bullet 1's duplicate note never
+        fired (`score_rule_bullet`'s `duplicates` read `[]`) and
+        `score_path_bullet` reported the collision as an ordinary unresolved
+        producer. The verdict therefore depended on `ast.walk` order — the
+        reverse order DID report it.
+        """
+        if key in writers:
+            writers[key] = {
+                "callee": entry["callee"],
+                "at": entry["at"],
+                "kind": "duplicate",
+                "label": DUPLICATE_LABEL,
+            }
+            # The override's label did not survive the collision, so it must
+            # not be REPORTED as one used (`score_path_bullet` prints
+            # `_overridden_writers() & set(written_labels())`).
+            overridden.discard(key)
+            return
+        writers[key] = entry
+
     seam_module = root / "tortoise/embeddings.py"
     for path in sorted((root / "tortoise").rglob("*.py")):
         if path == seam_module:
@@ -643,12 +677,12 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # (review round 5, P2 — measured: 17 functions carry an
                 # embedding-write clause, 9 of them were absent from this map).
                 if kind is None and _EMBED_WRITE.search(source):
-                    writers[f"{module}::{node.name}"] = {
+                    _put(f"{module}::{node.name}", {
                         "callee": "unrecognised",
                         "at": f"{rel}:{node.lineno}",
                         "kind": "unresolved_write",
                         "label": "UNKNOWN(unresolved producer)",
-                    }
+                    })
                 continue
             own = _strings(node)
             pairs = _NODE_LABEL.findall(own)
@@ -659,10 +693,10 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # Two labels in one writer's Cypher: picking one would report a
                 # stored label as covered while the other may be unserved.
                 label = "UNKNOWN(two labels: " + ",".join(sorted(labels)) + ")"
-                writers[f"{module}::{node.name}"] = {
+                _put(f"{module}::{node.name}", {
                     "callee": callee, "at": f"{rel}:{node.lineno}",
                     "kind": kind, "label": label,
-                }
+                })
                 continue
             else:
                 stem = (node.name[len("_upsert_"):]
@@ -685,20 +719,12 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # was `node.name`, so it could).
                 label = WRITER_LABEL_OVERRIDES[key]
                 overridden.add(key)
-            if key in writers:
-                writers[key] = {
-                    "callee": callee,
-                    "at": f"{rel}:{node.lineno}",
-                    "kind": "duplicate",
-                    "label": "UNKNOWN(duplicate writer name)",
-                }
-                continue
-            writers[key] = {
+            _put(key, {
                 "callee": callee,
                 "at": f"{rel}:{node.lineno}",
                 "kind": kind,
                 "label": label,
-            }
+            })
     _OVERRIDDEN_BY_ROOT[root] = frozenset(overridden)
     return writers
 
@@ -1084,7 +1110,7 @@ def written_labels(writers: dict[str, dict] | None = None) -> dict[str, str]:
     return {
         w: (d["label"] if d["kind"] in ("gated", "ungated")
             else ("UNKNOWN(unresolved producer)" if d["kind"] == "unresolved_write"
-                  else "UNKNOWN(duplicate writer name)"))
+                  else DUPLICATE_LABEL))
         for w, d in sorted(writers.items())
         if d["kind"] in ("gated", "ungated", "unresolved_write", "duplicate")
     }
