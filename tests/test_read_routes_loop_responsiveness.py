@@ -2737,7 +2737,6 @@ def test_a_read_lane_refusal_keeps_its_503_on_the_read_routes(client):
     review: 500 ``{"detail": "Search failed"}`` / ``"Topic summary failed"``
     against 503 for ``list_points``, which has no blanket arm).
     """
-    from fastapi import HTTPException
 
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app
@@ -2791,9 +2790,8 @@ def test_the_anchored_point_read_serves_on_the_read_lane_in_prefer_mode(client):
     is about WHERE the submissions run and which fallback they name, not about
     the record's behaviour (which ``tests/test_record_serve.py`` owns).
     """
-    from tortoise import record_serve
-
     import tortoise.hosted_api as ha_mod
+    from tortoise import record_serve
     from tortoise.hosted_api import app
 
     _seed_read_surface()
@@ -2866,9 +2864,8 @@ def test_a_record_served_prefer_read_never_opens_the_projection(client):
     ``_data_sdk_with_projection`` (and ``_data_sdk_offloaded``) before the record
     is asked, so both probes fire.
     """
-    from tortoise import record_serve
-
     import tortoise.hosted_api as ha_mod
+    from tortoise import record_serve
     from tortoise.hosted_api import app
 
     _seed_read_surface()
@@ -2937,9 +2934,8 @@ def test_the_prefer_fallback_opens_the_projection_construction_first(client):
     consulted two stores: the deferred fallback (#10602 review, "the pinned
     occupancy becomes two only on the arm that genuinely consulted two stores").
     """
-    from tortoise import record_serve
-
     import tortoise.hosted_api as ha_mod
+    from tortoise import record_serve
     from tortoise.hosted_api import app
 
     _seed_read_surface()
@@ -3023,10 +3019,9 @@ def test_a_record_bound_miss_is_not_reported_as_graph_capacity(client):
     RED on the pre-fix shape: the seam's default refusal factory answers
     ``graph_unavailable`` here.
     """
-    from tortoise import record_serve
-    from tortoise import monitoring as mon
-
     import tortoise.hosted_api as ha_mod
+    from tortoise import monitoring as mon
+    from tortoise import record_serve
     from tortoise.hosted_api import app
 
     _seed_read_surface()

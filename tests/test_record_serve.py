@@ -854,7 +854,7 @@ def test_a_prefer_fallback_STILL_builds_the_handle(monkeypatch):
     rs.reset_fallback_counts()
     monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
     monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[])))
-    body, err, built = _call_endpoint(monkeypatch, cache="empty")
+    _body, err, built = _call_endpoint(monkeypatch, cache="empty")
     assert err is not None and err.status_code == 404
     assert built, "the fallback arm never constructed its cache handle"
     assert err.detail["fallbackReason"] == rs.FALLBACK_RECORD_MISS
