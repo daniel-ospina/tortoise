@@ -1418,6 +1418,43 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     return report
 
 
+def _rail_identity_annotation(document: str, failure: str) -> str:
+    """A one-line ``::error::`` naming ONE finding, for the merge rail (#10536).
+
+    THE DEFECT THIS CLOSES. The failure block below is HUMAN prose — ``FAIL — N
+    problem(s):`` — and the merge rail's exemption compares failures by IDENTITY, not by
+    check name. A step that prints only prose yields ``ids=0``, so the rail cannot compare
+    it against the base and refuses to merge at all.
+
+    MEASURED (not inferred) on run `41353799666`, the `changes` job on `main`:
+
+        $ python3 scripts/ci_exemption.py ids --log <capture>
+        ci-exemption: ids=0 unattributable=0 guard-steps=0 non-nodeid=0 ...
+
+    — even though that capture carries the aggregate's own `##[error]leg 'changes'
+    reported 'failure' …` lines, because `guard_step_failures` requires the run's ROOT
+    failing step to yield an identity and this step printed none. The rail therefore
+    refused all 14 ready PRs (`#10536`).
+
+    ⛔ THE VERDICT IS UNCHANGED, and that is the whole point. This adds no exemption,
+    waives nothing, and leaves the same-commit refusal exactly as it was (the pinned
+    `test_ordering_is_not_satisfied_by_the_same_second` still holds): the tool still
+    exits 1 on the same input, for the same reason. It only makes an existing refusal
+    COMPARABLE, so the rail's designed "this is already red on `main`" exemption can see
+    it. Whether the ordering RULE itself should change is `#10529`'s owner decision;
+    making a refusal legible is not.
+
+    Whitespace is collapsed because an annotation is one line and the rail's parser reads
+    one line. Digits are deliberately left in place: the rail masks integer runs itself
+    (`_GUARD_INT_RE`), so the same finding on the same tree reduces to the same identity
+    on both surfaces.
+    """
+    payload = " ".join(f"{document}: {failure}".split())
+    # GitHub workflow-command escaping: `%` opens an escape sequence.
+    payload = payload.replace("%", "%25")
+    return f"::error::capstone preregistration {payload}"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Verify the extractor-v4 capstone pre-registration (#9075)."
@@ -1498,6 +1535,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL — {len(report['failures'])} problem(s):")
             for f in report["failures"]:
                 print(f"  - {f}")
+                # The human block above is not an identity; this is (#10536). One
+                # annotation per finding, so a NEW finding cannot inherit a red main's.
+                print(_rail_identity_annotation(report["document"], f), file=sys.stderr)
         exempt_note = ""
         if report.get("ordering_exempt"):
             exempt_note = (f" (exempt by CONTENT, measured nothing: "

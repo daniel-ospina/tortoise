@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -746,6 +747,91 @@ def test_cli_exits_one_on_a_broken_document(tmp_path, capsys):
     assert target.exists()
     assert check.main(["--dir", str(tmp_path), "--no-git", "--no-corpus"]) == 1
     assert "FAIL —" in capsys.readouterr().out
+
+
+# ── #10536: the refusal must be COMPARABLE, not just honest ──────────────────
+#
+# The merge rail's exemption compares failures by IDENTITY. `FAIL — N problem(s):` is
+# prose, so a step printing only it yields no identity, and the rail then refused to
+# merge ANY PR while this bundle was red on `main` (measured: `ids=0` on run
+# 41353799666, 14 PRs BLOCKED). These pin the annotation that closes that gap — and
+# pin that it is an attribution only, never a verdict change.
+
+
+def test_every_finding_is_also_emitted_as_a_rail_parseable_annotation(tmp_path, capsys):
+    """One `::error::` per finding, carrying the document and the finding."""
+    target = _doc(tmp_path, _rows(
+        "| E1 | shape Objects written |  | `<= 0.50 × before` |",
+        "| E2 | value units | the **14** value units | `>= 13 of 14` |",
+        "| E3 | anchored nodes | all derived nodes (floor ≥ 30) | `= 1.000` |",
+        "| E4 | operator edges | the **15** edges | `= 15 of 15` |",
+        "| E5 | marker claims | **29** sentences | `>= 0.90` ratio |",
+    ))
+    assert target.exists()
+    assert check.main(["--dir", str(tmp_path), "--no-git", "--no-corpus"]) == 1
+    captured = capsys.readouterr()
+    annotations = [ln for ln in captured.err.splitlines() if ln.startswith("::error::")]
+    findings = [ln for ln in captured.out.splitlines() if ln.startswith("  - ")]
+    assert findings, "the fixture must produce at least one finding"
+    assert len(annotations) == len(findings), (annotations, findings)
+    for annotation, finding in zip(annotations, findings):
+        assert check.PREREG_NAME in annotation
+        assert finding.strip().removeprefix("- ").split(" ")[0] in annotation
+
+
+def test_the_annotation_never_changes_the_verdict(tmp_path, capsys):
+    """Attribution only: same exit code, same findings, same refusal.
+
+    A gate that started passing because it became legible would be a fail-open of the
+    exact shape this tool exists to prevent (#10529's rule is untouched).
+    """
+    target = _doc(tmp_path, _rows(
+        "| E1 | shape Objects written |  | `<= 0.50 × before` |",
+        "| E2 | value units | the **14** value units | `>= 13 of 14` |",
+        "| E3 | anchored nodes | all derived nodes (floor ≥ 30) | `= 1.000` |",
+        "| E4 | operator edges | the **15** edges | `= 15 of 15` |",
+        "| E5 | marker claims | **29** sentences | `>= 0.90` ratio |",
+    ))
+    assert target.exists()
+    assert check.main(["--dir", str(tmp_path), "--no-git", "--no-corpus"]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL —" in out
+    # The human verdict line is unchanged — the annotation is additive.
+    assert "OK" not in out
+
+
+def test_the_annotation_is_one_line_and_raises_no_workflow_escape(tmp_path):
+    """GitHub takes only the first line, and `%` opens an escape sequence."""
+    line = check._rail_identity_annotation(
+        "docs/evidence/x/PRE-REGISTRATION.md",
+        "a.log: added at 1 which is not strictly after 2 — 50% of it\nsecond line\ttabbed",
+    )
+    assert line.startswith("::error::")
+    assert "\n" not in line and "\t" not in line
+    # Every `%` must open an escape — a bare one is invalid in a workflow command.
+    assert "%25" in line
+    assert re.search(r"%(?![0-9A-Fa-f]{2})", line) is None, line
+    assert line.count("::") == 2  # exactly the workflow-command delimiters
+
+
+def test_the_annotation_identity_discriminates_distinct_findings():
+    """A NEW finding must not inherit an existing red's identity.
+
+    The rail exempts a PR failure only when the SAME identity is red on `main`. If the
+    identity were coarse enough to be shared by unrelated findings, an exemption bought
+    by one defect would silently cover the next.
+    """
+    doc = "docs/evidence/5087-hypothesis/PRE-REGISTRATION.md"
+    first = check._rail_identity_annotation(doc, "a.log: added at 1 which is not strictly after 2")
+    same = check._rail_identity_annotation(doc, "a.log: added at 1 which is not strictly after 2")
+    other_log = check._rail_identity_annotation(doc, "b.log: tracked but with no add-commit")
+    other_doc = check._rail_identity_annotation(
+        "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
+        "a.log: added at 1 which is not strictly after 2",
+    )
+    assert first == same
+    assert first != other_log
+    assert first != other_doc
 
 
 @requires_history
