@@ -9243,7 +9243,36 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
         unavailable=_graph_unavailable)
 
 
-async def _read_offload(fn, *, op: str):
+def _record_unavailable() -> HTTPException:
+    """#10602 review P2: the fail-closed 503 for an armed read's RECORD phase.
+
+    ``get_point`` submits ``record_serve.serve_point`` — in ``record`` mode that
+    callable contains no graph work at all, and in ``prefer`` mode its record
+    phase contains none either (the cache is deferred to
+    ``CacheAnswerRequired``, so the cold open keeps its own construction lane).
+    Reporting a *record* bound miss with ``graph_unavailable`` collapses the two
+    meanings this route's own arms keep apart: "the record could not answer"
+    (503, absence NOT established — the §17.2 rule mirrored onto the record) and
+    "the graph pool had no worker" (503 ``graph_unavailable``). A client that
+    can tell them apart retries the right thing, and an operator is not sent to
+    look at a store the read never touched.
+
+    Same 503 status as its sibling: the record round trip is retryable in both
+    directions. Only the BODY differs, and it carries the route's own
+    "absence is NOT established" wording so the two refusals cannot be confused
+    on the wire.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "record_unavailable",
+            "message": ("The record service is temporarily unavailable — try "
+                        "again in a moment; absence is NOT established."),
+        },
+    )
+
+
+async def _read_offload(fn, *, op: str, unavailable=None):
     """#10602: run ONE read-path graph ROUND TRIP on the dedicated read lane.
 
     The read handlers used to submit their blocking query with the house
@@ -9293,11 +9322,18 @@ async def _read_offload(fn, *, op: str):
     (its 500 arm, its ``status: degraded`` arm) is preserved. A lane refusal is a
     503 ``graph_unavailable`` — retryable, and NOT the empty-shape refusal #3892
     forbids.
+
+    ``unavailable`` overrides that refusal BODY (#10602 review P2), for the one
+    caller whose callable is not graph work: ``get_point``'s ARMED record phase,
+    which is a record round trip and answers ``record_unavailable`` instead. The
+    read lane still owns the bound and the fail-closed shape either way — only
+    the name of the dependency that was refused changes.
     """
     ctx = contextvars.copy_context()
     return await _cp_offload(
         functools.partial(ctx.run, fn), op=op, pool="read",
-        timeout=read_offload_timeout_s(), unavailable=_graph_unavailable)
+        timeout=read_offload_timeout_s(),
+        unavailable=_graph_unavailable if unavailable is None else unavailable)
 
 
 async def _capture_session_probe_off_loop(org: dict, session_id: str):
@@ -10437,42 +10473,34 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
     # 503 arm below exists to forbid — and on an embedded deployment the SDK's
     # construction itself probes (and may start) the store.
     #
-    # ⚠️ The other two modes construct it EXACTLY as before, through the
-    # bounded graph-lane seam (#3498) — which supplies the graph pool slot, the
-    # wait bound and the fail-closed 503. An earlier cut of this change built the
-    # handle from inside a worker thread with a bare sync `_data_sdk`, which made
-    # `record` lazy but silently dropped all three from the DEFAULT path; the
-    # laziness belongs to `record` alone.
+    # ⚠️ `prefer` constructs NO handle up front either (#10602 review, P2). Its
+    # cache is a FALLBACK, and the record answers most reads: an eager open would
+    # make every record-served read pay a graph-pool slot for a cold open it
+    # never uses, and on a restored graph that open is the phase budgeted by
+    # `probe_setup_timeout()` (20 s, up to 300 s) — in front of the record
+    # consult, so a read the record answers in milliseconds could cross
+    # `mcp_auth._TRANSPORT_WAIT_BOUND_S` and come back as the 504 -32009 "the
+    # work may still complete" body this change exists to replace. So the handle
+    # is built on the CONSTRUCTION lane (#3498) only once the record has not
+    # answered — a fallback read pays it, a record-served read pays nothing.
+    #
+    # `off` constructs it eagerly, as before: there the cache IS the only answer.
+    # Every construction goes through `_data_sdk_offloaded(...,
+    # attach_projection=True)`, which supplies the graph pool slot, the wait
+    # bound, and — for the cold attach — the construction lane whose bound
+    # already covers it, so the read lane never measures an index build
+    # (cycle-2 review, P1).
     mode = record_serve.serve_mode()
     sdk = None
-    # ⚠️ A `prefer` read must be able to answer from the RECORD even when the
-    # CACHE cannot be opened: the lenient mode exists to survive an unavailable
-    # store, and an eager 403 GRAPH_NOT_FOUND here would make it strictly LESS
-    # able to answer than `record` — every prefer read would pay a graph-pool
-    # slot and, with the graph stopped, would never consult the record at all.
-    # So a `prefer` construction failure is CAPTURED and re-raised only when the
-    # cache is actually needed (the record missed or was unavailable). `off`
-    # keeps propagating it, exactly as before.
-    cache_open_error: Exception | None = None
-    if mode == record_serve.MODE_PREFER:
-        try:
-            sdk = await _data_sdk_offloaded(org, attach_projection=True)
-        except Exception as e:  # the seam's 403/503, or the driver's own
-            cache_open_error = e
-    elif mode == record_serve.MODE_OFF:
+    if mode == record_serve.MODE_OFF:
         sdk = await _data_sdk_offloaded(org, attach_projection=True)
 
     def _cache_props() -> dict | None:
         if sdk is None:
-            # The handle could not be built (see `cache_open_error`): this is
-            # only reachable when the CACHE is genuinely needed, so the caller
-            # gets the ORIGINAL error — the 403/503 the seam raised — rather
-            # than a plausible empty answer or a rewritten status.
-            # ⚠️ Never `raise captured or RuntimeError(...)`: truthiness decides
-            # that, and an exception class defining `__bool__`/`__len__` would be
-            # silently replaced by an uncaused 500.
-            if cache_open_error is not None:
-                raise cache_open_error
+            # Unreachable by construction: `off` builds eagerly above, and both
+            # armed arms build (below) before they read. It is a LOUD programming
+            # error rather than a plausible empty answer — the failure mode §17.2
+            # forbids is an impairment reported as absence.
             raise RuntimeError(
                 "the cache handle is unavailable and the cache is required")
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
@@ -10517,37 +10545,59 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             # on outages, fire permanently on a condition the record never
             # caused.
             # ⚠️ Count AFTER the cache answers — the same invariant as
-            # `record_serve._fell_back`. A cache failure raises out of here, so a
-            # request that was never answered contributes no increment (this arm
-            # is the most-travelled counting path in `prefer` mode: it is taken
-            # for every request whose org has no nameable default row).
+            # `record_serve.answered_by_cache`. A cache failure raises out of
+            # here, so a request that was never answered contributes no
+            # increment (this arm is the most-travelled counting path in
+            # `prefer` mode: it is taken for every request whose org has no
+            # nameable default row). The handle is built HERE, lazily, because
+            # this is the first point at which the cache is genuinely needed.
             reason = record_serve.FALLBACK_RECORD_TENANT_UNRESOLVED
+            sdk = await _data_sdk_offloaded(org, attach_projection=True)
             props_from_cache = await _read_offload(_cache_props,
                                                   op="get_point.cache")
-            record_serve.note_fallback(reason)
-            served = record_serve.ServedAnswer(
+            served = record_serve.answered_by_cache(
                 read=record_serve.READ_POINT_BY_ID,
-                coordinate=f"Point:{point_id}", served_from="cache",
-                props=props_from_cache,
-                fallback_reason=reason)
+                coordinate=f"Point:{point_id}", props=props_from_cache,
+                reason=reason)
         else:
+            # #10602 review P2: the record's OWN round trip used to queue on the
+            # shared default executor, so the anchored read degraded in the same
+            # 32 s step as everything else. It rides the read lane now — but the
+            # cache FALLBACK is DEFERRED, because its cold open is budgeted on
+            # the construction lane (`probe_setup_timeout()` + margin), not on
+            # this lane's 8 s query bound. `cache_answer=None` is the deferred
+            # shape: `serve_point` still decides and NAMES the fallback reason,
+            # and raises `CacheAnswerRequired` for it (#10602 review, P2).
             try:
-                # #10602 review P2: this arm carries the SAME graph round trip
-                # (``cache_answer=_cache_props`` is invoked by the record
-                # reader), so in ``prefer``/``record`` mode the single-id read
-                # would otherwise still queue on the shared default executor —
-                # the measured #10602 shape, reachable in the two modes this
-                # route's own docstring calls the anchored read. Same callable,
-                # same keyword arguments; only WHERE it runs changes.
                 served = await _read_offload(
                     lambda: record_serve.serve_point(
                         tenant=tenant, point_id=point_id,
-                        cache_answer=_cache_props, mode=mode),
-                    op="get_point.serve")
+                        cache_answer=(None if mode == record_serve.MODE_PREFER
+                                      else _cache_props),
+                        mode=mode),
+                    op="get_point.serve",
+                    # The callable is the RECORD's round trip, not graph work:
+                    # a bound miss here must not be reported as graph capacity.
+                    unavailable=_record_unavailable)
+            except record_serve.CacheAnswerRequired as needed:
+                # `prefer` only: the record missed or could not be asked. The
+                # reason is the SEAM's; the read is the ROUTE's, on the lanes it
+                # belongs to — construction (cold open + attach) then read (the
+                # hot query), so the 8 s read bound never measures an index
+                # build and a record-served read never pays the open at all.
+                sdk = await _data_sdk_offloaded(org, attach_projection=True)
+                props_from_cache = await _read_offload(_cache_props,
+                                                      op="get_point.cache")
+                served = record_serve.answered_by_cache(
+                    read=record_serve.READ_POINT_BY_ID,
+                    coordinate=f"Point:{point_id}", props=props_from_cache,
+                    reason=needed.reason)
             except record_serve.RecordUnavailable as e:
-                # 'record' mode has no cache branch. Answering 404 here would
-                # turn an IMPAIRED read into a finding of absence — the exact
-                # defect §17.2 exists to forbid, mirrored onto the record.
+                # 'record' mode has no cache branch (in `prefer` the seam
+                # raises `CacheAnswerRequired` instead of this). Answering 404
+                # here would turn an IMPAIRED read into a finding of absence —
+                # the exact defect §17.2 exists to forbid, mirrored onto the
+                # record.
                 raise HTTPException(
                     status_code=503,
                     # `str(e)`, not `type(e).__name__`: `RecordUnavailable`

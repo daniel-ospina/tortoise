@@ -2773,16 +2773,22 @@ def test_the_anchored_point_read_serves_on_the_read_lane_in_prefer_mode(client):
     """#10602 review cycle 2, finding 3: the ``prefer``/``record`` arm is pinned.
 
     ``get_point`` has TWO graph round trips: the cache-props read and — when a
-    record tenant resolves — ``record_serve.serve_point(..., cache_answer=
-    _cache_props)``, which invokes that SAME cache read inside the worker. Only
-    the first was covered by the route-level cases (they run in the default
+    record tenant resolves — the RECORD round trip, ``record_serve.serve_point``.
+    Only the first was covered by the route-level cases (they run in the default
     ``off`` mode), so a refactor reverting the second back to
     ``asyncio.to_thread`` would re-park the anchored read on the shared executor
-    with the whole suite green. This drives the ``prefer`` arm and asserts the
-    submission went to the read lane.
+    with the whole suite green. This drives the ``prefer`` arm and asserts BOTH
+    real submissions reached the read lane.
 
-    ``serve_point`` is stubbed to raise ``RecordUnavailable`` — the route's own
-    503 arm — because this test is about WHERE the submission runs, not about
+    The two lanes the ``prefer`` arm uses, in order (#10602 review, P2):
+    ``get_point.serve`` is the RECORD consult (deferred cache), then — because
+    this stub makes the record unavailable — ``get_point.cache`` is the hot
+    cache query. The cold projection open between them belongs to the
+    CONSTRUCTION lane and is pinned by
+    ``test_the_prefer_fallback_opens_the_projection_construction_first``.
+
+    ``serve_point`` is stubbed to raise ``RecordUnavailable`` because this test
+    is about WHERE the submissions run and which fallback they name, not about
     the record's behaviour (which ``tests/test_record_serve.py`` owns).
     """
     from tortoise import record_serve
@@ -2791,16 +2797,21 @@ def test_the_anchored_point_read_serves_on_the_read_lane_in_prefer_mode(client):
     from tortoise.hosted_api import app
 
     _seed_read_surface()
+    record_serve.reset_fallback_counts()
 
     ops: list[str] = []
     real = ha_mod._read_offload
 
-    async def _recorder(fn, *, op):
+    async def _recorder(fn, *, op, unavailable=None):
         ops.append(op)
-        return await real(fn, op=op)
+        return await real(fn, op=op, unavailable=unavailable)
 
     def _serve_point(**_kwargs):
-        raise record_serve.RecordUnavailable("probe: record arm reached")
+        # The real seam's DEFERRED shape: it names the reason and hands the
+        # cache read back to the route, which owns the lanes (see
+        # `tests/test_record_serve.py` for the seam's own arms).
+        raise record_serve.CacheAnswerRequired(
+            record_serve.FALLBACK_RECORD_UNAVAILABLE)
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(ha_mod, "_read_offload", _recorder)
@@ -2817,14 +2828,279 @@ def test_the_anchored_point_read_serves_on_the_read_lane_in_prefer_mode(client):
                 return await ac.get(f"/v1/points/{_SEEDED_POINT}")
 
         response = asyncio.run(_run())
+        counts = record_serve.fallback_counts()
     finally:
         monkeypatch.undo()
 
-    assert response.status_code == 503, response.text[:300]
+    assert response.status_code == 200, response.text[:300]
     assert "get_point.serve" in ops, (
         f"the prefer-mode record arm never reached the read lane (ops seen: "
         f"{ops!r}) — it is back on the shared default executor, which is the "
         f"measured #10602 shape for the anchored point read")
+    assert ops.index("get_point.serve") < len(ops), ops
+    assert ops[-1] == "get_point.cache", (
+        f"a record-unavailable fallback did not read the cache on the read lane "
+        f"(ops seen: {ops!r}) — the fallback either stopped running on the read "
+        f"lane or never happened at all")
+    body = response.json()
+    assert body["servedFrom"] == "cache"
+    assert body["fallbackReason"] == record_serve.FALLBACK_RECORD_UNAVAILABLE
+    assert counts == {record_serve.FALLBACK_RECORD_UNAVAILABLE: 1}, (
+        f"the deferred fallback was not counted with its named reason ({counts!r}) "
+        f"— `answered_by_cache` is the one place that ordering lives")
+
+
+def test_a_record_served_prefer_read_never_opens_the_projection(client):
+    """#10602 review, ISSUE 1 (P2): ``prefer``'s cache open is LAZY.
+
+    ``prefer`` first asks the RECORD, and the record answers most reads. Before
+    this fix the route constructed its handle with ``attach_projection=True``
+    *before* the record was consulted, so every record-served read paid a graph
+    pool slot for a cold open (connect + version probe + ``_ensure_indexes()``,
+    budgeted by ``probe_setup_timeout()``: 20 s, up to 300 s) it never used —
+    and on a restored/DR graph that open could push an answerable read past the
+    10 s transport bound into the 504 -32009 "the work may still complete" body
+    this change exists to replace.
+
+    RED on the pre-fix shape: the eager construction reaches
+    ``_data_sdk_with_projection`` (and ``_data_sdk_offloaded``) before the record
+    is asked, so both probes fire.
+    """
+    from tortoise import record_serve
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+
+    touched: list[str] = []
+
+    def _attach(_org):
+        touched.append("attach")
+        raise AssertionError(
+            "a record-served prefer read opened the cache's projection (#10602 "
+            "review ISSUE 1) — the open must be lazy")
+
+    async def _build(_org, **_kwargs):
+        touched.append("build")
+        raise AssertionError(
+            "a record-served prefer read constructed a cache handle (#10602 "
+            "review ISSUE 1) — the handle must be built only if the record "
+            "does not answer")
+
+    def _serve_point(**kwargs):
+        # The record answers: no cache is needed at all.
+        return record_serve.ServedAnswer(
+            read=record_serve.READ_POINT_BY_ID,
+            coordinate=f"Point:{_SEEDED_POINT}", served_from="record",
+            props={"id": _SEEDED_POINT, "content": "from-record",
+                   "pointKind": "statement", "status": "live"})
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(ha_mod, "_data_sdk_with_projection", _attach)
+    monkeypatch.setattr(ha_mod, "_data_sdk_offloaded", _build)
+    monkeypatch.setattr(record_serve, "serve_mode",
+                        lambda: record_serve.MODE_PREFER)
+    monkeypatch.setattr(ha_mod, "_resolve_record_tenant",
+                        lambda _org: ("tenant-probe", "graph-probe"))
+    monkeypatch.setattr(record_serve, "serve_point", _serve_point)
+    try:
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.get(f"/v1/points/{_SEEDED_POINT}")
+
+        response = asyncio.run(_run())
+    finally:
+        monkeypatch.undo()
+
+    assert touched == [], (
+        f"a record-served prefer read reached the cache ({touched!r})")
+    assert response.status_code == 200, response.text[:300]
+    assert response.json()["servedFrom"] == "record"
+    assert response.json()["content"] == "from-record"
+
+
+def test_the_prefer_fallback_opens_the_projection_construction_first(client):
+    """The two bounds stay honest: record on the read lane, cold open on graph.
+
+    A ``prefer`` fallback does two things with different legitimate costs: the
+    RECORD round trip (bounded by the read lane's 8 s) and the cache's COLD OPEN
+    plus hot query. The open is budgeted by ``probe_setup_timeout()`` (20 s, up
+    to 300 s) on the CONSTRUCTION lane; the query alone stays on the read lane.
+    This pins the ordering — attach, then the cache read — so a fix that moved
+    the open back inside the read submission (re-breaking cycle-2 finding 6) or
+    one that skipped the open (leaving the cache unreadable) is red.
+
+    Exactly ONE ``graph``-pool submission is made, on the arm that genuinely
+    consulted two stores: the deferred fallback (#10602 review, "the pinned
+    occupancy becomes two only on the arm that genuinely consulted two stores").
+    """
+    from tortoise import record_serve
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+    record_serve.reset_fallback_counts()
+
+    events: list[str] = []
+    real_attach = ha_mod._data_sdk_with_projection
+    real_read = ha_mod._read_offload
+    real_call = ha_mod.run_control_plane_call
+    pools: list[str] = []
+
+    def _attach(org):
+        events.append("attach")
+        return real_attach(org)
+
+    async def _read(fn, *, op, unavailable=None):
+        events.append(f"read:{op}")
+        return await real_read(fn, op=op, unavailable=unavailable)
+
+    async def _record_call(fn, *, op, timeout=None, pool="auth",
+                           cancel_on_timeout=True):
+        pools.append(pool)
+        return await real_call(fn, op=op, pool=pool, timeout=timeout,
+                               cancel_on_timeout=cancel_on_timeout)
+
+    def _serve_point(**_kwargs):
+        # The real seam's DEFERRED shape: it names the reason and hands the
+        # cache read back to the route, which owns the lanes (see
+        # `tests/test_record_serve.py` for the seam's own arms).
+        raise record_serve.CacheAnswerRequired(
+            record_serve.FALLBACK_RECORD_UNAVAILABLE)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(ha_mod, "_data_sdk_with_projection", _attach)
+    monkeypatch.setattr(ha_mod, "_read_offload", _read)
+    monkeypatch.setattr(ha_mod, "run_control_plane_call", _record_call)
+    monkeypatch.setattr(record_serve, "serve_mode",
+                        lambda: record_serve.MODE_PREFER)
+    monkeypatch.setattr(ha_mod, "_resolve_record_tenant",
+                        lambda _org: ("tenant-probe", "graph-probe"))
+    monkeypatch.setattr(record_serve, "serve_point", _serve_point)
+    try:
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.get(f"/v1/points/{_SEEDED_POINT}")
+
+        response = asyncio.run(_run())
+    finally:
+        monkeypatch.undo()
+
+    assert response.status_code == 200, response.text[:300]
+    assert "attach" in events, (
+        f"the fallback never attached a projection (events: {events!r}) — the "
+        f"cache read would run against an unopened projection")
+    cache_read = next((i for i, e in enumerate(events)
+                       if e == "read:get_point.cache"), None)
+    assert cache_read is not None, (
+        f"the fallback never read the cache on the read lane (events: "
+        f"{events!r})")
+    assert events.index("attach") < cache_read, (
+        f"the projection open landed INSIDE/after the cache read (events: "
+        f"{events!r}) — the 8 s read bound is measuring the cold open again "
+        f"(#10602 cycle-2 P1)")
+    assert [p for p in pools if p == "graph"] == ["graph"], (
+        f"the fallback made {pools.count('graph')} `graph`-pool submission(s) "
+        f"(all pools: {pools!r}) — the pinned occupancy is ONE construction per "
+        f"read request")
+
+
+def test_a_record_bound_miss_is_not_reported_as_graph_capacity(client):
+    """#10602 review P2: an armed read's REFUSAL names the store that refused it.
+
+    In ``record`` mode the read-lane callable is a RECORD round trip — no graph
+    is opened at all. Mapping its bound miss to ``graph_unavailable`` collapses
+    the two meanings ``get_point``'s own arms keep apart ("the record could not
+    answer" vs "the graph pool had no worker") and sends an operator to look at
+    a store the read never touched.
+
+    RED on the pre-fix shape: the seam's default refusal factory answers
+    ``graph_unavailable`` here.
+    """
+    from tortoise import record_serve
+    from tortoise import monitoring as mon
+
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+
+    async def _refuse(*_a, **_kw):
+        raise mon.ControlPlaneOffloadError("probe: read lane bound miss")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(ha_mod, "run_control_plane_call", _refuse)
+    monkeypatch.setattr(record_serve, "serve_mode",
+                        lambda: record_serve.MODE_RECORD)
+    monkeypatch.setattr(ha_mod, "_resolve_record_tenant",
+                        lambda _org: ("tenant-probe", "graph-probe"))
+    try:
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.get(f"/v1/points/{_SEEDED_POINT}")
+
+        response = asyncio.run(_run())
+    finally:
+        monkeypatch.undo()
+
+    assert response.status_code == 503, response.text[:300]
+    assert response.json()["detail"]["error_code"] == "record_unavailable", (
+        f"a record bound miss was reported as "
+        f"{response.json()['detail'].get('error_code')!r} ({response.text[:200]}) "
+        f"— the refusal must name the store that refused, and in `record` mode "
+        f"no graph was opened (#10602 review P2)")
+
+
+def test_the_anchored_point_read_serves_on_the_read_lane_in_off_mode(client):
+    """OFF is unchanged: the cache is the only answer, built EAGERLY.
+
+    The lazy ``prefer`` construction must not leak into the default path: in
+    ``off`` mode the handle is constructed with its projection attached before
+    any query, so the read lane still measures only the hot round trip.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+
+    events: list[str] = []
+    real_attach = ha_mod._data_sdk_with_projection
+    real_read = ha_mod._read_offload
+
+    def _attach(org):
+        events.append("attach")
+        return real_attach(org)
+
+    async def _read(fn, *, op, unavailable=None):
+        events.append(f"read:{op}")
+        return await real_read(fn, op=op, unavailable=unavailable)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.delenv("TORTOISE_RECORD_SERVE", raising=False)
+    monkeypatch.setattr(ha_mod, "_data_sdk_with_projection", _attach)
+    monkeypatch.setattr(ha_mod, "_read_offload", _read)
+    try:
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.get(f"/v1/points/{_SEEDED_POINT}")
+
+        response = asyncio.run(_run())
+    finally:
+        monkeypatch.undo()
+
+    assert response.status_code == 200, response.text[:300]
+    assert events[:2] == ["attach", "read:get_point.cache"], (
+        f"OFF mode no longer attaches before its query (events: {events!r})")
 
 
 @pytest.mark.parametrize("label,handler,request_kwargs", _PROJECTION_READ_CASES)
