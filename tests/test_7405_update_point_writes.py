@@ -1744,6 +1744,200 @@ def test_a_journal_truncated_and_regrown_in_place_drops_the_stale_map(
             sdk.close()
 
 
+def test_a_map_past_its_bound_latches_the_needle_pass_instead_of_refolding(
+        tmp_path, monkeypatch):
+    """#10543 round 10, finding 1: the bound was checked AFTER the fold it bounds.
+
+    ``_JOURNAL_PRESENCE_MAP_MAX`` is documented as the point past which "the map is
+    DROPPED and the call takes the needle-filtered pass instead … a bounded-memory
+    degradation". Neither half held:
+
+    * the fold built the WHOLE over-bound dict and only then looked at its length,
+      so the pass peaked at one entry per distinct journal id — the memory the
+      constant exists to bound, unbound;
+    * every memo that survives storage has ``len(known) <= MAX`` by construction,
+      so ``len(known) > MAX`` on the reuse path was UNREACHABLE. The next absent
+      write saw no memo, re-folded from byte 0, crossed again and released again
+      — for ever. That is the O(journal)-per-absent-write cost round 8 removed,
+      restored on exactly the large journal the constant is for.
+
+    Both are pinned here, because a test that only counted reads would pass on a
+    fix that latched the degradation but still built the dict once, and a test
+    that only measured the peak would pass on one that kept re-folding cheaply.
+    """
+    from tortoise import sdk as sdk_mod
+    from tortoise.log import EventLog
+
+    monkeypatch.setattr(sdk_mod, "_JOURNAL_PRESENCE_MAP_MAX", 3)
+    sdk, _journal = _sdk_journaled(tmp_path, "bound")
+    try:
+        log = sdk._get_event_log()
+        for i in range(12):
+            log.append({"type": "PointAdded", "point": {"id": f"bounded-{i:04d}"}})
+
+        scans: list[tuple[bytes | None, int]] = []
+        real_scan = EventLog.mention_lines
+
+        def scan_spy(self, needle=None, start=0):
+            scans.append((needle, start))
+            return real_scan(self, needle, start)
+
+        widths: list[int] = []
+        real_state = sdk_mod._journal_presence_state
+
+        def state_spy(log_, state, start=0, needle=None, **kwargs):
+            try:
+                return real_state(log_, state, start, needle, **kwargs)
+            finally:
+                # runs on the over-bound raise too — that is the peak
+                widths.append(len(state))
+
+        monkeypatch.setattr(EventLog, "mention_lines", scan_spy)
+        monkeypatch.setattr(sdk_mod, "_journal_presence_state", state_spy)
+
+        # ── the crossing pass: 12 ids against a bound of 3 ──
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert max(widths) <= 4, (
+            "the fold must STOP at the bound (limit + 1) rather than build a dict "
+            f"proportional to the journal's distinct-id count: widths={widths}")
+        assert sdk._journal_presence_memo is None, (
+            "an over-bound map is not retained")
+        # the crossing call itself answers through the needle pass after the fold
+        # stops — that retry is the fix working, not a second full read
+        assert scans[0][0] is None, f"the first pass folds every record: {scans}"
+        assert scans[-1][0] is not None, (
+            f"the crossing call answers from the needle pass: {scans}")
+        assert len([s for s in scans if s[0] is None]) == 1, (
+            f"exactly ONE full fold, and it stopped at the bound: {scans}")
+
+        # ── the NEXT absent write must take the needle pass, not re-fold ──
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert len(scans) == 3, f"one pass per absent write, saw {scans}"
+        assert scans[2][0] is not None, (
+            "past the bound the needle-filtered pass is the STEADY STATE — a "
+            "second full fold from byte 0 is the O(journal) cost round 8 removed, "
+            f"and it is what the unreachable post-fold guard allowed: {scans[2]}")
+        assert len([s for s in scans if s[0] is None]) == 1, (
+            f"no later call may re-fold the whole journal: {scans}")
+        assert max(widths) <= 4, (
+            f"no later pass may rebuild an over-bound map either: widths={widths}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_seam_that_cannot_be_read_drops_the_map_instead_of_trusting_it(
+        tmp_path, caplog):
+    """#10543 round 10, finding 2: "unanswerable" was read as "no mismatch".
+
+    ``_read_regular_range`` opens with ``O_NOFOLLOW``, so a SYMLINKED journal path
+    raises ``ELOOP`` before ``S_ISREG`` is ever reached — while everything else
+    keeps working, because ``os.stat`` and ``mention_lines``' plain ``open`` both
+    FOLLOW the link. So the map stays live and only the seam check dies, which is
+    the worst combination: the guard that exists for exactly this lane silently
+    does not run.
+
+    Pre-fix the empty answer collapsed into ``None`` ⇒ "no seam, no claim to
+    disprove" ⇒ the stale map was REUSED over an in-place truncate+regrow. The
+    harmful direction is pinned here: the id's last record in the first journal is
+    a hard delete (folds ABSENT), the regrown journal re-adds it as a point BELOW
+    the watermark (the truth is PRESENT), so a reused map silences a genuine
+    revision loss — #10515 indicator 1.
+    """
+    from tortoise import monitoring
+
+    sdk, journal = _sdk_journaled(tmp_path, "seamunreadable")
+    try:
+        point_id = str(uuid.uuid4())     # absent from the LIVE graph either way
+        target = tmp_path / "seamunreadable-target.jsonl"
+        with open(target, "w", encoding="utf-8") as fh:
+            for i in range(40):
+                fh.write(json.dumps({"type": "PointAdded",
+                                     "point": {"id": f"seed-{i:04d}"}}) + "\n")
+            fh.write(json.dumps({"type": "EntityMutated", "id": point_id,
+                                 "label": "Point", "op": "delete"}) + "\n")
+        # the journal path is a SYMLINK: `mention_lines` follows it, `tail_bytes`
+        # (O_NOFOLLOW) cannot open it at all
+        os.symlink(target, journal)
+
+        # ── build the map: the seam read on this path CANNOT answer ──
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        memo = sdk._journal_presence_memo
+        assert memo is not None and memo["folded_to"] == os.path.getsize(journal), (
+            "the map must be complete for the whole journal, or this is not the "
+            "prefix the guard reuses")
+        assert sdk._journal_knows_point(point_id) is False, (
+            "the first journal's last record for this id is a delete")
+        before = monitoring.silent_revision_loss_counts().get("journal_known", 0)
+
+        # ── truncate IN PLACE (same inode, through the link) and regrow PAST it ──
+        with open(journal, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "PointAdded",
+                                 "point": {"id": point_id}}) + "\n")
+            for i in range(60):
+                fh.write(json.dumps({"type": "PointAdded",
+                                     "point": {"id": f"rewritten-{i:04d}"}}) + "\n")
+        assert os.stat(journal).st_ino == memo["ident"][1], (
+            "the case only means anything if the file was rewritten in place")
+        assert os.path.getsize(journal) > memo["folded_to"], (
+            "the case is a regrow PAST the folded offset")
+
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(point_id, confidence=0.9) == {}
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == before + 1, (
+            "a seam read that cannot ANSWER must be read as a MISMATCH and drop "
+            "the map — reading it as 'no seam to compare' reuses a map folded "
+            "from bytes this file no longer holds and silences the loss")
+        assert any("will not be replayed" in r.getMessage()
+                   and point_id in r.getMessage() for r in caplog.records), (
+            "the loss is reported with the id it lost")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+class TestJournalSeamContract:
+    """``EventLog.tail_bytes``' three answers, pinned where the guard reads them.
+
+    ``None`` (this path cannot answer) and ``b''`` (a genuinely empty prefix) are
+    different facts with OPPOSITE safe directions, and the caller is written to
+    that contract (#10543 round 10, finding 2). It had no test of its own before
+    this round, which is why the collapse went unnoticed.
+    """
+
+    def test_a_symlinked_journal_is_unanswerable_not_empty(self, tmp_path):
+        from tortoise.log import EventLog
+
+        target = tmp_path / "real.jsonl"
+        target.write_bytes(b"0123456789")
+        link = tmp_path / "linked.jsonl"
+        os.symlink(target, link)
+        assert EventLog(str(link)).tail_bytes(10, 4) is None, (
+            "O_NOFOLLOW refuses the link, so this path cannot answer — and the "
+            "caller must be able to tell that from an empty prefix")
+        assert EventLog(str(target)).tail_bytes(10, 4) == b"6789", (
+            "the same read through the real path answers")
+
+    def test_a_directory_or_missing_path_is_unanswerable(self, tmp_path):
+        from tortoise.log import EventLog
+
+        assert EventLog(str(tmp_path)).tail_bytes(10, 4) is None, (
+            "a directory is not a regular file")
+        assert EventLog(str(tmp_path / "absent.jsonl")).tail_bytes(10, 4) is None, (
+            "a path that is gone cannot answer either — the caller's one safe "
+            "reading of every unanswerable shape is the same: re-fold")
+
+    def test_an_empty_prefix_is_empty_bytes_not_unanswerable(self, tmp_path):
+        from tortoise.log import EventLog
+
+        target = tmp_path / "real.jsonl"
+        target.write_bytes(b"0123456789")
+        assert EventLog(str(target)).tail_bytes(0, 4) == b"", (
+            "offset 0 is 'nothing was folded yet' — a MATCH, not a mismatch")
+
+
 class TestJournalMentionScan:
     """The journal byte-scan's MECHANICS, pinned where they now live (#10543).
 

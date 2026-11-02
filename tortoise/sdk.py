@@ -4244,8 +4244,26 @@ def _apply_journal_presence(line: bytes, state: dict[str, bool]) -> None:
         state[rec_id] = True
 
 
+class _PresenceMapFull(Exception):
+    """The presence map crossed its bound MID-FOLD (#10543 review round 10, finding 1).
+
+    Raised by :func:`_journal_presence_state` when it is handed a ``limit`` and the
+    map outgrows it. The bound has to be enforced WHILE folding, not after: a check
+    on ``len(state)`` after the fold has already built a dict proportional to the
+    journal's distinct-id count, which is the memory the constant exists to bound.
+
+    It is an exception rather than a sentinel return because the fold is a
+    generator-consuming loop: stopping it is the point, and a caller cannot
+    distinguish "finished, map is complete" from "stopped early, map is partial"
+    from an ``int`` resume offset. The caller (``_journal_knows_point``) catches it,
+    LATCHES the degradation so the needle pass is the steady state, and answers the
+    call through that pass.
+    """
+
+
 def _journal_presence_state(log, state: dict[str, bool], start: int = 0,
-                           needle: bytes | None = None) -> int:
+                           needle: bytes | None = None,
+                           limit: int | None = None) -> int:
     """Fold journal presence into *state* from *start*, returning the resume offset.
 
     One bounded-MEMORY pass: a window plus one partial line, never the journal
@@ -4267,9 +4285,10 @@ def _journal_presence_state(log, state: dict[str, bool], start: int = 0,
     record.
 
     MEMORY, stated rather than implied: *state* holds one entry per distinct id
-    the journal names. The caller owns that bound
-    (:data:`_JOURNAL_PRESENCE_MAP_MAX`), because only it knows how long the map
-    is worth retaining.
+    the journal names, so *limit* is checked on EVERY record rather than once at
+    the end — the fold stops with :class:`_PresenceMapFull` the moment the map
+    outgrows the bound, which is what makes the bound a real cap on the pass
+    rather than a verdict on a dict that was already built.
 
     RESIDUAL, still true on the *needle* path only (it was the round-2 note on
     the always-needle scan): the needle is the raw id bytes, so an id containing
@@ -4279,8 +4298,19 @@ def _journal_presence_state(log, state: dict[str, bool], start: int = 0,
     bytes, so this needs a caller-supplied id AND a lane that dropped the map.
     """
     scan = log.mention_lines(needle, start=start)
-    for line in scan:
-        _apply_journal_presence(line, state)
+    lines = iter(scan)
+    try:
+        for line in lines:
+            _apply_journal_presence(line, state)
+            if limit is not None and len(state) > limit:
+                raise _PresenceMapFull(len(state))
+    finally:
+        # Closing deterministically releases the journal handle HERE rather than
+        # whenever the abandoned generator is collected — this runs on the SDK's
+        # ABSENT-write path, so a lingering descriptor is a real cost.
+        close = getattr(lines, 'close', None)
+        if callable(close):
+            close()
     return getattr(scan, 'resume_offset', start)
 
 
@@ -5311,7 +5341,10 @@ _NON_POINT_RECORD_TYPES = frozenset(_JOURNALED_ENTITY_EVENT_TYPES) | frozenset({
 #: SDK in an HTTP-exposed path, so it is bounded CONSCIOUSLY rather than left to
 #: the tenant's history. Past the bound the map is released and the probe falls
 #: back to the needle-filtered pass: the answer is unchanged, only the cost — a
-#: bounded-memory degradation, never a wrong verdict.
+#: bounded-memory degradation, never a wrong verdict. The bound is enforced WHILE
+#: folding and the crossing is LATCHED on the SDK
+#: (``_journal_presence_map_disabled``), so the degraded pass is the steady state
+#: rather than one call's fallback (#10543 review round 10, finding 1).
 _JOURNAL_PRESENCE_MAP_MAX = 200_000
 
 #: How many bytes across the memo's SEAM are read back to prove the retained
@@ -5326,6 +5359,17 @@ _JOURNAL_PRESENCE_MAP_MAX = 200_000
 #: and is one ``pread``: O(1), no lock, no parse, paid only when the journal GREW
 #: (an unchanged journal answers from ``mtime_ns`` with no read at all).
 _JOURNAL_SEAM_BYTES = 256
+
+#: The seam verdict for a journal that cannot ANSWER whether the folded prefix is
+#: still there (#10543 review round 10, finding 2).
+#:
+#: It has to be a third value, not ``None``, because the two facts point in opposite
+#: directions from "reuse": ``None`` means NO CLAIM WAS MADE (a synthetic log with no
+#: ``tail_bytes``, or an empty prefix) and reuse is safe, while an unanswerable read
+#: — a symlinked journal under ``O_NOFOLLOW``, a FIFO, a failed ``pread`` — is a fact
+#: ABOUT THE FILE and must be read as a MISMATCH. Identity, so it can never be
+#: confused with a ``(start, expected)`` tuple.
+_SEAM_UNREADABLE = object()
 
 
 def _journal_record_payload(event: dict) -> dict:
@@ -9863,7 +9907,18 @@ class TortoiseSDK:
         delta. Retained memory becomes the MAP rather than one window, so it is
         bounded explicitly: past ``_JOURNAL_PRESENCE_MAP_MAX`` ids the map is
         DROPPED and the call takes the needle-filtered pass instead (today's
-        cost, bounded memory) — a degradation, never a wrong answer. A RESUMED
+        cost, bounded memory) — a degradation, never a wrong answer. ⛔ AND THE
+        DEGRADATION STICKS (review round 10, finding 1): the bound used to be
+        tested only AFTER a fold had built the whole map, so the crossing pass
+        built an unbounded dict AND released it, and the NEXT call — seeing no
+        memo — re-folded from byte 0 and crossed again, for ever. That is the
+        O(journal)-per-absent-write cost round 8 set out to remove, on exactly
+        the large journal the constant exists for. The bound is now enforced
+        DURING the fold (``_journal_presence_state(limit=…)`` stops with
+        ``_PresenceMapFull``), and crossing it LATCHES
+        ``_journal_presence_map_disabled`` on this SDK for this log, so the
+        needle pass is the steady state rather than one call's fallback. A
+        RESUMED
         call also pays one ``pread`` of ``_JOURNAL_SEAM_BYTES`` to verify the seam
         (see the truncation block below); a journal that has not changed since the
         last fold pays no read at all.
@@ -9929,6 +9984,21 @@ class TortoiseSDK:
         coincidental rewrite, not an operator's ``>`` truncate); and the
         same-size/same-tick case above still skips the check, because it skips the
         read.
+
+        ⛔ A SEAM THAT CANNOT ANSWER IS A MISMATCH (review round 10, finding 2).
+        ``EventLog.tail_bytes`` returns ``None`` — not ``b''`` — when the path is
+        not a regular file or the read failed, and this guard reads that as "the
+        folded prefix cannot be verified" ⇒ DISCARD the map. It used to read it
+        as "no seam, no claim to disprove" ⇒ REUSE, which made the whole check
+        inert on any lane whose journal path is a symlink (``_read_regular_range``
+        opens ``O_NOFOLLOW``, so it raises ``ELOOP`` before ``S_ISREG`` is ever
+        reached) or otherwise unreadable — the round-9 hazard, unguarded on those
+        lanes. Only TWO facts may mean "nothing to verify": this log exposes no
+        ``tail_bytes`` at all (a synthetic log, whose map was never claimed from a
+        file), and an EMPTY prefix (``offset == 0`` — nothing was folded). The
+        distinction is the one ``pread(2)`` itself draws: a successful read of 0 is
+        end-of-file, while -1 is an error, a different outcome
+        (<https://man7.org/linux/man-pages/man2/pread.2.html>).
         """
         log = self._get_event_log()
         if log is None:
@@ -9980,13 +10050,37 @@ class TortoiseSDK:
         # Past the bound the map is NOT extended: memory stays bounded and the
         # call takes the needle-filtered pass instead (today's cost). The answer
         # is the same either way — only how many bytes are read differs.
+        #
+        # ⛔ AND ONCE THAT HAS HAPPENED IT STAYS THAT WAY (review round 10,
+        # finding 1). `_journal_presence_map_disabled` is the LATCH this SDK sets
+        # for THIS log when a fold crosses the bound, so the degraded pass is the
+        # steady state. Without it the crossing was invisible: every memo that
+        # survives storage has `len(known) <= MAX` by construction, so the
+        # `len(known) > MAX` guard that used to follow the fold was unreachable,
+        # the next call saw no memo and re-folded the whole journal from byte 0,
+        # and the call after that did the same — permanently, which is the
+        # O(journal) cost round 8 set out to remove.
         resume_from_map = stat_key is not None \
-            and len(known) <= _JOURNAL_PRESENCE_MAP_MAX
+            and getattr(self, '_journal_presence_map_disabled', None) is not log
         narrowed: dict[str, bool] = {}
         try:
-            if resume_from_map:
-                resume = _journal_presence_state(log, known, folded_to)
-            else:
+            try:
+                if resume_from_map:
+                    resume = _journal_presence_state(
+                        log, known, folded_to, limit=_JOURNAL_PRESENCE_MAP_MAX)
+                else:
+                    resume = _journal_presence_state(
+                        log, narrowed, 0, needle=str(point_id).encode('utf-8'))
+            except _PresenceMapFull:
+                # The map outgrew its bound WHILE folding, so the fold stopped
+                # there: that is the bounded-memory promise kept, not a failure
+                # to answer. Latch the degradation so no later absent write
+                # rebuilds the same over-bound dict and throws it away again, and
+                # answer THIS call through the needle pass.
+                self._journal_presence_map_disabled = log
+                self._journal_presence_memo = None
+                known = {}
+                resume_from_map = False
                 resume = _journal_presence_state(
                     log, narrowed, 0, needle=str(point_id).encode('utf-8'))
         except FileNotFoundError:
@@ -10026,12 +10120,6 @@ class TortoiseSDK:
             # cached, so the next call pays the same bounded price
             self._journal_presence_memo = None
             return narrowed.get(point_id, False)
-        if len(known) > _JOURNAL_PRESENCE_MAP_MAX:
-            # the bound was crossed while folding: release it rather than keep
-            # growing, and answer from what was folded (still correct for THIS
-            # call — the map covers [0, resume))
-            self._journal_presence_memo = None
-            return known.get(point_id, False)
         dev, ino, size, stat_mtime = stat_key
         self._journal_presence_memo = {
             'log': log, 'ident': (dev, ino), 'folded_to': resume,
@@ -10044,19 +10132,39 @@ class TortoiseSDK:
     def _journal_seam(log, offset: int):
         """The bytes ending at *offset* — what a later call re-reads to verify.
 
-        ``None`` when the log object cannot answer (no :meth:`EventLog.tail_bytes`,
-        a read that raised, an EMPTY prefix): a seam it never retained must never
-        be reported as a mismatch, or a synthetic log would re-fold on every call.
+        THREE answers, because there are three facts and two of them point in
+        OPPOSITE directions from "reuse" (review round 10, finding 2):
+
+        * ``(start, bytes)`` — a seam to compare on the next call;
+        * ``None`` — NOTHING TO VERIFY, and reuse is safe: this log exposes no
+          :meth:`EventLog.tail_bytes` at all (a synthetic log, whose map was never
+          claimed from a file), or the prefix is genuinely EMPTY (``offset == 0``,
+          so no byte was folded);
+        * :data:`_SEAM_UNREADABLE` — the log could not ANSWER (a non-regular path
+          such as a symlink, an ``O_NOFOLLOW`` refusal, a failed/raising read).
+          That is a fact ABOUT THE FILE, not an absence of a claim, and it is the
+          state the seam exists for — so a later call reads it as a MISMATCH and
+          re-folds. Collapsing it into ``None`` (what this did before) made the
+          guard inert on every symlinked or otherwise unreadable journal path.
         """
         read = getattr(log, 'tail_bytes', None)
         if not callable(read):
             return None
         try:
             raw = read(offset, _JOURNAL_SEAM_BYTES)
-        except Exception:  # noqa: BLE001, RUF100 — no seam, no claim to disprove
-            return None
-        if not isinstance(raw, (bytes, bytearray)) or not raw:
-            return None
+        except Exception:  # noqa: BLE001, RUF100 — unreadable ⇒ unverifiable
+            return _SEAM_UNREADABLE
+        if not isinstance(raw, (bytes, bytearray)):
+            # ``None`` from `tail_bytes` is "this path is not a regular file / the
+            # read failed"; anything else non-bytes is just as unanswerable.
+            return _SEAM_UNREADABLE
+        if not raw:
+            # An EMPTY read is TWO facts and only one of them is safe:
+            #   * offset == 0 ⇒ nothing was folded, so there is no claim to
+            #     verify;
+            #   * offset > 0  ⇒ bytes this caller folded are not there any more
+            #     (the file shrank between the stat and this read) ⇒ MISMATCH.
+            return None if int(offset) <= 0 else _SEAM_UNREADABLE
         return (max(0, int(offset) - len(raw)), bytes(raw))
 
     @staticmethod
@@ -10065,15 +10173,21 @@ class TortoiseSDK:
 
         ``False`` ⇒ discard the map and re-fold from byte 0. This never PROVES an
         answer; it only stops one being read out of a file whose folded bytes are
-        gone (see the COST/RESIDUAL block in :meth:`_journal_knows_point`).
+        gone (see the COST/RESIDUAL block in :meth:`_journal_knows_point`). An
+        UNVERIFIABLE seam is ``False``: "cannot check" must never clear a guard.
         """
+        if seam is _SEAM_UNREADABLE:
+            return False
         if not seam:
+            # no claim was ever made (see `_journal_seam`): nothing to disprove
             return True
         start, expected = seam
         try:
             got = log.tail_bytes(start + len(expected), len(expected))
         except Exception:  # noqa: BLE001, RUF100 — an unreadable seam re-folds
             return False
+        if not isinstance(got, (bytes, bytearray)):
+            return False        # `None` = this path cannot answer ⇒ re-fold
         return got == expected
 
     @staticmethod

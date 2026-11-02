@@ -2144,7 +2144,7 @@ class EventLog:
         """
         return MentionScan(self.path, needle, start, self.MENTION_SCAN_CHUNK)
 
-    def tail_bytes(self, offset: int, length: int) -> bytes:
+    def tail_bytes(self, offset: int, length: int) -> bytes | None:
         """The bytes just BELOW *offset* — the memo's seam check (#10543 round 9).
 
         A caller that retains a parsed PREFIX of this journal (see
@@ -2156,16 +2156,39 @@ class EventLog:
         which moves on an ordinary append too. The one cheap read that can is a
         comparison across the seam itself, which is what this returns.
 
-        Returns ``b''`` for a path that is not a regular file (a FIFO, a device, a
-        symlink, a directory), which a caller comparing against retained bytes reads as
-        a MISMATCH — the correct direction: re-fold, never reuse.
+        Returns ``None`` — never ``b''`` — when this path cannot ANSWER at all: it is
+        not a regular file (a FIFO, a device, a symlink, a directory), or the read
+        failed. ``b''`` is returned only for a prefix that is genuinely empty
+        (``offset`` at 0).
 
-        Read-only, ``O(1)`` in the journal's size, and it creates nothing.
+        ⛔ THE DISTINCTION IS LOAD-BEARING, NOT STYLE (#10543 review round 10,
+        finding 2). The caller retains the bytes it folded and re-reads them later,
+        so an unanswerable read collapsed into ``b''`` reads to that caller as "the
+        retained bytes are not there" — and its guard has to treat that as "nothing
+        to compare", i.e. a MATCH, i.e. reuse. That is the inverse of what the
+        paragraph above promises, and it made the whole seam check inert on any lane
+        whose journal path is a symlink (``_read_regular_range`` opens
+        ``O_NOFOLLOW``, so ``os.open`` raises ``ELOOP`` before ``S_ISREG`` is ever
+        reached) or otherwise not readable. It is the distinction ``pread(2)`` draws
+        for the same reason: a successful read of 0 bytes is END-OF-FILE, while -1
+        is an ERROR, a different outcome
+        (<https://man7.org/linux/man-pages/man2/pread.2.html>).
+
+        Read-only, ``O(1)`` in the journal's size, and it creates nothing. Every
+        failure — a symlink's ``ELOOP`` (raised before the ``S_ISREG`` gate can
+        answer, measured), a directory's ``EISDIR``, a FIFO's refusal, a vanished
+        path's ``ENOENT`` — is the SAME answer (``None``), because the caller has
+        exactly one safe reading of it: re-fold.
         """
         start = max(0, int(offset) - max(0, int(length)))
         stop = max(start, int(offset))
-        raw = _read_regular_range(Path(self.path), start, stop - start)
-        return raw or b''
+        try:
+            # `None` from `_read_regular_range` is "not a regular file", and it is
+            # passed through AS ITSELF: an empty bytes object is the answer to a
+            # DIFFERENT question (an empty prefix), never to this one.
+            return _read_regular_range(Path(self.path), start, stop - start)
+        except OSError:
+            return None
 
     def carried_records(self) -> bool:
         """Did this journal demonstrably carry at least one RECORD? (#10543 r7)
