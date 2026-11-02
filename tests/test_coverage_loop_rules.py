@@ -391,3 +391,145 @@ def test_expansion_terms_never_displace_original_tokens():
     assert set(original_tokens) <= set(expanded_tokens)
     assert expanded_tokens[:len(original_tokens)] == original_tokens
     assert len(expanded_tokens) <= 12 + DEFAULT_MAX_EXPANSION_TERMS
+
+
+# ── #2513: the missing LOWER bound (floor term) ──────────────────────────
+
+def _non_monopolised_pool():
+    """The census's 4/0 row as a pool: the top-5 is held by THREE distinct
+    sessions (A, A, B, B, C) — so no session is a monopolist — and the gold
+    session D's best rank is 6."""
+    return [_hit("a1", "A"), _hit("a2", "A"), _hit("b1", "B"),
+            _hit("b2", "B"), _hit("c1", "C"), _hit("d1", "D"),
+            _hit("a3", "A"), _hit("d2", "D")]
+
+
+def test_cap_only_guard_cannot_admit_a_session_ranked_past_the_window():
+    """THE DEFECT (#2513 §1, guard-reach census). ``per_session_cap`` is an
+    UPPER bound only: once the window is full with ``window/cap`` distinct
+    sessions, ``len(windowed) >= window`` is unsatisfiable for every later
+    item, so a reachable session ranked past the window is deferred, never
+    admitted. Measured on the n=71 cohort as 4 non-monopolised misses, 0
+    closed. This test PINS the shipped behaviour; the floor-term test below
+    is the fix."""
+    order = session_diverse_order(_non_monopolised_pool(), window=5,
+                                  per_session_cap=2)
+    top5 = [h["session_id"] for h in order[:5]]
+    assert len(set(top5)) == 3, "top-5 is held by three sessions, not one"
+    assert "D" not in top5, (
+        "cap-only guard never admits a session ranked past the window — the "
+        "firing condition is inverse to its purpose")
+
+
+def test_floor_term_admits_a_session_ranked_past_the_window():
+    """The floor term (minimum representation): an unrepresented session takes
+    a slot back from a session holding more than one, so D is admitted."""
+    order = session_diverse_order(_non_monopolised_pool(), window=5,
+                                  per_session_cap=2, floor_term=True)
+    top5 = [h["session_id"] for h in order[:5]]
+    assert "D" in top5, "the floor term must admit the reachable session"
+    assert len(order) == len(_non_monopolised_pool()), (
+        "additive: reordering never drops an item")
+
+
+def test_floor_term_evicts_the_lowest_ranked_duplicate_not_the_first():
+    """Which duplicate is dropped is the floor term's whole advantage over
+    ``per_session_cap=1``: it evicts the LOWEST-ranked item of a session that
+    holds more than one, so an early singleton-surviving session is untouched
+    and A keeps its two ranks while B's second rank (rank 4) is the one that
+    goes — never A's rank-1 hit."""
+    order = session_diverse_order(_non_monopolised_pool(), window=5,
+                                  per_session_cap=2, floor_term=True)
+    ids = [h["id"] for h in order[:5]]
+    assert "a1" in ids, "the session's best-ranked hit is never the one evicted"
+    assert "b2" not in ids, "the lowest-ranked duplicate is the one that goes"
+
+
+def test_floor_term_is_bounded_by_the_window_and_spends_the_duplicate_slot():
+    """The floor term is a bounded lower bound, NOT a completeness blocker and
+    NOT a density-free alternative to ``per_session_cap=1``: in the SATURATED
+    regime (>= window distinct sessions available — the only regime where
+    admission can change the graded top-k) the window has no spare slot, so
+    the admitted session costs exactly one duplicate and the resulting window
+    is ELEMENTWISE the same as ``per_session_cap=1``'s (measured: 8000/8000
+    randomised saturated pools). The density cost is unavoidable, not
+    avoided."""
+    items = [_hit("a1", "A"), _hit("a2", "A"), _hit("a3", "A"),
+             _hit("b1", "B"), _hit("c1", "C"), _hit("d1", "D"),
+             _hit("e1", "E"), _hit("f1", "F")]
+    floor = session_diverse_order(items, window=5, per_session_cap=2,
+                                 floor_term=True)[:5]
+    cap1 = session_diverse_order(items, window=5, per_session_cap=1)[:5]
+    assert len({h["session_id"] for h in floor}) == 5
+    assert [h["id"] for h in floor] == [h["id"] for h in cap1], (
+        "a saturated window cannot hold more distinct sessions than it has "
+        "slots, and no duplicate survives to choose between — the density "
+        "cost is unavoidable, not avoided")
+
+
+def test_floor_term_is_off_by_default_and_default_preserving():
+    """The default output is the SHIPPED output, pinned against a frozen id
+    list — the arm can only be turned on by an explicit caller (the sealed
+    A/B), never by an upgrade. This fails if the default flips OR if the
+    floor path ever leaks into the default."""
+    items = _non_monopolised_pool()
+    shipped = ["a1", "a2", "b1", "b2", "c1", "d1", "a3", "d2"]
+    assert [h["id"] for h in session_diverse_order(
+        items, window=5, per_session_cap=2)] == shipped
+    assert [h["id"] for h in session_diverse_order(
+        items, window=5, per_session_cap=2, floor_term=False)] == shipped
+    assert [h["id"] for h in session_diverse_order(
+        items, window=5, per_session_cap=2, floor_term=True)] != shipped
+
+
+def test_floor_term_survives_an_all_one_session_pool():
+    """One session's pool still surfaces its own evidence — the floor term
+    never trades a naive completeness win for an empty window."""
+    items = [_hit(f"a{i}", "A") for i in range(6)]
+    order = session_diverse_order(items, window=5, per_session_cap=2,
+                                  floor_term=True)
+    assert {"a0", "a1", "a2", "a3", "a4"} <= {h["id"] for h in order[:5]}
+
+
+def _guard_and_recap_pool():
+    """Resolve the shared composition lazily: ``tortoise.retrieval`` imports
+    the coverage loop, so a module-level import would be circular."""
+    from tortoise.retrieval import guard_and_recap_pool
+    return guard_and_recap_pool
+
+
+_SESSION_TRANSCRIPT_KIND = "session-transcript"
+
+
+def test_floor_term_keeps_the_deferred_tail_in_original_rank_order():
+    """An eviction pushes a LOW-ranked item into the tail behind items deferred
+    at HIGHER ranks. If the tail is left unordered, a session's own items
+    invert and ``dedup_pool`` (which keeps the first ``max_chunks_per_session``
+    RAW chunks in POOL order) keeps the worse chunk and drops the better one —
+    a reordering artifact charged to the diversity policy. Session E holds
+    ranks 1, 2 and 6 with cap 3, so the re-cap is what exposes the order; both
+    survivors must be E's best-ranked chunks."""
+    def raw(hid, session):
+        return {"id": hid, "session_id": session,
+                "point_kind": _SESSION_TRANSCRIPT_KIND}
+    items = [raw("e1", "E"), raw("e2", "E"), raw("b1", "B"),
+             raw("b2", "B"), raw("b3", "B"), raw("e3", "E"),
+             raw("c1", "C"), raw("d1", "D")]
+    out = _guard_and_recap_pool()(items, guard=True, window=5,
+                                  per_session_cap=3, floor_term=True,
+                                  max_chunks_per_session=2)
+    assert [h["id"] for h in out if h["session_id"] == "E"] == ["e1", "e2"], (
+        "the re-cap must keep E's best-ranked chunks, never its rank-6 one")
+
+
+def test_guard_and_recap_pool_forwards_the_floor_term():
+    """The seam the eval harness arms must actually be wired: dropping the
+    ``floor_term=floor_term`` forward leaves every other test green, so this
+    one asserts the forward itself."""
+    items = _non_monopolised_pool()
+    on = _guard_and_recap_pool()(items, guard=True, window=5, per_session_cap=2,
+                              floor_term=True, max_chunks_per_session=99)
+    off = _guard_and_recap_pool()(items, guard=True, window=5, per_session_cap=2,
+                               floor_term=False, max_chunks_per_session=99)
+    assert "d1" in [h["id"] for h in on[:5]]
+    assert "d1" not in [h["id"] for h in off[:5]]

@@ -617,11 +617,11 @@ def session_diverse_order(items: list[dict], *,
                           window: int = DEFAULT_LOOP_GUARD_WINDOW,
                           per_session_cap: int = DEFAULT_LOOP_SESSION_CAP,
                           session_key: Callable[[dict], str] | None = None,
+                          floor_term: bool = False,
                           ) -> list[dict]:
     """The merge discipline (step 4, pure): reorder ``items`` so the top
     ``window`` ranks are session-diverse — no session holds more than
-    ``per_session_cap`` of the window while an underrepresented session's
-    evidence remains available below it.
+    ``per_session_cap`` of the window.
 
     Same-session near-dupes are deferred past the window (a monopolizing
     session's points were never capped — §1(2)); the cap yields to
@@ -630,6 +630,52 @@ def session_diverse_order(items: list[dict], *,
     never fire the loop anyway). Additive by construction: reordering never
     drops an item — the windowed prefix + the deferred tail partition the
     input. Stable: within a session, original order is preserved.
+
+    ``floor_term`` (#2513) adds the LOWER bound this discipline was missing.
+    ``per_session_cap`` is only an UPPER bound: once ``window`` slots are held
+    by ``ceil(window / per_session_cap)`` or more distinct sessions the
+    ADMISSION condition ``len(windowed) < window`` is false for every later
+    item, so a session whose best rank is past the window is DEFERRED, never
+    admitted — measured on the n=71 multi-session cohort as the 4/0 row of the
+    guard-reach census (4 non-monopolised misses, 0 closed; §1 of the #2513
+    diagnosis). Called *minimum representation* / a per-group LOWER bound in
+    the fair-ranking literature (arXiv 1906.01747 ``l_{v,p}``: at least l
+    items of group v among the top p) — the exact dual of the cap we ship
+    (arXiv 2103.14000 §coverage-based diversity).
+
+    With ``floor_term`` on, an item from a session holding NO window slot
+    takes a slot back from a session holding MORE THAN ONE, by evicting that
+    session's lowest-ranked windowed item (whose survivor still represents its
+    session — the least information loss available). Three bounds that hold by
+    construction, and the third is why this is OFF by default:
+
+    * the window never holds more than ``window`` distinct sessions (the lower
+      bound is bounded, not a completeness blocker);
+    * the deferred tail stays in ORIGINAL RANK order, so a session's own items
+      never invert and a downstream per-session re-cap (``dedup_pool``, which
+      keeps the first ``max_chunks_per_session`` IN POOL ORDER) still keeps a
+      session's best-ranked chunks — not an artifact of the reorder;
+    * **the density cost is NOT avoidable, only minimised.** In the SATURATED
+      regime (>= ``window`` distinct sessions available — the only regime in
+      which admitting a missing session can change the graded top-k) the
+      window has zero spare slots, so admitting a new session necessarily
+      drops a duplicate: the floor term yields ``window`` distinct sessions,
+      the same count ``per_session_cap=1`` yields. Measured over 2000
+      randomised saturated pools: identical distinct-session count on
+      2000/2000, and an ELEMENTWISE identical window to
+      ``per_session_cap=1`` on 8000/8000 further pools — in that regime no
+      duplicate survives, so there is no "which one goes" choice to make. The
+      difference is confined to the UNDER-saturated regime (fewer than
+      ``window`` distinct sessions available), where the floor term keeps a
+      session's later item in rank order instead of pushing it past the
+      window. It spends nothing at all while the pool holds no more than
+      ``ceil(window / per_session_cap)`` distinct sessions (measured, window=5
+      cap=2: 0/4000 pools displaced at 3 sessions, 2154/4000 at 4, 3739/4000
+      at 5). It is therefore NOT a density-free alternative to
+      ``per_session_cap=1`` — the #2513 §4 projection for ``cap=1`` (residual
+      10->5, recall_all@5 0.8592->0.9296, evidence density lost on 20/71) is
+      the ceiling for this lever too. Arming it requires that sealed A/B
+      measurement.
     """
     if not items:
         return []
@@ -639,11 +685,36 @@ def session_diverse_order(items: list[dict], *,
     deferred: list[dict] = []
     for h in items:
         s = _session_of(h, session_key)
-        if len(windowed) >= window or counts.get(s, 0) >= per_session_cap:
+        n = counts.get(s, 0)
+        if len(windowed) >= window:
+            # FLOOR TERM: admit a session with no window slot by taking one
+            # back from a session that holds more than one. Evict that
+            # session's LOWEST-ranked windowed item — the least information
+            # loss available, since the survivor still represents its session.
+            if floor_term and n == 0:
+                for j in range(len(windowed) - 1, -1, -1):
+                    sj = _session_of(windowed[j], session_key)
+                    if counts.get(sj, 0) > 1:
+                        deferred.append(windowed.pop(j))
+                        counts[sj] -= 1
+                        windowed.append(h)
+                        counts[s] = 1
+                        break
+                else:
+                    deferred.append(h)
+            else:
+                deferred.append(h)
+        elif n >= per_session_cap:
             deferred.append(h)
         else:
             windowed.append(h)
-            counts[s] = counts.get(s, 0) + 1
+            counts[s] = n + 1
+    # An eviction pushes a LOW-ranked item into the tail behind items deferred at
+    # higher ranks. Restore original rank order when the arm is on, so no
+    # session's own items invert and the re-cap below still keeps its best ones.
+    if floor_term:
+        rank = {id(h): k for k, h in enumerate(items)}
+        deferred.sort(key=lambda h: rank[id(h)])
     # Under-filled window (every remaining item belongs to a capped session):
     # fill from the deferred tail in original order — the cap is a diversity
     # guard, never a completeness blocker.
