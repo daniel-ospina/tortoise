@@ -10250,6 +10250,17 @@ class TortoiseSDK:
                 # that are gone. The seam is the only cheap fact that can speak:
                 # compare the retained bytes across it.
                 same_file = self._journal_seam_matches(log, memo.get('seam'))
+            elif same_file and not memo.get('stable', True):
+                # ⛔ A WRITE LANDED WHILE THE FOLD WAS READING (review round 12,
+                # finding 2). `stable` is False when the journal's stat MOVED
+                # between the pre-fold observation and the post-fold one, so the
+                # memo's `mtime_ns` is an observation taken AFTER bytes the fold
+                # did not necessarily see: `mtime_ns` cannot anchor the folded
+                # prefix there. The one cheap fact that can is the seam — the same
+                # read the growth branch above relies on, on the same file. The
+                # same-size arm below still decides the QUIET case, which is the
+                # one it was written for.
+                same_file = self._journal_seam_matches(log, memo.get('seam'))
             elif same_file and stat_mtime != memo['mtime_ns']:
                 same_file = False       # same-size rewrite in a later tick
             if same_file:
@@ -10330,11 +10341,35 @@ class TortoiseSDK:
             # cached, so the next call pays the same bounded price
             self._journal_presence_memo = None
             return narrowed.get(point_id, False)
-        dev, ino, size, stat_mtime = stat_key
+        # ⛔ THE STAT MUST DESCRIBE THE FILE **AT** `folded_to`, SO IT IS TAKEN
+        # AFTER THE FOLD (review round 12, finding 2). The `stat_key` read above
+        # is the CACHE KEY — it has to be read before the resume decision — and
+        # storing it next to the offset the fold actually reached described a file
+        # SMALLER than the bytes that were folded. One ordinary append landing
+        # while the fold read then left `folded_to == current size` with a stale
+        # `mtime_ns`, so the NEXT call took the same-size arm, discarded a map
+        # that was a true prefix of the journal, and re-folded from byte 0: an
+        # O(journal) scan per absent write on exactly the append-active lane
+        # #7405 describes, which is the cost round 8 removed. Re-statting here
+        # makes the pair consistent by construction.
+        seam = self._journal_seam(log, resume)
+        stat_after = self._journal_stat_key(log)
+        if stat_after is None or stat_after[2] < resume:
+            # The journal vanished, or it no longer holds the bytes that were
+            # folded. Nothing may be memoised: an unmemoised answer costs one
+            # re-fold, a memoised one could answer out of bytes that are gone.
+            self._journal_presence_memo = None
+            return known.get(point_id, False)
         self._journal_presence_memo = {
-            'log': log, 'ident': (dev, ino), 'folded_to': resume,
-            'mtime_ns': stat_mtime, 'known': known,
-            'seam': self._journal_seam(log, resume),
+            'log': log, 'ident': stat_after[:2], 'folded_to': resume,
+            'mtime_ns': stat_after[3], 'known': known, 'seam': seam,
+            # Did the journal stand STILL for the whole fold? `True` means no
+            # write completed between the key read BEFORE the fold and the read
+            # after it, so `mtime_ns` genuinely describes the bytes at
+            # `folded_to`. When it moved, that mtime is a POST-fold observation
+            # and the seam — not it — must decide the next reuse (see the
+            # `stable` arm above).
+            'stable': stat_after == stat_key,
         }
         return known.get(point_id, False)
 

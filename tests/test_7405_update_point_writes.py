@@ -1632,6 +1632,133 @@ def test_the_presence_memo_resumes_and_answers_a_never_seen_id(
             sdk.close()
 
 
+def test_an_append_landing_during_a_fold_does_not_discard_the_presence_map(
+        tmp_path, monkeypatch):
+    """PR #10543 review round 12, finding 2: the memo's stat must describe its offset.
+
+    The memo stored the journal identity read **before** the fold next to the
+    offset the fold actually reached. One ordinary append landing while the fold
+    was reading — the ordinary state of the append-active lane #7405 describes —
+    then left ``folded_to == current size`` with a STALE ``mtime_ns``, so the next
+    absent write read that pair as "a same-size rewrite in a later tick", threw
+    away a map that was a true prefix of the journal, and re-folded from byte 0.
+    That is an O(journal) scan per absent write: exactly the cost round 8 removed,
+    restored by an accounting mistake. Here the append lands INSIDE the fold, so
+    every later write to this journal is skipped — only the resume offset proves
+    the map survived.
+
+    Non-vacuity: on the pre-fix tree the second absent write scans from byte 0.
+    """
+    from tortoise.log import EventLog
+
+    sdk, journal = _sdk_journaled(tmp_path, "midfold")
+    try:
+        log = sdk._get_event_log()
+        for i in range(120):
+            log.append({"type": "PointAdded", "point": {"id": f"seed-{i:04d}"}})
+
+        scans: list[tuple[int | None, int]] = []
+        real = EventLog.mention_lines
+        armed = {'on': True}
+
+        def spy(self, needle=None, start=0):
+            scans.append((needle, start))
+            if armed['on'] and needle is None and start == 0:
+                # the append lands AFTER the pre-fold stat and BEFORE the fold
+                # reaches EOF: the tightest seam this defect can be seen at
+                armed['on'] = False
+                log.append({"type": "PointAdded", "point": {"id": "mid-fold"}})
+            return real(self, needle, start)
+
+        monkeypatch.setattr(EventLog, "mention_lines", spy)
+
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert len(scans) == 1, f"one pass for the first absent id, saw {scans}"
+        folded_to = sdk._journal_presence_memo['folded_to']
+        assert folded_to == os.path.getsize(journal), (
+            "the fold must have consumed the record appended DURING it, or the "
+            f"append did not land where this test needs it: {folded_to} vs "
+            f"{os.path.getsize(journal)}")
+
+        # nothing is written between the two calls: the ONLY difference from
+        # `test_the_presence_memo_resumes_and_answers_a_never_seen_id` is that the
+        # journal's last bytes arrived mid-fold, so the memo's mtime has to be the
+        # POST-fold one or the pair reads as a same-size rewrite
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        # The pre-fix memo is discarded here and this write re-folds from byte 0.
+        # A retained map either answers it outright (no read: it already covers
+        # every byte) or resumes at `folded_to`; both are fine, byte 0 is not.
+        assert len(scans) <= 2, f"at most one pass per absent write, saw {scans}"
+        assert scans[1:] == [] or scans[1][1] == folded_to, (
+            "an append DURING the fold must not cost the next absent write a "
+            "re-fold from byte 0 — that is O(journal) per absent write on the "
+            f"lane #7405 describes: {scans[1:]}, folded_to {folded_to}")
+
+        # and the surviving map still answers an id it folded, for free
+        before = len(scans)
+        assert sdk._journal_knows_point("seed-0007") is True, (
+            "the map retained across a mid-fold append must still answer an id "
+            "folded before the seam")
+        assert len(scans) == before, (
+            f"a covered id must cost no journal read, saw {scans[before:]}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_same_size_rewrite_after_a_quiet_fold_still_drops_the_map(
+        tmp_path, monkeypatch):
+    """Inverse control for the fix above: the quiet path keeps the OLD guard.
+
+    A journal that stood STILL through its fold is anchored by its ``mtime_ns``,
+    so a same-size rewrite in a later tick must still discard the map — the fix
+    for round 12's finding 2 buys the append-during-fold case with a byte
+    comparison across the seam, and it must not buy it by trusting every
+    same-size change. This asserts the discard, so a map that was merely
+    *re-used more often* cannot pass as the fix.
+    """
+    from tortoise.log import EventLog
+
+    sdk, journal = _sdk_journaled(tmp_path, "sameSize")
+    try:
+        log = sdk._get_event_log()
+        for i in range(60):
+            log.append({"type": "PointAdded", "point": {"id": f"quiet-{i:04d}"}})
+
+        scans: list[tuple[int | None, int]] = []
+        real = EventLog.mention_lines
+
+        def spy(self, needle=None, start=0):
+            scans.append((needle, start))
+            return real(self, needle, start)
+
+        monkeypatch.setattr(EventLog, "mention_lines", spy)
+
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert len(scans) == 1, scans
+        assert sdk._journal_presence_memo['stable'] is True, (
+            "the first fold raced nothing, so its mtime anchors its offset")
+        folded_to = sdk._journal_presence_memo['folded_to']
+
+        # same size, different bytes, later tick — the shape the mtime arm owns
+        journal_path = Path(journal)
+        raw = journal_path.read_bytes()
+        assert len(raw) > 8 and b'quiet-0007' in raw
+        journal_path.write_bytes(raw.replace(b'quiet-0007', b'quiet-0009'))
+        st = os.stat(journal_path)
+        os.utime(journal_path, ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
+        assert os.path.getsize(journal_path) == folded_to, "a SAME-SIZE rewrite"
+
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        assert len(scans) == 2, scans
+        assert scans[1][1] == 0, (
+            "a same-size rewrite in a later tick must re-fold from byte 0, not "
+            f"resume over bytes that changed: {scans[1]}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 def test_an_empty_id_does_not_scan_the_journal_at_all(tmp_path, monkeypatch):
     """An EMPTY id can never be a journaled point, and its needle is every line.
 
