@@ -1004,7 +1004,7 @@ def _admitted_default_namespace(org: dict) -> str | None:
     return None
 
 
-async def _hydrate_default_namespace(org: dict) -> dict:
+def _hydrate_default_namespace(org: dict) -> dict:
     """Give an ORG-WIDE caller dict the default-graph namespace it lacks.
 
     The REST auth seams stamp ``graph_namespace`` on the credential; the MCP
@@ -1045,21 +1045,33 @@ async def _hydrate_default_namespace(org: dict) -> dict:
     beside that namespace (``mcp_auth.use_graph_target``), so a graph-bound
     request carries ``graph_id`` and never reaches this branch.
 
-    The control-plane read remains only for a request that resolved NO default
-    namespace at all (a transport with no credential resolution — self-host
-    static/none) — the pre-#10180 behaviour for exactly those lanes, and the
-    read is the only source that can answer there. One primary-key read at most,
-    only on that branch, and OFF the loop.
+    ⛔ ONE SOURCE, TWO READERS — and the second reader is SYNC, so the source
+    must be too (#10452 review). The ADMISSION KEY (`_capture_session_key`) runs
+    before this function does (the slot is reserved before any write), it cannot
+    await, and it must name the very graph this write opens. It therefore reads
+    `_admitted_default_namespace` as well and falls through to the SAME
+    historical `namespace=org_id` open. A control-plane read here — the shape
+    this function used to carry, and the reason its "agree by construction on
+    every branch" claim was false — is a SECOND instant the key can never see:
+    on a promoted org it resolved the PROMOTED namespace while the key had
+    already named the DEMOTED one, so the capture landed in a bucket that named
+    a graph it was not writing (a FALSE 409 for a legitimate capture of that
+    graph, and TWO buckets for the graph actually written — the #3129
+    silent-loss window, reopened by the fix for #3365).
+
+    Reads nothing, and that is not a lost capability: every credential resolution
+    that carries the RECORD tenant carries the namespace BESIDE it, from ONE
+    `public.graphs` row (`default_graph_for_credential` — the #10452 F2 pair),
+    and it falls back to `organizations.graph_name` on an additive-read degrade,
+    which is the same column a read here would consult. So "this request has no
+    namespace to carry" always means "it has no tenant either", and for those
+    lanes (self-host static/none) there is no promotion to miss: the historical
+    open IS the org's default graph.
     """
     if _awaits_default_namespace(org):
         carried = _admitted_default_namespace(org)
         if carried:
             return {**org, "graph_namespace": carried}
-        resolved = await _cp_offload(
-            lambda: _org_default_namespace(org["org_id"]),
-            op="org_default_ns")
-        if resolved:
-            return {**org, "graph_namespace": resolved}
     return org
 
 
@@ -1154,13 +1166,13 @@ def _capture_session_key(org: dict, session_id: str | None) -> str | None:
     """
     if not session_id:
         return None
-    # #10452 review (P2): the WRITE resolves an org-wide dict's missing
-    # namespace (`_hydrate_default_namespace`) BEFORE `_capture_session_impl`
-    # opens anything, so the KEY must resolve it from the same source — else it
-    # names the DEMOTED graph on a promoted org and this bucket is not the one
-    # the capture writes. Both read `_admitted_default_namespace`; the fallback
-    # below is the same `_data_graph_name` the write's dict yields, so the two
-    # agree by construction on every branch.
+    # #10452 review: the KEY must name the graph the WRITE opens. Both read the
+    # ONE source — `_admitted_default_namespace`, the namespace this request was
+    # admitted with — and both fall through to the historical
+    # `namespace=org_id` derivation (this function via `_data_graph_name`, the
+    # write via `_hydrate_default_namespace`, which reads nothing). That is what
+    # makes the two agree on every branch: neither may consult a control-plane
+    # instant the other cannot see (see `_hydrate_default_namespace`).
     carried = _admitted_default_namespace(org)
     if carried:
         org = {**org, "graph_namespace": carried}
@@ -15676,7 +15688,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # graph a promotion DEMOTED while its record rows (tenant = the credential's
     # `default_graph_id`) named the promoted one — the split #10025 exists to
     # remove, on the lane agents write through.
-    org = await _hydrate_default_namespace(org)
+    org = _hydrate_default_namespace(org)
 
     # #1927: session_recording is an OPT-OUT now (default ON, ToS-covered) —
     # not an enforced consent gate. C6 #2115 (D-C6-3): the gate resolves
@@ -24297,7 +24309,7 @@ def _historical_onboarding_sources(org_id: str, namespace: str | None,
     return per_graph + historical
 
 
-def _onboarding_progress(node: dict, steps: list[str]) -> tuple[int, int, int]:
+def _onboarding_progress(node: dict, steps: list[str]) -> tuple:
     """How far along an ``:OnboardingState`` record is — the only order this
     tree can derive between two candidate SNAPSHOTS of it (#10180).
 
@@ -24309,11 +24321,43 @@ def _onboarding_progress(node: dict, steps: list[str]) -> tuple[int, int, int]:
     the next — which makes "most advanced" and "most recent" the same question,
     answerable from the DATA rather than from a clock (``graphs.created_at``
     records when a graph was minted, not when it last became the default).
+
+    ⛔ THE PROGRESS HALF ALONE IS NOT ENOUGH (#10452 review P2). `copy_org_state`
+    also copies the FLOW keys, and two snapshots can hold EQUAL progress while
+    holding DIFFERENT flow state: an org that answered the fork card after the
+    first promotion, without completing another step, ties its frozen
+    predecessor on ``(status, steps, members)``. Ranking on progress only then
+    broke the tie on CANDIDATE ORDER, so the repair carried the stale
+    ``fork = None`` into a fresh default graph and silently dropped the owner's
+    choice — the one thing this carry exists to preserve.
+
+    So the FLOW keys are ranked after the progress keys, and every one of them
+    is orderable for the same reason the progress keys are — monotonic along a
+    copy chain, not a guess about what the value means:
+
+    * ``fork`` — SET-ONCE (`write_fork` answers 'conflict' rather than
+      overwrite), copied forward, so a snapshot carrying one is strictly later
+      than a snapshot that has none;
+    * ``fork_unsure_at`` — LWW while the fork is unset, and CLEARED when the fork
+      is answered, so among snapshots still awaiting a choice a later stamp is a
+      later state;
+    * ``compact`` — set at node creation and carried forward, so it only ever
+      goes False → True along a chain.
+
+    ⛔ NOT RANKED: ``last_decide_attempt`` ('failed' / 'dismissed'). It is LWW
+    but NOT monotonic — ``write_completed_step('decide-completed')`` REMOVES it —
+    so presence is not an order and ranking on it would prefer a stale failure
+    marker to the state that superseded it. Two candidates that tie on
+    everything above and differ only there are still separated by candidate
+    order; that residual is recorded on the issue (#10452), not guessed at here.
     """
     status = 1 if node.get("status") == "complete" else 0
     members = sum(len(steps_done or ()) for steps_done in
                   _os.parse_member_progress(node.get("member_progress")).values())
-    return (status, len(steps), members)
+    fork = 1 if node.get("fork") in _os.FORK_VALUES else 0
+    unsure = str(node.get("fork_unsure_at") or "")
+    compact = 1 if node.get("compact") else 0
+    return (status, len(steps), members, fork, unsure, compact)
 
 
 def _pick_onboarding_source(candidates: list[str], org_id: str) -> str | None:
@@ -24322,8 +24366,12 @@ def _pick_onboarding_source(candidates: list[str], org_id: str) -> str | None:
 
     Ties keep the EARLIER candidate, i.e. the preference order
     `_historical_onboarding_sources` already established (a per-graph namespace
-    before the bare historical ones) — two snapshots of equal progress hold the
-    same state, so either carries the same thing.
+    before the bare historical ones) — but only after the FLOW half of the
+    comparison, because "equal progress" does NOT mean "the same state":
+    `_onboarding_progress` ranks the flow keys too, so the tie that reaches this
+    fallback is one where the two snapshots carry the same choice AND the same
+    progress. (Before that, a tie was decided by candidate order alone and a
+    stale ``fork = None`` beat the owner's answered fork — #10452 review P2.)
 
     A read FAILURE propagates, deliberately. This is the repair arm for a record
     a failed carry stranded, so "I could not read this candidate" must never be
@@ -24333,7 +24381,7 @@ def _pick_onboarding_source(candidates: list[str], org_id: str) -> str | None:
     ``no_source``.
     """
     best: str | None = None
-    best_key: tuple[int, int, int] | None = None
+    best_key: tuple | None = None
     for candidate in candidates:
         sdk = None
         try:

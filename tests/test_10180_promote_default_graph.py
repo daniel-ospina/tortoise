@@ -1688,43 +1688,94 @@ def test_every_hosted_auth_seam_stamps_the_same_field():
             "the demoted graph after a promotion")
 
 
-def test_the_mcp_capture_lane_resolves_the_default_namespace_itself(monkeypatch):
+def test_the_admission_key_and_the_capture_write_resolve_one_source(monkeypatch):
     """The MCP `tortoise_session_capture` tool builds its own credential dict and
     (because that file is a FROZEN served surface — `tools/surface-guard.py`)
-    cannot be changed to carry the default namespace. So the shared impl hydrates
-    it: an org-wide caller whose dict lacks the field resolves it there.
+    cannot be changed to carry the default namespace. So the shared impl stamps
+    it from the credential the request was ADMITTED with.
 
     BEHAVIOURAL, not a source grep: the assertions below run the resolver the
     capture impl calls and check the dict it hands the data plane.
 
-    FAIL-ON: without the hydration, an org-wide MCP capture opens
-    `org_{org_id}` — the graph a promotion DEMOTED — while its record rows
-    (tenant = the credential's `default_graph_id`) name the promoted one: the
-    record/data split #10025 exists to remove, on the surface agents write
-    through. The guard half below makes sure the fix is NOT put back into the
-    frozen file."""
-    import asyncio
-
+    FAIL-ON (#10452 review P2 — the split this pins shut): the dict with NOTHING
+    admitted used to be answered by a control-plane READ. That is a SECOND
+    instant the ADMISSION KEY can never see — the key is computed before this
+    hydration, and it cannot await — so on a promoted org the capture was written
+    to the PROMOTED graph while its in-flight bucket named the DEMOTED one: a
+    FALSE 409 for a legitimate capture of the graph the bucket names, and TWO
+    buckets for the graph actually written (the #3129 silent-loss window),
+    which is the whole point of the key (#3365). The two halves now read ONE
+    source — `_admitted_default_namespace` — and fall through to the SAME
+    historical open, so they agree on every branch.
+    """
     _fake_org_row(monkeypatch, f"org_{TEAM}_{NEW_ID}")
+    reads: list[str] = []
+    real_read = ha._org_default_namespace
 
-    # 1. An org-wide dict with NO namespace (what the MCP tool builds) resolves
-    #    the PROMOTED graph — the one the record tenant names.
-    got = asyncio.run(ha._hydrate_default_namespace({"org_id": TEAM}))
-    assert got["graph_namespace"] == f"org_{TEAM}_{NEW_ID}", (
-        "an org-wide capture with no namespace in its dict must resolve the "
-        "DEFAULT graph — otherwise it writes the graph a promotion demoted")
+    def _counting_read(org_id: str):
+        reads.append(org_id)
+        return real_read(org_id)
+
+    monkeypatch.setattr(ha, "_org_default_namespace", _counting_read)
+
+    # 1. An org-wide dict with NOTHING admitted cannot be answered at all — and
+    #    it must NOT be answered from a second instant.
+    got = ha._hydrate_default_namespace({"org_id": TEAM})
+    assert "graph_namespace" not in got, got
     assert got["org_id"] == TEAM  # the rest of the dict is untouched
+    assert reads == [], (
+        "the hydration resolved the default namespace itself — a control-plane "
+        "instant the ADMISSION KEY cannot see, so the key and the write can "
+        "name different graphs (#10452 review P2)")
 
-    # 2. A dict that ALREADY carries one is returned untouched — the REST lanes
-    #    are not re-resolved (and pay no read).
+    # 1b. …so the key and the write agree: the key's bucket names the very graph
+    #     `_data_graph_name` hands the data plane.
+    key = ha._capture_session_key({"org_id": TEAM}, "sess")
+    assert key == f"{TEAM}:{ha._data_graph_name(got)}:sess", key
+
+    # 1c. NON-VACUITY — the identical dict, ADMITTED with a namespace, hydrates
+    #     and keys on THAT namespace. So (1b) is agreement, not a constant.
+    from tortoise import mcp_auth
+
+    token = mcp_auth._current_graph_namespace.set(f"org_{TEAM}_{NEW_ID}")
+    try:
+        carried_out = ha._hydrate_default_namespace({"org_id": TEAM})
+        carried_key = ha._capture_session_key({"org_id": TEAM}, "sess")
+    finally:
+        mcp_auth._current_graph_namespace.reset(token)
+    assert carried_out["graph_namespace"] == f"org_{TEAM}_{NEW_ID}"
+    assert carried_key == \
+        f"{TEAM}:{ha._data_graph_name(carried_out)}:sess", carried_key
+
+    # 2. A dict that ALREADY carries one is returned untouched.
     carried = {"org_id": TEAM, "graph_namespace": f"org_{TEAM}"}
-    assert asyncio.run(ha._hydrate_default_namespace(dict(carried))) == carried
+    assert ha._hydrate_default_namespace(dict(carried)) == carried
 
     # 3. A GRAPH-BOUND dict is untouched: its namespace is a CUSTOM graph's, and
     #    "the default graph" is not the question it asks.
     bound = {"org_id": TEAM, "graph_id": NEW_ID,
              "graph_namespace": f"org_{TEAM}_{NEW_ID}"}
-    assert asyncio.run(ha._hydrate_default_namespace(dict(bound))) == bound
+    assert ha._hydrate_default_namespace(dict(bound)) == bound
+
+    # 4. The fix must NOT live in the frozen file: an unconditional stamp there
+    #    is a surface change needing owner approval (#3863/#4282).
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "tortoise"
+           / "mcp_server.py").read_text(encoding="utf-8")
+    bridge = src.split("_gid = _current_graph_id.get()", 1)[1].split(
+        'if limits.get("max_points")', 1)[0]
+    stamps = [ln for ln in bridge.splitlines()
+              if 'org["graph_namespace"]' in ln]
+    assert stamps, (
+        "the MCP capture bridge stopped stamping `graph_namespace` at all — "
+        "that is the graph-BOUND half the frozen tool served before #10180")
+    assert all(ln.startswith("        ") for ln in stamps), (
+        "tortoise/mcp_server.py serves frozen tools — a top-level (4-space, "
+        "UNCONDITIONAL) `org[\"graph_namespace\"]` stamp there is a surface "
+        "change needing owner approval (#3863/#4282, tools/surface-guard.py). "
+        "It must stay nested under `if _gid:`; put the org-wide fix in "
+        "`_hydrate_default_namespace` instead.")
 
     # 4. The fix must NOT live in the frozen file: an unconditional stamp there
     #    is a surface change needing owner approval (#3863/#4282).
@@ -1766,8 +1817,6 @@ def test_the_mcp_capture_data_half_and_its_record_tenant_are_one_snapshot(monkey
     against) and the WRITE half names `org_{TEAM}_{NEW_ID}` while the FILED
     half names OLD_ID — the two assertions below disagree.
     """
-    import asyncio
-
     from tortoise import mcp_auth, record_writer
 
     _hosted(monkeypatch)
@@ -1790,7 +1839,7 @@ def test_the_mcp_capture_data_half_and_its_record_tenant_are_one_snapshot(monkey
         # not straddle, and the reason the assertion below is not vacuous.
         assert ha._org_default_namespace(TEAM) == f"org_{TEAM}_{NEW_ID}"
 
-        hydrated = asyncio.run(ha._hydrate_default_namespace({"org_id": TEAM}))
+        hydrated = ha._hydrate_default_namespace({"org_id": TEAM})
         tenant = record_writer.record_tenant_for(admitted,
                                                 control_plane_ids=True)
     finally:
@@ -1810,7 +1859,7 @@ def test_the_mcp_capture_data_half_and_its_record_tenant_are_one_snapshot(monkey
                  "default_graph_id": NEW_ID}
     token = mcp_auth._current_graph_namespace.set(refreshed["graph_namespace"])
     try:
-        hydrated = asyncio.run(ha._hydrate_default_namespace({"org_id": TEAM}))
+        hydrated = ha._hydrate_default_namespace({"org_id": TEAM})
         tenant = record_writer.record_tenant_for(refreshed,
                                                 control_plane_ids=True)
     finally:
@@ -2646,6 +2695,44 @@ def test_the_repair_candidates_are_the_orgs_per_graph_namespaces_first():
     # A pre-#3543 per-graph spelling is a candidate too.
     legacy = f"team_{TEAM}_g_legacy"
     assert ha._historical_onboarding_sources(TEAM, None, {legacy}) == [legacy]
+
+
+def test_the_repair_keeps_the_fork_choice_a_progress_tie_hides(sb):
+    """FAIL-ON (#10452 review P2): the ranking asked only ``(status, steps,
+    members)`` and broke a tie on CANDIDATE ORDER, so a snapshot that tied on
+    progress but held a DIFFERENT flow state lost silently — the tie-break kept
+    the earlier candidate, which along a promotion chain is the STALE one.
+
+    This is that shape and nothing else: equal progress, `complete` in both, and
+    the only difference is the owner's ANSWERED fork (`write_fork` is set-once,
+    so the frozen census carries `None` while the live record carries
+    `'build'`). Pre-fix the picker returns the stale graph and `copy_org_state`
+    writes `fork = None` into the fresh default, i.e. the fork choice the carry
+    exists to preserve is dropped.
+    """
+    # The census `org_{org_id}` keeps: frozen at the first promotion, unanswered.
+    _seed_onboarding(_OLD_NS, steps=_COMPLETE_STEPS, status="complete")
+    # The live record: the SAME progress, and the owner HAS answered the fork.
+    _seed_onboarding(_MID_NS, steps=_COMPLETE_STEPS, status="complete",
+                     fork="build")
+    assert _read_onboarding(_OLD_NS).get("fork") is None
+    assert _read_onboarding(_MID_NS).get("fork") == "build"
+
+    picked = ha._pick_onboarding_source([_OLD_NS, _MID_NS], TEAM)
+    assert picked == _MID_NS, (
+        f"the repair read its source from {picked!r}: the two snapshots tie on "
+        "progress, and the tie-break kept the EARLIER candidate — carrying the "
+        "stale `fork = None` over the owner's answered fork")
+
+    # Order-independence: the same answer with the candidates REVERSED, so the
+    # FLOW half of the ranking decided it and not the list order.
+    assert ha._pick_onboarding_source([_MID_NS, _OLD_NS], TEAM) == _MID_NS
+
+    # NON-VACUITY: with the flow state EQUAL the earlier candidate still wins,
+    # so the assertions above are discriminating rather than "always the last".
+    _seed_onboarding(_NEW_NS, steps=_COMPLETE_STEPS, status="complete",
+                     fork="build")
+    assert ha._pick_onboarding_source([_MID_NS, _NEW_NS], TEAM) == _MID_NS
 
 
 def test_the_repair_reads_the_live_record_not_an_older_snapshot(
