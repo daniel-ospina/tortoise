@@ -3921,6 +3921,76 @@ class TestStallWatchdog:
             "that sentence is about the SOFT path; unqualified it denies the "
             "in-process detection fly.toml relies on")
 
+    def test_the_call_site_contract_names_the_ceiling_the_deployment_arms(self):
+        """#10585 review P2 (THIRD copy): the CALL SITE still described the
+        pre-ceiling behaviour — in the file this PR edits.
+
+        ``hosted_api._start_liveness`` is where the hosted deployment arms the
+        watchdog, and the comment above that call said it "returns None" with
+        ``TORTOISE_LOOP_STALL_EXIT_S`` unset, and that enabling it "also
+        requires 3 consecutive stale windows and an idle workload". Both are
+        false for the shape production runs: ``fly.toml`` ``[env]`` arms
+        ``TORTOISE_LOOP_STALL_HARD_EXIT_S=600`` while leaving its sibling
+        unset, so that call does NOT return None, and the hard branch consults
+        neither the hysteresis nor the in-flight gauge.
+
+        The identical defect was fixed in ``.env.example``, in
+        ``monitoring.py``'s gate contract and in ``start_stall_watchdog``'s
+        docstring; this is the copy a reader hits while asking the most
+        operational question there is — "what does the hosted deployment
+        actually arm?" — and it is the file, and the call, that does the arming.
+        """
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent
+               / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+        lines = src.splitlines()
+
+        call = next(i for i, line in enumerate(lines)
+                    if "app.state._loop_watchdog = start_stall_watchdog(" in line)
+        # Slice from the COMMENT BLOCK that introduces this call, not from 40
+        # lines up: the enclosing docstring already names the ceiling, and a
+        # slice that swallows it would make the assertions below pass on the
+        # pre-fix tree (verified by reverting the fix and re-running).
+        lead = next(i for i, line in enumerate(lines)
+                    if i < call
+                    and "DISABLED BY DEFAULT (#2850 review P0):" in line)
+        block = "\n".join(lines[lead:call])
+        assert len(block) > 100, block
+
+        assert "TORTOISE_LOOP_STALL_HARD_EXIT_S" in block, (
+            "the call site must name the knob the hosted deployment ARMS: a "
+            "reader asking what production runs was told only about its "
+            "sibling, which is unset there")
+        assert "SOFT" in block, (
+            "the stale-window and idle-workload conditions describe the SOFT "
+            "path only; unqualified they describe a mechanism production does "
+            "not run")
+        assert "does NOT return None" in block, (
+            "and must state the exemption plainly: with only the soft knob "
+            "unset this call does NOT return None — the hard ceiling arms it")
+        assert "bypass" in block, (
+            "naming the exemption explicitly is the fix: the hard ceiling "
+            "BYPASSES the idle gate, it does not inherit it")
+
+        # The same false belief, one level down: LOOP_STALE_AFTER's own
+        # rationale said the destructive self-kill is "gated on an idle
+        # workload" with no path qualifier.
+        src_mon = (Path(__file__).resolve().parent.parent
+                   / "tortoise" / "monitoring.py").read_text(encoding="utf-8")
+        mon_lines = src_mon.splitlines()
+        stale_end = next(i for i, line in enumerate(mon_lines)
+                         if line.startswith("LOOP_STALE_AFTER = "))
+        stale_block = "\n".join(mon_lines[max(0, stale_end - 30):stale_end])
+        gated = [i for i, line in enumerate(mon_lines)
+                 if "gated on an idle workload" in line
+                 and i < stale_end and i >= max(0, stale_end - 30)]
+        assert gated, "LOOP_STALE_AFTER's rationale no longer states the gate"
+        assert "SOFT" in stale_block and (
+            "TORTOISE_LOOP_STALL_HARD_EXIT_S" in stale_block), (
+            "LOOP_STALE_AFTER's rationale must scope its idle-gate claim to "
+            "the SOFT path and name the hard ceiling that bypasses it")
+
     def test_the_test_session_pins_the_hard_ceiling_disarmed(self):
         """#10585 review P3: the session-wide env pin covered only the sibling.
 

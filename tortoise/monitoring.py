@@ -3524,9 +3524,12 @@ LOOP_HEARTBEAT_INTERVAL = 0.25   # tick period of the loop-side heartbeat task
 #: set ABOVE the longest single bounded on-loop operation (the 60s LLM call) so
 #: it distinguishes "wedged" from "busy" for the single-operation case. It is
 #: still not a load signal: multi-stage extraction can legitimately exceed it,
-#: which is exactly why the destructive self-kill below is opt-in and gated on
-#: an idle workload, and why the durable remedy is offloading these synchronous
-#: calls rather than tuning this number.
+#: which is exactly why the destructive self-kill below is opt-in and, on its
+#: SOFT path, gated on an idle workload (the HARD ceiling
+#: ``TORTOISE_LOOP_STALL_HARD_EXIT_S`` is the exception and deliberately
+#: bypasses that gate — a request in flight does not stop the loop ticking, so
+#: a MISSING TICK is the evidence of a wedge), and why the durable remedy is
+#: offloading these synchronous calls rather than tuning this number.
 LOOP_STALE_AFTER = 90.0
 
 #: monotonic timestamp of the last loop tick; 0.0 == the loop has NEVER ticked

@@ -1978,10 +1978,21 @@ def _start_liveness(app) -> None:
     app.state._analytics_canary_task = loop.create_task(_analytics_canary_loop())
     app.state._healthz_server = start_health_listener()
     app.state._loop_watchdog_stop = threading.Event()
-    # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
-    # unset this returns None — the /healthz listener is the signal and the
-    # destructive action lives in the out-of-band watchdog. Enabling it here
-    # also requires 3 consecutive stale windows and an idle workload.
+    # DISABLED BY DEFAULT (#2850 review P0): the SOFT, idle-gated self-kill is
+    # what this comment used to describe. TORTOISE_LOOP_STALL_EXIT_S is unset,
+    # so THAT path stays off: the /healthz listener is the signal and the
+    # destructive action lives in the out-of-band watchdog. When armed it
+    # requires 3 consecutive stale windows AND an idle workload.
+    #
+    # The HARD ceiling (#10585) is the exception, and it is the one the HOSTED
+    # deployment actually runs: fly.toml [env] arms
+    # TORTOISE_LOOP_STALL_HARD_EXIT_S=600 while leaving its sibling unset, so
+    # this call does NOT return None in production. That branch deliberately
+    # bypasses the idle gate and the hysteresis — the in-flight gauge is TRUE by
+    # construction during the wedge it guards (an open `GET /mcp` SSE stream is
+    # an in-flight request), so an idle-gated exit could never fire. It keeps
+    # only the dead-TICKER disarm, and relies on fly.toml's [[restart]] block
+    # (policy `on-failure`) to turn the non-zero exit into a RESTART.
     app.state._loop_watchdog = start_stall_watchdog(
         stop_event=app.state._loop_watchdog_stop)
 
