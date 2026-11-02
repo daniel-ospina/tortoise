@@ -1461,10 +1461,35 @@ def test_expect_empty_reaches_a_verdict_when_the_local_record_is_absent(
 
     monkeypatch.setattr(FalkorProjection, "from_uri",
                         classmethod(lambda cls, *a, **k: _Empty()))
+    out = tmp_path / "out.json"
     code = tpc.main(["--uri", "docker://x", "--graph-name", "g",
                      "--local-record-dir", str(tmp_path / "absent"),
-                     "--expect-empty"])
+                     "--expect-empty", "--json", str(out)])
     assert code == 0               # the record leg was SKIPPED, not an absence
+    import json as _json
+    assert _json.loads(out.read_text())["record"]["leg"] == "local-skipped"
+
+
+def test_expect_empty_does_NOT_skip_the_hosted_leg(tmp_path, monkeypatch):
+    """Cycle-6 P1: an unreachable hosted DSN must not certify via the skip."""
+    from tortoise.projection import FalkorProjection
+
+    class _G:
+        def query(self, cypher, params=None):
+            class R:
+                result_set = ([[0]] if "count(t)" in cypher else [])
+            return R()
+
+    class _Empty:
+        def __init__(self, *a, **k):
+            self.g = _G()
+
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        classmethod(lambda cls, *a, **k: _Empty()))
+    code = tpc.main(["--uri", "docker://x", "--graph-name", "g",
+                     "--record-dsn", "postgresql://nowhere.invalid:1/x",
+                     "--org-id", "o", "--graph-id", "g", "--expect-empty"])
+    assert code == 3               # the record leg was DIALED, and it refused
     # …and without the flag the same empty graph still refuses.
     assert tpc.main(["--uri", "docker://x", "--graph-name", "g",
                      "--local-record-dir", str(tmp_path / "absent")]) == 3

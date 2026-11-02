@@ -1240,7 +1240,10 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
                        "lines_parsed": record.get("lines_parsed"),
                        "torn_tail": record.get("torn_tail") or []}
                       if record.get("leg") == "local" else
-                      {"leg": "hosted"})},
+                      # Verbatim, never collapsed: a SKIPPED leg named
+                      # 'hosted' is an artifact claiming a read that never
+                      # happened (review cycle 6, P2).
+                      {"leg": record.get("leg") or "hosted"})},
         "parity": {
             "clean_sessions": clean,
             "failed_sessions": failed,
@@ -1388,10 +1391,12 @@ def main(argv: list[str] | None = None) -> int:
     # (while the same input certified on the hosted leg, which tolerates zero
     # rows). The empty leg is LABELLED `local-skipped`/`hosted-skipped` so the
     # artifact cannot read as a real read.
-    if graph_is_empty:
+    if graph_is_empty and args.local_record_dir:
+        # LOCAL ONLY: the hosted read tolerates zero rows by itself, and
+        # skipping IT reported a read of a DSN that was never opened (review
+        # cycle 6, P1 — an unreachable hosted DSN certified exit 0).
         record = {"rows_by_key": {}, "non_turn_shaped": 0,
-                  "leg": ("local-skipped" if args.local_record_dir
-                          else "hosted-skipped")}
+                  "leg": "local-skipped"}
     else:
         try:
             if args.local_record_dir:
@@ -1416,9 +1421,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"population : {pop['episodic_graph_nodes']} episodic graph node(s) "
           f"(the delete set), {pop['turn_shaped_nodes']} of them turn-shaped, "
           f"across {pop['sessions_with_graph_turns']} session(s)")
-    print(f"record     : {report['record']['turn_rows_total']} turn rows "
-          f"({report['record']['episodic_rows_not_turn_shaped']} episodic "
-          f"rows not turn-shaped)")
+    if report["record"].get("leg", "").endswith("-skipped"):
+        print("record     : SKIPPED — the graph holds ZERO episodic nodes, so "
+              "there is nothing to compare a record against (NOT a measured "
+              "zero)")
+    else:
+        print(f"record     : {report['record']['turn_rows_total']} turn rows "
+              f"({report['record']['episodic_rows_not_turn_shaped']} episodic "
+              f"rows not turn-shaped)")
     if report.get("declared_absent"):
         # A narrower comparison must never read as the strong one.
         pronoun = "it" if len(report["declared_absent"]) == 1 else "them"
