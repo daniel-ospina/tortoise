@@ -19866,6 +19866,11 @@ class FalkorProjection(
         # for why.
         embed_clear = ""
         wrote_content_hash = False
+        # #10523 review (P2): did the re-encode branch below already emit the
+        # absolute `n.embeddingText = NULL`? The caller-vector clause further
+        # down emits the SAME SET for the same field, and one statement must not
+        # carry it twice.
+        reencode_cleared_embedding_text = False
 
         # #4042: `n.content` is written UNCONDITIONALLY by
         # `_upsert_point_props`, so a creation that superseded this revision
@@ -20072,7 +20077,13 @@ class FalkorProjection(
                 # enriched text — `embeddingText` describes the vector that was
                 # just replaced. Mirrors `update_point`'s re-derive branch
                 # exactly, so a rebuild and the live write agree (#4194).
+                # ABSOLUTE (not presence-conditional) on purpose: this clause
+                # must clear even for a hand-written record that omits the key,
+                # because the vector it described is gone either way. The
+                # caller-vector door's presence-conditional clause is emitted
+                # after this block and skipped here (`reencode_cleared_…`).
                 set_clauses.append("n.embeddingText = NULL")
+                reencode_cleared_embedding_text = True
                 wrote_embedding = True
             if not skip_hash:
                 # #2795: content_hash is derived from content — mirror the live
@@ -20095,6 +20106,35 @@ class FalkorProjection(
         if set_updated_at and not skip_content:
             set_clauses.append("n.updatedAt = $now")
             params["now"] = _now_iso()
+        # #10523 review (P2): the CALLER-VECTOR door's enrich-text clear.
+        #
+        # `update_point(embedding=[…])` / `update_point(embedding=None)` journals
+        # a `PointRevised` with `embeddingText: None` (the writer sets it beside
+        # `embedding_verbatim`, `sdk.py:16585`, and `emit_props` carries it). The
+        # only clause that folded that field sat INSIDE the
+        # `new_content is not None` re-encode branch above, so this door's clear
+        # was journalled and never replayed: `rebuild()` restored a text the LIVE
+        # graph no longer holds — the opposite of what that branch's own comment
+        # promises ("so a rebuild and the live write agree").
+        #
+        # Shape is the `tags` / `validToPrecision` one: PRESENCE-conditional
+        # (mirroring live's `SET n += $props`), with `_store_holds_prop_value` as
+        # the shared write bar — a value the transport gate refuses is what live
+        # nulls, so it REMOVES the property here too. On `skip_embedding` the
+        # paired half was superseded by a later same-file creation, and the text
+        # describes THIS revision's vector, so it shares that boundary exactly.
+        # The re-encode branch keeps its ABSOLUTE `n.embeddingText = NULL` (it
+        # must clear even for a record that does not state the key); this clause
+        # is skipped there, since it would restate the same SET.
+        # ⚠️ Not the record lane's rule: `_upsert_statement`'s `props = point.props
+        # || EXCLUDED.props` makes an OMITTED key preserve a stale text, which is
+        # why the carrier's own clause is unconditional (`SET n.embeddingText=$et`),
+        # not conditional.
+        if (not skip_embedding and not reencode_cleared_embedding_text
+                and "embeddingText" in ev
+                and (ev["embeddingText"] is None
+                     or not _store_holds_prop_value(ev["embeddingText"]))):
+            set_clauses.append("n.embeddingText = NULL")
         # #3689: fold the annotator dims carried as PointRevised extras
         # (update_point's emit) — apply()/rebuild previously dropped them, so
         # rebuild_all silently erased annotate_operator's write. Presence-

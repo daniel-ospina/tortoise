@@ -98,10 +98,13 @@ What this module DOES decide, and why — the one omission review round 2 caught
 """
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 
 from .env_truthy import is_truthy
+
+_logger = logging.getLogger(__name__)
 
 #: The repo's ONE untrusted-region seam (#10311). Imported deliberately rather
 #: than re-implemented: a second framing renderer is exactly the drift this
@@ -135,6 +138,56 @@ _SYSTEM_PROMPT = (
 #: (:data:`_UNTRUSTED_LABEL` is ours, never session text — it becomes the
 #: boundary slug).
 _UNTRUSTED_LABEL = "NEIGHBOUR WINDOW"
+
+#: How often a per-turn rewrite failure is logged (the FIRST one always is).
+#: Per-turn loud would log once per turn of every capture, which is the shape an
+#: operator learns to filter out — and an enrichment model that raises does so
+#: per CALL, so the failure count is the window length, not one.
+_FAILURE_LOG_EVERY = 100
+
+#: Process-lifetime count of failed rewrites, for the rate limit above. The
+#: counter is the deliverable, not the log line: it is what makes "ON is
+#: degrading to raw" measurable instead of invisible.
+_rewrite_failures = 0
+
+
+def rewrite_failure_count() -> int:
+    """Failures seen since process start (the test seam for the warning)."""
+    return _rewrite_failures
+
+
+def _reset_rewrite_failure_count() -> None:
+    """Test seam: reset the counter the rate-limited warning keys on."""
+    global _rewrite_failures
+    _rewrite_failures = 0
+
+
+def _note_rewrite_failure(index: int, exc: BaseException) -> None:
+    """Count one failed rewrite and LOG it — rate-limited (#10523 review, P2).
+
+    The ``except`` arm in :func:`_rewrite_one` degrades that turn to its raw
+    text, and a raw-text fallback is INDISTINGUISHABLE from a faithful rewrite
+    that happened to be the identity. So a model that raises per call — a
+    context-length overrun on a long window, an API error, a refusal — would
+    silently degrade EVERY turn of EVERY capture with no signal at all, and the
+    capture would still pay N sequential completions for it.
+
+    The repo's posture is the opposite, stated at its own degradation path:
+    ``sdk._record_prior_vectors`` — *"it is a DEGRADATION, not a normal path, so
+    it is never silent"*. This is that posture, rate-limited so the log stays a
+    signal rather than a stream.
+    """
+    global _rewrite_failures
+    _rewrite_failures += 1
+    if _rewrite_failures == 1 or _rewrite_failures % _FAILURE_LOG_EVERY == 0:
+        _logger.warning(
+            "context enrichment: the rewrite failed for turn %d (%s: %s) — "
+            "falling back to raw text; %d failed rewrite(s) this process so "
+            "far. The capture stays coherent (#4194: text, hash and vector "
+            "agree), but %s is set and ON is degrading to raw text, which is "
+            "not a normal path.",
+            index, type(exc).__name__, exc, _rewrite_failures, ENRICH_ENV,
+        )
 
 
 def enrich_enabled() -> bool:
@@ -242,7 +295,16 @@ def _rewrite_one(
     user = f"{window_block}\n\n{_target_clause(index)}"
     try:
         rewritten = complete_fn(system=_SYSTEM_PROMPT, user=user)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — fail-soft is the contract
+        # #10523 review (P2): a raise here degrades THIS turn to raw text, and
+        # the result is indistinguishable from a faithful identity rewrite — so
+        # it is counted and logged rather than swallowed. Fail-soft stays the
+        # contract (a capture must never fail over one turn); SILENTLY soft was
+        # the defect: on an ON deployment a model that raises per call (a
+        # context-length overrun, an API error, a refusal) degrades every turn
+        # of every capture with zero signal, and the capture pays every one of
+        # those completions. Rate-limited via `_note_rewrite_failure`.
+        _note_rewrite_failure(index, exc)
         return text
     if not isinstance(rewritten, str) or not rewritten.strip():
         return text

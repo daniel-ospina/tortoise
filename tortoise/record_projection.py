@@ -534,9 +534,16 @@ TURNS_RECORD_TYPE = "TurnsRecorded"
 #: ⛔ THE PAYLOAD IS PINNED TO THE WRITER'S, so step 7 is a MOVE and not a
 #: reshape. Each entry of the carrier's ``turns`` list is one of the
 #: ``_turn_snapshot`` dicts `sdk._write_capture_turns` builds today, verbatim —
-#: these keys ALWAYS, plus at most one branch of the optional set below, MINUS
-#: (never partially) the ``TURNS_SNAPSHOT_UNATTESTABLE_KEYS`` when the writer could
-#: not attest them. The
+#: these keys ALWAYS, plus ONE of the embedding-identity branches
+#: (``embedding_preserved`` XOR the three stamps) and INDEPENDENTLY
+#: ``embeddingText`` on the enriched branch, MINUS (never partially) the
+#: ``TURNS_SNAPSHOT_UNATTESTABLE_KEYS`` when the writer could not attest them.
+#: ⛔ "at most one key of the optional set" was the sentence here until #10523
+#: review P3, and it is FALSE on the enriched preserved capture the writer can
+#: now emit: that snapshot carries ``embedding_preserved`` AND ``embeddingText``
+#: — two optional keys, because the text is a separate question from the vector's
+#: identity. `_assert_snapshot_contract(optional=…)` takes a SET, so the two
+#: coexist without tripping the contract; the prose, not the code, was wrong. The
 #: ``contains_session`` link rides the EVENT ENVELOPE rather than the per-turn
 #: dicts, exactly as it does for `PointAdded` (#3947: it is a capture-write
 #: STRUCTURAL fact, restored by the projection's edge fold, and never a node

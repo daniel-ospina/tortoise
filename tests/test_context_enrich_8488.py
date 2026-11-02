@@ -48,6 +48,7 @@ from tortoise.context_enrich import (
     _target_clause,
     enrich_enabled,
     enrich_turn_texts,
+    rewrite_failure_count,
 )
 from tortoise.embeddings import (
     NEAR_DUPLICATE_THRESHOLD,
@@ -331,6 +332,50 @@ def test_enrich_turn_texts_fails_soft_to_raw_text():
     assert enrich_turn_texts(texts, complete_fn=raising) == texts
     assert enrich_turn_texts(texts, complete_fn=lambda system, user: "   ") == texts
     assert enrich_turn_texts(texts, complete_fn=lambda system, user: None) == texts
+
+
+def test_a_raising_rewrite_is_LOGGED_not_swallowed(caplog, monkeypatch):
+    """#10523 review (P2): a per-turn raise degrades to raw text *silently*.
+
+    Fail-soft stays the contract — the capture must never fail over one turn —
+    but the fallback is INDISTINGUISHABLE from a faithful rewrite that happened
+    to be the identity. So a model that raises per call (a context-length
+    overrun on a long window, an API error, a refusal) would degrade EVERY turn
+    of EVERY capture with zero signal, while the capture still pays every one of
+    those completions. The repo's posture is the opposite at its own degradation
+    path (`sdk._record_prior_vectors`: "it is a DEGRADATION, not a normal path,
+    so it is never silent").
+
+    Non-vacuity: on the pre-fix `except Exception: return text` arm the counter
+    never moves and no record at WARNING or above is emitted, so both halves of
+    this test red.
+    """
+    from tortoise import context_enrich
+
+    context_enrich._reset_rewrite_failure_count()
+    monkeypatch.setattr(context_enrich, "_FAILURE_LOG_EVERY", 2)
+
+    def raising(system, user):
+        raise RuntimeError("context length exceeded")
+
+    with caplog.at_level("WARNING", logger=context_enrich.__name__):
+        assert enrich_turn_texts(["[user] a", "[user] b", "[user] c"],
+                                 complete_fn=raising) == ["[user] a", "[user] b",
+                                                           "[user] c"]
+
+    assert rewrite_failure_count() == 3, (
+        "a failed rewrite was swallowed without being counted — the failure is "
+        "invisible to an operator (#10523 review P2)")
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    # Rate-limited: the first failure and then every Nth (here 1 and 3 of 3).
+    assert len(warnings) == 2, [r.getMessage() for r in caplog.records]
+    assert "context length exceeded" in warnings[0].getMessage()
+    assert ENRICH_ENV in warnings[0].getMessage()
+
+    # …and a SUCCESSFUL rewrite must not inflate the count.
+    context_enrich._reset_rewrite_failure_count()
+    enrich_turn_texts(["[user] a"], complete_fn=lambda system, user: "rewritten")
+    assert rewrite_failure_count() == 0
 
 
 # ── 3. OFF is byte-identical to pre-#8488 ──────────────────────────────────
@@ -720,6 +765,52 @@ def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text
         "a caller CLEAR of the vector left the embeddingText it described "
         "behind (#4194)")
     assert cleared[3] is None, cleared
+
+
+def test_a_caller_vector_does_not_resurrect_the_enriched_text_on_rebuild(
+        embedder, enrichment_on, tmp_path):
+    """#10523 review (P2): the caller-vector CLEAR must replay, not just happen.
+
+    `update_point(embedding=[…])` / `update_point(embedding=None)` journals a
+    `PointRevised` carrying `embeddingText: None` (`sdk.py:16585` sets it beside
+    `embedding_verbatim`, and `emit_props` carries it). `_revise_point` folded
+    that field ONLY inside its `new_content is not None` re-encode branch, so
+    this door's clear was journalled and never replayed — `rebuild()` restored a
+    text the live graph no longer holds, contradicting that branch's own comment
+    ("so a rebuild and the live write agree"). Live is the truth here: the
+    vector was replaced, so no text describes it.
+
+    Non-vacuity: on the pre-fix fold the REBUILT row keeps
+    `'[user] the auth flow is blocked'` while LIVE holds `None`, so the
+    live-vs-rebuilt assertion reds.
+    """
+    from tortoise.log import EventLog
+
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
+    try:
+        s.capture_session(CONV, session_id="sess-vec-rebuild")
+        before = _turn_rows(s, "sess-vec-rebuild")
+        assert before[0][2] == "[user] the auth flow is blocked", before
+
+        s.update_point(before[0][0], embedding=[1.0, 0.0, 0.0, 0.0])
+        live = _turn_rows(s, "sess-vec-rebuild")
+        assert live[0][2] is None, live
+
+        s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
+
+        rebuilt = _turn_rows(s, "sess-vec-rebuild")
+        assert rebuilt[0][2] is None, (
+            "a rebuild restored an embeddingText the LIVE graph does not hold: "
+            "the caller-vector clear was journalled but never replayed "
+            "(#10523 review P2)")
+        # The sibling turn is untouched — the clear is keyed to this record, so a
+        # blanket wipe cannot satisfy this test.
+        assert rebuilt[1][2] == before[1][2], (
+            "the caller-vector clear wiped a SIBLING turn's embeddingText",
+            live, rebuilt)
+    finally:
+        s.close()
 
 
 # ── 10. `embeddingText` is WRITER-minted at every intake door ──────────────
