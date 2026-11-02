@@ -104,13 +104,13 @@ from collections.abc import Callable
 
 from .env_truthy import is_truthy
 
-_logger = logging.getLogger(__name__)
-
 #: The repo's ONE untrusted-region seam (#10311). Imported deliberately rather
 #: than re-implemented: a second framing renderer is exactly the drift this
 #: module must not become a third copy of (`extractor_v2.py:1511` records the
 #: only sanctioned exception, and it is NOT this site).
 from .extractor_v2 import _render_untrusted_block
+
+_logger = logging.getLogger(__name__)
 
 #: The gate. Fail-safe OFF: enrichment is only applied when an operator asks
 #: for it AND (#8486) has a baseline to judge it against — the same posture as
@@ -295,7 +295,7 @@ def _rewrite_one(
     user = f"{window_block}\n\n{_target_clause(index)}"
     try:
         rewritten = complete_fn(system=_SYSTEM_PROMPT, user=user)
-    except Exception as exc:  # noqa: BLE001 — fail-soft is the contract
+    except Exception as exc:
         # #10523 review (P2): a raise here degrades THIS turn to raw text, and
         # the result is indistinguishable from a faithful identity rewrite — so
         # it is counted and logged rather than swallowed. Fail-soft stays the
