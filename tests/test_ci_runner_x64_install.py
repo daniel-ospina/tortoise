@@ -4603,8 +4603,11 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # re-cut comments this PR added to that file pushed it 1590 → 1596, and the record↔bars
         # tests added above at the same head pushed it 1596 → 1673, then 1682 when the disagreement
         # case was widened from the two log-invisible bars to all seven — the pin landing rather
-        # than drifting, because a plausible offset is what it exists to refuse)
-        ("tests/test_capstone_preregistration_9075.py", 1682):
+        # than drifting, because a plausible offset is what it exists to refuse. Then 1687: the
+        # E3 class-set arms (`_e3_class_set_failures`, one per CELL) and the scope-declaration
+        # paragraphs that #9736/#9738 needed pushed it 1682 → 1687, and this pin redded the sibling
+        # at that head rather than letting the relay land on an adjacent comment.)
+        ("tests/test_capstone_preregistration_9075.py", 1687):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
