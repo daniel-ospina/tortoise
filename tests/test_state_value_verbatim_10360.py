@@ -1131,6 +1131,95 @@ def test_the_MINT_stores_the_refs_OWN_identity_prefix_so_the_5069_loop_closes():
     assert hard in minted, ([len(c) for c in minted], result["warnings"])
 
 
+def test_a_NUMBER_WORD_cut_at_the_cap_moves_the_identity_span():
+    """Review cycle-18 P2/P1: the identity cap moves for a NUMBER WORD too.
+
+    `_value_bindings` binds number words (`four` is 4, `fourteen` is 14), so a
+    cut INSIDE `fourteen` keeps a prefix that states a DIFFERENT value. Measured
+    pre-fix: `"the "*249 + "fourteen widgets"` stored `… the four` and the
+    write-path rule then REFUSED the truthful point with `point says '4', quote
+    says '14'` — a false accusation, which is the class this whole rule forbids.
+
+    ⛔ The SECOND half is the harder defect (#10513 review cycle-18 P1): the arm
+    is DEFINED against the value engine, and `_num_word_value` strips whitespace
+    only — so it answers None for `fourteen.`/`fourteen,`/`(fourteen` while
+    `_value_bindings` reads 14 from all three. Probing the raw split token
+    therefore left the SAME false accusation live one punctuation mark away. It
+    does so from BOTH sides, and the first repair only closed the trailing one
+    (`re.match` is anchored): `"the "*248 + "ab (fourteen widgets"` kept `ab
+    (four` and produced `('ab', '4', '14')` — the identical refusal, reached
+    from the leading side. The probe is now `re.search` of the token's word run,
+    so a punctuation mark on either side cannot hide the word.
+
+    Non-vacuous in BOTH directions, and the controls are the point: `moved`
+    alone would pass if the arm had gone blind by widening. `tender` pins the
+    not-too-wide side (a token that merely CONTAINS a number word keeps the
+    span), and the last two pin the WHOLE-TOKEN probe from both sides —
+    `fourteen-widgets` keeps the span although its kept prefix `four` IS a
+    number word (the engine reads no value from the whole token, so there is
+    nothing to lose), while `twenty-five` moves it although its kept prefix
+    `twen` binds nothing (the whole token binds 25).
+    """
+    pad = "the " * 249
+    assert len(pad) == 996
+
+    for tail in ("fourteen widgets", "fourteen. widgets", "fourteen, widgets"):
+        raw = pad + tail
+        hard = raw[:v2._MAX_CONTENT]
+        # the cut really does land INSIDE the number word (`four|teen`)
+        assert hard.endswith("four"), (tail, hard[-12:])
+        span = v2._write_span(raw, v2._MAX_CONTENT)
+        assert span != hard, (tail, span[-14:])
+        assert span == pad, (tail, repr(span[-14:]))
+        # …and the pair the write then judges no longer disagrees about a value
+        assert v2._value_slot_divergence(span, raw) == (), (
+            tail, v2._value_slot_divergence(span, raw))
+
+    # ⛔ LEADING punctuation hides it just as well, and the anchored form the
+    # first repair shipped (`re.match`) fixed only the trailing half: measured,
+    # every one of these kept `… ab Xfour` and was REFUSED against the source's
+    # 14. The pad keeps the punctuation AND four characters of the word, so the
+    # shape is not vacuous.
+    lead_pad = "the " * 248 + "ab "
+    assert len(lead_pad) == 995
+    for lead in ("(", '"', "'", "[", "\u00ab", "-", "\u2212"):
+        raw = lead_pad + lead + "fourteen widgets"
+        hard = raw[:v2._MAX_CONTENT]
+        assert hard.endswith("four"), (lead, hard[-12:])
+        span = v2._write_span(raw, v2._MAX_CONTENT)
+        assert span != hard, (lead, repr(span[-14:]))
+        assert span == lead_pad, (lead, repr(span[-14:]))
+        assert v2._value_slot_divergence(span, raw) == (), (
+            lead, v2._value_slot_divergence(span, raw))
+
+    # POSITIVE CONTROL 1: a token that merely CONTAINS a number word keeps the
+    # identity span — otherwise this arm would have eaten the identity key for
+    # every word starting with ten/two/six…
+    raw = pad + "tender widgets"
+    hard = raw[:v2._MAX_CONTENT]
+    assert hard.endswith("tend"), hard[-12:]
+    assert v2._write_span(raw, v2._MAX_CONTENT) == hard
+
+    # POSITIVE CONTROL 2: the engine reads no value out of `fourteen-widgets`,
+    # so there is nothing to preserve and the span must stay put — even though
+    # its KEPT PREFIX `four` is itself a number word. This is the control that
+    # makes the probe ask the whole token instead.
+    raw = pad + "fourteen-widgets"
+    hard = raw[:v2._MAX_CONTENT]
+    assert hard.endswith("four"), hard[-12:]
+    assert v2._value_bindings("fourteen-widgets") == ()
+    assert v2._write_span(raw, v2._MAX_CONTENT) == hard
+
+    # POSITIVE CONTROL 3: a hyphenated NUMBER-WORD pair IS one value (25), so a
+    # cut inside it must move the span — the mirror of control 2: the KEPT
+    # PREFIX `twen` binds nothing, and only the whole token does.
+    raw = pad + "twenty-five widgets"
+    hard = raw[:v2._MAX_CONTENT]
+    assert hard.endswith("twen"), hard[-12:]
+    assert v2._value_bindings("twenty-five") == (("", "25"),)
+    assert v2._write_span(raw, v2._MAX_CONTENT) != hard
+
+
 # ── 8. the rule's own BOUND, and the residual it still carries ───────────────────
 
 def test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded():
@@ -1675,8 +1764,19 @@ def test_a_currency_symbol_does_not_swallow_the_SIGN():
     assert v2._value_core("-$4") == ("-", "4", None)
     assert not v2._value_slot_divergence("the delta was $-4",
                                          "the delta was -4")
+    # ⛔ U+2212 MINUS SIGN IS `Sm`, so a decoration-skip that consumed every
+    # `Sm` ate the sign it existed to find (#10513 review cycle-18 P1, measured):
+    # `€\u221250` was REFUSED against `-50`, and `$\u22124` against `$4` — a
+    # DROPPED sign — was written. U+2212 is what Word and PDF math autocorrect
+    # emit, so this is ordinary extracted text. Both directions pinned.
+    assert v2._value_core("$\u22124") == ("-", "4", None)
+    assert v2._value_core("\u20ac\u221250") == ("-", "50", None)
+    assert not v2._value_slot_divergence("the shortfall was \u20ac\u221250",
+                                         "the shortfall was -50")
     # POSITIVE CONTROL: the sign the model dropped is still a rewrite.
     assert v2._value_slot_divergence("the delta was $-4",
+                                     "the delta was $4")
+    assert v2._value_slot_divergence("the delta was $\u22124",
                                      "the delta was $4")
 
 
@@ -1697,11 +1797,26 @@ def test_an_accounting_PAREN_numeral_is_outside_the_judged_set():
     assert v2._value_core("($4)") is None
     assert not v2._value_slot_divergence("the shortfall was ($4)",
                                          "the shortfall was -4")
-    # POSITIVE CONTROL: a prose parenthetical keeps its slot, so a real rewrite
-    # in that text is still refused — the exclusion did not swallow the side.
-    assert v2._value_slots("a loss of (see 2019) here")
-    assert v2._value_slot_divergence("a loss of (see 2019) here",
-                                     "a loss of (see 2020) here")
+    assert not v2._value_slot_divergence("the shortfall was (-4)",
+                                         "the shortfall was -4")
+    # ⛔ POSITIVE CONTROLS, and they have to be the RIGHT ones (#10513 review
+    # cycle-18 P1, measured): the exclusion is the ACCOUNTING SHAPE — a currency
+    # symbol or a sign inside the parens — NOT every parenthesised number. An
+    # earlier revision made both optional, so a bare `(2019)`/`(2)` matched and
+    # the WHOLE side went unjudged: `"the p95 hit 4.0 seconds (see note 2019)"`
+    # against `"… 4.2 …"` was written with zero warnings. `(2)` and `(2019)` now
+    # keep their slots, and a rewrite in a text carrying one is still refused.
+    assert v2._value_slots("see (2) for details")
+    assert v2._value_slots("a loss of (2019) here")
+    assert v2._value_slot_divergence(
+        "the p95 hit 4.0 seconds (see note 2019)",
+        "the p95 hit 4.2 seconds (see note 2019)")
+    # ⛔ STATED RESIDUAL (row (o)): a BARE `(4)` in an accounting column is
+    # indistinguishable from a prose parenthetical with no locale and no column
+    # context, so it is read as POSITIVE and `(4)`/`-4` is still refused. Pinned
+    # so closing it has to move the row.
+    assert v2._value_slot_divergence("the shortfall was (4)",
+                                     "the shortfall was -4")
 
 
 def test_a_SCALE_word_is_compared_across_the_pair_rather_than_dropped():
