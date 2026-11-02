@@ -361,6 +361,25 @@ def test_the_withdrawn_log_still_hashes_to_the_digest_its_note_publishes(probe):
         "A note that additionally publishes OTHER digests is fine: only this file's must be here")
 
 
+def _checker():
+    """The pre-registration checker as a module — same loader shape as `_probe()`.
+
+    Loaded for ONE thing: `EVIDENCE_LOG_GLOB`, so the test below globs the same set the ordering
+    half globs instead of a private copy of the literal. The glob is deliberately a named constant
+    in the guard (`tools/capstone_preregistration_check.py:134`, *"Widening it is a deliberate
+    act"*), and a second copy here would be exactly the two-copies-that-can-disagree shape this
+    file refuses for the bars.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_capstone_preregistration_check",
+        ROOT / "tools/capstone_preregistration_check.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_the_withdrawn_log_is_not_back_in_the_checked_directory(probe):
     """The withdrawal moves the log out of the glob — and NOTHING pinned it staying out.
 
@@ -378,14 +397,17 @@ def test_the_withdrawn_log_is_not_back_in_the_checked_directory(probe):
     and the registration IS on the base branch now — so the cheapest-looking way to drop the
     "provisional" is to move the file back.
 
-    Compared by BYTES, not by name: a copy under any filename is the same act. A genuine
-    re-measurement writes DIFFERENT bytes, so it is not refused here.
+    The scanned set is `EVIDENCE_LOG_GLOB` ITSELF, read off the guard, so "the directory the ordering
+    half reads" is measured rather than asserted: if that glob is ever narrowed, this test narrows
+    with it instead of redding on a file the ordering half no longer orders. The match is by BYTES,
+    against the withdrawn file's own digest — a copy under any name the glob covers is the same act —
+    and a genuine re-measurement writes DIFFERENT bytes, so it is not refused here.
     """
     import hashlib
 
     withdrawn = hashlib.sha256((probe.EVIDENCE_DIR / MEASURED_LOG_REL).read_bytes()).hexdigest()
     back = sorted(
-        p.name for p in probe.EVIDENCE_DIR.glob("*.log")
+        p.name for p in probe.EVIDENCE_DIR.glob(_checker().EVIDENCE_LOG_GLOB)
         if hashlib.sha256(p.read_bytes()).hexdigest() == withdrawn)
     assert not back, (
         "the withdrawn log's measured bytes are back in the checked directory "
