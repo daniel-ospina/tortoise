@@ -845,7 +845,7 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 # sessions" while their records are gone. The seal refuses to
                 # create either (`_read_archive`: "an EMPTY file is not a sealed
                 # day"), so the census refuses to read one.
-                if not raw:
+                if not any(line.strip() for line in raw):
                     raise CensusError(
                         f"the sealed day {path.name} is EMPTY — an empty "
                         "archive is not a day that held no sessions (the seal "
@@ -859,7 +859,8 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 # removes a source once it is provably archived, so this is loss,
                 # not an empty day. The newest plain file is exempt — it is
                 # created at boot and may simply not have been written yet.
-                if not raw and path != newest_plain:
+                if not any(line.strip() for line in raw) \
+                        and path != newest_plain:
                     raise CensusError(
                         f"the plain day {path.name} is EMPTY and it is not the "
                         "current day file — a settled day holds records or does "
@@ -916,6 +917,15 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                     "a list — the record cannot be read")
             occurrences[sid] = occurrences.get(sid, 0) + 1
             conversations[sid] = conversation
+
+    if not conversations:
+        # Non-empty files, zero parseable records: the record is empty, which is
+        # not evidence of parity (a whitespace-only day used to slip past the
+        # file-level guard — review cycle 4, P2).
+        raise CensusError(
+            f"the local record under {root} parsed ZERO sessions from "
+            f"{len(files)} file(s) — an empty record is not evidence of parity, "
+            "so an absence is NOT established")
 
     duplicated = sorted(s for s, n in occurrences.items() if n > 1)
     if duplicated:
@@ -1012,15 +1022,30 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
     # waiving `embedding` would then report CLEAN over a node whose enriched
     # text and vector the purge would destroy — the false PASS this gate exists
     # to refuse. Fail closed, once, by name.
+    # ⚠️ The refusal is over EVERY episodic node, not only the in-population
+    # ones: an anomaly is still in the delete set (`is_episodic = true`), so an
+    # enriched anomaly is exposed to the same loss — but it is LABELLED as an
+    # episodic node, because calling it an "in-population turn" would send the
+    # operator at the enrichment instead of at the anomaly the same run reports.
     enriched = sorted(tid for tid, node in nodes.items()
                       if node.get("embeddingText"))
-    if enriched and record.get("carries_embedding_text") is not True:
+    if enriched:
+        # This census does NOT read `embeddingText` on either side. The hosted
+        # record CAN hold it (`record_read.read_record_prior_turns` reads
+        # `props->>'embeddingText'`, record_read.py:773-781) — the local JSONL
+        # cannot — and no leg compares it, so this is a GAP in the comparison,
+        # not an impossibility. Stated as such: a lane that reads this refusal
+        # must be able to fix it (add the column to `_RECORD_TURNS_COLUMNS`,
+        # select `t.embeddingText`, compare) instead of believing the record
+        # cannot carry it.
         raise CensusError(
-            f"{len(enriched)} in-population turn node(s) carry an "
-            f"`embeddingText` (context enrichment, #8488) that this record leg "
-            f"cannot hold or compare (first: {enriched[0]}). Deleting them "
-            "would destroy text no record can restore, so an absence is NOT "
-            "established")
+            f"{len(enriched)} episodic node(s) carry an `embeddingText` "
+            f"(context enrichment, #8488; first: {enriched[0]}). This census "
+            "does not compare that field on EITHER side — the hosted record can "
+            "hold it (`props->>'embeddingText'`), the local JSONL cannot — so a "
+            "purge would destroy text nothing here has verified a copy of. The "
+            "comparison must be extended before this gate may open: an absence "
+            "is NOT established")
     compared_fields = ["key"] + [rcol for _, rcol, _ in _EXACT_FIELDS
                                  if rcol not in declared_absent]
     if "embedding" not in declared_absent:

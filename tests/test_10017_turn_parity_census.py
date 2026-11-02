@@ -617,9 +617,12 @@ class _PagedG:
         return _R(page)
 
 
-def _turn_row(inner_id: int, tid: str, sid: str) -> list:
+def _turn_row(inner_id: int, tid: str, sid: str, et=None) -> list:
+    # 11 columns: the 10 the census has always read, plus `t.embeddingText`
+    # (#8488). Two spellings of the row shape is how the enriched column would
+    # silently drop out of the read (review cycle 4, P2).
     return [inner_id, tid, f"[user] body of {tid}", "user", "draft",
-            "2026-10-25T00:00:00+00:00", "event", None, False, [sid]]
+            "2026-10-25T00:00:00+00:00", "event", None, False, [sid], et]
 
 
 def _patch_proj(monkeypatch, g):
@@ -1397,3 +1400,45 @@ def test_an_enriched_turn_refuses_because_no_record_can_restore_it(tmp_path):
                                   embeddingText="ctx: hi (rewritten)")}
     with pytest.raises(tpc.CensusError, match="embeddingText"):
         tpc.census({"nodes": nodes}, record, sample=5)
+
+
+def test_both_graph_cyphers_SELECT_the_enriched_text(monkeypatch):
+    """Cycle-4 P2: dropping `t.embeddingText` restored a false CLEAN silently."""
+    assert "t.embeddingText" in tpc._GRAPH_EPISODIC_CYPHER
+    assert "t.embeddingText" in tpc._GRAPH_EPISODIC_IDS_CYPHER
+
+
+def test_the_graph_leg_carries_embedding_text_onto_the_node(monkeypatch):
+    """…and the READ must actually put it on the node dict."""
+    class _G:
+        def query(self, cypher, params=None):
+            is_count = "count(t)" in cypher
+            class R:
+                result_set = ([[1]] if is_count else
+                              [_turn_row(1, "s1_t0", "s1",
+                                         et="ctx rewrite of s1_t0")])
+            return R()
+
+    _patch_proj(monkeypatch, _G())
+    graph = tpc.read_graph_turns("docker://x", None, "g")
+    assert graph["nodes"]["s1_t0"]["embeddingText"] == "ctx rewrite of s1_t0"
+    with pytest.raises(tpc.CensusError, match="does not compare that field"):
+        tpc.census(graph, {"rows_by_key": {"s1_t0": _record_row("s1_t0")},
+                           "non_turn_shaped": 0}, sample=5)
+
+
+def test_a_whitespace_only_day_is_EMPTY(tmp_path):
+    """Cycle-4 P2: `raw` is ['']-truthy, so a blank day slipped both guards."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(gzip.compress(b"\n"))
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    with pytest.raises(tpc.CensusError, match="EMPTY"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_record_that_parses_ZERO_sessions_refuses(tmp_path):
+    (tmp_path / "2026-11-02.jsonl").write_text("\n\n", encoding="utf-8")
+    with pytest.raises(tpc.CensusError, match="ZERO sessions"):
+        tpc.read_local_record_turns(tmp_path)
