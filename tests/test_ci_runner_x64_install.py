@@ -3322,6 +3322,11 @@ def test_the_label_assertion_other_files_cite_lands_on_it():
     comments) plus the mirror test — globbing every file under `tests/` for this class would read
     ~48 MB per run and cover nothing further.
 
+    ⚠️ The mirror test cites the assertion by SYMBOL, not by line (it was re-pointed in #10525's
+    "two more unpinned tree cites made symbol-form" commit, because a `:NNNN` cite here re-staled the
+    moment this module's docstring grew). It is therefore still SCANNED — a new `:NNNN` from it reds
+    `unknown` — but it is not in `known`, because there is no number left for this pin to land.
+
     Non-vacuity (measured): the pre-fix refs red on the landing check — the old number is an empty
     line — and re-pointing only SOME of the five reds on the agreement check.
     """
@@ -3333,11 +3338,16 @@ def test_the_label_assertion_other_files_cite_lands_on_it():
         ".github/workflows/availability-watchdog.yml",
         ".github/workflows/ci-check-repair.yml",
         ".github/workflows/ci-queue-health.yml",
-        "tests/test_reporting_workflow_concurrency.py",
     }
     scanned = [
         *(REPO_ROOT / ".github" / "workflows").glob("*.yml"),
         *(REPO_ROOT / ".github" / "workflows").glob("*.yaml"),
+        # ⛔ THE MIRROR IS STILL SCANNED BUT NO LONGER IN `known`: it cites this file by
+        # SYMBOL now (`::test_the_os_label_is_opt_in_and_no_fallback_arm_can_drop_it`), which
+        # cannot re-stale, so there is no number here for this pin to check — and requiring it in
+        # `known` made the pin over a citation that no longer exists (#10525, the `stale` arm
+        # redded). Keeping it in `scanned` is what keeps that true: re-introducing a `:NNNN` cite
+        # from the mirror lands in `unknown` and forces a decision instead of drifting quietly.
         REPO_ROOT / "tests" / "test_reporting_workflow_concurrency.py",
     ]
     ref = re.compile(r"tests/test_ci_runner_x64_install\.py:(\d+)")
@@ -4603,8 +4613,11 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # re-cut comments this PR added to that file pushed it 1590 → 1596, and the record↔bars
         # tests added above at the same head pushed it 1596 → 1673, then 1682 when the disagreement
         # case was widened from the two log-invisible bars to all seven — the pin landing rather
-        # than drifting, because a plausible offset is what it exists to refuse)
-        ("tests/test_capstone_preregistration_9075.py", 1682):
+        # than drifting, because a plausible offset is what it exists to refuse. Then 1687: the
+        # E3 class-set arms (`_e3_class_set_failures`, one per CELL) and the scope-declaration
+        # paragraphs that #9736/#9738 needed pushed it 1682 → 1687, and this pin redded the sibling
+        # at that head rather than letting the relay land on an adjacent comment.)
+        ("tests/test_capstone_preregistration_9075.py", 1687):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
