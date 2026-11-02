@@ -178,6 +178,9 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "embedding_revision": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_text_hash": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_preserved": "#5004 — payload-only capture marker, never a node prop",
+    "evidence_fold": (
+        "#10010 — payload-only record flag (`_fold_source_evidence`): this "
+        "PointAdded folded evidence into an EXISTING Point, it created nothing"),
     # EP-owned runtime state. `ep_dirty`/`ep_dirty_at` are mutated out of band by
     # ep.py/dream.py with NO journal record; they are NOT in `_POINT_DENY`, so
     # the replay passthrough does copy them out of a payload — which is a
