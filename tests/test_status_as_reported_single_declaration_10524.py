@@ -259,9 +259,15 @@ def test_the_point_idiom_pointer_line_number_lands_on_the_idiom():
 #   * the line leg — pre-fix carried `sdk.py:20346`, whose line is docstring prose
 #     ("natural key: under #3590 D2 two live Objects may hold it, so the read"), so
 #     `_terminal_excluded('o.status') in lines[20346-1]` reds;
-#   * the symbol leg — pre-fix named no `TortoiseSDK.<method>` at all, so the
-#     assertion "the paragraph cites the Object leg in some resolvable form" reds
-#     on the combination of the two legs even if a future edit keeps only a line.
+#   * the SYMBOL leg — measured by MUTATION, not by the pre-fix text, which carried
+#     a line cite and so satisfied `symbol_cites or line_cites` while the symbol
+#     loop ran ZERO times. Rewriting the arm out of `belief_timeline`'s body (the
+#     `_terminal_excluded('o.status')` call renamed or removed) reds this pin on
+#     "that method's body carries no `…`", which is what makes the symbol cite
+#     load-bearing rather than decorative. That is also why the symbol leg is now
+#     REQUIRED below (`assert symbol_cites`): the doctrine this pin serves is
+#     "a symbol cannot re-stale", and a paragraph that reverted to a bare line
+#     would be re-vacuumed by the next merge.
 
 _SDK = Path(__file__).resolve().parent.parent / "tortoise" / "sdk.py"
 _PROJECTION_ENTITIES = Path(__file__).resolve().parent.parent / "tortoise" / "projection" / "entities.py"
@@ -322,6 +328,11 @@ def test_the_read_surface_sweep_cites_resolve_at_this_head():
     assert symbol_cites or line_cites, (
         "the sweep paragraph cites no `sdk.py` Object leg at all — the claim "
         f"'every in-repo read surface was swept' is then unverifiable: {window[:240]!r}")
+    assert symbol_cites, (
+        "the sweep paragraph cites the Object leg by LINE only — a bare line "
+        "cannot survive `sdk.py` growing above it (it drifted +55 inside this "
+        "very PR), so the resumed line is stale before the next merge. Cite "
+        "`TortoiseSDK.<method>` (#10524 review ISSUE 1)")
 
     for name in symbol_cites:
         body = _def_body(source, name)
@@ -463,3 +474,88 @@ def test_the_disclosed_exception_cites_resolve_at_this_head():
             f"it names ({', '.join(_LOG_CLAUSES)}) is there. A bare line cite cannot "
             "survive this file growing above it; cite the symbol "
             "(`_upsert_point_props`) instead (#10524 review ISSUE 1)")
+
+
+# --- the REST of `tortoise/log.py`'s module comment (delta review, ISSUE 3) ---
+#
+# The disclosed-exception pin above holds only the passage it names
+# (`ONE DISCLOSED EXCEPTION` … `WHY THE FOUR REMAIN`). The SAME module comment
+# carried SIX more `projection/entities.py:<line>` cites — plus four into
+# `projection/__init__.py` and one into `hosted_api.py` — and every one of them
+# was dead at the head the delta review read: `:719-730 → :772` landed on a
+# docstring and a `github_issue` list, `entities.py:853` on a blank line,
+# `:1650`/`:1713-1719` on unrelated prose, `:1989` on a comment about
+# `_DOCUMENT_HANDLED`, `:1261-1266` on `return False`, `:2390`/`:2399` on
+# docstring text, `projection/__init__.py:6734-6736` on a journal-ownership
+# paragraph, `:6585`/`:6717` on blank lines, and `hosted_api.py:10041-10065` on
+# the `/v1/points` route. A lane told "cite the symbol, a line cannot re-stale"
+# reads a survivor as verified — so the sweep has to cover the WHOLE comment,
+# not the one passage a review happened to quote.
+#
+# The invariant below is deliberately the rot-proof one: after repointing, this
+# comment cites NO `file.py:<line>` at all, so there is nothing left to drift.
+# (Bare historical mentions such as "the three line cites that stood here
+# (`:2525`, …)" are not cites — they point at nothing and are labelled as such.)
+_LOG_COMMENT_START = "# ── torn-tail revival classification (#3316)"
+_LOG_COMMENT_END = '# A ``"type"`` KEY'
+
+#: Every symbol the comment leans on, and the file that must still define it.
+#: Renaming one reds this pin instead of silently leaving a decorative cite.
+_LOG_SYMBOLS = {
+    "tortoise/projection/entities.py": (
+        "_upsert_point_props", "_belief_prop_value_ok", "_fold_session_recorded",
+        "_upsert_document", "_DOC_RETIRED_KEYS", "_materialize_connector_source",
+    ),
+    "tortoise/projection/__init__.py": (
+        "_apply_one", "_apply_annotator", "_revise_point", "_annotator_value_ok",
+    ),
+    "tortoise/vector_write.py": (
+        "clear_embedding", "clear_then_set_prefix", "set_embedding_clause",
+    ),
+    "tortoise/sdk.py": ("capture_session",),
+}
+
+
+def _log_module_comment() -> str:
+    """The whole `#3316` torn-tail comment block, not only its exception part."""
+    text = _LOG.read_text(encoding="utf-8")
+    start = text.index(_LOG_COMMENT_START)
+    return text[start:text.index(_LOG_COMMENT_END, start)]
+
+
+def test_the_log_module_comment_cites_no_file_line_number():
+    """No `file.py:<line>` cite may survive in the comment — they all rot.
+
+    Pre-fix this reds on eleven dead cites (listed above); post-fix it is the
+    invariant that keeps the next merge from re-introducing one.
+    """
+    comment = _log_module_comment()
+    line_cites = re.findall(r"[\w/]+\.py:(\d+)", comment)
+    assert not line_cites, (
+        "`tortoise/log.py`'s torn-tail comment still cites a LINE "
+        f"({line_cites}) — a line cannot survive the file growing above it (the "
+        "cites in this block were 100+ lines off), so cite the SYMBOL "
+        "(``_upsert_point_props``, ``clear_embedding``, …) instead "
+        "(#10524 delta review ISSUE 3)")
+
+
+def test_every_symbol_the_log_module_comment_cites_still_exists():
+    """A symbol cite is only the fix if the symbol resolves.
+
+    Checked against the defining FILE, so a rename or a move reds here rather
+    than leaving the durability reader a plausible-looking dead end.
+    """
+    root = Path(__file__).resolve().parent.parent
+    missing = []
+    for rel_path, names in _LOG_SYMBOLS.items():
+        source = (root / rel_path).read_text(encoding="utf-8")
+        for name in names:
+            defined = re.search(
+                rf"^\s*(?:async )?def {re.escape(name)}\(|^\s*{re.escape(name)}\s*[:=]"
+                rf"|^\s*(?:async )?def {re.escape(name)}\b",
+                source, re.MULTILINE)
+            if defined is None:
+                missing.append(f"{rel_path}::{name}")
+    assert not missing, (
+        "`tortoise/log.py`'s torn-tail comment cites symbols that no longer "
+        f"exist: {missing} — repoint the cite (#10524 delta review ISSUE 3)")

@@ -85,11 +85,15 @@ except ImportError:       # pragma: no cover - import-time platform branch
 # though nothing is deleted (see ``PointRevised`` below). The owned-null
 # ``embedding`` clear is such a removal too, NOT a recompute: writing it away
 # RESURRECTED the vector an earlier record set (``_upsert_point_props``'
-# ``embedding_clear`` arm, projection/entities.py:719-730 → :772, whose own
-# ``#5004 round-6`` comment records that bug). The OTHER embedding writes are a
-# genuine recompute cache clear: a ``REMOVE n.embedding`` gated on a NEW vector
-# being written, in the Point fold (entities.py:853), the Subject/Object upserts
-# (:1650, :1713-1719), the Document fold (:1951) and the Event fold (:2127).
+# ``$embedding_clear`` arm, whose own ``#5004 round-6`` note records that bug —
+# every cite in this comment names a SYMBOL, because a bare line cannot survive
+# this file growing above it; the whole comment is swept that way and pinned).
+# The OTHER embedding writes are a genuine recompute cache clear: a
+# ``REMOVE <alias>.embedding`` gated on a NEW vector being written, and it has
+# exactly TWO spellings, both shared helpers — ``vector_write.clear_embedding``
+# (the MERGE-shaped ``Subject``/``Object``/``Event`` upserts) and
+# ``vector_write.clear_then_set_prefix`` (the ``FOREACH``-gated removal spliced
+# into the ``Point``/``Document`` folds' SET).
 # A member with no fold at all is a proof-carrying no-op. A torn tail whose
 # type is legible and wholly inside this set keeps the pre-existing tolerance.
 # EVERYTHING ELSE is refused: an unlisted type and an
@@ -105,8 +109,10 @@ except ImportError:       # pragma: no cover - import-time platform branch
 #     ``n.status = coalesce($st, n.status, 'live')`` with ``$st`` taken from the
 #     payload (``projection/entities._upsert_point_props``'s fixed SET list —
 #     cited by SYMBOL, not by line. The three line cites that stood here
-#     (``:2525``, ``:2515``, ``:2627``) never resolved: each was ~40 lines off
-#     when written, and a symbol cannot re-stale) and ``create_point`` accepts
+#     (``:2525``, ``:2515``, ``:2627``) DID resolve when they were written and
+#     at this branch's base; they were moved +50/+56/+59 by ``origin/main``
+#     merges landing above them — which is exactly why a symbol cannot
+#     re-stale) and ``create_point`` accepts
 #     every value in ``POINT_STATUS_VALUES`` — a BORN-TERMINAL
 #     create (``_born_terminal``, a first-class case: see #2422)
 #     journals ``status`` in its ``PointAdded`` point snapshot. A
@@ -239,16 +245,16 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 # Deliberately NOT harmless although the name reads as an addition or an
 # update:
 #   PointRevised — its fold WRITES a payload property with a plain
-#                  ``SET n.{key} = ${key}`` (PointRevised belief props
-#                  projection/__init__.py:6734-6736, in-memory :2082-2083;
-#                  the point's content :6660-6712; the annotator dims :6717),
+#                  ``SET n.{key} = ${key}`` (the belief props, the point's
+#                  content and the annotator dims, in ``_revise_point`` on the
+#                  graph and ``_apply_one``'s ``PointRevised`` arm in memory),
 #                  and ``None`` is a LEGITIMATE payload value that CLEARS — the
 #                  code says so at ``_belief_prop_value_ok``
-#                  (projection/entities.py:104-106, "``None`` is VALID for
+#                  ("``None`` is VALID for
 #                  every key — it is the journaled CLEAR … dropping it would
 #                  leave a stale prior in place across a rebuild") and at
-#                  ``_annotator_value_ok`` (projection/__init__.py:1790-1792,
-#                  the same sentence for ``annotate_operator``/``update_point``
+#                  ``_annotator_value_ok``
+#                  (the same sentence, for ``annotate_operator``/``update_point``
 #                  with ``x=None``). ``update_point(id, confidence=None)``
 #                  journals ``"confidence": null``, so a
 #                  torn ``PointRevised`` that drops a CLEAR leaves the stale
@@ -257,27 +263,28 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                  argument: the clear is visible IN THE SURVIVING PREFIX when
 #                  it is the torn key, and the type alone cannot exclude it.
 #   OperatorAnnotated — same shape: ``set_clauses = [f"n.{key} = ${key}" for
-#                  key in dims]`` (projection/__init__.py:6585), and
+#                  key in dims]`` (``_apply_annotator``), and
 #                  ``annotator_bias=None`` / a dim of ``None`` is the journaled
 #                  CLEAR (``_annotator_value_ok``).
 #   DocumentCreated — ``_upsert_document`` scrubs the RETIRED props
 #                     ``content`` / ``doc_status`` / ``docStatus`` /
 #                     ``objectKind`` / ``object_kind``
-#                     (projection/entities.py:1989), so a dropped tear leaves
+#                     (the ``_DOC_RETIRED_KEYS`` set), so a dropped tear leaves
 #                     state the live write removed.
 #   ConfidenceChanged — can carry ``outdated=true``, an EP-terminal flag.
 #   DirectEdgeRepoint — its ``delete_only=true`` leg removes an edge.
 #   EventRecorded — additive ONLY in the common case; see below.
 #   SessionRecorded — ``_fold_session_recorded`` OVERWRITES ``capture_ok`` /
 #                     ``capture_extractor`` / ``capture_redactions`` from the
-#                     payload (projection/entities.py:1261-1266; the only gate
+#                     payload (the only gate
 #                     is payload PRESENCE — ``val is not None and
 #                     _annotator_value_ok(val)``), and the SDK emits it as one of
 #                     the capture's TRAILING records with
 #                     ``capture_ok=False`` on a failed or keyless capture. A
 #                     dropped tear restores ``capture_ok=NULL``, which
-#                     ``hosted_api`` reads as the legacy "presumed captured"
-#                     replay case (hosted_api.py:10041-10065) — so the failed
+#                     the capture lane reads as the legacy "presumed captured"
+#                     replay case (``TortoiseSDK.capture_session``'s
+#                     ``#2335 WI-2b`` gate) — so the failed
 #                     session silently STOPS being re-attempted while recovery
 #                     reports success. Same root cause as #5921 (a payload-only
 #                     lifecycle property), but its harmful payload is COMMON and
@@ -296,7 +303,7 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 # direction for most records. ``_upsert_event`` →
 # ``_materialize_connector_source`` DELETEs the superseded
 # ``(Source)-[:references]->(Event)`` edge and the orphaned ``:Source`` node
-# (projection/entities.py:2390, :2399) whenever the record carries a registered
+# (its delete legs) whenever the record carries a registered
 # connector ``sourceKind`` or an explicit ``sourceUrl``. A torn record is a
 # BYTE PREFIX of the record being written, so the ABSENCE of those keys in it
 # is NOT evidence that the full record lacked them — the tear can land before
