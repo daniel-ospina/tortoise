@@ -393,7 +393,7 @@ no candidate is dated, which the caller treats as "leg inert".
     #: ``date_window`` (#10538). The window branch runs precisely because no
     #: anchor matched, so its members need not share an anchor token.
     relevant: set[str] = set()
-            #: #10538: the (date, session) buckets the reader ALREADY holds in
+    #: #10538: the (date, session) buckets the reader ALREADY holds in
     #: the visible window — never spent on a pick by the window path. See the
     #: window branch below for why this is the whole slice and not just the
     #: bucket sitting at the promotion ceiling. ⚠️ ``candidates`` here is in
