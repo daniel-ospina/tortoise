@@ -286,7 +286,8 @@ list, no classify items, or a fail-open `except`) while doing nothing, and that 
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
 unconditionally at `:10576`/`:10586` and now reaches the receipt through the seam at the meta fold
-`sdk.py:15287` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updatedaccordingly, and the "where the fix must target" line with it.
+`sdk.py:15287` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
+accordingly, and the "where the fix must target" line with it.
 
 Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
 there WITH activity), `test_a_stats_home_for_the_classify_surface_also_counts`,
