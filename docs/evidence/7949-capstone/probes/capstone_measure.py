@@ -2763,7 +2763,13 @@ def main(argv: list[str] | None = None) -> int:
                  f"delta cannot be certified. #9738 also records that §10's prior "
                  f"measurement was visible when the record claimed it was not, and "
                  f"that the 25-bound vs 29-marker populations must be reconciled "
-                 f"before either number is called final"),
+                 f"before either number is called final. The row's blocker moved "
+                 f"on 2026-11-02 from #9738 to #5087: #9738 CLOSED that morning "
+                 f"because its own record correction landed (PR #10525), which is "
+                 f"not a measurement of this number — raw recovery "
+                 f"{e5_result['raw_recovery']:.4f} against the 0.80 floor is S3 "
+                 f"selection recovery, owned by the S0→S6 selective write path "
+                 f"(#5087)"),
     }
 
     rows = build_rows(head=head, out_path=out_path, log_corpus_sha=corpus_sha,

@@ -124,6 +124,7 @@ import json
 import posixpath
 import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA = "capstone-verdict-v1"
@@ -252,10 +253,23 @@ def _blocker_exempt(run: dict, kind: object, num: object, den: object) -> bool:
     measurement arm passed (the corpus digest was present), and only V10's
     E4-specific arm redded. A row that says `evidence_kind: "measurement"` is
     not a refusal, whatever the run block says.
+
+    ⛔ AND "MEASURED NOTHING" MEANS THE COUNTS ARE ABSENT, NOT MERELY NON-INT
+    (#10537 review P2). This leg was `not _count(num) and not _count(den)`, and
+    `_count` deliberately refuses a float or a string — so a row carrying
+    `157.0 / 397.0` (a real measurement, written as floats) read as "measured
+    nothing" and was EXEMPTED. Reproduced on this module: the same table with
+    E4/E5 re-pointed at the CLOSED `#8503`/`#9738` reds V12 when the counts are
+    integers, and passes when they are the same numbers as floats — the blocker
+    check switched off by a numeric TYPE. `is None` is the honest test for
+    "carries no number": anything present (a float, a string, `0`, even the
+    JSON `true` that `_count` also refuses) is a claim a state can be checked
+    against, so it fails CLOSED into V12. The shipped `capstone.log` refusal
+    rows carry `null`/`null`, which is what keeps them exempt.
     """
     return (run.get("status") == "REFUSED"
             and kind == "refusal"
-            and not _count(num) and not _count(den))
+            and num is None and den is None)
 
 
 def load_blocker_states(path: Path) -> dict:
@@ -289,6 +303,23 @@ def load_blocker_states(path: Path) -> dict:
     if not (isinstance(checked_at, str) and checked_at.strip()):
         raise ValueError("checked_at is missing — a state record with no read "
                          "time cannot be told from a fresh one")
+    # ⛔ A READ TIME NOTHING CAN PARSE IS NOT A READ TIME (#10537 review P2).
+    # This was validated only as "non-empty text", so `"zzz"` loaded, passed
+    # the freshness test's LEXICAL `>=` (measured: exit 0, OK line reading
+    # "every cited blocker verified zzz-not-a-timestamp") and was printed as a
+    # verification instant. Parsing here is what makes the freshness bound a
+    # bound: an unparseable or zone-less stamp is a malformation like any other,
+    # so it exits 2 rather than disarming the arm.
+    try:
+        instant = datetime.fromisoformat(checked_at.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"checked_at {checked_at!r} is not an ISO-8601 "
+                         "instant — the OK line would print it as a "
+                         "verification time nothing can compare with the log") from None
+    if instant.tzinfo is None:
+        raise ValueError(f"checked_at {checked_at!r} carries no UTC offset — "
+                         "a zone-less stamp cannot be ordered against the "
+                         "log's own UTC `# generated:` stamp")
     blockers = raw.get("blockers")
     if not isinstance(blockers, dict):
         raise ValueError(f"blockers is a {type(blockers).__name__}, not an object")

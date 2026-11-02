@@ -213,6 +213,22 @@ retrieved (`git show 6020cbd5f:docs/evidence/7949-capstone/capstone-measured-8a8
 superseding DELETES the tree entry, not the history — what it does cost is citability as a row's
 `evidence`, which V4 resolves against the tree.
 
+⛔ **One correction THIS log carries, and it is a different kind: two cells and a note tail are
+this lane's DECISION, not the run's output.** `capstone-measured-9152448d.log` was produced at
+`9152448d7`, where `probes/capstone_measure.py` still emitted `#8503` (E4) and `#9738` (E5) as the
+rows' `blocked_by` and its E5 note stopped at *"…before either number is called final"*. After the
+run, this lane re-pointed those two attributions (`#8503 → #9596`, `#9738 → #5087`, both verified
+**OPEN** in `blocker-states.json` at `2026-11-02T14:22:24Z`) and appended the E5 note sentence that
+explains the move. **No numerator, denominator or verdict was touched — the numbers are the run's.**
+The log's own `POST-RUN CORRECTION` block states this, the committed probe now EMITS both cells and
+that sentence so a re-run reproduces the file instead of contradicting it, and two pins in
+`tests/test_7949_capstone_measure.py` (`…blocker_cells_are_the_emitters_own`,
+`…discloses_what_the_run_did_not_emit`) RED if the artifact and its emitter diverge again or if the
+disclosure disappears. This was found in review and is recorded rather than absorbed: a cell edited
+silently would be indistinguishable from emitter output, which is the same stale-pointer class V12
+exists to refuse — and a reader who took `#8503`/`#9738` from a log claiming to be the run's output
+would be reading exactly the closed pointers this PR removes.
+
 ⚠️ **That retrieval is REF-QUALIFIED, not durable — and the earlier wording implied otherwise.**
 `6020cbd5f` is a **branch-only** commit: `git for-each-ref --contains 6020cbd5f` names this branch
 and its remote, never `origin/main` (`git merge-base --is-ancestor 6020cbd5f origin/main` exits 1).
