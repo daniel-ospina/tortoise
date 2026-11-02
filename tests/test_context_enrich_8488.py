@@ -563,7 +563,8 @@ def _attestable(point: dict) -> bool:
          (``projection/entities.py:2508-2509``). This clause tests only that
          the FIELD carries a value; production additionally requires the value
          to be *restorable* (`_writable_journalled_vector`) and, at the call
-         site, of the store's WIDTH (`:2491-2505`). Both are unrepresentable in
+         site, of the store's WIDTH (`:2483` for restorability, `:2488-2508` for
+         the width branch). Both are unrepresentable in
          this fixture, so the predicate below is exactly production's
          population — and the mismatch test PINS that with a premise assertion
          rather than making this pure predicate store-dependent. A future
@@ -628,8 +629,9 @@ def test_the_attestable_predicate_mirrors_the_replay_early_returns():
     assert not _attestable(dict(base, embedding=None))
     # 1b. UNMODELLED BY THIS PREDICATE, deliberately and pinned: restorability
     #     (`_writable_journalled_vector`) and store WIDTH are CALL-SITE gates
-    #     (`projection/entities.py:2488-2505`) needing state a pure predicate
-    #     does not have, so an empty/refused vector still reads as attestable
+    #     (`projection/entities.py:2483`, `:2488-2508`) needing state a pure
+    #     predicate does not have, so an empty/refused vector still reads as
+    #     attestable
     #     here. The mismatch test asserts the FIXTURE premise that no such
     #     record exists, which keeps the two populations identical. Adding a
     #     restorability clause HERE instead would red this line — correctly, as
@@ -726,18 +728,11 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     # would demand a contract production never makes and would false-red on a
     # legitimate record.
 
-    # PREMISE for leg 1 (review cycle 1, P2): the ABSENCE of a divergence is
-    # only discriminating if some attestable record's vector describes text that
-    # DIFFERS from `content` — otherwise a check re-pointed at `content` agrees
-    # by accident and leg 1 cannot tell the two spellings apart. Derived, never
-    # assumed: a later edit to CONV/the rewriter that left every turn an
-    # identity rewrite would silently remove one of the two mutation kills and
-    # keep the suite green — the exact false confidence this test prevents.
     # PREMISE (last-review non-blocking note 2): the call site gates the
     # identity/text check on `_writable_journalled_vector(...) is not None`
     # (non-empty list, finite, plausible length) AND on the width matching
-    # `FalkorProjection.required_embedding_dim` (`projection/entities.py:2491-
-    # 2505`); neither is expressible in a pure predicate, and neither fires on
+    # `FalkorProjection.required_embedding_dim` (`projection/entities.py:2488-
+    # 2508`); neither is expressible in a pure predicate, and neither fires on
     # this fixture's vectors. Asserting it keeps the population identity —
     # `_attestable` == what the replay attests — a checkable fact instead of an
     # observation: a future fixture that journals a wrong-width or non-finite
@@ -754,7 +749,7 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     # The WIDTH half of that gate is unreachable in THIS lane: the fixture is
     # embedded (`pytestmark = embedded_only`), and an embedded store skips
     # vector-index creation by design, so `required_embedding_dim` is None
-    # (`projection/__init__.py:19814`) and the refusal at `:2492-2494` cannot
+    # (`projection/__init__.py:19814`) and the refusal at `:2489` cannot
     # narrow the population. Asserted BOTH ways so the reasoning is checked, not
     # assumed: unreachable ⇒ say so; reachable ⇒ every vector must match it.
     if store_dim is None:
@@ -772,6 +767,13 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
             "premise: these attestable records carry a vector of the WRONG "
             f"WIDTH for this store ({store_dim}), so the call site refuses it "
             f"before `_record_embedding_identity` runs: {wrong_width}")
+    # PREMISE for leg 1 (review cycle 1, P2): the ABSENCE of a divergence is
+    # only discriminating if some attestable record's vector describes text that
+    # DIFFERS from `content` — otherwise a check re-pointed at `content` agrees
+    # by accident and leg 1 cannot tell the two spellings apart. Derived, never
+    # assumed: a later edit to CONV/the rewriter that left every turn an
+    # identity rewrite would silently remove one of the two mutation kills and
+    # keep the suite green — the exact false confidence this test prevents.
     differing_from_content = [
         p.get("id") for p in points
         if _attestable(p) and _attested_text(p) != p.get("content")]
