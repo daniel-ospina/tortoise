@@ -176,11 +176,14 @@ A marker is only an instrument if a caller can act on it. Therefore:
   not a scope note on that PR. ⚠️ selfhost `GET /points` is the same shape and is **undecided**, not
   deferred.
 - PR #10518 — `read_after` refuses an out-of-domain `limit` instead of rewriting it.
-- PR (this change, C2) — hosted `GET /v1/points` now **MARKS**: an internal `limit+1` probe row
+- PR #10622 (C2) — hosted `GET /v1/points` now **MARKS**: an internal `limit+1` probe row
   proves the cut, the probe is dropped before delivery, and the body carries `truncated`
   (`total_available` withheld, `exact=False`). The four boundary cases are pinned per surface —
-  hosted `/v1/points`, hosted `/v1/events` (cursor), and `paginated_query` (the control) — with two
-  mutation runs recorded in **PR #10622**'s body. Still **SILENT**: the list-shaped surfaces in §2a
+  hosted `/v1/points`, hosted `/v1/events` (cursor), and `paginated_query` (the control) — with the
+  `MUTATION-MATRIX(2/2)` (two mutants, 6 named tests red, disjoint sets) recorded on **#8447's
+  2026-11-02 mutation-evidence comment**, not in a PR body: the issue is the artifact a lane
+  auditing C2 reads (§2's census is written from it), and a PR body is neither durable nor the
+  pointer this census can hold. Still **SILENT**: the list-shaped surfaces in §2a
   (`tortoise_search`, selfhost `GET /search`, selfhost `GET /points`, `list_batches`,
   `suggest_entry_points`) — every one of them needs a return-shape decision, not a marker.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` — the storage seams these bounds sit on.

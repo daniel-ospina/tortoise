@@ -24,7 +24,21 @@ The boundary cases the issue names are covered as a set: exactly-at-limit,
 limit+1, and page-2-of-2 (via the paginated control).
 
 Lane: embedded (``TORTOISE_TEST_CARVE_OUT=1``) or any ``TORTOISE_DB_URI``
-(``tests/conftest.py`` session gate).
+(``tests/conftest.py`` session gate). ⚠️ The lane is not the whole environment: a GREEN here also
+needs a LIVE DENSE LEG — a real embeddings model, not a stub — because two pre-existing tests in
+this file read the fusion scores the store actually produces. Both were RED on ``main`` at
+``5b1888a6e`` (#10560) and are GREEN at ``83a22b2a7`` on a private docker lane with
+``--extra embeddings``; the intervening ``search_engine`` change is ``6b8793351`` (#10506).
+``TestAScoreFloorIsNotProofOfCompleteness::test_a_read_with_a_score_floor_never_publishes_a_total``
+derives a strict score band from the seeded store, and the seed is five points whose content differs
+only by an index — so with the dense leg degraded they tie (``0.0870113 == 0.0870113``) and the
+test reds on a property of the RANKING rather than on the behaviour it pins;
+``TestAnArmThatServedTheSlotIsNotALostLeg::test_the_same_read_without_the_arm_is_still_lost``
+needs the #8488 BM25 arm to actually be gated by ``TORTOISE_BM25_LEXICAL=0``. So quote the lane AND
+the embeddings extra with any whole-file count from this module — a bare "49 passed" does not say
+whether the dense leg ran. On a COLD first touch of the model the hermetic egress guard (#4387)
+blocks and retries the HuggingFace HEAD requests, which can push an early test past its timeout;
+warm the model once before collecting evidence.
 """
 from __future__ import annotations
 
@@ -925,3 +939,68 @@ class TestThePaginationControlBoundaries:
         assert page["hasMore"] is False
         assert page["total"] == 2
         assert TRUNCATED_FIELD not in page
+
+
+# ── the census: the artifact #8447's remaining scope is READ FROM ────────
+#
+# Review of this change found BOTH defects this class pins, and both had
+# already shipped once: the census row for hosted ``GET /v1/points`` still read
+# **SILENT** after the code started MARKS (P2), and §5 sent C2's mutation
+# evidence to a home that did not hold it — first "the issue" (no such comment
+# existed), then this PR's body (P3). The census and §5 are what a lane auditing
+# C2 reads before it derives anything, so a claim in them is asserted here
+# rather than trusted to the review that wrote it.
+
+class TestTheCensusNamesItsEvidenceHome:
+    """`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` must agree with the tree
+    and point its evidence at a home that HAS the evidence."""
+
+    @staticmethod
+    def _doc_text() -> str:
+        from pathlib import Path
+        doc = (Path(__file__).resolve().parent.parent
+               / "docs" / "architecture" / "BOUNDED-OPERATION-CONTRACT.md")
+        assert doc.is_file(), f"the contract doc is missing: {doc}"
+        return doc.read_text(encoding="utf-8")
+
+    def test_the_hosted_points_row_says_marks_and_says_the_total_is_withheld(self):
+        """The census row and the tree must say the same thing.
+
+        Pre-fix this row read **SILENT** while `list_points` marked, so a lane
+        reading the census would re-open work that had landed — the #6134 shape
+        (a conclusion re-derived because the map was stale).
+        """
+        rows = [ln for ln in self._doc_text().splitlines()
+                if ln.startswith("| `GET /v1/points` (hosted")]
+        assert len(rows) == 1, (
+            f"expected exactly ONE hosted `GET /v1/points` census row, found "
+            f"{len(rows)}")
+        row = rows[0]
+        assert "**MARKS**" in row, f"the census row does not say MARKS: {row}"
+        assert "**SILENT**" not in row, row
+        # The third state is the point: a truncated page here states THAT more
+        # exist, never HOW MANY (`exact=False`), so the row must say so.
+        assert "exact=False" in row or "WITHHELD" in row, (
+            f"the row does not record that `total_available` is withheld: {row}")
+
+    def test_the_mutation_evidence_points_at_the_issue_not_a_pr_body(self):
+        """§5 must send a lane to #8447, because that is where the record is.
+
+        `AGENTS.md` -> DECISION RELAY: the answer lives on the artifact the next
+        lane reads. A PR body is neither durable (it is edited, force-pushed and
+        eventually buried) nor the record §2's census is written from — and this
+        doc's own census is written FROM the issue.
+        """
+        text = self._doc_text()
+        assert "## 5. Related" in text
+        section = " ".join(text.split("## 5. Related", 1)[1].split())
+
+        assert "MUTATION-MATRIX" in section, (
+            "§5 no longer records the mutation matrix at all — C2's evidence "
+            "claim went missing rather than moving home")
+        assert "#8447" in section, section
+        assert "mutation-evidence comment" in section, (
+            f"§5's mutation evidence does not name a comment ON #8447: {section}")
+        assert "'s body" not in section, (
+            "§5 sends C2's mutation evidence to a PR body, which is not the "
+            "artifact a lane reads (and was the P3 finding)")
