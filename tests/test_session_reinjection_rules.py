@@ -52,6 +52,7 @@ from tortoise.session_reinjection import (
     DEFAULT_REINJECTION_SEED_WINDOW,
     DEFAULT_REINJECTION_TOTAL_ITEMS,
     SeededSession,
+    reader_window_displacement,
     reinjection_merge_order,
     seeded_sessions,
     source_session_chunk_pass,
@@ -995,3 +996,91 @@ def test_annotate_pool_additions_is_whole_dict_identical_except_leg():
     assert added["session_date"] == "2026-01-02"
     assert added["match_source"] == "session"
     assert base["match_source"] == "fts"
+
+
+# ── READER-WINDOW crowding (#10540) ─────────────────────────────────────
+# ``reinjection_merge_order`` is additive on the POOL; the reader consumes a
+# PREFIX of it. These pin the prefix cost, which no other census key saw.
+def _corpus(per_session=5, n_sessions=8):
+    return [{"id": f"s{s}#{i}", "session_id": f"s{s}",
+             "point_kind": TURN_POINT_KIND, "is_episodic": True,
+             "content": f"[user] turn s{s}#{i}"}
+            for s in range(n_sessions) for i in range(per_session)]
+
+
+def _groups(pool, sizes):
+    """The shipped fetch's admission shape: ``sizes`` items per seeded
+    session, seeded by that session's FIRST pool hit (in rank order)."""
+    order: list[str] = []
+    for h in pool:
+        if h["session_id"] not in order:
+            order.append(h["session_id"])
+    out: dict[str, list[dict]] = {}
+    for sid, n in zip(order, sizes, strict=False):
+        if n:
+            out[sid] = [_point(f"inj-{sid}-{k}", sid) for k in range(n)]
+    return out, order[:len(sizes)]
+
+
+def _merge(pool, sizes):
+    added, seed_order = _groups(pool, sizes)
+    return added, seed_order, reinjection_merge_order(
+        pool, added, seed_order=seed_order, guard=True,
+        guard_window=5, per_session_cap=2, max_chunks_per_session=3)
+
+
+def test_reader_window_displacement_names_the_sessions_injection_evicts():
+    """The shipped budgets (per-session 3, total 10) over 40 hits / 8
+    sessions: the injection's cost lands ENTIRELY on the two lowest-ranked
+    sessions, which lose all five hits each. ``injected_merged`` reports a
+    healthy 10 either way — that is the blind spot this key closes."""
+    pool = _corpus()
+    _added, _order, merged = _merge(pool, [3, 3, 3, 1])
+    out = reader_window_displacement(pool, merged, window=40)
+    assert out["injected_in_window"] == 10
+    assert out["base_displaced"] == 10
+    assert out["sessions_lost"] == ["s6", "s7"]
+    assert (out["sessions_before"], out["sessions_after"]) == (8, 6)
+    # NOT a top-5 effect: against the FAIR counterfactual (the base pool the
+    # reader would have seen, guard reorder included) the injection costs the
+    # top-5 nothing. Measured on the helper itself at window=5 the number is
+    # 3, and those 3 are the guard's reorder — which is why this helper is
+    # used at the READER's window, not at the loop's.
+    fair_base = guard_and_recap_pool(
+        pool, guard=True, window=5, per_session_cap=2,
+        max_chunks_per_session=3)
+    top5_base = {h["id"] for h in fair_base[:5]}
+    top5_merged = {h["id"] for h in merged[:5]}
+    assert top5_base <= top5_merged, (top5_base - top5_merged)
+
+
+def test_reader_window_displacement_is_zero_without_injection():
+    pool = _corpus()
+    out = reader_window_displacement(pool, list(pool), window=40)
+    assert out == {"window": 40, "injected_in_window": 0,
+                   "base_displaced": 0, "sessions_lost": [],
+                   "sessions_before": 8, "sessions_after": 8,
+                   "measured": True}
+
+
+def test_a_rank_below_five_count_is_invariant_to_injection():
+    """The metric artifact #10540's probe reports as "35 fall out of the
+    top-5": 35 of 40 base hits START below rank 5, so counting base hits at
+    final rank >= 5 returns 35 with 0, 10 or 15 injected items. It is not a
+    crowding measurement; ``base_displaced`` (above) is."""
+    pool = _corpus()
+    base_ids = {h["id"] for h in pool}
+    for sizes in ([0], [3, 3, 3, 1], [3, 3, 3, 3, 3]):
+        _added, _order, merged = _merge(pool, sizes)
+        # RANK-based, not count-based: the artifact is that the population
+        # below the cut never shrinks, so the number is input-invariant.
+        below5 = sum(1 for i, h in enumerate(merged)
+                     if i >= 5 and h["id"] in base_ids)
+        assert below5 == 35, (sizes, below5)
+
+
+def test_reader_window_displacement_window_zero_is_a_clean_zero():
+    pool = _corpus()
+    _added, _order, merged = _merge(pool, [3, 3, 3, 1])
+    out = reader_window_displacement(pool, merged, window=0)
+    assert out["base_displaced"] == 0 and out["sessions_lost"] == []

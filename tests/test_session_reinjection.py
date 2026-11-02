@@ -743,7 +743,14 @@ _CENSUS_KEYS = {
     # #2513 (#10629 review): the arm THIS composition spent — recorded per
     # outcome so a re-injection run's receipt says whether the lower bound
     # was armed and under which window cap, not only what the run declared.
-    "floor_term", "guard_per_session_cap"}
+    #
+    # #10540: the reader-window crowding census — the pool-scope keys
+    # above could not see it. REBASE UNION (#10632 × #2513): both sides
+    # added keys to this set; the census is a closed key set, so it must
+    # carry BOTH or whichever side was dropped is reported as an
+    # unexpected key.
+    "floor_term", "guard_per_session_cap",
+    "reader_window_displacement"}
 
 
 def test_reader_item_and_token_caps_hold_on_the_reinjected_pool(seeded_sdk):
