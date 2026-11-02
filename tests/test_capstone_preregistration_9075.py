@@ -2965,6 +2965,39 @@ def _readable_registration(directory: Path) -> Path:
     return target
 
 
+def test_no_committed_bundle_registers_itself_only_in_the_change_that_carries_its_log():
+    """#10547 review P1: a bundle may not be committed while its registration is UNPUBLISHED.
+
+    Discovery is what makes the refusal arm REACHED — and it is also what turns a bundle committed by
+    a contribution into a verdict about `main`. The two combine badly: a registration that exists
+    only in the change carrying its log is refused by :data:`check.SAME_PR_REFUSAL` (correctly, at
+    PR time), and once that change is SQUASH-merged the registration and the log share one add-epoch
+    on the base, so the same bundle is refused on `main` FOREVER — with nothing to withdraw it. That
+    is #10468's outage shape reproduced on purpose.
+
+    So the invariant is about the TREE, not about this PR's prose: every bundle the checker
+    discovers here must already have its registration published on the base. A throwaway bundle used
+    to prove the refusal in CI reds `main` the moment any merge lands it, which is why the proof in
+    this suite is a TEMP repo (``test_all_bundles_refuses_a_registration_added_beside_its_own_log``)
+    and not a committed directory.
+    """
+    if check.history_unavailable():
+        pytest.skip("shallow clone: the base's add-epochs are unavailable here")
+    base = check.resolve_base_ref()
+    if base is None:
+        pytest.skip("no resolvable base ref in this checkout: nothing to measure the tree against")
+    unpublishable = [
+        str(directory.relative_to(REPO_ROOT))
+        for directory in check.discover_bundles()
+        if not check._added_epochs_on(base, directory / check.PREREG_NAME)
+    ]
+    assert not unpublishable, (
+        f"bundle(s) {unpublishable} carry a registration that is NOT on {base}: such a bundle is "
+        "refused at PR time (correct) and, once squash-merged, refused on the base forever (a "
+        "permanent red with no withdrawal). Prove the same-PR refusal in a temp repo instead"
+    )
+
+
 def test_discovery_reads_every_registered_bundle_and_only_those(tmp_path, monkeypatch):
     """The population is the TREE, not a list CI was told about.
 
