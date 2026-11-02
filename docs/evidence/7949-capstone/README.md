@@ -258,9 +258,10 @@ of quoting a remembered one. A step is never *assigned* unwitnessed, and every s
 exactly one of the two sets (a hole or an overlap refuses the run). So the epic's own GREEN gate —
 V5, all eight steps **accounted for** — stays reachable: `#9116`'s seam makes both rows OBSERVABLE
 (each step's own block is on the receipt), and S2.2 then flips on a re-run at a post-seam head
-(S2.3 flips only once its pass does work, which the measured corpus' idle classify pass does not —
-which is why `#10215` restated the requirement as seven observed + S2.3 observed-or-witnessed-idle
-from the frozen record; see `PRE-REGISTRATION.md` §11 and §11.3). It
+(S2.3 flips once its pass does work — and it DID on the committed post-seam re-run, which is why
+this bundle's recorded idle prediction is falsified by its own artifact; `#10215` restated the
+requirement as seven observed + S2.3 observed-or-witnessed-idle from the frozen record, so an idle
+pass is also ACCOUNTED rather than refused; see `PRE-REGISTRATION.md` §11 and §11.3). It
 did **not** come for free and this bundle does not claim it did: the seam landed with this probe's
 observer rewritten (`observe_steps` reads `stats['step_witness']` instead of guessing at a surface
 the receipt never carried) and with the pin that certified the old unreachability replaced by the
@@ -466,7 +467,9 @@ raw absolute             0.4800    (bar >= 0.80 — FAILS)
 two: the ratio alone reads GREEN here while the narrative arm keeps half the qualifiers the raw
 arm loses. The re-score grades the 2026-10-18 arm receipts against **this** commit's gold (the
 gold is inside `fixtures_hash`); the receipts themselves are older, which is disclosed in the
-row's note. #9738 is the row's blocker and carries the rest: `EXTRACTOR-V4-ARCHITECTURE.md` §10's
+row's note. **`#5087` is the row's blocker and carries the rest** (`#9738`, which the row cited
+until 2026-11-02, CLOSED that morning on its own §10 *record* correction — that closure is not a
+measurement of this number): `EXTRACTOR-V4-ARCHITECTURE.md` §10's
 prior measurement was visible when the record said none was, and the 25-bound (this instrument) vs
 29-marker-sentence (the record) populations must be reconciled before either number is called final.
 
@@ -725,7 +728,12 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   still matters for the general rule: an idle classify pass is accounted as a **witnessed idle**
   (flag ON, no activity, no fail-open marker, a positive candidate count) rather than refused, and
   the probe emits that split itself (`run.steps_required` / `run.steps_conditional`, read from the
-  frozen record) so G5/V5 accept it where the record declares the step conditional.
+  frozen record) so G5/V5 accept it where the record declares the step conditional. ⚠️ The log
+  committed in THIS bundle predates that emitter (it was generated `2026-11-02T12:16:06Z`, and
+  `#10215` landed `8bc2fbed1a` at 12:22:19Z), so its run block carries `steps_observed` /
+  `steps_unobserved` — all eight observed, which V5 accepts either way — and NOT the conditional
+  split. A consumer must not read that log as carrying one (`probes/capstone_run.py:813` falls back
+  to the all-eight list exactly as it would for any pre-#10215 log); every FUTURE run writes it.
 
 ## Reproduce
 
@@ -738,9 +746,11 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
 # THE MEASURED RUN — a provider key and a searchable backend are required. #9116's
 # seam has LANDED: the receipt carries stats["step_witness"], and the probe reads
 # S2.2/S2.3 there (it still recovers S3/S6 from the live graph). What still bounds a
-# re-run is the CORPUS, not the receipt — the classify pass is IDLE on it, so S2.3
-# is witnessed IDLE and accounted, never observed (since #10215 the gate requires it
-# ACCOUNTED, not observed; the conditional set comes from the frozen record).
+# re-run is the CORPUS, not the receipt. On the SUPERSEDED run the classify pass was idle;
+# on the committed post-seam re-run it does work (the shipped log's `step S2.3 WITNESSED`
+# carries `assigned_llm: 7`), so S2.3 is OBSERVED there — and where a future corpus DOES leave
+# the pass idle, #10215 has the gate require it ACCOUNTED (witnessed idle), not observed, with
+# the conditional set read from the frozen record.
 # It writes its own file — never over capstone.log.
 # ⛔ AND THE FILE IT SUPERSEDES IS DELETED: exactly ONE scored log may exist, and
 # both the test and the pre-registration gate refuse a second one.
@@ -813,7 +823,7 @@ the same lesson (cite the symbol, not the line).
 | S1 NARRATE | `run_s1` `:10243` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:10267` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
 | S2.2 VET | `_run_vet_pass` `:10296` | `result["vet"]` — built at `extractor_v2.py:10586-10590`, copied onto the receipt at the meta fold `sdk.py:15484` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — the shipped log predates it |
-| S2.3 CLASSIFY | `_apply_classify_kinds` `:10312` | `result["classify_later"]` — built at `extractor_v2.py:10576-10582`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — ⚠️ and on the measured corpus the pass is IDLE (`enabled: true`, empty `s2`/`union`), so it is honestly NOT witnessed |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:10312` | `result["classify_later"]` — built at `extractor_v2.py:10576-10582`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
 | S3 RESOLVE | `search_graph` `:10328` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
 | S5 CONNECT | `execute_embed` `:10548` (+ `run_s4` `:10349` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]`, copied as `stats["step_witness"]["commit"]` (payload_produced + the count the write loop RESOLVED — created or folded onto an existing canonical, so a fully-folded capture reports the folded count, never 0) | ✅ — `capstone_measure.py` additionally reads the committed `:Point` nodes and their `eventId` stamps off the live graph |
@@ -855,7 +865,7 @@ gap, never as "the pipeline skipped VET/classify/search/commit". A receipt that 
 still does not witness a step is the run's own answer, quoted from the witness's values — a flag
 gated the pass off, or the stage produced nothing.
 
-## Dependency state (fresh read, 2026-10-23; the `#9116` row re-read at this PR's head)
+## Dependency state (fresh read `2026-11-02T14:22:24Z` — the committed `blocker-states.json`'s own `checked_at`; the `#9116` row re-read at this PR's head)
 
 | issue | state |
 |---|---|
