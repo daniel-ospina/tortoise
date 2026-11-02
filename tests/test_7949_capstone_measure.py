@@ -854,13 +854,14 @@ def test_the_census_enumerates_object_even_though_e3_no_longer_does(monkeypatch)
     """
     data = _canned_census(monkeypatch)
     assert "Object" in data["per_label"], sorted(data["per_label"])
-    assert data["per_label"]["Object"]["nodes"] == 50, data["per_label"]["Object"]
+    assert data["per_label"]["Object"]["nodes"] == 64, data["per_label"]["Object"]
     # The row SELECTOR is unchanged and still names what #9736 registered: `:Object` is not in it.
     assert "Object" not in measure.DERIVED_LABELS, measure.DERIVED_LABELS
     assert set(measure.DERIVED_LABELS) <= set(measure.CENSUS_LABELS)
-    # …and E3's totals stay on the ROW's classes: 338 + 45 + 0, never 433.
-    assert data["derived_total"] == 383, data["derived_total"]
-    assert data["anchored_total"] == 148, data["anchored_total"]
+    # …and E3's totals stay on the ROW's classes: 354 + 43 + 0, never the 461 that
+    # folding `:Object` in would report.
+    assert data["derived_total"] == 397, data["derived_total"]
+    assert data["anchored_total"] == 157, data["anchored_total"]
 
 
 def test_the_sibling_ablation_instrument_still_counts_objects(monkeypatch):
@@ -877,14 +878,16 @@ def test_the_sibling_ablation_instrument_still_counts_objects(monkeypatch):
     s3 = _ilu.module_from_spec(spec)
     spec.loader.exec_module(s3)
     counts = s3.created_counts(_canned_census(monkeypatch))
-    assert counts["objects"] == 50, counts
+    assert counts["objects"] == 64, counts
     # Read off the log's own composition line, never off the link count:
-    # `extraction_claims=141 (anchored 141)` (`capstone-measured-e0fc940b.log:37`).
-    assert counts["extraction_claims"] == 141, counts
-    assert counts["events"] == 45, counts
-    # 141 + 50 + 45, which is what #10463's committed log can produce; the 245
-    # this pin used to assert came from the mis-transcription above.
-    assert counts["extraction_nodes"] == 236, counts
+    # `extraction_claims=150 (anchored 150)` (`capstone-measured-9152448d.log`,
+    # `run.e3_census.point_composition`).
+    assert counts["extraction_claims"] == 150, counts
+    assert counts["events"] == 43, counts
+    # 150 + 64 + 43, which is what the shipped log's own classes produce; the 245
+    # this pin used to assert came from the mis-transcription above, and the 236
+    # from the SUPERSEDED stamp's 141 + 50 + 45.
+    assert counts["extraction_nodes"] == 257, counts
     # The partition the fixture must satisfy to be a transcription at all: the
     # composition's classes sum to the `Point` total the census reports.
     composition = _canned_census(monkeypatch)["point_composition"]
@@ -923,14 +926,17 @@ def test_the_canned_census_transcribes_the_committed_log_it_cites(monkeypatch):
     assert data["point_composition"] == block["point_composition"], (
         data["point_composition"], block["point_composition"])
 
-    # 2. The per-label block — and `Document` is a real 0, not a dropped key.
+    # 2. The per-label block — and `Document` is a real 0 on both sides, not a key
+    # the fixture invents.
     for label, expected in block["per_label"].items():
         got = data["per_label"][label]
         assert (got["nodes"], got["anchored"], got["anchored_out"],
                 got["anchored_in"]) == (
                     expected["nodes"], expected["anchored"],
                     expected["anchored_out"], expected["anchored_in"]), (label, got)
-    assert "Document" not in block["per_label"], block["per_label"]
+    # `:Document` is a REAL 0 the log itself carries (it is in the amended class set,
+    # #9736 §10.1) — so the fixture must carry it too, at 0, rather than omitting it.
+    assert block["per_label"]["Document"]["nodes"] == 0, block["per_label"]
     assert data["per_label"]["Document"]["nodes"] == 0, data["per_label"]
 
     # 3. Every relationship the fake answers carries the log's count AND anchor count.
@@ -1943,8 +1949,8 @@ def test_the_bundle_does_not_state_the_pre_seam_receipt_as_the_current_one():
             "lane reads would send it to re-derive a seam that is already here")
         assert "LANDED" in row, (
             f"{doc}'s {heading.lstrip('# ')!r} row must name `#9116` as LANDED and "
-            "say what still bounds the run (S2.3's idle classify pass, and V5's "
-            f"8/8 scoping); it reads: {row}")
+            "say what still bounds the run (the rows' own blockers, and V5's "
+            f"8/8 accounting); it reads: {row}")
 
     # The prose is only allowed to claim this because the fold really does it.
     sdk = (_REPO / "tortoise" / "sdk.py").read_text()
@@ -1952,6 +1958,90 @@ def test_the_bundle_does_not_state_the_pre_seam_receipt_as_the_current_one():
         "the bundle now names `#9116` as LANDED, but `_extract_session_v2`'s meta "
         "fold does not call `_capture_stats_with_step_witness`: the seam is gone, "
         "so the documents are lying again — restore the fold or the pre-seam text")
+
+
+#: Present-tense shapes that re-state this bundle's recorded PREDICTION about a
+#: post-seam re-run — the prediction the shipped log REFUTES. Guarded on the log
+#: itself (see the test), never on a constant: the moment the scored log stops
+#: observing S2.2/S2.3 these sentences become true again and the guard stands
+#: down, so it cannot outlive the artifact it depends on. Each phrase was
+#: measured present in at least one pre-fix document (#10601 round 2, P1).
+_BUNDLE_STALE_STEP_PREDICTION = (
+    "so a re-run there still reports S2.3",
+    "S2.3 does not flip",
+    "S2.3 does not move on this corpus",
+    "Until such a re-run is committed",
+    "What still has to land is a **committed post-seam re-run**",
+    "The two unwitnessed steps stay unwitnessed for THIS run",
+    "stays what it is — `capstone-measured-e0fc940b.log`",
+)
+
+
+def _flat(text: str) -> str:
+    """One-space-normalised prose, because these sentences WRAP.
+
+    A phrase matched against the raw text goes line-blind: "**S2.3 does not
+    flip**" is one sentence to a reader and two unrelated substrings to `in`,
+    which is how a guard like this passes over the very sentence it exists for.
+    """
+    return re.sub(r"\s+", " ", text)
+
+
+def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
+    """The bundle must not tell a lane a re-run cannot move S2.3 — one already did.
+
+    `E1-E5-PROOFS.md` is the audit a lane reads to decide whether a row can move,
+    and it asserted, in the present tense, that "a re-run there still reports S2.3"
+    unobserved, that "S2.3 does not flip", that "S2.3 does not move on this
+    corpus", that the epic's closing rule stays unsatisfiable "until such a re-run
+    is committed", and that "what still has to land is a **committed post-seam
+    re-run**" — while the log THIS PR ships IS that re-run, and it observes all
+    eight steps with S2.3's witness non-empty. The PR body already said the run
+    "falsified this bundle's recorded prediction that S2.3 stays IDLE"; the
+    sentences were simply never swept. A lane reading them concludes a re-run
+    cannot move S2.3 and does not run one — the stale-inference class `#10537`
+    exists to close.
+
+    Bound to the ARTIFACT, not to prose: the guard reads the shipped scored log's
+    own `steps_observed` / `steps_unobserved` / `status`, and only then forbids the
+    sentences. If a future re-run stops witnessing S2.3, those sentences become
+    true again and this test stands DOWN rather than lying in the other direction.
+
+    Non-vacuity (measured against the pre-fix tree at `fdb19441f`): every phrase
+    below is present in at least one of the two documents — README carries the
+    "a re-run there still reports S2.3", "S2.3 does not flip", "S2.3 does not move
+    on this corpus", "stay unwitnessed for THIS run" and "stays what it is —
+    `capstone-measured-e0fc940b.log`" shapes, and E1-E5-PROOFS carries "Until such
+    a re-run is committed" and "what still has to land is a **committed post-seam
+    re-run**". All seven red there, and none is present at this head.
+    """
+    shipped = _newest_log(_scored_logs())
+    run = cvc.extract_block(shipped.read_text())["run"]
+    observed = set(run.get("steps_observed") or ())
+    assert {"S2.2", "S2.3"} <= observed, (
+        f"{shipped.name} no longer observes S2.2+S2.3 (observed: "
+        f"{sorted(observed)}), so the documents' 'a re-run cannot move S2.3' "
+        "prediction is TRUE again and this guard must stand down — re-derive the "
+        "prose before replacing the log, not after")
+    assert run.get("steps_unobserved") == {}, (
+        f"{shipped.name} reports steps_unobserved={run.get('steps_unobserved')!r}: "
+        "a step is unexplained, so neither 'it moved' nor 'it cannot move' is "
+        "stateable")
+    assert run.get("status") == "COMPLETED", (
+        f"{shipped.name} status={run.get('status')!r}: a run that did not complete "
+        "cannot be the counter-example the prose is re-derived against")
+
+    for name, path in (("README.md", README_DOC),
+                       ("E1-E5-PROOFS.md", E1E5_PROOFS)):
+        text = _flat(path.read_text())
+        for phrase in _BUNDLE_STALE_STEP_PREDICTION:
+            assert _flat(phrase) not in text, (
+                f"{name} still states this bundle's recorded step PREDICTION as "
+                f"current ({phrase!r}), but {shipped.name} refutes it: the run "
+                "observes all eight steps and S2.3's witness is non-empty. A lane "
+                "reading that sentence concludes a re-run cannot move S2.3 and "
+                "never runs one — say what the SHIPPED log measured, and keep the "
+                "6-of-8 count as the SUPERSEDED run's history")
 
 
 # ── the bundle's OWN `file:line` cites must RESOLVE (not merely be spelled) ──
@@ -2440,11 +2530,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("118", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("131", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:379`) refuses a GREEN row whose", (
-            ("379", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:473`) refuses a GREEN row whose", (
+            ("473", "def _step_accounting("),
         ), "capstone_verdict_check"),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
