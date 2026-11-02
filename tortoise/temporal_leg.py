@@ -191,21 +191,32 @@ def _session_clustered(candidates: list[dict], head: int, limit: int,
     already applied. Stated plainly so the next reader does not credit the
     window with a selection it cannot perform.
 
-    The visible prefix is ``head`` (the reader-visible slice the caller
-    excludes from promotion). ``head == 0`` is the unguarded test mode AND the
-    ``placement="head"`` counterfactual; there ``window`` (the real reader
-    window the caller holds) stands in for it when supplied, and only when
-    BOTH ``head`` and ``window`` are 0 (a direct caller with no window in
-    hand) does the promotion ``limit`` size the sample. That last fallback is
-    non-vacuous only because of the ``< 3`` guard below — at the default
-    ``limit=2`` a 2-slot sample makes ``max(counts) * 2 >= len(visible)``
-    vacuously true, which is what let a four-distinct-session pool promote
-    before the guard existed (review cycles 2-3, #10549).
+    The sample is the caller's READER WINDOW, ``candidates[:max(head,
+    window)]`` — NOT ``head`` alone. ``head`` is the caller's PROMOTION
+    boundary, and the fused caller passes ``ceiling = window - limit``: the
+    ``limit`` slots the promotion actually displaces are missing from it. At
+    the shipped geometry (``window=12, limit=2``) sampling ``[:head]`` read
+    10 of the 12 visible slots and omitted exactly the two at risk, so the
+    guard could only OVER-fire — measured on a pool where one session owns 5
+    of the first 10 slots, indices 10/11 are two other sessions and index 12
+    a third: the ceiling sample says clustered (``5*2 >= 10``) while the
+    documented rule over the visible 12 declines (``5*2 < 12``), and the
+    resulting pick at index 12 evicted a reader-visible slot (review cycle 8,
+    #10549). It could also never fire at all for ``window=3`` (ceiling 2, a
+    2-slot sample is below the ``< 3`` floor, so the arm was dead there).
+
+    ``head == 0`` is the unguarded test mode AND the ``placement="head"``
+    counterfactual; there ``window`` (the real reader window the caller
+    holds) stands in for it when supplied, and only when BOTH ``head`` and
+    ``window`` are 0 (a direct caller with no window in hand) does the
+    promotion ``limit`` size the sample. That last fallback is non-vacuous
+    only because of the ``< 3`` guard below — at the default ``limit=2`` a
+    2-slot sample makes ``max(counts) * 2 >= len(visible)`` vacuously true,
+    which is what let a four-distinct-session pool promote before the guard
+    existed (review cycles 2-3, #10549).
     """
-    if head > 0:
-        visible = candidates[:head]
-    elif window > 0:
-        visible = candidates[:window]
+    if head > 0 or window > 0:
+        visible = candidates[:max(head, window)]
     else:
         visible = candidates[:max(limit, 1)]
     # A sample below three slots cannot distinguish clustered from spread:
@@ -363,7 +374,11 @@ no candidate is dated, which the caller treats as "leg inert".
     # START), so this slice reaches ``limit - 1`` slots INTO the window. That
     # is deliberate for phase 1 (the anchor path is measured as-is, #2976) and
     # the window branch's own exclusion — :data:`held_buckets` — is what keeps
-    # the window path from re-emitting an id the reader already sees.
+    # the window path from re-emitting an id the reader already sees. For the
+    # same reason the window branch's clustering guard samples the READER
+    # WINDOW (``max(head, window)``), never this slice: sampling `head` alone
+    # both over-fired and, at ``window=3``, could never fire at all (review
+    # cycle 8, #10549).
     promotable = [c for i, c in enumerate(candidates)
                   if i >= max(head, 0) and c.get("session_date")]
     if not promotable:
@@ -378,10 +393,18 @@ no candidate is dated, which the caller treats as "leg inert".
     #: ``date_window`` (#10538). The window branch runs precisely because no
     #: anchor matched, so its members need not share an anchor token.
     relevant: set[str] = set()
-    #: #10538: the (date, session) buckets the reader ALREADY holds in the
-    #: visible head slice — never spent on a pick by the window path. See the
+            #: #10538: the (date, session) buckets the reader ALREADY holds in
+    #: the visible window — never spent on a pick by the window path. See the
     #: window branch below for why this is the whole slice and not just the
-    #: bucket sitting at the promotion ceiling.
+    #: bucket sitting at the promotion ceiling. ⚠️ ``candidates`` here is in
+    #: ANNOTATED index space; the reader's visible window is
+    #: ``pool[:effective_top_k]`` taken AFTER ``_dedup_pool`` drops
+    #: ``session-transcript`` raw chunks beyond ``max_chunks_per_session``, so
+    #: a TR pool carrying a flood session's raw chunks can make the reader's
+    #: window reach DEEPER than ``candidates[:window]``. Inherited from #2976's
+    #: ``ceiling`` (not introduced here); the exclusion is therefore a
+    #: bucket-level no-re-emit guarantee on the annotated pool, not a hard
+    #: bound on what the reader ends up seeing.
     held_buckets: set[tuple[str, str]] = set()
     #: true per-(date, session) cap accounting ACROSS both phases — a
     #: phase-1 anchor pick consumes its bucket's slot.
@@ -555,7 +578,11 @@ def temporal_leg_empty_reason(*, dated: int, anchors: int, weight: float,
         where (a) and (b) are both FALSE. Named here rather than left
         implicit because this is the ON/OFF reconstruction surface and a
         windowed miss must not be laundered as an anchor miss. Distinct from
-        ``no_anchors`` on purpose: the two are different code paths.
+        ``no_anchors`` on purpose: the two are different code paths. ⚠️ It is
+        reported only when ``anchors <= 0``; an anchor-PRESENT question whose
+        window path starves reports ``no_promotable_anchor_match``, which is
+        why the trace is a reconstruction surface and not an attribution one
+        (review cycle 8, #10549).
 
     ``budget`` defaults to 1 so a caller that does not track it keeps the
     pre-budget behavior.

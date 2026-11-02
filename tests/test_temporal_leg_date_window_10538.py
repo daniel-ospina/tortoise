@@ -423,3 +423,74 @@ def test_the_exclusion_is_bucket_scoped_not_session_scoped():
         f"a different BUCKET of the same session must stay promotable — the "
         f"exclusion is (session_date, session_id)-scoped, not session-scoped: "
         f"{picks}")
+
+
+def test_the_clustering_guard_samples_the_reader_window_not_the_ceiling():
+    """Review cycle 8 (#10549), the BLOCKING defect: ``_session_clustered``
+    sampled ``candidates[:head]``, and ``head`` is the caller's PROMOTION
+    CEILING (``window - limit``), not the reader's window — so at the shipped
+    geometry it read 10 of the 12 visible slots and omitted exactly the
+    ``limit`` slots the promotion displaces. The guard could therefore only
+    OVER-fire, and the pick evicted a reader-visible slot.
+
+    This pool separates the two samples. One session owns 5 of the first 10
+    slots; indices 10 and 11 are two other sessions and index 12 a third:
+
+    * ceiling sample ``candidates[:10]`` → ``5*2 = 10 >= 10`` ⇒ **clustered**
+    * the documented rule over the visible 12 → ``5*2 = 10 < 12`` ⇒ **declined**
+
+    Pre-fix the arm fires here and promotes ``deep`` (index 12), which evicts
+    ``t11`` — a reader-visible slot — from the 12-window. The spread is
+    defined as the remedy for a window that STARVES the other sessions, and 5
+    of 12 is not that window, so the honest verdict is inert.
+    """
+    pool = (
+        [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
+          "content": "alpha"} for i in range(5)]
+        + [{"id": f"t{i}", "session_id": f"sT{i}",
+            "session_date": "2023-04-12", "content": "beta"} for i in range(5)]
+        + [{"id": "t10", "session_id": "sT10", "session_date": "2023-04-13",
+            "content": "beta"},
+           {"id": "t11", "session_id": "sT11", "session_date": "2023-04-14",
+            "content": "beta"},
+           {"id": "deep", "session_id": "sD", "session_date": "2023-04-15",
+            "content": "gamma"}]
+    )
+    base = [c["id"] for c in pool]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=12, limit=2,
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks == [], (
+        f"the guard fired on a window that is not clustered (5 of 12 slots): "
+        f"{picks}")
+    assert order == base, f"an unclustered window reordered the pool: {order}"
+    # ...and the reader-visible slot the ceiling-sample bug evicted stays put.
+    assert order.index("t11") < 12, (
+        f"a pick evicted t11 from the reader's window: {order}")
+
+
+def test_the_clustering_guard_can_fire_at_a_small_window():
+    """The MIRROR symptom of the same sample bug. At ``window=3`` the ceiling
+    is 2, so a ``[:head]`` sample is a 2-slot sample — below the ``< 3`` floor
+    — and the guard declined UNCONDITIONALLY: the arm could never widen
+    anything at a 3-wide window, whatever the pool looked like. The three
+    visible slots are what must be judged, and there one session holds all
+    three, so the new session IS promoted.
+
+    Pre-fix this returns ``[]``; the assertions below are the positive control
+    that the window sample did not simply make the guard never fire."""
+    pool = (
+        [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-11",
+          "content": "alpha"} for i in range(3)]
+        + [{"id": "b1", "session_id": "sB", "session_date": "2023-04-12",
+            "content": "alpha"}]
+    )
+    base = [c["id"] for c in pool]
+    order, picks = temporal_leg_fusion_order(
+        pool, anchors=(), window=3, limit=1,
+        date_window=("2023-04-10", "2023-04-20"))
+    assert picks == ["b1"], (
+        f"a 3-wide window whose 3 slots are one session is clustered, and the "
+        f"new session must be promoted: {picks}")
+    assert order != base, "the windowed pick moved nothing"
+    assert order.index("b1") < base.index("b1"), order
