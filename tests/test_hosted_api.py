@@ -5495,6 +5495,17 @@ class TestIssueInsightAPI:
         A marker written on a sink is a developer fact; the contract is about
         what the caller receives. Driving the real route is what proves the
         relay rather than the SDK's internal bookkeeping.
+
+        ⛔ The fixture must be a body the PRODUCER can emit (#10570 review, P3
+        note). It was not: it paired `"at least 20 graph hit(s)"` with
+        `total_available: 20`, and the producer never writes both —
+        `sdk.py:34077` prefixes `"at least "` only when `_exact` is False, and
+        `truncation.py:196` sets `total_available` only when it is True. An
+        impossible pair cannot catch a relay that mixed the two. This arm is now
+        the EXACT case (20 matches at `limit=2`, pool bound 20 — the boundary
+        `tests/test_8447_issue_insight_truncation.py::
+        test_a_pool_at_exactly_its_bound_is_not_marked_cut` pins); its qualified
+        sibling is the test below.
         """
         import tortoise.hosted_api as hosted_api
 
@@ -5504,7 +5515,7 @@ class TestIssueInsightAPI:
                     "has_prior": True, "no_prior_knowledge": False,
                     "repo_not_indexed": False,
                     "data_points": [{"kind": "statement", "content": "alpha"}],
-                    "insight": "at least 20 graph hit(s) relate to this issue "
+                    "insight": "20 graph hit(s) relate to this issue "
                                "— check the graph before filing.",
                     "more_in_graph": "alpha",
                     "repo_stats": None,
@@ -5520,6 +5531,46 @@ class TestIssueInsightAPI:
         payload = r.json()
         assert payload["truncated"] is True
         assert payload["total_available"] == 20
+        assert not payload["insight"].startswith("at least "), (
+            "an EXACT total beside a qualified count is a pair the producer "
+            "cannot emit — the fixture drifted off the contract")
+
+    def test_the_route_relays_a_floor_without_inventing_a_total(
+            self, client, monkeypatch):
+        """The qualified arm: a saturated pool relays `at least N` and NO total.
+
+        This is the pair that makes the relay's absence handling observable. A
+        route that dropped `truncated`, or that filled a missing
+        `total_available` with the floor it was handed, would pass the exact arm
+        above and fail here.
+        """
+        import tortoise.hosted_api as hosted_api
+
+        class _FakeSDK:
+            def issue_insight(self, title, body=None, repo=None, limit=2):
+                return {
+                    "has_prior": True, "no_prior_knowledge": False,
+                    "repo_not_indexed": False,
+                    "data_points": [{"kind": "statement", "content": "alpha"}],
+                    "insight": "at least 25 graph hit(s) relate to this issue "
+                               "— check the graph before filing.",
+                    "more_in_graph": "alpha",
+                    "repo_stats": None,
+                    "truncated": True,
+                }
+
+        monkeypatch.setattr(hosted_api, "_data_sdk",
+                            lambda org: _FakeSDK())
+
+        r = client.get("/v1/issue-insight", params={"title": "anything"})
+
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["truncated"] is True
+        assert "total_available" not in payload, (
+            "a floor never wears a total's clothes — the route must relay the "
+            "ABSENCE, not fill it")
+        assert payload["insight"].startswith("at least ")
 
     def test_cross_team_isolation(self, client):
         """Team B cannot see Team A's repo stats via the REST mirror."""

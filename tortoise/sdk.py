@@ -33830,9 +33830,9 @@ class TortoiseSDK:
         Fail-closed: empty graph -> no_prior_knowledge; repo given + graph
         non-empty + zero points for repo -> repo_not_indexed. An out-of-domain
         `limit` (not a positive int) is REFUSED with `ValueError` before any
-        work, and is the ONE thing this method raises for; every other failure,
-        including a graph-service fault, is an error dict via _safe at the
-        handler.
+        work — the ONE input this method refuses ITSELF. Every other failure,
+        including a graph-service fault, PROPAGATES: this body has no try/
+        except. Conversion is the BOUNDARY's job (_safe → dict, REST → 500).
         data_points never exceeds `limit` rows (repo-stage append is capped).
 
         #8447 — every reply carries `truncated`, true when `data_points` are NOT

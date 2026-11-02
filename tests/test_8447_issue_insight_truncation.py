@@ -205,15 +205,63 @@ class TestIssueInsightTruncation:
         (graph-service failure -> error dict via _safe at the handler)") reds the
         first assertion, and a sentence that drops the exception's name reds the
         second — so the leg pins the AGREEMENT, not one wording.
+
+        ⛔ SCOPED, because the first correction OVER-CLAIMED (#10570 review at
+        `2fb095f18`, P3 finding 2). It said the `ValueError` "is the ONE thing
+        this method raises for; every other failure … is an error dict via _safe
+        at the handler". Both halves after the `limit` refusal are false for the
+        surfaces that are NOT the MCP tool: this method has ONE `raise` and
+        ZERO `except`/`try` (measured: `grep -nE 'raise |except'` over its
+        body), so a graph-service fault PROPAGATES to a direct SDK caller;
+        `GET /v1/issue-insight` then answers 500 (`hosted_api.py`, `except
+        Exception: raise HTTPException(500)`), and only the MCP tool's `_safe`
+        converts anything to a dict (`mcp_server.py`). A caller who trusted the
+        over-claim would not wrap the SDK call at all — the same class of harm
+        as "never raises", one step milder.
+
+        So the leg pins the SCOPE too: the refusal is this method's own, and
+        conversion is attributed to the BOUNDARY rather than to the method.
         """
         doc = type(sdk).issue_insight.__doc__ or ""
         assert "never raises" not in doc, (
             "the docstring claims unconditional non-raising while the `limit` "
             "guard raises ValueError")
         assert "ValueError" in doc, doc
+        assert "PROPAGATES" in doc, (
+            "the docstring must say a non-`limit` failure propagates out of "
+            "this method (there is no try/except in it), not that it is "
+            "converted here: " + doc)
+        assert "_safe" in doc, (
+            "the dict conversion belongs to the MCP boundary (`_safe`); a "
+            "docstring that does not name the boundary reads as if THIS method "
+            "does it: " + doc)
         # …and the exception the doc names is the one the guard really raises.
         with pytest.raises(ValueError, match="positive int"):
             sdk.issue_insight(QUERY, limit=0)
+
+    def test_a_service_fault_propagates_instead_of_becoming_an_error_dict(
+            self, sdk, monkeypatch):
+        """The behaviour behind the docstring's scoped claim (#10570 P3 #2).
+
+        The corrected sentence asserted that every non-`limit` failure is "an
+        error dict via _safe at the handler". It is not: `issue_insight` has no
+        `try`/`except`, so whatever the graph layer raises leaves the method
+        unchanged. That matters to a direct SDK/REST caller, who would read the
+        docstring and skip the wrap. Proven by driving a real call with the
+        projection failing — an error dict here would be the documented (and
+        wrong) behaviour, so this leg reds if a `try/except` is ever added
+        without the docstring moving with it.
+
+        Non-vacuity: the pre-fix sentence is what a `try/except`-to-dict would
+        have made true; this leg is false on exactly that implementation.
+        """
+        def _unreachable():
+            raise RuntimeError("graph service unreachable")
+
+        monkeypatch.setattr(sdk, "_get_proj", _unreachable)
+
+        with pytest.raises(RuntimeError, match="unreachable"):
+            sdk.issue_insight(QUERY, limit=2)
 
     def test_the_absence_prose_never_contradicts_the_marker(self, sdk):
         """A non-truncated read must NOT be told "the read was TRUNCATED".
