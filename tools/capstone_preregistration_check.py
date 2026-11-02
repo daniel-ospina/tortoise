@@ -1086,6 +1086,31 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _logs_making_an_ordering_claim(logs: list[Path], exempt: dict, exempted: list[str] | None,
+                                  ) -> list[Path]:
+    """The logs the ordering rule actually reaches: every log NEITHER exemption covers.
+
+    Both exemptions are the same statement — *this log produced no number, so it cannot have been
+    scored against a threshold chosen after it was read* — reached from two directions:
+    ``pins.pre_existing_unscored_logs`` (grandfathered, content re-verified by
+    :func:`_log_declares_unscored`) and :func:`_log_declares_no_measurement` (its own verdict block
+    says the run measured nothing). A log the rule exempts makes NO ordering claim, so refusing it
+    for want of an ordering claim is a false refusal — and it was reachable only through the
+    not-on-the-base arm, which returned before this loop (#10547 review P2).
+    """
+    claiming: list[Path] = []
+    for log in logs:
+        if log.name in exempt:
+            continue
+        ok, _why = _log_declares_no_measurement(log)
+        if ok:
+            if exempted is not None:
+                exempted.append(log.name)
+            continue
+        claiming.append(log)
+    return claiming
+
+
 def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                    exempted: list[str] | None = None,
                    base_ref: str | None = None) -> list[str]:
@@ -1139,14 +1164,27 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     if not prereg_epochs:
         if not logs:
             return failures  # no registration on base, and nothing to be ordered against
+        # ⛔ BOTH DOCUMENTED EXEMPTIONS ARE CONSULTED HERE TOO (#10547 review P2). This method's
+        # contract is "[] when every log is after the registration ON THE BASE **or provably
+        # unscored**", and this arm used to return BEFORE the per-log loop that consults the second
+        # disjunct — so a NEW bundle landing its registration beside a log that declares no
+        # measurement (the `e1-e2.log` shape the repo's own `7949-capstone` carries, and the shape
+        # #9110/#9089 carved out) was REFUSED, with a message asserting the log "has no such claim
+        # to make" when an unscored log never made an ordering claim at all. The gate then sends the
+        # author to a two-PR dance for an artefact the doctrine says it does not reach. So: subtract
+        # everything the exemptions already cover, refuse over what remains, and keep the refusal's
+        # wording for the SCORED case it was written for.
+        unquestioned = _logs_making_an_ordering_claim(logs, exempt, exempted)
+        if not unquestioned:
+            return failures  # nothing here claims an ordering, so there is none to prove
         # ⛔ Three DISTINCT refusals, deliberately not one: "you never committed it", "it has no
         # add-commit to compare", and "it is in THIS change but not on the base" are three
         # different remedies, and a single message would send a contributor to whichever the
         # message happened to name. The last one is the arm #10463 asks for.
         if not _is_tracked(prereg):
             failures.append(
-                f"{PREREG_NAME} is not committed, but {len(logs)} evidence log(s) exist — "
-                "the ordering cannot be proved, and an unprovable ordering is not an ordering"
+                f"{PREREG_NAME} is not committed, but {len(unquestioned)} evidence log(s) exist "
+                "— the ordering cannot be proved, and an unprovable ordering is not an ordering"
             )
             return failures
         if not _added_epochs(prereg):
@@ -1156,7 +1194,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
             )
             return failures
         failures.append(
-            SAME_PR_REFUSAL.format(prereg=PREREG_NAME, base=base, n=len(logs))
+            SAME_PR_REFUSAL.format(prereg=PREREG_NAME, base=base, n=len(unquestioned))
         )
         return failures
     prereg_epoch = min(prereg_epochs)

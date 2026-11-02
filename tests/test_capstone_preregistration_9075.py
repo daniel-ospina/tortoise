@@ -2679,6 +2679,63 @@ def test_a_registration_added_by_the_same_change_is_refused(tmp_path, monkeypatc
     assert "own PR" in failures[0], failures[0]
 
 
+def test_a_registration_added_beside_an_UNSCORED_log_is_not_refused(tmp_path, monkeypatch):
+    """#10547 review P2: the arm must reach BOTH exemptions before it refuses.
+
+    ``check_ordering``'s contract is *"[] when every log is after the registration ON THE BASE **or
+    provably unscored**"*. The same-change arm returned before the per-log loop that consults the
+    second disjunct, so a NEW bundle landing its registration beside a log whose own verdict block
+    says the run measured nothing — the shape #9110/#9089 carved out, and the one the repo's own
+    `7949-capstone` carries — was REFUSED, in a message asserting the log "has no such claim to
+    make" when an unscored log never made an ordering claim at all. Wrong outcome: the gate reds a
+    contribution its own doctrine says is not subject to the rule. Fixed code: green, and the
+    waiver is DECLARED rather than silent.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)   # NOT published: same change
+    log = _write_log(repo, "capstone.log", epoch=1_700_000_200, body=_capstone_body())
+    exempted: list[str] = []
+    assert check.check_ordering(prereg, [log], None, exempted) == []
+    assert exempted == ["capstone.log"], (
+        f"an exemption that green-lights a bundle must be visible in its report. Got {exempted}"
+    )
+
+
+def test_the_PINS_exemption_also_reaches_a_registration_added_beside_its_log(tmp_path, monkeypatch):
+    """The OTHER exemption, same arm: `pins.pre_existing_unscored_logs` exempts the log by name.
+
+    Both exemptions are the same statement — this log produced no number, so it cannot have been
+    scored against thresholds chosen after it was read — and neither was reachable from the
+    not-on-the-base arm.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)   # NOT published: same change
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_050, body=UNSCORED_LOG)
+    assert check.check_ordering(prereg, [log], _exempt()) == []
+
+
+def test_a_registration_added_beside_a_SCORED_log_is_still_refused(tmp_path, monkeypatch):
+    """The refusal keeps its STRICTNESS and its count: only the exempt logs are subtracted.
+
+    Relaxing the arm would turn the one gate that fires at PR time into a formality; the fix is
+    bounded to the logs that provably measured nothing. A bundle adding one exempt AND one scored
+    log is refused, and the message counts the log that actually made a claim — not the directory's
+    whole `*.log` population.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    prereg = _commit_prereg(repo, epoch=1_700_000_100)   # NOT published: same change
+    grandfathered = _write_log(repo, "e1-e2.log", epoch=1_700_000_050, body=UNSCORED_LOG)
+    scored = _write_log(repo, "capstone.log", epoch=1_700_000_200,
+                        body=_capstone_body(numerator=0, denominator=5))
+    failures = check.check_ordering(prereg, [grandfathered, scored], _exempt())
+    assert len(failures) == 1, failures
+    assert "not on the merge base" in failures[0], failures[0]
+    assert "adds 1 evidence log(s)" in failures[0], (
+        f"the refusal must count the logs that CLAIM an ordering, not every *.log in the bundle: "
+        f"{failures[0]}"
+    )
+
+
 def test_the_refusal_is_not_a_no_op_when_the_base_is_missing(tmp_path, monkeypatch):
     """A checkout WITH a remote but NO resolvable base is REFUSED — a fatal `HistoryUnavailable`.
 
