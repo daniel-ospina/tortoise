@@ -536,7 +536,7 @@ def test_a_default_base_pr_whose_keyword_is_only_in_a_code_block_is_unresolved()
     pr = _pr(110, DEFAULT, "fix: the thing\n\nOld body said, for context:\n\n    Closes #10541\n")
     (finding,) = cl.classify(pr, _by_head(pr), DEFAULT)
     assert finding.verdict == "unresolved"
-    assert "code block" in finding.detail
+    assert "indented line" in finding.detail
 
 
 def test_a_default_base_pr_with_a_plain_claim_still_lands():

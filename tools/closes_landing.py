@@ -228,10 +228,12 @@ def parse_closing_refs(body: str, repo: str | None = None,
     Code spans and fenced blocks (``` and `~~~`) are stripped first, because a
     keyword inside one is a *quotation* of a keyword, not a claim (GitHub does
     not act on it either, so treating it as a claim would manufacture a finding).
-    Indented blocks are stripped ONLY when `strict` — see `strip_code`: the
-    lenient direction (used for the PR under test) deliberately over-reports a
-    quoted indented keyword rather than risk losing a real claim, while the
-    carrier side is parsed strictly so a quotation there cannot buy a `lands`.
+    Indented blocks are stripped ONLY when `strict` — see `strip_code`. Two
+    callers use it, and both for the same reason (a lenient-only match there
+    would be a PASS): the CARRIER body when asking whether it restates the
+    keyword, and the subject's OWN `lands` arm in `classify` (which refuses to
+    pass on a ref that survives only the lenient parse). Finding arms stay
+    lenient, where the cost of leniency is a false warning, not a pass.
 
     `repo` (``owner/name``) decides what an `owner/repo#N` reference means. A
     slug naming a DIFFERENT repo is a closure elsewhere, not a claim about an
@@ -288,6 +290,9 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
     if not refs:
         return []
     carrier = resolve_carrier(pr, by_head, default_branch)
+    # Only the `lands` arm needs this, and it is the SAME body for every ref, so
+    # it is computed once (review c6).
+    strict_refs = set(parse_closing_refs(pr.body, repo, strict=True))
     findings: list[Finding] = []
     for issue in refs:
         if carrier is None:
@@ -320,20 +325,18 @@ def classify(pr: PullRequest, by_head: dict[str, PullRequest],
         # number comparison would make 0 == 0 read as "this PR lands" — a false
         # pass on exactly the shape this tool exists to catch.
         if carrier is pr:
-            # A PASS may not rest on a lenient-only match: if the keyword appears
-            # only inside an indented/quoted CODE block, GitHub will not act on it,
-            # and guessing `lands` there is the one outcome this module forbids.
-            # `strict_refs` is computed on the SAME body, so a claim at column 0
-            # passes and an ambiguous one downgrades to a warning (review c5-2).
-            if issue not in set(parse_closing_refs(pr.body, repo, strict=True)):
+            # A PASS may not rest on a lenient-only match: `strict_refs` is the
+            # same body parsed strictly, so a claim at column 0 passes and an
+            # ambiguous one downgrades to a warning (review c5-2).
+            if issue not in strict_refs:
                 findings.append(Finding(
                     issue=issue, pr=pr.number, base=pr.base, verdict="unresolved",
                     carrier=pr.number,
                     detail=(f"PR #{pr.number} targets `{default_branch}`, but the "
-                            f"`Closes #{issue}` in its body appears only inside a "
-                            f"quoted or indented code block, which GitHub does not "
-                            f"act on — it cannot be shown that the keyword will "
-                            f"fire. State it as plain text."),
+                            f"`Closes #{issue}` in its body appears only on an "
+                            f"indented line (4+ spaces or a tab). That may be a code "
+                            f"block GitHub ignores — or a nested list item it acts "
+                            f"on; this tool will not guess. State it at column 0."),
                 ))
                 continue
             findings.append(Finding(
