@@ -375,12 +375,46 @@ def test_missing_tenant_refuses_to_guess(monkeypatch):
 
 
 def test_unreadable_side_exits_three_never_zero(monkeypatch, tmp_path):
-    """The P0 shape: an unreadable record must not certify parity vacuously."""
+    """The P0 shape: an unreadable record must not certify parity vacuously.
+
+    ⛔ THE AXIS IS THE RECORD, NOT THE GRAPH (review observation, fixed here).
+    With an EMPTY stub graph this passed for the wrong reason: the zero-node
+    guard returns 3 before the record leg is ever opened, so a record that
+    raises was never reached and the docstring named an axis the body did not
+    exercise. The graph now holds one turn, so the only path to exit 3 is the
+    raising record read — asserted below rather than assumed.
+    """
+    calls = []
+
     def boom(*a, **k):
+        calls.append(a)
         raise tpc.CensusError("the record could not be opened")
-    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {"nodes": {}})
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1")}})
     monkeypatch.setattr(tpc, "read_record_turns", boom)
     assert tpc.main(_argv()) == 3
+    assert calls, "the RECORD leg was never opened — exit 3 came from elsewhere"
+
+
+def test_graph_name_help_names_the_graph_leg_only(capsys):
+    """A flag's help must not claim a scope the code does not have (review P3).
+
+    `--graph-name` is passed to `read_graph_turns` only — the record tenant is
+    `--org-id`/`--graph-id` — while the argparse help read "applies to BOTH
+    legs", contradicting the module contract at the same head. The help is the
+    stale half, so it is pinned here against the real parser output rather than
+    the docstring: on the pre-fix string this fails on `BOTH legs`.
+    """
+    with pytest.raises(SystemExit) as exc:
+        tpc.main(["--help"])
+    assert exc.value.code == 0
+    text = capsys.readouterr().out
+    at = text.index("  --graph-name")
+    rest = text[at + 1:]
+    block = " ".join(rest[:rest.index("\n  --")].split())
+    assert "BOTH legs" not in block
+    assert "GRAPH leg only" in block
+    assert "--org-id/--graph-id" in block
 
 
 def test_main_maps_clean_to_zero_and_refused_to_two(monkeypatch, tmp_path):
@@ -1368,7 +1402,7 @@ def test_the_duplicate_refusal_reaches_the_consumer_as_DUPLICATE_WINDOW(
 
     out = purge.classify_sessions(report)
     assert out["eligible"] == []
-    entry = [e for e in out["excluded"] if e["session"] == "s1"][0]
+    entry = next(e for e in out["excluded"] if e["session"] == "s1")
     assert entry["class"] == purge.CLASS_DUPLICATE_WINDOW
     # The fabricated placeholder is GONE from the surface a consumer reads.
     assert entry["sample_ids"] == []

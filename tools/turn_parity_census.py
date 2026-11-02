@@ -1700,7 +1700,13 @@ def _problem_is(verdict: dict, name: str) -> bool:
 
 
 def _problem_is_not(verdict: dict, name: str) -> bool:
-    """Does this failed session carry a problem that is NOT ``name``?"""
+    """Is this failed session's FIRST problem something other than ``name``?
+
+    The check is on ``problems[0]`` only — a session whose FIRST problem is
+    ``name`` answers False even when a later problem differs, so a reader must
+    not assume a scan of the whole list (review wording nit, no behaviour
+    change).
+    """
     problems = verdict.get("problems") or []
     return bool(problems) and problems[0].get("problem") != name
 
@@ -1728,10 +1734,18 @@ def main(argv: list[str] | None = None) -> int:
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--uri", help="FalkorDB URI of the target graph")
     src.add_argument("--db-path", help="embedded graph path instead of a URI")
+    # ⛔ THE HELP MUST NOT CLAIM A SCOPE THE CODE DOES NOT HAVE (review P3).
+    # This read "applies to BOTH legs" while `--graph-name` is passed to
+    # `read_graph_turns` only — the record tenant is `--org-id`/`--graph-id` —
+    # so it contradicted the module contract at the same head (:354-360). A
+    # help string is the only documentation an operator reads at the moment of
+    # choosing the flag, so the stale half is corrected here rather than left
+    # for the next reader to disambiguate.
     parser.add_argument("--graph-name", default=None,
                         help="the graph inside the store (default: the URI's, "
-                             "or 'tortoise' for --db-path); applies to BOTH "
-                             "legs")
+                             "or 'tortoise' for --db-path); selects the GRAPH "
+                             "leg only — it never scopes the record read (the "
+                             "record's tenant is --org-id/--graph-id)")
     parser.add_argument("--record-dsn", default=None,
                         help="hosted record DSN (default: TORTOISE_RECORD_DSN)")
     parser.add_argument("--local-record-dir", default=None,
