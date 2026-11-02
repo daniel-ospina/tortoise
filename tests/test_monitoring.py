@@ -3991,28 +3991,45 @@ class TestStallWatchdog:
             "LOOP_STALE_AFTER's rationale must scope its idle-gate claim to "
             "the SOFT path and name the hard ceiling that bypasses it")
 
-    def test_the_test_session_pins_the_hard_ceiling_disarmed(self):
-        """#10585 review P3: the session-wide env pin covered only the sibling.
+    def test_the_test_session_pin_BEATS_an_ambient_hard_ceiling(self, monkeypatch):
+        """#10585 review P3: the pin must OVERRIDE an ambient value, not defer.
 
-        ``tests/conftest.py`` pins ``TORTOISE_LOOP_STALL_EXIT_S=0`` because the
-        watchdog ``os._exit``s the process and that is catastrophic in a test
-        runner. The HARD ceiling is the DELIBERATE exception to the idle gate —
-        it exits with a request in flight — so an ambient value is worse here:
-        ``fly.toml`` and ``.env.example`` both document ``600``, and a developer
-        who exported either would make any test that arms the watchdog kill the
-        runner instead of exercising it.
+        ``tests/conftest.py`` must pin ``TORTOISE_LOOP_STALL_HARD_EXIT_S=0``:
+        the watchdog ``os._exit``s the process, and the HARD ceiling is the
+        DELIBERATE exception to the idle gate — it exits with a request in
+        flight — so it kills a test runner mid-test. ``fly.toml`` and
+        ``.env.example`` both document ``600``, and a developer who exported
+        either is exactly the case ``setdefault`` does NOT cover: it writes only
+        when the key is ABSENT, so it pins nothing in the case it exists for.
+
+        So the assertion is on the EFFECT of the session pin with an ambient
+        value present, not on the source text (which previously pinned the one
+        construct that cannot do this job — the finding this test fixes). The
+        pin statement is read out of ``conftest.py`` and EXECUTED, so a
+        ``setdefault`` fails here.
         """
+        import os
         from pathlib import Path
 
         conftest = (Path(__file__).resolve().parent
                     / "conftest.py").read_text(encoding="utf-8")
-        assert (
-            'os.environ.setdefault("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0")'
-            in conftest
-        ), (
-            "the hard ceiling must be pinned disarmed for the whole test "
-            "session, exactly like its sibling: it is the one path that kills "
-            "the process with work in flight")
+        pin = [line for line in conftest.splitlines()
+               if "os.environ" in line
+               and "TORTOISE_LOOP_STALL_HARD_EXIT_S" in line]
+        assert len(pin) == 1, (
+            f"expected exactly one session pin for the hard ceiling, got {pin!r}")
+
+        # The shipped `fly.toml`/`.env.example` value, as a developer who
+        # exported either would carry it into the session.
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_HARD_EXIT_S", "600")
+        exec(compile(pin[0], "<tests/conftest.py hard-ceiling pin>", "exec"),
+             {"os": os})
+
+        assert os.environ["TORTOISE_LOOP_STALL_HARD_EXIT_S"] == "0", (
+            "an ambient TORTOISE_LOOP_STALL_HARD_EXIT_S survived the session "
+            "pin: `setdefault` writes only when the key is ABSENT, so the next "
+            "test that arms the watchdog os._exit()s the runner instead of "
+            "exercising it")
 
     def test_hard_ceiling_parser_is_fail_closed(self, monkeypatch):
         """Every unusable value must DISABLE the ceiling (fail closed) — a

@@ -35,8 +35,13 @@ os.environ.setdefault("TORTOISE_LOOP_STALL_EXIT_S", "0")
 # EVEN with a request in flight — so an ambient value is more dangerous here,
 # not less: ``fly.toml`` and ``.env.example`` both document 600, and a developer
 # who exported either would make any hosted-API test that arms the watchdog
-# ``os._exit`` the runner. Pinned for the same reason and the same way.
-os.environ.setdefault("TORTOISE_LOOP_STALL_HARD_EXIT_S", "0")
+# ``os._exit`` the runner. ASSIGNED, not ``setdefault`` (#10585 review P3):
+# ``setdefault`` writes only when the key is ABSENT, which is the one case that
+# is NOT the hazard — so it pins nothing in the case it exists for. Same shape
+# and same reason as the ``TORTOISE_EMBEDDER_WARMUP`` pin below (#7015). A test
+# that arms the ceiling deliberately still wins: ``monkeypatch.setenv`` applies
+# after this and restores this value when the test ends.
+os.environ["TORTOISE_LOOP_STALL_HARD_EXIT_S"] = "0"
 # #2850: the dedicated liveness listener defaults to the fixed 0.0.0.0:9090
 # deployment contract. An ephemeral port for the test session keeps parallel
 # test sessions on one host from fighting over it (and never exposes a
