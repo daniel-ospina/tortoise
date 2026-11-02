@@ -158,10 +158,9 @@ not as deferred. An undecided surface is not a deferred one; conflating them is 
 being tracked.
 
 ⚠️ **hosted `GET /v1/points` is NOT one of these, and is not parked on an approval.** Its body is a
-**dict**, not a list — `return {"points": results, "count": len(results)}` (`hosted_api.py:10324`) —
-and the route declares no `response_model` (`:10265-10266`), so a marker rides it **additively**,
-exactly as it rides `/v1/search`: build the body, then `response.update(truncation_field(…))`
-(`:10804`, `:10813`). #10500 recorded that shape as a `response_fields` row in
+**dict**, not a list — the `list_points` body build — and the route declares no `response_model`
+(`@app.get("/v1/points")` carries none), so a marker rides it **additively**, exactly as it rides
+`/v1/search`: build the body, then `response.update(truncation_field(…))`. #10500 recorded that shape as a `response_fields` row in
 `config/surface-manifest.yml` (`:121-143`), **not** as an MCP/SDK surface approval — and its own
 note draws the line there: wrapping a *list* in an object is the return-type change; adding a field
 to an object body is not. So this one was **SILENT and fixable without an approval** — recorded here
@@ -237,7 +236,7 @@ A marker is only an instrument if a caller can act on it. Therefore:
   proves the cut, the probe is dropped before delivery, and the body carries `truncated`
   (`total_available` withheld, `exact=False`). The four boundary cases are pinned per surface —
   hosted `/v1/points`, hosted `/v1/events` (cursor), and `paginated_query` (the control) — with two
-  mutation runs recorded on the issue. Still **SILENT**: the list-shaped surfaces in §2a
+  mutation runs recorded in **PR #10622**'s body. Still **SILENT**: the list-shaped surfaces in §2a
   (`tortoise_search`, selfhost `GET /search`, selfhost `GET /points`, `list_batches`,
   `suggest_entry_points`) — every one of them needs a return-shape decision, not a marker.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` — the storage seams these bounds sit on.
