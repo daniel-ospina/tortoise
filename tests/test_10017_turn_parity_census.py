@@ -1334,6 +1334,46 @@ def test_a_duplicated_session_the_graph_holds_REFUSES_by_name(tmp_path):
     assert report["dry_run"]["held_back_turn_nodes"] == 1
     assert report["record"]["duplicate_window"] == [
         {"session": "s1", "windows": 2, "graph_turn_nodes": 1}]
+    # ⛔ NO SYNTHETIC NODE ID (review P2). `node` is what every consumer treats
+    # as a turn id — `purge_legacy_turns.classify_sessions` collects it into
+    # `sample_ids` — so a placeholder like `s1_t*` names a node nothing can
+    # resolve. Mutation that goes RED here: `"node": f"{sid}_t*"`.
+    assert problem["node"] is None
+
+
+def test_the_duplicate_refusal_reaches_the_consumer_as_DUPLICATE_WINDOW(
+        tmp_path):
+    """The census's own warning must survive into the plan's classification.
+
+    `classify_sessions` used to fall through to MISMATCH ("the record holds a
+    DIFFERENT transcript"), which INVERTS this arm's advice — the remedy for
+    MISMATCH is a field repair and for RECORD-BEHIND a backfill, and both write
+    the wrong window over a duplicate. This drives the REAL census report into
+    the REAL classifier, so it cannot pass on a hand-built fixture.
+
+    Mutations that go RED here: `"node": f"{sid}_t*"` (a fabricated id reaches
+    `sample_ids`), and deleting the `duplicate` branch in `classify_sessions`.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import purge_legacy_turns as purge
+
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-01.jsonl")
+    _local_record(tmp_path, {"s1": _conversation(("user", "a"))},
+                  name="2026-11-02.jsonl")
+    record = tpc.read_local_record_turns(tmp_path)
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content="[user] a")}
+    report = tpc.census({"nodes": nodes}, record, sample=5)
+    assert report["verdict"] == "REFUSED"
+
+    out = purge.classify_sessions(report)
+    assert out["eligible"] == []
+    entry = [e for e in out["excluded"] if e["session"] == "s1"][0]
+    assert entry["class"] == purge.CLASS_DUPLICATE_WINDOW
+    # The fabricated placeholder is GONE from the surface a consumer reads.
+    assert entry["sample_ids"] == []
+    assert out["counts"][purge.CLASS_DUPLICATE_WINDOW] == 1
+    assert out["counts"][purge.CLASS_MISMATCH] == 0
 
 
 def test_a_duplicated_session_with_NO_graph_turn_does_NOT_block_the_census(
