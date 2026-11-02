@@ -4625,12 +4625,14 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # anti-rot loop (it now runs while the arm is DISARMED, so a disclosure for an ordinarily
         # ordered log is no longer accepted silently on the default path, plus the two tests that
         # pin both halves), then 2572 by the merge of #10525/#10554 (the amended pre-registration
-        # history claims and the S3 re-measurement added five lines above the pinned sentence) —
-        # the pin landing
+        # history claims and the S3 re-measurement added five lines above the pinned sentence),
+        # then 2586 by this cycle's re-derivation of the 5087-withdrawal test's docstring (fourteen
+        # lines that state WHY "no evidence log in the directory" stopped being the invariant once
+        # #10554 landed its re-measurement) — the pin landing
         # rather than drifting, because a plausible offset is what it exists to refuse. ⛔
         # Re-derive this number, never delete the entry: the whole point is that a citation which
         # names a line that does not say it is a dead pointer.
-        ("tests/test_capstone_preregistration_9075.py", 2572):
+        ("tests/test_capstone_preregistration_9075.py", 2586):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
