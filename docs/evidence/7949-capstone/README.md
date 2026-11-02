@@ -547,6 +547,32 @@ the file's OLDEST add-commit and that never moves. The new name is a new path, a
 record, and it passes. (Verified: `tools/capstone_preregistration_check.py --dir
 docs/evidence/7949-capstone` → `OK — … the ordering holds`, three evidence logs.)
 
+### The ordering rule this bundle's registration states is SUPERSEDED
+
+`PRE-REGISTRATION.md`'s exit list, item 2, tells an author that the commit that **adds** the
+registration must be **strictly older** than the commit that adds each `*.log` in this directory
+(`git log --diff-filter=A --format=%ct`) — a comparison of two sibling commits **inside one
+contribution**. That predicate is what the gate no longer enforces, for the reason `#10463` shows:
+a squash merge collapses the pair into ONE commit, so the same tree passed its PR checks and redded
+`main` minutes later (`#10468`). The ruled repair (`#10463` comment 6564634454, item 4) is **base
+ancestry**: the registration's earliest add-commit reachable from the **merge base** must strictly
+precede the log's add-commit, which means a change that lands the registration and its log **in one
+PR** is refused (`SAME_PR_REFUSAL` in the gate: *"it must land FIRST, in its own PR"*). The gate
+prints the ref it actually compared on its `ordering measured against:` line — read that line, not
+this note and not the registration's item 2.
+
+⛔ **The registration is NOT edited to say this, and its own terms are why.** `preregistration.json`
+pins the document by BYTES (`document_sha256`, asserted by
+`tests/test_s3_prior_ablation.py::test_the_record_pins_the_documents_digest`), and an amendment is a
+NEW linked record — never an edit to the frozen one, which is the `#10463` ruling and the reason a
+silent edit is the failure the gate exists to catch in the first place. Leaving item 2 as the only
+statement of the rule is the other failure: a lane that reads the authoritative protocol, orders its
+two commits inside one PR exactly as criterion 2 asks, and lands is refused by a requirement the
+registration never states. **This section is the changes record that closes that gap** — item 2 is
+what the registering author wrote, base ancestry is what the gate enforces today, and
+`tests/test_capstone_preregistration_9075.py::test_the_bundle_records_the_superseded_ordering_rule_its_registration_states`
+keeps this record here (and the registration unedited).
+
 ## The gate: two questions, two exits
 
 ```bash

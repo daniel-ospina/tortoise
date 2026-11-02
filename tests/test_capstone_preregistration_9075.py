@@ -251,6 +251,62 @@ def test_the_real_document_writes_no_four_edge_rate():
     assert not check.FOUR_EDGE_RATE.search(PREREG.read_text())
 
 
+#: The heading of the bundle README's CHANGES RECORD for the rule the frozen registration states.
+#: One constant, so the guard below and the document cannot drift apart on the string they agree on.
+_SUPERSESSION_HEADING = "### The ordering rule this bundle's registration states is SUPERSEDED"
+
+
+def test_the_bundle_records_the_superseded_ordering_rule_its_registration_states():
+    """The registration states the PR-internal rule; the bundle must record what the gate does now.
+
+    `PRE-REGISTRATION.md`'s exit list, item 2, tells an author that the commit ADDING the
+    registration must be **strictly older** than the commit adding each `*.log` — the sibling-commit
+    comparison this gate replaces with BASE ANCESTRY (#10463 item 4, because a squash merge collapses
+    the pair into one commit). Both halves of that are load-bearing here:
+
+    * the document may NOT be edited (its bytes are pinned by `preregistration.json` →
+      `document_sha256`, and the ruling makes an amendment a new linked record), so the divergence
+      cannot be corrected where it is stated; and
+    * left uncorrected everywhere, item 2 is an instruction this gate REFUSES: a lane that reads the
+      authoritative protocol, orders its two commits inside one PR exactly as criterion 2 asks, and
+      lands is turned away by `SAME_PR_REFUSAL` — *"it must land FIRST, in its own PR"* — a PR
+      boundary the registration never mentions.
+
+    So the fix is a changes record in the surface that MAY change (this bundle's README, the
+    supersession-note shape the 5087 withdrawal uses), and this leg keeps it there: the record is
+    found by its heading and must name what it supersedes, the replacement rule, the refusal it adds,
+    and the digest pin that forbids the edit. Delete or hollow out the note and this reds; re-state
+    the rule by editing the registration instead and the digest pin reds.
+
+    Non-vacuity: at the pre-fix head the README carries no such section, so the heading split below
+    finds one piece and this fails.
+    """
+    registration = PREREG.read_text(encoding="utf-8")
+    readme = (PREREG_DIR / "README.md").read_text(encoding="utf-8")
+
+    # The premise, not the defect — the frozen document still states the superseded comparison.
+    assert "strictly older" in registration, (
+        "the registration no longer states the sibling-commit rule this record supersedes. The "
+        "document is digest-pinned, so an amendment here is the silent edit the gate exists to "
+        "refuse — restore its bytes rather than deleting this premise")
+    assert "in its own PR" not in registration, (
+        "the registration now states the PR boundary the gate requires — if that is a real "
+        "amendment it is a NEW linked record, not an edit to these pinned bytes")
+
+    parts = readme.split(_SUPERSESSION_HEADING, 1)
+    assert len(parts) == 2, (
+        f"the bundle README no longer carries its changes record ({_SUPERSESSION_HEADING!r}): "
+        "without it the only statement of the ordering rule is the registration's item 2, which "
+        "this gate refuses and may not be edited")
+    record = parts[1].split("\n## ", 1)[0]
+    for phrase in ("merge base", "SAME_PR_REFUSAL", "PRE-REGISTRATION.md", "document_sha256"):
+        assert phrase in record, (
+            f"the changes record does not name {phrase!r}: it has to say WHAT is superseded "
+            "(`PRE-REGISTRATION.md`), WHAT replaces it (the merge base's add-commit), the refusal "
+            "a reader will hit (`SAME_PR_REFUSAL`), and why the document is not simply edited "
+            "(`document_sha256`)")
+
+
 def test_a_mutated_pin_fails_instead_of_re_basing_the_thresholds():
     pins = check.parse_pins(PREREG.read_text())
     pins["corpus"]["planted_units"] = 91
