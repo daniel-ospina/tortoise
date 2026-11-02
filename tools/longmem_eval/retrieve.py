@@ -1989,9 +1989,20 @@ def retrieve_for_question(
         # ``_apply_time_window`` already filtered on, every surviving hit is
         # in-window, so this window does NOT select a subset here — the
         # clustering condition inside ``temporal_leg_order`` is the sole
-        # targeting signal on the wired path. The window still matters for the
-        # ``tr_window_fallback`` pool (unfiltered because the filter emptied
-        # it) and for any caller passing a span the filter has not applied.
+        # targeting signal on the wired path. That holds for the
+        # ``tr_window_fallback`` pool as well, which is why it is NOT a second
+        # place the window selects: that pool is unfiltered because the filter
+        # EMPTIED it (``tr_window_fallback`` is set only when
+        # ``_apply_time_window`` returned ``[]``, i.e. no DATED hit was
+        # in-window), and both seams resolve their bounds from the same
+        # ``facet_window_bounds`` call with the same anchor — so
+        # ``_in_date_window`` is false for every promotable candidate there
+        # too and the arm cannot fire on it by construction (review cycle 6,
+        # #10549: the earlier text claimed reachability here that does not
+        # exist; pinned by
+        # ``test_the_fallback_pool_cannot_fire_the_window_arm``). The window
+        # carries reach only for a caller that passes a span the filter has
+        # not already applied.
         # ``ordering`` has no computable bound (`facet_window_bounds` returns
         # ``None``) → ``None`` → byte-identical to the pre-#10538 leg.
         _tl_date_window = None

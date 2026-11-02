@@ -128,3 +128,58 @@ def test_the_proxy_leaves_anchorless_searches_without_a_range_unwindowed(
     out = replay_mod.replay([_question(question)], window=12)
     assert seen.get("date_window") is None, seen
     assert out["leg_fired"] == 0, out
+
+
+def test_the_fallback_pool_cannot_fire_the_window_arm():
+    """Review cycle 6 (#10549): ``retrieve.py`` claimed the window "still
+    matters for the ``tr_window_fallback`` pool". It cannot — the pool is
+    unfiltered because the filter EMPTIED it, and both seams resolve their
+    bounds from the same ``facet_window_bounds`` call with the same anchor, so
+    no dated hit there is in-window and the leg's ``_in_date_window`` keeps
+    nothing.
+
+    Pinned as the composed claim, seam by seam: the filter returns ``[]`` on
+    this pool (which is exactly what sets ``tr_window_fallback``), and the
+    leg handed the SAME bounds then promotes nothing and reports
+    ``no_window_candidates``. A change that gave the fallback pool the
+    reachability the old comment claimed fails here."""
+    from tools.longmem_eval.retrieve import _apply_time_window
+    from tortoise.temporal_leg import (
+        temporal_leg_empty_reason,
+        temporal_leg_fusion_order,
+    )
+
+    question = "What did I do between 2023-04-10 and 2023-04-20 for the puppy?"
+    constraint = detect_time_constraint(question)
+    assert (constraint.kind, constraint.anchors) == ("interval", ())
+    question_date = "2023/04/21 (Fri) 10:00"
+    bounds = ("2023-04-10", "2023-04-20")
+    # The FALLBACK shape: every dated hit sits outside the window, and one
+    # session owns the visible slots (so a window that COULD select would fire
+    # — clustering is not what declines here). The pool spans past the
+    # promotion ceiling on purpose: at ``window=12, limit=2`` the slice is
+    # ``candidates[10:]``, and a pool that ENDS at index 10 would leave it
+    # empty and make this pin vacuous (a bounds-ignoring mutant passes).
+    hits = [
+        {"id": f"a{i}", "session_id": "sA",
+         "session_date": f"2022-01-0{i % 9 + 1}",
+         "content": "puppy training"}
+        for i in range(14)
+    ] + [
+        {"id": "b1", "session_id": "sB", "session_date": "2022-02-01",
+         "content": "puppy training"},
+    ]
+    assert _apply_time_window(hits, constraint,
+                              question_date=question_date) == [], (
+        "premise: the filter empties the dated pool, which is what sets "
+        "tr_window_fallback")
+
+    order, picks = temporal_leg_fusion_order(
+        hits, anchors=constraint.anchors, window=12, limit=2,
+        date_window=bounds)
+    assert picks == [], (
+        f"the window arm fired on the unfiltered fallback pool: {picks}")
+    assert order == [h["id"] for h in hits]
+    assert temporal_leg_empty_reason(
+        dated=len(hits), anchors=0, weight=1.0, budget=2,
+        date_window=True) == "no_window_candidates"

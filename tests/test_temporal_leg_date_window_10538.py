@@ -330,3 +330,41 @@ def test_the_reader_visible_head_is_never_disturbed_by_the_window():
     assert order == ["c1"], order
     head_ids = {c["id"] for c in SPREAD_POOL[:6]}
     assert not head_ids & set(order)
+
+
+def test_the_exclusion_is_bucket_scoped_not_session_scoped():
+    """Review cycle 6 (#10549): the exclusion comment claimed "every pick is a
+    session the reader does NOT already have", but ``held_buckets`` keys on
+    ``(session_date, session_id)`` — a BUCKET — so the guarantee is
+    bucket-level. The divergence is reachable and benign: the producer writes
+    one ``session_date`` per session, yet a hit carrying a different raw date
+    string for the same session is a DIFFERENT bucket.
+
+    This test pins the actual granularity, so the comment cannot drift back to
+    a session-level claim: the held head is ``sA`` at ``2023-04-11``, the pick
+    is ``aX`` — the SAME session ``sA`` at ``2023-04-19``, a distinct bucket —
+    and it must be promotable while ``a4`` (the held bucket itself) must not.
+    A session-keyed exclusion fails here."""
+    pool = [
+        {"id": "a1", "session_id": "sA", "session_date": "2023-04-11",
+         "content": "alpha"},
+        {"id": "a2", "session_id": "sA", "session_date": "2023-04-11",
+         "content": "alpha"},
+        {"id": "a3", "session_id": "sA", "session_date": "2023-04-11",
+         "content": "alpha"},
+        {"id": "a4", "session_id": "sA", "session_date": "2023-04-11",
+         "content": "alpha"},
+        {"id": "aX", "session_id": "sA", "session_date": "2023-04-19",
+         "content": "alpha"},
+        {"id": "b1", "session_id": "sB", "session_date": "2023-04-14",
+         "content": "alpha"},
+    ]
+    picks = temporal_leg_order(
+        pool, anchors=(), limit=2, head=3,
+        date_window=("2023-04-10", "2023-04-20"))
+    assert "a4" not in picks, (
+        f"the bucket the reader already holds was re-emitted: {picks}")
+    assert "aX" in picks, (
+        f"a different BUCKET of the same session must stay promotable — the "
+        f"exclusion is (session_date, session_id)-scoped, not session-scoped: "
+        f"{picks}")

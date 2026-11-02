@@ -322,6 +322,21 @@ Rows `head` are the rank-0 counterfactual (`--placement head`); they are
 why placement cannot be settled here (see above). The leg fires on 49 of
 the 54 answerable questions.
 
+RE-DERIVED at #10538's head (2026-11-02) with
+``uv run python -m tools.longmem_eval.temporal_leg_replay --json`` (plus
+``--limit 1`` and ``--placement head --limit 2``): every row above
+reproduces EXACTLY, so the table is not stale — but read its SCOPE, which
+is narrower than "the leg's effect". The pinned subset's own constraint
+class is uniform: ``detect_time_constraint`` returns ``ordering`` for **all
+55** questions, and ``facet_window_bounds`` has no computable bound for
+``ordering``, so the ``date_window`` #10538 threads through the proxy is
+``None`` on every question. The replay therefore exercises the ANCHOR path
+only: it bounds the no-harm direction there and says nothing about the
+#10538 window arm (which fires on the anchor-less ``interval``/``recency``
+class this subset does not contain). Do not read these rows as a
+measurement of the window arm; that one belongs to the eval lane (#9097),
+for the same reason the placement question does.
+
 The shipped base is 0/52 answerable with gold at ranks 41–120 — a base
 with nothing to lose — so budget 2 (the co-present pair, the target
 class) is the default and the end-to-end delta is the eval lane's to
@@ -419,9 +434,16 @@ no candidate is dated, which the caller treats as "leg inert".
                         if _in_date_window(c.get("session_date"),
                                            date_window)}
             # Every bucket the reader ALREADY holds in the visible head slice
-            # is excluded wholesale, so every pick is a session the reader
-            # does NOT already have. The slice includes the candidate sitting
-            # AT the promotion ceiling (index ``head``): a pick from that
+            # is excluded wholesale, so no pick re-emits a bucket (a
+            # ``(session_date, session_id)`` pair, the key ``_bucket_key``
+            # builds) that the reader can already see. That is a BUCKET-level
+            # guarantee, not a session-level one: it collapses to "a session
+            # the reader does NOT already have" only because the producer
+            # writes one ``session_date`` per session (``retrieve.py``'s
+            # ``dates[si]``), and two hits of the same session carrying
+            # different raw date strings are two buckets. Slice includes the
+            # candidate sitting
+            # at the promotion ceiling (index ``head``): a pick from that
             # bucket re-emits an id already in the head slice at its own
             # index, so the fused order comes out byte-identical while the
             # stats report ``applied``/``picks=1`` (review cycle 3, #10549 —
