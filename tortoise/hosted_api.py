@@ -3114,6 +3114,20 @@ _DREAM_QUEUES: dict[str, asyncio.Queue] = {}
 # enqueue (where the request's credential is in hand), read in `_open_sdk`,
 # and popped WITH the queue so it cannot outlive the key it describes.
 _DREAM_RECORD_TENANTS: dict[str, tuple[str, str]] = {}
+# #10452 review P2: the GRAPH the enqueueing request resolved, per dream key. The
+# drain used to resolve `_org_sdk(org_id)` for an ORG-WIDE key, i.e. read the
+# org's default at DRAIN time, while the tenant beside it was captured at
+# ENQUEUE time — so a `promote_default_graph` committing in that window made the
+# pass write its nodes into the PROMOTED graph and file every record it emitted
+# under the DEMOTED one. That is the `derived != measured` split #10025 exists to
+# remove, and it contradicts the promise this file publishes for the verb ("an
+# in-flight capture — and anything already queued behind it, including the dream
+# drain it enqueues ... finishes against the graph it started on"). So the graph
+# is carried BY VALUE beside the tenant, from the same credential, and the drain
+# opens it with NO read of its own (`_org_sdk_from_name`). Set at enqueue only
+# when a tenant was carried (no tenant ⇒ nothing to split, and the pre-fix
+# fail-soft read stays), and popped WITH the queue.
+_DREAM_DRAIN_GRAPHS: dict[str, str | None] = {}
 # #329: per-org hourly budget for /v1/dream?full=true (CPU DoS bound)
 _DREAM_FULL_BUCKETS: dict[str, list[float]] = {}
 _DREAM_TASKS: dict[str, asyncio.Task] = {}
@@ -3332,7 +3346,8 @@ def _dream_lock(key: str) -> threading.Lock:
 
 def _enqueue_dream(org_id: str, dirty_roots: list[str],
                    *, graph_namespace: str | None = None,
-                   record_tenant: tuple[str, str] | None = None) -> None:
+                   record_tenant: tuple[str, str] | None = None,
+                   default_graph_name: str | None = None) -> None:
     """Enqueue affected roots for a tenant's next dream cycle (per graph).
 
     ``record_tenant`` (#9188) is the Postgres record's tenant for THAT graph,
@@ -3351,6 +3366,14 @@ def _enqueue_dream(org_id: str, dirty_roots: list[str],
     key = _dream_key(org_id, graph_namespace)
     if record_tenant is not None:
         _DREAM_RECORD_TENANTS[key] = record_tenant
+        # #10452 review P2: carry the GRAPH too, so the drain cannot re-resolve
+        # it at drain time and land on the other side of a promotion from the
+        # tenant above. `default_graph_name` is the I/O-free answer this
+        # request's own credential already carries (`_default_graph_name`);
+        # ``None`` is the HISTORICAL open, not "unknown", so an unpromoted org
+        # keeps the exact graph it always drained.
+        _DREAM_DRAIN_GRAPHS[key] = (graph_namespace if graph_namespace is not None
+                                    else default_graph_name)
     q = _DREAM_QUEUES.setdefault(key, asyncio.Queue())
     for root in dirty_roots[: _DREAM_BATCH_MAX]:
         q.put_nowait(root)
@@ -3882,8 +3905,17 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
             # fail closed to, and its roots are already drained — an offload
             # failure there would DROP them (until a later sweep) while logging
             # a capacity signal as a graph failure.
-            sdk = (_make_sdk(graph_name=gns) if gns is not None
-                   else _org_sdk(org_id))
+            if gns is not None:
+                sdk = _make_sdk(graph_name=gns)
+            elif key in _DREAM_DRAIN_GRAPHS:
+                # #10452 review P2: the ORG-WIDE graph this enqueue resolved,
+                # opened BY VALUE — no read here, so the pass cannot land on the
+                # other side of a promotion from the tenant it binds below.
+                sdk = _org_sdk_from_name(org_id, _DREAM_DRAIN_GRAPHS[key])
+            else:
+                # Nothing was carried (the tenant was unnameable), so there is
+                # no pair to keep together — keep the pre-fix fail-soft read.
+                sdk = _org_sdk(org_id)
             # #9188: this drain writes as the tenant the ENQUEUEING request
             # named (see `_DREAM_RECORD_TENANTS`) — otherwise every dream-
             # emitted record on an armed hosted lane is refused `no_tenant`.
@@ -3950,6 +3982,7 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
             # stale one would make every dream-emitted record `write_failed`
             # (counted, never misfiled, but a permanent red nobody can explain).
             _DREAM_RECORD_TENANTS.pop(key, None)
+            _DREAM_DRAIN_GRAPHS.pop(key, None)
 
 
 # ── Rate Limiter ──────────────────────────────────────────────────
@@ -7693,13 +7726,20 @@ def _dream_record_tenant(org: dict,
       (``_open_sdk`` → ``_make_sdk(graph_name=gns)``), and the credential's own
       answer names it (a present ``graph_id`` answers or refuses — see
       :func:`tortoise.record_writer.record_tenant_for`);
-    * ``graph_namespace`` None → the drain opens the ORG-WIDE graph
-      (``_open_sdk`` → ``_make_sdk(namespace=org_id)``), which is BYTE-IDENTICAL
-      to what `_data_sdk` opens for the same credential on this very request
-      (`_make_sdk(namespace=org_id)`) — so an org-wide API KEY's
-      ``default_graph_id`` names exactly the graph the pass will write. That is
-      #10025's whole premise, and the REST request lane already files its rows
-      that way (`_bind_record_tenant`, reached from `_data_sdk`).
+    * ``graph_namespace`` None → the drain opens the ORG-WIDE graph, i.e. the
+      same graph `_data_sdk` opened for this very request. That is #10025's
+      whole premise, and the REST request lane already files its rows that way
+      (`_bind_record_tenant`, reached from `_data_sdk`).
+
+    ⛔ AND THE GRAPH IS CARRIED WITH IT (#10452 review P2). "The same graph"
+    used to be an argument about the resolver, not a fact about the drain: the
+    drain called `_org_sdk(org_id)` itself, i.e. READ the org's default at
+    DRAIN time, so a `promote_default_graph` committing between the enqueue and
+    the pass made the nodes land in the PROMOTED graph while ``default_graph_id``
+    filed every record under the DEMOTED one. `_enqueue_dream` therefore also
+    carries the graph (`_DREAM_DRAIN_GRAPHS`, resolved I/O-free from this same
+    credential) and the drain opens it by name, so the pair is one answer at
+    both ends.
 
     The ONE shape that must NOT carry a tenant is a **graph-bound credential
     with a falsy namespace**: `graph_namespace` is then None, so the enqueue
@@ -10627,21 +10667,31 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     # the carry is correct rather than a guess. ⚠️ That equality used to be
     # quoted as "both open `_make_sdk(namespace=org_id)`"; it is now the shared
     # RESOLVER that makes it true, which is why the two cannot drift apart.
+    # (#10452 review P2: the RESOLVER is now taken HERE, from this request's
+    # credential, and carried by value — the drain used to call `_org_sdk`
+    # itself at drain time, i.e. read the default a second time, so a promotion
+    # in that window split the pass's nodes from its records. See
+    # `_DREAM_DRAIN_GRAPHS`.)
     # (`_data_sdk` refuses the falsy-namespace org first with 403
     # GRAPH_NOT_FOUND, so that shape is latent rather than live.)
     _dream_ns = (org.get("graph_namespace") if org.get("graph_id") else None)
     _enqueue_dream(org["org_id"], list(sdk._dirty_roots),
                    # graph-bound key → ITS custom graph; org-wide/session →
                    # the org-keyed drain, which opens the org's DEFAULT graph
-                   # through `_org_sdk` (#10180) — i.e. the same graph THIS
-                   # request used, historical or promoted
+                   # — i.e. the same graph THIS request used, historical or
+                   # promoted
                    graph_namespace=_dream_ns,
                    # #9188: the record's tenant for the SAME graph, resolved
                    # once from THIS request's credential. Nothing else in the
                    # drain knows it (`_open_sdk` opens a namespace, not a
                    # tenant), and an armed lane otherwise refuses every
                    # dream-emitted record `no_tenant`.
-                   record_tenant=_dream_record_tenant(org, _dream_ns))
+                   record_tenant=_dream_record_tenant(org, _dream_ns),
+                   # #10452 review P2: …and the GRAPH that tenant names, from
+                   # the SAME credential and the same instant, so the drain
+                   # cannot open a different one. I/O-FREE: this is the
+                   # resolver `_data_sdk` opened with on this very request.
+                   default_graph_name=_default_graph_name(org))
     # Log audit event
     await _async_audit(
         request, org["org_id"], "point_create",
@@ -24338,7 +24388,9 @@ async def promote_graph(graph_id: str, request: Request, org_id: str,
       name it opens (``_data_sdk``) and the record tenant it binds come from the
       same credential dict, so an in-flight capture — and anything already
       queued behind it, including the dream drain it enqueues, which carries
-      that tenant by value — finishes against the graph it started on. The
+      that tenant AND that graph by value (``_DREAM_RECORD_TENANTS`` /
+      ``_DREAM_DRAIN_GRAPHS``, both set from the enqueueing request's own
+      credential) — finishes against the graph it started on. The
       switch is visible to the NEXT request that resolves its credential, not to
       work already admitted. Nothing is copied, moved or replayed: the old graph
       keeps its own data and stays a normal custom graph (list it, read it with
