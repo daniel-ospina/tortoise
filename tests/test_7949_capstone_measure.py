@@ -573,6 +573,73 @@ def test_the_e2_row_is_the_composite_and_not_e2a_alone():
     assert record["e2"]["decided_by"] in {"E2a", "E2b", "both"}
 
 
+def test_the_e2_composite_is_blocked_when_a_half_was_never_measured():
+    """P2: a conjunction cannot be MEASURED when an operand was not.
+
+    `main` builds a `measured=False` E2a result when the record carries no
+    `e2a.outcome`. The composite hard-coded `measured=True` and took `below_floor`
+    from E2b ALONE, so that record's row read RED — where the pre-composite path
+    read BLOCKED — for a half nobody scored (#10610 P2).
+
+    Non-vacuity: pre-fix the composite is measured=True / below_floor=False, so the
+    first arm reads FAIL and the floor arm reads FAIL too.
+    """
+    bars = measure.parse_bars(_prereg())
+    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    e2a_green = _e2a_result(survived=13, units=14, bars=bars)
+
+    e2a_unmeasured = measure.outcome(
+        measured=False, below_floor=False, passed=False, bar="13 of 14",
+        value="value_units=None survived=None")
+    composite = measure.e2_outcome(e2a_result=e2a_unmeasured,
+                                   e2b_result=e2b_good, bars=bars)
+    assert composite["measured"] is False, composite
+    assert composite["outcome"] == "BLOCKED", composite
+    assert measure.verdict_word(composite) == "BLOCKED", composite
+
+    # …the other operand too: a half nobody measured cannot be inherited from.
+    e2b_unmeasured = measure.outcome(
+        measured=False, below_floor=False, passed=False, bar="fused",
+        value="unmeasured")
+    other = measure.e2_outcome(e2a_result=e2a_green,
+                               e2b_result=e2b_unmeasured, bars=bars)
+    assert other["outcome"] == "BLOCKED", other
+
+    # …and the FLOOR half: E2a under its floor is a REFUSAL, and E2b's clean
+    # `below_floor` may not overwrite it (that is what "E2b alone" meant).
+    e2a_floored = measure.outcome(
+        measured=True, below_floor=True, passed=False, bar="13 of 14",
+        value="value_units 0/0 survived")
+    floored = measure.e2_outcome(e2a_result=e2a_floored,
+                                 e2b_result=e2b_good, bars=bars)
+    assert floored["outcome"] == "REFUSED", floored
+    assert measure.verdict_word(floored) == "BLOCKED", floored
+
+
+def test_the_e2_note_never_claims_a_shortfall_for_a_half_that_was_not_measured():
+    """P2's narration half: "falls short" is a SCORED finding, not a default.
+
+    The note asserted "E2a falls short of 13 of 14 on the run's own graph" for an
+    E2a half the record never scored — a measured claim over an unmeasured
+    population, beside a row that now reads BLOCKED (#10610 P2).
+
+    Non-vacuity: pre-fix the composite is FAIL, so the note carries "falls short"
+    and the first assertion reds.
+    """
+    parsed = measure.measure_e1_e2(_REPO)
+    bars = measure.parse_bars(_prereg())
+    e2a_unmeasured = measure.outcome(
+        measured=False, below_floor=False, passed=False, bar="13 of 14",
+        value="value_units=None survived=None")
+    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    composite = measure.e2_outcome(e2a_result=e2a_unmeasured,
+                                   e2b_result=e2b_good, bars=bars)
+    note = measure.e2_row_note(parsed, e2a_unmeasured, e2b_good, composite)
+    assert "falls short" not in note, note
+    assert "was NOT measured" in note, note
+    assert "BLOCKED" in note, note
+
+
 def test_the_e2_row_verdict_is_the_composite_main_uses():
     """The WIRING half of the composite pin (#10610 review issue 1).
 

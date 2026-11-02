@@ -632,9 +632,22 @@ def e2_outcome(*, e2a_result: dict, e2b_result: dict, bars: dict) -> dict:
     (#10610 review issue 1). Extracting it is what makes that mutant killable, and
     the pin calls THIS function while a second pin asserts ``main`` derives its
     row from it (``test_the_e2_row_verdict_is_the_composite_main_uses``).
+
+    ⛔ NEITHER half's refusal state is dropped. The composite used to hard-code
+    ``measured=True`` and take ``below_floor`` from E2b ALONE, so an E2a half that
+    was never scored (a record carrying no ``e2a.outcome`` — ``main`` then builds
+    an ``measured=False`` E2a result) was folded into a MEASURED composite: the
+    row read RED and its note asserted a scored shortfall for a half nobody
+    measured, where the pre-composite path read BLOCKED (#10610 P2). A composite
+    is unmeasured when EITHER half is, and below its floor when either half is —
+    the conjunction cannot know more than its weakest operand.
     """
+    measured = bool(e2a_result.get("measured")) and bool(
+        e2b_result.get("measured"))
     return outcome(
-        measured=True, below_floor=e2b_result["below_floor"],
+        measured=measured,
+        below_floor=bool(e2a_result.get("below_floor"))
+        or bool(e2b_result.get("below_floor")),
         passed=(e2a_result["outcome"] == "PASS"
                 and e2b_result["outcome"] == "PASS"),
         bar=f"E2a {bars['E2a']['required']} of {bars['E2a']['of']} AND E2b "
@@ -862,6 +875,12 @@ def e2_row_note(e1: dict, e2a_result: dict, e2b_result: dict,
     have printed "E2a falls short of 13 of 14 on the run's own graph" beside its
     own GREEN verdict. The row and the artifact it cites disagreeing, inside the
     log that IS the evidence, is the class `#10525`'s narration pin closed for E3.
+
+    ⛔ …and "falls short" is a SCORED finding, so it may not be written over a half
+    that was never measured. `main` builds an ``measured=False`` E2a result when
+    the record carries no ``e2a.outcome``; an unmeasured outcome is not ``PASS``,
+    so the old clause asserted a shortfall for a half nobody scored — beside a
+    composite that (correctly) reads BLOCKED (#10610 P2).
     """
     return (
         f"E2a: {e2a_result['outcome']} — {e2a_result['value']} vs bar "
@@ -875,7 +894,12 @@ def e2_row_note(e1: dict, e2a_result: dict, e2b_result: dict,
         f"{e2b_result['bar']}. The E2 row is "
         f"{verdict_word(e2_result)} on the COMPOSITE "
         f"({e2_result['bar']}): "
-        + (f"E2a falls short of {e1['e2a_required']} of {e1['e2a_units']} on "
+        + (f"E2a was NOT measured on this record (no `e2a.outcome`), so the "
+           f"composite is {verdict_word(e2_result)} rather than a scored "
+           f"shortfall; the {e1['e2a_required']}-of-{e1['e2a_units']} bar is "
+           f"neither met nor missed"
+           if not e2a_result["measured"] else
+           f"E2a falls short of {e1['e2a_required']} of {e1['e2a_units']} on "
            f"the run's own graph"
            if e2a_result["outcome"] != "PASS" else
            f"E2a meets the {e1['e2a_required']}-of-{e1['e2a_units']} bar on the "
