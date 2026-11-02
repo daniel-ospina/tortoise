@@ -275,6 +275,22 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`tortoise/projection/entities.py::_event_plain_merge` — "
         "`set_embedding_clause(\"e\", preserve_on_null=False)` / "
         "`set_embedding_clause(\"e\")`, the canonical clause"),
+    "tortoise.projection::_apply_one": (
+        CENSUS_EXEMPT,
+        "`tortoise/projection/__init__.py::_apply_one` — the instrument's match "
+        "is COMMENT PROSE, and the class is not inferred from that: the fold "
+        "never writes the vector, which the same comment states in its own "
+        "words (`⛔ This fold never SETS a real value`). `#8488`/`#10523` "
+        "documented the caller-vector clear as `#   2. a CALLER-VECTOR write "
+        "(`embedding=[…]` / `embedding=None`)`, and that prose is what "
+        "`_EMBED_WRITE` matches; the vector write belongs to the CARRIER "
+        "(`_upsert_point_props`, `n.embeddingText=$et`), not to this replay. "
+        "The only property the function touches is the TEXT prop — "
+        "`p.pop(\"embeddingText\", None)` — on an in-memory `{id: point}` "
+        "dict. Exempt as a fold of state computed ELSEWHERE, the same "
+        "direction as `turn_prior_vectors` (a mirror), and NOT the map-merge "
+        "the `_update_entity` entry carries: there is no `SET n += $p` here"
+    ),
     "tortoise.projection::_prewipe_synthetic_write_scope": (
         CENSUS_EXEMPT,
         "`tortoise/projection/__init__.py::_prewipe_synthetic_write_scope` — the "
@@ -372,6 +388,11 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.projection.entities::_event_plain_merge": (
         ("tortoise/projection/entities.py", "_event_plain_merge",
          "set_embedding_clause("),),
+    "tortoise.projection::_apply_one": (
+        ("tortoise/projection/__init__.py", "_apply_one",
+         "a CALLER-VECTOR write"),
+        ("tortoise/projection/__init__.py", "_apply_one",
+         'p.pop("embeddingText", None)'),),
     "tortoise.projection::_prewipe_synthetic_write_scope": (
         ("tortoise/projection/__init__.py", "_prewipe_synthetic_write_scope",
          "SET n.embedding = NULL"),),

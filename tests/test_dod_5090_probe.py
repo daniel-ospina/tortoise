@@ -40,6 +40,7 @@ claims:
 | `test_searched_is_the_walk_not_the_list_of_mentions` | the documented `searched` contract | `searched` reports the mentions, so "what 'nowhere' covered" is `[]` for the case the function exists for |
 | `test_an_unreadable_surface_is_named_not_silently_excluded` | the `UNMEASURED` rule, applied to the walk | a file the walk could not read is folded into a measured `False` |
 | `test_every_unresolved_writer_carries_a_census_class` | the census and the unresolved set are the SAME SET, in both directions, LIVE | a writer this tree holds is unresolved and nothing says which of the three honest classes it is in — or a census entry outlives its hole, so `exempt` counts an instrument false positive that no longer exists |
+| `test_a_prose_MENTION_of_an_embedding_write_is_classed_exempt_not_a_hole` | `exempt`'s own definition — *"merely MENTIONS one in a comment/docstring (the instrument's own false positives)"* | `main` lands a fold whose COMMENT quotes `embedding=…` and the census, which must be an EXACT set match, has no class for the writer the needle then reports (measured: `#8488`/`#10523` → `tortoise.projection::_apply_one`) — or the fold grows a REAL vector write, so `exempt` stops describing it |
 | `test_the_census_guard_has_teeth_on_an_INJECTED_map` | the same guard's teeth, without pinning this head | the guard goes vacuous when #5090's remainder lands and this tree holds no unresolved writer |
 | `test_a_duplicate_identity_paints_no_census_note` | #10541's census population | a `duplicate` identity is counted as a census member, so a census is painted over a population that cannot hold a key for it |
 | `test_the_census_note_names_only_the_unresolved_producers` | the same population, in the other direction | a classed unresolved producer stops being named, or a duplicate is counted alongside it |
@@ -1768,6 +1769,89 @@ def test_every_unresolved_writer_carries_a_census_class() -> None:
     violations = _census_violations(
         unresolved, census, classes, probe.CENSUS_BYPASS)
     assert not violations, "\n".join(violations)
+
+
+def test_a_prose_MENTION_of_an_embedding_write_is_classed_exempt_not_a_hole() -> None:
+    """`main`'s `#8488` fold MENTIONS `embedding=` in a COMMENT — not a write.
+
+    The needle (`_EMBED_WRITE`) is applied to a function's SOURCE TEXT, and a
+    comment is source text, so this census necessarily carries a class for the
+    false positives the needle produces — `exempt` names that case itself
+    (*"merely MENTIONS one in a comment/docstring (the instrument's own false
+    positives)"*). `#8488`/`#10523` landed on `main` AFTER this census was read,
+    and it documented the `embeddingText` clear with the prose
+    `#   2. a CALLER-VECTOR write (``embedding=[…]`` / ``embedding=None``)` — which
+    the needle matched inside `tortoise.projection::_apply_one`, a fold that
+    writes no vector, and which the census therefore had no class for. Because
+    the live guard is an EXACT set match, that reddened it on the `origin/main`
+    integration (measured: `unclassified by the #10541 census:
+    ['tortoise.projection::_apply_one']`).
+
+    ⛔ The repair is `exempt`, NOT `recognised_producer`, and NOT a change to
+    the needle: `_EMBED_WRITE` is deliberately blind — `#4094`'s `SET n += $p`
+    map-merge is invisible to it, and the `_update_entity` entry depends on
+    exactly that over-detection to keep a REAL write path in the map. Dropping
+    comment text from the scan would silence this false positive AND silently
+    lose `_update_entity`, which is the fail-open direction. So the match is
+    READ and classified, which is what this census is for.
+
+    Both directions, so the entry cannot rot into a lie: the class must be
+    `exempt`, and every needle match in that function must sit inside a COMMENT
+    — a fold that grows a real vector write reds HERE and has to be re-read.
+    """
+    import ast
+    import io
+    import textwrap
+    import tokenize
+
+    key = "tortoise.projection::_apply_one"
+    assert probe._census_class(key) == probe.CENSUS_EXEMPT, (
+        f"{key} is an instrument false positive (a comment quoting "
+        f"`embedding=…`); classing it as anything but {probe.CENSUS_EXEMPT!r} "
+        "claims a stored vector this fold never writes")
+
+    src = (probe.REPO_ROOT / "tortoise/projection/__init__.py").read_text(
+        encoding="utf-8")
+    lines = src.splitlines()
+    bodies = [
+        "\n".join(lines[n.lineno - 1:n.end_lineno])
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.FunctionDef) and n.name == "_apply_one"
+    ]
+    assert bodies, (
+        "the fold this census entry names is gone from "
+        "tortoise/projection/__init__.py — re-measure the entry")
+
+    def _comment_blind(text: str) -> str:
+        """`text` with every COMMENT token BLANKED — strings and layout kept.
+
+        Blanked, not deleted: the offsets stay put, and the string literals
+        (where the Cypher lives, so where a real write would live) survive, so
+        this cannot pass by removing the evidence it is checking.
+        """
+        dedented = textwrap.dedent(text)
+        rows = dedented.splitlines(keepends=True)
+        try:
+            toks = list(tokenize.generate_tokens(io.StringIO(dedented).readline))
+        except (tokenize.TokenError, IndentationError, SyntaxError):
+            return dedented
+        for tok in toks:
+            if tok.type != tokenize.COMMENT:
+                continue
+            row, col = tok.start
+            end_col = tok.end[1]
+            line = rows[row - 1]
+            rows[row - 1] = line[:col] + " " * (end_col - col) + line[end_col:]
+        return "".join(rows)
+
+    matching = [b for b in bodies if probe._EMBED_WRITE.search(b)]
+    assert matching, (
+        "the needle no longer matches this fold at all — the census entry is "
+        "STALE and must be trimmed in the same change, not carried")
+    for body in matching:
+        assert not probe._EMBED_WRITE.search(_comment_blind(body)), (
+            "`_apply_one` now matches the embedding-write needle in CODE, not "
+            "prose — re-read the census entry: `exempt` no longer describes it")
 
 
 def test_an_untrimmed_census_over_a_resolved_set_is_red() -> None:
