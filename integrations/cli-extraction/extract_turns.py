@@ -203,13 +203,16 @@ def _turn_record(row) -> dict:
 def dump(out: Path, allow_empty: bool = False):
     """Pull the captured session turns out of the container.
 
-    This is the integration's ONE private graph read (walking
-    `(s:Session)-[:CONTAINS]->(t:Point)` has no public equivalent); everything
-    else goes through public SDK doors. Fails loudly on zero rows unless
+    This is the integration's ONE private graph read. The per-session walk is
+    public (`sdk.get_session`, which also serves record-held turns); what no
+    public API offers is an ENUMERATION of captured `:Session` nodes
+    (`search_sessions` searches indexed `AgentSession` Events, not the durable
+    `:Session`), and an all-sessions dump needs exactly that. Everything else
+    goes through public SDK doors. Fails loudly on zero rows unless
     --allow-empty: an empty capture usually means capture is off, the schema
     moved, or — on a deployment with the Postgres record armed
-    (`TORTOISE_RECORD_DSN`) — the turns live in the RECORD and the graph was
-    never written, which this integration cannot read (#10000).
+    (`TORTOISE_RECORD_DSN`) — the turns live in the RECORD and this lane's
+    graph-only read finds none (#10000).
     """
     ns = _cfg("TORTOISE_NAMESPACE", "selfhost")
     log = _cfg("TORTOISE_EVENT_LOG", f"/data/events/{ns}.jsonl")

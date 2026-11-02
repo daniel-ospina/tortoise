@@ -10,18 +10,23 @@ turns into tiered graph Points using subscriptions you already have.
 No SDK or MCP surface changes: this is a client-side integration. Its writes
 go through public SDK doors (`create_point`, `set_source_tier`,
 `get_source_reliability`, `compute_confidence`, `query`); `dump` uses one
-private read (`sdk._get_proj().g`) because no public API offers a
-`(s:Session)-[:CONTAINS]->(t:Point)` walk — that is the only private surface,
-it is read-only, and it is documented here rather than glossed.
+private read (`sdk._get_proj().g`) — not because the per-session walk is
+private (it is public: `sdk.get_session()`, which also serves record-held
+turns), but because **no public API enumerates captured `:Session` nodes**
+(`search_sessions` searches indexed `AgentSession` Events, not the durable
+`:Session`) and an all-sessions dump needs exactly that. It is the only
+private surface, it is read-only, and it is documented here rather than
+glossed.
 
 `dump` reads the turns the capture lane actually writes (the ONE turn store,
 `tortoise/sdk.py`'s `_TURN_WRITE_CYPHER`, used by both the SDK and the hosted
 capture path): the `:Point` nodes wired to a `:Session`, with the role taken
 from `t.speaker`. It no longer reads `codex://`-tagged Points — no capture lane
 in this repo ever wrote one (`#9932`). A hand-built turns *file* in the
-`codex://threads/<id>#message=<id>` shape is still accepted, and a deployment
-whose turns live in the Postgres record rather than the graph (record armed,
-`#10000`) is not readable by this integration at all.
+`codex://threads/<id>#message=<id>` shape is still accepted. A deployment whose
+turns live in the Postgres record rather than the graph (record armed,
+`#10000`) has no turn nodes for this graph-only read to find — use
+`sdk.get_session()`, which serves record-held turns.
 
 ## How it works
 
