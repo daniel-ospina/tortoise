@@ -172,9 +172,13 @@ def mark_truncation(sink: dict | None, *, returned: int,
                     ``complete``.
 
     Writes ``truncated`` on EVERY call (so a complete read is positively
-    marked complete, not merely un-marked) and ``total_available`` only when
+    marked complete, not merely un-marked), ``total_available`` only when
     ``exact`` — see the module docstring for why a lower bound rendered as a
-    total is the same defect one level down.
+    total is the same defect one level down — and the private :data:`EXACT_KEY`
+    proof on every call, which is what lets a consumer RELAY the exactness
+    verdict instead of re-deriving it from ``truncated`` (they are not the same
+    thing). All three are written ONLY here, so a reused sink cannot carry a
+    stale verdict from an earlier call.
     """
     if sink is None:
         return

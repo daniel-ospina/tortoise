@@ -33821,11 +33821,9 @@ class TortoiseSDK:
         # body the caller must guess about, and then handed to the retrieval
         # call so the marker's own proof (a lost leg, a saturated pool) is MADE
         # ONCE, by the code that drops the rows — never re-derived here.
-        from .truncation import (
-            EXACT_KEY as _EXACT_KEY,
-            mark_truncation as _mark_truncation,
-            truncation_field as _truncation_field,
-        )
+        from .truncation import EXACT_KEY as _EXACT_KEY
+        from .truncation import mark_truncation as _mark_truncation
+        from .truncation import truncation_field as _truncation_field
         _trunc_out: dict = {"truncated": False}
 
         def _with_truncation(response: dict) -> dict:
@@ -34728,8 +34726,16 @@ class TortoiseSDK:
         # about — the distinction the issue's contract turns on. A missing
         # marker at the consumer is therefore a producer bug, not "complete"
         # (``truncation.truncation_field`` refuses to guess).
+        #
+        # ⛔ The seeding goes THROUGH the instrument, never around it: a sink is
+        # CALLER-OWNED and may be REUSED, so a hand-written ``truncated = False``
+        # would leave a stale ``_exact`` (and a stale ``total_available``) from an
+        # earlier call riding this verdict — the defect one level down, and
+        # exactly the hygiene ``truncation.mark_truncation`` performs and
+        # documents. One writer, one contract (#8447 review round 3, P2).
         if _truncation_out is not None:
-            _truncation_out["truncated"] = False
+            from .truncation import mark_truncation as _seed_mark
+            _seed_mark(_truncation_out, returned=0, candidates=0, exact=False)
 
         # B6 (#3892): the status sink and the trace used to classify it. When
         # no status is requested this is exactly today's ``leg_trace`` (None
@@ -34931,8 +34937,9 @@ class TortoiseSDK:
                 # 0 rows over an UNREAD store is the third state, not the first.
                 # Only ``status`` disagrees today, and only when its flag is on.
                 if _truncation_out is not None:
-                    _truncation_out["truncated"] = True
-                    _truncation_out.pop("total_available", None)
+                    from .truncation import mark_truncation as _lost_mark
+                    _lost_mark(_truncation_out, returned=0, candidates=0,
+                               incomplete=True)
                 return []
             raise
         graph = proj.g
@@ -34955,8 +34962,9 @@ class TortoiseSDK:
                 # #8447 (review round 2, P2): configured but silent is still an
                 # unread store — never a complete empty answer.
                 if _truncation_out is not None:
-                    _truncation_out["truncated"] = True
-                    _truncation_out.pop("total_available", None)
+                    from .truncation import mark_truncation as _lost_mark2
+                    _lost_mark2(_truncation_out, returned=0, candidates=0,
+                                incomplete=True)
                 return []
         # #7952: the store is reachable, so the known-hot set can be READ.
         if read_status_out is not None and _residency_enabled():
