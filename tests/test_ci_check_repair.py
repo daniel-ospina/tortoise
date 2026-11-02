@@ -1758,3 +1758,164 @@ def test_the_held_run_shape_this_tool_exists_to_repair_is_completed():
     plan = R.classify(pr(), [], [run], ["python-ci-gate"], EMITTERS, max_attempts=3)
     assert plan.pending == [], "a held-but-completed run must NOT read as merely late"
     assert [r.id for r in plan.rerun] == [1]
+
+
+# ── 12. a run that is PENDING with ZERO JOBS will never emit a verdict ──────
+#
+# MEASURED on daniel-ospina/tortoise 2026-11-02T20:14Z: 11 of 16 `pending` runs
+# had a job list of `total_count: 0` at 11-22 minutes old, while 11 runners were
+# online (10 busy, 1 offline). The merge rail's precondition is "a run must have
+# TESTED this head", so such a run can never satisfy it, and the class was
+# reported as merely PENDING — a wait that cannot clear. These tests keep the
+# three halves apart: MEASURED zero + AGE is a named refusal; a young zero-job run
+# is ordinary progressive-job-creation lag; an UNREADABLE count is an abstention.
+
+def aged_run(rid, status="pending", jobs=0, age_s=1800.0, attempt=1,
+             path="python-ci.yml", name="Python CI"):
+    from datetime import UTC, datetime
+    created = datetime.fromtimestamp(R.time.time() - age_s, UTC).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    return R.Run(id=rid, name=name or Path(path).stem, path=f".github/workflows/{path}",
+                 status=status, conclusion=None, run_attempt=attempt,
+                 event="pull_request", created_at=created, job_count=jobs)
+
+
+def test_aged_zero_job_pending_run_is_named_no_verdict_will_arrive(capsys):
+    runs = [aged_run(41480218593, jobs=0, age_s=1320.0)]
+    plan = R.classify(pr(), [], runs, ["python-ci-gate"], EMITTERS, max_attempts=3)
+
+    assert [d["run"] for d in plan.no_verdict] == [41480218593]
+    assert plan.no_verdict[0]["jobs"] == 0
+    assert plan.no_verdict[0]["age_seconds"] >= 900
+    # It stays PENDING as well: a reopen must remain deferred while a run sits there.
+    assert "python-ci-gate" in plan.pending
+    # And it is ACTED on with this module's own primitive, not waited on.
+    assert [r.id for r in plan.rerun] == [41480218593]
+    assert plan.needs_report is True
+
+    R.report([plan], apply=False, trigger_ok=True, repo="o/r", cooldown_min=60)
+    captured = capsys.readouterr()
+    assert "NO-VERDICT-WILL-ARRIVE(run 41480218593, pending, 0 jobs," in captured.err
+    # ⛔ stdout is reserved for the ONE `--json` document: a notice printed there makes
+    # `json.load` raise in tools/ci-check-repair-local.sh (swallowed by `2>/dev/null`,
+    # reported as "PRs needing repair: ?", freezing its transition signature) and
+    # invalidates the workflow's step-summary JSON block.
+    assert captured.out == "", "the notice must never enter the --json stream"
+
+
+def test_young_zero_job_run_is_still_ordinary_lag():
+    """Below the floor this shape is normal: GitHub creates jobs progressively."""
+    plan = R.classify(pr(), [], [aged_run(1, jobs=0, age_s=120.0)],
+                      ["python-ci-gate"], EMITTERS, max_attempts=3)
+    assert plan.no_verdict == [] and plan.rerun == []
+    assert "python-ci-gate" in plan.pending
+
+
+def test_unreadable_job_count_is_an_abstention_never_a_zero():
+    """`None` is not `0`: inferring a stall from an unreadable read is fail-open."""
+    plan = R.classify(pr(), [], [aged_run(1, jobs=None, age_s=3600.0)],
+                      ["python-ci-gate"], EMITTERS, max_attempts=3)
+    assert plan.no_verdict == [] and plan.rerun == []
+
+
+def test_zero_job_run_that_spent_its_attempt_budget_escalates():
+    plan = R.classify(pr(), [], [aged_run(1, jobs=0, age_s=3600.0, attempt=3)],
+                      ["python-ci-gate"], EMITTERS, max_attempts=3)
+    assert plan.rerun == [], "the budget is spent — re-running again is a loop"
+    assert "python-ci-gate" in plan.exhausted
+
+
+def test_the_same_run_shared_by_two_contexts_is_named_once():
+    runs = [aged_run(7, path="ci.yml", name="CI", jobs=0, age_s=1800.0)]
+    plan = R.classify(pr(), [], runs, ["docs", "test-isolation"], EMITTERS, max_attempts=3)
+    assert len(plan.no_verdict) == 1 and [r.id for r in plan.rerun] == [7]
+
+
+# ── 13. a rate-limited read is a REFUSAL, never an empty result ─────────────
+
+def _fake(returncode=0, stdout="null", stderr=""):
+    return subprocess.CompletedProcess(args=["gh"], returncode=returncode,
+                                       stdout=stdout, stderr=stderr)
+
+
+LIMITED = "HTTP 403: API rate limit exceeded for user ID 1. (secondary rate limit)"
+
+
+def test_rate_limited_read_raises_a_named_refusal_not_an_empty_result(monkeypatch):
+    monkeypatch.setattr(R, "_run", lambda argv: _fake(1, "", LIMITED))
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    with pytest.raises(R.MeasureError, match="RATE-LIMITED \\(not empty\\)"):
+        R.gh_json(["api", "repos/o/r/commits/x/check-runs"], retries=0)
+
+
+def test_rate_limited_read_is_retried_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+    slept: list[float] = []
+
+    def fake(argv):
+        calls["n"] += 1
+        return _fake(1, "", "HTTP 403: API rate limit exceeded. Retry-After: 7") \
+            if calls["n"] == 1 \
+            else _fake(0, '{"total_count": 0}', "")
+
+    monkeypatch.setattr(R, "_run", fake)
+    monkeypatch.setattr(R, "_sleep", slept.append)
+    assert R.gh_json(["api", "x"], retries=1) == {"total_count": 0}
+    assert calls["n"] == 2 and slept == [7.0], "the server's own hint is honoured"
+
+
+def test_non_rate_limit_failure_is_not_retried_and_not_called_empty(monkeypatch):
+    calls = {"n": 0}
+
+    def fake(argv):
+        calls["n"] += 1
+        return _fake(1, "", "HTTP 404: Not Found")
+
+    monkeypatch.setattr(R, "_run", fake)
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    with pytest.raises(R.MeasureError, match="404"):
+        R.gh_json(["api", "x"], retries=2)
+    assert calls["n"] == 1
+
+
+def test_permission_403_is_not_misread_as_a_rate_limit(monkeypatch):
+    """`HTTP 403` is also how a PERMISSION error arrives — retrying it is wrong.
+
+    A permission 403 was routed into the rate-limit path, which slept up to two
+    minutes and then diagnosed a token problem as a budget problem.
+    """
+    calls = {"n": 0}
+
+    def fake(argv):
+        calls["n"] += 1
+        return _fake(1, "", "HTTP 403: Resource not accessible by integration")
+
+    monkeypatch.setattr(R, "_run", fake)
+    monkeypatch.setattr(R, "_sleep", lambda s: pytest.fail("must not sleep on a 403 that is not a rate limit"))
+    with pytest.raises(R.MeasureError, match="Resource not accessible"):
+        R.gh_json(["api", "x"], retries=2)
+    assert calls["n"] == 1
+
+
+def test_approval_parked_run_is_not_named_no_verdict():
+    """`waiting` = parked for manual approval: no age starts it, and a rerun cannot
+    obtain an approval, so spending the budget there is wasted."""
+    plan = R.classify(pr(), [], [aged_run(1, status="waiting", jobs=0, age_s=7200.0)],
+                      ["python-ci-gate"], EMITTERS, max_attempts=3)
+    assert plan.no_verdict == [] and plan.rerun == []
+
+
+def test_backoff_honours_retry_after_then_reset_then_jitter():
+    assert R._rate_limit_sleep_s("HTTP 403: Retry-After: 30", 0) == 30.0
+    assert R._rate_limit_sleep_s("Retry-After: 999999", 0) == R.RATE_LIMIT_MAX_SLEEP_S
+    # X-RateLimit-Reset is an absolute epoch; the wait is what is LEFT of it.
+    # A reset is an ABSOLUTE epoch (10 digits in practice); a short number is not
+    # one, and treating it as one would sleep for a nonsense interval.
+    assert R._rate_limit_sleep_s("X-RateLimit-Reset: 1700000030", 0,
+                                 now=1_700_000_000.0) == 30.0
+    assert R._rate_limit_sleep_s("X-RateLimit-Reset: 1000", 0, now=970.0) != 30.0
+    # No hint: exponential with FULL jitter, inside [ceiling/2, ceiling].
+    lo, hi = R._rate_limit_sleep_s("secondary rate limit", 1), \
+        R._rate_limit_sleep_s("secondary rate limit", 1)
+    for v in (lo, hi):
+        assert R.RATE_LIMIT_BASE_S <= v <= min(R.RATE_LIMIT_BASE_S * 2, R.RATE_LIMIT_MAX_SLEEP_S)

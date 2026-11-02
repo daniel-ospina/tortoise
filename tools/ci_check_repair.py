@@ -130,6 +130,8 @@ if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
 import argparse
 import json
 import os
+import random
+import re
 import shutil
 import subprocess
 import time
@@ -176,6 +178,55 @@ class MeasureError(RuntimeError):
 #: evidence of queue starvation, and must not be classified as one.
 QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 
+#: How long a run may sit in a QUEUED status with ZERO jobs before it stops being
+#: "waiting" and becomes "no verdict will arrive". MEASURED on daniel-ospina/tortoise
+#: 2026-11-02T20:14Z: 11 of 16 `pending` runs had zero jobs at 11-22 minutes old,
+#: while 11 runners were online (10 busy, 1 offline) — the wait was not runner
+#: matching, and progressive job creation (this repo's own measured note: a run's
+#: 22-job matrix appeared 51 min after the run) is a DELAY, not a queue slot.
+#:
+#: THE FLOOR IS A DECIDED TRADE-OFF, not a measured boundary. 1200 s sits INSIDE the
+#: 51-minute lag this repo measured, so some runs flagged here would have created
+#: jobs on their own; the cost of being early is one bounded, budget-limited rerun,
+#: while the cost of being late is what was measured — a 93-minute `pending` run that
+#: left a PR unmergeable and 1176 s of a rail waiting. Below the floor a zero-job run
+#: is indistinguishable from ordinary lag, and reporting it every window is the noise
+#: that gets a repair report muted.
+ZERO_JOB_MIN_AGE_S = float(os.environ.get("CI_REPAIR_ZERO_JOB_MIN_AGE_S") or 1200)
+
+#: Retries for a RATE-LIMITED read, and the sleep that paces them. A 403 from the
+#: secondary rate limiter is NOT an empty answer and NOT a permanent failure: the
+#: measured failure this exists for is a caller polling a REFUSED read for 1176 s and
+#: reporting "unreachable is not empty" hours later than it had to. `Retry-After` and
+#: `X-RateLimit-Reset` are honoured where `gh` surfaces them; otherwise the backoff is
+#: exponential with EQUAL jitter (`uniform(ceiling/2, ceiling)` — never below half
+#: the ceiling, which is what keeps a lane from retrying instantly), so a fleet of
+#: lanes does not retry in lockstep and re-create the burst that triggered the limiter.
+RATE_LIMIT_RETRIES = int(os.environ.get("CI_REPAIR_RATE_LIMIT_RETRIES") or 2)
+RATE_LIMIT_BASE_S = 2.0
+RATE_LIMIT_MAX_SLEEP_S = float(os.environ.get("CI_REPAIR_RATE_LIMIT_MAX_SLEEP_S") or 60.0)
+#: ⛔ NOT BATTERY: a bare `HTTP 403` is how a PERMISSION failure also arrives
+#: ("Resource not accessible by integration"), and retrying that sleeps up to two
+#: minutes and then diagnoses a token problem as a rate limit. Only these wordings
+#: mean "refused because of the budget"; a permission 403 keeps its own error.
+_RATE_LIMIT_RE = re.compile(r"rate limit|secondary rate|HTTP 429", re.I)
+
+#: Statuses whose zero-job runs are NOT the stall this module names. `waiting` is a
+#: run parked for MANUAL APPROVAL or an environment gate: it has no jobs by design,
+#: no age makes it start, and a `rerun` cannot obtain an approval — re-running it
+#: spends the budget on a run whose next step is a human, not a scheduler.
+_APPROVAL_PARKED_STATUSES = frozenset({"waiting"})
+
+#: Per-PASS read cache for the hot reads (check-runs, runs and job counts for one
+#: sha). A pass reads each sha once per PR; the cache is what makes the zero-job
+#: re-classification free, and it is the seam a cross-process cache would extend.
+#: Cleared at the start of every pass — a stale entry would be a verdict about a
+#: head that has moved.
+_READ_CACHE: dict[tuple, object] = {}
+
+#: Patched in tests so a rate-limit test never actually sleeps.
+_sleep = time.sleep
+
 
 @dataclass
 class Run:
@@ -187,6 +238,11 @@ class Run:
     run_attempt: int
     event: str
     created_at: str = ""
+    #: Jobs the run's CURRENT attempt has created, or None when that read ABSTAINED.
+    #: `0` and `None` are deliberately different: only a MEASURED zero makes a run
+    #: "no verdict will arrive", because an unreadable jobs surface says nothing and
+    #: inferring a stall from it is the fail-open direction.
+    job_count: int | None = None
 
 
 @dataclass
@@ -215,6 +271,14 @@ class PrPlan:
     # contexts are NOT repaired by any per-PR action — no rerun and no reopen can
     # create a runner slot.
     starved: list[str] = field(default_factory=list)
+    # Runs at this head that are NOT completed, have a MEASURED zero jobs, and are
+    # older than ZERO_JOB_MIN_AGE_S. They stay in `pending` too — a reopen must stay
+    # deferred while they sit there — but `pending` alone asserts "the run will emit
+    # the check", and for this shape that assertion is FALSE: no job exists to emit
+    # anything, so waiting cannot clear it. Each entry is
+    # ``{run, workflow, status, jobs, age_seconds}`` and is reported by name as
+    # ``NO-VERDICT-WILL-ARRIVE(...)``.
+    no_verdict: list[dict] = field(default_factory=list)
 
     @property
     def actionable(self) -> bool:
@@ -232,30 +296,79 @@ class PrPlan:
         nothing left to act on (`actionable` is False) and must still be reported
         and escalated — dropping it is how an unrepairable check goes silent.
         """
-        return bool(self.actionable or self.rerun or self.exhausted or self.starved)
+        return bool(self.actionable or self.rerun or self.exhausted or self.starved
+                    or self.no_verdict)
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
 
-def gh_json(args: list[str]) -> object:
+def _rate_limit_sleep_s(detail: str, attempt: int, now: float | None = None) -> float:
+    """Seconds to wait before retrying a RATE-LIMITED read. PURE, so it is tested.
+
+    Order of authority: the server's own instruction first (`Retry-After` seconds,
+    then `X-RateLimit-Reset` as an absolute epoch), then exponential backoff with
+    full jitter. Honouring the server's hint is the documented handling (GitHub's
+    secondary-rate-limit guidance: wait at least a minute before retrying); guessing
+    a shorter wait is how one 403 becomes a storm.
+    """
+    m = re.search(r"[Rr]etry-[Aa]fter:\s*(\d+)", detail)
+    if m:
+        return min(float(m.group(1)), RATE_LIMIT_MAX_SLEEP_S)
+    m = re.search(r"[Xx]-[Rr]ate[Ll]imit-[Rr]eset:\s*(\d{9,})", detail)
+    if m:
+        reset_in = float(m.group(1)) - (now if now is not None else time.time())
+        return max(1.0, min(reset_in, RATE_LIMIT_MAX_SLEEP_S))
+    ceiling = min(RATE_LIMIT_BASE_S * (2 ** attempt), RATE_LIMIT_MAX_SLEEP_S)
+    return random.uniform(ceiling / 2, ceiling)
+
+
+def gh_json(args: list[str], retries: int | None = None) -> object:
     """`gh` → JSON. Any failure is a MeasureError (never a silent empty list).
 
     A truncated/empty answer must not read as "no PRs, all good": the whole point
     of the tool is that ABSENCE is dangerous, so an unreadable surface is exit 2.
+
+    A RATE-LIMITED read is retried (bounded, server hint honoured — see
+    `_rate_limit_sleep_s`) and, once that budget is spent, raised with a
+    ``RATE-LIMITED (not empty)`` prefix. That wording is load-bearing: the measured
+    failure it replaces is a caller that polled a read the API was REFUSING and then
+    reported an unreadable surface long after it already knew nothing was measured.
+    A refusal must arrive AS a refusal, never as a zero.
     """
-    try:
-        r = _run([GH_BIN, *args])
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise MeasureError(f"could not run {GH_BIN}: {exc}") from exc
-    if r.returncode != 0:
-        raise MeasureError(f"gh {' '.join(args)} exited {r.returncode}: "
-                           f"{(r.stderr or r.stdout or '').strip()[:400]}")
-    try:
-        return json.loads(r.stdout or "null")
-    except json.JSONDecodeError as exc:
-        raise MeasureError(f"gh {' '.join(args)} returned unparseable JSON: {exc}") from exc
+    tries = RATE_LIMIT_RETRIES if retries is None else retries
+    detail = ""
+    for attempt in range(max(0, tries) + 1):
+        try:
+            r = _run([GH_BIN, *args])
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise MeasureError(f"could not run {GH_BIN}: {exc}") from exc
+        if r.returncode == 0:
+            try:
+                return json.loads(r.stdout or "null")
+            except json.JSONDecodeError as exc:
+                raise MeasureError(
+                    f"gh {' '.join(args)} returned unparseable JSON: {exc}") from exc
+        detail = ((r.stderr or "") + " " + (r.stdout or "")).strip()
+        limited = bool(_RATE_LIMIT_RE.search(detail))
+        if limited and attempt < tries:
+            _sleep(_rate_limit_sleep_s(detail, attempt))
+            continue
+        if limited:
+            raise MeasureError(
+                f"RATE-LIMITED (not empty): gh {' '.join(args)} was REFUSED by the API "
+                f"rate limiter after {attempt + 1} attempt(s), so NOTHING was measured "
+                f"— this is a refusal, not an empty result: {detail[:400]}")
+        raise MeasureError(f"gh {' '.join(args)} exited {r.returncode}: {detail[:400]}")
+    raise MeasureError(f"gh {' '.join(args)} was rate limited; no read completed")
+
+
+def _cached(key: tuple, build):
+    """One read per key per PASS. See `_READ_CACHE`."""
+    if key not in _READ_CACHE:
+        _READ_CACHE[key] = build()
+    return _READ_CACHE[key]
 
 
 def gh_api(path: str, *, method: str = "GET") -> object:
@@ -296,16 +409,65 @@ def _paginate_array(path: str) -> list[dict]:
 
 
 def check_runs_at(repo: str, sha: str) -> list[dict]:
-    return _paginate(f"repos/{repo}/commits/{sha}/check-runs?filter=all", "check_runs")
+    return _cached(("checks", repo, sha),
+                   lambda: _paginate(f"repos/{repo}/commits/{sha}/check-runs?filter=all",
+                                     "check_runs"))
+
+
+def job_count(repo: str, run_id: int, attempt: int = 0) -> int | None:
+    """Jobs this run's current attempt has created — or None when the read ABSTAINED.
+
+    None and 0 are never conflated: only a MEASURED zero makes a run "no verdict
+    will arrive" (`classify`), because an unreadable jobs surface says nothing about
+    whether jobs exist and inferring a stall from it is the fail-open direction this
+    module refuses everywhere else.
+    """
+    try:
+        data = _cached(("jobs", repo, run_id, attempt),
+                       lambda: gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=1"))
+    except (MeasureError, subprocess.TimeoutExpired):
+        return None
+    if not isinstance(data, dict):
+        return None
+    total = data.get("total_count")
+    return total if isinstance(total, int) else None
+
+
+def _zero_job_stalled(run: Run, min_age_s: float, now: float | None = None) -> bool:
+    """Is this run past the point where waiting can produce a verdict? PURE.
+
+    Requires a MEASURED zero (`job_count != 0` abstains on None) and an AGE — both
+    halves matter: young zero-job runs are the normal progressive-job-creation lag,
+    and an unreadable count is an abstention, not a zero. A run parked for manual
+    approval is excluded from the class entirely: its remedy is a human, and a
+    rerun cannot obtain one.
+    """
+    if run.status == "completed" or run.status in _APPROVAL_PARKED_STATUSES:
+        return False
+    if run.job_count != 0:
+        return False
+    age = age_seconds(run.created_at, now)
+    return age is not None and age >= min_age_s
 
 
 def runs_at_head(repo: str, sha: str) -> list[Run]:
-    raw = _paginate(f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
-    return [Run(id=r["id"], name=r.get("name") or "", path=r.get("path") or "",
-                status=r.get("status") or "", conclusion=r.get("conclusion"),
-                run_attempt=int(r.get("run_attempt") or 1), event=r.get("event") or "",
-                created_at=r.get("created_at") or "")
-            for r in raw]
+    def build() -> list[Run]:
+        raw = _paginate(f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
+        runs = [Run(id=r["id"], name=r.get("name") or "", path=r.get("path") or "",
+                    status=r.get("status") or "", conclusion=r.get("conclusion"),
+                    run_attempt=int(r.get("run_attempt") or 1),
+                    event=r.get("event") or "", created_at=r.get("created_at") or "")
+                for r in raw]
+        # Job counts are read ONLY where they can change a verdict: a run that has
+        # not completed and is still QUEUED. A completed run's jobs are settled and an
+        # in-progress one demonstrably has jobs, so reading those is pure budget —
+        # which is the currency the rate-limit handling above exists to protect.
+        for r in runs:
+            if r.status in QUEUED_STATUSES:
+                r.job_count = job_count(repo, r.id, r.run_attempt)
+        return runs
+
+    return _cached(("runs", repo, sha), build)
 
 
 def age_seconds(created_at: str, now: float | None = None) -> float | None:
@@ -418,7 +580,8 @@ def producing_runs(ctx: str, all_runs: list[Run], emitters: dict[str, list[str]]
 
 def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[str],
              emitters: dict[str, list[str]], max_attempts: int,
-             queue_starved: bool = False) -> PrPlan:
+             queue_starved: bool = False,
+             zero_job_min_age_s: float | None = None) -> PrPlan:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     For each required context absent from the head's check runs, the producing
@@ -462,6 +625,28 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
         # is the context DEAD (the #8254 signature: a completed run with zero jobs).
         if any(r.status != "completed" for r in runs):
             plan.pending.append(ctx)
+            # NO-VERDICT-WILL-ARRIVE: a queued run with a MEASURED zero jobs on an
+            # aged head stays `pending` (a reopen must remain deferred) AND is named
+            # here, because `pending` asserts the run will emit the check and this run
+            # has no job that could. Bounded, not a new wait: this module's own
+            # documented primitive applies — a rerun creates a fresh attempt that DOES
+            # get jobs (measured on the #8254 shape) — and it spends the same attempt
+            # budget every other repair path spends.
+            floor = (ZERO_JOB_MIN_AGE_S if zero_job_min_age_s is None
+                     else zero_job_min_age_s)
+            for r in runs:
+                if not _zero_job_stalled(r, floor):
+                    continue
+                if not any(d["run"] == r.id for d in plan.no_verdict):
+                    plan.no_verdict.append(
+                        {"run": r.id, "workflow": r.name or r.path, "status": r.status,
+                         "jobs": r.job_count,
+                         "age_seconds": round(age_seconds(r.created_at) or 0)})
+                if r.run_attempt >= max_attempts:
+                    if ctx not in plan.exhausted:
+                        plan.exhausted.append(ctx)
+                elif r not in plan.rerun:
+                    plan.rerun.append(r)
             # STARVED (#9115): the runs EXIST and NONE of them is executing, so no
             # slot was granted. Requires the repo-level reading to have WITNESSED
             # starvation (FLOOD or PR-STARVED) — the same per-head shape is the
@@ -646,6 +831,9 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
                 include_drafts: bool, max_attempts: int,
                 queue_starved: bool = False) -> list[PrPlan]:
     plans: list[PrPlan] = []
+    # A PASS IS THE CACHE SCOPE. Two passes in one process (a launcher that polls)
+    # must not reuse a verdict measured against a head that has since moved.
+    _READ_CACHE.clear()
     for pr in open_prs(repo, include_drafts):
         head = pr.get("headRefOid") or ""
         if not head:
@@ -739,7 +927,26 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
                      "pending": p.pending, "rerun": [], "reopened": False,
                      "missing_run": p.missing_run, "exhausted": list(p.exhausted),
                      "starved": list(p.starved),
+                     "no_verdict": list(p.no_verdict),
                      "reopen_attempts": 0, "needs_user_actor": False}
+        for nv in p.no_verdict:
+            # THE NAMED REFUSAL. A zero-job run older than the floor cannot produce a
+            # verdict, so the honest output is this line — never an infinite wait, and
+            # never a relax to "any run will do", which would certify a head that
+            # nothing tested.
+            #
+            # ⛔ STDERR, NOT STDOUT. `--json` writes ONE JSON document to stdout and two
+            # in-repo consumers parse that stream (`tools/ci-check-repair-local.sh` and
+            # the workflow's step summary). A notice printed to stdout ahead of the
+            # document makes `json.load` raise; the local fallback swallows it with
+            # `2>/dev/null` and reports "PRs needing repair: ?", freezing its transition
+            # signature so a real change in the backlog is silently suppressed. The
+            # module's own convention already sends the STARVED and needs-credential
+            # lines to stderr; this follows it, and the record carries `no_verdict` too,
+            # so `--json` consumers lose nothing.
+            print(f"NO-VERDICT-WILL-ARRIVE(run {nv['run']}, {nv['status']}, "
+                  f"{nv['jobs']} jobs, {nv['age_seconds']}s)"
+                  f" pr=#{p.number} workflow={nv['workflow']}", file=sys.stderr)
         # A SPENT BUDGET ESCALATES REGARDLESS OF WHAT ELSE IS TRUE OF THE PR, so it
         # is hoisted above the repair branches. When a PR had BOTH an exhausted
         # context and a missing run, the missing-run branch skipped the escalation
