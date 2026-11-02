@@ -619,6 +619,28 @@ def _is_ancestor(older: str, newer: str) -> bool:
     return out.returncode == 0
 
 
+def _resolves_to_commit(sha: str) -> bool:
+    """Does ``sha`` name a commit THIS repository has? Never raises.
+
+    ⛔ THE ASYMMETRY IS THE POINT (#10531 review cycle 14, P2). ``branch_commits`` may NOT be
+    required to resolve — a squash merge leaves them unreachable from ``main``, so demanding the
+    object would make the disclosure permanently red in exactly the case it exists for. The same
+    argument does NOT reach ``squash_merge``: that commit is ON ``main`` by construction, so in any
+    tree where this check runs it either exists or the claim is about a repository that does not.
+    Format alone accepted ``deadbeef1`` — and the CLI then printed it as "squashed by deadbeef1",
+    presenting the ONE line this change added to make the disclosure checkable as an unresolvable
+    pointer. ``rev-parse --verify --quiet`` is the same primitive ``_blob_at`` already uses.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError:  # pragma: no cover - git absent
+        return False
+    return out.returncode == 0 and bool(out.stdout.strip())
+
+
 def _is_tracked(path: Path) -> bool:
     try:
         rel = path.resolve().relative_to(REPO_ROOT)
@@ -1052,10 +1074,12 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
 ATOMIC_ADD_KEY = "atomic_add_ordering"
 
 #: A commit sha as the leading token of a ``branch_commits`` or ``squash_merge`` value. FORMAT only
-#: — resolvability is deliberately NOT required (#10531 review P1): a squash merge leaves the branch
-#: commits unreachable from ``main``, so requiring the object to be present would make the disclosure
-#: permanently red in exactly the case it exists for — the stuck light this change removes. It is
-#: still a checkable claim: a reader resolves the sha from the PR that carried it.
+#: — resolvability is deliberately NOT required for ``branch_commits`` (#10531 review P1): a squash
+#: merge leaves the branch commits unreachable from ``main``, so requiring the object to be present
+#: would make the disclosure permanently red in exactly the case it exists for — the stuck light
+#: this change removes. It is still a checkable claim: a reader resolves the sha from the PR that
+#: carried it. ⛔ That reasoning stops at ``branch_commits``: ``squash_merge`` is on ``main`` by
+#: construction and MUST resolve (#10531 review cycle 14, P2 — see ``_resolves_to_commit``).
 COMMIT_SHA_TOKEN = re.compile(r"^[0-9a-f]{7,40}$")
 
 
@@ -1124,10 +1148,23 @@ def _atomic_add_failure(declared: object, prereg_epoch: int) -> str | None:
             "it carries no squash_merge — the branch commits a squash leaves behind are not "
             "reachable from main, so the squash commit is the only pointer a reader can resolve"
         )
-    if not COMMIT_SHA_TOKEN.match(squash.split()[0]):
+    squash_token = squash.split()[0]
+    if not COMMIT_SHA_TOKEN.match(squash_token):
         return (
             f"its squash_merge {squash!r} does not begin with a commit sha — the merged commit is "
             "the one pointer on main, and an unaddressable one points nowhere"
+        )
+    # ⛔ FORMAT IS NOT ADDRESSABILITY (#10531 review cycle 14, P2). `squash_merge` is required
+    # *because* it is the one pointer on main a reader can resolve; checking only its shape made
+    # that argument a decoration — `deadbeef1` passed every arm and was then printed as "squashed
+    # by deadbeef1". `branch_commits` stays format-only (a squash leaves them unreachable); this
+    # one is on `main` by construction, so an unresolvable value is a claim about nothing.
+    if not _resolves_to_commit(squash_token):
+        return (
+            f"its squash_merge {squash!r} names a commit this repository does not have — the "
+            "merged commit is the one pointer a reader can resolve, so a value that addresses "
+            "nothing cannot be told from a fabricated one; name the commit that actually landed "
+            "the pair"
         )
     return None
 
@@ -1398,11 +1435,14 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 continue  # the specific field failure is already reported above
             if log.name not in atomic:
                 if record_unreadable:
-                    # ⛔ RETURN, do not fall through (#10531 review cycle 7, P1). The record itself
-                    # could not be read, so there is nothing declared and nothing to index —
-                    # `atomic[log.name]` below raised KeyError straight out of run()/main(),
-                    # printing a traceback and NO findings, on exactly the state this flag exists
-                    # for. `check_machine_record` owns the diagnosis.
+                    # ⛔ DO NOT FALL THROUGH (#10531 review cycle 7, P1; wording corrected in
+                    # cycle 14, P3). The `continue` skips the rest of THIS LOG's arms — it does not
+                    # return from the function (the earlier comment said "RETURN", which a future
+                    # reader would act on by converting it). The record itself could not be read, so
+                    # there is nothing declared and nothing to index — `atomic[log.name]` below
+                    # raised KeyError straight out of run()/main(), printing a traceback and NO
+                    # findings, on exactly the state this flag exists for.
+                    # `check_machine_record` owns the diagnosis.
                     # It is REPORTED (#10531 review cycle 8, P2): the ordering half decided nothing
                     # here, so `run_order_claim` must not read `verified`.
                     if unreadable_atomic is not None:

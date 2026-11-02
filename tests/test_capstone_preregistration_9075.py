@@ -369,11 +369,22 @@ def _atomic_pins(name: str, **overrides) -> dict:
     The disclosure lives in `preregistration.json`, NOT in the pre-registration's pins block: that
     block is inside the document `document_sha256` freezes, so adding to it re-cuts the digest and
     the record then describes a document that post-dates the run (#10531 review cycle 2, P1).
+
+    ⛔ THE DEFAULTS RESOLVE (#10531 review cycle 14, P2). They used to be this repo's real shas
+    (`a1075dfc2` / `cfa3de857`), which exist in NO hermetic repo — so every disclosure here named
+    a commit its own tree did not have, and `squash_merge`'s resolvability could not be asserted
+    against a passing fixture at all. The default is now HEAD of whichever repo `_repo()` installed,
+    so a passing default is a disclosure a reader could actually follow; a test that wants an
+    unaddressable value passes `squash_merge=` explicitly.
     """
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(check.REPO_ROOT),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
     entry = {
         "reason": "the bars were committed before any arm ran",
-        "branch_commits": ["a1075dfc2 prereg: amend definitions before any run"],
-        "squash_merge": "cfa3de857 measure: the merged commit",
+        "branch_commits": [f"{head[:9]} the branch commit the pair was collapsed from"],
+        "squash_merge": f"{head[:9]} the merged commit",
     }
     entry.update(overrides)
     return {name: entry}
@@ -745,6 +756,45 @@ def test_a_typed_shrug_is_not_a_disclosure(tmp_path, monkeypatch):
     monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
     for entry in bad:
         assert check.check_ordering(prereg, [log], None, None, None, {log.name: entry}), entry
+
+
+def test_a_squash_merge_no_reader_can_resolve_is_a_refusal(tmp_path, monkeypatch):
+    """REGRESSION (#10531 review cycle 14, P2): `squash_merge` is required BECAUSE it resolves.
+
+    The field's whole justification is "a squash leaves the branch commits unreachable from main,
+    so the squash commit is the one pointer a reader can actually resolve". Checking only its
+    FORMAT made that a decoration: `deadbeef1` passed every arm, and the CLI printed it as
+    `squashed by deadbeef1` — the one line this change added to make the disclosure checkable,
+    presenting an address that names nothing. Non-vacuous against the pre-fix tool, which accepted
+    any 7-40 hex token here.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    pins = _atomic_pins(log.name, squash_merge="deadbeef1 measure: a merge that never landed")
+    failures = check.check_ordering(prereg, [log], None, None, None, pins)
+    assert len(failures) == 1, failures
+    assert "not a usable disclosure" in failures[0], failures
+    assert "squash_merge" in failures[0] and "does not have" in failures[0], failures
+    # The SAME disclosure is refused when the log is atomic AND provably unscored: the field rule
+    # belongs to the disclosure, not to whichever arm happens to run first (cycle-2 P2).
+    monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
+    assert check.check_ordering(prereg, [log], None, None, None, pins) == failures
+
+
+def test_branch_commits_need_not_resolve_because_a_squash_hides_them(tmp_path, monkeypatch):
+    """The OTHER half of the asymmetry (#10531 review cycle 14, P2) — do not "fix" it into a trap.
+
+    A squash leaves the branch commits unreachable from `main`, so requiring the OBJECT here would
+    make the disclosure permanently red in exactly the case it exists for — the stuck light this
+    change removes. Format-only is deliberate; this test is what stops a later lane tidying the two
+    fields into one rule and re-creating the outage.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    prereg, log = _both_in_one_commit(repo)
+    pins = _atomic_pins(
+        log.name, branch_commits=["deadbeef1 the branch commit a squash made unreachable"]
+    )
+    assert check.check_ordering(prereg, [log], None, None, None, pins) == []
 
 
 def test_the_cli_prints_the_declared_atomic_add_and_its_commits(capsys):
