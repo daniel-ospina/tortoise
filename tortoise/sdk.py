@@ -36397,7 +36397,19 @@ class TortoiseSDK:
                 ranked = w4_enrich_items(proj, ranked)
             if _claim_class_applies and _claim_classes_ok:
                 ranked = _with_claim_class(ranked, claim_classes)
-            return _with_read_status(ranked)
+            from .ranking import annotate_belief_order as _belief_label
+            from .ranking import belief_read_for as _belief_read
+            # #10137 review rounds 3-4: the label describes the READ, not the
+            # branch name and not the ranker's configuration, and it is scoped
+            # PER ROW — a row the read did not answer was scored from a default
+            # and makes no claim. A duck-typed `graph_ranker` whose read we
+            # cannot observe makes no claim either (None ⇒ key absent).
+            _consulted, _answered = _belief_read(ranker, ranked)
+            return _with_read_status(_belief_label(
+                ranked, consulted=_consulted, answered=_answered))
+        belief_consulted = False
+        read = None
+        answered: frozenset | None = None
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
             # that ep.confidence_mean carries. GraphRanker reads the
@@ -36409,13 +36421,31 @@ class TortoiseSDK:
             # 0.75 prior — the pre-fix read ranked it as unmeasured 0.5).
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
-            signals = ranker._fetch_signals([r.id for r in results], entity_type)
+            read = ranker._fetch_signals([r.id for r in results], entity_type)
+            signals = read or {}
             results.sort(
                 key=lambda r: signals.get(r.id, {}).get("confidence", 0.5),
                 reverse=True,
             )
+            # #10137 review P1 / round 7 P1: the label describes the READ and
+            # the read must have supplied a MEASUREMENT — a failed fetch answers
+            # None (every key stays at the neutral 0.5, leaving the list in RRF
+            # order), and a row with no persisted belief at all — no α/β AND no
+            # `n.confidence` mirror — answered 0.5 too. Neither is a consulted
+            # order. A mirror-only row IS a measurement on this read (it is the
+            # coalesce's FIRST choice) and is labelled `consulted`; see
+            # test_the_mirror_counts_only_where_the_read_consults_it.
+            answered = frozenset(
+                pid for pid, sig in (read or {}).items() if sig.get("has_prior"))
+            belief_consulted = bool(answered)
         # Default: RRF relevance order (already in fused order)
 
+        # #10137: `order_by="confidence"` above sorts on the belief mean — so
+        # it DID consult the layer, unless its signal read failed (then every
+        # key is the neutral 0.5 and the list is left in RRF order, which
+        # `belief_consulted` records). The relevance order below never reads
+        # it. The hits carry an `ep` block either way, so the distinction has
+        # to be stated — see `annotate_belief_order`.
         out = [r.to_dict() for r in results[:limit]]
         # W4 (#2101): additive why-layer enrichment (flag-gated) — see the
         # order_by=graph branch above for the contract.
@@ -36424,7 +36454,12 @@ class TortoiseSDK:
             out = w4_enrich_items(proj, out)
         if _claim_class_applies and _claim_classes_ok:
             out = _with_claim_class(out, claim_classes)
-        return _with_read_status(out)
+        from .ranking import annotate_belief_order as _belief_label
+        # `answered` is only meaningful on the confidence path, which is the
+        # only one that reads (`read` stays None on the relevance path).
+        return _with_read_status(_belief_label(
+            out, consulted=belief_consulted,
+            answered=answered if order_by == "confidence" else None))
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
 
@@ -37327,6 +37362,16 @@ class TortoiseSDK:
         # 3. Multiplicative-gate ranking over the merged pool.
         merged = points + objects
         ranked = ranker.rerank(merged, entity_type="point", query=query)
+        # #10137 (review round 3, P1): the POOL was read at order_by="relevance"
+        # and is therefore labelled "not_consulted" — but THIS ranker's score is
+        # `relevance ** a × confidence ** b` over the EP belief mean, so the
+        # order the caller actually receives DID consult the layer. The label is
+        # owned by the LAST re-order, so it is re-stated here from the ranker's
+        # own read outcome (`belief_read_for`: None ⇒ no claim).
+        from .ranking import annotate_belief_order as _belief_label
+        from .ranking import belief_read_for as _belief_read
+        _consulted, _answered = _belief_read(ranker, ranked)
+        ranked = _belief_label(ranked, consulted=_consulted, answered=_answered)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
         # #2598: a DRAFT whose belief EP has not measured carries
