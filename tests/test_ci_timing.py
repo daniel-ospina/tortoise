@@ -6464,3 +6464,43 @@ def test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped() -> None:
     assert column0 > 100, (
         f"the block carries only {column0} COLUMN-0 prose lines, so the "
         f"indentation bound the span relies on is no longer load-bearing")
+
+
+def test_a_re_base_keeps_a_live_count_outside_the_stale_basis_claim() -> None:
+    """A refresh must not take a LIVE fact with the falsified clause beside it.
+
+    `test_ci_catch_history.py`'s note carries the count of its own offline tests and
+    the command that re-derives it, and `test_the_durations_note_counts_the_tests_this_
+    file_actually_has` RUNS that command. The 2026-11-02 refresh re-based the row
+    (its first CI junit reading), which made the clause `a NEW file has no CI junit
+    measurement … so this is the LOCAL wall of its offline tests: 69 of them` stale
+    as a whole — and the stale-basis cutter took the clause atomically, count
+    included, so the committed note stopped stating a number and the guard went red.
+    This is the #9134 "a live instruction went with the falsified claim" shape, and
+    the repair is that the count now sits in its own clause, ahead of any dated one.
+
+    Non-vacuity: on the PRE-FIX map (this commit's parent) the same render emits no
+    `N of them` at all and the first assertion fails — that is exactly the red the
+    guard in `tests/test_ci_catch_history.py` reported.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    key = "test_ci_catch_history.py"
+    rebased, _ = ci_timing.render_refreshed_manifest(
+        text, {key: 1.5}, "2026-11-09T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    lines = rebased.split("\n")
+    index = next(i for i, ln in enumerate(lines) if ln.startswith(f"  {key}: "))
+    match = ci_timing._DURATION_LINE_RE.match(lines[index])
+    assert match is not None, lines[index]
+    continuation = ci_timing._row_continuation_lines(lines, index)
+    note = (ci_timing._joined_note_tail(match.group("tail"),
+                                       [lines[j] for j in continuation])
+            if continuation else match.group("tail"))
+    stated = re.search(r"\b(\d+) of them", note)
+    assert stated, f"the re-base dropped the note's own count: {note}"
+    actual = len(re.findall(r"^def test_",
+                            (REPO_ROOT / "tests" / key).read_text(), re.MULTILINE))
+    assert int(stated.group(1)) == actual, (
+        f"the note states {stated.group(1)} offline tests; the file defines {actual}")
+    assert len(re.findall(r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2}",
+                          note)) == 1, note
