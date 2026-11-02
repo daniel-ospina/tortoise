@@ -3003,6 +3003,48 @@ def test_the_cli_refuses_a_named_base_ref_it_cannot_resolve(tmp_path, monkeypatc
     )
 
 
+def test_a_local_main_that_IS_the_branch_under_test_is_not_a_base(tmp_path, monkeypatch):
+    """#10547 review 6 P3: `main` is a candidate only when it is NOT the branch under test.
+
+    ``BASE_REF_CANDIDATES = ("origin/main", "main")`` ends with the bare ``main``, which is right
+    when it is a PEER ref (a main carrying the published side) and wrong when HEAD *is* ``main``:
+    in a clone whose HEAD is main and whose ``origin/main`` does not resolve, "the base" and "the
+    contribution" are the SAME ref, so every log's add-commit is measured against the branch that
+    carries it — the PR-internal rule #10463 removes, reported as an ordinary ``OK``. Measured on
+    the pre-fix code: ``resolve_base_ref()`` answered ``main`` here. The remedy is the ordinary one
+    (:data:`check.NO_BASE_REF`: fetch the base), not a verdict about the contribution.
+
+    Scoped to the branch NAME on purpose: ``origin/main`` equal to HEAD is the PUBLISHED base — that
+    is what CI on main itself checks out — so a sha comparison would refuse a legitimate run. The
+    second half pins that scope: a ``main`` that is not HEAD keeps its documented meaning.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    _git(repo, "remote", "add", "upstream", "https://example.invalid/x.git")
+    (repo / "README.md").write_text("base\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "base", epoch=1_700_000_000)
+    _git(repo, "branch", "-M", "main")          # HEAD IS main; there is no `origin/main`
+
+    assert check.resolve_base_ref() is None, "the branch under test must not be its own base"
+    assert check.no_base_ref_reason() == check.NO_BASE_REF
+
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/contrib")   # main is now a PEER ref
+    assert check.resolve_base_ref() == "main"
+
+
+def test_the_published_base_wins_even_when_main_is_the_branch_under_test(tmp_path, monkeypatch):
+    """...and the skip must not touch the case it would otherwise break: CI checked out ON main.
+
+    On `main` itself (and on any branch sitting exactly at the published tip) ``origin/main``'s sha
+    EQUALS HEAD's, and that is the legitimate published base — comparing shas instead of branch
+    names would refuse the run that guards `main`. `origin/main` is tried first, so the skip for
+    the branch under test is never reached here.
+    """
+    repo = _repo_with_published_base(tmp_path, monkeypatch)
+    _git(repo, "branch", "-M", "main")          # HEAD is main AND at the published tip
+    assert check.resolve_base_ref() == "origin/main"
+
+
 def test_a_corpus_refusal_still_names_the_base_ref_refusal(tmp_path, monkeypatch, capsys):
     """#10547 review 4 P2: a raise from a history-free half bypassed the deferral.
 

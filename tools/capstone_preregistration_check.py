@@ -702,7 +702,8 @@ def _touch_epochs(path: Path) -> list[int]:
 # own PR. That refusal is what makes this a gate rather than a red `main`.
 
 #: The ref the ordering is measured against. `origin/main` first: that is what a contribution is
-#: merged into. `PREREG_ORDERING_BASE_REF` (or `--base-ref`) overrides it.
+#: merged into. `PREREG_ORDERING_BASE_REF` (or `--base-ref`) overrides it. The bare `main` is a
+#: candidate ONLY when it is not the branch under test — see :func:`resolve_base_ref`.
 BASE_REF_ENV = "PREREG_ORDERING_BASE_REF"
 BASE_REF_CANDIDATES = ("origin/main", "main")
 
@@ -805,11 +806,27 @@ def resolve_base_ref(explicit: str | None = None) -> str | None:
     ``origin/main`` is the silent degradation, not a convenience. So the explicit ref is tried
     ALONE and an unresolved one returns ``None``, which raises the fail-closed refusal naming it
     (:func:`no_base_ref_reason`).
+
+    ⛔ A CANDIDATE THAT IS THE BRANCH UNDER TEST IS NOT A BASE (#10547 review 6 P3, measured:
+    with `origin/main` absent and HEAD on `main`, ``resolve_base_ref()`` answered ``main``). The
+    bare ``main`` candidate is right when it is a PEER ref — a main that carries the published
+    side — and wrong when HEAD *is* ``main``: then "the base" and "the contribution" are one ref,
+    so every log's add-commit is compared against the very branch that carries it. That is the
+    PR-internal rule #10463 removes, answering about another subject while reporting ``OK`` — the
+    class this branch exists to end. Skipped on the branch NAME (``symbolic-ref``), not on the sha:
+    a remote-tracking ``origin/main`` that happens to equal HEAD is the published base (it is what
+    CI on `main` itself checks out), so comparing shas would refuse a legitimate run. A detached
+    HEAD names no branch and keeps the candidate list as documented; the remedy for the skipped
+    case is the ordinary one — ``git fetch origin main``.
     """
     if explicit:
         code, out = _git_stdout(["rev-parse", "--verify", "--quiet", explicit])
         return explicit if code == 0 and out.strip() else None
+    code, out = _git_stdout(["symbolic-ref", "--quiet", "--short", "HEAD"])
+    current = out.strip() if code == 0 else ""        # "" on a detached HEAD: no branch to skip
     for candidate in BASE_REF_CANDIDATES:
+        if candidate == current:
+            continue                      # the branch under test cannot be the base it is measured on
         code, out = _git_stdout(["rev-parse", "--verify", "--quiet", candidate])
         if code == 0 and out.strip():
             return candidate
