@@ -31,12 +31,12 @@ claims:
 | `test_every_real_assignment_shape_still_reads_as_shipped_ON` | the same input, in the other direction | tightening the test makes a REAL shipped ON (compose map/array, `.env`, Dockerfile, `export`) read as a false `False` |
 | `test_searched_is_the_walk_not_the_list_of_mentions` | the documented `searched` contract | `searched` reports the mentions, so "what 'nowhere' covered" is `[]` for the case the function exists for |
 | `test_an_unreadable_surface_is_named_not_silently_excluded` | the `UNMEASURED` rule, applied to the walk | a file the walk could not read is folded into a measured `False` |
-| `test_every_unresolved_writer_carries_a_census_class` | #10541's `0 unclassified` property, LIVE | a writer this tree holds is unresolved and nothing says which of the three honest classes it is in |
+| `test_every_unresolved_writer_carries_a_census_class` | the census and the unresolved set are the SAME SET, in both directions, LIVE | a writer this tree holds is unresolved and nothing says which of the three honest classes it is in — or a census entry outlives its hole, so `exempt` counts an instrument false positive that no longer exists |
 | `test_the_census_guard_has_teeth_on_an_INJECTED_map` | the same guard's teeth, without pinning this head | the guard goes vacuous when #5090's remainder lands and this tree holds no unresolved writer |
 | `test_a_duplicate_identity_paints_no_census_note` | #10541's census population | a `duplicate` identity is counted as a census member, so a census is painted over a population that cannot hold a key for it |
 | `test_the_census_note_names_only_the_unresolved_producers` | the same population, in the other direction | a classed unresolved producer stops being named, or a duplicate is counted alongside it |
 | `test_the_census_note_does_not_break_the_markdown_table` | the note is safe in the artifact a reader sees | a note carries a `|` into `Row.observed`, which `_table` emits raw into a 4-column row (GFM: an unescaped pipe is a cell separator) |
-| `test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible` | the census totals ACCOUNT for the population | a census entry's class string is a typo/retired, so it falls through both `by_class` and `unclassified` and every class total reads `0` over a population of one |
+| `test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible` | an out-of-vocabulary class is NAMED as UNCLASSIFIED, and the census segments still ACCOUNT for the population | a class outside `CENSUS_CLASSES` falls through both `by_class` and `unclassified`, so the writer is named nowhere and the segments sum to `0` against a header claiming `N` |
 | `test_the_census_note_names_the_population_it_counted` | the total does not claim a population wider than it counted | a duplicate is listed as an unresolved writer while the note claims to cover the whole unresolved set and silently omits it |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
@@ -1348,7 +1348,6 @@ def test_the_census_note_does_not_break_the_markdown_table(monkeypatch):
         f"a note embedded a `|`: {lines}")
 
 
-
 def test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible(
         monkeypatch):
     """A class outside `CENSUS_CLASSES` must read as UNCLASSIFIED, not vanish.
@@ -1365,6 +1364,13 @@ def test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible(
     everything, and this diff's equality guard makes editing census entries a
     routine act — so the instrument must not lie while CI is the only one
     objecting.
+
+    Two properties, because naming the writer is not enough: the writer must be
+    NAMED on the UNCLASSIFIED line, and the census line's segments must still
+    RECONCILE to the `N of M` in its own header. Without the second, the line
+    read `1 of 1 … recognised_producer=0 · exempt=0 · bypass=0` — a header
+    claiming one writer and totals summing to zero, i.e. the same
+    silently-omitted-writer shape the note was re-worded to remove.
     """
     writers = {
         "tortoise.consistency::_compare_views": {
@@ -1385,6 +1391,13 @@ def test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible(
         "a census entry whose class is outside CENSUS_CLASSES disappeared from "
         f"the instrument's output entirely: {row.notes}")
     assert "tortoise.consistency::_compare_views" in unclassified[0], unclassified
+    # ...and the census line still ACCOUNTS for it: the segments reconcile to
+    # the `1 of 1` in the header instead of summing to zero.
+    census = [n for n in row.notes if n.startswith("#10541 census")]
+    assert len(census) == 1, row.notes
+    assert "unclassified=1 (tortoise.consistency::_compare_views)" in census[0], (
+        f"the census segments do not reconcile to its own header: {census[0]}")
+    assert "1 of 1 UNKNOWN-labelled" in census[0], census[0]
 
 
 def test_the_census_note_names_the_population_it_counted(monkeypatch):

@@ -914,9 +914,25 @@ def score_path_bullet() -> Row:
             # actually looks at (GFM: an unescaped `|` is a cell separator).
             # A middle dot separates the counts without escaping anything.
             + " · ".join(
-                f"{cls}={len(by_class.get(cls, []))}"
-                + (f" ({', '.join(sorted(by_class[cls]))})" if by_class.get(cls) else "")
-                for cls in CENSUS_CLASSES
+                # ⛔ The `unclassified=` segment is what makes the totals RECONCILE
+                # to the `N` in the header. An out-of-vocabulary class is in no
+                # `by_class` bucket, so without this the line could read
+                # "1 of 1 … recognised_producer=0 · exempt=0 · bypass=0" — a
+                # header claiming one writer and three totals summing to zero,
+                # which is the same "silently omits a writer" defect this note
+                # was re-worded to stop. `by_class` covers in-vocabulary classes
+                # and `unclassified` covers the rest, so the segments now sum to
+                # `len(unresolved_writers)` by construction.
+                [
+                    f"{cls}={len(by_class.get(cls, []))}"
+                    + (f" ({', '.join(sorted(by_class[cls]))})"
+                       if by_class.get(cls) else "")
+                    for cls in CENSUS_CLASSES
+                ]
+                + ([
+                    f"unclassified={len(unclassified)}"
+                    f" ({', '.join(unclassified)})"
+                ] if unclassified else [])
             )
         )
     if unclassified:
