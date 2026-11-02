@@ -8286,8 +8286,13 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         if st.get("outdated"):
             r["outdated"] = True
         # E6 (#1538) D7: promoted window fields — additive, only when present.
+        # #9741 review P3-2: PRESENT, not truthy. ``if st.get(key):`` dropped a
+        # stored falsy bound outright (``validFrom=0``), so the fallback hit
+        # carried ``valid_from_precision: "day"`` with no ``valid_from`` at all
+        # — the same erasure the primary decoration had, and the same drift the
+        # renderer cannot see. A bound the store HAS is ``not None``.
         for key in ("valid_from", "valid_to", "expired_at"):
-            if st.get(key):
+            if st.get(key) is not None:
                 r[key] = st[key]
         # #2350 (E-prec): the precision block owes every read path the same
         # 3-state end the primary decoration carries — the embedded fallback
@@ -8847,6 +8852,31 @@ def _resolve_end_state(valid_to: object, valid_to_precision: object) -> str:
     """#2350: the 3-state end, resolved by validity.py's ONE home."""
     from tortoise.validity import end_state
     return end_state(valid_to, valid_to_precision)
+
+
+def _stored_bound(*values: object) -> object:
+    """#9741: the first window bound the STORE holds — ABSENT, not falsy.
+
+    Both promoted-window wire surfaces used to build each field with
+    ``a or b or ""`` (the search decoration) / ``if st.get(key):`` (the
+    embedded fallback). Truthiness is the wrong question for a stored bound: a
+    falsy value is a value the author put there. ``create_point(validFrom=0)``
+    is a REAL epoch instant — ``validate_validity_window`` orders it and raises
+    nothing, and ``tests/test_validity_windows.py`` pins it as "a real start,
+    not a warning" — yet ``0 or … or ""`` handed the renderer ``""``, i.e. "no
+    start recorded", while ``valid_from_precision: "day"`` rode the same hit.
+    Two surfaces, one stored value, two answers: the drift #9730's residual
+    test exists to catch, and the reason fixing the renderer alone was not
+    enough (#9741 review P3-2).
+
+    Falls through on ``None`` ONLY, and returns ``""`` when nothing is stored —
+    the same absent spelling every reader of these fields already treats as
+    "no bound".
+    """
+    for value in values:
+        if value is not None:
+            return value
+    return ""
 
 
 def _refuse_inconsistent_validity_precision(g, props: dict, *,
@@ -36290,12 +36320,25 @@ class TortoiseSDK:
                 outdated=bool(point_state.get(pid, {}).get("outdated")),
                 # E6 (#1538) D7: promoted window fields (additive — empty
                 # string when undated ⇒ no marker, byte-identical output).
-                valid_from=point_state.get(pid, {}).get("valid_from")
-                or pt.get("validFrom") or "",
-                valid_to=point_state.get(pid, {}).get("valid_to")
-                or pt.get("validTo") or "",
-                expired_at=point_state.get(pid, {}).get("expired_at")
-                or pt.get("expiredAt") or "",
+                # #9741 review P3-2: PRESENT, not truthy — ``x or pt.get(k) or
+                # ""`` collapsed a stored FALSY bound into "no bound".
+                # ``validFrom=0`` is a legal epoch instant (the write boundary
+                # orders it, ``tests/test_validity_windows.py`` pins it), and it
+                # arrived here as ``""``, so the hit carried NO start at all
+                # while ``valid_from_precision: "day"`` rode beside it — the
+                # renderer said "no window recorded" next to a precision that
+                # names one. That is the drift #9730's residual test was written
+                # to detect, and the renderer half alone cannot close it.
+                # ``_stored_bound`` falls through on ABSENCE (``None``) only.
+                valid_from=_stored_bound(
+                    point_state.get(pid, {}).get("valid_from"),
+                    pt.get("validFrom")),
+                valid_to=_stored_bound(
+                    point_state.get(pid, {}).get("valid_to"),
+                    pt.get("validTo")),
+                expired_at=_stored_bound(
+                    point_state.get(pid, {}).get("expired_at"),
+                    pt.get("expiredAt")),
                 # #2350 (E-prec): the precision block rides the SAME decoration
                 # as the window fields above. ⚠️ ``end_state``/precision are
                 # read from ``point_state`` ONLY — when the batch decoration
