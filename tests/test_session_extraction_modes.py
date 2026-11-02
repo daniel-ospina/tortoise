@@ -441,9 +441,10 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
     stray_routing = routed - set(_PROVIDER_KEY_ENV)
     assert not stray_routing, (
         f"resolve_extractor_provider() routes provider(s) "
-        f"{sorted(stray_routing)} that _PROVIDER_KEY_ENV does not register — a "
-        f"deployment holding only that provider's key resolves (None, None) "
-        f"and the capture lane silently skips extraction, which is the #8133 "
+        f"{sorted(stray_routing)} that _PROVIDER_KEY_ENV does not register — the "
+        f"resolver HONOURS a provider the registry does not name, so the "
+        f"registry-derived consumers (the capture lane gate's key set, "
+        f"_providers_can_serve) disagree with what it can serve: the #8133 "
         f"divergence on the resolver side. Register the provider (and its key "
         f"env var) in _PROVIDER_KEY_ENV, or remove it from the routing order."
     )
