@@ -72,6 +72,86 @@ def _w4_flag_on() -> bool:
         return False
 
 
+# #10137: whether the belief layer INFORMED the order a query returned.
+#
+# The read path ships each hit's ``ep`` block (``confidence_mean``, ``has_ep``,
+# ``measured``, ``baseline``) on EVERY ordering, but only ``order_by="graph"``
+# and ``order_by="confidence"`` ever READ the posterior. On the default
+# (``order_by="relevance"``) path the order is RRF-only, so a hit presenting
+# ``confidence_mean: 0.91`` says nothing about why it ranked where it did —
+# and a consumer (or a benchmark report) reading those numbers as evidence
+# that belief propagation participated is reading a layer that was never
+# consulted. These labels make that distinction machine-readable, which is the
+# only honest way to ship a belief block beside an order it did not produce.
+BELIEF_ORDER_CONSULTED = "consulted"
+BELIEF_ORDER_NOT_CONSULTED = "not_consulted"
+
+
+def annotate_belief_order(rows: list[dict], *, consulted: bool | None,
+                          answered: frozenset | None = None) -> list[dict]:
+    """Label each hit's ``ep`` block with whether the ORDER read the belief.
+
+    Additive and in-place (the read path builds these dicts per call): only a
+    row that already carries an ``ep`` block is labelled, so a surface that
+    ships no belief ships no claim about one. Idempotent. ``consulted=None``
+    means the caller cannot observe the ranker's read — it makes NO claim and
+    the key is left absent, which is the honest answer, not ``False``.
+    """
+    value = BELIEF_ORDER_CONSULTED if consulted else BELIEF_ORDER_NOT_CONSULTED
+    for row in rows:
+        ep = row.get("ep")
+        if not isinstance(ep, dict):
+            continue
+        # The LAST re-order owns the claim: a label set by an earlier stage (the
+        # belief-blind pool that `recall_state` re-ranks) is REMOVED before this
+        # stage decides, so no predecessor can leak a verdict and "no claim" is
+        # represented by an ABSENT key on every path, not by an inherited one.
+        ep.pop("informed_order", None)
+        if consulted is None:
+            continue
+        if consulted and answered is not None and row.get("id") not in answered:
+            # The read answered for other rows but not this one: its own score
+            # came from a neutral default, so it makes NO claim.
+            continue
+        ep["informed_order"] = value
+    return rows
+
+
+def belief_read_for(ranker, rows: list[dict]) -> tuple[bool | None, frozenset]:
+    """Did `ranker`'s order for `rows` actually READ the belief layer?
+
+    Answers ``(verdict, answered_ids)``, and the distinctions are the point
+    (#10137 review rounds 3-4):
+
+      * ``None``  — the ranker is not one whose read we can observe (a
+        duck-typed or caller-supplied object), or no rerank has run yet: make
+        NO claim.
+      * ``False`` — the read failed, was never attempted, OR succeeded but
+        answered none of the rows on this page (an empty page intersection
+        collapses to ``(False, ∅)``, which is why an all-neutral page reads
+        ``not_consulted``), so every score came from a neutral fallback.
+        ``StateRanker``'s embedded branch sets ``signals_read`` unconditionally
+        (it reads the rows, not a graph) and relies on exactly that collapse.
+      * ``True``  — the read answered, and ``answered_ids`` names WHICH rows it
+        answered for. The verdict is NOT spread over the whole page: a row
+        whose own id the read did not answer was scored from a default, and
+        ``annotate_belief_order`` leaves that row without a claim. A page-level
+        "some row was answered" bit would stamp ``consulted`` on a belief-free
+        row — the very ambiguity this field removes.
+    """
+    if not isinstance(ranker, (GraphRanker, StateRanker)):
+        return None, frozenset()
+    read = getattr(ranker, "signals_read", None)
+    if read is None:
+        # never attempted — the honest third state, not "consulted=False"
+        return None, frozenset()
+    if read is False:
+        return False, frozenset()
+    answered = frozenset(getattr(ranker, "signals_answered", frozenset()))
+    page = frozenset(r.get("id") for r in rows if r.get("id") in answered)
+    return (True, page) if page else (False, frozenset())
+
+
 # Default signal weights — must sum to 1.0.
 DEFAULT_SIMILARITY_WEIGHT = 0.5
 DEFAULT_GRAPH_BOOST_WEIGHT = 0.35
@@ -512,6 +592,12 @@ class GraphRanker:
         # #1348: use_degree=False isolates the CONFIDENCE contribution (ablation
         # arm — degree term neutralized so the graph_boost is confidence-only).
         self.use_degree = use_degree
+        # #10137: set by every `rerank` call — whether the graph signal read
+        # actually ANSWERED (see `_fetch_signals`). Read by the caller to label
+        # the order honestly; ``None`` until a rerank has run, which
+        # `belief_read_for` reports as "no claim".
+        self.signals_read: bool | None = None
+        self.signals_answered: frozenset = frozenset()
         # #2952: recency decay is INTENTIONAL product behaviour (γ·e^(-λ·age),
         # 30-day half-life), so the fix is not to delete it but to make the
         # reference time it measures against EXPLICIT and injectable. A caller
@@ -544,11 +630,24 @@ class GraphRanker:
         (``w4_contested_boost``) — flag-off or no-query runs are
         byte-identical to the pre-W4-b ranking (R11 golden-ordering
         regression)."""
+        self.signals_read = False
+        self.signals_answered = frozenset()
         if not results:
             return results
 
         ids = [r.get("id") for r in results if r.get("id")]
+        # #10137 review P1: `signals_read` is the READ's outcome, not the
+        # ranker's configuration. `_fetch_signals` swallows a failed read and
+        # answers None; deriving "belief was consulted" from
+        # `projection is not None` would then stamp `consulted` on an order
+        # produced from the neutral fallbacks (every confidence 0.5, every
+        # graph_boost 0.0) — a false claim minted by the very field that exists
+        # to prevent false claims.
         signals = self._fetch_signals(ids, entity_type) if self.projection is not None else {}
+        self.signals_read = bool(signals)
+        signals = signals or {}
+        self.signals_answered = frozenset(
+            pid for pid, sig in signals.items() if sig.get("has_prior"))
         contested_boosts: dict[str, float] = {}
         if query and self.projection is not None and _w4_flag_on():
             contested_boosts = resolve_contested_relevance(
@@ -651,8 +750,15 @@ class GraphRanker:
 
     # ── Graph queries ─────────────────────────────────────────────────────
 
-    def _fetch_signals(self, ids: list[str], entity_type: str) -> dict[str, dict]:
-        """Batch-fetch graph signals for the given ids. Returns {id: {…}}."""
+    def _fetch_signals(self, ids: list[str], entity_type: str) -> dict[str, dict] | None:
+        """Batch-fetch graph signals for the given ids. Returns {id: {…}}.
+
+        Returns ``None`` (never ``{}``) when the read FAILED — the caller must
+        be able to tell "the read answered, and it answered empty" from
+        "the read did not answer", because #10137's ``ep.informed_order``
+        label is derived from exactly that difference. An empty batch (no ids)
+        is a successful read of nothing and still answers ``{}``.
+        """
         if not ids:
             return {}
         try:
@@ -661,7 +767,7 @@ class GraphRanker:
             return self._fetch_point_signals(ids)
         except Exception as e:  # pragma: no cover — defensive
             logger.warning("GraphRanker signal fetch failed: %s", e)
-            return {}
+            return None
 
     def _fetch_point_signals(self, ids: list[str]) -> dict[str, dict]:
         # Post-#2206/#2286 parity: a point's confidence is the belief MEAN
@@ -695,7 +801,16 @@ class GraphRanker:
             # #3276: has_ep == EP measured (ep_measured_cypher) — a #2199
             # baseline prior alone is prior-only, NOT measured.
             f"  {ep_measured_cypher('n')} AS has_ep, "
-            "  n.status, coalesce(n.outdated, false)"
+            "  n.status, coalesce(n.outdated, false), "
+            # #10137 review rounds 6-12: a row is a MEASUREMENT when the node
+            # carries a persisted belief — the α/β columns OR the
+            # `n.confidence` flush-mirror this read coalesces FIRST (the mirror
+            # is specific to THIS read; StateRanker's is α/β only). `has_ep` is
+            # #3276's narrower "EP measured this" and a #2199 baseline prior is
+            # prior-only — but it IS a belief value the score multiplies in, so
+            # it counts here.
+            "  (n.confidence IS NOT NULL OR n.posterior_alpha IS NOT NULL "
+            "   OR n.ep_alpha IS NOT NULL) AS has_prior"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
@@ -704,6 +819,9 @@ class GraphRanker:
             pid = row[0]
             variance = _beta_variance(float(row[4]), float(row[5]))
             has_ep = bool(row[6])
+            # Test doubles mirror the pre-round-6 row shape; falling back to
+            # has_ep keeps them honest without inventing a prior.
+            has_prior = bool(row[9]) if len(row) > 9 else has_ep
             # #2490: terminal rows (status in the terminal vocab OR the legacy
             # outdated flag) never surface as measured/contested EP. The len
             # guard tolerates test doubles mirroring the pre-#2490 row shape
@@ -718,6 +836,7 @@ class GraphRanker:
                 # Uncalibrated (no persisted α/β) is NOT contested.
                 "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
                 "is_event": False,
+                "has_prior": has_prior,
             }
         return out
 
@@ -833,6 +952,10 @@ class StateRanker:
             raise ValueError(
                 f"centrality_weight must be 0-1, got {centrality_weight}")
         self.projection = projection
+        # #10137: same observation surface as GraphRanker, so an un-reranked
+        # instance ABSTAINS (see `belief_read_for`) instead of claiming.
+        self.signals_read: bool | None = None
+        self.signals_answered: frozenset = frozenset()
         self.relevance_exp = relevance_exp
         self.confidence_exp = confidence_exp
         self.centrality_weight = centrality_weight
@@ -889,6 +1012,8 @@ class StateRanker:
         (``w4_contested_boost``) — flag-off or no-query runs are
         byte-identical to the pre-W4-b ranking (R11 golden-ordering
         regression)."""
+        self.signals_read = False
+        self.signals_answered: frozenset = frozenset()
         if not results:
             return results
 
@@ -899,6 +1024,11 @@ class StateRanker:
             by_entity.setdefault(et, []).append(r)
         ids_by_entity = {et: [r.get("id") for r in rs if r.get("id")] for et, rs in by_entity.items()}
         signals: dict[str, dict] = {}
+        # #10137: the same read-outcome bookkeeping as GraphRanker, because
+        # recall_state re-orders this pool by `confidence ** b` and must be able
+        # to say whether that order read the belief or a neutral default.
+        self.signals_read = False
+        self.signals_answered: frozenset = frozenset()
         if self.projection is not None:
             for et, ids in ids_by_entity.items():
                 try:
@@ -908,8 +1038,18 @@ class StateRanker:
                         signals.update(self._fetch_point_signals(ids))
                 except Exception as e:  # pragma: no cover — defensive
                     logger.warning("StateRanker signal fetch failed (%s): %s", et, e)
+            self.signals_read = bool(signals)
+            self.signals_answered = frozenset(
+                pid for pid, sig in signals.items() if sig.get("has_prior"))
         else:
             signals = self._embedded_signals(results)
+            # #10137 review round 4: the embedded `state_confidence` IS the
+            # belief the score multiplies in, so a row that carried one was
+            # READ — answering for the ids that actually supplied a number
+            # keeps a pool row (which carries none) at `not_consulted`.
+            self.signals_read = True
+            self.signals_answered = frozenset(
+                pid for pid, sig in signals.items() if "confidence" in sig)
         # W4-b contested-relevance resolution (ONE batch read, S8): only
         # POINT results can be contested (objects aggregate means); the
         # embedded (projection=None) unit path has no graph to resolve
@@ -1049,7 +1189,15 @@ class StateRanker:
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  ep_degree + about_degree AS degree, "
-            "  n.status, coalesce(n.outdated, false)"
+            "  n.status, coalesce(n.outdated, false), "
+            # #10137 review rounds 6/8: has_prior distinguishes "the read
+            # answered with a belief" from "it answered with the neutral
+            # Beta(1,1) default". This read is α/β ONLY — it does NOT consult the
+            # `n.confidence` mirror the way GraphRanker does, so a mirror-only
+            # node is scored from the default here and must not claim
+            # `consulted`. (Teaching this read the mirror would change recall
+            # ORDERING — a ranking change, not this PR.)
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_prior"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
@@ -1065,9 +1213,11 @@ class StateRanker:
             if len(row) > 6 and is_terminal_status(row[5], bool(row[6])):
                 has_ep = False
             variance = _beta_variance(alpha, beta)
+            has_prior = bool(row[7]) if len(row) > 7 else has_ep
             out[pid] = {
                 "confidence": round(alpha / (alpha + beta), 6) if (alpha + beta) > 0 else NEUTRAL_CONFIDENCE,
                 "has_ep": has_ep,
+                "has_prior": has_prior,
                 "degree": degree,
                 "variance": variance,
                 # #2598: the staged state rides the SAME batch read EP already
@@ -1117,6 +1267,12 @@ class StateRanker:
             out[oid] = {
                 "confidence": round(mean, 6),
                 "has_ep": len(confs) > 0,
+                # #10137: the Object's belief is the MEAN of its about-Points,
+                # so it is a measurement only when at least one of them carried
+                # one — otherwise `NEUTRAL_CONFIDENCE` is an absence default.
+                "has_prior": any(
+                    point_sigs[p].get("has_prior") for p in pids
+                    if p in point_sigs),
                 "degree": about_degree,
                 "variance": 0.0,
                 "contested": False,
