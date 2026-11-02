@@ -315,7 +315,6 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
     """#8133 (class fix): ``_PROVIDER_KEY_ENV`` is the SINGLE place the v2
     resolver's provider key vars are named, and ``resolve_extractor_provider``
     must honour exactly it — no provider more, none less.
-
     This is the direction the merged lane-gate guard could not see. Before the
     unification the resolver read three ``os.environ.get("…_API_KEY")``
     literals of its own, so adding a provider to ONE of the two lists (the map
@@ -391,6 +390,25 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
         f"honour them"
     )
 
+    # The OTHER direction of "exactly": a provider registered in the map must
+    # actually be ROUTED by the resolver, or its key is read and never used —
+    # a deployment holding only that key resolves (None, None), the capture lane
+    # reports ``no-provider`` and skips extraction silently: the #8133 symptom
+    # class on the opposite axis (review cycle 2, P2; measured — a registry-only
+    # entry left every guard green).
+    import inspect as _inspect
+
+    routed = _inspect.getsource(resolve_extractor_provider)
+    unrouted = [p for p in _PROVIDER_KEY_ENV if f'"{p}"' not in routed]
+    assert not unrouted, (
+        f"provider(s) {sorted(unrouted)} are registered in _PROVIDER_KEY_ENV "
+        f"but never named in resolve_extractor_provider's routing order — "
+        f"their key would be read and never used, so a deployment configured "
+        f"with only that key resolves (None, None) and the capture silently "
+        f"skips extraction. Add the provider to the resolver's `_chain(...)` "
+        f"calls, or remove it from the registry."
+    )
+
     # The explicit-selector enum is a POLICY set, not the registry; it may only
     # ever be a SHRINKAGE of it (a provider registered but not yet pinnable).
     stray = set(_PROVIDER_NAMES) - set(_PROVIDER_KEY_ENV)
@@ -414,10 +432,20 @@ def test_resolve_extractor_provider_reads_no_inline_provider_keys():
     ⚠️ It collects EVERY string constant ending in ``_API_KEY`` in the
     function, not just the first argument of an ``os.environ.get`` call
     (review cycle 1, P2): a scan limited to call arguments let
-    ``os.environ["FOO_API_KEY"]`` (a Subscript) and
-    ``os.environ.get(_FOO_KEY_ENV)`` (a non-constant name) through, and a
-    resolver honouring ``foo`` while the map did not name it is the #8133
-    divergence itself — reproduced, then closed by widening the scan.
+    ``os.environ["FOO_API_KEY"]`` (a Subscript) through, and a resolver
+    honouring ``foo`` while the map did not name it is the #8133 divergence
+    itself — reproduced, then closed by widening the scan.
+
+    ⛔ RESIDUAL, stated rather than claimed closed (review cycle 2, P2): a read
+    whose key NAME never appears as a literal inside this function is still
+    invisible — ``os.environ.get(_FOO_KEY_ENV)`` with
+    ``_FOO_KEY_ENV = "FOO_API_KEY"`` bound at module level, or a subscript of
+    another mapping. Measured: an injected resolver branch of that shape leaves
+    this guard green. Closing it needs operand resolution (``ast.Name`` /
+    ``ast.Subscript`` → the module constant), which this scan does not do; the
+    behavioural guard's "every registered provider is routed" half is what
+    catches the practical case, and any inline literal — the shape the original
+    drift used — is caught here.
 
     ``TORTOISE_EXTRACTOR_PROVIDER`` is deliberately exempt — it is the
     selector, not a provider key.

@@ -577,19 +577,32 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 #: Provider → key env var. **THE ONE PROVIDER-KEY REGISTRY FOR THE V2
 #: EXTRACTOR'S RESOLVER** — `resolve_extractor_provider` (below) derives its key
 #: presence from this mapping rather than reading the env vars inline, so the
-#: provider set the resolver honours and the provider set this mapping names
-#: cannot diverge.
+#: provider set the resolver HONOURS and the provider set this mapping names
+#: cannot disagree on what a provider's key is.
+#:
+#: ⚠️ Registering an entry does NOT make the resolver route it (review cycle 2):
+#: `resolve_extractor_provider` names its routing order in its own `_chain(...)`
+#: calls, so a provider present here but absent from those literals resolves to
+#: nothing — its key is read and then never used, and a deployment holding only
+#: that key reports `no-provider` and silently skips extraction, the #8133
+#: symptom class on the opposite axis.
+#: `test_the_v2_resolver_honours_exactly_the_provider_key_map` pins BOTH
+#: directions: nothing outside this map can be honoured, and every provider in
+#: it must appear in the resolver's own routing literals.
 #:
 #: ⚠️ Coverage, stated exactly (review cycle 1): this map is the single source
-#: for the V2 RESOLVER. Two consumers still hold their own inline key lists and
-#: are NOT derived from it — `resolve_reader_provider` (ask lane) builds a
-#: hand-written `keyed` dict from the same three vars, and
+#: for the V2 RESOLVER's key PRESENCE. Two consumers still hold their own inline
+#: key lists and are NOT derived from it — `resolve_reader_provider` (ask lane)
+#: builds a hand-written `keyed` dict from the same three vars, and
 #: `_SPEC_FAMILY_PROVIDERS`/`_providers_can_serve` never read this map at all.
-#: Those are the #8133 shape surviving on another lane: register a provider here
-#: and the ask lane will not see it, so an `_ASK_PROVIDERS` entry added next
-#: makes `keyed[explicit]` raise `KeyError` (500 on the ask lane) while `auto`
-#: mode silently never keys it. Unifying the ask lane is a separate change —
-#: this comment names the residual rather than claiming it is closed.
+#: Those are the #8133 shape surviving on another lane. Register a provider here
+#: and the ask lane will not see it; make it ask-servable too (add it to
+#: `_SPEC_FAMILY_PROVIDERS`) and the ask lane still has to be taught its key in
+#: `keyed`, or `keyed[explicit]` raises `KeyError` (500 on the ask lane) —
+#: measured: without the `_SPEC_FAMILY_PROVIDERS` edit the lane fails closed
+#: earlier, with a `ValueError` naming the unservable family (review cycle 2).
+#: Unifying the ask lane is a separate change — this comment names the residual
+#: rather than claiming it is closed.
 #:
 #: Why it is single-source (#8133): the defect this closes was two
 #: hand-maintained lists in the SAME file — this map, and three inline
