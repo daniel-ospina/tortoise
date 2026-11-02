@@ -9346,12 +9346,50 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     declares a 15 s ceiling — a bound that does not cover its callee refuses
     work that was inside its own budget. Same override argument the graph lane's
     ``_graph_offload`` makes for the cold projection open.
+
+    ⛔ #4055 (review P1) — A REQUEST-OWNED ONE-TIME EMBEDDER LOAD IS SETUP, NOT
+    THE WORK THIS BOUND MEASURES, and ``/v1/search``'s callable contains one:
+    ``sdk.tortoise_fts_query`` calls ``EmbeddingModel.get()`` synchronously in
+    the worker (a cold bge-small load is measured at ~57 s, budgeted
+    ``_LOAD_TIMEOUT_S`` = 90 s). Judging that by this lane's 8 s answers **503
+    ``graph_unavailable`` for a HEALTHY graph while the embedder is merely
+    loading** — a capacity error naming the wrong dependency. The transport
+    seam already refuses to make that mistake: ``mcp_auth.await_under_wait_bound``
+    drains a load that is OWNED BY THIS REQUEST AND STILL IN FLIGHT *outside* the
+    budget and re-arms the bound **at most once**. This seam reuses those same
+    helpers rather than re-deriving the rule, so the two bounds cannot disagree
+    about what "setup" means. Without it the lane would be the third instance of
+    the class this change already fixed twice (the projection cold open, the
+    record leg): a bound that does not cover its callee's cold phase.
+
+    ⚠️ The exemption is deliberately NARROW — identity, not a time window: a
+    load this request did not OWN (a background pre-warm, a concurrent
+    request's) is never exempted, because then the read really is waiting on
+    init it did not trigger.
     """
     ctx = contextvars.copy_context()
-    return await _cp_offload(
-        functools.partial(ctx.run, fn), op=op, pool="read",
-        timeout=read_offload_timeout_s() if timeout is None else timeout,
-        unavailable=_graph_unavailable if unavailable is None else unavailable)
+    bound = read_offload_timeout_s() if timeout is None else timeout
+    refuse = _graph_unavailable if unavailable is None else unavailable
+    submitted = functools.partial(ctx.run, fn)
+    # #4055: the identity + clock the exemption compares against. ``owner`` is
+    # whatever this request bound as its one-time-load owner (``None`` unarmed,
+    # which never exempts — ``_cold_setup_ran_during`` enforces that).
+    from tortoise.embeddings import current_load_owner
+    reference = time.monotonic()
+    owner = current_load_owner()
+    exempted = False
+    while True:
+        try:
+            return await run_control_plane_call(
+                submitted, op=op, pool="read", timeout=bound)
+        except ControlPlaneOffloadError:
+            # Re-arm AT MOST ONCE, exactly as the transport seam does, so a
+            # genuinely slow read still breaches.
+            if exempted or not _mcp_auth._cold_setup_ran_during(
+                    reference, owner):
+                raise refuse() from None
+            exempted = True
+            await _mcp_auth._drain_cold_setup()
 
 
 async def _capture_session_probe_off_loop(org: dict, session_id: str):
@@ -10596,10 +10634,16 @@ async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)): 
             # the strict one under lane saturation, which is a property no caller
             # can reason about. `record` mode keeps its refusal — it has no
             # cache branch to fall back to.
+            #
+            # ⛔ The REASON is its own fourth one (review P2): a refused lane
+            # means the record was NEVER ASKED, so it must not be counted as
+            # `record-unavailable` — that reason is the alertable OUTAGE counter,
+            # and misfiling a pool condition there sends ops to Postgres for a
+            # saturation the database never caused.
             def _record_refusal():
                 if mode == record_serve.MODE_PREFER:
                     return record_serve.CacheAnswerRequired(
-                        record_serve.FALLBACK_RECORD_UNAVAILABLE)
+                        record_serve.FALLBACK_RECORD_LANE_REFUSED)
                 return _record_read_unavailable()
 
             try:

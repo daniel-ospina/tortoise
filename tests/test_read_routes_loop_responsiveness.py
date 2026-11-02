@@ -3359,6 +3359,9 @@ def test_a_prefer_bound_miss_falls_back_to_the_cache(client):
     _seed_read_surface()
     real_call = ha_mod.run_control_plane_call
     ops: list[str] = []
+    # ⚠️ These counters are MODULE-level and shared by the whole session, so the
+    # assertion must be a DELTA — an absolute read is another test's residue.
+    before = dict(record_serve.fallback_counts())
 
     async def _refuse_only_the_record_leg(fn, *, op, **kwargs):
         ops.append(op)
@@ -3393,6 +3396,24 @@ def test_a_prefer_bound_miss_falls_back_to_the_cache(client):
         f"the lenient mode answered a refusal instead of a miss "
         f"(#10602 review P2); got {response.status_code} {response.text[:200]}")
     assert response.status_code == 200, response.text[:300]
+    # ⛔ The REASON is its own fourth one. `record-unavailable` is the ALERTABLE
+    # OUTAGE counter (record_serve's own words), and a refused lane means the
+    # record was NEVER ASKED — misfiling it there sends ops to Postgres for a
+    # pool condition the database never caused (review P2).
+    body = response.json()
+    assert body.get("fallbackReason") == record_serve.FALLBACK_RECORD_LANE_REFUSED, (
+        f"a refused read lane was recorded as {body.get('fallbackReason')!r} — "
+        f"the outage counter must not fire for a record that was never asked "
+        f"(#10602 review P2)")
+    after = record_serve.fallback_counts()
+    assert after.get(record_serve.FALLBACK_RECORD_UNAVAILABLE, 0) == \
+        before.get(record_serve.FALLBACK_RECORD_UNAVAILABLE, 0), (
+            f"the read-lane refusal incremented the OUTAGE counter "
+            f"(before {before!r} -> after {after!r})")
+    assert after.get(record_serve.FALLBACK_RECORD_LANE_REFUSED, 0) == \
+        before.get(record_serve.FALLBACK_RECORD_LANE_REFUSED, 0) + 1, (
+            f"the refused lane was not counted under its own reason "
+            f"(before {before!r} -> after {after!r})")
 
 
 def test_the_record_read_refusal_is_not_shadowed_by_the_session_one():
@@ -3419,3 +3440,131 @@ def test_the_record_read_refusal_is_not_shadowed_by_the_session_one():
         f"the point-read refusal is serving #8447's SESSION-detail copy "
         f"({message!r}) — the two refusals share a name again, and the last "
         f"definition wins at import (#10602 review P2)")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# #4055 (review P1) — the read lane must not bound the ONE-TIME embedder load
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestTheReadLaneExemptsARequestOwnedColdSetup:
+    """``/v1/search``'s read-lane callable CONTAINS the embedder cold load.
+
+    ``sdk.tortoise_fts_query`` calls ``EmbeddingModel.get()`` synchronously in
+    the worker, and a cold bge-small load is measured at ~57 s (budgeted
+    ``_LOAD_TIMEOUT_S`` = 90 s). Judging that by the lane's 8 s answers 503
+    ``graph_unavailable`` for a HEALTHY graph while the embedder is merely
+    loading — a capacity refusal naming the wrong dependency, and the third
+    instance of "a bound that does not cover its callee's cold phase" in this
+    change (the projection cold open, the record leg, this).
+
+    The transport seam already refuses to make that mistake
+    (``mcp_auth.await_under_wait_bound`` drains a load OWNED BY THIS REQUEST and
+    re-arms AT MOST ONCE). The read lane delegates to the SAME helpers, so the
+    two bounds cannot disagree about what "setup" means.
+    """
+
+    @staticmethod
+    def _drive(monkeypatch, *, cold_setup: bool, timeout: float = 0.05):
+        import tortoise.hosted_api as ha_mod
+        from tortoise import mcp_auth
+
+        calls: list[str] = []
+
+        async def _refuses_then_succeeds(fn, *, op, pool="auth", timeout=None,
+                                         cancel_on_timeout=True):
+            calls.append(op)
+            if len(calls) == 1:
+                raise mon_offload_error()
+            return fn()
+
+        def mon_offload_error():
+            from tortoise.monitoring import ControlPlaneOffloadError
+            return ControlPlaneOffloadError("probe: bound miss", refused=False)
+
+        drained: list[bool] = []
+
+        async def _drain():
+            drained.append(True)
+
+        monkeypatch.setattr(ha_mod, "run_control_plane_call",
+                            _refuses_then_succeeds)
+        monkeypatch.setattr(ha_mod, "read_offload_timeout_s", lambda: timeout)
+        monkeypatch.setattr(mcp_auth, "_cold_setup_ran_during",
+                            lambda *a, **k: cold_setup)
+        monkeypatch.setattr(mcp_auth, "_drain_cold_setup", _drain)
+
+        async def _run():
+            return await ha_mod._read_offload(lambda: "rows", op="search")
+
+        return _run, calls, drained
+
+    def test_a_request_owned_cold_load_re_arms_the_bound_once(
+            self, monkeypatch):
+        """RED before the fix: the 8 s bound refused at 8 s and the #4055
+        exemption was never consulted, so a healthy graph answered 503."""
+        _run, calls, drained = self._drive(monkeypatch, cold_setup=True)
+        assert asyncio.run(_run()) == "rows", (
+            "a read whose own embedder cold load was in flight was not "
+            "exempted — the #4055 transport exemption exists for exactly this, "
+            "and the read lane must not be the one bound that cannot see it")
+        assert len(calls) == 2, (
+            f"the read lane made {len(calls)} submission(s) — a request-owned "
+            f"cold setup must re-arm the bound AT MOST ONCE")
+        assert drained == [True], (
+            f"the in-flight cold load was not drained outside the budget "
+            f"(drains: {drained!r})")
+
+    def test_a_bound_miss_with_no_owned_cold_load_still_refuses(
+            self, monkeypatch):
+        """The other direction, so "always retry" cannot satisfy the test above:
+        a load this request did NOT own (a background pre-warm, a concurrent
+        request's) is never exempted — then the read really is waiting on init
+        it did not trigger."""
+        from fastapi import HTTPException
+
+        _run, calls, drained = self._drive(monkeypatch, cold_setup=False)
+        with pytest.raises(HTTPException) as excinfo:
+            asyncio.run(_run())
+        assert excinfo.value.status_code == 503
+        assert excinfo.value.detail["error_code"] == "graph_unavailable"
+        assert len(calls) == 1, (
+            f"the read lane re-submitted {len(calls)} times for a bound miss "
+            f"with no request-owned cold setup")
+        assert drained == [], "a cold drain ran with nothing to drain"
+
+    def test_the_exemption_re_arms_only_once(self, monkeypatch):
+        """An exemption that can be re-taken is not a bound: a genuinely slow
+        read must still breach rather than being forgiven indefinitely."""
+        from fastapi import HTTPException
+
+        import tortoise.hosted_api as ha_mod
+        from tortoise import mcp_auth
+        from tortoise.monitoring import ControlPlaneOffloadError
+
+        calls: list[str] = []
+
+        async def _always_refuses(fn, *, op, pool="auth", timeout=None,
+                                  cancel_on_timeout=True):
+            calls.append(op)
+            raise ControlPlaneOffloadError("probe: bound miss", refused=False)
+
+        async def _drain():
+            return None
+
+        monkeypatch.setattr(ha_mod, "run_control_plane_call", _always_refuses)
+        monkeypatch.setattr(ha_mod, "read_offload_timeout_s", lambda: 0.05)
+        # ALWAYS claims a cold load ran — the loop must still give up.
+        monkeypatch.setattr(mcp_auth, "_cold_setup_ran_during",
+                            lambda *a, **k: True)
+        monkeypatch.setattr(mcp_auth, "_drain_cold_setup", _drain)
+
+        async def _run():
+            return await ha_mod._read_offload(lambda: "rows", op="search")
+
+        with pytest.raises(HTTPException) as excinfo:
+            asyncio.run(_run())
+        assert excinfo.value.status_code == 503
+        assert len(calls) == 2, (
+            f"the cold-setup exemption re-armed {len(calls) - 1} time(s) — it "
+            f"must re-arm AT MOST ONCE, or a genuinely slow read is forgiven "
+            f"indefinitely and the bound stops being a bound")

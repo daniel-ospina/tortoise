@@ -476,9 +476,10 @@ def not_served_reads() -> tuple[str, ...]:
 
 # ── fallback accounting — the fallback must be MEASURABLE ───────────────────
 
-#: Why a read was answered by the cache while the record was armed. Two reasons,
-#: kept apart because they have different repairs: an OUTAGE is ops, a MISS is a
-#: backfill/completeness question.
+#: Why a read was answered by the cache while the record was armed. The reasons
+#: are kept apart because they have different repairs: an OUTAGE is ops, a MISS is
+#: a backfill/completeness question, an UNRESOLVED TENANT and a REFUSED LANE are
+#: each a condition the record never caused.
 FALLBACK_RECORD_UNAVAILABLE = "record-unavailable"
 FALLBACK_RECORD_MISS = "record-miss"
 #: A THIRD reason, for a condition that is neither: the credential resolves no
@@ -492,9 +493,17 @@ FALLBACK_RECORD_MISS = "record-miss"
 #: counter permanently on a condition the record never caused — and the counter's
 #: whole purpose is to be alertable.
 FALLBACK_RECORD_TENANT_UNRESOLVED = "record-tenant-unresolved"
+#: A FOURTH reason, for the same class as the third: the read LANE refused the
+#: submission (backlog full / wait bound) so the record was NEVER ASKED. The
+#: record was not slow and is not down, so folding this into
+#: `record-unavailable` would fire the OUTAGE counter — permanently, on every
+#: saturated read — and send an operator to Postgres for a pool condition. That
+#: is the identical misattribution `record-tenant-unresolved` exists to prevent.
+#: `exc.refused` is precisely the discriminator: the submission never ran.
+FALLBACK_RECORD_LANE_REFUSED = "record-read-lane-refused"
 FALLBACK_REASONS: tuple[str, ...] = (
     FALLBACK_RECORD_UNAVAILABLE, FALLBACK_RECORD_MISS,
-    FALLBACK_RECORD_TENANT_UNRESOLVED)
+    FALLBACK_RECORD_TENANT_UNRESOLVED, FALLBACK_RECORD_LANE_REFUSED)
 
 _FALLBACKS: dict[str, int] = {}
 #: The counter is incremented from BOTH the event loop (the endpoint's
