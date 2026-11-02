@@ -368,9 +368,9 @@ def _atomic_pins(name: str, **overrides) -> dict:
 
     The disclosure lives in `preregistration.json`, NOT in the pre-registration's pins block: that
     block is inside the document `document_sha256` freezes, so adding to it re-cuts the digest and
-    the record then describes a document that post-dates the run (#10531 review cycle 2, P1).
+    the record then describes a document that post-dates the run (#10529 review cycle 2, P1).
 
-    ⛔ THE DEFAULTS RESOLVE (#10531 review cycle 14, P2). They used to be this repo's real shas
+    ⛔ THE DEFAULTS RESOLVE (#10529 review cycle 14, P2). They used to be this repo's real shas
     (`a1075dfc2` / `cfa3de857`), which exist in NO hermetic repo — so every disclosure here named
     a commit its own tree did not have, and `squash_merge`'s resolvability could not be asserted
     against a passing fixture at all. The default is now HEAD of whichever repo `_repo()` installed,
@@ -404,7 +404,7 @@ def _two_commits_same_second(repo: Path, log_first: bool,
                              epoch: int = 1_700_000_000) -> tuple[Path, Path]:
     """Two DISTINCT commits with the SAME epoch — git can still order them by ANCESTRY.
 
-    Atomicity is identical-SHA, not equal-epoch (#10531 review cycle 4, P1): an `==` epoch test
+    Atomicity is identical-SHA, not equal-epoch (#10529 review cycle 4, P1): an `==` epoch test
     admitted the attack shape (log commit is a true ancestor, hidden behind an equal second) and
     accused the honest shape of being one commit.
     """
@@ -420,7 +420,7 @@ def _two_commits_same_second(repo: Path, log_first: bool,
 
 
 def test_a_same_second_attack_is_still_a_hard_failure(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-4 P1): the log's commit is a TRUE ancestor, one second shared.
+    """REGRESSION (#10529 cycle-4 P1): the log's commit is a TRUE ancestor, one second shared.
 
     An equal-epoch rule handed this to the atomic arm, where a disclosure would have waived a real
     ordering violation. Identity + ancestry keeps it a hard failure — and undeclarable.
@@ -438,7 +438,7 @@ def test_a_correctly_ordered_same_second_pair_needs_no_disclosure(tmp_path, monk
     """The honest shape: two distinct commits, same second, registration the older one.
 
     The equal-epoch rule called this "the SAME commit" and demanded a disclosure — a false record
-    entry, which is the mirror of the attack it was meant to stop (#10531 cycle-4 P1).
+    entry, which is the mirror of the attack it was meant to stop (#10529 cycle-4 P1).
     """
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _two_commits_same_second(repo, log_first=False)
@@ -448,7 +448,7 @@ def test_a_correctly_ordered_same_second_pair_needs_no_disclosure(tmp_path, monk
 
 
 def test_a_future_dated_log_that_is_a_true_ancestor_still_hard_fails(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-5 P1): `%ct` is attacker-controlled, so ancestry decides.
+    """REGRESSION (#10529 cycle-5 P1): `%ct` is attacker-controlled, so ancestry decides.
 
     The log's add-commit is a TRUE ANCESTOR of the registration's, but its committer date was set
     LATER. Gating the reverse-ancestry test behind `log_epoch <= prereg_epoch` let that tree pass
@@ -462,7 +462,7 @@ def test_a_future_dated_log_that_is_a_true_ancestor_still_hard_fails(tmp_path, m
 
 
 def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-5 P2): the print path re-read UNVALIDATED JSON and raised.
+    """REGRESSION (#10529 cycle-5 P2): the print path re-read UNVALIDATED JSON and raised.
 
     `atomic_add_ordering: {log: "yes"}` reached `run()`'s detail comprehension and escaped as
     `AttributeError` — no failure text, nothing from `--json`, and the module's own exit-2 contract
@@ -481,7 +481,7 @@ def test_a_malformed_disclosure_on_an_unscored_log_is_reported_not_a_crash(tmp_p
 
 
 def test_a_proven_order_is_not_reported_as_a_content_waiver(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-6 P2): a waiver reported where none was granted teaches that they
+    """REGRESSION (#10529 cycle-6 P2): a waiver reported where none was granted teaches that they
     are routine. Git PROVED the order, so no arm may record an exemption."""
     repo = _repo(tmp_path, monkeypatch)
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
@@ -493,11 +493,11 @@ def test_a_proven_order_is_not_reported_as_a_content_waiver(tmp_path, monkeypatc
 
 
 def test_an_unreadable_record_does_not_add_a_wrong_instruction(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-6 P2): 'disclose it under X' is the wrong repair when X cannot be read."""
+    """REGRESSION (#10529 cycle-6 P2): 'disclose it under X' is the wrong repair when X cannot be read."""
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     # `atomic_detail` is a DICT here, as `run()` always passes one — the earlier version of this
-    # test passed `None` and so could not see the KeyError the dict path raised (#10531 cycle 7, P1).
+    # test passed `None` and so could not see the KeyError the dict path raised (#10529 cycle 7, P1).
     failures = check.check_ordering(prereg, [log], None, None, None, None, {},
                                     record_unreadable=True)
     assert not any("Disclose it under" in f for f in failures), failures
@@ -508,7 +508,7 @@ def test_an_unreadable_record_does_not_add_a_wrong_instruction(tmp_path, monkeyp
 
 
 def test_a_content_decided_pass_is_not_dressed_as_a_declaration(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-7 P2): the pass is decided by the LOG'S CONTENT, so a disclosure
+    """REGRESSION (#10529 cycle-7 P2): the pass is decided by the LOG'S CONTENT, so a disclosure
     sitting in the same tree decided nothing and must not be reported as the GROUND of it.
 
     The unscored arm appended to `atomic_added` whenever a disclosure existed, so the CLI claimed
@@ -545,7 +545,7 @@ def test_a_report_never_claims_a_declaration_the_record_does_not_carry(tmp_path,
 
 
 def test_an_atomic_disclosure_does_not_cover_a_later_in_place_edit(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-8 P1): the add-commit is immutable, so it cannot see an edit.
+    """REGRESSION (#10529 cycle-8 P1): the add-commit is immutable, so it cannot see an edit.
 
     A log re-committed with a rewritten number AFTER the bars passed green with
     `verified (atomic-add DECLARED: …)` — a NEW silent-green path, invisible to every other check
@@ -573,7 +573,7 @@ def test_a_valid_json_non_object_record_is_a_parse_error_not_a_traceback(tmp_pat
 
 
 def test_a_backdated_edit_does_not_beat_the_touch_bound(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-9 P1): the touch bound must be TOPOLOGY, not `%ct`.
+    """REGRESSION (#10529 cycle-9 P1): the touch bound must be TOPOLOGY, not `%ct`.
 
     The cycle-8 bound compared `max(_touch_epochs(log)) > prereg_epoch` — a `%ct` comparison in a
     module whose own cycle-5 finding says `%ct` is attacker-controlled. The forward-dated rewrite was
@@ -591,7 +591,7 @@ def test_a_backdated_edit_does_not_beat_the_touch_bound(tmp_path, monkeypatch):
 
 
 def test_a_backdated_readd_cannot_choose_the_pair(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-10 P1): `%ct` may not decide WHICH add-commit is the pair.
+    """REGRESSION (#10529 cycle-10 P1): `%ct` may not decide WHICH add-commit is the pair.
 
     `_added_commits` is sorted by epoch, so `log_adds[0]` — the representative — was chosen by the
     one field this module has ruled attacker-controlled. A delete-and-re-add BACKDATED to look newer
@@ -614,7 +614,7 @@ def test_a_backdated_readd_cannot_choose_the_pair(tmp_path, monkeypatch):
 
 
 def test_a_late_edit_cannot_erase_the_disclosure_requirement(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-10 P2): the content arm must not certify "measured nothing" over a
+    """REGRESSION (#10529 cycle-10 P2): the content arm must not certify "measured nothing" over a
     LATER edit — a post-green edit flipping the verdict is the silent-green class one arm earlier."""
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
@@ -628,7 +628,7 @@ def test_a_late_edit_cannot_erase_the_disclosure_requirement(tmp_path, monkeypat
 
 
 def test_a_late_strip_cannot_green_a_predating_log(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-11 P1): the predating arm was the last one with no topology bound.
+    """REGRESSION (#10529 cycle-11 P1): the predating arm was the last one with no topology bound.
 
     A later commit stripping the numbers out of a predating log flipped the guard's central HARD
     FAIL into green ("exempt by CONTENT, measured nothing") — the content read was no longer the
@@ -647,7 +647,7 @@ def test_a_late_strip_cannot_green_a_predating_log(tmp_path, monkeypatch):
 
 
 def test_a_pins_exempt_atomic_log_does_not_claim_its_disclosure(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-11 P2): the pass is the EXEMPTION's, so the disclosure is not its
+    """REGRESSION (#10529 cycle-11 P2): the pass is the EXEMPTION's, so the disclosure is not its
     ground — deleting the disclosure from the identical tree yields the same verdict."""
     repo = _repo(tmp_path, monkeypatch)
     log = _write_log(repo, "capstone.log", epoch=1_700_000_000, body=_capstone_body())
@@ -659,7 +659,7 @@ def test_a_pins_exempt_atomic_log_does_not_claim_its_disclosure(tmp_path, monkey
 
 
 def test_a_merge_landing_the_pair_unchanged_is_not_a_late_edit(tmp_path, monkeypatch):
-    """REGRESSION (#10531 cycle-12 P1): the fleet's own rail lands with `--merge`, not `--squash`.
+    """REGRESSION (#10529 cycle-12 P1): the fleet's own rail lands with `--merge`, not `--squash`.
 
     `--full-history` lists the landing merge, and that merge is a DESCENDANT of the registration's
     add-commit — so a commit-PRESENCE bound reported it as a "late edit", consulted it BEFORE the
@@ -685,7 +685,7 @@ def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, P
 
     This is what a squash merge produces — and it is also what one commit written after the numbers
     were read produces. The git objects are identical, which is why the arm cannot compare them
-    (#10531).
+    (#10529).
     """
     prereg = repo / "docs" / "evidence" / "7949-capstone" / check.PREREG_NAME
     log = repo / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
@@ -698,7 +698,7 @@ def _both_in_one_commit(repo: Path, epoch: int = 1_700_000_000) -> tuple[Path, P
 
 
 def test_an_undisclosed_atomic_add_fails(tmp_path, monkeypatch):
-    """Same commit + no disclosure is still a FAILURE, and it names the ORDINARY cause (#10531).
+    """Same commit + no disclosure is still a FAILURE, and it names the ORDINARY cause (#10529).
 
     The pre-fix message read "not strictly after", which is what made #10468 permanently red: a
     squash merge can never satisfy it. The verdict must stay a failure — a laundering commit has
@@ -723,7 +723,7 @@ def test_a_disclosed_atomic_add_passes_and_is_reported(tmp_path, monkeypatch):
 
 
 def test_the_three_argument_form_agrees_with_the_reported_one(tmp_path, monkeypatch):
-    """REGRESSION (#10531 review P1): the verdict must not depend on an OUT-PARAM.
+    """REGRESSION (#10529 review P1): the verdict must not depend on an OUT-PARAM.
 
     Deferring the anti-rot rule to `atomic_added` made the same tree and pins green through `run()`
     and red through the three-argument form every test and any future caller uses. An out-param
@@ -737,7 +737,7 @@ def test_the_three_argument_form_agrees_with_the_reported_one(tmp_path, monkeypa
 
 
 def test_an_atomic_and_unscored_log_may_be_disclosed(tmp_path, monkeypatch):
-    """A log that is BOTH atomic and provably unscored is honestly disclosable (#10531 review P1)."""
+    """A log that is BOTH atomic and provably unscored is honestly disclosable (#10529 review P1)."""
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     monkeypatch.setattr(check, "_log_declares_no_measurement", lambda _p: (True, ""))
@@ -745,7 +745,7 @@ def test_an_atomic_and_unscored_log_may_be_disclosed(tmp_path, monkeypatch):
 
 
 def test_a_typed_shrug_is_not_a_disclosure(tmp_path, monkeypatch):
-    """REGRESSION (#10531 review P2): `str({})` is truthy, so a truthiness test let a shrug pass."""
+    """REGRESSION (#10529 review P2): `str({})` is truthy, so a truthiness test let a shrug pass."""
     repo = _repo(tmp_path, monkeypatch)
     prereg, log = _both_in_one_commit(repo)
     bad = [
@@ -769,7 +769,7 @@ def test_a_typed_shrug_is_not_a_disclosure(tmp_path, monkeypatch):
 
 
 def test_a_squash_merge_no_reader_can_resolve_is_a_refusal(tmp_path, monkeypatch):
-    """REGRESSION (#10531 review cycle 14, P2): `squash_merge` is required BECAUSE it resolves.
+    """REGRESSION (#10529 review cycle 14, P2): `squash_merge` is required BECAUSE it resolves.
 
     The field's whole justification is "a squash leaves the branch commits unreachable from main,
     so the squash commit is the one pointer a reader can actually resolve". Checking only its
@@ -792,7 +792,7 @@ def test_a_squash_merge_no_reader_can_resolve_is_a_refusal(tmp_path, monkeypatch
 
 
 def test_branch_commits_need_not_resolve_because_a_squash_hides_them(tmp_path, monkeypatch):
-    """The OTHER half of the asymmetry (#10531 review cycle 14, P2) — do not "fix" it into a trap.
+    """The OTHER half of the asymmetry (#10529 review cycle 14, P2) — do not "fix" it into a trap.
 
     A squash leaves the branch commits unreachable from `main`, so requiring the OBJECT here would
     make the disclosure permanently red in exactly the case it exists for — the stuck light this
@@ -1034,7 +1034,7 @@ def test_an_undisclosed_atomic_add_is_not_excused_by_an_empty_reason(tmp_path, m
 
 
 def test_a_disclosure_for_a_normally_ordered_log_fails(tmp_path, monkeypatch):
-    """A waiver granted where none is needed is how a waiver set becomes routine (#10531).
+    """A waiver granted where none is needed is how a waiver set becomes routine (#10529).
 
     The same anti-rot rule `pins.pre_existing_unscored_logs` applies: an atomic-add disclosure may
     only be carried by a log whose add-commit IS the registration's, so it cannot be pre-granted to
@@ -1056,7 +1056,7 @@ def test_a_disclosure_naming_an_absent_log_fails(tmp_path, monkeypatch):
 
 
 def test_the_attack_is_still_undeclarable(tmp_path, monkeypatch):
-    """REGRESSION: #10531 must NOT weaken the `log_epoch < prereg_epoch` arm.
+    """REGRESSION: #10529 must NOT weaken the `log_epoch < prereg_epoch` arm.
 
     The log added first and the thresholds written afterwards is THE defect the guard exists for.
     A disclosure must not launder it, and the message must stay the original one.
@@ -1867,7 +1867,7 @@ def test_the_touch_history_sees_a_merge_commit(tmp_path, monkeypatch):
     repo = _repo(tmp_path, monkeypatch)
     log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000)
     # The registration lands FIRST, then a side branch edits the log and main merges it --no-ff.
-    # The bound is TOPOLOGY now (#10531 cycle-9), so the late commit must be a descendant of the
+    # The bound is TOPOLOGY now (#10529 cycle-9), so the late commit must be a descendant of the
     # registration: an edit that is an ANCESTOR of it was visible to its author and is not a defect.
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     _git(repo, "checkout", "-q", "-b", "side")

@@ -44,7 +44,7 @@ It verifies five things, and it fails on each of them for a specific reason:
    whose author could already see it**. An exempt log stays unscored forever; the moment E1/E2 are
    re-run, the new log must postdate this file or the check fails.
 
-   **The FOURTH outcome — ATOMIC ADD, and why the rule is split (#10531).** The comparison above is
+   **The FOURTH outcome — ATOMIC ADD, and why the rule is split (#10529).** The comparison above is
    ``log_add_epoch <= prereg_add_epoch`` → fail. That ``<=`` conflated two different states, and one
    of them is unsatisfiable: a repo that SQUASH-merges collapses an ordered branch's two commits
    into one, so ``git log --diff-filter=A`` reports ONE add-commit for the registration and its log.
@@ -568,7 +568,7 @@ def history_unavailable() -> bool:
 def _added_commits(path: Path) -> list[tuple[int, str]]:
     """``(epoch, sha)`` for every commit that ADDED ``path``, oldest-first. Empty when never added.
 
-    ⛔ THE SHA IS NOT DECORATION (#10531 review cycle 4, P1). The first cut of this change inferred
+    ⛔ THE SHA IS NOT DECORATION (#10529 review cycle 4, P1). The first cut of this change inferred
     "the pair entered the repository atomically" from ``log_epoch == prereg_epoch`` — but two
     DIFFERENT commits can share a second, and git can order them by ANCESTRY. Comparing epochs alone
     therefore (a) let the attack shape through once a disclosure was supplied — a log commit and a
@@ -583,7 +583,7 @@ def _added_commits(path: Path) -> list[tuple[int, str]]:
         return []
     try:
         out = subprocess.run(
-            # ⚠️ KNOWN LIMITATION, DISCLOSED NOT SILENT (#10531 review cycle 10, P1): WITHOUT
+            # ⚠️ KNOWN LIMITATION, DISCLOSED NOT SILENT (#10529 review cycle 10, P1): WITHOUT
             # `--follow` a `git mv` reports the rename as an ADD of the new path, so a renamed
             # log's pre-rename history — including a content that predates the thresholds — is
             # invisible here. `--follow` was tried and REVERTED: measured on this tree it made
@@ -622,7 +622,7 @@ def _is_ancestor(older: str, newer: str) -> bool:
 def _resolves_to_commit(sha: str) -> bool:
     """Does ``sha`` name a commit THIS repository has? Never raises.
 
-    ⛔ THE ASYMMETRY IS THE POINT (#10531 review cycle 14, P2). ``branch_commits`` may NOT be
+    ⛔ THE ASYMMETRY IS THE POINT (#10529 review cycle 14, P2). ``branch_commits`` may NOT be
     required to resolve — a squash merge leaves them unreachable from ``main``, so demanding the
     object would make the disclosure permanently red in exactly the case it exists for. The same
     argument does NOT reach ``squash_merge``: that commit is ON ``main`` by construction, so in any
@@ -738,7 +738,7 @@ def _touch_epochs(path: Path) -> list[int]:
 def _touch_commits(path: Path) -> list[str]:
     """Every commit sha that TOUCHED ``path`` (``--full-history``, so a merge on a side branch counts).
 
-    ⛔ TOPOLOGY, NOT DATES (#10531 review cycle 9, P1). `_touch_epochs` answers the same question in
+    ⛔ TOPOLOGY, NOT DATES (#10529 review cycle 9, P1). `_touch_epochs` answers the same question in
     ``%ct``, and ``%ct`` is attacker-controlled (``GIT_COMMITTER_DATE``) — the lesson this module
     already learned for the ADD-commit in cycle 5. A number rewritten in a commit whose dates were
     set to look EARLIER than the registration defeated the epoch bound and passed green. Whether a
@@ -751,7 +751,7 @@ def _touch_commits(path: Path) -> list[str]:
     try:
         out = subprocess.run(
             # ⚠️ `--follow` is ABSENT here for the SAME reason as `_added_commits` above: it was
-            # tried and REVERTED (#10531 review cycle 10), because it made `--diff-filter=A` report
+            # tried and REVERTED (#10529 review cycle 10), because it made `--diff-filter=A` report
             # the MERGE-BASE commit as the add for ordinary files and broke the base ordering verdict
             # for logs added after the registration (8 tests). The consequence is the DISCLOSED
             # limitation at `_added_commits`: a `git mv` hides the pre-rename history from this bound
@@ -782,7 +782,7 @@ def _blob_at(sha: str, rel: Path) -> str:
 def _late_touches(path: Path, prereg_sha: str) -> list[str]:
     """Commits that changed ``path``'s CONTENT outside the registration's ancestry.
 
-    ⛔ CONTENT, NOT COMMIT-PRESENCE (#10531 review cycle 12, P1). `--full-history` deliberately lists
+    ⛔ CONTENT, NOT COMMIT-PRESENCE (#10529 review cycle 12, P1). `--full-history` deliberately lists
     a MERGE commit that carried the path in from a branch side, and that merge is a DESCENDANT of the
     registration's add-commit — so a commit-presence test reported the landing merge as a "late
     edit". The merge changed nothing (same blob), yet the bound is consulted BEFORE the disclosure is
@@ -814,7 +814,7 @@ def _atomic_detail_entry(block: dict) -> dict:
     """The printed detail for ONE disclosed log — one construction, so the arms cannot drift.
 
     Duplicating this literal is what produced the "header with zero commit lines" defect twice
-    (#10531 review cycles 6 and 9).
+    (#10529 review cycles 6 and 9).
     """
     return {
         "squash_merge": str(block.get("squash_merge") or ""),
@@ -1050,7 +1050,7 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
 #: The MACHINE RECORD key that discloses an ATOMIC ADD: a pre-registration and an evidence log that
 #: entered the repository in the SAME commit. Per-log: ``{log name: {reason, branch_commits}}``.
 #:
-#: ⛔ WHY THIS EXISTS AND WHY IT IS NOT ROUTE B (#10531) — the full argument is in the module
+#: ⛔ WHY THIS EXISTS AND WHY IT IS NOT ROUTE B (#10529) — the full argument is in the module
 #: docstring's "FOURTH outcome" section; one copy on purpose, so the two cannot rot apart. In short:
 #: ``<=`` conflated two states, and only one of them is an attack. The verdict is decided by COMMIT
 #: IDENTITY and ANCESTRY, never by the epoch (``%ct`` is attacker-controlled): the log's add-commit
@@ -1061,7 +1061,7 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
 #: a fresh commit) was refused: it is the fabrication the guard prevents, and ``min(add_epochs)``
 #: takes the OLDEST add, so it would not even work (``#9075 review r3 P3``).
 #:
-#: ⛔ WHERE THE DISCLOSURE LIVES (#10531 review cycle 2, P1). NOT in the pre-registration's pins
+#: ⛔ WHERE THE DISCLOSURE LIVES (#10529 review cycle 2, P1). NOT in the pre-registration's pins
 #: block: that block is inside the document `document_sha256` freezes, so adding to it re-cuts the
 #: digest — and a re-cut makes the record describe a document that POST-DATES the run, which is
 #: exactly what `tools/s3_prior_ablation.py`'s record↔document cross-check refuses (`REFUSED — the
@@ -1074,12 +1074,12 @@ def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
 ATOMIC_ADD_KEY = "atomic_add_ordering"
 
 #: A commit sha as the leading token of a ``branch_commits`` or ``squash_merge`` value. FORMAT only
-#: — resolvability is deliberately NOT required for ``branch_commits`` (#10531 review P1): a squash
+#: — resolvability is deliberately NOT required for ``branch_commits`` (#10529 review P1): a squash
 #: merge leaves the branch commits unreachable from ``main``, so requiring the object to be present
 #: would make the disclosure permanently red in exactly the case it exists for — the stuck light
 #: this change removes. It is still a checkable claim: a reader resolves the sha from the PR that
 #: carried it. ⛔ That reasoning stops at ``branch_commits``: ``squash_merge`` is on ``main`` by
-#: construction and MUST resolve (#10531 review cycle 14, P2 — see ``_resolves_to_commit``).
+#: construction and MUST resolve (#10529 review cycle 14, P2 — see ``_resolves_to_commit``).
 COMMIT_SHA_TOKEN = re.compile(r"^[0-9a-f]{7,40}$")
 
 
@@ -1123,7 +1123,7 @@ def _record_atomic_add(directory: Path) -> dict:
     Returns ``None`` when the record cannot be read at all. ``check_machine_record`` owns that
     failure, and reporting it here too would make one defect look like two — worse, the second one
     was WRONG-INSTRUCTIONED: it told the author to "disclose it under atomic_add_ordering" when the
-    real defect was that there is no readable record to disclose it in (#10531 review cycle 6, P2).
+    real defect was that there is no readable record to disclose it in (#10529 review cycle 6, P2).
     """
     try:
         record = json.loads((directory / MACHINE_RECORD).read_text())
@@ -1138,7 +1138,7 @@ def _atomic_add_failure(declared: object, prereg_epoch: int,
                         prereg_sha: str = "") -> str | None:
     """``None`` when the disclosure is complete, else the one reason it is not.
 
-    Fail-closed on TYPE, not merely on emptiness (#10531 review P2): ``str({})`` is truthy, so a
+    Fail-closed on TYPE, not merely on emptiness (#10529 review P2): ``str({})`` is truthy, so a
     truthiness test alone accepted ``reason: {a: 1}`` and ``branch_commits: [{}]`` — a shrug wearing
     a disclosure's shape, which is indistinguishable from a stale one. ``reason`` must be a
     non-empty STRING and every ``branch_commits`` entry must be a non-empty string whose leading
@@ -1175,7 +1175,7 @@ def _atomic_add_failure(declared: object, prereg_epoch: int,
                 "commit, or the disclosure asserts a history without pointing at it"
             )
     # ⛔ `squash_merge` is the ONE pointer a reader can actually resolve: a squash leaves the branch
-    # commits unreachable from `main`, and the squash commit itself is on main (#10531 review cycle
+    # commits unreachable from `main`, and the squash commit itself is on main (#10529 review cycle
     # 3, P2). Required, format-checked, and printed ahead of the branch commits.
     squash = declared.get("squash_merge")
     if not isinstance(squash, str) or not squash.strip():
@@ -1189,7 +1189,7 @@ def _atomic_add_failure(declared: object, prereg_epoch: int,
             f"its squash_merge {squash!r} does not begin with a commit sha — the merged commit is "
             "the one pointer on main, and an unaddressable one points nowhere"
         )
-    # ⛔ FORMAT IS NOT ADDRESSABILITY (#10531 review cycle 14, P2). `squash_merge` is required
+    # ⛔ FORMAT IS NOT ADDRESSABILITY (#10529 review cycle 14, P2). `squash_merge` is required
     # *because* it is the one pointer on main a reader can resolve; checking only its shape made
     # that argument a decoration — `deadbeef1` passed every arm and was then printed as "squashed
     # by deadbeef1". `branch_commits` stays format-only (a squash leaves them unreachable); this
@@ -1243,7 +1243,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
 
     ``exempted``, when given, is APPENDED with the name of every log the content arm exempted
     (#9089), and ``atomic_added`` with every log whose ordering was disclosed as an ATOMIC ADD
-    (#10531). Neither is decoration: an ordering that was WAIVED must be visible, or the green line
+    (#10529). Neither is decoration: an ordering that was WAIVED must be visible, or the green line
     reads exactly like a log that was ordered — the silent-green shape this tool exists to refuse
     (see the ``--no-git``/``--no-corpus`` rule ninety lines below).
 
@@ -1271,13 +1271,13 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # `record_unreadable` means the RECORD itself could not be read: `check_machine_record` reports
     # that, and this half must not also demand a disclosure into a file that cannot be read. It is a
     # separate flag rather than "disclosures is None", so the plain three-argument form every test
-    # and any future caller uses keeps its meaning (#10531 review cycle 6, P2).
+    # and any future caller uses keeps its meaning (#10529 review cycle 6, P2).
     atomic = dict(atomic_disclosures or {})
     #: Set by the arms below: the logs this tree PROVES entered with the registration. Distinct from
     #: the ``atomic_added`` out-param on purpose — the out-param reports, this decides.
     atomic_seen: set[str] = set()
 
-    # ⛔ The stale-disclosure rule runs BEFORE the history guards' early returns (#10531 review P2):
+    # ⛔ The stale-disclosure rule runs BEFORE the history guards' early returns (#10529 review P2):
     # a disclosure naming an absent log was invisible whenever the registration was uncommitted or
     # carried no add-commit, so a stale waiver could sit undetected in exactly the states where the
     # rest of the ordering half is not looking. It needs no history — it reads names.
@@ -1310,9 +1310,9 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     #: Logs with an add-commit that IS the registration's but whose OLDEST add predates it (a
     #: delete-and-re-add beside the registration). The disclosure's claim is TRUE for these, so the
     #: anti-rot message "but it is not one" would be false — the predating-add failure already
-    #: reports the real defect (#10531 review cycle 8, P2).
+    #: reports the real defect (#10529 review cycle 8, P2).
     atomic_no_matter: set[str] = set()
-    # ⛔ EVERY present disclosure is TYPE-CHECKED once, here, before the per-log arms (#10531 review
+    # ⛔ EVERY present disclosure is TYPE-CHECKED once, here, before the per-log arms (#10529 review
     # cycle 2, P2). The arms previously validated only the SCORED atomic path, so a disclosure on an
     # atomic-and-unscored log was never checked (`reason: {a: 1}` was accepted), and the field rules
     # applied to whichever arm happened to run first rather than to the disclosure itself.
@@ -1333,7 +1333,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     f"{log.name}: tracked but with no add-commit — ordering unprovable"
                 )
             continue  # untracked log: it cannot predate a commit that already exists
-        # ⛔ `%ct` MAY NOT CHOOSE WHICH ADD-COMMIT IS THE PAIR (#10531 review cycle 10, P1).
+        # ⛔ `%ct` MAY NOT CHOOSE WHICH ADD-COMMIT IS THE PAIR (#10529 review cycle 10, P1).
         # `_added_commits` is sorted by epoch, so `log_adds[0]` was decided by a field
         # (`GIT_COMMITTER_DATE`) this module has already ruled attacker-controlled: a delete-and-
         # re-add backdated to look NEWER became the representative, made the pair look ATOMIC, and a
@@ -1370,7 +1370,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     "exemption needs its CONTENT to predate the registration, not just its add"
                 )
                 continue
-            # ⛔ ANCESTRY, NOT THE EPOCH (#10531 review cycle 9, P2). `latest >= prereg_epoch` was
+            # ⛔ ANCESTRY, NOT THE EPOCH (#10529 review cycle 9, P2). `latest >= prereg_epoch` was
             # BOTH bypassable (a backdated edit) AND permanently unsatisfiable for an exempt log
             # whose add-commit IS the registration's — the squash shape this PR exists for, with no
             # exit short of rewriting history. Whether a touching commit is BEHIND the registration
@@ -1383,31 +1383,31 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     "in-place edit can put a measurement number into a grandfathered log after the "
                     "thresholds were written, and the add-commit cannot see that"
                 )
-                # ⛔ And then LEAVE (#10531 review cycle 9, P2): every other failure path in this
+                # ⛔ And then LEAVE (#10529 review cycle 9, P2): every other failure path in this
                 # function continues, and this one did not, so a waiver the arm had just DENIED was
                 # still reported as a granted declaration.
                 continue
-            # ⛔ Record the atomic state before this `continue` (#10531 review cycle 4, P2): an
+            # ⛔ Record the atomic state before this `continue` (#10529 review cycle 4, P2): an
             # exempt log that IS atomic and carries a disclosure reached the anti-rot loop and was
             # told "but it is not one" — the cycle-3 defect class resurfacing through this arm.
             if atomic_pair:
-                # ⛔ `atomic_seen` ONLY (#10531 review cycle 11, P2). Reporting the declaration here
+                # ⛔ `atomic_seen` ONLY (#10529 review cycle 11, P2). Reporting the declaration here
                 # named a ground that carried nothing: deleting the disclosure from the identical
                 # tree yields the same verdict, because this pass is the PINS EXEMPTION's. Cycle-7
                 # ruled exactly this for the content arm; cycle-4's purpose for the block is served
                 # by `atomic_seen`, which is what the anti-rot loop reads.
                 atomic_seen.add(log.name)
             continue
-        # ⛔ ATOMIC IS IDENTICAL-SHA, NOT EQUAL-EPOCH (#10531 review cycle 4, P1) — computed above,
-        # over EVERY add-commit, so `%ct` cannot choose the representative (#10531 cycle 10, P1).
+        # ⛔ ATOMIC IS IDENTICAL-SHA, NOT EQUAL-EPOCH (#10529 review cycle 4, P1) — computed above,
+        # over EVERY add-commit, so `%ct` cannot choose the representative (#10529 cycle 10, P1).
 
-        # ⛔ ANCESTRY IS CONSULTED FOR EVERY DISTINCT PAIR, NOT ONLY FOR `epoch <=` (#10531 review
+        # ⛔ ANCESTRY IS CONSULTED FOR EVERY DISTINCT PAIR, NOT ONLY FOR `epoch <=` (#10529 review
         # cycle 5, P1). `%ct` is attacker-controlled (`GIT_COMMITTER_DATE`), so gating the reverse
         # test behind the epoch let a log whose add-commit is a TRUE ANCESTOR of the registration's
         # pass green whenever its committer date was set to look LATER — the exact route this guard
         # exists to close, with no disclosure and no failure. The content arm is asked first, so an
         # unscored log is still exempt (#9089).
-        # ⛔ ONE topology bound for EVERY arm that reads the log's CONTENT (#10531 review cycle 11,
+        # ⛔ ONE topology bound for EVERY arm that reads the log's CONTENT (#10529 review cycle 11,
         # P1). The predating arm was the last one without it, so a later commit that STRIPPED the
         # numbers out of a predating log flipped the guard's central hard fail into green ("exempt by
         # CONTENT, measured nothing") — the content read was no longer the content that entered with
@@ -1426,7 +1426,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 continue
             ok, why = _log_declares_no_measurement(log)
             if not ok:
-                # ⛔ The ground is ANCESTRY, not the epoch (#10531 review cycle 6, P2): the committer
+                # ⛔ The ground is ANCESTRY, not the epoch (#10529 review cycle 6, P2): the committer
                 # date is the very thing this arm was moved ahead of the epoch comparison to defeat,
                 # so quoting it here printed "added at 1800000000 which is not strictly after …
                 # 1700000500" — a sentence that is simply false. The recorded date is shown as what
@@ -1442,7 +1442,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 # A waived ordering is REPORTED on every path that can waive it (#9089).
                 exempted.append(log.name)
             continue
-        # ⛔ PROVEN ORDER IS NOT A WAIVER (#10531 review cycle 6, P2). The content arm used to run
+        # ⛔ PROVEN ORDER IS NOT A WAIVER (#10529 review cycle 6, P2). The content arm used to run
         # first, so a pair git proves ordered was still appended to `exempted` and the claim read
         # "(exempt by CONTENT, measured nothing: X)" — a waiver reported where none was granted, the
         # mirror of the misdescription cycle 3 fixed in the verdict line, and it teaches readers that
@@ -1454,7 +1454,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
         # number this gate reds it again (#9089). This arm is asked FIRST in both shapes: an
         # unscored log needs no disclosure to be ordered, whichever commit carried it.
         if log_epoch <= prereg_epoch:
-            # ⛔ THE TOPOLOGY BOUND COMES BEFORE THE CONTENT PASS (#10531 review cycle 10, P2). The
+            # ⛔ THE TOPOLOGY BOUND COMES BEFORE THE CONTENT PASS (#10529 review cycle 10, P2). The
             # content arm `continue`d before the bound was consulted, so an atomic log whose record
             # was STRIPPED of its numbers in a LATER commit — leaving `run.status` not COMPLETED —
             # was certified "measured nothing" and the disclosure requirement erased. A post-green
@@ -1470,11 +1470,11 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 continue
             ok, why = _log_declares_no_measurement(log)
             if ok:
-                # ⛔ The atomic state is recorded HERE too (#10531 review P1): a log that is both
+                # ⛔ The atomic state is recorded HERE too (#10529 review P1): a log that is both
                 # atomic AND provably unscored is honestly disclosable, and a disclosure was being
                 # punished as "not an atomic add" because this `continue` skipped the bookkeeping.
                 #
-                # ⛔ BUT IT IS NOT REPORTED AS A DISCLOSURE (#10531 review cycle 7, P2). This arm
+                # ⛔ BUT IT IS NOT REPORTED AS A DISCLOSURE (#10529 review cycle 7, P2). This arm
                 # decided the pass on the log's CONTENT — deleting the disclosure from the same tree
                 # yields the identical verdict — so claiming `the ordering HOLDS BY DISCLOSURE` here
                 # would name a ground that carried nothing, and the printed block would be followed
@@ -1488,14 +1488,14 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     exempted.append(log.name)
                 continue
         if atomic_pair:
-            # ATOMIC ADD (#10531): the pair entered the repository in ONE commit — a squash merge of
+            # ATOMIC ADD (#10529): the pair entered the repository in ONE commit — a squash merge of
             # an ordered branch, or a single commit written after the numbers were read. The git
             # object is identical, so the comparison answers nothing; the disclosure is required.
             if log.name in disclosure_failed:
                 continue  # the specific field failure is already reported above
             if log.name not in atomic:
                 if record_unreadable:
-                    # ⛔ DO NOT FALL THROUGH (#10531 review cycle 7, P1; wording corrected in
+                    # ⛔ DO NOT FALL THROUGH (#10529 review cycle 7, P1; wording corrected in
                     # cycle 14, P3). The `continue` skips the rest of THIS LOG's arms — it does not
                     # return from the function (the earlier comment said "RETURN", which a future
                     # reader would act on by converting it). The record itself could not be read, so
@@ -1503,7 +1503,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     # raised KeyError straight out of run()/main(), printing a traceback and NO
                     # findings, on exactly the state this flag exists for.
                     # `check_machine_record` owns the diagnosis.
-                    # It is REPORTED (#10531 review cycle 8, P2): the ordering half decided nothing
+                    # It is REPORTED (#10529 review cycle 8, P2): the ordering half decided nothing
                     # here, so `run_order_claim` must not read `verified`.
                     if unreadable_atomic is not None:
                         unreadable_atomic.append(log.name)
@@ -1517,14 +1517,14 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 )
                 continue
             # `log.name` is provably in `atomic` from here on.
-            # ⛔ THE ADD-COMMIT IS IMMUTABLE, WHICH IS WHY IT CANNOT SEE AN EDIT (#10531 review
+            # ⛔ THE ADD-COMMIT IS IMMUTABLE, WHICH IS WHY IT CANNOT SEE AN EDIT (#10529 review
             # cycle 8, P1). The pins-exempt arm has always bound this (`_touch_epochs`), and the
             # atomic arm did not: a log re-committed with a rewritten number AFTER the bars passed
             # green with `verified (atomic-add DECLARED: …)`, invisible to every other check —
             # `document_sha256` covers only the registration, nothing pins the log's bytes. That is
             # a NEW silent-green path, which is the one thing this change may never add. The
             # disclosure can only cover the content that entered WITH the registration.
-            # ⛔ TOPOLOGY, NOT THE DATE (#10531 review cycle 9, P1). The first version of this bound
+            # ⛔ TOPOLOGY, NOT THE DATE (#10529 review cycle 9, P1). The first version of this bound
             # compared `max(_touch_epochs(log))` with `prereg_epoch` — a `%ct` comparison in a
             # module whose own cycle-5 finding says `%ct` is attacker-controlled. The rewrite the
             # forward-dated test killed passed green when BACKDATED. Whether a touching commit is
@@ -1537,7 +1537,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                     "an in-place edit can move a number after the thresholds were written"
                 )
                 continue
-            # ⛔ The STATE is derived HERE, never read back from the caller's out-param (#10531
+            # ⛔ The STATE is derived HERE, never read back from the caller's out-param (#10529
             # review P1). Deciding the anti-rot rule from `atomic_added` made the verdict depend on
             # whether a caller happened to pass a list: the same tree and pins gave `[]` via
             # `run()` and "disclosed ... but it is not one" via the three-argument form every test
@@ -1549,7 +1549,7 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
                 atomic_detail[log.name] = _atomic_detail_entry(atomic[log.name])
             continue
         if log_epoch <= prereg_epoch:
-            # THE ATTACK, and the conservative catch-all. Untouched and undeclarable (#10531).
+            # THE ATTACK, and the conservative catch-all. Untouched and undeclarable (#10529).
             # Distinct commits where git shows the log's add as the OLDER one, OR cannot order them
             # at all (identical epoch, unrelated history) — `main`'s verdict, kept, because an
             # unprovable ordering is not an ordering and this is NOT the squash shape.
@@ -1563,12 +1563,12 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
     # Declarations are held to the same anti-rot rule as the exemption: one describing a NORMALLY
     # ordered log is a waiver granted where none is needed — and a waiver that is routine is the
     # silent-pass shape this tool refuses. Read from ``atomic_seen``, the STATE, never from the
-    # caller's out-param (#10531 review P1).
+    # caller's out-param (#10529 review P1).
     for name in sorted(set(atomic) & present):
         # A disclosure that is genuinely atomic but malformed was already told so — and telling it
-        # "but it is not one" would be FALSE, since it is (#10531 review cycle 3, P2). The same
+        # "but it is not one" would be FALSE, since it is (#10529 review cycle 3, P2). The same
         # applies to a log whose add-commit could not be read AT ALL: its state is UNKNOWN, and a
-        # claim about it would be a guess (#10531 review cycle 6, P2).
+        # claim about it would be a guess (#10529 review cycle 6, P2).
         if (name in disclosure_failed or name in atomic_seen
                 or name not in sha_known or name in atomic_no_matter):
             continue
@@ -1597,7 +1597,7 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
         return [f"{MACHINE_RECORD} is not JSON: {exc}"]
     if not isinstance(record, dict):
         # `record.get("schema")` on a list/str/int raised AttributeError straight out of main() with
-        # NO verdict and no exit code (#10531 review cycle 8, P2). A check that cannot read its
+        # NO verdict and no exit code (#10529 review cycle 8, P2). A check that cannot read its
         # subject is exit 2, never a traceback.
         raise CheckError(
             f"{MACHINE_RECORD} parses to a {type(record).__name__}, expected a JSON object — it is "
@@ -1988,7 +1988,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
             atomic_added: list[str] = []
             atomic_detail: dict = {}
             # ONE read: the block that was JUDGED and the block that is PRINTED must be the same
-            # value (#10531 review cycle 3, P2) — two reads could differ under a concurrent edit.
+            # value (#10529 review cycle 3, P2) — two reads could differ under a concurrent edit.
             disclosures = _record_atomic_add(directory)
             unreadable_atomic: list[str] = []
             ordering_findings = check_ordering(
@@ -1998,7 +1998,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
             failures += ordering_findings
             report["ordering_exempt"] = sorted(content_exempt)
             report["ordering_atomic_add"] = sorted(atomic_added)
-            # ⛔ A DECLARED ordering is not a COMPARED one, and the claim line must say so (#10531
+            # ⛔ A DECLARED ordering is not a COMPARED one, and the claim line must say so (#10529
             # review P1). `report["ordering"]` feeds `run_order_claim`, which a machine consumer
             # reads by name: leaving it as a bare "verified" let a disclosed ordering be
             # indistinguishable from one the gate actually compared — the exemption half already
@@ -2008,7 +2008,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
                 report["ordering_atomic_add_commits"] = {
                     name: atomic_detail[name] for name in sorted(atomic_detail)
                 }
-            # ⛔ A FAILED ordering half must not carry a green CLAIM (#10531 review cycle 6, P2 —
+            # ⛔ A FAILED ordering half must not carry a green CLAIM (#10529 review cycle 6, P2 —
             # pre-existing at origin/main): `run_order_claim` is the field a machine consumer reads
             # by name, and it read `verified` whenever `check_ordering` so much as RETURNED, even
             # beside a "… or the ordering is unproven" failure. The qualification below decorates a
@@ -2147,13 +2147,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         unchecked = []
         # A DECLARED atomic add is "verified" only in the qualified sense the claim line states
-        # (#10531 review P1), so the prefix test — not equality — decides whether the ordering half
+        # (#10529 review P1), so the prefix test — not equality — decides whether the ordering half
         # actually ran a comparison and found nothing.
         if not report["ordering"].startswith("verified"):
             unchecked.append(f"ordering NOT checked ({report['ordering']})")
         if report.get("corpus") != "verified":
             unchecked.append(f"corpus pins NOT checked ({report.get('corpus')})")
-        # ⛔ A DISCLOSED ordering is not an UNCHECKED half (#10531 review cycle 3, P2). Reusing
+        # ⛔ A DISCLOSED ordering is not an UNCHECKED half (#10529 review cycle 3, P2). Reusing
         # `unchecked` made a fully checked run print "OK (halves NOT checked)" — the inverse of the
         # failure this tool exists to refuse: a verdict misdescribing what happened. It is its own
         # verdict, and the ATOMIC-ADD block below carries the detail.
@@ -2182,10 +2182,10 @@ def main(argv: list[str] | None = None) -> int:
             exempt_note = (f" (exempt by CONTENT, measured nothing: "
                            f"{', '.join(report['ordering_exempt'])})")
         print(f"machine record run-order claim: {report['run_order_claim']}{exempt_note}")
-        # ⛔ A declared atomic add is NEVER silent (#10531): the ordering half did not compare the
+        # ⛔ A declared atomic add is NEVER silent (#10529): the ordering half did not compare the
         # two epochs, so a green line reading as "the ordering was checked" would be the
         # silent-green shape this tool exists to refuse. It gets its own block, and it names the
-        # COMMITS the disclosure points at — the only part a reader can go and check (#10531 review
+        # COMMITS the disclosure points at — the only part a reader can go and check (#10529 review
         # P2: the earlier version printed the log and the pin key but never the history).
         if report.get("ordering_atomic_add"):
             print("ordering: ATOMIC-ADD declared — the pre-registration and "
