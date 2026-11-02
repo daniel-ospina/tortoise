@@ -123,8 +123,11 @@ detect_question_type(...) -> None
 
 So the emitted system prompt is `system_prompt_for(None)` = `_SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT`.
 The diagnostic does not re-derive this: it **captures the wire `(system, user)`** through a stub
-reader and asserts the captured system equals `system_prompt_for(resolved question_type)` before
-recording it. **`_PREFERENCE_FRAGMENT` is NOT emitted** — its marker `"PREFERENCE INSTRUCTIONS"` is
+reader and asserts the captured system equals
+`system_prompt_for(resolved question_type, question=q["question"])` before recording it — the same
+question-aware derivation the lane itself composes (#10539). For *this* question the two derivations
+coincide: `d6233ab6` carries no quantifier, so `_is_aggregative_question` returns `False` and no
+aggregation fragment is appended. **`_PREFERENCE_FRAGMENT` is NOT emitted** — its marker `"PREFERENCE INSTRUCTIONS"` is
 absent, and its opening premise ("this question asks which option the user prefers") does not fit a
 question with no option set.
 
