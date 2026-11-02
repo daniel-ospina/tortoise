@@ -160,11 +160,11 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     HealthProbe,
     event_retention_interval,
     graph_offload_timeout_s,
-    read_offload_timeout_s,
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
     note_heartbeat_task,
+    read_offload_timeout_s,
     record_analytics_outcome,  # #3820 analytics-sink outcome counter
     record_telemetry_drop,  # #4095 allowlist-drop counter (the /metrics seam)
     run_control_plane_call,

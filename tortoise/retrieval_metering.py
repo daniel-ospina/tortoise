@@ -97,7 +97,6 @@ MEASURED VS EXCLUDED — stated, not implied:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import contextvars
 import functools
@@ -469,8 +468,7 @@ class RetrievalMeteringMiddleware:
                     # invisible: under the old unbounded ``to_thread`` the flush
                     # always eventually ran, and a refused flush must not be the
                     # one drop this module cannot name.
-                    from tortoise.monitoring import (
-                        ControlPlaneOffloadError, run_control_plane_call)
+                    from tortoise.monitoring import ControlPlaneOffloadError, run_control_plane_call
                     try:
                         await run_control_plane_call(
                             functools.partial(contextvars.copy_context().run,
