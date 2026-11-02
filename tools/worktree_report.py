@@ -642,17 +642,36 @@ def _superseded_by_later_run(suites: list[dict[str, Any]], idx: int) -> bool:
     This is the resumed-lane case the artifact exists FOR. A lane killed at its
     cap leaves `exit: None` records; the lane that picks the worktree up
     re-runs those exact commands (the ON RESUME discipline), and without this
-    rule that lane can NEVER produce a valid report: the stale killed record
-    alone holds `check` at exit 1 however green every re-run is, so the merge
-    path (`agent-infra#2977`) refuses a report whose every command has real
-    captured evidence. Measured on tortoise#10452: three killed records from a
-    predecessor lane, five completed re-runs, verdict still INVALID.
+    rule the stale killed record alone holds `check` at exit 1 however green
+    every re-run is, so the merge path (`agent-infra#2977`) refuses a report
+    whose every command has real captured evidence. Measured on tortoise#10452:
+    three killed records from a predecessor lane, five completed re-runs,
+    verdict still INVALID.
+
+    ⚠️ `init --force` was the strict-rule escape hatch that existed, so the
+    resumed lane was never literally stuck (an earlier draft of this docstring
+    said "can NEVER produce a valid report"; that was overstated). It discards
+    the recorded suites and starts over — which throws away `base_sha`, the
+    files-changed snapshot and the predecessor's own suite evidence. This rule
+    keeps all of it and adds only the re-run, so it is the better shape, not
+    the only one. `--force` itself has no test; treat it as untested.
 
     Only a LATER completed record of the byte-identical command counts — a
     different command supersedes nothing, and neither does an earlier run (the
     killed one is the newer statement of that command). The superseding record
     still passes every other rule on its own iteration, so a fabricated or
     unhashable one is refused there.
+
+    ⚠️ THE KEY IS NARROWER THAN THE ANALOGY. This is the identity-of-the-action
+    principle a build cache uses (Bazel's action cache keys a result on the
+    action — the command line AND its inputs), and the direction is the same:
+    a re-run of the identical action supersedes, a different one does not. But
+    this tool records NO inputs, so the key here is the command STRING alone: a
+    later run of the same command at a different head supersedes a killed
+    record captured from an earlier tree. That is accepted rather than fixed
+    (`head_at_write` is a warning, not part of the key) because the artifact's
+    contract is the operator's own verbatim command, and a lane that re-runs a
+    command is answering for the tree it is sitting in.
     """
     cmd = str(suites[idx].get("command") or "").strip()
     if not cmd:
