@@ -4605,8 +4605,9 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # case was widened from the two log-invisible bars to all seven — the pin landing rather
         # than drifting, because a plausible offset is what it exists to refuse). #10536's
         # comparable-identity tests insert above it (at `:749`), pushing 1682 → 1768 → 1822, once
-        # per commit of that lane; re-derived from the head each time rather than nudged.
-        ("tests/test_capstone_preregistration_9075.py", 1822):
+        # per commit of that lane; re-derived from the head each time rather than nudged. The B905
+        # `strict=` fix is the same class of insert (3 lines, at `:777`), pushing 1822 → 1825.
+        ("tests/test_capstone_preregistration_9075.py", 1825):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
