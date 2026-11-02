@@ -18691,11 +18691,13 @@ class TortoiseSDK:
         # judged here, on the pair the graph will hold after the write.
         #
         # ⛔ ONE predicate: ``claim_class.direction_blocks_create``, fed the
-        # edge's stored direction canonicalized with ``_canonical_direction`` —
-        # the same predicate and the same canonicalizer as ``create_operator``,
-        # ``create_direct_edge``, ``ingest``'s partial-absorb branch and
-        # #10195's operator pre-flight above. A second copy of "may this edge
-        # exist" would be a finding of its own. The REFUSAL message is that
+        # edge's stored direction — a string verbatim, the edge TYPE's default
+        # when ABSENT, both ways for a present non-string (see the per-row
+        # note) — and, for the first two, the same canonicalizer as
+        # ``create_operator``, ``create_direct_edge``, ``ingest``'s
+        # partial-absorb branch and #10195's operator pre-flight above. A
+        # second copy of "may this edge exist" would be a finding of its own.
+        # The REFUSAL message is that
         # predicate's own (``override_refusal``), with this surface named —
         # the caller's ways out are the same ones it states.
         #
@@ -18716,19 +18718,21 @@ class TortoiseSDK:
         def _direct_incident_edges(_direction: str) -> list:
             """The 2a-DIRECT population for ONE direction (query + op filter).
 
-            ONE collection, read by the pre-flight above AND by the transfer
-            loop below: the population the door judges and the population it
-            mutates must be the same set, and two queries that drifted apart
-            would be a fail-open nobody notices.
+            ONE collection IMPLEMENTATION — every caller reads its own CURRENT
+            state. Two queries that drifted apart would be a fail-open nobody
+            notices, so the query and its operator filter live here only. The
+            pre-flight's up-front snapshot and each transfer pass's re-read are
+            deliberately separate (see the transfer loop's note): the
+            ``out`` pass mutates the graph the ``in`` pass must then read, so
+            hoisting ONE capture into both passes is the measured
+            double-re-point defect, not a de-duplication.
             """
             if _direction == "out":
                 _dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
-                       "RETURN type(r), r, t.id, ID(r), labels(t), "
-                       "coalesce(t.claimClass, 'asserted')")
+                       "RETURN type(r), r, t.id, ID(r), labels(t)")
             else:
                 _dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
-                       "RETURN type(r), r, t.id, ID(r), labels(t), "
-                       "coalesce(t.claimClass, 'asserted')")
+                       "RETURN type(r), r, t.id, ID(r), labels(t)")
             _rows = proj.g.query(_dq, params={"old_id": old_id}).result_set
             if not _rows:
                 return []
@@ -18751,7 +18755,20 @@ class TortoiseSDK:
                 params={"ids": _other_ids},
             ).result_set
             _op_set = {r[0] for r in _op_rows}
-            return [row for row in _rows if row[2] not in _op_set]
+            # ⛔ The operator filter must not hide a row that is DELETED rather
+            # than re-pointed (#9727). ``tid == new_id`` only ever deletes (the
+            # phantom self-edge branch), and a successor that is an operator by
+            # the CANONICAL population but not by the lifecycle guard's
+            # narrower ``is_operator`` test (an ``op_type``-only node —
+            # ``live.LIFECYCLE_FANOUT_QUERY`` reads the flag alone) would
+            # otherwise be filtered HERE, so the ``in`` pass never saw the
+            # transient ``(new)-[T]->(old)`` edge the ``out`` pass had just
+            # minted and left it stranded on the superseded point — with its
+            # ``derived -> asserted`` leg flowing. MEASURED (raw self-loop +
+            # an ``op_type``-only successor): the supersede returned
+            # ``edges_transferred=1`` with no refusal and that edge survived.
+            return [row for row in _rows
+                    if row[2] not in _op_set or row[2] == new_id]
 
         def _epistemic_label(node_id: str) -> str | None:
             """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
@@ -18818,9 +18835,11 @@ class TortoiseSDK:
                     # phantom self-edge case) — nothing is re-pointed.
                     # ``tid == old_id``: a SELF-LOOP at the predecessor, which
                     # the out/in passes consume between them (see the
-                    # ``_direct_incident_edges`` note) — no surviving wiring to
-                    # judge, and judging the ``in`` copy of it would refuse a
-                    # supersede over an edge that ends up deleted.
+                    # ``_direct_incident_edges`` note) PROVIDED the transient
+                    # row reaches the ``in`` pass — which is what that helper's
+                    # ``or row[2] == new_id`` exception guarantees. Judging the
+                    # ``in`` copy of it would refuse a supersede over an edge
+                    # that ends up deleted.
                     continue
                 _row_labels = set(_row[4] or ()) if len(_row) > 4 else set()
                 # The transfer writes an edge only when BOTH endpoints resolve
@@ -18849,17 +18868,52 @@ class TortoiseSDK:
                 # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
                 # and ``direction_flows`` tests membership in a frozenset — so
                 # handing it over aborts the supersede with a ``TypeError`` the
-                # guard is not about. A NON-SCALAR reads as ABSENT (the edge
-                # type's own default), the same reading
-                # ``claim_class.normalize`` gives a hand-edited marker: never a
-                # third state. ⚠️ A *string* outside the vocabulary is NOT
-                # remapped: it passes through and ``direction_flows`` reads it
-                # as both ways — deliberately, because that is the leg set the
-                # EP backstop sees for the same token (a door that read it more
-                # narrowly would keep a factor the load side drops).
+                # guard is not about. ⚠️ The three cases below are DIFFERENT,
+                # and none is read off ``create_direct_edge`` blindly: a string
+                # is judged on the leg set ``direction_flows`` gives it, a
+                # present non-string is judged BOTH ways (the hashable reader
+                # verdict, and the fail-closed stand-in where no reader verdict
+                # exists), and only the ABSENT case takes the creation door's
+                # canonical form — because that is the token the door WRITES,
+                # so no reader ever sees a door-made absent edge. A *string*
+                # token passes through verbatim (one outside the vocabulary is
+                # read by ``direction_flows`` as both ways — the leg set the EP
+                # backstop sees, so a door reading it more narrowly would judge
+                # ONE leg of a two-leg factor (the backstop NARROWS, it does not
+                # drop — measured: such a factor loads as ``'<-'`` with
+                # ``skipped == []``); an ABSENT token takes the
+                # edge TYPE's default (what ``create_direct_edge``
+                # canonicalizes it to before judging — deliberately NOT
+                # ``ep.py``'s ``coalesce(r.direction, 'bidirectional')``, which
+                # would be the over-refusal the directionless-NAND pin exists to
+                # prevent); a PRESENT non-string token is judged BOTH ways: a
+                # HASHABLE one (``3``, ``True``) is read as both ways by
+                # ``direction_flows`` and ``ep.py``, so both ways matches the
+                # leg set they see, while an UNHASHABLE one (list/map) makes
+                # ``direction_flows`` raise ``TypeError`` — there is no reader
+                # verdict to mirror, so both ways is the fail-closed stand-in
+                # (and keeps that value out of a frozenset membership test).
                 _raw_dir = _rdict.get("direction")
-                _eff_dir = self._canonical_direction(
-                    _rtype, _raw_dir if isinstance(_raw_dir, str) else None)
+                if isinstance(_raw_dir, str):
+                    _eff_dir = self._canonical_direction(_rtype, _raw_dir)
+                elif _raw_dir is None:
+                    # ABSENT: the edge TYPE's own default (NAND ->
+                    # ``unidirectional``), exactly as ``create_direct_edge``
+                    # canonicalizes it before judging.
+                    _eff_dir = self._canonical_direction(_rtype, None)
+                else:
+                    # ⛔ A PRESENT non-string token is NOT "absent" to any
+                    # reader: ``live.direction_flows`` reads it as BOTH ways
+                    # (unknown ⇒ the mutual default), which is also the leg set
+                    # ``ep.py`` sees. Judging it as the type default would judge
+                    # ONE leg of a two-leg wiring — for NAND that let a supersede
+                    # write ``asserted -[NAND {junk}]-> derived``, whose backward
+                    # leg is the override ``create_direct_edge(NAND, …,
+                    # 'bidirectional')`` refuses (measured). Both ways is the
+                    # fail-CLOSED reading, and it also keeps the unhashable case
+                    # away from ``direction_flows``' frozenset membership (which
+                    # raises ``TypeError``).
+                    _eff_dir = "bidirectional"
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
                     _src_classes, _tgt_classes = _new_classes, _tid_classes
@@ -18877,7 +18931,8 @@ class TortoiseSDK:
                         surface=(f"supersede_point: re-pointing the "
                                  f"{_rtype} edge {_src_id!r}->{_tgt_id!r} "
                                  f"(from {old_id!r} to {new_id!r}, "
-                                 f"direction {_eff_dir!r})")))
+                                 f"direction {_raw_dir!r} "
+                                 f"(judged {_eff_dir!r}))")))
 
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
@@ -33828,10 +33883,48 @@ class TortoiseSDK:
           * Repo (when repo= given): structural count of indexed GitHub
             observation points for that repo (source='github').
         Fail-closed: empty graph -> no_prior_knowledge; repo given + graph
-        non-empty + zero points for repo -> repo_not_indexed; never raises
-        (graph-service failure -> error dict via _safe at the handler).
+        non-empty + zero points for repo -> repo_not_indexed. An out-of-domain
+        `limit` (not a positive int) is REFUSED with `ValueError` before any
+        work — the ONE input this method refuses ITSELF. Every other failure,
+        including a graph-service fault, PROPAGATES: this body has no try/
+        except. Conversion is the BOUNDARY's job (_safe → dict, REST → 500).
         data_points never exceeds `limit` rows (repo-stage append is capped).
+
+        #8447 — every reply carries `truncated`, true when `data_points` are NOT
+        the whole set this read matched. THREE seams make it true and the caller
+        can reach none of them: (1) the `[:limit]` cut on the ranked hits, (2) a
+        candidate pool that saturated ITS window, so matches past it were never
+        read, and (3) an ASKED retrieval leg that never answered — a read where
+        nothing was cut from the visible set and the missing rows are just as
+        unreachable. `total_available` rides it ONLY when the count is EXACT, and
+        "exact" is the RETRIEVAL path's own proof RELAYED (never re-derived
+        here). That proof is withheld by a saturated window or a lost leg, and
+        independently by any post-window filter that shrank the union and by the
+        snapshot fallback arm — so this docstring does not try to enumerate it.
+        What matters to a caller: `total_available` is either the true population
+        or ABSENT (unknown, never zero); read `truncated` BEFORE `data_points`.
+        ⛔ A pool at EXACTLY its own bound (`max(limit*5, 20)`) is exact ONLY while
+        the STORE stays below the retrieval window (`max(120, 2*pool_bound)`) — not
+        while `limit` is small: 120 matches withhold the total at `limit=2` too.
         """
+        # #8447: `limit` is a CALLER INPUT, so an out-of-domain ask is REFUSED
+        # before any work — never silently re-interpreted. Measured before this
+        # guard: `limit=0` delivered no rows and answered "No graph matches"
+        # beside `total_available: 6` (prose contradicting the field next to
+        # it), and `limit=-1` sliced the tail off the list and served 5 of 6 —
+        # a silent subset from a negative cap. Parity, not a new bound: the REST
+        # route already validates `Query(2, ge=1, le=20)` and the sibling verb
+        # `tortoise_fts_query` refuses `limit must be 1-10000` the same way.
+        # `bool` is an `int` SUBCLASS, so `isinstance(True, int)` is True and a
+        # bool ask would otherwise be served as `limit=1` — a re-interpreted
+        # caller input, which is the defect this guard exists to refuse, and a
+        # parity break with the REST mirror (`GET /v1/issue-insight?limit=true`
+        # → 422 from `Query(2, ge=1, le=20)`). Same explicit bool test the
+        # #8447 page-size seam uses (`bool` is checked FIRST: the sibling
+        # comparisons are value tests and a bool passes them).
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError(
+                f"issue_insight: limit must be a positive int, got {limit!r}")
         proj = self._get_proj()
         count_rows = proj.g.query(
             "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
@@ -33839,8 +33932,43 @@ class TortoiseSDK:
         ).result_set
         total_points = int(count_rows[0][0]) if count_rows else 0
 
+        # #8447: the TRUNCATION marker's sink for THIS response. Seeded COMPLETE
+        # so every return below is a POSITIVE claim rather than an un-marked
+        # body the caller must guess about, and then handed to the retrieval
+        # call so the marker's own proof (a lost leg, a saturated pool) is MADE
+        # ONCE, by the code that drops the rows. Exactness is RELAYED from that
+        # proof; only the "was the pool itself cut" gate is added here.
+        from .truncation import EXACT_KEY as _EXACT_KEY
+        from .truncation import mark_truncation as _mark_truncation
+        from .truncation import truncation_field as _truncation_field
+        _trunc_out: dict = {"truncated": False}
+
+        def _with_truncation(response: dict) -> dict:
+            """Carry the #8447 marker on EVERY response path of this read.
+
+            `truncation.truncation_field` refuses to guess when the marker is
+            absent, so a producer bug is a loud 500 at the handler rather than
+            a silently-complete answer — the same posture `/v1/search` takes.
+            """
+            response.update(_truncation_field(_trunc_out))
+            return response
+
         text = " ".join(p for p in (title or "", body or "") if p and p.strip()).strip()
         semantic_hits: list[dict] = []
+        #: hits that cleared the relevance gate, BEFORE the `[:limit]` cut — the
+        #: honest population the cut was applied to, and the number the
+        #: `insight` sentence reports (post-cut it under-reported: a 17-hit
+        #: read at the shipped `limit=2` said "2 graph hit(s) relate").
+        relevant_hits = 0
+        #: Is the count EXACT? RELAYED from the marker's own recorded proof
+        #: (``truncation.EXACT_KEY``) AND gated on the pool not having been cut —
+        #: ⛔ never re-derived from the pool's LENGTH. A local
+        #: ``len(pool) >= pool_limit`` test marks a pool that returned exactly
+        #: its bound as cut (the retrieval path keeps every row there and says
+        #: COMPLETE), which withholds an exact total and trains callers to ignore
+        #: the marker — the round-2 defect, and what this variable must not
+        #: reintroduce (#8447 review round 5, P3).
+        _exact = False
         if text:
             # Fetch a wider candidate pool than `limit` (review P3): the gate
             # below filters post-retrieval, so a relevant hit ranked just past
@@ -33849,11 +33977,40 @@ class TortoiseSDK:
             # re-owns the order below, so the SDK-side validity selection could
             # only move which ids survive that cut. Same shape as
             # recall_state's opt-out.
+            pool_limit = max(limit * 5, 20)
             semantic_hits = self.tortoise_fts_query(
-                text, entity_type="point", limit=max(limit * 5, 20),
+                text, entity_type="point", limit=pool_limit,
                 _record_reads=False,  # #7983: a candidate pool
                 _valid_time_rerank=False,  # #8487: caller re-owns the order
+                _truncation_out=_trunc_out,  # #8447: the retrieval path's proof
             )
+            # The retrieval path's verdict: it dropped rows at the pool bound,
+            # or an ASKED leg never answered. Either way matches this read would
+            # have seen were never read, so no exact total is available and the
+            # answer is incomplete EVEN IF the gate below delivers everything it
+            # kept (``truncation.mark_truncation``'s ``incomplete`` case).
+            retrieval_incomplete = bool(_trunc_out.get("truncated"))
+            # ⛔ ``_exact`` is RELAYED from the marker's own recorded proof, never
+            # re-derived: ``truncated: False`` is NOT ``exact`` — it is also what
+            # a read reports when it completed but had to WITHHOLD exactness. A
+            # local ``len(pool) >= pool_limit`` test is worse still: it marks a
+            # pool that came back at EXACTLY its bound as cut, which is a false
+            # positive that withholds an exact total and trains callers to ignore
+            # the marker (#8447 review round 2). ⚠️ NOR is that bound a guarantee:
+            # below the window those rows are kept in full; AT it, the read saturated.
+            #
+            # ⛔ BOTH halves are required, and they answer different questions.
+            # ``retrieval_incomplete``: the pool WAS cut, so the relevance gate
+            # only saw part of the match population — `relevant_hits` is a FLOOR
+            # even though the retrieval path's own candidate count was exact
+            # (measured: 25 matches at limit=2, pool bound 20 → inner
+            # `{truncated: True, total_available: 25}`; the 5 unseen rows could
+            # clear the gate too, so publishing 20 as a total would be a lie).
+            # ``_EXACT_KEY``: the retrieval path PROVED its candidate set is the
+            # whole population; without it, a completed-but-exactness-withheld
+            # read would publish its survivors as a total.
+            _exact = (bool(_trunc_out.get(_EXACT_KEY))
+                      and not retrieval_incomplete)
             # c70: drop hits that clear neither the EP-confidence floor nor a
             # shared-token floor (TF-IDF fallback hits carry no EP annotation;
             # FTS-mode hits are EP-annotated but unmeasured points must still
@@ -33862,6 +34019,7 @@ class TortoiseSDK:
                 h for h in semantic_hits
                 if self._issue_insight_relevant(h, text)
             ]
+            relevant_hits = len(semantic_hits)
             # #3277: re-rank BEFORE truncating — retrieval order is
             # mode-dependent (#3254/#2573), so two unmeasured lexical matches
             # can precede a measured EP-confirmed claim and [:limit] at the
@@ -33869,6 +34027,10 @@ class TortoiseSDK:
             # _issue_insight_rank; the [:limit] cap still holds (reorder, not
             # exempt), so `data_points <= limit` is preserved.
             semantic_hits = self._issue_insight_rank(semantic_hits)[:limit]
+            _mark_truncation(
+                _trunc_out, returned=len(semantic_hits),
+                candidates=relevant_hits, exact=_exact,
+                incomplete=retrieval_incomplete)
 
         repo_points: list[dict] = []
         if repo:
@@ -33878,7 +34040,7 @@ class TortoiseSDK:
             )
 
         if total_points == 0:
-            return {
+            return _with_truncation({
                 "has_prior": False,
                 "no_prior_knowledge": True,
                 "repo_not_indexed": False,
@@ -33889,7 +34051,7 @@ class TortoiseSDK:
                             "indexes EVERY connected repo, not one.",
                 "more_in_graph": None,
                 "repo_stats": None,
-            }
+            })
 
         # #7983: the semantic pool opted out above; the hits that SURVIVE the
         # gate are what the caller receives, so record those (this is the read).
@@ -33917,7 +34079,7 @@ class TortoiseSDK:
                 })
 
         if repo and not repo_points:
-            return {
+            return _with_truncation({
                 "has_prior": True,
                 "no_prior_knowledge": False,
                 "repo_not_indexed": True,
@@ -33929,31 +34091,57 @@ class TortoiseSDK:
                             f"so '{repo}' is covered only if it is one of them.",
                 "more_in_graph": None,
                 "repo_stats": None,
-            }
+            })
 
         # c70: nothing cleared the semantic gate -> "no matches", even when the
         # repo stage found points (repo context is still reported via repo_stats).
         if not semantic_hits:
-            return {
+            # ⛔ "No graph matches" is a POSITIVE claim of absence, and today it
+            # can be produced by a read that dropped rows (a saturated pool, a
+            # lost leg). The marker is what tells those two apart — the caller
+            # may not assert absence over a read the store could not complete.
+            return _with_truncation({
                 "has_prior": False,
                 "no_prior_knowledge": False,
                 "repo_not_indexed": False,
                 "data_points": [],
-                "insight": "No graph matches for this issue title.",
+                # ⛔ Keyed on the MARKER's own verdict, never on `_exact`: a
+                # read can be exactness-withheld (a post-window filter, the
+                # snapshot fallback arm) while nothing was dropped, and telling
+                # that caller "the read was TRUNCATED" would be prose
+                # contradicting the field next to it — the same defect this
+                # branch exists to remove, inverted (#8447 review round 4).
+                "insight": (
+                    "No graph matches for this issue title."
+                    if not _trunc_out.get("truncated") else
+                    "No graph matches among the matches this read could see — "
+                    "the read was TRUNCATED (see `truncated`), so absence is "
+                    "NOT proven."),
                 "more_in_graph": None,
                 "repo_stats": repo_stats,
-            }
+            })
 
         top = semantic_hits[0]
-        return {
+        return _with_truncation({
             "has_prior": True,
             "no_prior_knowledge": False,
             "repo_not_indexed": False,
             "data_points": data_points,
-            "insight": f"{len(semantic_hits)} graph hit(s) relate to this issue — check the graph before filing.",
+            # `relevant_hits` (pre-cut), not `len(semantic_hits)` (post-cut):
+            # a 17-hit read at the shipped `limit=2` used to say "2 graph hit(s)
+            # relate" — a wrong statement, not merely an incomplete one.
+            #
+            # ⛔ And it is QUALIFIED when the count is not exact: a saturated
+            # pool makes `relevant_hits` a LOWER BOUND (which is why
+            # `total_available` is withheld on that read), so publishing it as
+            # an unqualified count would reintroduce the same defect one level
+            # down — a floor wearing a total's clothes, in prose this time.
+            "insight": (
+                f"{'' if _exact else 'at least '}{relevant_hits} graph hit(s) "
+                "relate to this issue — check the graph before filing."),
             "more_in_graph": ((top.get("content") or "")[:80] if top else None),
             "repo_stats": repo_stats,
-        }
+        })
 
     def _issue_insight_relevant(self, hit: dict, query_text: str) -> bool:
         """#1196 review c70 — semantic-stage relevance gate.
@@ -34671,8 +34859,16 @@ class TortoiseSDK:
         # about — the distinction the issue's contract turns on. A missing
         # marker at the consumer is therefore a producer bug, not "complete"
         # (``truncation.truncation_field`` refuses to guess).
+        #
+        # ⛔ The seeding goes THROUGH the instrument, never around it: a sink is
+        # CALLER-OWNED and may be REUSED, so a hand-written ``truncated = False``
+        # would leave a stale ``_exact`` (and a stale ``total_available``) from an
+        # earlier call riding this verdict — the defect one level down, and
+        # exactly the hygiene ``truncation.mark_truncation`` performs and
+        # documents. One writer, one contract (#8447 review round 3, P2).
         if _truncation_out is not None:
-            _truncation_out["truncated"] = False
+            from .truncation import mark_truncation as _seed_mark
+            _seed_mark(_truncation_out, returned=0, candidates=0, exact=False)
 
         # B6 (#3892): the status sink and the trace used to classify it. When
         # no status is requested this is exactly today's ``leg_trace`` (None
@@ -34874,8 +35070,9 @@ class TortoiseSDK:
                 # 0 rows over an UNREAD store is the third state, not the first.
                 # Only ``status`` disagrees today, and only when its flag is on.
                 if _truncation_out is not None:
-                    _truncation_out["truncated"] = True
-                    _truncation_out.pop("total_available", None)
+                    from .truncation import mark_truncation as _lost_mark
+                    _lost_mark(_truncation_out, returned=0, candidates=0,
+                               incomplete=True)
                 return []
             raise
         graph = proj.g
@@ -34898,8 +35095,9 @@ class TortoiseSDK:
                 # #8447 (review round 2, P2): configured but silent is still an
                 # unread store — never a complete empty answer.
                 if _truncation_out is not None:
-                    _truncation_out["truncated"] = True
-                    _truncation_out.pop("total_available", None)
+                    from .truncation import mark_truncation as _lost_mark2
+                    _lost_mark2(_truncation_out, returned=0, candidates=0,
+                                incomplete=True)
                 return []
         # #7952: the store is reachable, so the known-hot set can be READ.
         if read_status_out is not None and _residency_enabled():
