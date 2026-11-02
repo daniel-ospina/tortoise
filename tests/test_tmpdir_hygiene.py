@@ -64,7 +64,22 @@ def test_tracker_removes_every_directory_it_tracked():
     with TrackedTempfileArtifacts() as tracker:
         paths = [tempfile.mkdtemp(prefix=f"ask_hygiene_{i}_")
                  for i in range(5)]
-    assert len(tracker.created) == 5
+        # A PEER mints a directory through the same patched `mkdtemp` while the
+        # block is open. That is not hypothetical: a leaked live redislite child
+        # reconnecting during this module's window did exactly it, and the shard
+        # went red with `AssertionError: assert 6 == 5`, the sixth entry
+        # `/tmp/tt_r1zwabg1/tmpit7yzu9z` (unprefixed) listed between this test's
+        # own — while the tracker had removed it correctly.
+        tempfile.mkdtemp()
+    # The record is PROCESS-wide (that is what makes the tracker a leak
+    # detector), so an exact count over the whole of it is not this test's
+    # evidence. Count only this test's own directories. The removal half stays
+    # scoped to those too: teardown tolerates a directory a live child keeps
+    # re-creating (#7735), so a peer's absence is not a property of a green
+    # suite — asserting it would trade this false positive for the reverse one.
+    ours = [p for p in tracker.created
+            if os.path.basename(p).startswith("ask_hygiene_")]
+    assert ours == paths
     assert all(not os.path.exists(p) for p in paths)
 
 
