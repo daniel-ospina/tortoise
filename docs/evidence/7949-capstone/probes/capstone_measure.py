@@ -2691,7 +2691,7 @@ def main(argv: list[str] | None = None) -> int:
         # PASS-direction half of it (Objects that are NOT bare-definite) because
         # that is the table's convention on every other row and the bare-definite
         # count it minimises can legitimately be 0 — see `e1_pass_objects`.
-        "numerator": e1_pass_objects(e1),
+        "numerator": e1["after_numerator"],
         "denominator": e1["after_objects"],
         "note": e1_row_note(e1, e1_result, bars),
     }
@@ -2699,8 +2699,8 @@ def main(argv: list[str] | None = None) -> int:
         "verdict": verdict_word(e2_result),
         "sha": e1["sha"],
         "corpus_sha256": e1["corpus_sha256"],
-        "numerator": e1["e2a_survived"],
-        "denominator": e1["e2a_units"],
+        "numerator": None,
+        "denominator": None,
         "note": e2_row_note(e1, e2a_result, e2b_result, e2_result),
     }
 
