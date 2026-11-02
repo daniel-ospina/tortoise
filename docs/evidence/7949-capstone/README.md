@@ -152,7 +152,16 @@ itself.
 ⚠️ **A later probe delta DOES render, and the log is not edited for it.** #9553's insertion into
 `tortoise/sdk.py` (+86 lines) moved the symbols this bundle cites, so the `file:line` numbers in the
 probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
-a log. The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
+a log. ⚠️ **The SHIPPED log's own cites are as-of ITS stamp too, and this branch has since moved
+them.** That log renders, for the capture path's `proj.link_source_to_event` call, the number
+`tortoise/sdk.py` line 15506, and for `_TURN_WRITE_CYPHER` the number `tortoise/sdk.py` line 2408
+— written here WITHOUT the `file:line` form on purpose, because these are not live cites and must
+not be read as such. At the base it ships from (`9152448d7`) those lines are exactly those symbols;
+at THIS head they are a comment and a different statement, because the `#10215` integration on this
+branch moved `sdk.py` around them. Neither number is a defect and the log is not edited for it — a
+log is the record of what the run rendered — but do NOT follow them as pointers at this head.
+
+The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
 stamp**, and those are the numbers listed here — the ones that log rendered, exactly as it
 renders them: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
 references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
@@ -230,7 +239,7 @@ though the receipt cannot witness them.
 | S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:10586-10590` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:15484`), so this ❌ is the frozen run's answer, not the seam's reachability |
 | S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:10576-10582` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:15484`) |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
-| S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=65 INPUT=68 NAND=14` |
+| S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
 
 **6 of 8.** The two that are missing are missing from the INSTRUMENT: the arm was forced and read back, so both passes were ENABLED on this run — but whether either did work was NOT observable through this surface, which is exactly why the surface was missing (a flag-on block that idles, or a fail-open pass, leaves the same empty stats). So the honest statement is "enabled and not witnessed", not "ran and was hidden" — and the receipt did not say so either way. Working around that by reading a wrapper's state is

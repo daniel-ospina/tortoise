@@ -1845,11 +1845,29 @@ def test_the_not_established_section_quotes_the_s5_operator_counts_the_log_measu
         f"the README's not-established bullet says IMPL={quoted.group(1)} "
         f"INPUT={quoted.group(2)} NAND={quoted.group(3)}; the shipped log measured "
         f"IMPL={measured.group(1)} INPUT={measured.group(2)} NAND={measured.group(3)}")
-    # and the S5 table row in the same document must not disagree either
+    # and the S5 table row in the same document must describe ONE run. #10601 made the
+    # eight-step table the SUPERSEDED run's (README's own banner), while `8173e88eb` moved
+    # this row's operator triple to THIS run's — pairing the superseded census
+    # (433 derived nodes / Point 338 / Object 50 / Event 45) with the shipped run's
+    # IMPL=65 INPUT=68 NAND=14, a combination no artifact ever measured
+    # (`e0fc940b5` pairs 433/338/50/45 with IMPL=57 INPUT=58 NAND=10). The old form of
+    # this leg REQUIRED that fusion, because it was written when the eight-step table WAS
+    # the shipped run's; it now holds the row to one run instead.
     s5_row = next(ln for ln in readme.splitlines()
                   if ln.startswith("| S5 CONNECT"))
-    assert f"IMPL={measured.group(1)} INPUT={measured.group(2)} " \
-           f"NAND={measured.group(3)}" in s5_row, s5_row
+    shipped_triple = (f"IMPL={measured.group(1)} INPUT={measured.group(2)} "
+                      f"NAND={measured.group(3)}")
+    superseded_census = "433 derived nodes" in s5_row
+    assert not (superseded_census and shipped_triple in s5_row), (
+        "the S5 row pairs the SUPERSEDED run's census (433 derived nodes) with THIS "
+        f"run's operator triple ({shipped_triple}) — no artifact measured that "
+        "combination. The eight-step table is the superseded run's (see the banner), "
+        f"so its row carries that run's own triple: {s5_row[:400]}")
+    if superseded_census:
+        assert "IMPL=57 INPUT=58 NAND=10" in s5_row, (
+            "the S5 row quotes the SUPERSEDED run's census, so its operator triple must "
+            "be that run's too (`e0fc940b5`'s `step S5` line pairs 433 derived nodes "
+            f"with IMPL=57 INPUT=58 NAND=10): {s5_row[:400]}")
 
 
 # ── the bundle's STATE LEDGER must describe the seam that SHIPPED ──────────
@@ -1997,31 +2015,10 @@ def _flat(text: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
-#: Table rows are STRUCTURED, so they can be checked without parsing prose — but the
-#: DISCRIMINATOR has to be right, and two earlier attempts were measured wrong (both are
-#: recorded here so a future round does not re-invent them):
-#:
-#: 1. a SENTENCE-level prose regex pairing S2.3 with "idle" — false-RED on `#10215`'s general
-#:    idle-accounting rule in `E1-E5-PROOFS.md`, which is true of any corpus;
-#: 2. a row ban whose allowlist was the bare words `accounted`/`conditional` — false-RED on a
-#:    row stating the SUPERSEDED run's history (which the sibling message explicitly asks to
-#:    keep) AND false-GREEN on "the pass is IDLE on this corpus, accounted".
-#:
-#: This is attempt 3. A row that names S2.3 and asserts a NEGATIVE witness state (idle / not
-#: witnessed / never observed / "come back empty") must also name the SCOPE it applies to —
-#: the superseded run, the general rule, a prediction, or the refutation itself. Measured in
-#: both directions: passes all three S2.3 rows in this tree; REDs the pre-fix witness row at
-#: `7caace29c` and at `27808f958`; REDs both paraphrases above; passes "SUPERSEDED run …
-#: 6-of-8", "accounted as a witnessed idle … conditional", and "was NOT idle: assigned_llm=7".
-_STALE_STATE_NEGATIVE = re.compile(
-    r"\bidle\b|\bidled\b|not witnessed|never observed|unwitnessed|"
-    r"c(?:o|a)me(?:s)? back empty|no witness|empty `s2`",
-    re.IGNORECASE)
-_STALE_STATE_SCOPED = re.compile(
-    r"superseded|e0fc940b|6-of-8|history|prior run|prediction|"
-    r"not an? idle|not idle|does work|witnessed by|witnessed idle|"
-    r"accounted as|general rule|conditional",
-    re.IGNORECASE)
+#: The superseded-run history the sibling message ASKS to keep, and the refutation — both TRUE.
+#: Kept as spellings only; the regex experiments that tried to generalise this are recorded as
+#: dead ends in `test_no_document_states_the_step_prediction_its_own_artifact_refutes`.
+
 
 
 def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
@@ -2080,28 +2077,36 @@ def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
                 "never runs one — say what the SHIPPED log measured, and keep the "
                 "6-of-8 count as the SUPERSEDED run's history")
 
-        # ⛔ The phrase list above is spelling-based, and a spelling is the thing a
-        #    paraphrase walks around: measured at `27808f958`, round 3 added the
-        #    "`S2.3` is IDLE on this corpus" spelling while the SAME claim survived
-        #    in three other shapes. Two of those were prose (unpinnable without
-        #    false-redding `#10215`'s true general rule — see `_STALE_STATE_NEGATIVE`
-        #    for the two attempts and why each was rejected), but the third lived in
-        #    a TABLE, and a row is machine-shaped. So rows naming the classify step
-        #    are checked structurally. The blockquote strip is load-bearing: the
-        #    bundle's HEADLINE verdict table is written `> | **E1** | …`, so a
-        #    `startswith("|")` test skips exactly the table a lane reads first.
-        for line in path.read_text().splitlines():
-            row = re.sub(r"^\s*(?:>\s*)+", "", line)
-            if not row.lstrip().startswith("|") or "S2.3" not in row:
-                continue
-            assert not (_STALE_STATE_NEGATIVE.search(row)
-                        and not _STALE_STATE_SCOPED.search(row)), (
-                f"{name} has a TABLE ROW naming S2.3 while asserting an idle/"
-                f"unwitnessed state and naming no scope for it: {row[:300]!r} — "
-                f"{shipped.name} WITNESSES S2.3 (assigned_llm: 7), so the row "
-                "states what this bundle's own artifact refutes. Say what the "
-                "shipped log measured; if you mean the SUPERSEDED run's 6-of-8 or "
-                "`#10215`'s idle-accounting rule, name that scope in the row")
+        # ⛔ A STRUCTURAL ROW CHECK WAS TRIED HERE AND REMOVED — measured. Three designs,
+        #    each wrong, recorded so a future round does not re-invent them:
+        #      · a sentence-level prose regex → false-RED on `#10215`'s general rule
+        #        ("an idle classify pass is ACCOUNTED from the receipt's own facts"),
+        #        which is TRUE of any corpus;
+        #      · a row ban allowlisting the bare words `accounted|conditional` →
+        #        false-RED on a legitimate SUPERSEDED-history row AND false-GREEN on
+        #        "the pass is IDLE on this corpus, accounted";
+        #      · a scope-based row discriminator → false-RED on a TRUE row ("the classify
+        #        pass's `union` is unwitnessed (`{}`) while `s2` carries 7 assignments" —
+        #        both facts are in the log) and false-GREEN on "the pass was enabled and
+        #        did no work on this corpus (s2 counters all zero)".
+        #    A guard that reds on true content AND greens on the refuted claim is worse
+        #    than none: it is a false PASS that reports the class closed. So it is
+        #    deleted, and the residual is STATED rather than hidden: a PARAPHRASE of the
+        #    idle claim is not caught by any pin in this file. What actually protects the
+        #    load-bearing claim is the artifact-bound leg at the top of this test (it
+        #    reads the shipped log's own `steps_observed`) plus the POSITIVE pin below,
+        #    which requires the witness row to name the EVIDENCE that the pass did work
+        #    rather than a word describing it.
+        if name == "README.md":
+            witness_rows = [r for r in path.read_text().splitlines()
+                            if r.startswith("| S2.3")]
+            assert witness_rows, (
+                "README.md no longer carries a `| S2.3 …` witness row — the positive "
+                "pin below cannot check a row that is not there")
+            assert any("assigned_llm" in r for r in witness_rows), (
+                "the S2.3 witness row must name the EVIDENCE that the classify pass "
+                "did work (`assigned_llm` on the shipped log's witness), not a word "
+                f"describing it: {witness_rows[0][:300]!r}")
 
 
 #: The `e1-aux` triple of the SUPERSEDED run — `capstone-measured-e0fc940b.log`
