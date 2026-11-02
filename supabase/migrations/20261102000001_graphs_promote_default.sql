@@ -51,6 +51,23 @@
 -- POST-CONDITION check at the end of the function is what covers "never ZERO",
 -- which no index can express.
 --
+-- ⚠️ …AND THE COLLISION CAN BE OURS, NOT THEIRS (#10452 review P2). For an org
+-- with NO live default row — exactly the state
+-- `_mint_default_graph_row_best_effort` exists for — the demote above matches
+-- nothing, a racing mint commits in the window, and it is the PROMOTE that
+-- lands on the index (SQLSTATE 23505). Unhandled, that surfaced to the caller as
+-- `500 Internal Server Error` for a race that is safe to RETRY: the whole
+-- transaction rolled back and nothing was written. So the move is wrapped in a
+-- `unique_violation` handler that re-raises the POST-CONDITION's own text —
+-- which `supabase_control._PROMOTE_DEFAULT_ERROR_CODES` already maps to the
+-- retryable `409 PROMOTE_CONFLICT`. (Re-raising a custom message rather than
+-- retrying in-function is deliberate: PostgreSQL's serialization guidance is
+-- that a concurrency-caused `unique_violation` may be retried only by retrying
+-- the WHOLE transaction, and this function cannot see the caller's. A plpgsql
+-- EXCEPTION block is an implicit savepoint, so reaching the handler means the
+-- demote is already undone — the "nothing was written" property is the
+-- handler's own, not a comment's.)
+--
 -- ── WHY `organizations.graph_name` MOVES TOO ─────────────────────────────
 -- This is the part that is easy to get wrong and expensive to get wrong. The
 -- default graph's DATA-PLANE key is the org's namespace, and `graph_name` IS
@@ -281,6 +298,15 @@ BEGIN
     -- 1. DEMOTE first. Demote-then-promote is the only order the unique index
     -- permits; between the two statements this transaction holds zero default
     -- rows, which no other session can observe (see the header).
+    --
+    -- ⛔ STEPS 1-4 SIT INSIDE A `unique_violation` HANDLER (#10452 review P2).
+    -- The promote below is where a racing MINT lands when the org had no live
+    -- default row for the demote to move: the index refuses it, and without the
+    -- handler that surfaced as `500 Internal Server Error` on a race that is
+    -- safe to retry. A plpgsql EXCEPTION block is an implicit savepoint, so when
+    -- the handler runs the demote and the pointer write are ALREADY undone —
+    -- "nothing was written" is the handler's own property, not a comment's.
+    BEGIN
     UPDATE public.graphs g
        SET kind = 'custom'
      WHERE g.org_id = p_org_id
@@ -333,6 +359,19 @@ BEGIN
             'promote_default_graph: the default did not move (org % has no single active default at % after the move)',
             p_org_id, p_graph_id;
     END IF;
+    EXCEPTION
+        WHEN unique_violation THEN
+            -- THE SAME STATE AS THE POST-CONDITION ABOVE, reached the other way:
+            -- a concurrent creation path minted an active default in the window
+            -- the demote could not cover, so the index refused OUR promote. The
+            -- text reuses the post-condition's prefix on purpose — that is the
+            -- message `_PROMOTE_DEFAULT_ERROR_CODES` maps to the RETRYABLE
+            -- `409 PROMOTE_CONFLICT`, and a bare 23505 would surface as a 500
+            -- for a race the caller did nothing wrong to lose.
+            RAISE EXCEPTION
+                'promote_default_graph: the default did not move (org % lost the active-default race to a concurrent writer; nothing was written — retry)',
+                p_org_id;
+    END;
 
     RETURN jsonb_build_object(
         'ok', true,

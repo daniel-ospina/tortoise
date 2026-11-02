@@ -1443,6 +1443,65 @@ def test_the_sql_locks_the_target_row_and_checks_the_post_condition():
     assert "RAISE EXCEPTION" in fn[post - 400:post]
 
 
+def test_a_lost_unique_index_race_is_the_same_retryable_conflict():
+    """#10452 review P2: a promotion that LOSES the unique-index race must not
+    answer 500.
+
+    The migration header claimed a racing mint always "fails its own statement".
+    For an org with NO live default row (the state
+    `_mint_default_graph_row_best_effort` exists for) the demote matches
+    nothing, the mint commits in the window, and the PROMOTE is the statement
+    that hits `uq_graphs_org_default_active` — SQLSTATE 23505, which
+    `_PROMOTE_DEFAULT_ERROR_CODES` had no arm for, so a race that is safe to
+    retry surfaced as `500 {"detail":"Internal Server Error"}`.
+
+    FAIL-ON: drop the `EXCEPTION WHEN unique_violation` arm and the handler's
+    text is missing — the only thing that maps a lost race to the retryable
+    409. (The executing half of this pin is the PGlite drill in
+    `supabase/tests/20261102000001_graphs_promote_default.sql` §5c, which forces
+    the collision and asserts the RAISE text; this half is what reds when the
+    handler is edited away and the migration paths are not in the CI shard.)
+    """
+    import re
+    from pathlib import Path
+
+    from tortoise.supabase_control import (
+        _PROMOTE_DEFAULT_ERROR_CODES,
+        PromoteDefaultGraphError,
+    )
+    from tortoise.supabase_control import promote_default_graph as sb_promote
+
+    root = Path(__file__).resolve().parent.parent
+    path = root / "supabase" / "migrations" / "20261102000001_graphs_promote_default.sql"
+    sql = "\n".join(line.split("--")[0] for line in
+                    path.read_text(encoding="utf-8").splitlines())
+    fn = sql.split("CREATE OR REPLACE FUNCTION public.promote_default_graph")[1]
+    assert "EXCEPTION" in fn and "WHEN unique_violation THEN" in fn, (
+        "the move is not guarded against the index collision a racing mint can "
+        "win — that is an unhandled 23505, i.e. a 500 for a retryable race")
+    handler = fn.split("WHEN unique_violation THEN", 1)[1]
+    messages = re.findall(r"'promote_default_graph: [^']*'", handler)
+    assert messages, "the handler re-raises no message the endpoint can map"
+    mapped = [m for m in messages
+              if any(code in m for code in _PROMOTE_DEFAULT_ERROR_CODES)]
+    assert mapped, (
+        "the 23505 handler's message is not in _PROMOTE_DEFAULT_ERROR_CODES, "
+        f"so a lost race still surfaces as a 500: {messages}")
+    status, detail_code = next(v for k, v in _PROMOTE_DEFAULT_ERROR_CODES.items()
+                              if k in mapped[0])
+    assert (status, detail_code) == (409, "PROMOTE_CONFLICT"), (
+        "a lost race writes nothing, so it must be RETRYABLE (409)")
+
+    # …and the endpoint really does map that text (the behaviour, not the map).
+    class _Cp:
+        def rpc(self, fn, body, representation=True):
+            raise RuntimeError(mapped[0].strip("'"))
+
+    with pytest.raises(PromoteDefaultGraphError) as exc:
+        sb_promote(_Cp(), TEAM, NEW_ID)
+    assert exc.value.status == 409 and exc.value.code == "PROMOTE_CONFLICT"
+
+
 # ── 11. The state the move makes reachable: zero live defaults ────────────
 # Before this verb nothing ever changed `kind`, so a DELETE could not tombstone
 # a default row. After it, "the graph was custom a moment ago" is a statement

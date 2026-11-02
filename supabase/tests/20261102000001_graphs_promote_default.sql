@@ -361,6 +361,127 @@ SELECT tests.assert(
   (SELECT kind FROM public.graphs WHERE id = 'g_10180default0001') = 'custom',
   '#10180: the aborted target did not keep the promotion it never completed');
 
+-- ── 5c. A racing mint that wins the index surfaces as a RETRYABLE conflict ──
+-- #10452 review P2. For an org with NO live default row (`_mint_default_graph_row_
+-- best_effort` exists for exactly that state) the demote matches nothing, a
+-- racing creation path commits its own active default in the window, and it is
+-- the PROMOTE that lands on `uq_graphs_org_default_active` (SQLSTATE 23505).
+-- Unhandled, that reached the caller as `500 Internal Server Error` for a race
+-- that is safe to retry. The drill forces that instant with a trigger that makes
+-- the DEMOTE a no-op — i.e. the org's single live default is already held by
+-- "someone else" when our promote runs — and asserts the function maps it to the
+-- text `_PROMOTE_DEFAULT_ERROR_CODES` turns into `409 PROMOTE_CONFLICT`.
+-- FAIL-ON: without the `EXCEPTION WHEN unique_violation` arm the SQLERRM is
+-- `duplicate key value violates unique constraint
+-- "uq_graphs_org_default_active"`, which no code maps (a 500).
+CREATE OR REPLACE FUNCTION public._10180_keep_the_live_default() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.kind = 'default' AND NEW.kind = 'custom' THEN
+    -- "another session already holds this org's default": the demote does
+    -- nothing, exactly as if a racing mint had committed first.
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER _10180_keep_the_live_default
+  BEFORE UPDATE ON public.graphs
+  FOR EACH ROW EXECUTE FUNCTION public._10180_keep_the_live_default();
+
+DO $$
+BEGIN
+  PERFORM public.promote_default_graph('10180promote', 'g_10180default0001');
+  RAISE EXCEPTION
+    'ASSERTION FAILED: a lost unique-index race returned success instead of a conflict';
+EXCEPTION WHEN others THEN
+  IF SQLERRM NOT LIKE 'promote_default_graph: the default did not move%' THEN
+    RAISE;
+  END IF;
+END $$;
+
+DROP TRIGGER _10180_keep_the_live_default ON public.graphs;
+DROP FUNCTION public._10180_keep_the_live_default();
+
+SELECT tests.assert(
+  (SELECT id FROM public.graphs
+    WHERE org_id = '10180promote' AND kind = 'default'
+      AND status = 'active') = 'g_10180promote0002',
+  '#10180: a lost index race wrote nothing — the existing default is untouched');
+
+SELECT tests.assert(
+  (SELECT kind FROM public.graphs WHERE id = 'g_10180default0001') = 'custom',
+  '#10180: …and the target did not keep a promotion the index refused');
+
+SELECT tests.assert(
+  (SELECT graph_name FROM public.organizations WHERE id = '10180promote')
+    = 'org_10180promote_g_10180promote0002',
+  '#10180: …nor did the org pointer move on the failed race');
+
+-- ── 5d. The POST-CONDITION's "exactly one" half is EXECUTED, not just quoted ─
+-- #10452 review P2 (test gap). The drill above aborts at step 3 — BEFORE the
+-- post-condition — so the half no index can express ("never ZERO / never TWO")
+-- had no executing test: dropping the `count(*) <> 1` branch from the move arm
+-- kept every assertion here green, because the string still occurs in the
+-- idempotent arm's identical check.
+--
+-- The index is DROPPED for this drill on purpose: "two ACTIVE defaults" is a
+-- state `uq_graphs_org_default_active` forbids, i.e. precisely the pre-existing
+-- drift the post-condition exists to refuse. A trigger on the org-pointer write
+-- (step 3) mints the second default there, so the post-condition runs with the
+-- TARGET PRESENT and one rival: the `NOT EXISTS` half is satisfied, which is
+-- what leaves the `count(*)` half as the only thing that can fire.
+-- FAIL-ON: with that half removed the function returns `ok` and the assertion
+-- below reports a promotion that silently left the org with two live defaults.
+DROP INDEX public.uq_graphs_org_default_active;
+
+CREATE OR REPLACE FUNCTION public._10180_mint_a_rival() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.graph_name IS DISTINCT FROM OLD.graph_name THEN
+    INSERT INTO public.graphs (id, org_id, name, kind, namespace, status)
+    VALUES ('g_10180drift0009', '10180promote', 'drifted', 'default',
+            'org_10180promote_drift', 'active');
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER _10180_mint_a_rival
+  AFTER UPDATE ON public.organizations
+  FOR EACH ROW EXECUTE FUNCTION public._10180_mint_a_rival();
+
+DO $$
+BEGIN
+  PERFORM public.promote_default_graph('10180promote', 'g_10180default0001');
+  RAISE EXCEPTION
+    'ASSERTION FAILED: the post-condition did not fire over TWO active defaults';
+EXCEPTION WHEN others THEN
+  IF SQLERRM NOT LIKE 'promote_default_graph: the default did not move%' THEN
+    RAISE;
+  END IF;
+END $$;
+
+DROP TRIGGER _10180_mint_a_rival ON public.organizations;
+DROP FUNCTION public._10180_mint_a_rival();
+
+SELECT tests.assert(
+  (SELECT count(*) FROM public.graphs
+    WHERE org_id = '10180promote' AND kind = 'default'
+      AND status = 'active') = 1,
+  '#10180: the post-condition''s RAISE rolled the injected second default back with the move');
+
+SELECT tests.assert(
+  (SELECT id FROM public.graphs
+    WHERE org_id = '10180promote' AND kind = 'default'
+      AND status = 'active') = 'g_10180promote0002',
+  '#10180: …and left the org on the default it had');
+
+-- Recreating the index IS the "never TWO" assertion the drill needed: a second
+-- active default surviving the rollback (with the `status='deleted'` rows gone)
+-- would make this statement fail instead of silently restoring the backstop.
+CREATE UNIQUE INDEX uq_graphs_org_default_active
+    ON public.graphs (org_id) WHERE kind = 'default' AND status <> 'deleted';
+
 -- ── 6. The serialization point is in the function, not in the caller ──────
 -- Two callers must never read the same "current default" concurrently: the
 -- second would demote it, then its own target, and one of the two would hit

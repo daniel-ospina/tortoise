@@ -4841,7 +4841,12 @@ _PROMOTE_DEFAULT_ERROR_CODES: dict[str, tuple[int, str]] = {
     # The function's own POST-CONDITION ("exactly one active default, and it is
     # the target") firing: a concurrent writer won a race the row locks did not
     # cover. Nothing was written — the whole transaction rolled back — so this
-    # is a RETRYABLE conflict, not a 500 and not a caller mistake.
+    # is a RETRYABLE conflict, not a 500 and not a caller mistake. #10452 review
+    # P2: the function's `EXCEPTION WHEN unique_violation` arm re-raises under
+    # THIS SAME text, because losing `uq_graphs_org_default_active` to a racing
+    # mint (the no-live-default window the demote cannot cover) is the same
+    # state reached the other way — and a bare 23505 had no arm here at all, so
+    # it surfaced as a 500 for a race that is safe to retry.
     "promote_default_graph: the default did not move": (409, "PROMOTE_CONFLICT"),
     # #10180 review round 8, P1: the target's namespace is not one the org-wide
     # lanes can FOLLOW, so promoting it would succeed and then route every
