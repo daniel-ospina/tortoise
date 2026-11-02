@@ -503,7 +503,11 @@ def test_the_subject_anchor_mint_is_not_widened(sdk_with_journal, monkeypatch):
         "no statement touching `:Subject` was issued — this pin would be vacuous"
     )
     for cypher in subject_statements - set(expected):
-        assert False, (
+        # `raise`, never `assert False` (ruff B011, the CI lint gate): under
+        # `python -O` an assert is STRIPPED, so the one red this pin exists to
+        # raise — a widened `:Subject` mint — would go GREEN in an optimized
+        # run, i.e. the gate would report the widening as authorized.
+        raise AssertionError(
             "the `:Subject` anchor statement changed. It is the ONE write on "
             "this lane to a journalled ontology class, authorized only as the "
             "id-only anchor link (see the ANCHOR MINT bullet above "
