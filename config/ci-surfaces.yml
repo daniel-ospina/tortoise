@@ -1329,6 +1329,16 @@ surfaces:
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
+  # #4051: the org-limit gate must count the graph the write will OPEN. Guards
+  # `hosted_api._check_org_limit`/`_gate_sdk_for` against `quota._count_resource`,
+  # and BOTH changed modules select `api` (measured: `--changed-files
+  # tortoise/quota.py` -> surfaces ['api']; `tortoise/hosted_api.py` -> ['api',
+  # 'onboarding']), so one `api` row covers either half. Without the row the file
+  # is unclassified: `--integrity` reports `manifest drift: ['test_4051_gate_graph.py']`
+  # (reddening the `manifest-integrity` leg) AND `--changed-files` omits it from
+  # `test_files`, so the discriminating test would never execute — the
+  # #1349/#2938 silent-drop class this block keeps documenting.
+  - test_4051_gate_graph.py
   # D10: the document-source gold fixture + the proof the `documents` cap
   # predicate is not vacuous (#5100, #5013). Sits with the quota surface
   # because the predicate under test IS the `documents` cap.
