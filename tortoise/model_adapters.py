@@ -587,13 +587,25 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 #: that key reports `no-provider` and silently skips extraction, the #8133
 #: symptom class on the opposite axis.
 #: `test_the_v2_resolver_honours_exactly_the_provider_key_map` pins both
-#: directions as far as an assertion can (review cycle 3): nothing OUTSIDE this
-#: map can be honoured through a literal routing name, and every provider IN it
-#: must appear in the resolver's `_chain(...)` arguments or its explicit-selector
-#: comparisons (parsed from the AST, so a comment naming a provider does not
-#: satisfy it). NOT pinned: a provider honoured through a module-level constant
-#: (`os.environ.get(_X)` with `_X` bound at module scope) — that is the AST
-#: guard's documented residual, and no test here claims otherwise.
+#: directions as far as an AST assertion can, and the two halves are SEPARATE
+#: asserts (review cycle 5, P2 — the earlier wording credited one half with
+#: both): `assert not unrouted` is map → routing (every provider IN this map
+#: appears in the resolver's `_chain(...)` arguments or its explicit-selector
+#: comparisons), and `assert not stray_routing` is routing → map (nothing
+#: OUTSIDE this map is named by a `_chain(...)` argument or an `explicit == ...`
+#: comparator). Both parse the AST, so a comment naming a provider satisfies
+#: neither. Measured: before the second half existed, a branch gated on its own
+#: env literal — `if os.environ.get("ANTHROPIC_KEY"): return _chain(
+#: "anthropic", ...)` — was honoured with all four guards green.
+#:
+#: ⛔ RESIDUALS, stated rather than claimed closed: both halves read LITERAL
+#: names, so a provider routed or read through a module-level constant
+#: (`_chain(_P, ...)` / `os.environ.get(_X)` with `_P`/`_X` bound at module
+#: scope) is invisible to both; and the separate inline-key scan
+#: (`test_resolve_extractor_provider_reads_no_inline_provider_keys`) flags only
+#: literals ending in `_API_KEY`, so a key var named otherwise is not flagged by
+#: IT (the routing → map half catches the routing anyway, provided the provider
+#: name is itself a literal). No test here claims either is closed.
 #:
 #: ⚠️ Coverage, stated exactly (review cycle 1): this map is the single source
 #: for the V2 RESOLVER's key PRESENCE. Two consumers still hold their own inline

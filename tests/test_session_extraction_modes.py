@@ -356,7 +356,7 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
     _AUTO_PATH_PRIMARIES = {"deepseek-direct", "openrouter", "venice"}
 
     honoured = set()
-    for provider, key_env in _PROVIDER_KEY_ENV.items():
+    for key_env in _PROVIDER_KEY_ENV.values():
         os.environ[key_env] = "sk-test-8133"
         try:
             primary, avail = resolve_extractor_provider()
@@ -383,7 +383,7 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
         f"an auto-path primary, add it to _AUTO_PATH_PRIMARIES; if you did not, "
         f"the resolver is answering from a list other than the registry (#8133)"
     )
-    assert _AUTO_PATH_PRIMARIES <= set(_PROVIDER_KEY_ENV), (
+    assert set(_PROVIDER_KEY_ENV) >= _AUTO_PATH_PRIMARIES, (
         f"_AUTO_PATH_PRIMARIES names provider(s) "
         f"{sorted(_AUTO_PATH_PRIMARIES - set(_PROVIDER_KEY_ENV))} that "
         f"_PROVIDER_KEY_ENV does not register — the resolver cannot possibly "
@@ -427,6 +427,25 @@ def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
         f"that key resolves (None, None) and the capture silently skips "
         f"extraction. Add the provider to the resolver's `_chain(...)` calls, "
         f"or remove it from the registry."
+    )
+
+    # The OTHER direction of "exactly" (review cycle 5, P2): a provider the
+    # resolver ROUTES through a literal name that the map does not register.
+    # Without this, `if os.environ.get("ANTHROPIC_KEY"): return _chain(
+    # "anthropic", ...)` is honoured with every guard green — "anthropic" lands
+    # in `routed` but not in `_PROVIDER_KEY_ENV`, so `unrouted` (the map → routing
+    # half above) cannot see it, and the inline-literal scan only flags names
+    # ending in ``_API_KEY``. Measured mutation; that silence is the #8133
+    # divergence on the resolver side, which is what the registry's comment
+    # claims is pinned.
+    stray_routing = routed - set(_PROVIDER_KEY_ENV)
+    assert not stray_routing, (
+        f"resolve_extractor_provider() routes provider(s) "
+        f"{sorted(stray_routing)} that _PROVIDER_KEY_ENV does not register — a "
+        f"deployment holding only that provider's key resolves (None, None) "
+        f"and the capture lane silently skips extraction, which is the #8133 "
+        f"divergence on the resolver side. Register the provider (and its key "
+        f"env var) in _PROVIDER_KEY_ENV, or remove it from the routing order."
     )
 
     # The explicit-selector enum is a POLICY set, not the registry; it may only
