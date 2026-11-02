@@ -574,7 +574,52 @@ def _alert_provider_billing_exhausted(adapter, exc: BaseException,
 
 # ── Provider routing (D2) ──────────────────────────────────────────────────
 
+#: Provider → key env var. **THE ONE PROVIDER-KEY REGISTRY for the routing
+#: lanes** — `resolve_extractor_provider` (below) derives its key presence from
+#: this mapping rather than reading the env vars inline, so the provider set the
+#: v2 resolver honours and the provider set this mapping names cannot diverge.
+#: The empty-intersection guard and `_providers_can_serve` (ask lane) read it
+#: too.
+#:
+#: Why it is single-source (#8133): the defect this closes was two
+#: hand-maintained lists in the SAME file — this map, and three inline
+#: `os.environ.get("…_API_KEY")` reads inside the resolver. `venice` was in the
+#: first and absent from the lane gate; adding a provider to one list and
+#: forgetting the other is how it happened. A guard test
+#: (`test_resolve_extractor_provider_reads_no_inline_provider_keys`) now fails
+#: if any `*_API_KEY` name is read literally inside the resolver, and
+#: `test_the_v2_resolver_honours_exactly_the_provider_key_map` pins the
+#: map → behaviour direction.
+#:
+#: ⚠️ Adding an entry here registers the provider's KEY. It does not decide the
+#: ROUTING order (that is the `_chain` calls below), it does not add the
+#: provider to the explicit-selector enum (`_PROVIDER_NAMES` — a product
+#: question open on #8133), and it is not enough on its own for a hosted
+#: deployment: also register the provider in `tortoise.ingest._PROVIDERS`, in
+#: `sdk._SESSION_LLM_PROVIDER_PRIORITY` + `_SESSION_LLM_DEFAULT_MODELS`, and in
+#: the deploy mirror. `test_the_lane_gate_registry_covers_the_v2_extractor_
+#: registry` and friends fail loudly if one of those is skipped.
+_PROVIDER_KEY_ENV = {
+    "deepseek-direct": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "venice": "VENICE_API_KEY",
+}
+
+#: The providers `TORTOISE_EXTRACTOR_PROVIDER` accepts explicitly. ⚠️ NOT
+#: derived from `_PROVIDER_KEY_ENV`: whether `venice` is a pinnable primary or
+#: intentionally fallback-only is an OPEN product question recorded on #8133
+#: (the auto path returns it as a standalone primary — the tree's precedent,
+#: not a recorded decision). Nothing here may widen this tuple until that
+#: question is ruled; the two are allowed to differ in exactly this one
+#: direction, and `test_the_v2_resolver_honours_exactly_the_provider_key_map`
+#: states so instead of asserting equality.
 _PROVIDER_NAMES = ("deepseek-direct", "openrouter")
+
+
+def _provider_keys_present() -> dict[str, bool]:
+    """Which registered providers have their key set — derived from
+    `_PROVIDER_KEY_ENV`, the only place a provider's key var is named."""
+    return {p: bool(os.environ.get(env)) for p, env in _PROVIDER_KEY_ENV.items()}
 
 
 def resolve_extractor_provider() -> tuple[str, str | None]:
@@ -585,11 +630,16 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
     absent fails closed with ValueError (never silently route elsewhere);
     an invalid value lists the valid ones. Unset infers DEEPSEEK first
     (owner-confirmed production decision); no keys → (None, None) — the
-    caller gate fails closed as today."""
+    caller gate fails closed as today.
+
+    This function names the ROUTING ORDER, never the provider set: which
+    providers EXIST (and which env var each one's key lives in) is
+    `_PROVIDER_KEY_ENV`'s job, and the key presence below is derived from it
+    (#8133 — the venue where two lists drifted apart)."""
     explicit = os.environ.get("TORTOISE_EXTRACTOR_PROVIDER", "").strip().lower()
-    ds_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
-    or_key = bool(os.environ.get("OPENROUTER_API_KEY"))
-    vz_key = bool(os.environ.get("VENICE_API_KEY"))
+    _keys = _provider_keys_present()
+    ds_key = _keys["deepseek-direct"]
+    or_key = _keys["openrouter"]
 
     # Pilot #1549 — 3-provider rotation: the fallback chain extends to
     # venice when its key is configured. The ordered pool is
@@ -597,9 +647,7 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
     def _chain(primary: str, *ordered: str) -> tuple[str, list[str]]:
         avail = [primary]
         for p in ordered:
-            if ((p == "deepseek-direct" and ds_key)
-                    or (p == "openrouter" and or_key)
-                    or (p == "venice" and vz_key)):
+            if _keys.get(p, False):
                 avail.append(p)
         return (primary, avail)
 
@@ -627,7 +675,7 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
         return _chain("deepseek-direct", "openrouter", "venice")
     if or_key:
         return _chain("openrouter", "deepseek-direct", "venice")
-    if vz_key:
+    if _keys["venice"]:
         return _chain("venice", "openrouter", "deepseek-direct")
     return (None, None)
 
@@ -654,14 +702,9 @@ _SPEC_FAMILY_PROVIDERS = {
 }
 
 #: Ask-lane provider enum (``TORTOISE_ASK_PROVIDER`` valid values).
+#: ⚠️ `venice` is here and not in `_PROVIDER_NAMES` — the asymmetry is #8133's
+#: open product question, not an oversight to tidy away.
 _ASK_PROVIDERS = ("deepseek-direct", "openrouter", "venice")
-
-#: Provider → key env var (the empty-intersection guard names these).
-_PROVIDER_KEY_ENV = {
-    "deepseek-direct": "DEEPSEEK_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "venice": "VENICE_API_KEY",
-}
 
 #: Ordered provider chain per explicit primary (mirrors
 #: ``resolve_extractor_provider``'s ``_chain`` ordering).

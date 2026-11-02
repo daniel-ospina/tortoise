@@ -281,14 +281,18 @@ def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
     provider added there cannot land in one registry only (the #1549 venice
     drift).
 
-    ⚠️ Scope, stated so the guard is not over-claimed (review cycle 1): what is
-    pinned is the KEY MAP, not ``resolve_extractor_provider``, which reads
-    ``DEEPSEEK_API_KEY``/``OPENROUTER_API_KEY``/``VENICE_API_KEY`` INLINE
-    (``model_adapters.py:591-593``) rather than through this map. A provider
-    added by editing only the resolver's inline reads stays green here — that
-    residual is why ``test_a_venice_only_deployment_extracts`` asserts all
-    three readings agree end-to-end on a venice-only env, which a registry-only
-    drift cannot satisfy.
+    ⚠️ Scope, stated so the guard is not over-claimed: what is pinned HERE is
+    the KEY MAP, not ``resolve_extractor_provider``. The resolver used to read
+    ``DEEPSEEK_API_KEY``/``OPENROUTER_API_KEY``/``VENICE_API_KEY`` INLINE, so a
+    provider added by editing only those inline reads stayed green here — the
+    residual this test's docstring named. That residual is CLOSED: the resolver
+    now derives its key presence from ``_PROVIDER_KEY_ENV``
+    (``_provider_keys_present``), and
+    ``test_resolve_extractor_provider_reads_no_inline_provider_keys`` fails if
+    an ``*_API_KEY`` name reappears inside it, while
+    ``test_the_v2_resolver_honours_exactly_the_provider_key_map`` pins the
+    map → behaviour direction. So the map is now the single registration site
+    for the key axis, in both directions.
 
     ``test_sdk_priority_covers_all_registry_providers`` guards the other
     direction (ingest -> priority/hosted); this guards the key map -> lane gate.
@@ -304,6 +308,129 @@ def test_the_lane_gate_registry_covers_the_v2_extractor_registry():
         f"capture lane gate — a deployment configured with only those would "
         f"silently skip extraction (#8133); register the provider in "
         f"tortoise.ingest._PROVIDERS"
+    )
+
+
+def test_the_v2_resolver_honours_exactly_the_provider_key_map(no_provider_keys):
+    """#8133 (class fix): ``_PROVIDER_KEY_ENV`` is the SINGLE place a provider's
+    key var is named, and ``resolve_extractor_provider`` must honour exactly it
+    — no provider more, none less.
+
+    This is the direction the merged lane-gate guard could not see. Before the
+    unification the resolver read three ``os.environ.get("…_API_KEY")``
+    literals of its own, so adding a provider to ONE of the two lists (the map
+    or the literals) produced a resolver and a lane gate that disagreed again —
+    the #8133 defect re-created by the next provider, which is what makes this
+    a class fix rather than a one-off.
+
+    Measured both ways, one provider at a time:
+      * set ONLY that provider's key → the resolver returns that provider as
+        the PRIMARY (so the map's entries are all honoured), and
+      * the provider set the resolver honours is EXACTLY the map's keys (so a
+        provider that exists only as an inline read is caught).
+
+    ⚠️ Deliberately NOT asserted: that the resolver's set equals
+    ``_PROVIDER_NAMES`` (the explicit-selector enum). ``venice`` is in this map
+    and not in that enum on purpose — whether it is a pinnable primary or
+    fallback-only is an OPEN product question recorded on #8133, and a test
+    demanding equality would silently decide it.
+    """
+    from tortoise.model_adapters import (
+        _PROVIDER_KEY_ENV,
+        _PROVIDER_NAMES,
+        resolve_extractor_provider,
+    )
+
+    honoured = set()
+    for provider, key_env in _PROVIDER_KEY_ENV.items():
+        os.environ[key_env] = "sk-test-8133"
+        try:
+            primary, avail = resolve_extractor_provider()
+        finally:
+            del os.environ[key_env]
+        assert primary == provider, (
+            f"{provider!r} is registered in _PROVIDER_KEY_ENV (key {key_env}) "
+            f"but resolve_extractor_provider() returns {primary!r} on a "
+            f"{key_env}-only env — the v2 resolver and the key map have "
+            f"diverged again, the #8133 defect"
+        )
+        assert avail == [provider], (
+            f"{provider!r} alone should yield a one-provider pool, got {avail!r}"
+        )
+        honoured.add(primary)
+
+    assert honoured == set(_PROVIDER_KEY_ENV), (
+        f"resolve_extractor_provider() honours {sorted(honoured)}, but "
+        f"_PROVIDER_KEY_ENV registers {sorted(_PROVIDER_KEY_ENV)} — the "
+        f"resolver answers from a list other than the registry (#8133)"
+    )
+
+    # The explicit-selector enum is a POLICY set, not the registry; it may only
+    # ever be a SHRINKAGE of it (a provider registered but not yet pinnable).
+    stray = set(_PROVIDER_NAMES) - set(_PROVIDER_KEY_ENV)
+    assert not stray, (
+        f"_PROVIDER_NAMES names provider(s) {sorted(stray)} that "
+        f"_PROVIDER_KEY_ENV cannot resolve — TORTOISE_EXTRACTOR_PROVIDER would "
+        f"accept a value the resolver can never serve"
+    )
+
+
+def test_resolve_extractor_provider_reads_no_inline_provider_keys():
+    """#8133 (the structural half): the resolver must not name a provider key
+    env var in its own source — every ``*_API_KEY`` read goes through
+    ``_PROVIDER_KEY_ENV``.
+
+    A behavioural test cannot catch this: a hard-coded inline read that happens
+    to agree with the map today passes every assertion, and only diverges when
+    the NEXT provider is added to one list and not the other. So this test
+    reads the function's AST and fails on the literal itself.
+
+    ``TORTOISE_EXTRACTOR_PROVIDER`` is deliberately exempt — it is the
+    selector, not a provider key.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from tortoise import model_adapters
+
+    src = textwrap.dedent(
+        inspect.getsource(model_adapters.resolve_extractor_provider)
+    )
+    tree = ast.parse(src)
+
+    inline: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        # os.environ.get("X") / os.getenv("X") / environ.get("X")
+        is_environ_get = (
+            isinstance(fn, ast.Attribute)
+            and fn.attr in ("get", "getenv")
+        )
+        if not is_environ_get or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            inline.append(first.value)
+
+    api_key_reads = [n for n in inline if n.endswith("_API_KEY")]
+    assert not api_key_reads, (
+        f"resolve_extractor_provider() reads provider key(s) "
+        f"{sorted(api_key_reads)} as literals. Derive them from "
+        f"_PROVIDER_KEY_ENV instead (via _provider_keys_present()): a provider "
+        f"added to that registry would otherwise be invisible here and the two "
+        f"lists drift again — the exact #8133 root. Add the provider to "
+        f"_PROVIDER_KEY_ENV and let the resolver pick it up."
+    )
+
+    # Non-vacuity: the selector read is still there, so the scan is finding
+    # real calls rather than an empty AST.
+    assert "TORTOISE_EXTRACTOR_PROVIDER" in inline, (
+        "the AST scan found no os.environ.get call at all in "
+        "resolve_extractor_provider, so this guard is vacuous — the function "
+        "reads TORTOISE_EXTRACTOR_PROVIDER and the scan must see it"
     )
 
 
