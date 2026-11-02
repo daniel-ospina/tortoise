@@ -39,7 +39,7 @@ justify (the bundle prefix `docs/evidence/7949-capstone/`, landed by #9076, alre
 `core` for a PROBE-ONLY diff — measured, not assumed), and **add** one for the gate source
 (`tools/capstone_verdict_check.py`), because a GATE-ONLY diff selected no surface at all while
 the bundle prefix covers only the probe/evidence paths (pinned by
-`tests/test_ci_selection.py::test_the_capstone_change_selects_core_not_tier1`) — and add a pin
+`tests/test_ci_selection.py::test_the_capstone_gate_change_selects_core_not_tier1`) — and add a pin
 that no `CORE_ALSO` row is shadowed by a parent prefix; the surface re-cut the new caller forces
 (`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`); and two test-side edits —
 `tests/test_ci_check_repair.py` (the `gh` launcher stub) and
@@ -546,6 +546,48 @@ moment it carries a number it fails the ordering comparison — permanently, bec
 the file's OLDEST add-commit and that never moves. The new name is a new path, added after the
 record, and it passes. (Verified: `tools/capstone_preregistration_check.py --dir
 docs/evidence/7949-capstone` → `OK — … the ordering holds`, three evidence logs.)
+
+### The ordering rule this bundle's registration states is SUPERSEDED
+
+`PRE-REGISTRATION.md`'s exit list, item 2, tells an author that the commit that **adds** the
+registration must be **strictly older** than the commit that adds each `*.log` in this directory
+(`git log --diff-filter=A --format=%ct`) — a comparison of two sibling commits **inside one
+contribution**. That predicate is what the gate no longer enforces, for the reason `#10463` shows:
+a squash merge collapses the pair into ONE commit, so the same tree passed its PR checks and redded
+`main` minutes later (`#10468`). The ruled repair (`#10463` comment 6564634454, item 4) is **base
+ancestry**: the registration's earliest add-commit reachable from the **merge base** must strictly
+precede the log's add-commit, which means a change that lands the registration and its log **in one
+PR** is refused (`SAME_PR_REFUSAL` in the gate: *"it must land FIRST, in its own PR"*). The gate
+prints the ref it actually compared on its `ordering measured against:` line — read that line, not
+this note and not the registration's item 2.
+
+⛔ **The registration is NOT edited to say this, and its own terms are why.** `preregistration.json`
+pins the document by BYTES (`document_sha256`), asserted for **this** bundle by
+`tests/test_capstone_preregistration_9075.py::test_the_real_record_pins_the_real_document` (its
+`PREREG_DIR` is `docs/evidence/7949-capstone`, so an edited registration reds there at any checkout
+depth — the test reads no history), and enforced in the required CI step by the gate's own
+`DOCUMENT_SHA_PIN` arm in `tools/capstone_preregistration_check.py::check_machine_record`. An
+amendment is a NEW linked record — never an edit to the frozen one, which is the `#10463` ruling and the reason a
+silent edit is the failure the gate exists to catch in the first place. Leaving item 2 as the only
+statement of the rule is the other failure: a lane that reads the authoritative protocol, orders its
+two commits inside one PR exactly as criterion 2 asks, and lands is refused by a requirement the
+registration never states. **This section is the changes record that closes that gap** — item 2 is
+what the registering author wrote, base ancestry is what the gate enforces today, and
+`tests/test_capstone_preregistration_9075.py::test_the_bundle_records_the_superseded_ordering_rule_its_registration_states`
+keeps this record here (and the registration unedited).
+
+⚠️ **This sentence must cite a test that pins THIS bundle's bytes, not merely a test that exists.**
+An earlier revision of it cited
+`tests/test_s3_prior_ablation.py`'s `test_the_frozen_pre_registration_is_still_the_document_its_record_pins`
+(named, not addressed — it is a historical mention, not a command to run)
+— a real name in a real file, which pins the **5087** document (`tools/s3_prior_ablation.py`'s
+`PREREG_REL`) and therefore stays GREEN on an edited 7949 registration. That is worse than citing
+nothing: it turns "unchecked" into "checked and green" for exactly the lane this paragraph is
+warning. `test_every_test_name_the_evidence_bundles_cite_exists` resolves a citation's *existence*
+and structurally cannot see its *subject*, so this one is held by
+`tests/test_capstone_preregistration_9075.py::test_the_supersession_record_cites_the_pin_that_guards_this_bundles_bytes`
+instead — and reproduce it by hand by appending a byte to `PRE-REGISTRATION.md` and running the cited
+test (it must FAIL) before changing this line.
 
 ## The gate: two questions, two exits
 
