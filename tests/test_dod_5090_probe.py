@@ -1821,8 +1821,18 @@ def test_the_census_note_names_only_the_unresolved_producers(monkeypatch):
     assert not [n for n in row.notes if "UNCLASSIFIED" in n], row.notes
 
 
+def _cell_count(line: str) -> int:
+    """Pipes that SEPARATE cells in a GFM row: an escaped `\\|` is literal text.
+
+    `line.count("|")` counts the escape too, so a guard built on it either
+    passes an unescaped pipe's neighbour or — once the emitter escapes — reds a
+    correct row. Both directions were wrong, so the count is on the separator.
+    """
+    return line.replace("\\|", "").count("|")
+
+
 def test_the_census_note_does_not_break_the_markdown_table(monkeypatch):
-    """`_table` emits `Row.observed` RAW, so a note must not carry a pipe.
+    """`_table` emits `Row.observed` as ONE cell, so a note must not split it.
 
     GFM: an unescaped `|` inside a table cell is a cell separator. The row that
     carries the most evidence rendered with three spurious columns on the one
@@ -1844,10 +1854,40 @@ def test_the_census_note_does_not_break_the_markdown_table(monkeypatch):
     monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
     table = probe._table([probe.score_path_bullet()])
     lines = [ln for ln in table.splitlines() if ln.startswith("|")]
-    widths = {ln.count("|") for ln in lines}
+    widths = {_cell_count(ln) for ln in lines}
     assert len(widths) == 1, (
         f"the table's row has a different cell count than its header: {widths} — "
-        f"a note embedded a `|`: {lines}")
+        f"a note split a cell: {lines}")
+
+
+def test_the_table_escapes_a_pipe_in_every_row_not_only_row_two():
+    """The docstring above says "any future note is covered"; this is that claim.
+
+    It was not: the guard built exactly ONE row (`score_path_bullet`), while
+    three of the four rows carry text the tool does not author — row 1's
+    `shipped["files"]` config lines and row 4's `open:` / `restates the DoD
+    bullet` lines read out of `V1_SURFACES`, one of which,
+    `docs/architecture/STORAGE-ARCHITECTURE.md`, keeps its V1 discussion in
+    markdown TABLE rows (pipe-bearing by construction). Measured at `d0f31cfa4`:
+    no live `open:` line carries a `|`, so this is a latent hole and an
+    over-claiming guard, not a current malformation — which is exactly why the
+    falsifier drives the EMITTER with all four bullet numbers instead of
+    trusting today's note text.
+    """
+    rows = [
+        probe.Row(bullet=n, text=f"a bullet | with a pipe {n}", verdict="MET",
+                  command=f"uv run python tools/dod_5090_probe.py --row {n}",
+                  observed=f"a note | with a pipe {n}")
+        for n in (1, 2, 3, 4)
+    ]
+    table = probe._table(rows)
+    lines = [ln for ln in table.splitlines() if ln.startswith("|")]
+    widths = {_cell_count(ln) for ln in lines}
+    assert len(widths) == 1, (
+        f"a pipe in a row's text or note split a cell: {widths} — {lines}")
+    # Escaped, not silently DROPPED: the pipe survives as text, so the rendered
+    # cell still reads what the note says.
+    assert all("\\|" in ln for ln in lines[2:]), lines
 
 
 

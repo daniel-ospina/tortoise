@@ -2099,10 +2099,24 @@ def _head() -> str:
         return f"UNMEASURED({type(e).__name__}: {e})"
 
 
+def _cell(value: str) -> str:
+    """One GFM table cell: a literal `|` is written `\\|` (GFM §4.10, Ex. 200).
+
+    The escaping belongs to the EMITTER, not to each note. Three of the four
+    rows carry text this tool does not author — `shipped["files"]` config lines,
+    and `V1_SURFACES` doc lines, one of which is a markdown document whose V1
+    discussion lives in *table rows*. A per-note rule has to be remembered by
+    every `notes` producer, so it is only ever as wide as the last person to
+    remember it; escaping here covers a row added tomorrow.
+    """
+    return str(value).replace("|", "\\|")
+
+
 def _table(rows: list[Row]) -> str:
     out = ["| # | bullet | verdict | evidence |", "|---|---|---|---|"]
     for r in rows:
-        out.append(f"| {r.bullet} | {r.text} | **{r.verdict}** | {r.observed} |")
+        out.append(
+            f"| {r.bullet} | {_cell(r.text)} | **{r.verdict}** | {_cell(r.observed)} |")
     # The command is NOT decoration: `#10465` scores a bullet WITH its command,
     # so a row printed without one would be unscored evidence in the one place
     # a reader actually looks.
