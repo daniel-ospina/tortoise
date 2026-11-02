@@ -3322,6 +3322,11 @@ def test_the_label_assertion_other_files_cite_lands_on_it():
     comments) plus the mirror test — globbing every file under `tests/` for this class would read
     ~48 MB per run and cover nothing further.
 
+    ⚠️ The mirror test cites the assertion by SYMBOL, not by line (it was re-pointed in #10525's
+    "two more unpinned tree cites made symbol-form" commit, because a `:NNNN` cite here re-staled the
+    moment this module's docstring grew). It is therefore still SCANNED — a new `:NNNN` from it reds
+    `unknown` — but it is not in `known`, because there is no number left for this pin to land.
+
     Non-vacuity (measured): the pre-fix refs red on the landing check — the old number is an empty
     line — and re-pointing only SOME of the five reds on the agreement check.
     """
@@ -3333,11 +3338,16 @@ def test_the_label_assertion_other_files_cite_lands_on_it():
         ".github/workflows/availability-watchdog.yml",
         ".github/workflows/ci-check-repair.yml",
         ".github/workflows/ci-queue-health.yml",
-        "tests/test_reporting_workflow_concurrency.py",
     }
     scanned = [
         *(REPO_ROOT / ".github" / "workflows").glob("*.yml"),
         *(REPO_ROOT / ".github" / "workflows").glob("*.yaml"),
+        # ⛔ THE MIRROR IS STILL SCANNED BUT NO LONGER IN `known`: it cites this file by
+        # SYMBOL now (`::test_the_os_label_is_opt_in_and_no_fallback_arm_can_drop_it`), which
+        # cannot re-stale, so there is no number here for this pin to check — and requiring it in
+        # `known` made the pin over a citation that no longer exists (#10525, the `stale` arm
+        # redded). Keeping it in `scanned` is what keeps that true: re-introducing a `:NNNN` cite
+        # from the mirror lands in `unknown` and forces a decision instead of drifting quietly.
         REPO_ROOT / "tests" / "test_reporting_workflow_concurrency.py",
     ]
     ref = re.compile(r"tests/test_ci_runner_x64_install\.py:(\d+)")
@@ -4614,11 +4624,13 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # tests that keep the ruled verdict the default), then 2567 by its cycle-18 fix of the
         # anti-rot loop (it now runs while the arm is DISARMED, so a disclosure for an ordinarily
         # ordered log is no longer accepted silently on the default path, plus the two tests that
-        # pin both halves) — the pin landing
+        # pin both halves), then 2572 by the merge of #10525/#10554 (the amended pre-registration
+        # history claims and the S3 re-measurement added five lines above the pinned sentence) —
+        # the pin landing
         # rather than drifting, because a plausible offset is what it exists to refuse. ⛔
         # Re-derive this number, never delete the entry: the whole point is that a citation which
         # names a line that does not say it is a dead pointer.
-        ("tests/test_capstone_preregistration_9075.py", 2567):
+        ("tests/test_capstone_preregistration_9075.py", 2572):
             r"test_the_changes_job_carries_no_job_scope_env",
         # the four fleet observers' prose (`:25-26`): the inventory row it contrasts — the
         # moving alias the observers must NOT pin to, which the version pin below it replaces
