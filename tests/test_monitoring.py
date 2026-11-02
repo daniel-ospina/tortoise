@@ -3517,7 +3517,8 @@ class TestStallWatchdog:
 
         The old ``_HEARTBEAT_TASK_DEAD`` was a one-way latch, so one ticker
         death disarmed the ceiling for the whole process even after
-        ``_start_liveness`` installed a fresh ticker (hosted_api.py:1957-1964).
+        ``_start_liveness`` installed a fresh ticker
+        (``hosted_api.py::_start_liveness``).
         Every end state of the CURRENT task must disarm, and a re-armed running
         ticker must re-arm the ceiling.
         """
@@ -3651,8 +3652,8 @@ class TestStallWatchdog:
 
         ``min_ticks`` exists so a slow BOOT is not mistaken for a wedge, which
         is about the first seconds. A loop that wedges during startup — only the
-        synthetic tick at hosted_api.py:1962 (``heartbeat_record()``), never the
-        real ticker's second
+        synthetic tick at ``hosted_api.py::_start_liveness``
+        (``heartbeat_record()``), never the real ticker's second
         tick — never advances ``ticks``, so it hung indefinitely with the
         ceiling armed. Past the ceiling the boot rationale no longer applies.
         """
