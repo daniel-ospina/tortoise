@@ -34,6 +34,10 @@ WHAT THIS PINS
    percentage claim it would lose.
 5. The per-session percentage swings that DO exceed the drift are stated, and every percentage
    the record attributes to a session is one the logs' own per-session tables support.
+6. The recorded log is LOADED from either side of the withdrawal the #10463 ruling orders, so
+   neither merge order (this PR first, or #10544 first) collects zero pins.
+7. The bundle README scopes that withdrawal to the RECORDED run's log — the ordering half reads
+   no log of that run, and it does read this run's log, measured from the guard's own glob.
 
 Every number is re-derived from `s3-ablation-a1075dfc.log` and `s3-ablation-a83c23a8.log`; none
 is hardcoded, so a future edit to either log reds these pins instead of silently re-basing them.
@@ -81,6 +85,7 @@ def _resolve_recorded_log(evidence: Path) -> Path:
 RECORDED_LOG = _resolve_recorded_log(EVIDENCE)
 THIS_LOG = EVIDENCE / "s3-ablation-a83c23a8.log"
 RECORD = EVIDENCE / "REMEASUREMENT-a83c23a8.md"
+README = EVIDENCE / "README.md"
 
 #: The document's minus sign for deltas is U+2212, not ASCII hyphen — match both.
 MINUS = r"[-\u2212]"
@@ -153,6 +158,14 @@ def logs() -> dict[str, object]:
         "recorded_sessions": _per_session_deltas(RECORDED_LOG),
         "this_sessions": _per_session_deltas(THIS_LOG),
     }
+
+
+@pytest.fixture(scope="module")
+def readme_text() -> str:
+    """The bundle README's prose with runs of whitespace collapsed, as `record_text` does."""
+    text = README.read_text()
+    assert text, f"{README.name} is empty"
+    return re.sub(r"\s+", " ", text)
 
 
 @pytest.fixture(scope="module")
@@ -370,4 +383,66 @@ def test_every_session_percentage_the_record_states_is_the_logs_arithmetic(
     assert any(abs(float(number)) > drift_pct for _s, _sign, number in stated), (
         f"at least one stated per-session swing must exceed the {drift_pct:.1f} % drift, or "
         f"the record's qualification has no counter-example behind it"
+    )
+
+
+def _ordering_glob() -> str:
+    """The ordering half's own glob, read off the guard instead of copied from it.
+
+    Same loader shape as the sibling module's `_checker()`: a second copy of the literal here
+    would be the two-copies-that-can-disagree shape this bundle refuses for its bars.
+    """
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "_capstone_preregistration_check_for_10554",
+        EVIDENCE.parent.parent.parent / "tools" / "capstone_preregistration_check.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.EVIDENCE_LOG_GLOB
+
+
+def test_the_ordering_half_reads_this_log_and_not_the_withdrawn_one(
+    readme_text: str,
+) -> None:
+    """The README's claim about WHICH logs the ordering half reads must be the true one.
+
+    The #10463 ruling withdraws the RECORDED run's log (item 3), so the bundle README (rewritten
+    by #10544) originally said the ordering half "now examines **no** log for this bundle — the
+    log is under `withdrawn/`, outside its non-recursive glob". That is true of the recorded run
+    and false as a statement about the bundle the moment THIS PR adds the re-measurement's log at
+    the top level: the guard's non-recursive glob does see `s3-ablation-a83c23a8.log`, and that is
+    the log whose add-commit carries the ordering this record claims. A README that says "no log"
+    overstates the withdrawal in the direction that hides the re-measurement's own provenance.
+
+    Both halves are pinned against the guard's own `EVIDENCE_LOG_GLOB`, so the sentence cannot
+    drift from what the guard reads: the re-measurement's log IS in the globbed set, the withdrawn
+    copy is NOT, and the README must still say the withdrawal covers the recorded run specifically
+    (the pre-fix universal is refused by name).
+    """
+    glob = _ordering_glob()
+    scanned = {path.name for path in EVIDENCE.glob(glob)}
+
+    assert THIS_LOG.name in scanned, (
+        f"the ordering half's glob {glob!r} no longer reaches {THIS_LOG.name}, which is the log "
+        f"the record's ordering claim is made from; it globs {sorted(scanned)}"
+    )
+    assert RECORDED_LOG_NAME not in scanned, (
+        f"the withdrawn log is back inside the globbed set {sorted(scanned)} — it must stay "
+        f"under `withdrawn/` (#10463 item 3), which the non-recursive glob excludes"
+    )
+
+    assert re.search(r"\*\*no\*\* log of the recorded run", readme_text), (
+        "the README must scope the withdrawal to the RECORDED run's log: the ordering half reads "
+        f"no log of that run ({RECORDED_LOG_NAME} is under `withdrawn/`), but it does read "
+        f"{THIS_LOG.name}, so an unscoped \"no log\" is a false claim about the instrument"
+    )
+    assert not re.search(r"\*\*no\*\* log (?:for|of) this bundle", readme_text), (
+        "the README says the ordering half examines no log for THIS BUNDLE, and it examines "
+        f"{THIS_LOG.name} (measured from the guard's own glob above) — say which run's log is "
+        "withdrawn instead of overstating the withdrawal to the whole bundle"
     )

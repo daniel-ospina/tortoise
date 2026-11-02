@@ -337,8 +337,9 @@ def test_the_withdrawn_log_still_hashes_to_the_digest_its_note_publishes(probe):
     tracked file, so it is still editable — and an edit would leave the published digest
     describing bytes that no longer exist, i.e. a FALSE evidence record on the one artifact whose
     whole purpose is that these numbers were measured once. Nothing else looks: the guard globs
-    `*.log` non-recursively, so `withdrawn/` is invisible to it (`evidence logs: 0`), which is
-    exactly why the ruling is enforced here and nowhere else.
+    `*.log` non-recursively, so `withdrawn/` is invisible to it (the withdrawn copy is never
+    counted in its `evidence logs:` line), which is exactly why the ruling is enforced here and
+    nowhere else.
 
     Prose versus BYTES, not a third copy of the constant: the expectation is parsed out of the note
     so a re-cut note and a re-cut log have to move together (the two-copies-that-can-disagree
