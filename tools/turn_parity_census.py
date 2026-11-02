@@ -226,6 +226,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import contextlib
+import gzip
 import json
 import os
 import re
@@ -352,7 +353,8 @@ _UNDECLINABLE_FIELDS = frozenset({"content", "speaker"})
 #: defect rather than as a limit of the source. The vector is a pure function
 #: of `content` (same rule as `content_hash`), so the transcript is not what is
 #: being waived. It is still printed as NOT COMPARED.
-_LOCAL_RECORD_DECLARED_ABSENT = ("status", "created_at", "embedding")
+_LOCAL_RECORD_DECLARED_ABSENT = ("status", "created_at", "point_kind",
+                                "embedding")
 
 #: The field names a record leg may declare absent: the compared columns plus
 #: `embedding` (compared by `_embedding_parity`, not by `_EXACT_FIELDS`). A name
@@ -360,8 +362,16 @@ _LOCAL_RECORD_DECLARED_ABSENT = ("status", "created_at", "embedding")
 _DECLARABLE_FIELDS = frozenset(
     {rcol for _, rcol, _ in _EXACT_FIELDS} | {"embedding"})
 
-#: The day-addressed capture-log files the local record is made of.
-_LOCAL_RECORD_GLOB = "*.jsonl"
+#: The surfaces the local record is made of. ⛔ TWO, not one (review P1):
+#: the seal (`tools/seal_session_events.py`, `DEFAULT_KEEP_DAYS = 7`) MOVES
+#: every day older than the window to `archive/<day>.jsonl.gz` and unlinks the
+#: plain file, and `tortoise/session_events_drain.py` reads both for that
+#: reason. A leg that read only `*.jsonl` made every archived day silently
+#: invisible — every graph turn older than the seal window would report
+#: `missing_in_record` (the purge's own pre-cutover population, i.e. the gate
+#: could never open) and the duplicate-window arm would silently skip a session
+#: whose first window had been sealed.
+_LOCAL_RECORD_GLOBS = ("*.jsonl", "archive/*.jsonl.gz")
 
 
 class CensusError(Exception):
@@ -761,13 +771,21 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
         raise CensusError(
             f"the local record directory does not exist ({root}) — the record "
             "cannot be read, so an absence is NOT established")
-    files = sorted(root.glob(_LOCAL_RECORD_GLOB))
+    files: list[Path] = []
+    for pattern in _LOCAL_RECORD_GLOBS:
+        files.extend(root.glob(pattern))
+    files.sort()
+    # The tail is only tolerance-able on the newest PLAIN day file: a `.gz`
+    # archive is written whole and verified by the seal, so a torn archive is
+    # corruption, never an in-flight append.
+    plain = [f for f in files if not f.name.endswith(".gz")]
+    newest_plain = plain[-1] if plain else None
     if not files:
         raise CensusError(
-            f"no {_LOCAL_RECORD_GLOB} files under {root} — the local record is "
-            "EMPTY, and an empty record is not evidence of parity (it is the "
-            "shape that would certify deleting every turn). An absence is NOT "
-            "established")
+            f"no record files under {root} ({' / '.join(_LOCAL_RECORD_GLOBS)}) "
+            "— the local record is EMPTY, and an empty record is not evidence "
+            "of parity (it is the shape that would certify deleting every "
+            "turn). An absence is NOT established")
 
     try:
         from tortoise.sdk import (
@@ -787,13 +805,29 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     parsed = 0
     torn_tail: list[dict] = []
     for path in files:
-        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        try:
+            if path.name.endswith(".gz"):
+                raw = gzip.decompress(path.read_bytes()).decode(
+                    "utf-8", "replace").splitlines()
+            else:
+                raw = path.read_text(encoding="utf-8",
+                                     errors="replace").splitlines()
+        except Exception as exc:
+            # A sealed day that cannot be decompressed is an unreadable side —
+            # `session_events_drain` treats it the same way. Absence is NOT
+            # established for the sessions it may hold.
+            raise CensusError(
+                f"the local record's file {path.name} could not be read "
+                f"({type(exc).__name__}: {exc}) — the record cannot be read, "
+                "so an absence is NOT established") from exc
         nonempty = [(n + 1, ln) for n, ln in enumerate(raw) if ln.strip()]
         for pos, (lineno, line) in enumerate(nonempty):
             try:
                 entry = json.loads(line)
             except Exception as exc:
-                at_tail = (path == files[-1] and pos == len(nonempty) - 1)
+                at_tail = (newest_plain is not None
+                           and path == newest_plain
+                           and pos == len(nonempty) - 1)
                 where = f"{path.name}:{lineno}"
                 if not at_tail:
                     raise CensusError(
@@ -871,22 +905,27 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
                 "node_key": key,
                 "content": framed,
                 "speaker": _capture_turn_role_text(framed)[0],
-                "point_kind": "event",
                 # Declared absent, never fabricated: see
-                # _LOCAL_RECORD_DECLARED_ABSENT.
+                # _LOCAL_RECORD_DECLARED_ABSENT. `point_kind` is here because
+                # the local record has no kind to corroborate — writing the
+                # constant 'event' and then LISTING it as compared (review P2)
+                # claimed a comparison the source never performed.
                 "status": None,
                 "created_at": None,
+                "point_kind": None,
                 "embedding": None,
                 "is_episodic": True,
             }
     return {
         "rows_by_key": rows_by_key,
         "non_turn_shaped": 0,
+        "leg": "local",
+        "record_dir": str(root),
+        "files": [str(p.relative_to(root)) for p in files],
         "declared_absent": list(_LOCAL_RECORD_DECLARED_ABSENT),
         "sessions": len(conversations),
         "lines_parsed": parsed,
         "torn_tail": torn_tail,
-        "record_dir": str(root),
     }
 
 
@@ -1093,7 +1132,18 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
         },
         "record": {"turn_rows_total": len(rows),
                    "episodic_rows_not_turn_shaped":
-                       record["non_turn_shaped"]},
+                       record["non_turn_shaped"],
+                   # WHICH authority this verdict came from: a hosted run and a
+                   # local run must not be indistinguishable in the artifact
+                   # (review P2) — the whole point of the finding is that the
+                   # two are not the same store.
+                   **({"leg": "local", "dir": record.get("record_dir"),
+                       "files": record.get("files"),
+                       "sessions": record.get("sessions"),
+                       "lines_parsed": record.get("lines_parsed"),
+                       "torn_tail": record.get("torn_tail") or []}
+                      if record.get("leg") == "local" else
+                      {"leg": "hosted"})},
         "parity": {
             "clean_sessions": clean,
             "failed_sessions": failed,
@@ -1173,27 +1223,38 @@ def main(argv: list[str] | None = None) -> int:
     if args.sample < 0:
         parser.error("--sample must be >= 0")
 
-    if args.local_record_dir and args.record_dsn:
-        sys.stderr.write(
-            "turn_parity_census: --local-record-dir and --record-dsn are "
-            "mutually exclusive — the census compares against ONE record, and "
-            "silently preferring one would measure the wrong authority.")
-        return 1
-    record_dsn = args.record_dsn or os.environ.get("TORTOISE_RECORD_DSN", "")
-    if not record_dsn and not args.local_record_dir:
-        sys.stderr.write("turn_parity_census: no record leg — pass "
-                         "--record-dsn / set TORTOISE_RECORD_DSN for the "
-                         "hosted record, or --local-record-dir for the local "
-                         "one. The record cannot be read, so an absence is NOT "
-                         "established.\n")
-        return 1
-    if record_dsn and (not args.org_id or not args.graph_id):
-        sys.stderr.write(
-            "turn_parity_census: --org-id/--graph-id (or "
-            "TORTOISE_RECORD_ORG_ID/TORTOISE_RECORD_GRAPH_ID) are required — "
-            "the census must be filed under the deployment's real tenant, "
-            "never a guess.\n")
-        return 1
+    if args.local_record_dir:
+        # The local leg is tenant-less, so an AMBIENT `TORTOISE_RECORD_DSN`
+        # must not reach it (review P1): only an explicitly passed
+        # `--record-dsn` is an ambiguity worth refusing. Refusing on the
+        # ambient variable made the documented flag unusable on any box that
+        # exports the DSN the repo's own `.env.example` sets.
+        if args.record_dsn:
+            sys.stderr.write(
+                "turn_parity_census: --local-record-dir and --record-dsn are "
+                "mutually exclusive — the census compares against ONE record, "
+                "and silently preferring one would measure the wrong "
+                "authority.\n")
+            return 1
+        record_dsn = ""
+    else:
+        record_dsn = args.record_dsn or os.environ.get("TORTOISE_RECORD_DSN", "")
+        if not record_dsn:
+            sys.stderr.write(
+                "turn_parity_census: no record leg — pass --record-dsn / set "
+                "TORTOISE_RECORD_DSN for the hosted record, or "
+                "--local-record-dir for the local one. The record cannot be "
+                "read, so an absence is NOT established.\n")
+            return 1
+        # The tenant is the HOSTED leg's requirement only: the local record is
+        # keyed by session id and carries no tenant at all.
+        if not args.org_id or not args.graph_id:
+            sys.stderr.write(
+                "turn_parity_census: --org-id/--graph-id (or "
+                "TORTOISE_RECORD_ORG_ID/TORTOISE_RECORD_GRAPH_ID) are "
+                "required — the census must be filed under the deployment's "
+                "real tenant, never a guess.\n")
+            return 1
 
     try:
         graph = read_graph_turns(args.uri, args.db_path, args.graph_name)

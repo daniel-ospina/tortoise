@@ -1093,7 +1093,7 @@ def test_the_local_leg_keys_by_position_and_uses_the_writers_own_frame(
     assert record["rows_by_key"]["s1_t1"]["speaker"] == "assistant"
     # The one declaration this leg makes, stated by name and never faked.
     assert record["declared_absent"] == ["status", "created_at",
-                                        "embedding"]
+                                        "point_kind", "embedding"]
 
 
 def test_local_parity_passes_when_the_record_holds_every_turn(tmp_path):
@@ -1107,9 +1107,12 @@ def test_local_parity_passes_when_the_record_holds_every_turn(tmp_path):
     assert report["verdict"] == "CLEAN"
     assert report["dry_run"]["would_delete_turn_nodes"] == 2
     # The weaker comparison is VISIBLE in the artifact, never a silent pass.
-    assert report["declared_absent"] == ["created_at", "embedding", "status"]
-    assert report["compared_fields"] == ["key", "content", "speaker",
-                                         "point_kind"]
+    assert report["declared_absent"] == ["created_at", "embedding",
+                                         "point_kind", "status"]
+    assert report["compared_fields"] == ["key", "content", "speaker"]
+    # WHICH authority produced this verdict is in the artifact (review P2).
+    assert report["record"]["leg"] == "local"
+    assert report["record"]["dir"].endswith(str(tmp_path.resolve())[-8:])
 
 
 def test_a_record_may_not_declare_the_transcript_absent():
@@ -1205,12 +1208,66 @@ def test_the_local_leg_reads_only_the_keys_it_was_asked_for(tmp_path):
     assert list(record["rows_by_key"]) == ["s1_t1"]
 
 
-def test_the_cli_refuses_an_ambiguous_record_choice(tmp_path, monkeypatch):
+def test_the_cli_refuses_an_explicitly_ambiguous_record_choice(tmp_path):
     """Two record legs is not a preference — it is a wrong-authority risk."""
-    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x/y")
     code = tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--record-dsn", "postgresql://x/y",
+                     "--org-id", "o", "--graph-id", "g",
                      "--local-record-dir", str(tmp_path)])
     assert code == 1
+
+
+def test_an_AMBIENT_record_dsn_does_not_block_the_local_leg(tmp_path,
+                                                            monkeypatch):
+    """Review P1: the flag must work on a box that exports the documented DSN."""
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x/y")
+    monkeypatch.delenv("TORTOISE_RECORD_ORG_ID", raising=False)
+    monkeypatch.delenv("TORTOISE_RECORD_GRAPH_ID", raising=False)
+    _local_record(tmp_path, {"s1": _conversation(("user", "hi"))})
+    # The graph side is unreachable here, so the leg is reached (exit 3);
+    # what matters is that it is NOT the usage refusal (exit 1).
+    assert tpc.main(["--db-path", str(tmp_path / "g.db"),
+                     "--local-record-dir", str(tmp_path)]) == 3
+
+
+def test_a_sealed_archive_day_is_read_not_silently_invisible(tmp_path):
+    """Review P1: the seal MOVES old days to archive/<day>.jsonl.gz."""
+    import gzip
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    sealed = {"session_id": "s_old",
+              "conversation": _conversation(("user", "old hi"))}
+    (archive / "2026-10-01.jsonl.gz").write_bytes(
+        gzip.compress((json.dumps(sealed) + "\n").encode()))
+    _local_record(tmp_path, {"s_new": _conversation(("user", "new hi"))})
+    record = tpc.read_local_record_turns(tmp_path)
+    assert sorted(record["rows_by_key"]) == ["s_new_t0", "s_old_t0"]
+    assert record["files"] == ["2026-11-02.jsonl",
+                              "archive/2026-10-01.jsonl.gz"]
+
+
+def test_a_corrupt_archive_refuses_rather_than_hiding_a_session(tmp_path):
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-10-01.jsonl.gz").write_bytes(b"not gzip")
+    with pytest.raises(tpc.CensusError, match="could not be read"):
+        tpc.read_local_record_turns(tmp_path)
+
+
+def test_a_turn_past_the_capture_cap_uses_the_writers_clipped_text(tmp_path):
+    """Review P2: the WINDOW half of the stored-text rule must be pinned."""
+    from tortoise.sdk import _capture_turn_texts_with_redactions
+    long_body = "x" * 6001
+    conversation = _conversation(("user", long_body))
+    _local_record(tmp_path, {"s1": conversation})
+    record = tpc.read_local_record_turns(tmp_path)
+    stored = _capture_turn_texts_with_redactions(
+        __import__("tortoise.sdk", fromlist=["_capture_turn_window"])
+        ._capture_turn_window(conversation))[0][0]
+    assert len(stored) < len(long_body)  # the window really clipped it
+    assert record["rows_by_key"]["s1_t0"]["content"] == stored
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1", content=stored)}
+    assert tpc.census({"nodes": nodes}, record, sample=5)["verdict"] == "CLEAN"
 
 
 def test_the_cli_reaches_exit_three_when_the_local_record_refuses(tmp_path,
@@ -1233,7 +1290,7 @@ def test_the_local_leg_redacts_like_the_writer_so_a_secret_is_not_a_mismatch(
     stored = _capture_turn_texts_with_redactions(conversation)[0][0]
     assert record["rows_by_key"]["s1_t0"]["content"] == stored
     # …and it is NOT the raw re-frame, which is what made this a false refusal.
-    assert "localhost:6379" not in stored or stored == record["rows_by_key"]["s1_t0"]["content"]
+    assert "falkordb@localhost" not in record["rows_by_key"]["s1_t0"]["content"]
 
 
 def test_a_vector_bearing_graph_node_certifies_because_embedding_is_declared(
