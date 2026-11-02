@@ -5070,6 +5070,33 @@ def metering_get_usage(cp, org_id: str, period_start: str) -> dict:
     }
 
 
+def metering_get_capture(cp, org_id: str, period_start: str) -> dict | None:
+    """Extraction TOKEN usage for an org's window STARTING at *period_start*
+    (#5331) — the supabase-mode READ path for ``metering.get_capture_usage``.
+
+    Returns ``None`` when NO row exists for the window, which is a different
+    fact from a row of zeros: #5045 records a capture whose extraction reported
+    no provider usage as ZERO tokens, and that zero IS a reading. An allowance
+    gate must be able to tell "nobody has captured" (no reading → fail closed)
+    from "captured, reported nothing" (a real zero → allowed), so this reader
+    keeps the distinction the sibling ``metering_get_usage`` flattens.
+    """
+    rows = cp.query(
+        "metering_records",
+        select=["capture_calls", "capture_tokens_in", "capture_tokens_out"],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "capture_calls": int(row.get("capture_calls") or 0),
+        "capture_tokens_in": int(row.get("capture_tokens_in") or 0),
+        "capture_tokens_out": int(row.get("capture_tokens_out") or 0),
+    }
+
+
 def metering_increment_ask(cp, org_id: str, period_start: str,
                            period_end: str, *, calls: int = 1,
                            tokens_in: int = 0, tokens_out: int = 0,

@@ -4160,3 +4160,59 @@ class TestQueryAllKeysetWalk:
         with pytest.raises(RuntimeError, match="not a list of rows"):
             SupabaseControlPlane.query_all(
                 _NotAList(), "analytics_events", select=["id"])
+
+
+# ── #9567 D11/D12: the capture-token READER, in the mode production runs ───
+#
+# ``metering_get_capture`` is 27 lines implementing the distinction the whole
+# fail-closed extraction allowance rests on: NO ROW is "no reading" (the gate
+# must refuse), while a row of ZEROS is a real reading (#5045: a capture whose
+# extraction reported no provider usage records zero tokens). The registry-mode
+# test in ``tests/test_allowance_gate.py`` cannot cover this branch, because the
+# test lane runs registry mode — so a regression that flattened ``None`` into a
+# dict of zeros would pass every other test and silently DISARM the allowance.
+
+
+class _StubCp:
+    def __init__(self, rows):
+        self._rows = rows
+        self.calls = []
+
+    def query(self, table, select=None, filters=None):
+        self.calls.append({"table": table, "select": select, "filters": filters})
+        return self._rows
+
+
+def test_metering_get_capture_returns_none_when_no_row_exists():
+    from tortoise.supabase_control import metering_get_capture
+
+    assert metering_get_capture(_StubCp([]), "org-x", "2026-10-01") is None
+
+
+def test_metering_get_capture_returns_zeros_for_a_recorded_zero_row():
+    from tortoise.supabase_control import metering_get_capture
+
+    row = metering_get_capture(
+        _StubCp([{"capture_calls": 0, "capture_tokens_in": 0,
+                  "capture_tokens_out": 0}]), "org-x", "2026-10-01")
+    assert row == {"capture_calls": 0, "capture_tokens_in": 0,
+                   "capture_tokens_out": 0}
+
+
+def test_get_capture_usage_reads_no_reading_from_an_absent_row(monkeypatch):
+    """The supabase branch of ``get_capture_usage``: absent row ⇒ measured False."""
+    from tortoise import metering
+
+    monkeypatch.setattr(metering, "_supabase_mode", lambda: True)
+    from datetime import UTC, datetime
+
+    monkeypatch.setattr(
+        metering, "_current_period",
+        lambda org_id: metering.MeteringPeriod(
+            start=datetime(2026, 10, 1, tzinfo=UTC),
+            end=datetime(2026, 11, 1, tzinfo=UTC)))
+    monkeypatch.setattr(
+        "tortoise.supabase_control.get_control_plane", lambda: _StubCp([]))
+    usage = metering.get_capture_usage("org-x")
+    assert usage["measured"] is False
+    assert usage["unmeasured_reason"] == "absent"

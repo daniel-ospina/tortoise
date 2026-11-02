@@ -1,0 +1,582 @@
+"""The per-DIMENSION allowance gate — the ruled storage/LLM dimensions (#5331).
+
+**Why this module exists.** The plan's storage allowance was measured against the
+node-count dimension: ``quota.enforce_org_limit`` counts NODES and refuses at
+``max_points``. The owner ruled the customer-facing unit is **bytes** — storage in
+MB/GB for Postgres, MB for the graph, and LLM usage in tokens for extraction
+(``#4495``, ``#5331``) — and the shipped gate counts none of them. So the meter
+and the gate disagree about what is being sold, which is why the capstone item
+could not be measured (#9567 D11/D12).
+
+**⛔ THIS MODULE GATES; IT DOES NOT PRICE.** It sets no allowance, no rate, no
+tier boundary, no overage and no retention window. Every allowance value is the
+owner's and is, today, ``TBD-BY-MEASUREMENT`` under the ``#4051`` ruling: **no
+production resolver emits any ``ALLOWANCE_KEYS`` value**, so on every live path
+every dimension below is UNCONFIGURED and the gate is inert. It refuses nothing
+until someone configures a limit — which is the ordering the storage architecture
+requires (*"the meter must be wired into the gate before any allowance is
+configured"*, ``docs/architecture/STORAGE-ARCHITECTURE.md``: §"The byte path").
+
+**⛔ ONE REGISTRY, NOT TWO (#1178).** The dimensions are NOT redeclared here.
+``cost_dimensions.DIMENSIONS`` declares them (``graph_storage``,
+``postgres_storage``, ``capture_extraction``); this module only states, per
+declared dimension, **which resolved-limits key carries its allowance** and
+**which meter reads its usage**. ``_dimension()`` resolves every entry against
+that registry at import, so a renamed or removed dimension is a hard import
+failure rather than a gate that silently stops gating. A test pins the same
+invariant.
+
+**Three outcomes per configured dimension, and only three:**
+
+* **under the allowance** → allowed (the write proceeds);
+* **at/over the allowance** → ``QuotaExceededError``, naming the dimension, with
+  ``used``/``limit`` in the dimension's own unit and the meter's honesty attached
+  (a sampling estimate must not be presented as exact);
+* **configured, but the meter yields NO READING** (never measured, measurement
+  error, or a reading older than the dimension's stated bound) →
+  ``QuotaCheckError``. Never a silent pass — the #686 fail-closed posture, and
+  never a bare exception escaping as an unmapped 500 (the #4051 lesson).
+
+An UNCONFIGURED dimension (key absent) is UNLIMITED by construction: no invented
+cap, and the dimension keeps being METERED by its own writer — an unset allowance
+never disables measurement. A key that is PRESENT with ``None`` is also
+unlimited, but the meter is still READ (and a broken meter logged, not raised), so
+"unlimited" cannot be used to stop measuring a dimension.
+
+**Units are the meter's own; nothing is converted.** ``graph_storage`` is
+denominated in MB because that is what the byte meter publishes
+(``graph_storage_mb``), and converting it to a byte allowance would force a
+MiB-vs-decimal-MB factor — the error class ``STORAGE-ARCHITECTURE.md`` records as
+costing 3.77× on the per-node figures. ``capture_extraction`` is in tokens;
+``postgres_storage`` is in bytes, which is #5331's own ruled base (*"the unit is
+bytes"* — MB/GB for Postgres and MB for the graph are byte multiples and are a
+PRESENTATION decision, not a second unit). The ``unit`` of every entry is READ
+from the declared row (``cost_dimensions.by_name(...).unit``), never restated
+here — two copies of a unit is how a unit factor goes wrong.
+
+**⚠️ WHICH DOORS ARE GATED (per dimension, declared — not one global set).** The
+gate runs inside ``quota.enforce_org_limit``, the seam REST and MCP share. Each
+entry names the resources whose operation can move ITS meter: the storage
+dimensions are gated on the write doors (``points``/``documents``), and
+``capture_extraction`` on ``sessions`` ONLY — the capture lane
+(``hosted_api._capture_session_impl``) reaches ``_check_org_limit(org,
+"sessions")`` and that is the only door that SPENDS extraction tokens. A key
+mint (``api_keys``), a seat (``users``) or a graph create (``graphs``) moves no
+meter, so gating them would refuse an operation that cannot cross the cap — the
+cap that blocks a fix, which this module refuses to build.
+
+⚠️ **RESIDUAL, named rather than hidden:** the ``sessions`` door is
+``_check_org_limit(org, "sessions")`` in ``hosted_api._capture_session_impl``,
+and it runs unconditionally — including the store-only lanes (keyless #3892,
+extraction-disabled #4258) and replays, which make no provider call and cannot
+move the token meter. So an exhausted token allowance would also refuse a
+zero-token capture on that one door. Narrowing it needs the check moved into the
+branch that actually extracts, which is a change INSIDE that handler and a
+follow-up; it is stated here so the boundary is a known one rather than a
+surprise at arming time.
+"""
+from __future__ import annotations
+
+import logging
+import math
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+from .cost_dimensions import by_name as _declared_dimension
+from .quota import QuotaCheckError, QuotaExceededError, with_limit_contact
+
+_logger = logging.getLogger(__name__)
+
+__all__ = [
+    "ALLOWANCE_GATED_RESOURCES",
+    "ALLOWANCE_KEYS",
+    "BLOCKED",
+    "DIMENSIONS",
+    "AllowanceDimension",
+    "MeterReading",
+    "enforce_allowances",
+]
+
+#: The stated bound on how old a GAUGE reading may be and still be enforced.
+#: It is an EVIDENCE-AGE bound, not an allowance: a stale gauge describes a graph
+#: that no longer exists, so enforcing it would decide from a number we cannot
+#: defend. 24 h is chosen because the graph meter is a periodic estimate, not a
+#: per-write figure — and it is overridable by the caller passing its own
+#: ``meters``/by configuring the dimension, never by an implicit default cap.
+STALE_AFTER_SECONDS = 24 * 60 * 60
+
+#: A configured dimension whose meter does NOT exist is BLOCKED, never faked.
+BLOCKED = "blocked"
+
+
+class _Absent:
+    """The meter's answer for "there is no row YET" — distinct from ``None``.
+
+    ``None`` means the meter could not produce a figure (a failure); this means
+    the figure is KNOWN to be zero for a cumulative flow nobody has started. The
+    two must not share a value: flattening them is either a fail-open (a broken
+    meter read as zero) or a deadlock (a fresh window refused forever). Only a
+    dimension that declares ``absent_is_zero`` may consume this as a zero; every
+    other dimension still refuses on it.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<no usage yet>"
+
+
+ABSENT = _Absent()
+
+
+@dataclass(frozen=True)
+class MeterReading:
+    """One meter's answer for one org. The unit is the DIMENSION's unit.
+
+    ``estimated``/``note`` carry the instrument's honesty so a refusal built on
+    a sampling estimate cannot read as exact (the graph meter's own contract).
+    ``measured_at`` is the ISO instant the reading describes, when the instrument
+    records one; ``None`` means the instrument has no age, not that it is fresh.
+    """
+
+    used: float
+    measured_at: str | None = None
+    estimated: bool = False
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class AllowanceDimension:
+    """One DECLARED cost dimension, as the allowance gate sees it.
+
+    ``dimension`` must name a row in ``cost_dimensions.DIMENSIONS`` — verified at
+    import. ``limit_key`` is the key in the RESOLVED limits dict (the same dict
+    ``quota.enforce_org_limit`` already receives), and its absence is what makes
+    the dimension unlimited. ``meter`` is ``None`` for a dimension with no
+    per-org meter plumbed: ``blocked_reason`` then states exactly what is
+    missing, and configuring such a dimension REFUSES (fail closed) rather than
+    passing on a figure nobody measured.
+    """
+
+    dimension: str
+    limit_key: str
+    unit: str
+    meter: Callable[[str], MeterReading | None] | None = None
+    stale_after_seconds: int | None = None
+    blocked_reason: str | None = None
+    resources: frozenset[str] = frozenset({"points", "documents"})
+    #: Whether "no ledger row yet" is a real ZERO or NO reading. It differs by
+    #: dimension KIND: a cumulative FLOW for a window that has just begun is
+    #: zero-by-construction (nobody has captured), while a GAUGE's absence means
+    #: the instrument has not reported. Getting this wrong in the flow direction
+    #: is a deadlock: the row is created by the very operation being refused.
+    absent_is_zero: bool = False
+
+    @property
+    def blocked(self) -> bool:
+        """True when this dimension MUST NOT be enforced, and why is recorded.
+
+        ``blocked_reason`` is the whole state: a dimension can carry a working
+        meter and still be BLOCKED (``graph_storage`` is — its meter's own
+        contract forbids capping on the ledger figure). The reason is what the
+        refusal shows, so it cannot be a note beside the state.
+        """
+        return self.blocked_reason is not None
+
+
+# ── the meters: adapters onto the instruments that already exist ────────────
+#
+# Neither adapter raises: a meter is FAIL-SOFT by its own contract
+# (``graph_storage``'s docstring: "FAIL-SOFT … never raise"; the metering readers
+# degrade to a zero view, #923). The fail-CLOSED half is the GATE's, and it lives
+# in ``_enforce_dimension`` below: a meter that cannot answer returns ``None``,
+# and ``None`` is refused. A meter that raised would make the gate's refusal
+# depend on an exception rather than on "no reading", which is the distinction
+# D12 measures.
+
+
+class MeterUnavailable(RuntimeError):
+    """A meter that has NO reading for a reason worth naming.
+
+    ``None`` means "no reading" with nothing more to say (a dimension nobody has
+    measured yet). This carries the ones that DO have something to say — chiefly
+    that the fault is OURS (an unresolvable metering window, a store error), which
+    a refusal must not present to the tenant as their usage. It is still a
+    REFUSAL (fail closed, #686) and it is reported on the #3981/#4779 surface, so
+    the operator's bookkeeping fault is disclosed rather than absorbed.
+    """
+
+
+def _graph_storage_mb(org_id: str) -> MeterReading | None:
+    """The org's last graph-storage GAUGE, in MB (#5331 unit 2).
+
+    ``get_graph_storage_reading`` never raises: a degraded read is
+    indistinguishable from "never measured" in its return value, and both carry
+    ``graph_storage_measured_at is None``. Both are NO READING here — which is
+    the honest answer for both, because a zero-valued degradation would otherwise
+    compare as 0 MB and pass silently.
+    """
+    from .metering import get_graph_storage_reading
+
+    reading = get_graph_storage_reading(org_id)
+    measured_at = reading.get("graph_storage_measured_at")
+    if not measured_at:
+        return None
+    return MeterReading(
+        used=float(reading.get("graph_storage_mb") or 0.0),
+        measured_at=str(measured_at),
+        estimated=True,
+        note=("measured with GRAPH.MEMORY USAGE (a SAMPLES-based estimate that "
+              "excludes per-graph/Redis overhead)"),
+    )
+
+
+def _disclose_unmeasured(org_id: str, reason: str) -> None:
+    """Log an our-side metering fault at ERROR — and do NOT reuse the swallow-site
+    reporter.
+
+    ``metering.report_unmetered_increment`` exists for the six sites that SERVE a
+    request and lose the increment; its alert text says exactly that ("the request
+    was served") and it hard-codes ``DROP_CLASS_WINDOW_UNRESOLVABLE``. Here the
+    request is REFUSED and nothing was dropped, so calling it would (a) alert with
+    the reverse of what happened, (b) file a phantom dropped increment under the
+    wrong class, and (c) mint a ninth, undeclared lane that the lane-inventory
+    fence cannot see because the call shape is positional. Naming the wrong class
+    durably is worse than not filing: the durable disclosure needs its own
+    ``served=False`` surface and class on #4779, and that is a follow-up, not
+    something this gate may fake.
+    """
+    _logger.error(
+        "allowance unmeasured (our fault, tenant refused): team=%s reason=%s",
+        org_id, reason)
+
+
+def _extraction_tokens(org_id: str) -> MeterReading | None:
+    """Extraction tokens consumed in the org's current window (#5331 unit 3).
+
+    The figure is ``capture_tokens_in + capture_tokens_out``: the allowance is on
+    LLM consumption for extraction, and one limit cannot name a side. A recorded
+    ZERO is a reading (#5045: an extraction that reported no provider usage), so
+    only ``measured is False`` — no ledger row, or a read/window failure — is NO
+    READING.
+    """
+    from .metering import get_capture_usage
+
+    usage = get_capture_usage(org_id)
+    if not usage.get("measured"):
+        reason = usage.get("unmeasured_reason")
+        if reason in ("read_error", "period_error"):
+            # ⚠️ OUR fault, not the tenant's: the ledger or the billing window
+            # failed. The gate still REFUSES (#686 fail-closed), but the refusal
+            # names the fault and is disclosed on the #3981/#4779 surface —
+            # ``metering._current_period``'s own docstring records the opposing
+            # ruling ("refusing a paying org over our own bookkeeping fault is
+            # exactly the #3981 ruling forbids"), and this is the reconciliation:
+            # refuse, name it, and REPORT it, rather than serve silently or
+            # refuse invisibly. Choosing "serve + report" instead needs a ruling
+            # (a cap that serves past our fault is a cap that can be evaded during
+            # an outage), so it is not taken here.
+            _disclose_unmeasured(org_id, reason)
+            raise MeterUnavailable(
+                f"the {reason} fault is on our side (capture usage could not be "
+                f"read), not on the tenant's")
+        return ABSENT
+    return MeterReading(
+        used=float(usage.get("capture_tokens_total") or 0),
+        measured_at=None,
+        estimated=False,
+        note="tokens in + out, as reported by the extraction provider",
+    )
+
+
+def _dimension(name: str, limit_key: str,
+               **kwargs: Any) -> AllowanceDimension:
+    """Build an entry, resolving ``name`` against the DECLARED registry (#1178).
+
+    Raises at IMPORT when the dimension is not declared — a second registry or a
+    renamed dimension must be a loud failure, not a gate that stops closing. The
+    ``unit`` is TAKEN from the declared row: restating it here is how the row and
+    the refusal message drift into two units for one dimension (review round 2).
+    A dimension whose declared unit is a phrase ("MB (graph on-disk size, with
+    index size, spread and sampled min/max)", "tokens in / tokens out (plus
+    calls…)") is reduced to its HEAD unit — the base the allowance is
+    denominated in: the first word. Anything finer is a presentation detail the
+    refusal does not need.
+    """
+    declared = _declared_dimension(name)  # raises KeyError when undeclared
+    unit = str(declared.unit).split()[0]
+    return AllowanceDimension(dimension=name, limit_key=limit_key, unit=unit,
+                              **kwargs)
+
+
+#: The allowance key per ruled dimension. Named for the dimension, one key each:
+#: a shared key would make two independent dimensions charge the same figure,
+#: which is the double-counting the #5331 model exists to avoid. ⚠️ The graph key
+#: is NOT the unmerged ``max_storage_bytes`` name on ``feat/5331-node-to-byte-cap``
+#: (R11 in ``docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md``):
+#: that branch denominates the GRAPH meter's MB reading in bytes, which needs a
+#: MiB-vs-MB factor the storage architecture records as a measured 3.77× error
+#: class. The ruled decision (storage denominated in the bytes family, never in
+#: nodes) is untouched by the key's name — no node count appears here.
+ALLOWANCE_KEYS: dict[str, str] = {
+    "graph_storage": "max_graph_storage_mb",
+    "postgres_storage": "max_postgres_storage_bytes",
+    "capture_extraction": "max_extraction_tokens",
+}
+
+DIMENSIONS: tuple[AllowanceDimension, ...] = (
+    _dimension(
+        "graph_storage", ALLOWANCE_KEYS["graph_storage"],
+        # ⛔ BLOCKED, and NOT because a meter is missing — because OUR OWN
+        # instrument forbids wiring a cap to this figure yet. ``graph_storage``'s
+        # module docstring states it outright: *"Until they are corrected, a cap
+        # MUST NOT be wired to the ledger figure for vector-bearing tenants"* —
+        # the HNSW index share is under-reported by 8.5×–21.7× (≈2× on the total)
+        # and the ledger returns the old wording. A cap wired to it would not fire
+        # for exactly the tenants who grow biggest (fail-open), and a refusal
+        # built on it would present an unmeasurable figure as measured.
+        meter=_graph_storage_mb,
+        stale_after_seconds=STALE_AFTER_SECONDS,
+        blocked_reason=(
+            "the graph byte meter exists but its own contract forbids capping on "
+            "the ledger figure: the vector-index share is under-reported 8.5x-21.7x "
+            "(~2x on the total) and metering.get_graph_storage_reading returns the "
+            "uncorrected numerics (tortoise/graph_storage.py: 'a cap MUST NOT be "
+            "wired to the ledger figure for vector-bearing tenants'). BLOCKED on "
+            "the corrected ledger figure"),
+    ),
+    _dimension(
+        "postgres_storage", ALLOWANCE_KEYS["postgres_storage"],
+        meter=None,
+        blocked_reason=(
+            "no per-org byte meter: ``postgres_storage`` measures at DATABASE "
+            "grain (``measure_postgres_storage``; its cost-dimension "
+            "``attribution`` states that a per-org byte split would be an "
+            "ALLOCATION, not a measurement, because Postgres records no per-org "
+            "byte ownership). BLOCKED until a per-org attribution exists — a "
+            "gate that charged this org for the whole database's bytes would "
+            "over-charge every tenant"),
+    ),
+    _dimension(
+        "capture_extraction", ALLOWANCE_KEYS["capture_extraction"],
+        meter=_extraction_tokens,
+        # ``sessions`` is the capture lane's door (``_check_org_limit(org,
+        # "sessions")``) and it is the ONLY operation that spends extraction
+        # tokens. The write doors are deliberately NOT gated on this dimension:
+        # a token allowance exhausted mid-window must not refuse a points write
+        # that spends no tokens — a cap that blocks an unrelated fix is the
+        # anti-pattern this module's door principle refuses to build.
+        resources=frozenset({"sessions"}),
+        # A window with no ledger row has captured NOTHING — a real zero for a
+        # cumulative flow. Treating it as "no reading" would deadlock: the row is
+        # MERGE-created by record_capture_usage, i.e. by the very capture the gate
+        # would be refusing, so the window could never open (review round 3, P1).
+        absent_is_zero=True,
+    ),
+)
+
+#: Every resource ANY dimension gates on. Per-DIMENSION scope lives on
+#: ``AllowanceDimension.resources`` (above): one global set could not express that
+#: the token dimension must also cover the capture lane while a storage dimension
+#: must not.
+ALLOWANCE_GATED_RESOURCES = frozenset().union(
+    *(d.resources for d in DIMENSIONS))
+
+
+def _limit(value: Any, dim: AllowanceDimension, org_id: str) -> int | None:
+    """Read one configured allowance. Unreadable is REFUSED, never 'unlimited'.
+
+    ``None`` (an explicit null) is unlimited by the same rule
+    ``enforce_org_limit`` documents; an UNREADABLE value is the #4051 class and
+    raises ``QuotaCheckError`` naming the field.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        _logger.error(
+            "allowance limit unreadable (fail-closed): team=%s dimension=%s "
+            "field=%s value=%r", org_id, dim.dimension, dim.limit_key, value)
+        raise QuotaCheckError(
+            f"team limits {dim.limit_key} unreadable for dimension "
+            f"{dim.dimension!r} ({value!r})") from None
+
+
+def _stale(reading: MeterReading, dim: AllowanceDimension) -> bool:
+    """True when a reading is older than the dimension's stated bound."""
+    if dim.stale_after_seconds is None:
+        return False  # the dimension declares no age bound
+    if not reading.measured_at:
+        # ``None`` means the instrument has no age — which cannot prove
+        # freshness, so on a BOUNDED dimension it is treated as stale. Silently
+        # reading it as fresh would make the stated bound unenforceable for
+        # exactly the readings that cannot be aged (review round 1, P2).
+        return True
+    try:
+        measured = datetime.fromisoformat(str(reading.measured_at))
+    except (TypeError, ValueError):
+        # An unparseable timestamp cannot prove freshness → treat as stale.
+        return True
+    if measured.tzinfo is None:
+        measured = measured.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - measured).total_seconds() > dim.stale_after_seconds
+
+
+def _reading(dim: AllowanceDimension, org_id: str,
+             meters: Mapping[str, Callable[[str], MeterReading | None]] | None,
+             *, observed_only: bool) -> MeterReading | None:
+    """Call one dimension's meter. ``observed_only`` swallows every fault.
+
+    ``observed_only`` is the UNLIMITED path (a key present with ``None``): the
+    dimension must still be METERED, but there is no allowance to enforce, so a
+    broken meter is LOGGED and cannot refuse a write nobody capped.
+    """
+    if dim.blocked and not observed_only:
+        # A dimension whose meter our own contract forbids capping on is BLOCKED:
+        # configuring it REFUSES, and no reading is taken (a `meters=` override
+        # cannot un-block it — that is the point of the declaration).
+        _logger.error(
+            "allowance dimension BLOCKED (fail-closed): team=%s dimension=%s",
+            org_id, dim.dimension)
+        raise QuotaCheckError(
+            f"dimension {dim.dimension!r} has an allowance configured for team "
+            f"{org_id!r} but is {BLOCKED.upper()} — {dim.blocked_reason}")
+    meter = (meters or {}).get(dim.dimension, dim.meter)
+    if meter is None:
+        if observed_only:
+            return None
+        raise QuotaCheckError(
+            f"dimension {dim.dimension!r} has an allowance configured for team "
+            f"{org_id!r} but is {BLOCKED.upper()} — {dim.blocked_reason}")
+    try:
+        reading = meter(org_id)
+    except Exception as e:
+        if observed_only:
+            _logger.warning(
+                "allowance meter failed (dimension unlimited, no refusal): "
+                "team=%s dimension=%s error=%r", org_id, dim.dimension, e)
+            return None
+        _logger.error(
+            "allowance meter failed (fail-closed): team=%s dimension=%s "
+            "error=%r", org_id, dim.dimension, e)
+        raise QuotaCheckError(
+            f"{dim.dimension} usage could not be measured for team {org_id!r}: "
+            f"{e!r}") from e
+    if reading is ABSENT and dim.absent_is_zero:
+        # The per-dimension FLOW semantics: for a cumulative flow, "no ledger row
+        # for this window" is a real ZERO (nobody has done it yet) — not an
+        # unmeasurable figure. Declared on the dimension, consumed HERE, so a
+        # future flow dimension gets the behaviour from its declaration instead of
+        # from a meter-specific branch (and a GAUGE that declares nothing stays
+        # strict, which is what keeps a missing gauge a refusal).
+        return MeterReading(used=0.0, measured_at=None, estimated=False,
+                            note="no usage metered in this window")
+    if reading is ABSENT:
+        # Absence with NO declared flow semantics is still no reading.
+        reading = None
+    if reading is None:
+        if observed_only:
+            return None
+        _logger.error(
+            "allowance unmeasurable (fail-closed): team=%s dimension=%s "
+            "reason=no_reading", org_id, dim.dimension)
+        raise QuotaCheckError(
+            f"{dim.dimension} usage has no reading for team {org_id!r} and an "
+            f"allowance of {dim.limit_key} is configured — refusing to fail "
+            f"open (#686)")
+    if _stale(reading, dim):
+        if observed_only:
+            return reading
+        _logger.error(
+            "allowance reading stale (fail-closed): team=%s dimension=%s "
+            "measured_at=%s bound=%ss", org_id, dim.dimension,
+            reading.measured_at, dim.stale_after_seconds)
+        raise QuotaCheckError(
+            f"{dim.dimension} reading for team {org_id!r} is older than "
+            f"{dim.stale_after_seconds}s (measured_at={reading.measured_at!r}) "
+            f"— refusing to enforce {dim.limit_key} from a stale figure")
+    return reading
+
+
+def enforce_allowances(
+        limits: dict | None, *, org_id: str | None = None, resource: str = "points",
+        meters: Mapping[str, Callable[[str], MeterReading | None]] | None = None,
+) -> None:
+    """Apply every CONFIGURED dimension allowance. Unconfigured ones are inert.
+
+    Args:
+        limits: the SAME resolved limits dict ``quota.enforce_org_limit``
+            receives. ``None`` or no ``org_id`` → skip (stdio/operator).
+        org_id: resolved org, defaulting to ``limits["org_id"]``.
+        resource: the quota resource being gated; only
+            :data:`ALLOWANCE_GATED_RESOURCES` are checked (a key mint cannot move
+            a storage meter).
+        meters: optional per-dimension meter overrides, keyed by DECLARED
+            dimension name. The production path passes nothing and uses the
+            instruments; D11/D12's "a reading supplied" is this seam.
+
+    Raises:
+        QuotaExceededError: at/over a configured allowance (names the dimension).
+        QuotaCheckError: configured but unmeasurable, stale, blocked or with an
+            unreadable limit value (fail closed).
+    """
+    if limits is None:
+        return
+    org_id = org_id or limits.get("org_id")
+    if not org_id:
+        return
+    if resource not in ALLOWANCE_GATED_RESOURCES:
+        return
+    for dim in DIMENSIONS:
+        if resource not in dim.resources:
+            continue  # this door cannot move THIS dimension's meter
+        if dim.limit_key not in limits:
+            continue  # ABSENT = unlimited. No invented cap, and the dimension
+            #           keeps being metered by its own writer.
+        allowance = _limit(limits.get(dim.limit_key), dim, org_id)
+        if allowance is None:
+            _reading(dim, org_id, meters, observed_only=True)
+            continue
+        reading = _reading(dim, org_id, meters, observed_only=False)
+        if reading is None:  # _reading refuses, so this is belt-and-braces
+            raise QuotaCheckError(
+                f"{dim.dimension} usage has no reading for team {org_id!r}")
+        # #3665's trap, in the other direction: ``nan >= allowance`` is False, so
+        # a NaN reading would SILENTLY PASS (a disarmed allowance), and ``inf``
+        # would raise a bare OverflowError out of ``int(used)`` below — an
+        # unmapped 500 this module promises never to produce (#4051). And a
+        # NON-NUMERIC reading (``None``, ``"5"``, a Decimal) would raise a bare
+        # TypeError at the comparison. So the figure is COERCED once, here, and
+        # every shape that is not a finite number is REFUSED.
+        try:
+            used = float(reading.used)
+        except (TypeError, ValueError):
+            _logger.error(
+                "allowance reading non-numeric (fail-closed): team=%s "
+                "dimension=%s used=%r", org_id, dim.dimension, reading.used)
+            raise QuotaCheckError(
+                f"{dim.dimension} usage reading for team {org_id!r} is not a "
+                f"number ({reading.used!r}) — refusing to enforce "
+                f"{dim.limit_key} from it") from None
+        if not math.isfinite(used):
+            _logger.error(
+                "allowance reading non-finite (fail-closed): team=%s "
+                "dimension=%s used=%r", org_id, dim.dimension, used)
+            raise QuotaCheckError(
+                f"{dim.dimension} usage reading for team {org_id!r} is not a "
+                f"finite number ({used!r}) — refusing to enforce "
+                f"{dim.limit_key} from it")
+        if used >= allowance:
+            note = f" ({reading.note})" if reading.note else ""
+            _logger.warning(
+                "allowance exceeded: team=%s dimension=%s used=%s limit=%s",
+                org_id, dim.dimension, used, allowance)
+            raise QuotaExceededError(
+                with_limit_contact(
+                    f"Team {dim.dimension} allowance reached "
+                    f"({allowance:g} {dim.unit}, used {used:g}). Upgrade your "
+                    f"plan to increase it.{note}"),
+                resource=dim.dimension, used=int(used), limit=int(allowance),
+                estimated=bool(reading.estimated),
+            )

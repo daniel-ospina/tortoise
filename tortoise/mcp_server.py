@@ -5990,6 +5990,17 @@ def tortoise_session_capture(conversation: list[dict],
     # kill, and it would make MCP capture succeed where REST 500s).
     if "max_sessions" in limits:
         org["max_sessions"] = limits["max_sessions"]
+    # #9567 D11/D12: carry the RULED-dimension allowance keys through the SAME
+    # bridge. Enumerated from `ALLOWANCE_KEYS` (declared in `allowance_gate`),
+    # not hand-listed: a hand-list is how the MCP capture lane would keep
+    # spending past a configured token allowance while REST refused — the gate
+    # reads the dict it is GIVEN, so a key this bridge drops reads as UNLIMITED.
+    # Only keys the resolver actually produced are carried (absent = unlimited,
+    # which is the gate's own declared default).
+    from tortoise.allowance_gate import ALLOWANCE_KEYS as _allowance_keys
+    for _key in _allowance_keys.values():
+        if _key in limits:
+            org[_key] = limits[_key]
     try:
         body = SessionRequest(conversation=conversation, harness=harness,
                               session_id=session_id,

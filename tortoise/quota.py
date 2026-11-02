@@ -406,12 +406,18 @@ class QuotaExceededError(Exception):
     def __init__(self, message: str, *, resource: str | None = None,
                  used: int | None = None, limit: int | None = None,
                  estimate: int | None = None,
+                 estimated: bool | None = None,
                  code: str = QUOTA_REFUSAL_CODE) -> None:
         super().__init__(message)
         self.resource = resource
         self.used = used
         self.limit = limit
         self.estimate = estimate
+        # #5331: ``estimated`` marks a refusal decided from a SAMPLING estimate
+        # (the graph byte meter). Omitted (None) by every raise site that knows
+        # its figure is exact, so the payload keeps its shape — a refusal may
+        # not present an estimate as exact, and may not claim precision either.
+        self.estimated = estimated
         self.code = code
 
 
@@ -438,7 +444,7 @@ def quota_refusal_payload(exc: QuotaExceededError) -> dict:
         "code": getattr(exc, "code", None) or QUOTA_REFUSAL_CODE,
         "message": str(exc),
     })
-    for key in ("resource", "used", "limit", "estimate"):
+    for key in ("resource", "used", "limit", "estimate", "estimated"):
         value = getattr(exc, key, None)
         if value is not None:
             payload[key] = value
@@ -1078,14 +1084,47 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             client-supplied value — an unproven credit is a free slot.
 
     Raises:
-        QuotaExceededError: org at/over limit (402-equivalent).
-        QuotaCheckError: counting failed (fail-closed).
+        QuotaExceededError: org at/over limit (402-equivalent) — including a
+            RULED dimension at/over its configured allowance (#5331: graph MB /
+            Postgres bytes / extraction tokens), which is checked FIRST and
+            names the dimension in ``resource``.
+        QuotaCheckError: counting failed (fail-closed), or a ruled dimension has
+            an allowance configured but NO usable reading (never measured, meter
+            fault, older than the stated bound, blocked, or an unreadable limit
+            value). See ``tortoise/allowance_gate.py``.
     """
     if limits is None:
         return  # stdio/operator — no org context
     org_id = limits.get("org_id")
     if not org_id:
         return
+    # ── #5331/#9567 D11-D12: the DIMENSIONS THE OWNER RULED ──────────
+    # The gate below counts NODES and enforces ``max_points``. The ruled storage/
+    # LLM dimensions are BYTES (Postgres, graph MB) and TOKENS (extraction), and
+    # a node count is explicitly NOT the model (#4495/#5331). So they are
+    # enforced HERE, ahead of the legacy node count, through the ONE declared
+    # registry (``cost_dimensions``) — see ``tortoise/allowance_gate.py``.
+    #
+    # ⛔ INERT BY DEFAULT: no production resolver emits an ``ALLOWANCE_KEYS``
+    # value, so every dimension is unconfigured and this call is a dict-miss per
+    # dimension. It REFUSES only once an allowance is configured — the ordering
+    # the storage architecture requires (wire the meter, then configure).
+    # The legacy ``points`` count below is deliberately RETAINED (it is a real
+    # node cap with its own #4051 history); it is a LEGACY dimension whose unit
+    # the owner has replaced, and it stays until an allowance is configured.
+    try:
+        from .allowance_gate import enforce_allowances
+    except Exception as e:
+        # unmapped 500 this gate promises never to produce (#4051). The gate's
+        # own drift check is deliberately LOUD at import (a renamed dimension is
+        # a hard failure), so the loudness is preserved inside the documented
+        # refusal type instead of escaping as a KeyError/ImportError.
+        _logger.error(
+            "allowance gate unavailable (fail-closed): team=%s error=%r",
+            org_id, e)
+        raise QuotaCheckError(
+            f"the allowance gate is unavailable ({type(e).__name__}: {e})") from e
+    enforce_allowances(limits, org_id=org_id, resource=resource)
     # ── documents: DERIVED-CONSTANT cap (T2-P2a, #1726) — handled BEFORE the
     # pricing-keyed generic path. Deliberately NOT in _RESOURCE_LIMIT_KEYS: a
     # pricing.json max_documents field would ripple through tier_limits /
