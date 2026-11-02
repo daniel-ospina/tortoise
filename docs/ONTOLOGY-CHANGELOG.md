@@ -70,11 +70,35 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > three cell replacements and the 37-line §4.3 consumer note (*"Querying liveness — do NOT filter the literal
 > `status:'live'`"*, withdrawn for the same reason by the previous head) — carry their exact proposed wording
 > on **#9974** (comment, 2026-11-02), so the approval question arrives with the text in hand rather than being
-> re-derived. **What a consumer needs is already stated by the unmodified cells and the doctrine they cite:**
-> `status` is a cache of the event stream (§2's Procedural row, the §4.2/§4.3 `status` cells, §11's
-> derived-cache rule), and an absent status READS live (`live._terminal_excluded`'s NULL arm). The predicate
-> that implements "not terminal" — `live._terminal_excluded` / `live.is_terminal_status`, never a literal — is
-> stated where it lives, in `tortoise/live.py` and its §4.3 consumers.
+> re-derived.
+>
+> ⛔ **Corrected after the 2026-11-02 delta review: an earlier version of this entry claimed "what a consumer
+> needs is already stated by the unmodified cells". That was WRONG, and it is the one part of this record a
+> reviewer had to falsify.** Those cells describe the **pre-change** fold (`ObjectRegistered→live`,
+> `status=coalesce($st,'live')`), so they are exactly where a consumer learns the OLD behaviour. The rule
+> itself is unchanged (`status` is a cache of the event stream — §2's Procedural row, the §4.2/§4.3 `status`
+> cells, §11's derived-cache rule — and an absent status READS live); what was missing is that the cells no
+> longer tell anyone **how to query it**. Publishing the trap here, because no model document can carry it
+> until the owner approves one (above), and a lane that reads only the cells will get it wrong:
+>
+> **⚠️ The consumer trap: a literal `status:'live'` filter now matches ZERO rows for a status-less birth.**
+> Cypher answers a missing property with `null`, and *"testing any value against null, either with the `=`
+> operator or with the `<>` operator, always evaluates to null … In the case of a predicate used in a `WHERE`
+> clause, anything that is not true is interpreted as being false"* (Cypher manual, *Working with null*). So
+> `MATCH (o:Object) WHERE o.status = 'live'` **silently drops the very Objects that are live** — the sharpest
+> form of the regression this change could have created, and it is why every in-repo read surface was swept
+> before this landed: the Object legs go through the NULL-tolerant predicate (`sdk.py:20346`'s `o.status`
+> leg; `projection/entities.py:4746-4748`'s `WITH o, (o.status IS NULL OR NOT (o.status IN $excluded)) AS
+> live`), `audit.py:528,539` spells the arm out (`active.status IS NULL OR active.status = 'live'`), and the
+> retrieval legs take their family vocabulary from `search_engine._status_vocab_for(label)`. None of them
+> relies on the literal. **Filter on the
+> predicate, never on the literal:** `live._terminal_excluded` (whose composition is
+> `(clause IS NULL OR clause <> '<every excluded status>')`) via `search_engine._exclude_status_clause` +
+> `search_engine._status_vocab_for(label)` (the ONE place the family → vocabulary/flag decision lives), or —
+> on a value already read out — `live.status_as_reported`, the ONE declaration for what an ABSENT status
+> reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
+> `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
+> `MATCH (p:Point {status:'live'})` idiom printed in §4.3 remains correct as written.
 
 ---
 
