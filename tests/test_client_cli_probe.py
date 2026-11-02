@@ -133,7 +133,11 @@ def test_call_prints_the_payload_even_with_a_trailing_block(monkeypatch, capsys)
     def fake_call_tool(*_a, **_k):
         return SimpleNamespace(
             is_error=False,
-            structured_content=payload,
+            # DIVERGES on purpose: for a wrap-envelope tool the structured
+            # payload is `{"result": …}` while `content[0]` is the tool's own
+            # answer. A fixture where the two agree cannot tell the two
+            # implementations apart, so it cannot catch the output-shape change.
+            structured_content={"result": payload},
             content=[SimpleNamespace(text=json.dumps(payload)),
                      SimpleNamespace(text=trailing)],
         )
@@ -157,7 +161,7 @@ def test_call_falls_back_to_the_first_block_when_there_is_no_structured_payload(
     def fake_call_tool(*_a, **_k):
         return SimpleNamespace(
             is_error=False,
-            structured_content=None,
+            structured_content={"result": payload},   # diverges — see above
             content=[SimpleNamespace(text=json.dumps(payload)),
                      SimpleNamespace(text="trailing disclosure")],
         )

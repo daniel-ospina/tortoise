@@ -148,15 +148,16 @@ def _cmd_call(args: argparse.Namespace) -> int:
     if getattr(result, "is_error", None):
         print(json.dumps({"is_error": True, "result": str(result)}, indent=2))
         return _EXIT_ERR
-    # The PAYLOAD is `structured_content` when the server sends one, else
-    # `content[0]`. Joining EVERY content block and parsing the result is not a
-    # contract: the dispatch seam appends blocks LAST (a retired-name warning,
-    # the #10084 graph disclosure), and a join turns valid JSON into
-    # "Extra data: line 1 …" for every scripted caller of a write tool.
-    payload = getattr(result, "structured_content", None)
-    if payload is not None:
-        print(json.dumps(payload, indent=2))
-        return _EXIT_OK
+    # The PAYLOAD is `content[0]`, and extra blocks are appended LAST by the
+    # dispatch seam (a retired-name warning, the #10084 graph disclosure). Joining
+    # EVERY block and parsing the result is not a contract: it turns valid JSON
+    # into "Extra data: line 1 …" for every scripted caller of a write tool.
+    #
+    # `content[0]` and NOT `structured_content`: for a tool declaring
+    # `x-fastmcp-wrap-result` the structured payload is the ENVELOPE
+    # (`{"result": …}`) while `content[0]` is the tool's own answer — preferring
+    # the former would silently change this command's output shape for 12 read
+    # tools that never receive a disclosure block at all.
     text = getattr((getattr(result, "content", None) or [None])[0], "text", "")
     try:
         print(json.dumps(json.loads(text), indent=2))

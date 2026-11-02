@@ -194,8 +194,9 @@ def _result_text(body: dict) -> str:
 
     Extra blocks are appended LAST by the dispatch seam (#10084's graph
     disclosure, `_warn_retired_result`'s retired-name warning before it), so a
-    join over every block is not the payload — the retired filter below exists
-    for exactly that reason and this is the same class, generalised.
+    join over every block is not the payload. The sibling helpers that DID join
+    (and filter `RETIRED TOOL` prefixes instead) live in `tests/test_selfhost.py`
+    and `tests/test_mcp_http.py`; both are payload-first here.
     """
     content = body.get("result", {}).get("content", [])
     if not content:
