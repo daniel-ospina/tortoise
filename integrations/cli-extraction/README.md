@@ -24,24 +24,23 @@ glossed.
 capture path): the `:Point` nodes wired to a `:Session`, with the role taken
 from `t.speaker`. It no longer reads `codex://`-tagged Points — no capture lane
 in this repo ever wrote one (`#9932`). A hand-built turns *file* in the
-`codex://threads/<id>#message=<id>` shape is still accepted.
+`codex://threads/<id>#message=<id>` shape is still accepted. A deployment whose
+turns live in the Postgres record rather than the graph (record armed,
+`#10000`) has no turn nodes for this graph-only read to find — use
+`sdk.get_session()`, which serves record-held turns.
 
-A deployment with the Postgres record armed (`TORTOISE_RECORD_DSN`, `#10000`)
-puts turns in **two** places, and the graph-only read has to be honest about
-both states:
-
-- **fully migrated** — every one of a session's turns is in the record, so this
-  read returns no row for it at all. Those turns are served by
-  `sdk.get_session()`, which merges the record with the graph copy.
-- **split** — the writer decides **per turn** which store takes it, so a record
-  write refused mid-capture leaves the refused turns in Postgres and the rest in
-  the graph, while the session's `turn_count`/`turn_max_index` still describe the
-  whole window. A short-but-non-empty row set is therefore **not** a complete
-  session, and `dump` reconciles the two (`_partial_reason`, the same
-  reconciliation the SDK's own turn read applies) and **refuses** rather than
-  writing a truncated transcript that `run`/`write` would land as that session's
-  durable output. `--allow-partial` writes the graph's subset on the operator's
-  explicit word.
+⚠️ **"The turns live in the record" is not all-or-nothing.** With
+`TORTOISE_RECORD_DSN` armed the writer decides **per turn** which store takes it
+(`sdk._write_capture_turns` writes a refused record turn to the GRAPH) while
+this read covers the graph for **the whole session**, so a mid-capture refusal
+leaves part of the transcript in each store. `dump` therefore reads the
+`:Session`'s own account of what it holds (`turn_count`, `turn_max_index`) and
+a PARTIAL transcript **fails instead of being written** — `run` would otherwise
+extract claims from a truncated session and `write` would land them as that
+session's durable output. `sdk.get_session()` serves the UNION of both stores;
+`--allow-partial` writes what the graph holds when that is what you want. Rows
+ABOVE `turn_max_index` are residue from a shorter re-capture whose surplus
+sweep did not land: they are dropped and reported, never written.
 
 ## How it works
 
@@ -61,8 +60,7 @@ capture (tortoise/sdk.py: _TURN_WRITE_CYPHER)  (s:Session)-[:CONTAINS]->(t:Point
 Three composable phases, one file:
 
 ```bash
-python3 extract_turns.py dump                       # turns -> turns_raw.jsonl (fails on 0 rows; --allow-empty to accept)
-                                                    # ...and on a PARTIAL run: --allow-partial to write the graph's subset anyway
+python3 extract_turns.py dump                       # turns -> turns_raw.jsonl (fails on 0 rows, and on a PARTIAL one; --allow-empty / --allow-partial to accept)
 python3 extract_turns.py run --transcript <session-id> --out ex.json
                                                     # prefix is fine if unambiguous; defaults: claude-haiku-5-5 @ high
 python3 extract_turns.py write --extraction ex.json \

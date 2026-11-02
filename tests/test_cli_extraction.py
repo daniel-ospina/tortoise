@@ -45,6 +45,18 @@ from extract_turns import (
 )
 
 
+def _mark(session: str, index: int, count, mark, role: str = "assistant") -> list:
+    """A dump row carrying the `:Session`'s OWN account (columns 6/7).
+
+    `turn_count` is the WINDOW length the writer stores and `turn_max_index` the
+    session's live inclusive id-space end (`sdk._write_session_and_turns`) — the
+    two witnesses a PARTIAL dump is decided from, so a fixture that leaves them
+    out cannot exercise that decision at all.
+    """
+    return ["session://" + session, "event", role, _frame(role, f"m{index}"),
+            "2026-11-02T00:00:00+00:00", _turn_id(session, index), count, mark]
+
+
 def _turn_id(session: str, index: int) -> str:
     """A turn Point id, built by the WRITER's own derivation.
 
@@ -383,32 +395,31 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         self.assertNotIn("authoredBy", _DUMP_QUERY)
 
     def test_the_completeness_check_is_coupled_to_the_writers_declaration(self):
-        # `_partial_reason` reads the session's declaration, so the names it
-        # reads must be the ones the writer SETS — otherwise the check silently
-        # degrades to "undeclared" (which is deliberately not a refusal) and the
-        # split-store partial run walks through again. Same seam as the
-        # predicate coupling above, one level up.
+        # `_dump_shortfall` reads the session's DECLARATION, so the two names it
+        # reads must be the ones the writer SETS — the same seam as the
+        # predicate coupling above, one level up. Without this pin a writer
+        # rename leaves `_session_marks` returning `None`, which deliberately
+        # degrades to "cannot be shown" rather than refusing, and the split
+        # store partial run walks through again with every other test green.
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         import inspect
 
-        from tortoise.sdk import _write_session_and_turns
+        from tortoise.sdk import _write_capture_turns, _write_session_and_turns
 
         # The declaration is set by the :Session MERGE in the shared Session
-        # writer; `_write_capture_turns` (asserted below) is where the SAME
-        # call decides which STORE takes each turn — the two facts the split
-        # state is made of.
+        # writer; `_write_capture_turns` is where the SAME call decides which
+        # STORE takes each turn — the two facts the split state is made of.
         writer = inspect.getsource(_write_session_and_turns)
         for set_clause in ("s.turn_count=$tc", "s.turn_max_index=$tmi"):
             self.assertIn(set_clause, writer,
-                          "the completeness check reads a declaration the "
-                          f"writer no longer makes: {set_clause}")
+                          "dump reads a declaration the writer no longer "
+                          f"makes: {set_clause}")
         # ⛔ and they are NOT interchangeable (#10021): `$tc` is a WINDOW
         # LENGTH while `$tmi` is the ID SPACE's end — a reader that treats one
-        # as the other either invents a missing tail or misses one.
+        # as the other either reports a healthy append as partial or misses a
+        # refused tail.
         self.assertIn('"tc": turn_count', writer)
         self.assertIn('"tmi": turn_offset + turn_count - 1', writer)
-        # ...and the per-TURN store decision the split state comes from.
-        from tortoise.sdk import _write_capture_turns
         self.assertIn("_record_first", inspect.getsource(_write_capture_turns))
         self.assertIn("s.turn_count", _DUMP_QUERY)
         self.assertIn("s.turn_max_index", _DUMP_QUERY)
@@ -537,14 +548,16 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
                           "a pre-#947 graph has no `is_episodic` flag, so the "
                           "predicate matches nothing — that cause needs naming")
 
-    def test_dump_payload_round_trips_every_returned_column(self):
+    def test_dump_payload_round_trips_eight_columns(self):
         # the container emitter and `_DUMP_QUERY`'s RETURN arity must agree;
         # a short row is an IndexError inside the sort, not a red test, unless
-        # this drives `dump()` itself with the subprocess mocked. The two
-        # DECLARATION columns (`s.turn_count`, `s.turn_max_index`) ride the same
-        # RETURN because the completeness check reads them (#10000 split store),
-        # so they are counted here too — a column dropped on one side silently
-        # reads as "undeclared" and disables that check.
+        # this drives `dump()` itself with the subprocess mocked.
+        #
+        # Columns 6/7 are the `:Session`'s own account (`turn_count`,
+        # `turn_max_index`) — the witness a partial dump is detected from. A
+        # column added to (or dropped from) EITHER side is an `IndexError` in
+        # the middle of a dump, so the count is asserted here rather than
+        # trusted.
         emitted = json.dumps(["session://s1", "event", "user",
                               _frame("user", "hello"), "2026-11-02T00:00:00Z",
                               _turn_id("s1", 0), 1, 0])
@@ -554,118 +567,18 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
                 run.return_value = types.SimpleNamespace(stdout=emitted + "\n", stderr="")
                 dump(out)
             self.assertEqual(build_transcripts(out), {"s1": "[2026-11-02] user: hello"})
-            # the emitter and the query's RETURN arity must agree: a column
-            # added to (or dropped from) either side is the cycle-2 P0
-            # (`IndexError` inside the sort), so assert the two counts here
-            # rather than trusting the mocked payload.
             script = run.call_args[0][0][-1]
             ret = _DUMP_QUERY.split("RETURN ", 1)[1].split(" ORDER BY ", 1)[0]
             cols = len([c for c in ret.split(",")])
             self.assertEqual(cols, 8)
+            for column in ("s.turn_count", "s.turn_max_index"):
+                self.assertIn(column, ret,
+                              "the session's declared count and id-space end are "
+                              "the witness a PARTIAL dump is detected from (#10000)")
             self.assertIn("r[5]", script)
             for i in range(cols):
                 self.assertIn(f"r[{i}]", script,
                               f"the emitter must print column {i}")
-
-    def test_a_split_store_partial_run_is_refused_not_written(self):
-        # #10000 SPLIT STORE, the P1 this pin exists for: with
-        # TORTOISE_RECORD_DSN armed the writer decides PER TURN which store takes
-        # it, so a record write refused mid-capture leaves the refused turns in
-        # Postgres and the rest in the graph — while `s.turn_count` /
-        # `s.turn_max_index` are set from the WHOLE window regardless
-        # (`_write_capture_turns`). A graph-only read then sees a NON-EMPTY row
-        # set that used to be indistinguishable from a complete session, so
-        # `dump` wrote a truncated transcript and `run`/`write` landed claims
-        # from it as that session's durable output.
-        ts = "2026-11-02T00:00:00+00:00"
-        # the session declares 3 turns reaching index 2; the graph holds 0 and 1
-        rows = [["session://s1", "event", "user", _frame("user", f"m{i}"), ts,
-                 _turn_id("s1", i), 3, 2] for i in (0, 1)]
-        payload = "\n".join(json.dumps(r) for r in rows)
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td) / "turns.jsonl"
-            with mock.patch("extract_turns.subprocess.run") as run:
-                run.return_value = types.SimpleNamespace(stdout=payload + "\n",
-                                                         stderr="")
-                with self.assertRaises(SystemExit) as cm:
-                    dump(out)
-            # refused BEFORE the write: a partial turns file must never be left
-            # on disk for a later `run` (or a re-run of `run`) to consume.
-            self.assertFalse(out.exists(),
-                             "a refused dump must not leave a partial turns file")
-            refused = str(cm.exception)
-            self.assertIn("PARTIAL", refused)
-            self.assertIn("s1", refused)
-            # ...and it names the CAUSE and the working route, not a setting:
-            # #9932 was filed because the message sent the operator somewhere
-            # that was not at fault.
-            for fragment in ("#10000", "TORTOISE_RECORD_DSN", "get_session",
-                             "--allow-partial"):
-                self.assertIn(fragment, refused)
-            # the escape hatch still writes the subset, on the operator's word
-            with mock.patch("extract_turns.subprocess.run") as run:
-                run.return_value = types.SimpleNamespace(stdout=payload + "\n",
-                                                         stderr="")
-                dump(out, allow_partial=True)
-            self.assertEqual(
-                [json.loads(ln)["content"] for ln in out.read_text().splitlines() if ln],
-                ["m0", "m1"])
-
-    def test_a_missing_tail_is_a_partial_run_even_when_the_count_agrees(self):
-        # the third decidable fact in `record_read._shortfall`: a refused HIGHEST
-        # turn is invisible to the window LENGTH and to a gap scan of the rows
-        # that DID land — only the declared `turn_max_index` witnesses it. The
-        # graph holds a contiguous {0, 1} for a session whose id space reaches 2.
-        ts = "2026-11-02T00:00:00+00:00"
-        rows = [["session://s1", "event", "user", _frame("user", f"m{i}"), ts,
-                 _turn_id("s1", i), 2, 2] for i in (0, 1)]
-        payload = "\n".join(json.dumps(r) for r in rows)
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td) / "turns.jsonl"
-            with mock.patch("extract_turns.subprocess.run") as run:
-                run.return_value = types.SimpleNamespace(stdout=payload + "\n",
-                                                         stderr="")
-                with self.assertRaises(SystemExit) as cm:
-                    dump(out)
-        self.assertIn("tail is missing", str(cm.exception))
-
-    def test_an_undeclared_session_is_never_refused(self):
-        # a pre-#10000 `:Session` carries neither counter. That is "cannot be
-        # shown", not "is partial": refusing it would break every older graph,
-        # and the lane's job is to fail on measured facts, not on absence.
-        ts = "2026-11-02T00:00:00+00:00"
-        rows = [["session://s1", "event", "user", _frame("user", f"m{i}"), ts,
-                 _turn_id("s1", i), None, None] for i in (0, 1)]
-        payload = "\n".join(json.dumps(r) for r in rows)
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td) / "turns.jsonl"
-            with mock.patch("extract_turns.subprocess.run") as run:
-                run.return_value = types.SimpleNamespace(stdout=payload + "\n",
-                                                         stderr="")
-                dump(out)
-            self.assertEqual(
-                [json.loads(ln)["content"] for ln in out.read_text().splitlines() if ln],
-                ["m0", "m1"])
-
-    def test_a_gap_is_partial_even_without_a_declaration(self):
-        # the gap arm is decidable from the rows alone — the same fact
-        # `record_read._shortfall` reads (`0 .. max(held)` not covered) — so it
-        # does not need the session's counters. An interior hole is what a
-        # refused write between two that landed leaves behind, and the window
-        # LENGTH cannot see it.
-        ts = "2026-11-02T00:00:00+00:00"
-        rows = [["session://s1", "event", "user", _frame("user", f"m{i}"), ts,
-                 _turn_id("s1", i), None, None] for i in (0, 2)]
-        payload = "\n".join(json.dumps(r) for r in rows)
-        with tempfile.TemporaryDirectory() as td:
-            out = Path(td) / "turns.jsonl"
-            with mock.patch("extract_turns.subprocess.run") as run:
-                run.return_value = types.SimpleNamespace(stdout=payload + "\n",
-                                                         stderr="")
-                with self.assertRaises(SystemExit) as cm:
-                    dump(out)
-        self.assertIn("no turn for index 1", str(cm.exception))
-        self.assertFalse(out.exists())
 
     def test_dump_writes_the_file_in_turn_index_order_not_the_graph_order(self):
         # `_turn_order` alone is NOT enough: it is only ever called by the test
@@ -679,20 +592,22 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
         # The rows carry ONE identical `createdAt` (what the writer does: it
         # stamps a capture batch with one `$now`), so a timestamp sort cannot
         # rescue this the way the old predicate did. `s1_t10` must come last:
-        # a lexicographic sort would put it between t1 and t2. The window is
-        # CONTIGUOUS 0..10 because that is what the writer produces — and
-        # because `dump` now reconciles the rows against the session's declared
-        # window, a deliberately sparse fixture would (correctly) be refused.
+        # a lexicographic sort would put it between t0/t1 and before t2.
+        #
+        # ⛔ THE IDS ARE CONTIGUOUS 0..10, because that is what a capture
+        # mints (`_capture_turn_id`, a running index). A sparse fixture
+        # (t0, t2, t10) is a session with two REFUSED turns — the partial shape
+        # `dump` now refuses — so it cannot double as an ordering fixture.
         ts = "2026-11-02T00:00:00+00:00"
-        order = (10, 2, 0, 1, 3, 4, 5, 6, 7, 8, 9)
+        order = [10, 2, 0, 7, 4, 9, 1, 8, 3, 6, 5]
         rows = [
             ["session://s1", "event", "assistant", _frame("assistant", f"m{i}"), ts,
-             _turn_id("s1", i), 11, 10]
+             _turn_id("s1", i)]
             for i in order
         ] + [
             # a turn-shaped point whose id is NOT a turn: it must be dropped,
             # not spliced in by the sort.
-            ["session://s1", "event", "user", _frame("user", "claim"), ts, "s1_note", 11, 10],
+            ["session://s1", "event", "user", _frame("user", "claim"), ts, "s1_note"],
         ]
         payload = "\n".join(json.dumps(r) for r in rows)
         with tempfile.TemporaryDirectory() as td:
@@ -716,6 +631,124 @@ class TestDumpReadsTheCaptureShape(unittest.TestCase):
     def test_turn_order_refuses_a_turn_id_with_no_index(self):
         with self.assertRaises(ValueError):
             _turn_order(["session://s1", "event", "r", _frame("r", "x"), None, "no-index"])
+
+    # ── THE SPLIT STORE: a dump can be PARTIAL (#10574 review P1) ─────────────
+    #
+    # `dump` read the graph for the whole session while the WRITER decides each
+    # turn's store per turn (`sdk._write_capture_turns`: a refused record write
+    # goes to the graph), so a mid-capture refusal leaves part of the transcript
+    # in each store. `rows` was the only witness, so a graph holding the failed
+    # subset was indistinguishable from a complete session and `dump` reported
+    # success over a truncated transcript — which `run`+`write` then landed as
+    # that session's durable output. The witness is the `:Session`'s OWN account
+    # (`turn_count`, `turn_max_index`), the same reconciliation
+    # `record_read._shortfall` performs on the read door.
+
+    def test_a_partial_dump_refuses_and_writes_no_file(self):
+        # The tail is gone in the shape `turn_count` CANNOT see: `_t0.._t2` held
+        # against a `turn_count` of 2 (a window length, so 3 rows is not "short")
+        # and a `turn_max_index` of 3 — an append window whose `_t3` was refused.
+        # Three contiguous rows, a satisfied count, and a missing HIGHEST turn.
+        rows = [_mark("s1", i, 2, 3) for i in (0, 1, 2)]
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(
+                    stdout="\n".join(json.dumps(r) for r in rows) + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists(),
+                             "a refused dump must leave NO file: `run` would "
+                             "otherwise consume the truncated transcript")
+        refused = str(cm.exception)
+        for fragment in ("PARTIAL", "TAIL", "#10000", "TORTOISE_RECORD_DSN",
+                        "PER TURN", "get_session", "--allow-partial"):
+            self.assertIn(fragment, refused,
+                          "the operator needs the cause and the remedy, not only "
+                          "the verdict")
+
+    def test_the_append_window_is_not_a_false_refusal(self):
+        # ⛔ THE TRAP `record_read.served_turn_count` DOCUMENTS, MEASURED: an
+        # APPEND at `turn_offset=2` leaves 4 rows `_t0.._t3` against a
+        # `turn_count` of 2 (a WINDOW length, not a running total). A
+        # `len(rows) < turn_count` rule refuses this HEALTHY, COMPLETE session —
+        # so the witness is the id-space COVERAGE, not a count comparison.
+        rows = [_mark("s1", i, 2, 3) for i in range(4)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out)
+            self.assertEqual(len(out.read_text().splitlines()), 4,
+                             "a complete append writes every turn")
+
+    def test_an_interior_hole_from_a_refused_record_write_is_caught(self):
+        # The append shape as a PARTIAL: `_t2`/`_t3` in the graph, `_t0`/`_t1`
+        # still in the record. The count (a window length) cannot see it and the
+        # tail is intact — only the coverage check can.
+        rows = [_mark("s1", i, 2, 3) for i in (2, 3)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                with self.assertRaises(SystemExit) as cm:
+                    dump(out)
+            self.assertFalse(out.exists())
+        self.assertIn("no turn for index 0, 1", str(cm.exception))
+
+    def test_allow_partial_writes_the_transcript_and_says_so(self):
+        rows = [_mark("s1", i, 4, 3) for i in (0, 1)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            printed = io.StringIO()
+            with mock.patch("extract_turns.subprocess.run") as run, \
+                    contextlib.redirect_stdout(printed):
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out, allow_partial=True)
+            self.assertEqual(len(out.read_text().splitlines()), 2,
+                             "the flag is the declared escape hatch")
+        self.assertIn("WARNING", printed.getvalue(),
+                      "an accepted partial must never be silent")
+        self.assertIn("PARTIAL", printed.getvalue())
+
+    def test_residue_above_the_mark_is_dropped_not_written(self):
+        # A shorter re-capture (`_t0.._t1`) whose surplus sweep did not land: the
+        # rows above `turn_max_index` are the session's OLD turns, and the read
+        # door drops them (`record_read.merge_turn_payloads`). Writing them would
+        # publish turns the session no longer owns; SILENTLY writing them is what
+        # #10021 review P3 rejected.
+        rows = [_mark("s1", i, 2, 1) for i in range(4)]
+        payload = "\n".join(json.dumps(r) for r in rows)
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            printed = io.StringIO()
+            with mock.patch("extract_turns.subprocess.run") as run, \
+                    contextlib.redirect_stdout(printed):
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out)
+            written = [json.loads(ln) for ln in out.read_text().splitlines() if ln]
+        self.assertEqual([r["content"] for r in written], ["m0", "m1"])
+        self.assertIn("dropped 2 row(s)", printed.getvalue(),
+                      "a deletion the operator cannot see is not a report")
+
+    def test_a_session_with_no_declared_marks_degrades_rather_than_refuses(self):
+        # A pre-#10000 capture carries no `turn_max_index` (the property did not
+        # exist) and an older emitter carries neither column. `None` degrades to
+        # the checks that do not need it — the same rule `record_read._shortfall`
+        # states — so an old graph is not refused for a mark it never had.
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "turns.jsonl"
+            payload = "\n".join(json.dumps(["session://s1", "event", "user",
+                                            _frame("user", f"m{i}"), None,
+                                            _turn_id("s1", i)])
+                                for i in (3, 0, 1, 2))
+            with mock.patch("extract_turns.subprocess.run") as run:
+                run.return_value = types.SimpleNamespace(stdout=payload + "\n", stderr="")
+                dump(out)
+            self.assertEqual(len(out.read_text().splitlines()), 4)
 
     def test_a_non_turn_point_is_not_spliced_into_the_transcript(self):
         # `is_episodic` + `pointKind='event'` is not enough: only the derived
