@@ -315,6 +315,59 @@ def test_all_three_mechanisms_are_visible_to_the_caller():
     assert probe.score_fallback_bullet().verdict == "MET"
 
 
+def test_the_fallback_probe_reads_a_HEALTHY_scan():
+    """Each probe must take its HEALTHY branch — not a failed read that reports `ok`.
+
+    The fake rows are `(id, score)` pairs and that is load-bearing: the
+    brute-force scan reads `row[1]`, so a one-element row raises
+    `IndexError: tuple index out of range` — a message containing "index" — and
+    the leg records `degraded=True, reason="index_missing"`, returns `[]`, and
+    STILL reports `mechanism="scan"`. The probe therefore looked healthy while
+    measuring a failure (`scan: degraded=True reason='index_missing' count=0`,
+    measured pre-fix), which is why `#5090` row 3's `degraded` clause could not
+    be scored from the row's own command (review round 13, P3).
+    """
+    degraded: dict = {}
+    observed = probe.fallback_probe(degraded=degraded)
+    assert set(degraded) == set(observed), (sorted(degraded), sorted(observed))
+    for name, d in degraded.items():
+        assert d["degraded"] is False, (
+            f"the {name!r} probe took a DEGRADED path, so it measured a failed "
+            f"read rather than the mechanism it reports: {d}")
+        assert d["reason"] == "ok", (name, d)
+        assert d["declared"] is None, (name, d)
+
+
+def test_bullet_three_SCORES_the_2952_clause_its_evidence_cites(monkeypatch):
+    """`degraded` keeping `#2952`'s meaning is part of row 3's claim, so it is read.
+
+    `#5090` row 3's evidence cell asserts "`degraded` keeps `#2952`'s meaning"
+    while the row's own command read only the mechanism key — half the cell was
+    unscored, the defect class `#10465` exists to remove (review round 13, P3).
+    This pins the SCORING: the same three mechanisms, with a `degraded` reading
+    injected as True, must NOT be `MET`.
+    """
+    clean: dict = {}
+    probe.fallback_probe(degraded=clean)
+    assert probe.score_fallback_bullet().verdict == "MET", clean
+
+    def _degraded_probe(degraded=None):
+        out = {"index": "index", "scan": "scan",
+               "scan_fallback": "scan_fallback"}
+        if degraded is not None:
+            degraded.update({k: {"degraded": False, "reason": "ok",
+                                 "declared": None} for k in out})
+            # ONE mechanism declares a degraded read (#2952).
+            degraded["scan_fallback"]["degraded"] = True
+        return out
+
+    monkeypatch.setattr(probe, "fallback_probe", _degraded_probe)
+    row = probe.score_fallback_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert any("#2952 untouched on every mechanism: False" in n
+               for n in row.notes), row.notes
+
+
 # ── The census ─────────────────────────────────────────────────────────────
 
 
@@ -323,6 +376,67 @@ class _UnreadableGraph:
 
     def query(self, cypher, params=None, timeout=None):
         raise RuntimeError("Timeout reading from socket")
+
+
+class _SpyDB:
+    """A handle whose only job is to let `main` reach the census."""
+
+    def select_graph(self, name):
+        return object()
+
+
+def test_a_pathless_uri_does_not_put_its_userinfo_in_the_census(
+        monkeypatch, capsys):
+    """`docker://:SECRET@host:6379` names NO graph, and its password is not a name.
+
+    The pre-fix derivation was the last `/`-segment of the RAW URI, so for a
+    path-less URI that segment is the URI's userinfo — carried into
+    `report["census"]["graph"]` and printed (twice on the text path). Reachable
+    with NO flag at all, because `--uri` defaults to `$TORTOISE_DB_URI`: the
+    same credential class as #3039 and `tests/_embedded.py`'s warning (review
+    round 13, P2).
+    """
+    monkeypatch.setattr(probe, "_connect", lambda uri: (_SpyDB(), ["g1"]))
+    rc = probe.main(["--census", "--uri", "docker://:s3cr3t@127.0.0.1:6399",
+                     "--json"])
+    out = capsys.readouterr().out
+    assert "s3cr3t" not in out, (
+        f"the census echoed the URI's userinfo: {out[-2000:]}")
+    assert "no graph name" in out, out[-2000:]
+    assert rc == 2, "an unmeasurable census must not exit 0"
+
+
+def test_the_uri_path_graph_is_the_PATH_not_the_authority(monkeypatch, capsys):
+    """With `--graph`, the recorded `uri_path_graph` is the path — or None.
+
+    `''` would itself be a lie (`the URI names an empty graph`), so a path-less
+    URI records None; the pre-fix code recorded the userinfo here too.
+    """
+    seen: dict = {}
+
+    def _census(graph, name, graph_names=None, uri_graph_name=None):
+        seen["name"] = name
+        seen["uri_path_graph"] = uri_graph_name
+        return {"graph": name, "at": "t", "labels": {},
+                "catalogue": "UNMEASURED(spy)"}
+
+    monkeypatch.setattr(probe, "_connect", lambda uri: (_SpyDB(), ["g1"]))
+    monkeypatch.setattr(probe, "vector_census", _census)
+    rc = probe.main(["--census", "--uri", "docker://:s3cr3t@127.0.0.1:6399",
+                     "--graph", "safe_graph", "--json"])
+    out = capsys.readouterr().out
+    assert seen["name"] == "safe_graph", seen
+    assert seen["uri_path_graph"] is None, seen
+    assert "s3cr3t" not in out, out[-2000:]
+    assert rc == 2, rc
+
+    # ...and a URI that DOES carry a path still records it.
+    rc = probe.main(["--census", "--uri", "docker://:s3cr3t@127.0.0.1:6399/real",
+                     "--json"])
+    capsys.readouterr()
+    assert seen["name"] == "real", seen
+    assert seen["uri_path_graph"] == "real", seen
+    assert rc == 2, rc
 
 
 def test_the_census_refuses_to_report_zero_for_an_unreadable_store():
