@@ -2014,14 +2014,14 @@ class EventLog:
 
         Lines are the ones ``append`` writes, matched the way :meth:`read_all`
         tolerates them — split on the byte ``append`` terminates a record with
-        (``\n``), then on a bare ``\r``, which universal newlines also treats as a
+        (``\\n``), then on a bare ``\\r``, which universal newlines also treats as a
         terminator, so a foreign CR-separated journal still reads. A line SPLIT
         ACROSS TWO WINDOWS is carried and yielded once complete; a torn tail fails
         the caller's own parse and is skipped there, never here.
 
         ⚠️ MEMORY follows the separator, and this method does not close that
-        hole: with ``\n``/``\r\n`` a window is the peak, but a journal with NO
-        ``\n`` at all makes the carried partial line the whole file. The ANSWER
+        hole: with ``\\n``/``\\r\\n`` a window is the peak, but a journal with NO
+        ``\\n`` at all makes the carried partial line the whole file. The ANSWER
         stays correct there; only the bound moves.
 
         :meth:`read_all`'s own DECODING note is WHY the needle is searched in
