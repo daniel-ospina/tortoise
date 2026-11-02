@@ -2080,6 +2080,29 @@ def test_the_artifact_fields_of_a_not_implemented_row_are_still_verified(
             for e in errors
         ), f"{field}: an empty list was not refused ({errors})"
 
+    # #10636 review round 3 (P3): the `symbols:` SHAPE guard is the same
+    # fail-open class, one field over, and NOTHING pinned it. Its three operands
+    # are load-bearing in different ways, so each is asserted through the message
+    # it alone produces (the same per-operand discipline the `code:`/`tests:` loop
+    # above uses):
+    #
+    # * `not isinstance(…)` — a bare STRING would iterate CHARACTER BY CHARACTER
+    #   and reach the absence check with a nonsense name list (the exact shape the
+    #   `preconditions:` allow-list comment calls out);
+    # * `not declared_symbols` — with a VALID `code:`, `symbols: []` leaves the
+    #   absence check iterating an empty list, which finds nothing missing: drop
+    #   this operand and `gate_errors() == []` on an inert declaration;
+    # * `not all(isinstance(s, str) and s.strip() …)` — without it a blank name is
+    #   fed to the absence check and reported as "not defined at module level",
+    #   a different and wrong verdict for the same row.
+    for bad_symbols in ([], ["   "], [123], "validate_span"):
+        errors = gate_errors([dict(good, symbols=bad_symbols)], root=tmp_path)
+        assert any(
+            "`symbols` is declared on a not-implemented row but is not a "
+            "non-empty list of names" in e
+            for e in errors
+        ), f"symbols={bad_symbols!r} was not refused by the shape guard ({errors})"
+
     # Review cycle 3 (P3): an explicit null is a declaration of nothing that
     # looks like a declaration — refused, never read as an omission.
     for field in ("code", "tests", "symbols"):
