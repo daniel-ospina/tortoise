@@ -4703,7 +4703,8 @@ def _write_span(text: object, cap: int, *,
 
     * the discarded remainder carries an alphanumeric character (a real split,
       not a full stop), and
-    * the part of the split token that would be KEPT carries a DIGIT.
+    * the part of the split token that would be KEPT carries a DECIMAL digit
+      (Unicode `Nd`, the class the value engine's digit run matches).
 
     ⛔ **That second condition is what keeps this helper on the IDENTITY cap**
     (#10513 review cycle-18, both P1s, measured). ``_MAX_CONTENT`` is not only a
@@ -4757,7 +4758,13 @@ def _write_span(text: object, cap: int, *,
                 discarded_alnum = True
                 break
             rest = rest[1:]
-        if discarded_alnum and any(ch.isdigit() for ch in split_kept):
+        if discarded_alnum and any(ch.isdecimal() for ch in split_kept):
+            # `isdecimal` is exactly Unicode `Nd`, the class the value engine's
+            # digit run (`_VALUE_DECIMALS`) matches — so the span moves only for a
+            # character a value could actually be made of. `isdigit` is broader
+            # (`No` superscripts: `unicodedata.decimal('⁹')` is undefined while
+            # `digit('⁹')` is 9), and firing on those would move the identity
+            # span over a character the engine never reads as a number.
             # a numeral is cut in two: drop the split token whole
             cut = kept
     if not cut:
