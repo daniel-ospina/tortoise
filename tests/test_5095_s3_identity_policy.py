@@ -780,6 +780,68 @@ class TestIdentityOnTheResult:
         assert "no candidate was left unchecked" in messages[0], messages[0]
         assert "did not run over the whole candidate set" not in messages[0]
 
+    def test_an_unrun_lookup_with_no_candidate_never_claims_the_budget_cut(self):
+        """`unresolved` with a ZERO numerator is a third fact (#5095 review round 5).
+
+        The lookup did not run AT ALL and there was no candidate whose own query
+        could have — and the `partial` sentence asserted both of those falsely:
+        "part of the lookup did not run or did not complete, but every
+        candidate's own query ran — no candidate was left unchecked". The
+        pre-fix code reached that sentence because the block branched on
+        `unresolved_total` alone, so this run carried a warning that contradicted
+        the reason it printed in the same line.
+
+        ⛔ The discriminating assertion is the sentence's OWN text: an earlier
+        draft of this test asserted `"budget" not in message`, which no arm has
+        ever emitted — inert against the defect it named (review round 5).
+        """
+        class _NoCandidates(_FakeModel):
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "stop"
+                if "STORY SUMMARIZER" in system:
+                    return "A narrative."
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [], "chain_notes": [], '
+                        '"link_before_create": []}')
+
+        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
+        block = out["identity"]
+        assert block["state"] == fp.LOOKUP_UNRESOLVED, block
+        assert block["unresolved_total"] == 0, block
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert len(messages) == 1, out["warnings"]
+        assert "the lookup did not run, and this run proposed no candidate" in messages[0], (
+            messages[0])
+        # The `partial` sentence, verbatim, is what must NOT be reachable here.
+        assert "part of the lookup" not in messages[0], messages[0]
+        assert "every candidate's own query" not in messages[0], messages[0]
+
+    def test_a_state_the_warning_does_not_describe_claims_nothing(self, monkeypatch):
+        """The residual arm's only protection is this test (#5095 review round 6).
+
+        A state added to `failure_policy.LOOKUP_STATES` later must not INHERIT the
+        `partial` or the counted sentence — that is the defect class this whole
+        change removes, and without this pin the arm would be protected by a
+        comment alone. The arm states only what it was handed.
+        """
+        monkeypatch.setattr(fp, "lookup_state", lambda search: "future_state")
+
+        class _NoCandidates(_FakeModel):
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_finish_reason = "stop"
+                if "STORY SUMMARIZER" in system:
+                    return "A narrative."
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [], "chain_notes": [], '
+                        '"link_before_create": []}')
+
+        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
+        messages = [w for w in out["warnings"] if "S3 identity" in w]
+        assert len(messages) == 1, out["warnings"]
+        assert "describes no sentence for that state" in messages[0], messages[0]
+        assert "part of the lookup" not in messages[0], messages[0]
+        assert "did not run for " not in messages[0], messages[0]
+
     def test_a_resolved_run_reports_resolved_and_does_not_warn(self):
         """The flag-side of R1: the disposition must not fire on a healthy run.
 

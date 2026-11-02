@@ -10647,7 +10647,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 f"S3 identity {_id['state']}{_reason}: the existing-item lookup "
                 f"did not run for {_id['unresolved_total']} of {_denominator} "
                 f"candidate(s)")
-        else:
+        elif _id["state"] == _failure_policy.LOOKUP_PARTIAL:
             # The other shape, and it is ordinary rather than broken: the budget
             # can cut only the trailing STORY-TOPIC queries, which follow every
             # candidate query. Saying "the lookup did not run over the candidate
@@ -10657,6 +10657,33 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 f"S3 identity {_id['state']}{_reason}: part of the lookup did "
                 f"not run or did not complete, but every candidate's own query "
                 f"ran — no candidate was left unchecked")
+        elif _id["state"] == _failure_policy.LOOKUP_UNRESOLVED:
+            # ⛔ `unresolved` with a ZERO numerator is a THIRD fact, and it is
+            # reachable on the main path: the lookup did not run AT ALL (no graph
+            # client, an embedded backend, a first query that raised) and the run
+            # proposed no candidate whose own identity it could have established
+            # (an empty S2/S4 list, or one carrying only operators/retractions).
+            # The `partial` sentence above would then assert two things that
+            # never happened — that the budget cut something, and that a
+            # candidate's own query ran — i.e. exactly the
+            # claim-about-a-check-that-did-not-happen defect this change exists
+            # to remove, in the one channel an operator reads (#5095 review
+            # round 3).
+            result.setdefault("warnings", []).append(
+                f"S3 identity {_id['state']}{_reason}: the lookup did not run, "
+                f"and this run proposed no candidate whose identity it could "
+                f"have established")
+        else:
+            # ⛔ Deliberately NOT a catch-all that reuses one of the three
+            # sentences above: a state added to `failure_policy.LOOKUP_STATES`
+            # later would inherit a claim about a check nobody wrote for it, with
+            # nothing to notice it — the defect class this whole change removes.
+            # This arm claims only what it was handed (the state and the counter)
+            # and is LOUD rather than silent, per I2.
+            result.setdefault("warnings", []).append(
+                f"S3 identity {_id['state']}{_reason}: this warning describes no "
+                f"sentence for that state — {_id['unresolved_total']} of "
+                f"{_denominator} candidate(s) were not checked against the graph")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface
