@@ -1757,25 +1757,6 @@ def test_the_admission_key_and_the_capture_write_resolve_one_source(monkeypatch)
              "graph_namespace": f"org_{TEAM}_{NEW_ID}"}
     assert ha._hydrate_default_namespace(dict(bound)) == bound
 
-    # 4. The fix must NOT live in the frozen file: an unconditional stamp there
-    #    is a surface change needing owner approval (#3863/#4282).
-    from pathlib import Path
-
-    src = (Path(__file__).resolve().parent.parent / "tortoise"
-           / "mcp_server.py").read_text(encoding="utf-8")
-    bridge = src.split("_gid = _current_graph_id.get()", 1)[1].split(
-        'if limits.get("max_points")', 1)[0]
-    stamps = [ln for ln in bridge.splitlines()
-              if 'org["graph_namespace"]' in ln]
-    assert stamps, (
-        "the MCP capture bridge stopped stamping `graph_namespace` at all — "
-        "that is the graph-BOUND half the frozen tool served before #10180")
-    assert all(ln.startswith("        ") for ln in stamps), (
-        "tortoise/mcp_server.py serves frozen tools — a top-level (4-space, "
-        "UNCONDITIONAL) `org[\"graph_namespace\"]` stamp there is a surface "
-        "change needing owner approval (#3863/#4282, tools/surface-guard.py). "
-        "It must stay nested under `if _gid:`; put the org-wide fix in "
-        "`_hydrate_default_namespace` instead.")
 
     # 4. The fix must NOT live in the frozen file: an unconditional stamp there
     #    is a surface change needing owner approval (#3863/#4282).
