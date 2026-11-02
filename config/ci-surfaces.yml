@@ -627,6 +627,11 @@ surfaces:
   # emits. The `core` arm (below) is the primary one — it pins
   # tortoise/truncation.py (no SOURCE_PATTERN) and tortoise/sdk.py.
   - test_8447_truncation_marker.py
+  # #8447 (the OTHER half): `issue_insight`'s marker rides the SDK verb and the
+  # hosted GET /v1/issue-insight body, whose handler lives in hosted_api.py —
+  # the same dual registration the /v1/search marker needed. DUAL-REGISTERED
+  # with `core` (below), which pins tortoise/sdk.py and tortoise/truncation.py.
+  - test_8447_issue_insight_truncation.py
   # #8447 row #6: the PAGE BOUND on the same instrument's other seam — an
   # out-of-domain `limit` is REFUSED by `event_store.read_after`, never
   # silently clamped (`max(1, min(int(limit), 1000))` was the defect: a caller
@@ -5006,6 +5011,11 @@ surfaces:
   # surface is DUAL-REGISTERED with `api` (above) for the hosted /v1/search
   # response.
   - test_8447_truncation_marker.py
+  # #8447: the `issue_insight` marker — `tortoise/sdk.py` (insertions) and
+  # `tortoise/truncation.py` (the consumed instrument, which this change EXTENDS
+  # with `EXACT_KEY`) fall through to `core`, so this is the primary arm;
+  # DUAL-REGISTERED with `api` (above).
+  - test_8447_issue_insight_truncation.py
   # #8447 row #6: the PAGE BOUND's primary arm. Its subjects are
   # `tortoise/event_store.py` (`MAX_PAGE` and `read_after`'s refusal — that
   # module matches no SOURCE_PATTERN, so an event_store.py-only change selects

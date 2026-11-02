@@ -1301,9 +1301,13 @@ def test_supersede_repoint_survives_a_unhashable_stored_direction(lane):
 
     ``live.direction_flows`` tests membership in a frozenset, so an unhashable
     property value (a list/map) raises ``TypeError`` — a traceback aborting a
-    supersede the guard is not about. Junk reads as ABSENT (the edge's type
-    default), which is the same reading ``claim_class.normalize`` gives a
-    hand-edited marker, never a third state.
+    supersede the guard is not about. ⛔ The value is judged BOTH ways, NOT as
+    the edge type's default: a HASHABLE unknown token is read as both ways by
+    ``live.direction_flows`` (an UNHASHABLE one raises ``TypeError`` there, so
+    both ways is the fail-closed stand-in), i.e. a present junk value is a
+    two-leg wiring, and judging NAND's ``unidirectional`` would judge one leg of
+    it (see ``test_supersede_repoint_reads_a_junk_direction_as_both_ways``).
+    This test pins only the no-``TypeError`` half, on a same-class fixture.
     """
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
@@ -1343,17 +1347,20 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
     So the re-point's verdict (allow), the creation door's verdict (allow) and
     the token actually written all agree: there is no door/load divergence to
     close here, and #9727's stated invariant is not broken by this arm. The
-    review's suggested remedy (default an ABSENT direction to the direct-edge
-    ``bidirectional``) was implemented and measured against this shape: it is a
-    NO-OP here, because the reproduction's token is a string and therefore never
-    takes the absent branch. What it does change is the raw-written
-    absent/JUNK branch, where it flips an absent NAND to both-ways — refusing a
-    transfer the load side would keep (``ep.py`` narrows that same edge to
-    ``->`` rather than dropping it) and breaking the existing
-    ``test_supersede_repoint_reads_a_junk_direction_as_absent`` pin, whose point
-    is that a junk token must not abort a supersede. That is the over-refusal
-    this test guards against — kept so a later lane reading that finding does
-    not "fix" it twice.
+    review's suggested remedy (default EVERY non-string direction to the
+    direct-edge ``bidirectional``) is a NO-OP for this shape, because the
+    reproduction's token is a string and therefore never takes the absent
+    branch — and it would be wrong for it: a PRESENT junk token really is
+    read as both ways (``live.direction_flows``), so
+    ``test_supersede_repoint_reads_a_junk_direction_as_both_ways`` pins the
+    both-ways reading for it. ABSENT is the other case and keeps the TYPE's
+    default, which is what ``create_direct_edge`` canonicalizes an absent
+    direction to before judging. ⛔ The two are pinned separately so a later
+    lane cannot "fix" one by collapsing it into the other: the absent/default
+    reading is pinned by part (c) below (it must not become ``-``) AND by
+    ``test_supersede_repoint_carries_an_absent_NAND_forward_leg`` (it must not
+    become both ways — that would refuse a legal asserted -> derived
+    transfer).
 
     ⛔ It also FAILS the moment the premise becomes true: with
     ``create_direct_edge`` mutated to leave an absent direction ABSENT on disk
@@ -1421,6 +1428,64 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
     assert _direct_rows(lane, c_old)[0][2] == ""
 
 
+def test_supersede_repoint_carries_an_absent_NAND_forward_leg(lane):
+    """ABSENT is the TYPE's default, and must not be flattened to both ways.
+
+    The mirror of the part (c) pin above: a direction-less NAND edge whose
+    FORWARD leg is ``asserted -> derived`` (a legal corroboration-free
+    direction: the door accepts it) must still TRANSFER when the successor is
+    asserted. Reading an absent direction as ``bidirectional`` would add the
+    backward leg ``derived -> asserted`` and refuse a supersede the load side
+    keeps — the over-refusal a later lane taking the refuted finding seriously
+    would ship. Measured: this test is GREEN on the shipped reading and RED
+    under an ``absent -> "bidirectional"`` mutant.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    new = lane.create_point("statement", "authored v2")["id"]  # asserted
+    t = lane.create_point("statement", "computed peer",
+                          claim_class="derived")["id"]
+    lane._get_proj().g.query(
+        "MATCH (a:Point {id:$a}), (b:Point {id:$b}) MERGE (a)-[r:NAND]->(b)",
+        params={"a": old, "b": t})  # NO direction property on disk
+
+    lane.supersede_point(old, new)  # must not raise
+
+    # The edge transferred AND still carries no direction token.
+    assert _direct_rows(lane, new) == [[new, "NAND", "", t]], _direct_rows(
+        lane, new)
+
+
+def test_supersede_repoint_deletes_a_self_loop_onto_an_op_type_successor(lane):
+    """The operator filter must not hide a DELETE-only row (#9727).
+
+    A self-loop ``(old)-[IMPL]->(old)`` is consumed between the two transfer
+    passes: the ``out`` pass mints ``(new)-[IMPL]->(old)`` and the ``in`` pass
+    then deletes it as its ``tid == new_id`` row. That only works if the row
+    REACHES the ``in`` pass — and the canonical-operator filter dropped it
+    whenever the successor is an operator by ``op_type`` alone (a legacy /
+    migrated node: ``live.LIFECYCLE_FANOUT_QUERY`` -- the lifecycle guard --
+    reads ``is_operator`` only, so such a successor passes the guard while
+    being filtered out of the edge population). MEASURED pre-fix: the supersede
+    returned ``edges_transferred=1`` with no refusal and left
+    ``new(asserted) -[IMPL {bidirectional}]-> old(derived)`` stranded on the
+    superseded point, its ``derived -> asserted`` leg flowing — the E2E-11.6
+    "zero direct edges remain incident" contract broken.
+    """
+    old = lane.create_point("statement", "computed v1",
+                            claim_class="derived")["id"]
+    lane._get_proj().g.query(
+        "MATCH (o:Point {id:$old}) "
+        "CREATE (o)-[:IMPL {direction: 'bidirectional'}]->(o)",
+        params={"old": old})
+    lane._get_proj().g.query(
+        "CREATE (n:Point {id: 777}) SET n.op_type = 'IMPL'")
+
+    lane.supersede_point(old, 777)  # must not raise
+
+    assert _direct_rows(lane, old) == [], _direct_rows(lane, old)
+
+
 def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
     """A resolvable NON-STRING id must still be judged, not skipped.
 
@@ -1428,7 +1493,8 @@ def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
     and the edge IS re-pointed — while the class probe is id-ADDRESSABLE only
     (``classes_for_ids`` drops a non-``str`` id). Skipping such a row would be a
     fail-open on exactly the axis the string filter closes, so the verdict comes
-    from the row's own marker (absence ⇒ ``asserted``). MEASURED pre-fix: the
+    from the ``:Point``-anchored marker probe ``_claim_classes_for`` uses for a
+    non-string id (absence of the property ⇒ ``asserted``). MEASURED pre-fix: the
     illegal wiring was ALLOWED for ``id=777`` while the identical wiring with
     ``id='777'`` was refused.
     """
@@ -1446,16 +1512,21 @@ def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
     assert _props(lane, new).get("status") == "live"
 
 
-def test_supersede_repoint_reads_a_junk_direction_as_absent(lane):
-    """The junk reading is ABSENT, not "no leg flows" and not "both ways".
+def test_supersede_repoint_reads_a_junk_direction_as_both_ways(lane):
+    """A PRESENT non-string ``direction`` is judged as BOTH ways (fail-closed).
 
-    A non-``str`` stored ``direction`` reads as ABSENT, i.e. the edge TYPE's own
-    default — ``unidirectional`` for NAND, whose only flowing leg is
-    source->target. So a legal ``old``(derived) -[NAND]-> ``t``(derived) edge
-    whose ``t -> new`` leg would be the override must still TRANSFER when the
-    successor is ASSERTED: reading junk as ``-`` (no leg) or as both-ways would
-    refuse it, which is the over-refusal this pins.
+    ⛔ It is NOT the edge type's default. A HASHABLE unknown token (``3``,
+    ``True``) is read as both ways by ``live.direction_flows`` and ``ep.py``;
+    an UNHASHABLE one (this fixture's list) makes ``direction_flows`` raise
+    ``TypeError``, so both ways is the fail-closed stand-in there — either way
+    judging NAND's ``unidirectional`` here would judge ONE leg of a two-leg
+    wiring and let a supersede write ``asserted -[NAND {junk}]-> derived``, whose backward
+    leg is the override ``create_direct_edge(NAND, …, 'bidirectional')``
+    refuses (measured: the pre-fix door transferred exactly that). The
+    same-class shape below still transfers, so "junk must not abort a supersede
+    the guard is not about" is pinned too.
     """
+    # (a) the override on the backward leg must be REFUSED.
     old = lane.create_point("statement", "computed v1",
                             claim_class="derived")["id"]
     new = lane.create_point("statement", "authored v2")["id"]  # asserted
@@ -1466,20 +1537,52 @@ def test_supersede_repoint_reads_a_junk_direction_as_absent(lane):
         "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
         "SET r.direction = ['sideways']",
         params={"a": old, "b": t})
+    with pytest.raises(ValueError, match="re-pointing the NAND edge"):
+        lane.supersede_point(old, new)
+    assert _props(lane, new).get("status") == "live"
 
-    lane.supersede_point(old, new)  # must not raise
+    # (a2) the HASHABLE half of the same rule: ``direction_flows`` reads ``3``
+    # as both ways, so the backward leg must be judged too (a branch that sent a
+    # hashable junk value to the type default would be the same fail-open).
+    h_old = lane.create_point("statement", "computed h1",
+                              claim_class="derived")["id"]
+    h_new = lane.create_point("statement", "authored h2")["id"]  # asserted
+    h_t = lane.create_point("statement", "computed h peer",
+                            claim_class="derived")["id"]
+    lane.create_direct_edge("NAND", h_old, h_t, direction="->")
+    lane._get_proj().g.query(
+        "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
+        "SET r.direction = 3",
+        params={"a": h_old, "b": h_t})
+    with pytest.raises(ValueError, match="re-pointing the NAND edge"):
+        lane.supersede_point(h_old, h_new)
+    assert _props(lane, h_new).get("status") == "live"
 
-    _rows = _direct_rows(lane, new)
-    assert _rows and _rows[0][0] == new, _rows
+    # (b) …and the same-class transfer is not aborted by the junk token.
+    same_old = lane.create_point("statement", "computed s1",
+                                 claim_class="derived")["id"]
+    same_new = lane.create_point("statement", "computed s2",
+                                 claim_class="derived")["id"]
+    same_t = lane.create_point("statement", "computed s peer",
+                               claim_class="derived")["id"]
+    lane.create_direct_edge("NAND", same_old, same_t, direction="->")
+    lane._get_proj().g.query(
+        "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
+        "SET r.direction = ['sideways']",
+        params={"a": same_old, "b": same_t})
+    lane.supersede_point(same_old, same_new)  # must not raise
+    _rows = _direct_rows(lane, same_new)
+    assert _rows and _rows[0][0] == same_new, _rows
 
 
 def test_supersede_repoint_reads_a_non_string_id_endpoints_own_marker(lane):
-    """The row's own marker, not a blanket ``asserted`` default.
+    """The endpoint's own marker, not a blanket ``asserted`` default.
 
     A NON-STRING id cannot be resolved by the id-addressable class probe, so the
-    verdict comes from the row (``coalesce(t.claimClass, 'asserted')``). Reading
+    verdict comes from the ``:Point``-anchored marker probe
+    (``_claim_classes_for``). Reading
     that endpoint as a bare ``asserted`` instead would REFUSE this legal
-    ``derived -> derived`` transfer, which is the over-refusal the row marker
+    ``derived -> derived`` transfer, which is the over-refusal the marker probe
     exists to prevent — the guard must be neither a fail-open nor a fail-closed
     on an axis it cannot resolve.
     """
@@ -1572,7 +1675,7 @@ def test_supersede_repoint_judges_a_non_string_id_successor(lane):
     ``create_direct_edge`` refuses; (b) the same int-id DERIVED successor over a
     DERIVED far endpoint must transfer.
     """
-    def _raw(source, target, mark_int_successor=None):
+    def _raw(source, target):
         lane._get_proj().g.query(
             "MATCH (a:Point {id:$a}), (b:Point {id:$b}) "
             "CREATE (a)-[:IMPL {direction: 'bidirectional'}]->(b)",

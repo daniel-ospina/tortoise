@@ -1,0 +1,411 @@
+"""#8447 — `issue_insight` must MARK a cut answer, never truncate silently.
+
+The contract (issue #8447):
+
+    A bounded operation must either return complete results, or mark the result
+    as INCOMPLETE. It must never return a silently truncated result that is
+    indistinguishable from a complete one.
+
+The surface under test is ``TortoiseSDK.issue_insight`` -> the MCP tool
+``tortoise_issue_insight`` -> ``GET /v1/issue-insight``. It is the read whose
+ENTIRE JOB is to say *"there is more in the graph"*, and it cut its answer at
+``_issue_insight_rank(...)[:limit]`` — shipped default ``limit=2`` — with no
+signal anywhere on the response. Worse than incomplete: its ``insight``
+sentence rendered the **post-cut** length as the count, so a 12-hit read at
+``limit=2`` said, in prose, *"2 graph hit(s) relate to this issue"*. That is a
+WRONG statement wearing a success code, not merely a short one.
+
+Asserted on the RESPONSE VALUE only — never on a log or a message string:
+
+(a) a cut result is DETECTABLE by the caller, and the count it reports is the
+    PRE-cut population;
+(b) a genuinely complete result is NOT marked truncated (no false positives);
+(c) a ``truncated: true`` over a SATURATED candidate pool withholds
+    ``total_available`` — a floor never wears a total's clothes;
+(d) an ``insight`` that claims ABSENCE (``"No graph matches"``) cannot be read
+    as proof when the read itself was incomplete.
+
+Lane: embedded (``TORTOISE_DB_PATH``), no LLM, no corpus.
+"""
+from __future__ import annotations
+
+import pytest
+
+from tortoise.truncation import (
+    TOTAL_AVAILABLE_FIELD,
+    TRUNCATED_FIELD,
+)
+
+QUERY = "zebra migration claim"
+
+
+@pytest.fixture()
+def sdk(tmp_path, monkeypatch, force_sparse_tfidf):
+    """Embedded store for the marker's end-to-end assertions.
+
+    `force_sparse_tfidf` (tests/conftest.py) pins the embedder state: these tests
+    pin EXACT pool sizes, and a box with the `embeddings` extra present would let
+    the dense leg widen the union past the pool bound and redden them for an
+    unrelated environment difference (the #2573/#2772 rule).
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    # `total_available` is emitted only when the candidate pool proves it saw
+    # EVERY match, and the pool bound is `max(limit*5, 20)`; the retrieval
+    # window underneath is `max(limit*2, TORTOISE_POOL_FLOOR)`. A box exporting
+    # a small floor would silently redden the "detectable" test for an unrelated
+    # shell variable.
+    monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "insight.db"))
+    from tortoise.sdk import TortoiseSDK
+
+    s = TortoiseSDK()
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+def _seed(sdk, n):
+    for i in range(n):
+        sdk.create_point(kind="statement",
+                         content=f"zebra migration claim number {i:02d}",
+                         entity_type="point")
+
+
+def _store_matches(sdk, term="zebra"):
+    return sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.content CONTAINS $t RETURN count(n)",
+        params={"t": term}).result_set[0][0]
+
+
+class TestIssueInsightTruncation:
+    def test_a_cut_result_is_detectable_by_the_caller(self, sdk):
+        """(a) DETECTABLE — 12 matches, `limit=2`, and the response says so."""
+        _seed(sdk, 12)
+        assert _store_matches(sdk) == 12
+
+        resp = sdk.issue_insight(QUERY, limit=2)
+
+        # the delivered rows are a STRICT SUBSET ...
+        assert len(resp["data_points"]) == 2 < 12
+        # ... and the caller can TELL, with the exact population behind the cap.
+        assert resp[TRUNCATED_FIELD] is True
+        assert resp[TOTAL_AVAILABLE_FIELD] == 12
+
+    def test_the_reported_count_is_the_pre_cut_population(self, sdk):
+        """The prose count was post-cut: a 12-hit read said "2 graph hit(s)"."""
+        _seed(sdk, 12)
+
+        resp = sdk.issue_insight(QUERY, limit=2)
+
+        assert len(resp["data_points"]) == 2
+        assert resp["insight"].startswith("12 graph hit(s) relate"), resp["insight"]
+
+    def test_a_complete_result_is_not_marked(self, sdk):
+        """(b) no false positive — 3 matches, `limit=5`, nothing was dropped."""
+        _seed(sdk, 3)
+        assert _store_matches(sdk) == 3
+
+        resp = sdk.issue_insight(QUERY, limit=5)
+
+        assert len(resp["data_points"]) == 3
+        assert resp[TRUNCATED_FIELD] is False
+        assert TOTAL_AVAILABLE_FIELD not in resp
+
+    def test_exactly_at_limit_is_complete(self, sdk):
+        """The issue's `exactly-at-limit` boundary: nothing was cut, so nothing is marked."""
+        _seed(sdk, 2)
+
+        resp = sdk.issue_insight(QUERY, limit=2)
+
+        assert len(resp["data_points"]) == 2
+        assert resp[TRUNCATED_FIELD] is False
+        assert TOTAL_AVAILABLE_FIELD not in resp
+
+    def test_limit_plus_one_flips_the_marker(self, sdk):
+        """The issue's `limit+1` boundary — the ONE row past the cap is the whole difference."""
+        _seed(sdk, 3)
+
+        at_limit = sdk.issue_insight(QUERY, limit=2)
+        assert at_limit[TRUNCATED_FIELD] is True
+        assert at_limit[TOTAL_AVAILABLE_FIELD] == 3
+
+    def test_a_saturated_pool_withholds_the_total(self, sdk):
+        """(c) 25 matches, pool bound 20 — a floor must never wear a total's clothes.
+
+        The pool itself was cut, so matches past it were never read and the exact
+        population is UNKNOWN. Absence of `total_available` is the honest answer;
+        publishing `20` — or `25`, the store's true count — would be the same
+        defect one level down, and the prose is qualified to match.
+        """
+        _seed(sdk, 25)
+        assert _store_matches(sdk) == 25
+
+        resp = sdk.issue_insight(QUERY, limit=2)
+
+        assert resp[TRUNCATED_FIELD] is True
+        assert TOTAL_AVAILABLE_FIELD not in resp
+        assert resp["insight"].startswith("at least "), resp["insight"]
+
+    def test_a_pool_at_exactly_its_bound_is_not_marked_cut(self, sdk):
+        """⛔ A pool that came back AT its bound was not cut by it.
+
+        20 matches, `limit=2` → pool bound 20, and the retrieval path keeps every
+        row and reports COMPLETE. A local `len(pool) >= pool_limit` test would
+        call that cut — a false positive that withholds an exact total (20) and
+        trains callers to ignore the marker. The marker's own recorded proof is
+        the only sound source, and it says: exact.
+        """
+        _seed(sdk, 20)
+        assert _store_matches(sdk) == 20
+
+        resp = sdk.issue_insight(QUERY, limit=2)
+
+        assert len(resp["data_points"]) == 2
+        assert resp[TRUNCATED_FIELD] is True          # 20 > 2: the cut fired
+        assert resp[TOTAL_AVAILABLE_FIELD] == 20      # ... and the total is EXACT
+        assert resp["insight"].startswith("20 graph hit(s)"), resp["insight"]
+
+    def test_a_full_window_withholds_the_total(self, sdk):
+        """⛔ "A pool at its bound is still exact" is NOT an invariant — the WINDOW is.
+
+        The docstring, the manifest row and `docs/product/mcp-sdk-surface.md` all
+        stated it bare: "a pool that returned EXACTLY `max(limit*5, 20)` rows is
+        still exact". Measured, that is false, and the regime it holds in is not
+        the one the review assumed (#10570 review at `aba093557`, F3 — which put
+        the boundary at `limit >= 24`; the measured boundary below is `limit`-free,
+        because `pool_limit` is passed AS `limit` to `tortoise_fts_query`, so the
+        window there is `max(120, 2*pool_limit)`):
+
+            N=120, limit=24 -> pool bound 120, window 240 -> truncated, total 120  (exact)
+            N=120, limit=2  -> pool bound  20, window 120 -> truncated, total ABSENT
+
+        The second line is the falsification, at the SHIPPED default. The pool came
+        back at exactly its own bound (20), every row cleared the relevance gate —
+        `20 graph hit(s)` — and the total is withheld anyway, because a retrieval
+        leg filled the window underneath it (`_leg_peak >= str_limit`), so matches
+        past it were never read. The bound and the window are different objects and
+        only the window decides exactness.
+
+        Non-vacuity, in ONE store and one `limit` so the only variable is the store
+        size: at 20 matches the same read publishes `total_available: 20`, and 100
+        more matches take it away. A leg that asserted either half alone would pass
+        on a codebase that always published, or always withheld.
+        """
+        _seed(sdk, 20)
+        assert _store_matches(sdk) == 20
+
+        at_bound = sdk.issue_insight(QUERY, limit=2)
+        assert at_bound[TOTAL_AVAILABLE_FIELD] == 20, (
+            "a 20-match store under `limit=2`: the pool is at its bound 20 and the "
+            "window (120) is not filled, so the total is EXACT"
+        )
+
+        _seed(sdk, 100)                      # 20 -> 120: the WINDOW, not the bound
+        assert _store_matches(sdk) == 120
+
+        saturated = sdk.issue_insight(QUERY, limit=2)
+        assert len(saturated["data_points"]) == 2
+        # the pool is STILL at exactly its bound: 20 rows, all 20 gate-relevant
+        # (`at least ` is the prose's own qualification — the count is still 20)
+        assert "20 graph hit(s)" in saturated["insight"], saturated["insight"]
+        assert saturated[TRUNCATED_FIELD] is True
+        assert TOTAL_AVAILABLE_FIELD not in saturated, (
+            "120 matches fill the 120-row retrieval window, so matches past it were "
+            "never read and the exact population is UNKNOWN — publishing 20 here is "
+            "the floor-wearing-a-total defect the marker exists to prevent. This is "
+            "the case the docstring's bare 'at its bound is still exact' denied."
+        )
+        assert saturated["insight"] != at_bound["insight"]
+
+    def test_absence_is_not_claimed_over_an_unread_store(self, sdk):
+        """(d) `total_points == 0` is the only path that proves absence."""
+        resp = sdk.issue_insight(QUERY, limit=2)
+
+        assert resp["no_prior_knowledge"] is True
+        # every response path carries the marker — a missing key is a producer
+        # bug, not "complete" (`truncation.truncation_field` refuses to guess).
+        assert resp[TRUNCATED_FIELD] is False
+
+    def test_an_out_of_domain_limit_is_refused(self, sdk):
+        """`limit` is a caller input: refuse it, never re-interpret it.
+
+        Measured before the guard: `limit=0` delivered no rows and answered
+        "No graph matches" beside `total_available: 6` — prose contradicting the
+        field next to it — and `limit=-1` sliced the tail off and served 5 of 6,
+        a silent subset from a negative cap. Parity with the REST route's
+        `ge=1` and with `tortoise_fts_query`'s own refusal.
+        """
+        _seed(sdk, 6)
+
+        for bad in (0, -1):
+            with pytest.raises(ValueError, match="positive int"):
+                sdk.issue_insight(QUERY, limit=bad)
+
+    def test_a_bool_limit_is_refused_not_reinterpreted(self, sdk):
+        """`bool` is an `int` SUBCLASS, so the value test alone serves `True` as
+        `limit=1` — a caller input RE-INTERPRETED, which is exactly what the
+        guard exists to refuse (#10570 review at `b6be898182`, P3 finding 2).
+
+        The REST mirror of this read already refuses it: `GET
+        /v1/issue-insight?limit=true` is validated by `Query(2, ge=1, le=20)`,
+        which answers 422 because pydantic does not coerce a bool into an int.
+        The SDK verb must agree with its mirror rather than quietly pick 1 row.
+
+        Non-vacuity: on the pre-fix guard (`if not isinstance(limit, int) or
+        limit < 1`) `True` passes — `isinstance(True, int)` is True and
+        `True < 1` is False — so `issue_insight(limit=True)` is SERVED and this
+        leg reds with DID NOT RAISE. The sibling page-size seam (#8447) uses the
+        same explicit `isinstance(x, bool)` test for the same reason.
+        """
+        _seed(sdk, 6)
+
+        for bad in (True, False):
+            with pytest.raises(ValueError, match="positive int"):
+                sdk.issue_insight(QUERY, limit=bad)
+
+    def test_the_docstring_names_the_one_refusal_the_guard_raises(self, sdk):
+        """The public docstring said "never raises" while the guard 20 lines
+        below it raised `ValueError` (#10570 review, P3 finding 2).
+
+        Read the two TOGETHER, because each is harmless alone: the guard is the
+        behaviour, and the docstring is what a caller reads before deciding
+        whether to wrap the call. `TortoiseSDK.issue_insight.__doc__` IS public
+        surface, so the falsity sat on the reader's side of the contract — a
+        caller who trusted it would type-check `resp["error"]` and never see the
+        `ValueError` an out-of-domain `limit` actually produces.
+
+        Non-vacuity: restoring the pre-fix sentence ("never raises
+        (graph-service failure -> error dict via _safe at the handler)") reds the
+        first assertion, and a sentence that drops the exception's name reds the
+        second — so the leg pins the AGREEMENT, not one wording.
+
+        ⛔ SCOPED, because the first correction OVER-CLAIMED (#10570 review at
+        `2fb095f18`, P3 finding 2). It said the `ValueError` "is the ONE thing
+        this method raises for; every other failure … is an error dict via _safe
+        at the handler". Both halves after the `limit` refusal are false for the
+        surfaces that are NOT the MCP tool: this method has ONE `raise` and
+        ZERO `try` and ZERO `except` (its only `raise` is the guard above), so
+        a graph-service fault PROPAGATES to a direct SDK caller;
+        `GET /v1/issue-insight` then answers 500 (`hosted_api.py`, `except
+        Exception: raise HTTPException(500)`), and only the MCP tool's `_safe`
+        converts anything to a dict (`mcp_server.py`). A caller who trusted the
+        over-claim would not wrap the SDK call at all — the same class of harm
+        as "never raises", one step milder.
+
+        So the leg pins the SCOPE too: the refusal is this method's own, and
+        conversion is attributed to the BOUNDARY rather than to the method.
+        """
+        doc = type(sdk).issue_insight.__doc__ or ""
+        assert "never raises" not in doc, (
+            "the docstring claims unconditional non-raising while the `limit` "
+            "guard raises ValueError")
+        assert "ValueError" in doc, doc
+        assert "PROPAGATES" in doc, (
+            "the docstring must say a non-`limit` failure propagates out of "
+            "this method (there is no try/except in it), not that it is "
+            "converted here: " + doc)
+        assert "_safe" in doc, (
+            "the dict conversion belongs to the MCP boundary (`_safe`); a "
+            "docstring that does not name the boundary reads as if THIS method "
+            "does it: " + doc)
+        # …and the exception the doc names is the one the guard really raises.
+        with pytest.raises(ValueError, match="positive int"):
+            sdk.issue_insight(QUERY, limit=0)
+
+    def test_a_service_fault_propagates_instead_of_becoming_an_error_dict(
+            self, sdk, monkeypatch):
+        """The behaviour behind the docstring's scoped claim (#10570 P3 #2).
+
+        The corrected sentence asserted that every non-`limit` failure is "an
+        error dict via _safe at the handler". It is not: `issue_insight` has no
+        `try`/`except`, so whatever the graph layer raises leaves the method
+        unchanged. That matters to a direct SDK/REST caller, who would read the
+        docstring and skip the wrap. Proven by driving a real call with the
+        projection failing — an error dict here would be the documented (and
+        wrong) behaviour, so this leg reds if a `try/except` is ever added
+        without the docstring moving with it.
+
+        ⛔ GREEN on the pre-fix tree, so it is NOT one of this file's red→green
+        legs — it is a REGRESSION GUARD, and the evidence table must not count
+        it among them (#10570 review P3-1). Measured, not argued: this file at
+        this head run against base `origin/main` = `6b8793351` gives
+        `-k service_fault` → **1 passed, 13 deselected**, because main's
+        `issue_insight` has zero `try` and zero `except` and its first
+        executable statement is already `proj = self._get_proj()`, so the
+        RuntimeError propagates there too. The 13 red→green legs are the ones
+        that assert the marker #8447 ADDS; this one asserts the ABSENCE of a
+        conversion that never existed, which is why an error-dict
+        implementation — and only that — reds it.
+        """
+        def _unreachable():
+            raise RuntimeError("graph service unreachable")
+
+        monkeypatch.setattr(sdk, "_get_proj", _unreachable)
+
+        with pytest.raises(RuntimeError, match="unreachable"):
+            sdk.issue_insight(QUERY, limit=2)
+
+    def test_the_absence_prose_never_contradicts_the_marker(self, sdk):
+        """A non-truncated read must NOT be told "the read was TRUNCATED".
+
+        Keying that sentence on `_exact` was wrong: `_exact` is also False on
+        reads that dropped NOTHING — an empty query (no retrieval ran) or a
+        fallback arm whose proof is withheld — and the body then asserted
+        truncation next to `truncated: false`. Prose that contradicts the field
+        beside it is the defect this issue exists to remove, inverted.
+        """
+        _seed(sdk, 3)
+
+        resp = sdk.issue_insight("", limit=2)   # no text -> no retrieval at all
+
+        assert resp[TRUNCATED_FIELD] is False
+        assert resp["insight"] == "No graph matches for this issue title."
+        assert "TRUNCATED" not in resp["insight"]
+
+    def test_every_response_path_carries_the_marker(self, sdk):
+        """`repo_not_indexed` and `no matches` are responses too, and they make
+        POSITIVE claims — the marker must ride them, or the caller cannot tell
+        "nothing matched" from "I could not read it".
+        """
+        _seed(sdk, 3)
+
+        resp = sdk.issue_insight(QUERY, repo="an-org/a-repo-that-was-never-indexed",
+                                 limit=5)
+        assert resp["repo_not_indexed"] is True
+        assert resp[TRUNCATED_FIELD] is False
+
+    def test_no_matches_is_marked_when_the_pool_was_cut(self, sdk):
+        """(d) `"No graph matches"` is a POSITIVE claim of absence.
+
+        The gate drops every hit here (one shared token, no EP evidence), so
+        `data_points` is empty on BOTH sides of the boundary — the ONLY thing
+        that distinguishes "nothing relates" from "I cut the pool before I could
+        tell" is the marker. Without it this body reads as proof of absence over
+        an incomplete read.
+        """
+        for i in range(25):
+            sdk.create_point(kind="statement",
+                             content=f"zebra unrelated inventory item {i:02d}",
+                             entity_type="point")
+
+        cut = sdk.issue_insight(QUERY, limit=2)
+        assert cut["data_points"] == []
+        # 25 > the pool's own retrieval window: matches past it were never read,
+        # so the read may not assert ABSENCE — not in the marker, and not in the
+        # prose an agent actually reads.
+        assert cut[TRUNCATED_FIELD] is True
+        assert TOTAL_AVAILABLE_FIELD not in cut
+        assert cut["insight"] != "No graph matches for this issue title."
+        assert "TRUNCATED" in cut["insight"], cut["insight"]
+
+        # the SAME shape below the pool bound is genuinely complete
+        sdk2 = sdk
+        for i in range(3):
+            sdk2.create_point(kind="statement",
+                              content=f"yak unrelated inventory item {i:02d}",
+                              entity_type="point")
+        whole = sdk2.issue_insight("yak migration claim", limit=2)
+        assert whole["insight"] == "No graph matches for this issue title."
+        assert whole[TRUNCATED_FIELD] is False
+        assert TOTAL_AVAILABLE_FIELD not in whole
