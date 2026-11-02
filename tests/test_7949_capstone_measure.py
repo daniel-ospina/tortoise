@@ -677,18 +677,31 @@ def test_the_shipped_logs_blocker_cells_are_the_emitters_own():
 def test_the_shipped_log_discloses_what_the_run_did_not_emit():
     """A post-run edit is allowed only when the artifact SAYS it happened.
 
-    The failure mode is not the edit — it is an edit that reads as emitter output,
-    which is the whole class of stale evidence `#10537` exists to gate. Both the
-    E4/E5 cells and the E5 note tail were updated after the run at `9152448d7`,
-    so the log must name them, name the reason, and say that the NUMBERS were not
-    touched. Non-vacuity: at the pre-fix head this marker is absent (reds).
+    The failure mode is not the edit — it is an edit that reads as emitter
+    output, which is the whole class of stale evidence `#10537` exists to gate.
+    The E4/E5 cells and the E5 note tail were updated after the run at
+    `9152448d7`, so the log must name them, name the reason, and say that the
+    NUMBERS were not touched.
+
+    ⛔ AND IT STANDS DOWN WHEN THERE IS NOTHING TO DISCLOSE (#10601 review round
+    3). The first version of this pin REQUIRED the block unconditionally, which
+    turned the bundle's own sanctioned remedy — re-run the probe and delete the
+    log it supersedes — red on a strictly MORE correct artifact, and the only
+    cheap way to satisfy it would be to carry a FALSE disclosure into the new
+    file. The neighbouring artifact pin stands down for exactly this reason. The
+    protection is unchanged, because the two pins together still refuse an
+    undisclosed edit: `test_the_shipped_logs_blocker_cells_are_the_emitters_own`
+    reds WHENEVER the cells or the note diverge from the emitter, and this pin
+    reds whenever a block claims the edit but does not describe it. What is no
+    longer required is a confession for an edit that never happened.
     """
     log = _newest_log(_scored_logs())
     text = log.read_text()
-    assert "POST-RUN CORRECTION" in text, (
-        f"{log.name} carries cells the run did not emit, with no disclosure — "
-        f"an edit indistinguishable from emitter output is the stale-pointer "
-        f"class V12 refuses")
+    if "POST-RUN CORRECTION" not in text:
+        # Nothing to disclose — a freshly generated log is the good case. The
+        # sibling pin is what makes this branch safe rather than a hole: it
+        # reds the moment the artifact stops being what its emitter writes.
+        return
     for named in ("#8503 -> #9596", "#9738 -> #5087", "E5 note"):
         assert named in text, f"the correction block does not name {named!r}"
     assert "THE NUMBERS ARE THE RUN'S AND WERE NOT TOUCHED" in text, (
@@ -2857,11 +2870,20 @@ def test_every_readme_line_cite_carries_the_sentence_it_quotes():
     `sdk|edges|extractor_v2`, `_BUNDLE_CITE_PREFIX` requires the file to be one
     of those three, and the bundle's own docs are not sources. A document whose
     thesis is "a claim nothing re-checks can rot silently" leaves its
-    `README.md:<line>` cites unwatched, so this pin resolves them: whatever
-    sentence the cite QUOTES must appear inside the lines it names.
+    `README.md:<line>` cites unwatched, so this pin resolves EVERY one of them —
+    either the sentence the cite QUOTES must appear inside the lines it names, or
+    (for a cite that quotes nothing, e.g. a table cell's pointer) a case token
+    such as `E2b` printed on the citing line must appear inside the named range.
+
+    ⛔ EVERY CITE IS CHECKED, NOT JUST THE QUOTED ONES (#10601 review round 3).
+    The first version skipped a cite with no quote (`continue`) and then asserted
+    `checked >= 1` — satisfied by the single quoted cite — so three of the four
+    cites in this document were resolved by nothing, in the one file whose thesis
+    is that unwatched claims rot. The guard is now `checked == len(found)`, so a
+    dropped quote reds instead of silently shrinking coverage.
 
     Non-vacuity: at the pre-fix head it reds on `README.md:430-435`, where the
-    quote is absent.
+    quote is absent; re-pointing the surviving cites at the wrong range reds too.
     """
     import re as _re
 
@@ -2873,8 +2895,10 @@ def test_every_readme_line_cite_carries_the_sentence_it_quotes():
         encoding="utf-8")
     readme_lines = (_REPO / "docs/evidence/7949-capstone/README.md").read_text(
         encoding="utf-8").splitlines()
+    case_token = _re.compile(r"\bE[1-5][ab]?\b")
     checked = 0
     found = list(_re.finditer(r"README\.md:(\d+)(?:-(\d+))?", doc))
+    assert found, "E1-E5-PROOFS.md carries no README.md line cite — pin is moot"
     for index, match in enumerate(found):
         start = int(match.group(1))
         end = int(match.group(2) or match.group(1))
@@ -2883,21 +2907,37 @@ def test_every_readme_line_cite_carries_the_sentence_it_quotes():
         # cite, which would have made the pin pass on a cite pointing at nothing.
         nxt = found[index + 1].start() if index + 1 < len(found) else len(doc)
         tail = doc[match.end():min(nxt, match.end() + 600)]
-        quoted = _re.search(r'"([^"]{25,})"', tail)
-        if quoted is None:
-            continue          # a cite that quotes no sentence owes no quote check
-        checked += 1
-        wanted = plain(quoted.group(1))
         cited = plain("\n".join(readme_lines[start - 1:end]))
-        assert wanted in cited, (
-            f"E1-E5-PROOFS.md cites README.md:{start}-{end} for {quoted.group(1)[:70]!r}, "
-            f"but those lines carry {cited[:120]!r} — re-derive the range from the "
-            f"file, or drop the line numbers and keep the quote (the bundle's own "
-            "convention), rather than pointing at text that is not there")
-    assert checked >= 1, (
-        "no README line-cite in E1-E5-PROOFS.md carried a quoted sentence — if the "
-        "quotes were dropped, this pin stops testing anything and must be removed "
-        "with them, not left green")
+        assert cited, (
+            f"E1-E5-PROOFS.md cites README.md:{start}-{end}, which is past the end "
+            f"of the {len(readme_lines)}-line README")
+        quoted = _re.search(r'"([^"]{25,})"', tail)
+        checked += 1
+        if quoted is not None:
+            wanted = plain(quoted.group(1))
+            assert wanted in cited, (
+                f"E1-E5-PROOFS.md cites README.md:{start}-{end} for "
+                f"{quoted.group(1)[:70]!r}, but those lines carry {cited[:120]!r} — "
+                f"re-derive the range from the file, or drop the line numbers and "
+                f"keep the quote (the bundle's own convention), rather than "
+                f"pointing at text that is not there")
+            continue
+        # A cite that quotes no sentence is still a POINTER: the line carrying the
+        # cite names a criterion, so that criterion must be inside the range. It is
+        # a weaker anchor than a quote, and it is what a table cell can carry.
+        citing_line = doc.splitlines()[
+            doc.count("\n", 0, match.start())]
+        tokens = set(case_token.findall(citing_line))
+        assert tokens, (
+            f"the E1-E5-PROOFS.md line citing README.md:{start}-{end} names no "
+            f"criterion, so this cite cannot be anchored at all: {citing_line[:120]!r}")
+        assert tokens & set(case_token.findall(cited)), (
+            f"E1-E5-PROOFS.md cites README.md:{start}-{end} from a line about "
+            f"{sorted(tokens)}, but those lines carry none of them: {cited[:140]!r} — "
+            f"re-derive the range, or quote the sentence it points at")
+    assert checked == len(found), (
+        f"only {checked} of {len(found)} README.md line cites were resolved — a "
+        f"cite that skips its own check is the rot this pin exists to stop")
 
 
 def test_the_index_sweep_keeps_to_the_row_that_names_this_bundle():
