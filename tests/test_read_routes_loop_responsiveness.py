@@ -2667,7 +2667,12 @@ def test_capture_session_probe_attaches_off_the_loop(monkeypatch):
 # #3060 gave long/stallable work dedicated pools (`_CAPTURE_EXECUTOR`,
 # `_DREAM_EXECUTOR`, …) and #3498/#3773 gave the graph helpers one
 # (`CONTROL_PLANE_GRAPH_*`), but the READ PATH's own round trip kept riding the
-# shared pool. These tests are the executable claim that it no longer does.
+# shared pool. These tests are the executable claim that it no longer does —
+# FOR THE FOUR ROUTES THEY DRIVE (`_READ_LANE_CASES`), not for the REST read
+# surface as a whole: the sibling read handlers (`GET /v1/sessions`,
+# `/v1/sessions/{id}`, `/v1/team`, `/v1/events`, `/v1/context`,
+# `/v1/issue-insight`, the trash routes, the export route) still submit their
+# blocking round trip to the shared default executor — tracked as #10651.
 
 #: How long a read must answer INSIDE while every default-executor slot is
 #: occupied. The stall below is 4× this, so the assertion cannot be satisfied by
