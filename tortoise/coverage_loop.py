@@ -651,6 +651,10 @@ def session_diverse_order(items: list[dict], *,
 
     * the window never holds more than ``window`` distinct sessions (the lower
       bound is bounded, not a completeness blocker);
+    * ``per_session_cap`` still binds in the arm: an EVICTING session loses a
+      slot (``counts[sj] -= 1``) and the ADMITTED session is recorded as
+      holding exactly one (``counts[s] = 1``), so the floor term can never let
+      a session exceed the cap to buy representation;
     * the deferred tail stays in ORIGINAL RANK order, so a session's own items
       never invert and a downstream per-session re-cap (``dedup_pool``, which
       keeps the first ``max_chunks_per_session`` IN POOL ORDER) still keeps a
@@ -669,9 +673,17 @@ def session_diverse_order(items: list[dict], *,
       ``window`` distinct sessions available), where the floor term keeps a
       session's later item in rank order instead of pushing it past the
       window. It spends nothing at all while the pool holds no more than
-      ``ceil(window / per_session_cap)`` distinct sessions (measured, window=5
-      cap=2: 0/4000 pools displaced at 3 sessions, 2154/4000 at 4, 3739/4000
-      at 5). It is therefore NOT a density-free alternative to
+      ``ceil(window / per_session_cap)`` distinct sessions — that number is
+      structural, not sampled: a ``window``-slot window at
+      ``per_session_cap`` needs at least ``ceil(window / per_session_cap)``
+      sessions to fill, so below that threshold nothing is displaced. Above
+      it the displacement rate grows with the distinct-session count and is
+      generator-dependent (window=5 cap=2: 0 pools displaced at 3 sessions,
+      roughly half at 4 and roughly four fifths at 5 over randomised pools of
+      uniform session assignment) — the exact fractions are NOT quoted
+      because a bare ratio with an unspecified generator cannot be re-checked
+      by the next reader, which is the failure this note exists to avoid.
+      It is therefore NOT a density-free alternative to
       ``per_session_cap=1`` — the #2513 §4 projection for ``cap=1`` (residual
       10->5, recall_all@5 0.8592->0.9296, evidence density lost on 20/71) is
       the ceiling for this lever too. Arming it requires that sealed A/B

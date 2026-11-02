@@ -48,7 +48,14 @@ from tortoise.coverage_loop import (
     merge_expansion_order,
     session_diverse_order,
 )
+from tortoise.retrieval import guard_and_recap_pool
 from tortoise.sparse import DEFAULT_MAX_EXPANSION_TERMS, build_or_query
+
+# ``guard_and_recap_pool`` is imported at MODULE level on purpose: this module is
+# the importer, so the import is not circular (``test_session_reinjection_rules``
+# has imported it at module level all along). A lazy helper bought nothing and
+# hid the direction of the dependency.
+
 
 QUESTION = "how much did the road bike repairs cost me in total"
 ANCHOR = "road bike repairs"
@@ -496,13 +503,6 @@ def test_floor_term_survives_an_all_one_session_pool():
     assert {"a0", "a1", "a2", "a3", "a4"} <= {h["id"] for h in order[:5]}
 
 
-def _guard_and_recap_pool():
-    """Resolve the shared composition lazily: ``tortoise.retrieval`` imports
-    the coverage loop, so a module-level import would be circular."""
-    from tortoise.retrieval import guard_and_recap_pool
-    return guard_and_recap_pool
-
-
 _SESSION_TRANSCRIPT_KIND = "session-transcript"
 
 
@@ -523,7 +523,7 @@ def test_floor_term_keeps_the_deferred_tail_in_original_rank_order():
     items = [raw("e1", "E"), raw("e2", "E"), raw("b1", "B"),
              raw("b2", "B"), raw("b3", "B"), raw("e3", "E"),
              raw("c1", "C"), raw("d1", "D")]
-    out = _guard_and_recap_pool()(items, guard=True, window=5,
+    out = guard_and_recap_pool(items, guard=True, window=5,
                                   per_session_cap=3, floor_term=True,
                                   max_chunks_per_session=2)
     assert [h["id"] for h in out] == ["e1", "e2", "b1", "c1", "d1", "b2"], (
@@ -536,9 +536,9 @@ def test_guard_and_recap_pool_forwards_the_floor_term():
     ``floor_term=floor_term`` forward leaves every other test green, so this
     one asserts the forward itself."""
     items = _non_monopolised_pool()
-    on = _guard_and_recap_pool()(items, guard=True, window=5, per_session_cap=2,
+    on = guard_and_recap_pool(items, guard=True, window=5, per_session_cap=2,
                               floor_term=True, max_chunks_per_session=99)
-    off = _guard_and_recap_pool()(items, guard=True, window=5, per_session_cap=2,
+    off = guard_and_recap_pool(items, guard=True, window=5, per_session_cap=2,
                                floor_term=False, max_chunks_per_session=99)
     assert "d1" in [h["id"] for h in on[:5]]
     assert "d1" not in [h["id"] for h in off[:5]]
@@ -571,3 +571,56 @@ def test_a_represented_session_never_evicts_a_duplicate():
     assert [h["id"] for h in session_diverse_order(
         items2, window=5, per_session_cap=2, floor_term=True)[:5]] == \
         ["a1", "a2", "b1", "c1", "d1"]
+
+
+# The next two tests each pin a single line of the eviction path that every
+# OTHER test in this file lets through when it is mutated. Both were measured
+# as surviving mutations before they existed.
+
+
+def test_floor_term_never_drops_an_item_when_no_duplicate_can_be_evicted():
+    """ADMISSIBILITY OF THE ``for``/``else`` FALLBACK (``coverage_loop.py``:
+    the ``else: deferred.append(h)`` after the eviction loop).
+
+    When the window is full of SINGLE-holder sessions there is no duplicate to
+    take back, so the arriving unrepresented session must be DEFERRED. Replacing
+    that ``else`` body with ``pass`` drops it instead — and every other test in
+    this file stays green, because every other pool reaches the eviction
+    ``break``. Additivity ("reordering never drops an item") is the docstring's
+    headline invariant, so it has to be pinned on the branch that can break it.
+    """
+    # window=5, cap=3: A-E each take one slot and hit the cap only at 3, so the
+    # full window holds NO multi-holder and F, G cannot evict anything.
+    items = [_hit(f"{s.lower()}0", s) for s in "ABCDEFG"]
+    order = session_diverse_order(items, window=5, per_session_cap=3,
+                                  floor_term=True)
+    assert [h["id"] for h in order] == ["a0", "b0", "c0", "d0", "e0",
+                                        "f0", "g0"], (
+        "a pool with no evictable duplicate must be reordered, never truncated")
+    assert sorted(h["id"] for h in order) == sorted(h["id"] for h in items)
+
+
+def test_floor_term_keeps_the_per_session_cap_at_a_wide_window():
+    """THE ADMITTED SESSION IS RECORDED AS HOLDING ONE (``counts[s] = 1``).
+
+    Rewriting that line as ``counts[s] = n`` (reusing the value read above,
+    which is 0 for an admitted session) leaves the count at ZERO, so the same
+    session can eject a duplicate AGAIN on its next item and walk past
+    ``per_session_cap``. Discriminating that needs a window wide enough for
+    three sessions to hold two each — ``window >= 7`` — which no other test
+    here uses. Measured: real top-7 is ``{A:2, B:2, C:1, D:1, E:1}``; the
+    mutant gives E THREE of seven slots under ``per_session_cap=2``.
+    """
+    items = [_hit("a1", "A"), _hit("a2", "A"), _hit("b1", "B"),
+             _hit("b2", "B"), _hit("c1", "C"), _hit("c2", "C"),
+             _hit("d1", "D"), _hit("e1", "E"), _hit("e2", "E"),
+             _hit("e3", "E")]
+    order = session_diverse_order(items, window=7, per_session_cap=2,
+                                  floor_term=True)
+    top = [h["session_id"] for h in order[:7]]
+    assert len(top) == 7
+    assert max(top.count(s) for s in set(top)) <= 2, (
+        f"per_session_cap must still bind in the floor-term arm: {top}")
+    assert "e1" in [h["id"] for h in order[:7]], (
+        "the unrepresented session is still admitted at a wide window")
+    assert sorted(h["id"] for h in order) == sorted(h["id"] for h in items)
