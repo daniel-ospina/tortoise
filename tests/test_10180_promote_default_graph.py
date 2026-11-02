@@ -1112,8 +1112,14 @@ _OTHER_FILE_ALLOWLIST = {
     # used to be counted as 2 on that reason, and it was FALSE of the fork read
     # (#10452 review, P3, the RPC-side twin of the hosted P3): the `namespace=`
     # site that read a PRIOR org's `:OnboardingState` — an org a promotion CAN
-    # predate — now resolves through `hosted_api._org_sdk`, leaving only the
-    # mint for the org being CREATED historical.
+    # predate — now reads through the hosted lane's own gated door
+    # (`hosted_api._prior_org_onboarding_fork` → `_open_org_graph_sdk`, listing
+    # first), leaving only the mint for the org being CREATED historical. That
+    # helper is what #10510 requires here: resolving the prior org's default
+    # name alone still opened the absent `org_{prior}` for a pre-#3543
+    # `team_{prior}` org, and opened — so MINTED — any prior graph the registry
+    # listing never held (`test_the_post_provision_hook_opens_the_legacy_team_
+    # graph` / `..._skips_an_unlisted_prior_org`).
     "tortoise/supabase_control.py": {"provision_org": 1,
                                      "_ensure_onboarding_node_after_provision": 1},
 }
@@ -2828,6 +2834,104 @@ def test_the_post_provision_hook_follows_the_prior_promoted_default(sb):
     assert node.get("fork") == "build", (
         "the hook inherited the fork from the DEMOTED graph: the prior org's "
         f"record lives in the promoted default. node={node}")
+
+
+def test_the_post_provision_hook_opens_the_legacy_team_graph(sb, monkeypatch):
+    """#10510, rows 3 and 4, on the RPC-side hook: the door is GATED by the
+    registry listing, not merely resolved.
+
+    The prior org predates the `team_` → `org_` rename, so
+    `moved_default_namespace` refuses its bare `team_{prior}` shape by design
+    (#10505) and the historical arm is the only one that names the graph
+    holding its record. `_org_sdk` resolved the name correctly here — `None` —
+    but opened it through the `namespace=` form, i.e. the ABSENT `org_{prior}`:
+    no node, so the creator's fork was lost, and the open MATERIALIZED that
+    graph (FalkorDB creates a graph on the first `GRAPH.QUERY` against it;
+    read-path write pin 4 bans it, and this lane has no
+    `journal_mint_write_ahead`).
+
+    FAIL-ON, both assertions: restore `_ha._org_sdk(prior_ids[0])._get_proj()`
+    at `supabase_control._ensure_onboarding_node_after_provision` and the new
+    org starts `fork='self'` (read from the minted, empty `org_{TEAM}`) while
+    `org_{TEAM}` appears in the store.
+    """
+    import tortoise.supabase_control as sc
+
+    _, fake, _ = sb
+    legacy = f"team_{TEAM}"
+    fake.tables["organizations"][0]["graph_name"] = legacy
+    _seed_onboarding(legacy, steps=_COMPLETE_STEPS, status="complete",
+                     fork="build")
+    # The resolver refuses the bare legacy shape on purpose: the open below is
+    # what keeps these orgs on the graph that actually holds their record.
+    assert ha._org_default_namespace(TEAM) is None
+    assert f"org_{TEAM}" not in _store_graphs()
+    # The listing the gate decides on: a REAL one, naming only what exists.
+    monkeypatch.setattr(ha, "_registry_existing_graphs",
+                        lambda *_a, **_k: set(_store_graphs()))
+    ha._resolved_default_namespace.set(None)
+
+    new_org = "team-10180-rpc-legacy-heir"
+    sc._ensure_onboarding_node_after_provision(
+        fake, new_org, {"p_org_id": new_org, "p_user_id": OWNER},
+        prior_org_ids=[TEAM])
+
+    assert f"org_{TEAM}" not in _store_graphs(), (
+        f"the hook MINTED the absent canonical graph org_{TEAM} — it must open "
+        f"the listed legacy graph, never a re-derived name (pin 4)")
+    sdk = ha._make_sdk(namespace=new_org)
+    try:
+        node = _onboarding_state().read_onboarding_node(sdk._get_proj(), new_org)
+    finally:
+        sdk.close()
+    assert node is not None, "the hook wrote no OnboardingState"
+    assert node.get("fork") == "build", (
+        "the hook lost the legacy `team_` fork — it opened a name the listing "
+        f"never held instead of the one holding the record: node={node}")
+
+
+def test_the_post_provision_hook_skips_an_unlisted_prior_org(sb, monkeypatch):
+    """#10510, row 4: neither prior name is listed (probe failure → `None`, or
+    a hard-deleted graph — the #10450 arm). The fork read must be SKIPPED, not
+    attempted through a name the probe never observed.
+
+    FAIL-ON: the pre-fix `_org_sdk` open reads `org_{prior}` regardless — the
+    read runs, and it MINTS that absent graph (pin 4). Both assertions red.
+
+    ⚠️ The mutation this test does NOT catch, measured so the FAIL-ON is not
+    read as wider than it is: this hook's `except Exception` also swallows a
+    `None._get_proj()` into the same `fork=None` answer, so on its own the
+    `read_prior_org_fork` spy is what distinguishes "skipped" from "raised".
+    The GATE is what prevents the mint.
+    """
+    import tortoise.supabase_control as sc
+
+    _, fake, _ = sb
+    _os = _onboarding_state()
+    reads: list[str] = []
+    real_read = _os.read_prior_org_fork
+
+    def _record_read(proj, prior_org_id):
+        reads.append(prior_org_id)
+        return real_read(proj, prior_org_id)
+
+    monkeypatch.setattr(_os, "read_prior_org_fork", _record_read)
+    monkeypatch.setattr(ha, "_registry_existing_graphs", lambda *_a, **_k: set())
+    ha._resolved_default_namespace.set(None)
+    before = _store_graphs()
+    assert f"org_{TEAM}" not in before, before
+
+    new_org = "team-10180-rpc-nolist"
+    sc._ensure_onboarding_node_after_provision(
+        fake, new_org, {"p_org_id": new_org, "p_user_id": OWNER},
+        prior_org_ids=[TEAM])
+
+    assert reads == [], (
+        "the hook read a prior graph the listing never had — the pre-fix shape "
+        f"mints and reads an ABSENT graph (pin 4): {reads}")
+    after = _store_graphs()
+    assert f"org_{TEAM}" not in after and f"team_{TEAM}" not in after, (
+        f"the skipped prior-org read still MINTED a graph: {after - before}")
 
 
 # ── 15. The REGISTRY lane's publish must carry the guard's own predicate ────

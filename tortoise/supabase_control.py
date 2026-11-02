@@ -3361,16 +3361,40 @@ def _ensure_onboarding_node_after_provision(cp, org_id: str,
                 # `read_prior_org_fork` answers None and
                 # `resolve_init_fork_compact(True, None)` silently starts the
                 # NEW org in `fork='self'`, a different onboarding mode than
-                # the creator chose. `_org_sdk` is the one resolver: fail-soft
-                # (an unreadable control plane answers the historical open,
-                # byte-identical for an org that never promoted), and it
-                # CONSTRUCTS on this thread from an already-resolved name
-                # (#7500's split), so it adds no listing probe to a
-                # best-effort hook whose contract is "never block
-                # provisioning".
-                prior_fork = _os.read_prior_org_fork(
-                    _ha._org_sdk(prior_ids[0])._get_proj(),
-                    prior_ids[0])
+                # the creator chose.
+                #
+                # ⛔ IT CALLS THE HOSTED LANE'S OWN HELPER, not `_org_sdk`
+                # (#10510 — the finding this hook was fixed on). `_org_sdk`
+                # RESOLVES the prior org's default name but never gates it on
+                # the registry listing, so two of #10510's four rows went
+                # wrong here: a pre-#3543 prior org (`organizations.
+                # graph_name` = a bare `team_{prior}`, which the resolver
+                # refuses by design, #10505) was opened through the
+                # `namespace=` form, i.e. the absent `org_{prior}` — where the
+                # node is not, so the fork was lost — and an UNLISTED prior org
+                # (probe failure, or a hard-deleted graph: the #10450 arm) was
+                # opened anyway, which MATERIALIZES that graph on a read path
+                # (FalkorDB creates a graph on the first `GRAPH.QUERY` against
+                # it; read-path write pin 4 bans it) with no
+                # `journal_mint_write_ahead` on this lane.
+                # `_prior_org_onboarding_fork` is the ONE door the hosted twin
+                # opens a prior org through: it probes the listing, opens only
+                # a name the probe observed (`_open_org_graph_sdk`), reads the
+                # fork, and answers None on every failure — so the two lanes
+                # cannot drift apart again.
+                #
+                # This costs ONE extra round trip (`db.list_graphs()`) on a
+                # hook that already opens the prior graph and MATCHes a node in
+                # it, and it runs where that read already ran: provision_org
+                # and provision_org_with_token are submitted to `_cp_offload`,
+                # so this is a POOL WORKER, never the event loop, and it issues
+                # no second submission (a `_cp_offload` for a registry read
+                # would charge it the 10 s PostgREST bound and map a bound miss
+                # to the sign-in 503 — #3718/#3773/#7678). Fail-soft on the
+                # same terms as the hosted helper: an unreadable control plane
+                # or a failed probe answers the pre-#10452 behaviour, never a
+                # guess.
+                prior_fork = _ha._prior_org_onboarding_fork(prior_ids[0])
             except Exception:
                 prior_fork = None
         fork, compact = _os.resolve_init_fork_compact(
