@@ -664,14 +664,17 @@ def session_diverse_order(items: list[dict], *,
       regime (>= ``window`` distinct sessions available) the window has zero
       spare slots, so admitting a new session necessarily drops a duplicate:
       the floor term yields ``window`` distinct sessions, the same count
-      ``per_session_cap=1`` yields. Measured over 2000 randomised saturated
-      pools: identical distinct-session count on 2000/2000, and an ELEMENTWISE
-      identical window to ``per_session_cap=1`` on 8000/8000 further pools — in
-      that regime no duplicate survives, so there is no "which one goes"
-      choice to make. Against ``per_session_cap=1`` the difference is confined
-      to the UNDER-saturated regime (fewer than ``window`` distinct sessions
-      available), where the floor term keeps a session's later item in rank
-      order instead of pushing it past the window. ⛔ Against the CAP-ONLY
+      ``per_session_cap=1`` yields, and — in that regime, where no duplicate
+      survives — there is no "which one goes" choice to make, so the window is
+      ELEMENTWISE ``per_session_cap=1``'s. That equality is asserted directly
+      by ``test_floor_term_is_bounded_by_the_window_and_spends_the_duplicate_slot``
+      rather than quoted as a sample count here, for the same reason the
+      displacement rates below are not: a bare "N of N pools" needs its
+      generator, pool size and seed to be checkable at all, and this note is
+      meant to be re-checkable. Against ``per_session_cap=1`` the difference is
+      confined to the UNDER-saturated regime (fewer than ``window`` distinct
+      sessions available), where the floor term keeps a session's later item in
+      rank order instead of pushing it past the window. ⛔ Against the CAP-ONLY
       GUARD, though, the admitted session SET differs in BOTH regimes: with
       fewer than ``window`` distinct sessions the window can still be full of
       DUPLICATES, so a session ranked past it is admitted here where the

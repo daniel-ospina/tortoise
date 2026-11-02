@@ -460,12 +460,26 @@ def test_floor_term_evicts_the_lowest_ranked_duplicate_not_the_first():
 def test_floor_term_is_bounded_by_the_window_and_spends_the_duplicate_slot():
     """The floor term is a bounded lower bound, NOT a completeness blocker and
     NOT a density-free alternative to ``per_session_cap=1``: in the SATURATED
-    regime (>= window distinct sessions available — the only regime where
-    admission can change the graded top-k) the window has no spare slot, so
-    the admitted session costs exactly one duplicate and the resulting window
-    is ELEMENTWISE the same as ``per_session_cap=1``'s (measured: 8000/8000
-    randomised saturated pools). The density cost is unavoidable, not
-    avoided."""
+    regime (>= ``window`` distinct sessions available — the regime in which the
+    window can hold ``window`` DISTINCT sessions at all) the window has no
+    spare slot, so the admitted session costs exactly one duplicate and the
+    resulting window is ELEMENTWISE the same as ``per_session_cap=1``'s.
+
+    That claim is asserted immediately below rather than quoted as a
+    "N of N pools" ratio, which is the re-checkable form: a bare count would
+    need its generator, pool size and seed to be checkable at all — the same
+    rule the guard's docstring states for its own displacement rates. The
+    density cost is unavoidable, not avoided.
+
+    NOTE the parenthetical used to read "the only regime where admission can
+    change the graded top-k", which is measurably FALSE — ``_non_monopolised_pool``
+    above is under-saturated (4 distinct sessions against a window of 5) and
+    admission changes the graded top-5 session set there from {A,B,C} to
+    {A,B,C,D}. What is confined to the under-saturated regime is the difference
+    against ``per_session_cap=1``; against the cap-only guard the session set
+    changes in BOTH regimes, because a window of fewer distinct sessions can
+    still be full of DUPLICATES.
+    """
     items = [_hit("a1", "A"), _hit("a2", "A"), _hit("a3", "A"),
              _hit("b1", "B"), _hit("c1", "C"), _hit("d1", "D"),
              _hit("e1", "E"), _hit("f1", "F")]
