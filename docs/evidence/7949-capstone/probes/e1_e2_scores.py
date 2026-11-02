@@ -580,7 +580,9 @@ def score(repo: Path = _ROOT) -> dict:
             "outcome": ("PASS" if after["real_facts"] >= bars["E1b"]["required"]
                         else "FAIL"),
             "artifact": after["artifact"],
-            "note": "a no-loss CONTROL on both arms, not the frozen metric",
+            "note": ("a no-loss CONTROL on the scored arm, not the frozen "
+                     "metric — `real_facts` is read from the ON run's own "
+                     "`e1b` line, and no OFF-arm record carries it"),
         },
         "e2": e2,
         "gate_drops": {

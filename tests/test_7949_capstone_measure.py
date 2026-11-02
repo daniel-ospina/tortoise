@@ -1414,6 +1414,35 @@ def test_the_committed_score_record_is_what_the_probe_produces():
     assert scores_probe.score(_REPO) == json.loads(SCORES.read_text())
 
 
+def test_the_e1b_note_claims_only_the_arm_the_record_carries():
+    """P3 (#10610 review issue 5): `e1b.note` claimed BOTH arms for a number
+    read from ONE.
+
+    `read_on_arm` greps a single `e1b outcome=… real_facts=` line out of
+    `on-arm.log`, and `read_off_arms` returns NO `real_facts` at all for either
+    before realization — so "on both arms" was a comparison this artifact does
+    not carry, and only the graph's OWN turn nodes could ever corroborate it.
+    `capstone_measure.py` renders the same number as "on the scored arm" (its
+    `e1b note:` line), so a record saying "both arms" also disagrees with the
+    row reader over the same fact.
+
+    Non-vacuity: the OFF-arm shape asserted first is the REASON the note cannot
+    say "both arms" — on the pre-fix record the `"scored arm" in note` arm reds.
+    """
+    off_arms = scores_probe.read_off_arms(
+        _REPO, scores_probe.frozen_denominators(_REPO))
+    assert off_arms, "no OFF arms read — re-derive this pin"
+    assert all("real_facts" not in arm for arm in off_arms), (
+        "an OFF arm now carries real_facts, so the note MAY claim both arms — "
+        f"but it must then name the reading: {off_arms}")
+
+    note = json.loads(SCORES.read_text())["e1b"]["note"]
+    assert "scored arm" in note, (
+        f"e1b.note does not name the arm its number is read from: {note!r}")
+    assert "both arms" not in note, (
+        f"e1b.note claims a population the record does not carry: {note!r}")
+
+
 #: The scored-measurement logs, by the name the probe writes (`--out` default).
 _SCORED_LOG_GLOB = "capstone-measured-*.log"
 
