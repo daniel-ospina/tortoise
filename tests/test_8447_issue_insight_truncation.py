@@ -166,6 +166,58 @@ class TestIssueInsightTruncation:
         assert resp[TOTAL_AVAILABLE_FIELD] == 20      # ... and the total is EXACT
         assert resp["insight"].startswith("20 graph hit(s)"), resp["insight"]
 
+    def test_a_full_window_withholds_the_total(self, sdk):
+        """⛔ "A pool at its bound is still exact" is NOT an invariant — the WINDOW is.
+
+        The docstring, the manifest row and `docs/product/mcp-sdk-surface.md` all
+        stated it bare: "a pool that returned EXACTLY `max(limit*5, 20)` rows is
+        still exact". Measured, that is false, and the regime it holds in is not
+        the one the review assumed (#10570 review at `aba093557`, F3 — which put
+        the boundary at `limit >= 24`; the measured boundary below is `limit`-free,
+        because `pool_limit` is passed AS `limit` to `tortoise_fts_query`, so the
+        window there is `max(120, 2*pool_limit)`):
+
+            N=120, limit=24 -> pool bound 120, window 240 -> truncated, total 120  (exact)
+            N=120, limit=2  -> pool bound  20, window 120 -> truncated, total ABSENT
+
+        The second line is the falsification, at the SHIPPED default. The pool came
+        back at exactly its own bound (20), every row cleared the relevance gate —
+        `20 graph hit(s)` — and the total is withheld anyway, because a retrieval
+        leg filled the window underneath it (`_leg_peak >= str_limit`), so matches
+        past it were never read. The bound and the window are different objects and
+        only the window decides exactness.
+
+        Non-vacuity, in ONE store and one `limit` so the only variable is the store
+        size: at 20 matches the same read publishes `total_available: 20`, and 100
+        more matches take it away. A leg that asserted either half alone would pass
+        on a codebase that always published, or always withheld.
+        """
+        _seed(sdk, 20)
+        assert _store_matches(sdk) == 20
+
+        at_bound = sdk.issue_insight(QUERY, limit=2)
+        assert at_bound[TOTAL_AVAILABLE_FIELD] == 20, (
+            "a 20-match store under `limit=2`: the pool is at its bound 20 and the "
+            "window (120) is not filled, so the total is EXACT"
+        )
+
+        _seed(sdk, 100)                      # 20 -> 120: the WINDOW, not the bound
+        assert _store_matches(sdk) == 120
+
+        saturated = sdk.issue_insight(QUERY, limit=2)
+        assert len(saturated["data_points"]) == 2
+        # the pool is STILL at exactly its bound: 20 rows, all 20 gate-relevant
+        # (`at least ` is the prose's own qualification — the count is still 20)
+        assert "20 graph hit(s)" in saturated["insight"], saturated["insight"]
+        assert saturated[TRUNCATED_FIELD] is True
+        assert TOTAL_AVAILABLE_FIELD not in saturated, (
+            "120 matches fill the 120-row retrieval window, so matches past it were "
+            "never read and the exact population is UNKNOWN — publishing 20 here is "
+            "the floor-wearing-a-total defect the marker exists to prevent. This is "
+            "the case the docstring's bare 'at its bound is still exact' denied."
+        )
+        assert saturated["insight"] != at_bound["insight"]
+
     def test_absence_is_not_claimed_over_an_unread_store(self, sdk):
         """(d) `total_points == 0` is the only path that proves absence."""
         resp = sdk.issue_insight(QUERY, limit=2)

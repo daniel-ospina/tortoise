@@ -33847,9 +33847,10 @@ class TortoiseSDK:
         independently by any post-window filter that shrank the union and by the
         snapshot fallback arm — so this docstring does not try to enumerate it.
         What matters to a caller: `total_available` is either the true population
-        or ABSENT (unknown, never zero), and a pool that returned EXACTLY
-        `max(limit*5, 20)` rows is still exact. A caller that must not reason
-        over a subset reads `truncated` before `data_points`.
+        or ABSENT (unknown, never zero); read `truncated` BEFORE `data_points`.
+        ⛔ A pool at EXACTLY its own bound (`max(limit*5, 20)`) is exact ONLY while
+        the STORE stays below the retrieval window (`max(120, 2*pool_bound)`) — not
+        while `limit` is small: 120 matches withhold the total at `limit=2` too.
         """
         # #8447: `limit` is a CALLER INPUT, so an out-of-domain ask is REFUSED
         # before any work — never silently re-interpreted. Measured before this
@@ -33938,10 +33939,10 @@ class TortoiseSDK:
             # re-derived: ``truncated: False`` is NOT ``exact`` — it is also what
             # a read reports when it completed but had to WITHHOLD exactness. A
             # local ``len(pool) >= pool_limit`` test is worse still: it marks a
-            # pool that came back at EXACTLY its bound as cut (the retrieval path
-            # already says ``truncated: False`` there, because it keeps every
-            # row), which is a false positive that withholds an exact total and
-            # trains callers to ignore the marker (#8447 review round 2).
+            # pool that came back at EXACTLY its bound as cut, which is a false
+            # positive that withholds an exact total and trains callers to ignore
+            # the marker (#8447 review round 2). ⚠️ NOR is that bound a guarantee:
+            # below the window those rows are kept in full; AT it, the read saturated.
             #
             # ⛔ BOTH halves are required, and they answer different questions.
             # ``retrieval_incomplete``: the pool WAS cut, so the relevance gate
